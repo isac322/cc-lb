@@ -213,15 +213,15 @@ print("PASS senpi request-family markers match pinned package")
 PY
 }
 
-install_requested claude-code @anthropic-ai/claude-code 2.1.207 claude CLAUDE_CODE_BIN
-install_requested opencode opencode-ai 1.17.18 opencode OPENCODE_BIN
-# pi-coding-agent's ^0.80.6 companion ranges currently resolve to incompatible
-# 0.80.10 packages. Pin the published 0.80.6 package set explicitly.
-install_requested pi @earendil-works/pi-coding-agent 0.80.6 pi PI_BIN npm \
-  @earendil-works/pi-ai@0.80.6 \
-  @earendil-works/pi-agent-core@0.80.6 \
-  @earendil-works/pi-tui@0.80.6
-install_requested senpi @code-yeongyu/senpi 2026.7.30 senpi SENPI_BIN
+install_requested claude-code @anthropic-ai/claude-code 2.1.233 claude CLAUDE_CODE_BIN
+install_requested opencode opencode-ai 1.18.18 opencode OPENCODE_BIN
+# Pin the published 0.84.2 package set explicitly so the tested pi binary and
+# its companion packages stay in lockstep.
+install_requested pi @earendil-works/pi-coding-agent 0.84.2 pi PI_BIN npm \
+  @earendil-works/pi-ai@0.84.2 \
+  @earendil-works/pi-agent-core@0.84.2 \
+  @earendil-works/pi-tui@0.84.2
+install_requested senpi @code-yeongyu/senpi 2026.8.16 senpi SENPI_BIN
 if [ -z "${REAL_CLIENT_ONLY:-}" ] || [ "$REAL_CLIENT_ONLY" = "senpi" ]; then
   verify_senpi_markers
 fi

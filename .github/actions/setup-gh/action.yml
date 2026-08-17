@@ -7,9 +7,9 @@ runs:
     - name: Install GitHub CLI
       shell: bash
       env:
-        GH_VERSION: "2.96.0"
-        GH_SHA256_X64: 83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
-        GH_SHA256_ARM64: 06f86ec7103d41993b76cd78072f43595c34aaa56506d971d9860e67140bf909
+        GH_VERSION: "2.97.0"
+        GH_SHA256_X64: a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112
+        GH_SHA256_ARM64: 73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5
       run: |
         set -euo pipefail
         if [ "$RUNNER_OS" != "Linux" ]; then

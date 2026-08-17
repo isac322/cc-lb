@@ -27,7 +27,7 @@ resolver = "2"
 version = "0.4.1"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.97.0"
+rust-version = "1.97.1"
 
 [workspace.dependencies]
 cc-lb-domain = { path = "crates/cc-lb-domain", version = "0.4.1" }
@@ -53,7 +53,7 @@ wasmtime  = "47"
 rkyv      = { version = "0.8", default-features = false }
 bytecheck = { version = "0.8", default-features = false }
 blake3    = { version = "1", default-features = false }
-wasmparser = "0.254"
+wasmparser = "0.256"
 
 anyhow = "1"
 arc-swap = "1"
@@ -95,7 +95,7 @@ opentelemetry_sdk = { version = "0.32", features = ["trace"] }
 proptest = "1"
 rand = "0.10"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 ring = "0.17"
 rust-embed = { version = "8", features = ["deterministic-timestamps"] }
 secrecy = "0.10"

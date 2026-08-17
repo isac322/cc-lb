@@ -81,7 +81,7 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: llvm-tools-preview
       - name: Install wasm targets for pinned toolchain
@@ -153,7 +153,7 @@ jobs:
       LLVM_PROFILE_FILE_NAME: shard-${{ matrix.shard }}-%p-%m.profraw
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: llvm-tools-preview
       - uses: ./.github/actions/setup-rust-cache
@@ -189,7 +189,7 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@v2

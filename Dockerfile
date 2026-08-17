@@ -54,7 +54,7 @@ RUN if [ "${SKIP_SPA}" != "1" ]; then \
     fi
 
 # ---- Builder: cross toolchain, source, and the compile ----
-FROM --platform=$BUILDPLATFORM rust:1.97.0-alpine AS builder
+FROM --platform=$BUILDPLATFORM rust:1.97.1-alpine AS builder
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
 # clang/lld: xx uses clang as the cross linker driver for every target

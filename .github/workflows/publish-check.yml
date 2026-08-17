@@ -76,7 +76,7 @@ jobs:
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"
@@ -84,7 +84,7 @@ jobs:
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154
         with:
-          tool: cargo-semver-checks@0.48
+          tool: cargo-semver-checks@0.50
 
       - name: cargo semver-checks
         run: cargo semver-checks --package ${{ matrix.crate }}
@@ -94,7 +94,7 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"

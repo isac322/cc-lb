@@ -53,7 +53,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
 
       # Cache only preflight compilation. The release jobs below intentionally
       # remain uncached and retain real commit metadata for published artifacts.
@@ -62,7 +62,7 @@ jobs:
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853
         with:
-          tool: cargo-semver-checks@0.48
+          tool: cargo-semver-checks@0.50
 
       - name: cargo semver-checks (published baselines)
         run: |
@@ -88,7 +88,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-gh
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Authenticate to crates.io (trusted publishing)
         id: crates-io-auth
@@ -115,7 +115,7 @@ jobs:
           fetch-depth: 0
       - uses: ./.github/actions/setup-gh
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Run release-plz release-pr
         uses: MarcoIeni/release-plz-action@v0.5.131
