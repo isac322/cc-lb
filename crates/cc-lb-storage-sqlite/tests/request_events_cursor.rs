@@ -82,6 +82,89 @@ async fn request_event_list_uses_materialized_sort_columns() {
 }
 
 #[tokio::test]
+async fn request_event_principal_costs_use_principal_range_indexes() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir
+            .path()
+            .join("request-event-principal-cost-plan.sqlite")
+            .display()
+    );
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open sqlite");
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .expect("initialize sqlite");
+
+    let plan = sqlx::query(
+        "EXPLAIN QUERY PLAN \
+         SELECT principal_id, ((list_ts_ms - ?) / ?) AS bucket_index, \
+                SUM(list_cost_usd_micros) \
+         FROM ( \
+             SELECT principal_id, list_ts_ms, list_cost_usd_micros \
+             FROM request_events_v1 \
+             WHERE list_ts_ms >= ? AND list_ts_ms < ? \
+               AND (? IS NULL OR upstream_id = ?) \
+               AND principal_id IN (?, ?) \
+             UNION ALL \
+             SELECT principal_id, list_ts_ms, list_cost_usd_micros \
+             FROM request_events_v1 \
+             WHERE list_ts_ms >= ? AND list_ts_ms < ? \
+               AND (? IS NULL OR upstream_id = ?) \
+               AND (principal_id IS NULL \
+                 OR length(principal_id) <> 36 \
+                 OR length(replace(principal_id, '-', '')) <> 32 \
+                 OR substr(principal_id, 9, 1) <> '-' \
+                 OR substr(principal_id, 14, 1) <> '-' \
+                 OR substr(principal_id, 19, 1) <> '-' \
+                 OR substr(principal_id, 24, 1) <> '-' \
+                 OR lower(replace(principal_id, '-', '')) GLOB '*[^0-9a-f]*') \
+               AND (principal_id IS NOT NULL OR ?) \
+         ) matched \
+         GROUP BY principal_id, bucket_index",
+    )
+    .bind(1_900_500_000_000_i64)
+    .bind(60_000_i64)
+    .bind(1_900_500_000_000_i64)
+    .bind(1_900_500_120_000_i64)
+    .bind(Option::<String>::None)
+    .bind(Option::<String>::None)
+    .bind(Uuid::from_u128(0x51).to_string())
+    .bind(Uuid::from_u128(0x52).to_string())
+    .bind(1_900_500_000_000_i64)
+    .bind(1_900_500_120_000_i64)
+    .bind(Option::<String>::None)
+    .bind(Option::<String>::None)
+    .bind(false)
+    .fetch_all(storage.pool())
+    .await
+    .expect("explain composed principal cost aggregate")
+    .into_iter()
+    .map(|row| row.get::<String, _>("detail"))
+    .collect::<Vec<_>>();
+
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("request_events_v1_principal_list_order_idx")),
+        "exact principal cost source must use the principal-leading range index: {plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("request_events_v1_non_uuid_principal_cost_idx")),
+        "normalized fallback must use the non-UUID partial index: {plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .all(|detail| !detail.starts_with("SCAN request_events_v1")),
+        "composed principal cost aggregate must not scan the request-event table: {plan:?}"
+    );
+}
+
+#[tokio::test]
 async fn request_event_key_aggregates_use_normalized_columns() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
