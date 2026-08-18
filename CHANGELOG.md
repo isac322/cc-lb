@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-18
+
+### Fixed
+
+- Overview Top principals cost enrichment now uses principal-leading range indexes instead of normalizing or aggregating every request event in the selected period. Legacy non-UUID principal identifiers retain their normalized fallback path, and zero-cost recorded components remain visible.
+- PostgreSQL request-event tail polling now seeks the highest sequence below the snapshot visibility horizon with a backward primary-key scan instead of aggregating the full event table twice per second.
+
 ## [0.4.2] - 2026-08-18
 
 ### Added
