@@ -165,6 +165,9 @@ mod sqlite {
                 .execute(pool)
                 .await?;
         }
+        sqlx::query("UPDATE Jobs SET lock_by = 'worker-dead' WHERE id = 'old-done'")
+            .execute(pool)
+            .await?;
         Ok(())
     }
 
@@ -202,7 +205,7 @@ mod sqlite {
         for (id, status, run_at, done_at) in cache_keepalive_jobs() {
             sqlx::query(
                 "INSERT INTO Jobs (job, id, job_type, status, run_at, done_at, idempotency_key)
-                 VALUES (?1, ?2, 'adaptive', ?3, ?4, ?5, ?6)",
+                 VALUES (?1, ?2, 'cache_keepalive', ?3, ?4, ?5, ?6)",
             )
             .bind(Vec::<u8>::new())
             .bind(id)
@@ -364,6 +367,7 @@ mod postgres {
             vec!["live-enqueued", "live-pending"]
         );
         assert_postgres_stale_running_keepalive_recovery(pool).await?;
+        assert_postgres_stale_running_lock_recovery(pool).await?;
         Ok(())
     }
 
@@ -387,7 +391,7 @@ mod postgres {
         }
         sqlx::query(
             "INSERT INTO apalis.jobs (job, id, job_type, status, run_at, lock_by, lock_at, idempotency_key)
-             VALUES ($1, 'stale-keepalive-job', 'adaptive', 'Running', $2, 'worker-live', $3, 'cache_keepalive:stale-running:1')",
+             VALUES ($1, 'stale-keepalive-job', 'cache_keepalive', 'Running', $2, 'worker-live', $3, 'cache_keepalive:stale-running:1')",
         )
         .bind(Vec::<u8>::new())
         .bind(ts(NOW_SECS))
@@ -437,6 +441,50 @@ mod postgres {
         assert!(lock_at.is_none());
         Ok(())
     }
+    async fn assert_postgres_stale_running_lock_recovery(
+        pool: &PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        sqlx::query(
+            "INSERT INTO apalis.jobs
+             (job, id, job_type, status, run_at, lock_by, lock_at, idempotency_key)
+             VALUES ($1, 'stale-running-job', 'housekeeping', 'Running', $2, 'worker-live', $3, 'regular:stale-running:1')",
+        )
+        .bind(Vec::<u8>::new())
+        .bind(ts(NOW_SECS))
+        .bind(ts(NOW_SECS - 300))
+        .execute(pool)
+        .await?;
+
+        let result = ApalisHousekeepingJobHandler::new(
+            pool.clone(),
+            ApalisHousekeepingConfig::new(30).with_stale_lock_threshold_secs(120),
+        )
+        .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+        .await;
+        match result {
+            super::ApalisHousekeepingJobResult::Done {
+                stale_locks_reaped, ..
+            } => assert_eq!(stale_locks_reaped, 1),
+            other => panic!("expected completed housekeeping, got {other:?}"),
+        }
+
+        let (status, lock_by, lock_at, attempts): (
+            String,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            i32,
+        ) = sqlx::query_as(
+            "SELECT status, lock_by, lock_at, attempts
+             FROM apalis.jobs WHERE id = 'stale-running-job'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(status, "Pending");
+        assert!(lock_by.is_none());
+        assert!(lock_at.is_none());
+        assert_eq!(attempts, 1);
+        Ok(())
+    }
 
     async fn seed_postgres(pool: &PgPool) -> Result<(), sqlx::Error> {
         for (id, last_seen) in workers() {
@@ -456,6 +504,9 @@ mod postgres {
                 .execute(pool)
                 .await?;
         }
+        sqlx::query("UPDATE apalis.jobs SET lock_by = 'worker-dead' WHERE id = 'old-done'")
+            .execute(pool)
+            .await?;
         Ok(())
     }
 
@@ -493,7 +544,7 @@ mod postgres {
         for (id, status, run_at, done_at) in cache_keepalive_jobs() {
             sqlx::query(
                 "INSERT INTO apalis.jobs (job, id, job_type, status, run_at, done_at, idempotency_key)
-                 VALUES ($1, $2, 'adaptive', $3, $4, $5, $6)",
+                 VALUES ($1, $2, 'cache_keepalive', $3, $4, $5, $6)",
             )
             .bind(Vec::<u8>::new())
             .bind(id)

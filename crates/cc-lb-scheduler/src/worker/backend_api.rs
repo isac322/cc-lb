@@ -323,7 +323,7 @@ fn u64_to_i64(value: u64, field: &str) -> Result<i64, SchedulerError> {
     i64::try_from(value).map_err(|_| SchedulerError::Job(format!("{field} exceeds i64::MAX")))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use cc_lb_storage_api::CacheTtl;
     use sqlx::SqlitePool;
