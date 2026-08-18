@@ -8,7 +8,7 @@ use cc_lb_storage_api::{
     RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_pattern,
     model_filter_matches, normalize_usage_rollup_dimension,
 };
-use sqlx::AssertSqlSafe;
+use sqlx::{AssertSqlSafe, QueryBuilder, Sqlite};
 use std::{collections::BTreeMap, time::Instant};
 use uuid::Uuid;
 
@@ -333,6 +333,24 @@ async fn request_event_key_usage(
     Ok(buckets)
 }
 
+const PRINCIPAL_COST_SOURCE_COLUMNS: &str = "principal_id, list_ts_ms, \
+    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+    list_cost_cache_read_micros";
+
+const NON_UUID_PRINCIPAL_PREDICATE: &str = "(principal_id IS NULL \
+    OR length(principal_id) <> 36 \
+    OR length(replace(principal_id, '-', '')) <> 32 \
+    OR substr(principal_id, 9, 1) <> '-' \
+    OR substr(principal_id, 14, 1) <> '-' \
+    OR substr(principal_id, 19, 1) <> '-' \
+    OR substr(principal_id, 24, 1) <> '-' \
+    OR lower(replace(principal_id, '-', '')) GLOB '*[^0-9a-f]*')";
+
+fn is_canonical_uuid_principal(value: &str) -> bool {
+    value.len() == 36 && Uuid::parse_str(value).is_ok()
+}
+
 async fn request_event_principal_costs(
     storage: &SqliteStorage,
     query: &RequestEventPrincipalCostQuery,
@@ -357,9 +375,21 @@ async fn request_event_principal_costs(
         "request event principal cost bucket width",
     )?;
     let upstream_id = query.upstream_id.map(|id| id.to_string());
-    let rows = sqlx::query_as::<_, (Option<String>, i64, i64, i64, i64, i64, i64, i64, i64)>(
+    let uuid_keys = query
+        .principal_keys
+        .iter()
+        .filter(|key| is_canonical_uuid_principal(key))
+        .collect::<Vec<_>>();
+    let include_unknown = query.principal_keys.iter().any(|key| key == "unknown");
+    let mut builder = QueryBuilder::<Sqlite>::new(
         "SELECT principal_id, \
-                ((list_ts_ms - ?) / ?) AS bucket_index, \
+                ((list_ts_ms - ",
+    );
+    builder.push_bind(range_start_ms);
+    builder.push(") / ");
+    builder.push_bind(bucket_width_ms);
+    builder.push(
+        ") AS bucket_index, \
                 COALESCE(SUM(CASE WHEN list_cost_usd_micros > 0 \
                     THEN list_cost_usd_micros ELSE 0 END), 0) AS total_cost_micros, \
                 MAX(CASE WHEN list_cost_input_micros IS NOT NULL \
@@ -381,22 +411,56 @@ async fn request_event_principal_costs(
                 COALESCE(SUM(CASE WHEN list_cost_cache_read_micros > 0 \
                     THEN list_cost_cache_read_micros ELSE 0 END), 0) \
                     AS cost_cache_read_micros \
-         FROM request_events_v1 \
-         WHERE list_ts_ms >= ? \
-           AND list_ts_ms < ? \
-           AND (? IS NULL OR upstream_id = ?) \
+         FROM (",
+    );
+    if !uuid_keys.is_empty() {
+        builder.push("SELECT ");
+        builder.push(PRINCIPAL_COST_SOURCE_COLUMNS);
+        builder.push(
+            " FROM request_events_v1 \
+             WHERE list_ts_ms >= ",
+        );
+        builder.push_bind(range_start_ms);
+        builder.push(" AND list_ts_ms < ");
+        builder.push_bind(range_end_ms);
+        builder.push(" AND (");
+        builder.push_bind(upstream_id.as_deref());
+        builder.push(" IS NULL OR upstream_id = ");
+        builder.push_bind(upstream_id.as_deref());
+        builder.push(") AND principal_id IN (");
+        let mut separated = builder.separated(", ");
+        for key in &uuid_keys {
+            separated.push_bind(*key);
+        }
+        separated.push_unseparated(") UNION ALL ");
+    }
+    builder.push("SELECT ");
+    builder.push(PRINCIPAL_COST_SOURCE_COLUMNS);
+    builder.push(
+        " FROM request_events_v1 \
+         WHERE list_ts_ms >= ",
+    );
+    builder.push_bind(range_start_ms);
+    builder.push(" AND list_ts_ms < ");
+    builder.push_bind(range_end_ms);
+    builder.push(" AND (");
+    builder.push_bind(upstream_id.as_deref());
+    builder.push(" IS NULL OR upstream_id = ");
+    builder.push_bind(upstream_id.as_deref());
+    builder.push(") AND ");
+    builder.push(NON_UUID_PRINCIPAL_PREDICATE);
+    builder.push(" AND (principal_id IS NOT NULL OR ");
+    builder.push_bind(include_unknown);
+    builder.push(
+        ")) matched \
          GROUP BY principal_id, bucket_index \
          ORDER BY bucket_index ASC, principal_id ASC",
-    )
-    .bind(range_start_ms)
-    .bind(bucket_width_ms)
-    .bind(range_start_ms)
-    .bind(range_end_ms)
-    .bind(upstream_id.as_deref())
-    .bind(upstream_id.as_deref())
-    .fetch_all(storage.pool())
-    .await
-    .map_err(map_sqlx_error)?;
+    );
+    let rows = builder
+        .build_query_as::<(Option<String>, i64, i64, i64, i64, i64, i64, i64, i64)>()
+        .fetch_all(storage.pool())
+        .await
+        .map_err(map_sqlx_error)?;
 
     let mut buckets = BTreeMap::<(String, u64), RequestEventPrincipalCostBucket>::new();
     for (
