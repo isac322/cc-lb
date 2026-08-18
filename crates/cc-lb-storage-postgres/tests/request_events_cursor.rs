@@ -445,6 +445,42 @@ async fn assert_order_index_is_usable(pool: &PgPool) -> Result<()> {
     .bind(PAGE_LIMIT as i64)
     .fetch_all(&mut *tx)
     .await?;
+    let principal_cost_plan = sqlx::query_scalar::<_, String>(
+        "EXPLAIN (COSTS OFF) \
+         SELECT principal_id, ((list_ts_ms - $1) / $2)::bigint AS bucket_index, \
+                convert_from(payload, 'UTF8')::jsonb \
+         FROM ( \
+             SELECT principal_id, list_ts_ms, payload \
+             FROM request_events_v1 \
+             WHERE list_ts_ms >= $1 AND list_ts_ms < $3 \
+               AND ($4::uuid IS NULL OR upstream_id = $4) \
+               AND principal_id = ANY($5::text[]) \
+             UNION ALL \
+             SELECT principal_id, list_ts_ms, payload \
+             FROM request_events_v1 \
+             WHERE list_ts_ms >= $1 AND list_ts_ms < $3 \
+               AND ($4::uuid IS NULL OR upstream_id = $4) \
+               AND (principal_id IS NULL OR principal_id !~* \
+                   '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') \
+               AND LEFT(REGEXP_REPLACE(COALESCE(NULLIF(BTRIM(principal_id COLLATE \"C\", \
+                   U&'\\0009\\000A\\000B\\000C\\000D\\0020\\0085\\00A0\\1680\\2000\\2001\
+                   \\2002\\2003\\2004\\2005\\2006\\2007\\2008\\2009\\200A\\2028\\2029\\202F\
+                   \\205F\\3000'), ''), 'unknown'), '[^A-Za-z0-9_.:@-]', '_', 'g'), 64) \
+                   = ANY($6::text[]) \
+         ) selected \
+         OFFSET 0",
+    )
+    .bind((FALLBACK_TS_SECS * 1_000) as i64)
+    .bind(60_000_i64)
+    .bind(((FALLBACK_TS_SECS + 120) * 1_000) as i64)
+    .bind(Option::<Uuid>::None)
+    .bind(vec![
+        Uuid::from_u128(0x51).to_string(),
+        Uuid::from_u128(0x52).to_string(),
+    ])
+    .bind(vec!["team_A".to_owned()])
+    .fetch_all(&mut *tx)
+    .await?;
     tx.rollback().await?;
 
     ensure!(
@@ -457,6 +493,18 @@ async fn assert_order_index_is_usable(pool: &PgPool) -> Result<()> {
             .iter()
             .any(|line| line.contains("request_events_v1_principal_list_order_idx")),
         "principal request-event list index was not structurally usable: {principal_plan:?}"
+    );
+    ensure!(
+        principal_cost_plan
+            .iter()
+            .any(|line| line.contains("request_events_v1_principal_list_order_idx")),
+        "exact principal cost source could not use the principal-leading range index: {principal_cost_plan:?}"
+    );
+    ensure!(
+        principal_cost_plan.iter().any(|line| {
+            line.contains("request_events_v1_normalized_non_uuid_principal_cost_idx")
+        }),
+        "normalized fallback could not use the non-UUID partial index: {principal_cost_plan:?}"
     );
     Ok(())
 }

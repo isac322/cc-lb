@@ -9,7 +9,7 @@ use cc_lb_storage_api::{
     model_filter_matches, normalize_usage_rollup_dimension,
 };
 use chrono::{DateTime, Utc};
-use sqlx::{Postgres, QueryBuilder};
+use sqlx::{AssertSqlSafe, Postgres, QueryBuilder};
 use std::collections::BTreeMap;
 
 use super::request_event_list_sql::{self, status_class_range, upstream_as_str};
@@ -382,6 +382,10 @@ async fn request_event_key_usage(
     Ok(buckets)
 }
 
+fn is_canonical_uuid_principal(value: &str) -> bool {
+    value.len() == 36 && uuid::Uuid::parse_str(value).is_ok()
+}
+
 async fn request_event_principal_costs(
     storage: &PostgresStorage,
     query: &RequestEventPrincipalCostQuery,
@@ -405,7 +409,19 @@ async fn request_event_principal_costs(
         query.bucket_width_secs,
         "request event principal cost bucket width",
     )?;
-    let rows = sqlx::query_as::<_, (Option<String>, i64, i64, bool, i64, i64, i64, i64, i64)>(
+    let uuid_keys = query
+        .principal_keys
+        .iter()
+        .filter(|key| is_canonical_uuid_principal(key))
+        .cloned()
+        .collect::<Vec<_>>();
+    const NORMALIZED_PRINCIPAL: &str = "LEFT(REGEXP_REPLACE(COALESCE(NULLIF(\
+        BTRIM(principal_id COLLATE \"C\", U&'\\0009\\000A\\000B\\000C\\000D\\0020\\0085\\00A0\
+        \\1680\\2000\\2001\\2002\\2003\\2004\\2005\\2006\\2007\\2008\\2009\\200A\\2028\\2029\
+        \\202F\\205F\\3000'), ''), 'unknown'), '[^A-Za-z0-9_.:@-]', '_', 'g'), 64)";
+    const NON_UUID_PRINCIPAL: &str = "principal_id IS NULL OR principal_id !~* \
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'";
+    let sql = format!(
         "SELECT principal_id, bucket_index, \
                 COALESCE(SUM(GREATEST(COALESCE( \
                     (payload_jsonb ->> 'cost_usd_micros')::bigint, 0), 0)), 0)::bigint \
@@ -435,21 +451,35 @@ async fn request_event_principal_costs(
              SELECT principal_id, \
                     ((list_ts_ms - $1) / $2)::bigint AS bucket_index, \
                     convert_from(payload, 'UTF8')::jsonb AS payload_jsonb \
-             FROM request_events_v1 \
-             WHERE list_ts_ms >= $1 \
-               AND list_ts_ms < $3 \
-               AND ($4::uuid IS NULL OR upstream_id = $4) \
-               AND LEFT(REGEXP_REPLACE(COALESCE(NULLIF(BTRIM(principal_id COLLATE \"C\", U&'\\0009\\000A\\000B\\000C\\000D\\0020\\0085\\00A0\\1680\\2000\\2001\\2002\\2003\\2004\\2005\\2006\\2007\\2008\\2009\\200A\\2028\\2029\\202F\\205F\\3000'), ''), 'unknown'), \
-                   '[^A-Za-z0-9_.:@-]', '_', 'g'), 64) = ANY($5::text[]) \
+             FROM ( \
+                 SELECT principal_id, list_ts_ms, payload \
+                 FROM request_events_v1 \
+                 WHERE list_ts_ms >= $1 \
+                   AND list_ts_ms < $3 \
+                   AND ($4::uuid IS NULL OR upstream_id = $4) \
+                   AND principal_id = ANY($5::text[]) \
+                 UNION ALL \
+                 SELECT principal_id, list_ts_ms, payload \
+                 FROM request_events_v1 \
+                 WHERE list_ts_ms >= $1 \
+                   AND list_ts_ms < $3 \
+                   AND ($4::uuid IS NULL OR upstream_id = $4) \
+                   AND ({NON_UUID_PRINCIPAL}) \
+                   AND {NORMALIZED_PRINCIPAL} = ANY($6::text[]) \
+             ) selected \
              OFFSET 0 \
          ) matched \
          GROUP BY principal_id, bucket_index \
          ORDER BY bucket_index ASC, principal_id ASC",
+    );
+    let rows = sqlx::query_as::<_, (Option<String>, i64, i64, bool, i64, i64, i64, i64, i64)>(
+        AssertSqlSafe(sql),
     )
     .bind(range_start_ms)
     .bind(bucket_width_ms)
     .bind(range_end_ms)
     .bind(query.upstream_id)
+    .bind(&uuid_keys)
     .bind(&query.principal_keys)
     .fetch_all(&storage.pool)
     .await

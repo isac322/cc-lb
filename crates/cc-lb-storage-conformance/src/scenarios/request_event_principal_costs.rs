@@ -23,6 +23,11 @@ where
         let upstream_id = Uuid::from_u128(0x51);
         let other_upstream_id = Uuid::from_u128(0x52);
         let long_principal = format!("{} ignored suffix", "x".repeat(64));
+        let uuid_principal = Uuid::from_u128(0x53).to_string();
+        let padded_uuid_principal = Uuid::from_u128(0x54).to_string();
+        let padded_uuid_raw = format!(" {padded_uuid_principal} ");
+        let compact_uuid_principal = Uuid::from_u128(0x55).simple().to_string();
+        let extra_hyphen_principal = "1234-678-0123-5678-9abc-def012345678".to_owned();
 
         storage
             .append_request_event(&cost_event(
@@ -54,6 +59,50 @@ where
                 other_upstream_id,
                 Some(20),
                 Some([2, 3, 4, 5, 6]),
+                None,
+            ))
+            .await?;
+        storage
+            .append_request_event(&cost_event(
+                range_start + 20,
+                "principal-cost-uuid",
+                Some(&uuid_principal),
+                upstream_id,
+                Some(13),
+                Some([1, 2, 3, 3, 4]),
+                None,
+            ))
+            .await?;
+        storage
+            .append_request_event(&cost_event(
+                range_start + 25,
+                "principal-cost-padded-uuid",
+                Some(&padded_uuid_raw),
+                upstream_id,
+                Some(17),
+                Some([2, 3, 4, 3, 5]),
+                None,
+            ))
+            .await?;
+        storage
+            .append_request_event(&cost_event(
+                range_start + 30,
+                "principal-cost-compact-uuid",
+                Some(&compact_uuid_principal),
+                upstream_id,
+                Some(19),
+                Some([3, 4, 5, 3, 4]),
+                None,
+            ))
+            .await?;
+        storage
+            .append_request_event(&cost_event(
+                range_start + 35,
+                "principal-cost-extra-hyphen",
+                Some(&extra_hyphen_principal),
+                upstream_id,
+                Some(23),
+                Some([4, 5, 6, 3, 5]),
                 None,
             ))
             .await?;
@@ -193,6 +242,105 @@ where
                 .iter()
                 .all(|bucket| selected_principals.contains(&bucket.principal)),
             "unselected normalized principals must be excluded"
+        );
+
+        let uuid_buckets = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: range_start,
+                until_unix_secs: range_start + 120,
+                bucket_width_secs: 60,
+                upstream_id: Some(upstream_id),
+                principal_keys: vec![uuid_principal.clone()],
+            })
+            .await?;
+        ensure!(
+            uuid_buckets.len() == 1,
+            "UUID principal selection must return exactly one bucket"
+        );
+        let uuid_bucket = &uuid_buckets[0];
+        ensure!(
+            uuid_bucket.principal == uuid_principal,
+            "UUID principal key must remain exact"
+        );
+        ensure!(
+            uuid_bucket.total_cost_micros == 13
+                && uuid_bucket.cost_input_micros == 1
+                && uuid_bucket.cost_output_micros == 2
+                && uuid_bucket.cost_cache_creation_5m_micros == 3
+                && uuid_bucket.cost_cache_creation_1h_micros == 3
+                && uuid_bucket.cost_cache_read_micros == 4,
+            "UUID principal component costs mismatch"
+        );
+        let padded_uuid_buckets = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: range_start,
+                until_unix_secs: range_start + 120,
+                bucket_width_secs: 60,
+                upstream_id: Some(upstream_id),
+                principal_keys: vec![padded_uuid_principal.clone()],
+            })
+            .await?;
+        ensure!(
+            padded_uuid_buckets.len() == 1,
+            "normalized padded UUID selection must return exactly one bucket"
+        );
+        let padded_uuid_bucket = &padded_uuid_buckets[0];
+        ensure!(
+            padded_uuid_bucket.principal == padded_uuid_principal,
+            "padded UUID principal must preserve rollup normalization"
+        );
+        ensure!(
+            padded_uuid_bucket.total_cost_micros == 17
+                && padded_uuid_bucket.cost_input_micros == 2
+                && padded_uuid_bucket.cost_output_micros == 3
+                && padded_uuid_bucket.cost_cache_creation_5m_micros == 4
+                && padded_uuid_bucket.cost_cache_creation_1h_micros == 3
+                && padded_uuid_bucket.cost_cache_read_micros == 5,
+            "padded UUID principal component costs mismatch"
+        );
+        let compact_uuid_buckets = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: range_start,
+                until_unix_secs: range_start + 120,
+                bucket_width_secs: 60,
+                upstream_id: Some(upstream_id),
+                principal_keys: vec![compact_uuid_principal.clone()],
+            })
+            .await?;
+        ensure!(
+            compact_uuid_buckets.len() == 1,
+            "compact UUID selection must not double count exact and fallback paths"
+        );
+        ensure!(
+            compact_uuid_buckets[0].total_cost_micros == 19
+                && compact_uuid_buckets[0].cost_input_micros == 3
+                && compact_uuid_buckets[0].cost_output_micros == 4
+                && compact_uuid_buckets[0].cost_cache_creation_5m_micros == 5
+                && compact_uuid_buckets[0].cost_cache_creation_1h_micros == 3
+                && compact_uuid_buckets[0].cost_cache_read_micros == 4,
+            "compact UUID principal component costs mismatch"
+        );
+        let extra_hyphen_buckets = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: range_start,
+                until_unix_secs: range_start + 120,
+                bucket_width_secs: 60,
+                upstream_id: Some(upstream_id),
+                principal_keys: vec![extra_hyphen_principal.clone()],
+            })
+            .await?;
+        ensure!(
+            extra_hyphen_buckets.len() == 1,
+            "extra-hyphen principal must remain covered by the fallback path"
+        );
+        ensure!(
+            extra_hyphen_buckets[0].total_cost_micros == 23
+                && extra_hyphen_buckets[0].cost_input_micros == 4
+                && extra_hyphen_buckets[0].cost_output_micros == 5
+                && extra_hyphen_buckets[0].cost_cache_creation_5m_micros == 6
+                && extra_hyphen_buckets[0].cost_cache_creation_1h_micros == 3
+                && extra_hyphen_buckets[0].cost_cache_read_micros == 5,
+            "extra-hyphen principal component costs mismatch"
         );
 
         let filtered_buckets = storage
