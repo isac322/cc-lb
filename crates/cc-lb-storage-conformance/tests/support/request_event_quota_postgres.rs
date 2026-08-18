@@ -93,6 +93,55 @@ macro_rules! define_request_event_quota_postgres_tests {
         }
 
         #[test]
+        fn request_event_cursor_uses_highest_visible_seq_postgres() {
+            run_postgres_scenario(
+                "request_event_cursor_uses_highest_visible_seq",
+                |backend| async move {
+                    let fixture = backend.create_fixture().await?;
+                    let storage = backend.open(&fixture).await?;
+                    let event = request_event_quota_support::populated_event()?;
+                    let payload = serde_json::to_vec(&event)?;
+                    let ts = chrono::DateTime::from_timestamp(i64::try_from(event.ts)?, 0)
+                        .ok_or_else(|| anyhow::anyhow!("invalid request-event timestamp"))?;
+
+                    // Give the lower sequence a higher xid. Both explicit xid8 values are
+                    // below the snapshot xmin horizon after fixture initialization, making
+                    // the ordering regression deterministic even when another test session
+                    // holds the cluster-wide xmin horizon back.
+                    let lower_seq = sqlx::query_scalar::<_, i64>(
+                        "INSERT INTO request_events_v1 (ts, payload, event_id, tx_id) \
+                         VALUES ($1, $2, $3, '2'::xid8) RETURNING seq",
+                    )
+                    .bind(ts)
+                    .bind(&payload)
+                    .bind("cursor-later-xid")
+                    .fetch_one(&fixture.pool)
+                    .await?;
+
+                    let higher_seq = sqlx::query_scalar::<_, i64>(
+                        "INSERT INTO request_events_v1 (ts, payload, event_id, tx_id) \
+                         VALUES ($1, $2, $3, '1'::xid8) RETURNING seq",
+                    )
+                    .bind(ts)
+                    .bind(&payload)
+                    .bind("cursor-earlier-xid")
+                    .fetch_one(&fixture.pool)
+                    .await?;
+
+                    assert!(
+                        higher_seq > lower_seq,
+                        "the earlier xid must own the higher sequence for this regression"
+                    );
+                    let cursor = storage.current_request_event_cursor().await?;
+                    assert_eq!(cursor, u64::try_from(higher_seq)?);
+
+                    drop(storage);
+                    backend.teardown(fixture).await
+                },
+            );
+        }
+
+        #[test]
         fn request_event_quota_columns_null_for_mismatch_and_historical_rows_postgres() {
             run_postgres_scenario(
                 "request_event_quota_columns_null_for_mismatch_and_historical_rows",
