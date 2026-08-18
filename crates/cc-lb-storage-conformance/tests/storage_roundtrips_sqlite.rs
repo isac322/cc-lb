@@ -18,8 +18,8 @@ use cc_lb_storage_conformance::{
         anthropic_compatibility_kv_store, atomicity, cache_keepalive_session_reads,
         organization_metadata_store, plan_tier_store, plan_tier_store_backfill,
         plugin_registry_store, pool_quota_history_store, price_catalog, principal_store,
-        prompt_cache_observation_store, request_event_list, storage_roundtrips,
-        storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
+        prompt_cache_observation_store, request_event_list, request_event_principal_costs,
+        storage_roundtrips, storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         upstream_rate_limit_store, upstream_subscription_metadata_store,
         upstream_subscription_quota_store, warmup_attempts_store,
     },
@@ -127,6 +127,14 @@ fn request_event_list_model_filter_matches_case_insensitive_prefix_sqlite() {
     run_sqlite_scenario(
         "request_event_list_model_filter_matches_case_insensitive_prefix",
         request_event_list::request_event_list_model_filter_matches_case_insensitive_prefix,
+    );
+}
+
+#[test]
+fn request_event_principal_cost_components_sqlite() {
+    run_sqlite_scenario(
+        "request_event_principal_cost_components",
+        request_event_principal_costs::principal_cost_components_aggregate_without_fabrication,
     );
 }
 

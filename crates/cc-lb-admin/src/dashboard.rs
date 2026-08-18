@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use cc_lb_storage_api::{Storage, StorageError, UsageRollup, UsageRollupResolution};
+use cc_lb_storage_api::{
+    RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, Storage, StorageError,
+    UsageRollup, UsageRollupResolution,
+};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -8,6 +11,7 @@ const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
 const MAX_BUCKETS_PER_SERIES: u64 = 1_440;
 const MAX_GROUPED_SERIES: usize = 20;
+const MAX_PRINCIPAL_COST_SERIES: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DashboardRange {
@@ -81,6 +85,16 @@ pub struct UsageBucket {
     pub cache_read_input_tokens: u64,
     pub error_count: u64,
     pub virtual_cost_micros: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_input_micros: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_output_micros: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_cache_creation_5m_micros: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_cache_creation_1h_micros: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_cache_read_micros: Option<u64>,
     pub latency_ms_sum: u64,
     pub latency_count: u64,
     pub latency_ms_min: Option<u64>,
@@ -249,13 +263,26 @@ pub async fn build_dashboard_usage(
         .filter(|rollup| upstream_id.is_none_or(|id| rollup.upstream_id == id))
         .collect::<Vec<_>>();
     let observed = !rollups.is_empty();
-    let (series, truncated_series_count) = build_usage_series(
+    let (mut series, truncated_series_count) = build_usage_series(
         group_by,
         &rollups,
         window_start_unix_secs,
         window_end_unix_secs,
         step,
     );
+    if group_by == UsageGroupBy::Principal && !series.is_empty() {
+        let principal_keys = selected_principal_cost_keys(&series);
+        let costs = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: window_start_unix_secs,
+                until_unix_secs: window_end_unix_secs,
+                bucket_width_secs: step_width_secs(step),
+                upstream_id,
+                principal_keys,
+            })
+            .await?;
+        enrich_principal_costs(&mut series, costs);
+    }
 
     Ok(DashboardUsageResponse {
         range: range.as_str(),
@@ -395,6 +422,11 @@ pub(crate) fn empty_bucket(bucket_start_unix_secs: u64) -> UsageBucket {
         cache_read_input_tokens: 0,
         error_count: 0,
         virtual_cost_micros: 0,
+        cost_input_micros: None,
+        cost_output_micros: None,
+        cost_cache_creation_5m_micros: None,
+        cost_cache_creation_1h_micros: None,
+        cost_cache_read_micros: None,
         latency_ms_sum: 0,
         latency_count: 0,
         latency_ms_min: None,
@@ -606,6 +638,70 @@ pub(crate) fn build_usage_series(
     (series, truncated_series_count)
 }
 
+fn selected_principal_cost_keys(series: &[UsageSeries]) -> Vec<String> {
+    let mut ranked = series
+        .iter()
+        .map(|series| {
+            let total_virtual_cost_micros = series.buckets.iter().fold(0_u128, |total, bucket| {
+                total + u128::from(bucket.virtual_cost_micros)
+            });
+            (series.key.as_str(), total_virtual_cost_micros)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_unstable_by(
+        |(left_key, left_cost_micros), (right_key, right_cost_micros)| {
+            right_cost_micros
+                .cmp(left_cost_micros)
+                .then_with(|| left_key.cmp(right_key))
+        },
+    );
+    ranked
+        .into_iter()
+        .take(MAX_PRINCIPAL_COST_SERIES)
+        .map(|(key, _)| key.to_owned())
+        .collect()
+}
+
+fn enrich_principal_costs(series: &mut [UsageSeries], costs: Vec<RequestEventPrincipalCostBucket>) {
+    let mut costs_by_principal =
+        BTreeMap::<String, BTreeMap<u64, RequestEventPrincipalCostBucket>>::new();
+    for cost in costs {
+        costs_by_principal
+            .entry(cost.principal.clone())
+            .or_default()
+            .insert(cost.bucket_start_unix_secs, cost);
+    }
+
+    for principal_series in series {
+        let Some(cost_buckets) = costs_by_principal.get(&principal_series.key) else {
+            continue;
+        };
+        for bucket in &mut principal_series.buckets {
+            let Some(costs) = cost_buckets.get(&bucket.bucket_start_unix_secs) else {
+                continue;
+            };
+            let component_total = costs
+                .cost_input_micros
+                .checked_add(costs.cost_output_micros)
+                .and_then(|total| total.checked_add(costs.cost_cache_creation_5m_micros))
+                .and_then(|total| total.checked_add(costs.cost_cache_creation_1h_micros))
+                .and_then(|total| total.checked_add(costs.cost_cache_read_micros));
+            if !costs.component_costs_recorded
+                || component_total.is_none_or(|total| total > costs.total_cost_micros)
+                || costs.total_cost_micros > bucket.virtual_cost_micros
+            {
+                continue;
+            }
+
+            bucket.cost_input_micros = Some(costs.cost_input_micros);
+            bucket.cost_output_micros = Some(costs.cost_output_micros);
+            bucket.cost_cache_creation_5m_micros = Some(costs.cost_cache_creation_5m_micros);
+            bucket.cost_cache_creation_1h_micros = Some(costs.cost_cache_creation_1h_micros);
+            bucket.cost_cache_read_micros = Some(costs.cost_cache_read_micros);
+        }
+    }
+}
+
 fn group_key(group_by: UsageGroupBy, rollup: &UsageRollup) -> (String, Option<String>) {
     match group_by {
         UsageGroupBy::None => ("all".to_owned(), None),
@@ -732,5 +828,126 @@ mod tests {
                 expected_bucket_count
             );
         }
+    }
+
+    #[test]
+    fn principal_cost_keys_are_limited_and_ranked_by_summed_virtual_cost() {
+        let principal_series = |key: &str, costs: &[u64]| UsageSeries {
+            key: key.to_owned(),
+            upstream_name: None,
+            buckets: costs
+                .iter()
+                .map(|cost| {
+                    let mut bucket = empty_bucket(0);
+                    bucket.virtual_cost_micros = *cost;
+                    bucket
+                })
+                .collect(),
+        };
+        let series = vec![
+            principal_series("principal-a", &[5]),
+            principal_series("principal-b", &[50, 25]),
+            principal_series("principal-c", &[100]),
+            principal_series("principal-d", &[90]),
+            principal_series("principal-e", &[80]),
+            principal_series("principal-f", &[70]),
+            principal_series("principal-g", &[70]),
+        ];
+        assert_eq!(
+            selected_principal_cost_keys(&series),
+            vec![
+                "principal-c",
+                "principal-d",
+                "principal-e",
+                "principal-b",
+                "principal-f",
+            ]
+        );
+    }
+
+    struct DefaultPrincipalCostStore;
+
+    #[async_trait::async_trait]
+    impl cc_lb_storage_api::RequestEventStore for DefaultPrincipalCostStore {
+        async fn append_request_event(
+            &self,
+            _event: &cc_lb_storage_api::RequestEvent,
+        ) -> cc_lb_storage_api::StorageResult<u64> {
+            Ok(0)
+        }
+
+        async fn query_request_events(
+            &self,
+            _since: u64,
+            _until: u64,
+            _limit: usize,
+        ) -> cc_lb_storage_api::StorageResult<Vec<cc_lb_storage_api::RequestEvent>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_principal_cost_enrichment_defaults_to_absent_fields() {
+        let rows = cc_lb_storage_api::RequestEventStore::request_event_principal_costs(
+            &DefaultPrincipalCostStore,
+            &RequestEventPrincipalCostQuery {
+                since_unix_secs: 0,
+                until_unix_secs: MINUTE_SECS,
+                bucket_width_secs: MINUTE_SECS,
+                upstream_id: None,
+                principal_keys: vec!["principal-a".to_owned()],
+            },
+        )
+        .await
+        .expect("optional principal cost enrichment");
+
+        assert!(rows.is_empty());
+
+        let mut bucket = empty_bucket(0);
+        bucket.virtual_cost_micros = 10;
+        let mut series = vec![UsageSeries {
+            key: "principal-a".to_owned(),
+            upstream_name: None,
+            buckets: vec![bucket],
+        }];
+        enrich_principal_costs(&mut series, rows);
+
+        let bucket = &series[0].buckets[0];
+        assert_eq!(bucket.cost_input_micros, None);
+        assert_eq!(bucket.cost_output_micros, None);
+        assert_eq!(bucket.cost_cache_creation_5m_micros, None);
+        assert_eq!(bucket.cost_cache_creation_1h_micros, None);
+        assert_eq!(bucket.cost_cache_read_micros, None);
+    }
+
+    #[test]
+    fn principal_cost_enrichment_omits_inconsistent_component_sum() {
+        let bucket_start = 1_700_000_000;
+        let mut bucket = empty_bucket(bucket_start);
+        bucket.virtual_cost_micros = 10;
+        let mut series = vec![UsageSeries {
+            key: "principal-a".to_owned(),
+            upstream_name: None,
+            buckets: vec![bucket],
+        }];
+
+        enrich_principal_costs(
+            &mut series,
+            vec![RequestEventPrincipalCostBucket {
+                principal: "principal-a".to_owned(),
+                bucket_start_unix_secs: bucket_start,
+                total_cost_micros: 10,
+                component_costs_recorded: true,
+                cost_input_micros: 11,
+                ..RequestEventPrincipalCostBucket::default()
+            }],
+        );
+
+        let bucket = &series[0].buckets[0];
+        assert_eq!(bucket.cost_input_micros, None);
+        assert_eq!(bucket.cost_output_micros, None);
+        assert_eq!(bucket.cost_cache_creation_5m_micros, None);
+        assert_eq!(bucket.cost_cache_creation_1h_micros, None);
+        assert_eq!(bucket.cost_cache_read_micros, None);
     }
 }

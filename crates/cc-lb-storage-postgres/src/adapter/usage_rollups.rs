@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     OverviewExcludedErrorBucket, RequestEvent, RequestEventUpstream, StorageError, StorageResult,
     UsageRollup, UsageRollupResolution, UsageRollupRun, UsageRollupStore,
+    normalize_usage_rollup_dimension,
 };
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -17,8 +18,6 @@ const CHECKPOINT_ID: &str = "high_water";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
 const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
-const UNKNOWN_DIMENSION: &str = "unknown";
-const MAX_DIMENSION_CHARS: usize = 64;
 const USAGE_ROLLUP_LOCK_KEY: i64 = 0x_CC1B_0001_0010_0001_u64 as i64;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -307,10 +306,10 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
             let key = RollupKey {
                 resolution,
                 bucket_start: bucket_start(resolution, event_ts_secs(&event)),
-                principal: normalize_dimension(event.principal_id.as_deref()),
+                principal: normalize_usage_rollup_dimension(event.principal_id.as_deref()),
                 upstream_id: upstream.id,
-                upstream_name: normalize_dimension(Some(&upstream.name)),
-                model: normalize_dimension(event.model.as_deref()),
+                upstream_name: normalize_usage_rollup_dimension(Some(&upstream.name)),
+                model: normalize_usage_rollup_dimension(event.model.as_deref()),
             };
             if is_overview_excluded_status(event.status) {
                 let count = overview_excluded_error_deltas
@@ -635,31 +634,7 @@ fn event_upstream_name(event: &RequestEvent) -> String {
         .as_deref()
         .map(ToOwned::to_owned)
         .or_else(|| event.upstream.map(upstream_dimension))
-        .unwrap_or_else(|| UNKNOWN_DIMENSION.to_owned())
-}
-
-fn normalize_dimension(value: Option<&str>) -> String {
-    let Some(value) = value else {
-        return UNKNOWN_DIMENSION.to_owned();
-    };
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return UNKNOWN_DIMENSION.to_owned();
-    }
-
-    let mut normalized = String::new();
-    for ch in trimmed.chars().take(MAX_DIMENSION_CHARS) {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '@') {
-            normalized.push(ch);
-        } else {
-            normalized.push('_');
-        }
-    }
-    if normalized.is_empty() {
-        UNKNOWN_DIMENSION.to_owned()
-    } else {
-        normalized
-    }
+        .unwrap_or_else(|| normalize_usage_rollup_dimension(None))
 }
 
 fn upstream_dimension(upstream: RequestEventUpstream) -> String {

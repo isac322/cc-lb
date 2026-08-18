@@ -5,7 +5,9 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::Config;
-use cc_lb_storage_api::{RequestEvent, RequestEventStore, UsageRollupStore};
+use cc_lb_storage_api::{
+    RequestEvent, RequestEventStore, UsageRollupStore, normalize_usage_rollup_dimension,
+};
 use config_admin_common::{
     app, authed_bytes, authed_json, temp_storage, temp_storage_with_clock, test_state,
     test_state_with_clock,
@@ -138,6 +140,217 @@ async fn usage_filters_by_upstream_id() {
         .map(|bucket| bucket["input_tokens"].as_u64().unwrap_or_default())
         .sum::<u64>();
     assert_eq!(input_tokens, 3);
+}
+
+#[tokio::test]
+async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(3);
+    let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(60);
+
+    let mut modern = usage_event(
+        bucket_ts,
+        "req-principal-modern",
+        upstream_id,
+        "target-upstream",
+        1,
+    );
+    modern.principal_id = Some("  principal/A  ".to_owned());
+    modern.source_kind = Some("renewal".to_owned());
+    modern.cost_usd_micros = Some(15);
+    modern.cost_input_micros = Some(1);
+    modern.cost_output_micros = Some(2);
+    modern.cost_cache_creation_5m_micros = Some(3);
+    modern.cost_cache_creation_1h_micros = Some(4);
+    modern.cost_cache_read_micros = Some(5);
+    storage.append_request_event(&modern).await.unwrap();
+
+    let mut legacy = usage_event(
+        bucket_ts + 1,
+        "req-principal-legacy",
+        upstream_id,
+        "target-upstream",
+        1,
+    );
+    legacy.principal_id = Some("principal A".to_owned());
+    legacy.cost_usd_micros = Some(10);
+    storage.append_request_event(&legacy).await.unwrap();
+    storage.rollup_usage_once().await.unwrap();
+
+    let state = test_state_with_clock(Config::default(), Some(storage), clock);
+    let (status, _, body, _) = authed_json(
+        app(state),
+        "GET",
+        "/admin/usage?range=1h&group_by=principal",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let principal = normalize_usage_rollup_dimension(Some("principal A"));
+    let series = body["series"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|series| series["key"].as_str() == Some(principal.as_str()))
+        .expect("normalized principal series");
+    let bucket = series["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|bucket| bucket["virtual_cost_micros"] == 25)
+        .expect("cost-bearing bucket");
+    assert_eq!(bucket["cost_input_micros"], 1);
+    assert_eq!(bucket["cost_output_micros"], 2);
+    assert_eq!(bucket["cost_cache_creation_5m_micros"], 3);
+    assert_eq!(bucket["cost_cache_creation_1h_micros"], 4);
+    assert_eq!(bucket["cost_cache_read_micros"], 5);
+}
+
+#[tokio::test]
+async fn usage_principal_preserves_recorded_zero_component_costs() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(4);
+    let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(60);
+    let mut event = usage_event(
+        bucket_ts,
+        "req-principal-zero",
+        upstream_id,
+        "target-upstream",
+        1,
+    );
+    event.cost_input_micros = Some(0);
+    event.cost_output_micros = Some(0);
+    event.cost_cache_creation_5m_micros = Some(0);
+    event.cost_cache_creation_1h_micros = Some(0);
+    event.cost_cache_read_micros = Some(0);
+    storage.append_request_event(&event).await.unwrap();
+    storage.rollup_usage_once().await.unwrap();
+
+    let state = test_state_with_clock(Config::default(), Some(storage), clock);
+    let (status, _, body, _) = authed_json(
+        app(state),
+        "GET",
+        "/admin/usage?range=1h&group_by=principal",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let bucket = body["series"][0]["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|bucket| bucket["request_count"] == 1)
+        .expect("observed bucket");
+    assert_eq!(bucket["cost_input_micros"], 0);
+    assert_eq!(bucket["cost_output_micros"], 0);
+    assert_eq!(bucket["cost_cache_creation_5m_micros"], 0);
+    assert_eq!(bucket["cost_cache_creation_1h_micros"], 0);
+    assert_eq!(bucket["cost_cache_read_micros"], 0);
+}
+
+#[tokio::test]
+async fn usage_principal_omits_components_when_request_events_are_ahead() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(5);
+    let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(60);
+    let mut rolled = usage_event(
+        bucket_ts,
+        "req-principal-rolled",
+        upstream_id,
+        "target-upstream",
+        1,
+    );
+    rolled.cost_usd_micros = Some(10);
+    rolled.cost_input_micros = Some(10);
+    rolled.cost_output_micros = Some(0);
+    rolled.cost_cache_creation_5m_micros = Some(0);
+    rolled.cost_cache_creation_1h_micros = Some(0);
+    rolled.cost_cache_read_micros = Some(0);
+    storage.append_request_event(&rolled).await.unwrap();
+    storage.rollup_usage_once().await.unwrap();
+
+    let mut unrolled = rolled.clone();
+    unrolled.request_id = "req-principal-unrolled".to_owned();
+    unrolled.event_id = None;
+    unrolled.ts_ms = Some((bucket_ts + 1) * 1_000);
+    unrolled.cost_usd_micros = Some(5);
+    unrolled.cost_input_micros = Some(5);
+    storage.append_request_event(&unrolled).await.unwrap();
+
+    let state = test_state_with_clock(Config::default(), Some(storage), clock);
+    let (status, _, body, _) = authed_json(
+        app(state),
+        "GET",
+        "/admin/usage?range=1h&group_by=principal",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let bucket = body["series"][0]["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|bucket| bucket["virtual_cost_micros"] == 10)
+        .expect("rolled bucket");
+    let bucket = bucket.as_object().unwrap();
+    assert!(!bucket.contains_key("cost_input_micros"));
+    assert!(!bucket.contains_key("cost_output_micros"));
+    assert!(!bucket.contains_key("cost_cache_creation_5m_micros"));
+    assert!(!bucket.contains_key("cost_cache_creation_1h_micros"));
+    assert!(!bucket.contains_key("cost_cache_read_micros"));
+}
+
+#[tokio::test]
+async fn usage_non_principal_grouping_does_not_expose_component_costs() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(6);
+    let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(60);
+    let mut event = usage_event(
+        bucket_ts,
+        "req-model-components",
+        upstream_id,
+        "target-upstream",
+        1,
+    );
+    event.cost_usd_micros = Some(1);
+    event.cost_input_micros = Some(1);
+    event.cost_output_micros = Some(0);
+    event.cost_cache_creation_5m_micros = Some(0);
+    event.cost_cache_creation_1h_micros = Some(0);
+    event.cost_cache_read_micros = Some(0);
+    storage.append_request_event(&event).await.unwrap();
+    storage.rollup_usage_once().await.unwrap();
+
+    let state = test_state_with_clock(Config::default(), Some(storage), clock);
+    let (status, _, body, _) = authed_json(
+        app(state),
+        "GET",
+        "/admin/usage?range=1h&group_by=model",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let bucket = body["series"][0]["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|bucket| bucket["request_count"] == 1)
+        .expect("observed bucket")
+        .as_object()
+        .unwrap();
+    assert!(!bucket.contains_key("cost_input_micros"));
+    assert!(!bucket.contains_key("cost_output_micros"));
+    assert!(!bucket.contains_key("cost_cache_creation_5m_micros"));
+    assert!(!bucket.contains_key("cost_cache_creation_1h_micros"));
+    assert!(!bucket.contains_key("cost_cache_read_micros"));
 }
 
 #[tokio::test]

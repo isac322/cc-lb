@@ -14,12 +14,15 @@ export function BreakdownPopover({
   footer,
   showZeroRows,
   isPartial,
+  note,
 }: {
   title: string;
   rows: PopoverRow[];
   footer?: { label: string; value: number; fmt: (v: number) => string } | null;
   showZeroRows?: boolean;
   isPartial?: boolean;
+  /** Replaces the em dash when no row is visible: why the rows are missing. */
+  note?: string;
 }) {
   const visible = showZeroRows ? rows : rows.filter((r) => r.value > 0);
   const total = rows.reduce((a, r) => a + r.value, 0);
@@ -29,7 +32,13 @@ export function BreakdownPopover({
         {title}
       </div>
       {visible.length === 0 ? (
-        <div className="text-[11px] text-text-faint">—</div>
+        note ? (
+          <div className="max-w-[220px] whitespace-normal text-[11px] leading-snug text-text-muted">
+            {note}
+          </div>
+        ) : (
+          <div className="text-[11px] text-text-faint">—</div>
+        )
       ) : (
         <div className="flex flex-col gap-1">
           {visible.map((r) => {
