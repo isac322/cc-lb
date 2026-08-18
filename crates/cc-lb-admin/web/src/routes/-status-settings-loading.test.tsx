@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
 import type React from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { Route as SettingsRoute } from './settings';
@@ -21,12 +27,24 @@ const queryMocks = vi.hoisted(() => ({
   useValidateConfig: vi.fn(),
 }));
 
+const apiMocks = vi.hoisted(() => ({
+  downloadJson: vi.fn(),
+}));
+
 const localeMocks = vi.hoisted(() => ({
   setLocale: vi.fn(),
   setTimezone: vi.fn(),
 }));
 
 vi.mock('../lib/queries', () => queryMocks);
+
+vi.mock('../lib/api', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('../lib/api');
+  return {
+    ...actual,
+    downloadJson: apiMocks.downloadJson,
+  };
+});
 
 vi.mock('../lib/locale', () => ({
   formatAbsolute: () => 'Jul 30, 2026, 12:00:00 PM',
@@ -80,15 +98,25 @@ const loadedDraft = {
 };
 
 function loadingResult() {
-  return { data: undefined, isLoading: true };
+  return {
+    data: undefined,
+    isFetching: true,
+    isLoading: true,
+    isPending: true,
+  };
 }
 
 function loadedResult<T>(data: T) {
-  return { data, isLoading: false };
+  return {
+    data,
+    isFetching: false,
+    isLoading: false,
+    isPending: false,
+  };
 }
 
 function mutationResult() {
-  return { mutate: vi.fn(), isPending: false };
+  return { mutate: vi.fn(), isPending: false, variables: undefined };
 }
 
 function setSettingsLoaded() {
@@ -103,6 +131,7 @@ function setSettingsLoaded() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  apiMocks.downloadJson.mockResolvedValue(undefined);
 
   queryMocks.useStatus.mockReturnValue(loadingResult());
   queryMocks.useCredentials.mockReturnValue(loadingResult());
@@ -338,4 +367,200 @@ test('settings empty and loaded checklist/history states retain their slots', ()
     'min-h-[173px]',
   );
   expect(screen.getByText('on')).toBeDefined();
+});
+
+test('config mutations mutually lock the pipeline and retain the owning progress label', () => {
+  const cases = [
+    {
+      hook: queryMocks.useSaveDraft,
+      idleLabel: 'Save',
+      pendingLabel: 'Saving...',
+      statusLabel: 'Saving draft...',
+    },
+    {
+      hook: queryMocks.useValidateConfig,
+      idleLabel: 'Validate',
+      pendingLabel: 'Validating...',
+      statusLabel: 'Validating draft...',
+    },
+    {
+      hook: queryMocks.useApplyConfig,
+      idleLabel: 'Apply',
+      pendingLabel: 'Applying...',
+      statusLabel: 'Applying revision...',
+    },
+    {
+      hook: queryMocks.useReloadConfig,
+      idleLabel: 'Reload',
+      pendingLabel: 'Reloading...',
+      statusLabel: 'Reloading configuration...',
+    },
+  ];
+
+  for (const { hook, idleLabel, pendingLabel, statusLabel } of cases) {
+    setSettingsLoaded();
+    queryMocks.useApplyConfig.mockReturnValue(mutationResult());
+    queryMocks.useReloadConfig.mockReturnValue(mutationResult());
+    queryMocks.useSaveDraft.mockReturnValue(mutationResult());
+    queryMocks.useValidateConfig.mockReturnValue(mutationResult());
+
+    const view = render(<SettingsComponent />);
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: '{}' } });
+
+    hook.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: true,
+      variables: undefined,
+    });
+    view.rerender(<SettingsComponent />);
+
+    const pendingButton = screen.getByRole('button', {
+      name: pendingLabel,
+    });
+    expect(pendingButton.hasAttribute('disabled')).toBe(true);
+    expect(pendingButton.getAttribute('aria-busy')).toBe('true');
+    expect(pendingButton.querySelector('svg.animate-spin')).not.toBeNull();
+    expect(textarea.hasAttribute('disabled')).toBe(true);
+    expect(textarea.parentElement?.getAttribute('aria-busy')).toBe('true');
+    const progress = screen.getByTestId('config-pipeline-status');
+    expect(progress.getAttribute('role')).toBe('status');
+    expect(progress.getAttribute('aria-live')).toBe('polite');
+    expect(progress.className).toContain('min-h-4');
+    expect(within(progress).getByText(statusLabel)).toBeDefined();
+    expect(progress.querySelector('svg.animate-spin')).not.toBeNull();
+
+    for (const label of ['Save', 'Validate', 'Apply', 'Reload']) {
+      if (label === idleLabel) continue;
+      expect(
+        screen.getByRole('button', { name: label }).hasAttribute('disabled'),
+      ).toBe(true);
+    }
+
+    view.unmount();
+  }
+});
+
+test('configuration export exposes download progress and blocks duplicate clicks', () => {
+  setSettingsLoaded();
+  apiMocks.downloadJson.mockReturnValue(Promise.withResolvers<void>().promise);
+  render(<SettingsComponent />);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Download export.json' }));
+
+  const downloading = screen.getByRole('button', { name: 'Downloading...' });
+  expect(downloading.hasAttribute('disabled')).toBe(true);
+  expect(downloading.getAttribute('aria-busy')).toBe('true');
+  expect(downloading.querySelector('svg.animate-spin')).not.toBeNull();
+
+  fireEvent.click(downloading);
+  expect(apiMocks.downloadJson).toHaveBeenCalledTimes(1);
+});
+
+test('killswitch disengage retains its pending action when status changes', () => {
+  const mutate = vi.fn();
+  queryMocks.useStatus.mockReturnValue(
+    loadedResult({ ...loadedStatus, killswitch: true }),
+  );
+  queryMocks.useCredentials.mockReturnValue(
+    loadedResult({ credentials: [], observed: true }),
+  );
+  queryMocks.useOAuthStatus.mockReturnValue(
+    loadedResult({ credentials: [], observed: true }),
+  );
+  queryMocks.useKillswitch.mockReturnValue({
+    mutate,
+    isPending: false,
+    variables: undefined,
+  });
+
+  const view = render(<StatusComponent />);
+  fireEvent.click(screen.getByRole('button', { name: 'Disengage' }));
+  expect(mutate).toHaveBeenCalledTimes(1);
+  expect(mutate.mock.calls[0]?.[0]).toBe(false);
+
+  queryMocks.useStatus.mockReturnValue(
+    loadedResult({ ...loadedStatus, killswitch: false }),
+  );
+  queryMocks.useKillswitch.mockReturnValue({
+    mutate,
+    isPending: true,
+    variables: false,
+  });
+  view.rerender(<StatusComponent />);
+
+  const disengaging = screen.getByRole('button', { name: 'Disengaging...' });
+  expect(disengaging.hasAttribute('disabled')).toBe(true);
+  expect(disengaging.getAttribute('aria-busy')).toBe('true');
+  expect(disengaging.querySelector('svg.animate-spin')).not.toBeNull();
+
+  fireEvent.click(disengaging);
+  expect(mutate).toHaveBeenCalledTimes(1);
+});
+
+test('killswitch engage confirmation stays open and locked until success', () => {
+  const mutate = vi.fn();
+  queryMocks.useStatus.mockReturnValue(
+    loadedResult({ ...loadedStatus, killswitch: false }),
+  );
+  queryMocks.useCredentials.mockReturnValue(
+    loadedResult({ credentials: [], observed: true }),
+  );
+  queryMocks.useOAuthStatus.mockReturnValue(
+    loadedResult({ credentials: [], observed: true }),
+  );
+  queryMocks.useKillswitch.mockReturnValue({
+    mutate,
+    isPending: false,
+    variables: undefined,
+  });
+
+  const view = render(<StatusComponent />);
+  fireEvent.click(screen.getByRole('button', { name: 'Engage killswitch' }));
+
+  let dialog = screen.getByRole('alertdialog', {
+    name: 'Engage killswitch?',
+  });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Engage killswitch' }),
+  );
+  expect(mutate).toHaveBeenCalledTimes(1);
+  expect(mutate.mock.calls[0]?.[0]).toBe(true);
+  expect(
+    screen.getByRole('alertdialog', { name: 'Engage killswitch?' }),
+  ).toBeDefined();
+
+  queryMocks.useStatus.mockReturnValue(
+    loadedResult({ ...loadedStatus, killswitch: true }),
+  );
+  queryMocks.useKillswitch.mockReturnValue({
+    mutate,
+    isPending: true,
+    variables: true,
+  });
+  view.rerender(<StatusComponent />);
+
+  dialog = screen.getByRole('alertdialog', { name: 'Engage killswitch?' });
+  const engaging = within(dialog).getByRole('button', {
+    name: 'Engaging...',
+  });
+  expect(engaging.hasAttribute('disabled')).toBe(true);
+  expect(engaging.getAttribute('aria-busy')).toBe('true');
+  expect(engaging.querySelector('svg.animate-spin')).not.toBeNull();
+  expect(
+    within(dialog)
+      .getByRole('button', { name: 'Cancel' })
+      .hasAttribute('disabled'),
+  ).toBe(true);
+  expect(
+    screen.getByTestId('killswitch-control').hasAttribute('disabled'),
+  ).toBe(true);
+
+  fireEvent.click(engaging);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+  fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+  expect(mutate).toHaveBeenCalledTimes(1);
+  expect(
+    screen.getByRole('alertdialog', { name: 'Engage killswitch?' }),
+  ).toBeDefined();
 });

@@ -79,6 +79,7 @@ import {
   usePrincipalKeys,
   usePrincipalNameMap,
   usePrincipals,
+  usePrincipalWritePending,
   useRecentEvents,
   useReorderChain,
   useRevokeKey,
@@ -112,6 +113,10 @@ const PRINCIPAL_DETAIL_CARD_CLASS_NAMES = {
   apiKeys: 'min-h-[202px]',
 } as const;
 const EMPTY_PRINCIPAL_DETAIL_NAME_MAP = new Map<string, string>();
+
+// INPUT_CLASS carries no disabled affordance of its own; blocking mutations
+// need every locked control to read as unavailable, not merely inert.
+const PENDING_INPUT_CLASS = 'disabled:opacity-50 disabled:cursor-not-allowed';
 
 function pluginSupportsSlot(plugin: PluginEntry, slot: ChainSlot): boolean {
   const slots = plugin.supported_slots;
@@ -457,6 +462,7 @@ function PrincipalDetail({
 }) {
   const toggle = useTogglePrincipal();
   const del = useDeletePrincipal();
+  const principalWritePending = usePrincipalWritePending(principal.id) > 0;
   const routerChain = usePluginChain(principal.id, 'router');
   const observabilityChain = usePluginChain(principal.id, 'observability_hook');
   const shapeChain = usePluginChain(principal.id, 'shape');
@@ -506,6 +512,8 @@ function PrincipalDetail({
         <div className="flex items-center gap-2 shrink-0">
           <Button
             size="sm"
+            loading={toggle.isPending}
+            disabled={del.isPending || principalWritePending}
             onClick={() =>
               toggle.mutate(
                 {
@@ -530,6 +538,8 @@ function PrincipalDetail({
             size="sm"
             variant="danger"
             iconLeft={<Trash2 className="w-3 h-3" />}
+            loading={del.isPending}
+            disabled={toggle.isPending || principalWritePending}
             onClick={() => setConfirmDeleteOpen(true)}
           >
             Delete
@@ -551,11 +561,15 @@ function PrincipalDetail({
         }
         confirmLabel="Delete"
         destructive
+        pending={del.isPending}
+        confirmDisabled={principalWritePending}
+        closeOnConfirm={false}
         onConfirm={() =>
           del.mutate(
             { id: principal.id, revision: principal.revision },
             {
               onSuccess: () => {
+                setConfirmDeleteOpen(false);
                 toast.success('Principal deleted');
                 onBack();
               },
@@ -565,7 +579,9 @@ function PrincipalDetail({
       />
 
       <div className={PRINCIPAL_DETAIL_BODY_CLASS}>
-        <CacheKeepaliveCard principal={principal} />
+        <fieldset className="contents" disabled={principalWritePending}>
+          <CacheKeepaliveCard principal={principal} />
+        </fieldset>
         <AllowedModelsCard principal={principal} />
         <DefaultLimitsCard principal={principal} />
         <RecentRequestsCard principal={principal} />
@@ -636,8 +652,10 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
 
 function AllowedModelsCard({ principal }: { principal: Principal }) {
   const setAllowed = useSetAllowedModels();
+  const principalWritePending = usePrincipalWritePending(principal.id) > 0;
   const [models, setModels] = useState(principal.allowed_models.join(', '));
   const [editing, setEditing] = useState(false);
+  const saving = setAllowed.isPending;
   return (
     <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.allowedModels}>
       <CardHeader
@@ -647,6 +665,7 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
             <div className="flex items-center gap-2">
               <Button
                 size="sm"
+                disabled={saving || principalWritePending}
                 onClick={() => {
                   setEditing(false);
                   setModels(principal.allowed_models.join(', '));
@@ -657,6 +676,8 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
               <Button
                 size="sm"
                 variant="primary"
+                loading={saving}
+                disabled={saving || principalWritePending}
                 onClick={() =>
                   setAllowed.mutate(
                     {
@@ -676,11 +697,15 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
                   )
                 }
               >
-                Save
+                {saving ? 'Saving...' : 'Save'}
               </Button>
             </div>
           ) : (
-            <Button size="sm" onClick={() => setEditing(true)}>
+            <Button
+              size="sm"
+              disabled={principalWritePending}
+              onClick={() => setEditing(true)}
+            >
               Edit
             </Button>
           )
@@ -689,10 +714,15 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
       <CardBody>
         {editing ? (
           <textarea
-            className={`${INPUT_CLASS} min-h-[80px] font-mono`}
+            className={cx(
+              INPUT_CLASS,
+              PENDING_INPUT_CLASS,
+              'min-h-[80px] font-mono',
+            )}
             value={models}
             onChange={(e) => setModels(e.target.value)}
             placeholder="comma-separated model ids"
+            disabled={saving || principalWritePending}
           />
         ) : principal.allowed_models.length ? (
           <div className="flex flex-wrap gap-2">
@@ -751,9 +781,11 @@ function formatLimitCap(limit: PrincipalDefaultLimit): string {
 function LimitsEditor({
   value,
   onChange,
+  disabled = false,
 }: {
   value: PrincipalDefaultLimit[];
   onChange: (next: PrincipalDefaultLimit[]) => void;
+  disabled?: boolean;
 }) {
   const updateRow = (idx: number, patch: Partial<PrincipalDefaultLimit>) => {
     const next = value.map((row, i) =>
@@ -784,7 +816,8 @@ function LimitsEditor({
             <div className="w-40">
               <Field label="Kind">
                 <select
-                  className={INPUT_CLASS}
+                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+                  disabled={disabled}
                   value={row.kind}
                   onChange={(e) =>
                     updateRow(idx, { kind: e.target.value as LimitKind })
@@ -801,6 +834,7 @@ function LimitsEditor({
             <div className="w-32">
               <Field label="Window (sec)">
                 <BaseNumberField.Root
+                  disabled={disabled}
                   min={1}
                   step={1}
                   value={row.window_secs}
@@ -810,13 +844,16 @@ function LimitsEditor({
                     })
                   }
                 >
-                  <BaseNumberField.Input className={INPUT_CLASS} />
+                  <BaseNumberField.Input
+                    className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+                  />
                 </BaseNumberField.Root>
               </Field>
             </div>
             <div className="w-40">
               <Field label={isCost ? 'Cap (USD)' : 'Cap'}>
                 <BaseNumberField.Root
+                  disabled={disabled}
                   min={0}
                   step={isCost ? 0.01 : 1}
                   value={capValue}
@@ -833,7 +870,9 @@ function LimitsEditor({
                     });
                   }}
                 >
-                  <BaseNumberField.Input className={INPUT_CLASS} />
+                  <BaseNumberField.Input
+                    className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+                  />
                 </BaseNumberField.Root>
               </Field>
             </div>
@@ -841,6 +880,7 @@ function LimitsEditor({
               size="sm"
               variant="danger"
               iconLeft={<Trash2 className="w-3 h-3" />}
+              disabled={disabled}
               onClick={() => removeRow(idx)}
             >
               Remove
@@ -851,6 +891,7 @@ function LimitsEditor({
       <Button
         size="sm"
         iconLeft={<Plus className="w-3 h-3" />}
+        disabled={disabled}
         onClick={addRow}
       >
         Add limit
@@ -861,6 +902,8 @@ function LimitsEditor({
 
 function DefaultLimitsCard({ principal }: { principal: Principal }) {
   const update = useUpdatePrincipalDefaultLimits();
+  const principalWritePending = usePrincipalWritePending(principal.id) > 0;
+  const saving = update.isPending;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<PrincipalDefaultLimit[]>(
     principal.default_limits,
@@ -879,6 +922,7 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
             <div className="flex items-center gap-2">
               <Button
                 size="sm"
+                disabled={saving || principalWritePending}
                 onClick={() => {
                   setEditing(false);
                   setDraft(principal.default_limits);
@@ -889,6 +933,8 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
               <Button
                 size="sm"
                 variant="primary"
+                loading={saving}
+                disabled={saving || principalWritePending}
                 onClick={() =>
                   update.mutate(
                     {
@@ -905,11 +951,15 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
                   )
                 }
               >
-                Save
+                {saving ? 'Saving...' : 'Save'}
               </Button>
             </div>
           ) : (
-            <Button size="sm" onClick={() => setEditing(true)}>
+            <Button
+              size="sm"
+              disabled={principalWritePending}
+              onClick={() => setEditing(true)}
+            >
               Edit
             </Button>
           )
@@ -917,7 +967,11 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
       />
       {editing ? (
         <CardBody>
-          <LimitsEditor value={draft} onChange={setDraft} />
+          <LimitsEditor
+            value={draft}
+            onChange={setDraft}
+            disabled={saving || principalWritePending}
+          />
         </CardBody>
       ) : principal.default_limits.length ? (
         <div className="overflow-x-auto">
@@ -1218,6 +1272,116 @@ function useFlipReorder(
   }, [items]);
 }
 
+const TERMINAL_STRATEGY_OPTIONS = [
+  {
+    value: 'first-pick',
+    name: 'First eligible',
+    desc: 'Always pick the first upstream in the candidate list. Predictable, easy to reason about.',
+  },
+  {
+    value: 'random',
+    name: 'Random',
+    desc: 'Pick a random upstream from the candidate list. Helps spread load when many are equivalent.',
+  },
+] as const;
+
+function TerminalStrategyRadioGroup({
+  name,
+  value,
+  isPending,
+  disabled,
+  pendingValue,
+  onSelect,
+}: {
+  name: string;
+  value: string;
+  isPending: boolean;
+  disabled: boolean;
+  pendingValue: string | null;
+  onSelect: (strategy: string) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <BaseRadioGroup
+        aria-busy={isPending}
+        aria-disabled={disabled}
+        className="grid grid-cols-1 sm:grid-cols-2 gap-3"
+        name={name}
+        onValueChange={onSelect}
+        render={<ul />}
+        value={value}
+      >
+        {TERMINAL_STRATEGY_OPTIONS.map((opt) => {
+          const isActive = value === opt.value;
+          const isMutating = isPending && pendingValue === opt.value;
+          return (
+            <li
+              key={opt.value}
+              role="radio"
+              aria-checked={isActive}
+              className="h-full"
+            >
+              <label
+                className={cx(
+                  'flex items-start gap-3 p-3 border rounded-md transition-colors h-full',
+                  isActive
+                    ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
+                    : 'border-subtle hover:bg-overlay-3',
+                  isPending
+                    ? 'cursor-progress'
+                    : disabled
+                      ? 'cursor-not-allowed'
+                      : 'cursor-pointer',
+                  disabled && !isMutating && 'pointer-events-none opacity-50',
+                )}
+              >
+                <BaseRadio.Root
+                  className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
+                  disabled={disabled}
+                  value={opt.value}
+                >
+                  {isMutating ? (
+                    <Spinner className="w-3 h-3 text-accent" />
+                  ) : (
+                    <>
+                      <BaseRadio.Indicator className="status-dot ok" />
+                      <span
+                        className={cx(
+                          'status-dot neutral',
+                          isActive && 'hidden!',
+                        )}
+                      />
+                    </>
+                  )}
+                </BaseRadio.Root>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-sm truncate">
+                      {opt.name}
+                    </span>
+                  </div>
+                  <div className="text-xs text-text-faint mt-0.5">
+                    {opt.desc}
+                  </div>
+                </div>
+              </label>
+            </li>
+          );
+        })}
+      </BaseRadioGroup>
+      {isPending && (
+        <p
+          role="status"
+          className="flex items-center gap-2 text-xs text-text-faint"
+        >
+          <Spinner className="w-3 h-3" />
+          Updating strategy...
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function RouterSlotEditor({ principal }: { principal: Principal }) {
   const principalId = principal.id;
   const slot = 'router' as const;
@@ -1228,6 +1392,17 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   const del = useDeleteChainEntry();
   const terminalStrategy = useRouterTerminalStrategy(principalId);
   const updateTerminalStrategy = useUpdateRouterTerminalStrategy();
+  const principalWritePending = usePrincipalWritePending(principalId) > 0;
+  // Every chain write bumps sibling revisions, so one in-flight chain mutation
+  // invalidates the expected_revision any other chain edit would submit.
+  const isChainBusy = reorder.isPending || insert.isPending || del.isPending;
+  const insertingPluginId = insert.isPending
+    ? (insert.variables?.body.wasm_registry_id ?? null)
+    : null;
+  const deletingEntryId = del.isPending ? (del.variables?.id ?? null) : null;
+  const pendingStrategy = updateTerminalStrategy.isPending
+    ? (updateTerminalStrategy.variables?.strategy ?? null)
+    : null;
 
   const entries = useMemo(
     () => [...(chain.data?.entries ?? [])].sort((a, b) => a.order - b.order),
@@ -1264,7 +1439,16 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
 
   const hasSubscriptionPreference = subscriptionPreferenceEntry !== undefined;
 
+  // The switch writes the chain through insert/delete, so it shares the chain
+  // lock; only the write it started reports progress beside the control.
+  const subscriptionPreferencePending =
+    (insertingPluginId !== null &&
+      insertingPluginId === subscriptionPreferencePlugin?.id) ||
+    (deletingEntryId !== null &&
+      deletingEntryId === subscriptionPreferenceEntry?.id);
+
   const toggleSubscriptionPreference = () => {
+    if (isChainBusy) return;
     if (subscriptionPreferenceEntry) {
       del.mutate({
         id: subscriptionPreferenceEntry.id,
@@ -1283,7 +1467,12 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
     });
   };
   const setStrategy = (strategy: string) => {
-    if (!terminalStrategy.data) return;
+    if (
+      !terminalStrategy.data ||
+      updateTerminalStrategy.isPending ||
+      principalWritePending
+    )
+      return;
     updateTerminalStrategy.mutate(
       {
         id: principalId,
@@ -1312,7 +1501,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   const [pickerOpen, setPickerOpen] = useState(false);
 
   const moveUp = (index: number) => {
-    if (index === 0) return;
+    if (index === 0 || isChainBusy) return;
     const reordered = [...entries];
     const temp = reordered[index - 1];
     reordered[index - 1] = reordered[index]!;
@@ -1329,7 +1518,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   };
 
   const moveDown = (index: number) => {
-    if (index === entries.length - 1) return;
+    if (index === entries.length - 1 || isChainBusy) return;
     const reordered = [...entries];
     const temp = reordered[index + 1];
     reordered[index + 1] = reordered[index]!;
@@ -1346,18 +1535,22 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   };
 
   const addFilter = (pluginId: string) => {
-    insert.mutate({
-      pid: principalId,
-      body: {
-        slot,
-        wasm_registry_id: pluginId,
-        order: (entries.length + 1) * 100,
+    if (isChainBusy) return;
+    insert.mutate(
+      {
+        pid: principalId,
+        body: {
+          slot,
+          wasm_registry_id: pluginId,
+          order: (entries.length + 1) * 100,
+        },
       },
-    });
-    setPickerOpen(false);
+      { onSuccess: () => setPickerOpen(false) },
+    );
   };
 
   const removeFilter = (id: string, revision: number) => {
+    if (isChainBusy) return;
     del.mutate({ id, revision });
   };
 
@@ -1437,124 +1630,63 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   already served them, so the prompt cache hits stay high.
                 </div>
               </div>
-              <BaseSwitch.Root
-                checked={hasSubscriptionPreference}
-                className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
-                nativeButton
-                onCheckedChange={() => toggleSubscriptionPreference()}
-                render={<button type="button" />}
-                disabled={
-                  isChainMetadataLoading || del.isPending || insert.isPending
-                }
-              >
-                <div
-                  className={cx(
-                    'relative inline-flex h-4 w-8 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border',
-                    hasSubscriptionPreference
-                      ? 'bg-emerald-500 border-emerald-500'
-                      : 'bg-overlay-5 border-subtle-strong group-hover:border-text-muted',
-                  )}
+              <div className="flex items-center gap-2.5 shrink-0">
+                {subscriptionPreferencePending ? (
+                  <span
+                    role="status"
+                    aria-live="polite"
+                    className="inline-flex items-center gap-1.5 text-xs text-text-muted"
+                  >
+                    <Spinner className="w-3 h-3 text-accent" />
+                    {hasSubscriptionPreference
+                      ? 'Turning off...'
+                      : 'Turning on...'}
+                  </span>
+                ) : null}
+                <BaseSwitch.Root
+                  checked={hasSubscriptionPreference}
+                  className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
+                  nativeButton
+                  onCheckedChange={() => toggleSubscriptionPreference()}
+                  render={<button type="button" />}
+                  aria-busy={subscriptionPreferencePending || undefined}
+                  disabled={isChainMetadataLoading || isChainBusy}
                 >
-                  <BaseSwitch.Thumb
+                  <div
                     className={cx(
-                      'pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
+                      'relative inline-flex h-4 w-8 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border',
                       hasSubscriptionPreference
-                        ? 'translate-x-4'
-                        : 'translate-x-0.5',
+                        ? 'bg-emerald-500 border-emerald-500'
+                        : 'bg-overlay-5 border-subtle-strong group-hover:border-text-muted',
                     )}
-                  />
-                </div>
-              </BaseSwitch.Root>
+                  >
+                    <BaseSwitch.Thumb
+                      className={cx(
+                        'pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
+                        hasSubscriptionPreference
+                          ? 'translate-x-4'
+                          : 'translate-x-0.5',
+                      )}
+                    />
+                  </div>
+                </BaseSwitch.Root>
+              </div>
             </div>
 
             <div>
               <div className="text-sm font-medium text-text mb-3">
                 When multiple upstreams qualify, pick
               </div>
-              <BaseRadioGroup
-                className="grid grid-cols-1 sm:grid-cols-2 gap-3"
+              <TerminalStrategyRadioGroup
                 name="strategy"
-                onValueChange={setStrategy}
-                render={<ul />}
                 value={strategy}
-              >
-                <li
-                  role="radio"
-                  aria-checked={strategy === 'first-pick'}
-                  className="h-full"
-                >
-                  <label
-                    className={cx(
-                      'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
-                      strategy === 'first-pick'
-                        ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
-                        : 'border-subtle hover:bg-overlay-3',
-                    )}
-                  >
-                    <BaseRadio.Root
-                      className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
-                      value="first-pick"
-                    >
-                      <BaseRadio.Indicator className="status-dot ok" />
-                      <span
-                        className={cx(
-                          'status-dot neutral',
-                          strategy === 'first-pick' && 'hidden!',
-                        )}
-                      />
-                    </BaseRadio.Root>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-sm truncate">
-                          First eligible
-                        </span>
-                      </div>
-                      <div className="text-xs text-text-faint mt-0.5">
-                        Always pick the first upstream in the candidate list.
-                        Predictable, easy to reason about.
-                      </div>
-                    </div>
-                  </label>
-                </li>
-                <li
-                  role="radio"
-                  aria-checked={strategy === 'random'}
-                  className="h-full"
-                >
-                  <label
-                    className={cx(
-                      'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
-                      strategy === 'random'
-                        ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
-                        : 'border-subtle hover:bg-overlay-3',
-                    )}
-                  >
-                    <BaseRadio.Root
-                      className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
-                      value="random"
-                    >
-                      <BaseRadio.Indicator className="status-dot ok" />
-                      <span
-                        className={cx(
-                          'status-dot neutral',
-                          strategy === 'random' && 'hidden!',
-                        )}
-                      />
-                    </BaseRadio.Root>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-sm truncate">
-                          Random
-                        </span>
-                      </div>
-                      <div className="text-xs text-text-faint mt-0.5">
-                        Pick a random upstream from the candidate list. Helps
-                        spread load when many are equivalent.
-                      </div>
-                    </div>
-                  </label>
-                </li>
-              </BaseRadioGroup>
+                disabled={
+                  updateTerminalStrategy.isPending || principalWritePending
+                }
+                isPending={updateTerminalStrategy.isPending}
+                pendingValue={pendingStrategy}
+                onSelect={setStrategy}
+              />
             </div>
           </div>
         )}
@@ -1572,7 +1704,27 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
               </div>
             )}
 
-            <BasePopover.Root open={pickerOpen} onOpenChange={setPickerOpen}>
+            {isChainBusy && (
+              <div
+                role="status"
+                className="flex items-center gap-2 text-xs text-text-faint"
+              >
+                <Spinner className="w-3 h-3" />
+                {insert.isPending
+                  ? 'Adding filter...'
+                  : del.isPending
+                    ? 'Removing filter...'
+                    : 'Reordering steps...'}
+              </div>
+            )}
+
+            <BasePopover.Root
+              open={pickerOpen}
+              onOpenChange={(open) => {
+                if (!open && insert.isPending) return;
+                setPickerOpen(open);
+              }}
+            >
               <ul ref={listRef} className="space-y-0">
                 {entries.map((e, idx) => {
                   const reg = registry.data?.entries.find(
@@ -1613,24 +1765,32 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                         </div>
                         <div className="flex items-center gap-1 shrink-0">
                           <button
+                            aria-label="Move filter up"
                             onClick={() => moveUp(idx)}
                             className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
-                            disabled={idx === 0}
+                            disabled={idx === 0 || isChainBusy}
                           >
                             <ArrowUp className="w-4 h-4" />
                           </button>
                           <button
+                            aria-label="Move filter down"
                             onClick={() => moveDown(idx)}
                             className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
-                            disabled={idx === entries.length - 1}
+                            disabled={idx === entries.length - 1 || isChainBusy}
                           >
                             <ArrowDown className="w-4 h-4" />
                           </button>
                           <button
+                            aria-label="Remove filter"
                             onClick={() => removeFilter(e.id, e.revision)}
-                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-red-400 hover:bg-overlay-3"
+                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-red-400 hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-text-faint"
+                            disabled={isChainBusy}
                           >
-                            <Trash2 className="w-4 h-4" />
+                            {deletingEntryId === e.id ? (
+                              <Spinner className="w-4 h-4 text-red-400" />
+                            ) : (
+                              <Trash2 className="w-4 h-4" />
+                            )}
                           </button>
                         </div>
                       </li>
@@ -1649,19 +1809,32 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                 )}
 
                 <BasePopover.Trigger
+                  disabled={isChainBusy}
                   nativeButton={false}
                   render={
                     <li
-                      className="flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm bg-overlay-1/50 hover:bg-overlay-2 cursor-pointer transition-colors"
+                      className={cx(
+                        'flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm bg-overlay-1/50 transition-colors',
+                        isChainBusy
+                          ? 'opacity-50 cursor-progress'
+                          : 'hover:bg-overlay-2 cursor-pointer',
+                      )}
                       data-key="add-filter-placeholder"
                       onClick={(e) => e.stopPropagation()}
                     />
                   }
                 >
-                  <div className="flex items-center gap-2 text-text-muted hover:text-text">
-                    <Plus className="w-4 h-4" />
-                    <span className="text-sm font-medium">Add filter</span>
-                  </div>
+                  {insert.isPending ? (
+                    <div className="flex items-center gap-2 text-text-muted">
+                      <Spinner className="w-4 h-4" />
+                      <span className="text-sm font-medium">Adding...</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-text-muted hover:text-text">
+                      <Plus className="w-4 h-4" />
+                      <span className="text-sm font-medium">Add filter</span>
+                    </div>
+                  )}
                 </BasePopover.Trigger>
               </ul>
 
@@ -1683,90 +1856,16 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   </div>
                 </div>
                 <div className="pl-11">
-                  <BaseRadioGroup
-                    className="grid grid-cols-1 sm:grid-cols-2 gap-3"
+                  <TerminalStrategyRadioGroup
                     name="term-strategy"
-                    onValueChange={setStrategy}
-                    render={<ul />}
                     value={strategy}
-                  >
-                    <li
-                      role="radio"
-                      aria-checked={strategy === 'first-pick'}
-                      className="h-full"
-                    >
-                      <label
-                        className={cx(
-                          'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
-                          strategy === 'first-pick'
-                            ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
-                            : 'border-subtle hover:bg-overlay-3',
-                        )}
-                      >
-                        <BaseRadio.Root
-                          className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
-                          value="first-pick"
-                        >
-                          <BaseRadio.Indicator className="status-dot ok" />
-                          <span
-                            className={cx(
-                              'status-dot neutral',
-                              strategy === 'first-pick' && 'hidden!',
-                            )}
-                          />
-                        </BaseRadio.Root>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium text-sm truncate">
-                              First eligible
-                            </span>
-                          </div>
-                          <div className="text-xs text-text-faint mt-0.5">
-                            Always pick the first upstream in the candidate
-                            list. Predictable, easy to reason about.
-                          </div>
-                        </div>
-                      </label>
-                    </li>
-                    <li
-                      role="radio"
-                      aria-checked={strategy === 'random'}
-                      className="h-full"
-                    >
-                      <label
-                        className={cx(
-                          'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
-                          strategy === 'random'
-                            ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
-                            : 'border-subtle hover:bg-overlay-3',
-                        )}
-                      >
-                        <BaseRadio.Root
-                          className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
-                          value="random"
-                        >
-                          <BaseRadio.Indicator className="status-dot ok" />
-                          <span
-                            className={cx(
-                              'status-dot neutral',
-                              strategy === 'random' && 'hidden!',
-                            )}
-                          />
-                        </BaseRadio.Root>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium text-sm truncate">
-                              Random
-                            </span>
-                          </div>
-                          <div className="text-xs text-text-faint mt-0.5">
-                            Pick a random upstream from the candidate list.
-                            Helps spread load when many are equivalent.
-                          </div>
-                        </div>
-                      </label>
-                    </li>
-                  </BaseRadioGroup>
+                    disabled={
+                      updateTerminalStrategy.isPending || principalWritePending
+                    }
+                    isPending={updateTerminalStrategy.isPending}
+                    pendingValue={pendingStrategy}
+                    onSelect={setStrategy}
+                  />
                 </div>
               </div>
               <BasePopover.Portal>
@@ -1785,16 +1884,19 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                         const inChain = entries.some(
                           (e) => e.wasm_registry_id === p.id,
                         );
-                        const disabled = inChain;
+                        const isInserting = insertingPluginId === p.id;
+                        const disabled = inChain || isChainBusy;
 
                         return (
                           <button
                             key={p.id}
                             className={cx(
                               'w-full text-left px-3 py-2 text-sm flex flex-col gap-0.5',
-                              disabled
-                                ? 'opacity-50 cursor-not-allowed'
-                                : 'hover:bg-overlay-3',
+                              isInserting
+                                ? 'cursor-progress'
+                                : disabled
+                                  ? 'opacity-50 cursor-not-allowed'
+                                  : 'hover:bg-overlay-3',
                             )}
                             disabled={disabled}
                             onClick={() => addFilter(p.id)}
@@ -1803,7 +1905,9 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                               <span className="font-medium text-text">
                                 {p.name}
                               </span>
-                              {disabled ? (
+                              {isInserting ? (
+                                <Spinner className="w-3 h-3 text-text-faint" />
+                              ) : inChain ? (
                                 <span className="text-[10px] text-text-faint">
                                   Already in chain
                                 </span>
@@ -1999,7 +2103,15 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
     [chain.data],
   );
 
+  // Reorder, insert, and delete all rewrite this one chain, and each write bumps
+  // sibling revisions: a second write started mid-flight either races the first
+  // or 409s on revisions the server already moved. One lock therefore covers
+  // drag, add, and remove; the mutation that owns the interaction still renders
+  // its own progress so the operator sees which write holds the chain.
+  const chainBusy = reorder.isPending || insert.isPending || del.isPending;
+
   const onDragEnd = (e: DragEndEvent) => {
+    if (chainBusy) return;
     if (!e.over || e.over.id === e.active.id) return;
     const ids = entries.map((x) => x.id);
     const oldIx = ids.indexOf(String(e.active.id));
@@ -2027,13 +2139,26 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
         title="Observability"
         subtitle="SSE / audit hooks. Executed in order. Multiple allowed."
         action={
-          <Button
-            size="sm"
-            iconLeft={<Plus className="w-3 h-3" />}
-            onClick={() => setAddOpen(true)}
-          >
-            Add
-          </Button>
+          <>
+            {reorder.isPending ? (
+              <span
+                role="status"
+                aria-live="polite"
+                className="inline-flex items-center gap-1.5 text-xs text-text-muted"
+              >
+                <Spinner className="w-3 h-3 text-accent" />
+                Saving order...
+              </span>
+            ) : null}
+            <Button
+              size="sm"
+              iconLeft={<Plus className="w-3 h-3" />}
+              disabled={chainBusy}
+              onClick={() => setAddOpen(true)}
+            >
+              Add
+            </Button>
+          </>
         }
       />
       <CardBody>
@@ -2047,7 +2172,7 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
               items={entries.map((e) => e.id)}
               strategy={verticalListSortingStrategy}
             >
-              <ul className="space-y-1.5">
+              <ul className="space-y-1.5" aria-busy={chainBusy || undefined}>
                 {entries.map((e) => {
                   const reg = registry.data?.entries.find(
                     (r) => r.id === e.wasm_registry_id,
@@ -2058,6 +2183,7 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
                       id={e.id}
                       order={e.order}
                       name={reg?.name ?? e.wasm_registry_id}
+                      disabled={chainBusy}
                       onDelete={() =>
                         setPendingRemove({
                           id: e.id,
@@ -2074,7 +2200,8 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
         ) : (
           <button
             type="button"
-            className="w-full border border-dashed border-subtle rounded-sm py-4 text-xs text-text-faint hover:text-text hover:border-[color:var(--color-border-strong)]"
+            disabled={chainBusy}
+            className="w-full border border-dashed border-subtle rounded-sm py-4 text-xs text-text-faint hover:text-text hover:border-[color:var(--color-border-strong)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-text-faint disabled:hover:border-subtle"
             onClick={() => setAddOpen(true)}
           >
             + Set {label.toLowerCase()} plugin
@@ -2084,14 +2211,22 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
         <Modal
           open={addOpen}
           onOpenChange={setAddOpen}
+          preventDismiss={insert.isPending}
           title={`Add plugin to ${label}`}
           footer={
             <>
-              <Button onClick={() => setAddOpen(false)}>Cancel</Button>
+              <Button
+                disabled={insert.isPending}
+                onClick={() => setAddOpen(false)}
+              >
+                Cancel
+              </Button>
               <Button
                 variant="primary"
-                disabled={!selectedPluginId}
-                onClick={() =>
+                disabled={!selectedPluginId || chainBusy}
+                loading={insert.isPending}
+                onClick={() => {
+                  if (chainBusy) return;
                   insert.mutate(
                     {
                       pid: principalId,
@@ -2104,18 +2239,19 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
                         setSelectedPluginId('');
                       },
                     },
-                  )
-                }
+                  );
+                }}
               >
-                Add
+                {insert.isPending ? 'Adding...' : 'Add'}
               </Button>
             </>
           }
         >
           <Field label="Plugin" required>
             <select
-              className={INPUT_CLASS}
+              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
               value={selectedPluginId}
+              disabled={insert.isPending}
               onChange={(e) => setSelectedPluginId(e.target.value)}
             >
               <option value="">— select —</option>
@@ -2144,15 +2280,21 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
               </>
             ) : null
           }
-          confirmLabel="Remove"
+          confirmLabel={del.isPending ? 'Removing...' : 'Remove'}
           destructive
+          pending={del.isPending}
+          closeOnConfirm={false}
           onConfirm={() => {
-            if (!pendingRemove) return;
+            if (!pendingRemove || chainBusy) return;
             del.mutate(
               { id: pendingRemove.id, revision: pendingRemove.revision },
-              { onSuccess: () => toast.success('Plugin removed from chain') },
+              {
+                onSuccess: () => {
+                  toast.success('Plugin removed from chain');
+                  setPendingRemove(null);
+                },
+              },
             );
-            setPendingRemove(null);
           }}
         />
       </CardBody>
@@ -2165,11 +2307,13 @@ function SortableChainItem({
   order,
   name,
   onDelete,
+  disabled = false,
 }: {
   id: string;
   order: number;
   name: string;
   onDelete: () => void;
+  disabled?: boolean;
 }) {
   const {
     attributes,
@@ -2178,7 +2322,7 @@ function SortableChainItem({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id });
+  } = useSortable({ id, disabled });
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -2195,7 +2339,8 @@ function SortableChainItem({
         {...attributes}
         {...listeners}
         aria-label="Drag to reorder"
-        className="text-text-faint hover:text-text cursor-grab active:cursor-grabbing"
+        disabled={disabled}
+        className="text-text-faint hover:text-text cursor-grab active:cursor-grabbing rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-text-faint"
       >
         <GripVertical className="w-4 h-4" />
       </button>
@@ -2204,7 +2349,8 @@ function SortableChainItem({
       <button
         type="button"
         aria-label="Remove plugin"
-        className="text-text-faint hover:text-red-400"
+        disabled={disabled}
+        className="text-text-faint hover:text-red-400 rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-text-faint"
         onClick={onDelete}
       >
         <Trash2 className="w-4 h-4" />
@@ -2248,6 +2394,49 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
     key_id: string;
     label: string;
   } | null>(null);
+  // Issuance mints a plaintext key the server can never show again, so a
+  // duplicate request from one synchronous burst of clicks would strand a live
+  // secret nobody can read; revoke is the matching destructive one-shot. React
+  // Query only publishes `isPending` on the next render, which lands too late
+  // for that burst, so these refs latch each request until it settles. That is
+  // specific to these one-time-secret writes, not a rule for every mutation.
+  const issueInFlight = React.useRef(false);
+  const revokeInFlight = React.useRef(false);
+  const issuePending = issue.isPending;
+  const revokePending = revoke.isPending;
+
+  const submitIssue = () => {
+    if (issueInFlight.current || issuePending) return;
+    issueInFlight.current = true;
+    issue.mutate(
+      { id: principal.id, label },
+      {
+        onSuccess: (res) => setIssued(res),
+        onSettled: () => {
+          issueInFlight.current = false;
+        },
+      },
+    );
+  };
+
+  const submitRevoke = () => {
+    if (!pendingRevoke || revokeInFlight.current || revokePending) return;
+    revokeInFlight.current = true;
+    revoke.mutate(
+      { id: principal.id, key_id: pendingRevoke.key_id },
+      {
+        // The dialog stays mounted until the server acknowledges. Only success
+        // clears the target, so a failure keeps the key in context for a retry.
+        onSuccess: () => {
+          toast.success('Key revoked');
+          setPendingRevoke(null);
+        },
+        onSettled: () => {
+          revokeInFlight.current = false;
+        },
+      },
+    );
+  };
 
   return (
     <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}>
@@ -2325,8 +2514,12 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
                     {!k.revoked_at_unix_secs ? (
                       <button
                         type="button"
-                        className="text-text-faint hover:text-red-400"
+                        className={cx(
+                          'text-text-faint hover:text-red-400',
+                          'disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-text-faint',
+                        )}
                         aria-label="Revoke key"
+                        disabled={revokePending}
                         onClick={() =>
                           setPendingRevoke({
                             key_id: k.key_id,
@@ -2354,6 +2547,11 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
         </table>
       </div>
 
+      {/*
+        The issued plaintext cannot be recovered once this dialog closes, so it
+        refuses every implicit dismissal (Escape, backdrop, X) until the
+        operator acknowledges the key with Done.
+      */}
       <Modal
         open={issueOpen}
         onOpenChange={(o) => {
@@ -2363,6 +2561,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
             setIssued(null);
           }
         }}
+        preventDismiss={issuePending || issued !== null}
         title={issued ? 'API key issued' : 'Issue API key'}
         footer={
           issued ? (
@@ -2378,17 +2577,18 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
             </Button>
           ) : (
             <>
-              <Button onClick={() => setIssueOpen(false)}>Cancel</Button>
+              <Button
+                disabled={issuePending}
+                onClick={() => setIssueOpen(false)}
+              >
+                Cancel
+              </Button>
               <Button
                 variant="primary"
-                onClick={() =>
-                  issue.mutate(
-                    { id: principal.id, label },
-                    { onSuccess: (res) => setIssued(res) },
-                  )
-                }
+                loading={issuePending}
+                onClick={submitIssue}
               >
-                Issue
+                {issuePending ? 'Issuing...' : 'Issue'}
               </Button>
             </>
           )
@@ -2397,7 +2597,8 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
         {issued ? (
           <div className="space-y-3">
             <p className="text-xs text-text-faint">
-              Copy the key now. It will not be shown again.
+              Copy the key now. It will not be shown again, so this dialog stays
+              open until you choose Done.
             </p>
             <div className="flex items-center gap-2">
               <code className="flex-1 p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all">
@@ -2418,10 +2619,11 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
             hint="Human-readable name, e.g. 'github-actions'"
           >
             <input
-              className={INPUT_CLASS}
+              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               placeholder="laptop, ci, prod-app"
+              disabled={issuePending}
             />
           </Field>
         )}
@@ -2443,14 +2645,9 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
         }
         confirmLabel="Revoke"
         destructive
-        onConfirm={() => {
-          if (!pendingRevoke) return;
-          revoke.mutate(
-            { id: principal.id, key_id: pendingRevoke.key_id },
-            { onSuccess: () => toast.success('Key revoked') },
-          );
-          setPendingRevoke(null);
-        }}
+        pending={revokePending}
+        closeOnConfirm={false}
+        onConfirm={submitRevoke}
       />
     </Card>
   );
@@ -2464,44 +2661,66 @@ function CreatePrincipalModal({
   onOpenChange: (open: boolean) => void;
 }) {
   const create = useCreatePrincipal();
+  const createInFlight = React.useRef(false);
   const [name, setName] = useState('');
   const [kind, setKind] = useState<'machine' | 'human' | 'admin'>('human');
   const [defaultLimits, setDefaultLimits] = useState<PrincipalDefaultLimit[]>(
     [],
   );
+  const creating = create.isPending;
   const reset = () => {
     setName('');
     setKind('human');
     setDefaultLimits([]);
   };
+  // A close request is only honoured when nothing is in flight; the draft is
+  // discarded with the dialog so a cancelled form never resurfaces half-filled.
+  const requestClose = () => {
+    if (createInFlight.current || creating) return;
+    onOpenChange(false);
+    reset();
+  };
+  const submitCreate = () => {
+    if (createInFlight.current || creating) return;
+    createInFlight.current = true;
+    create.mutate(
+      { name, kind, default_limits: defaultLimits },
+      {
+        onSuccess: () => {
+          toast.success('Principal created');
+          onOpenChange(false);
+          reset();
+        },
+        onSettled: () => {
+          createInFlight.current = false;
+        },
+      },
+    );
+  };
   return (
     <Modal
       open={open}
+      preventDismiss={creating}
       onOpenChange={(o) => {
-        onOpenChange(o);
-        if (!o) reset();
+        if (!o) {
+          requestClose();
+          return;
+        }
+        onOpenChange(true);
       }}
       title="New principal"
       footer={
         <>
-          <Button onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button disabled={creating} onClick={requestClose}>
+            Cancel
+          </Button>
           <Button
             variant="primary"
             disabled={!name.trim()}
-            onClick={() =>
-              create.mutate(
-                { name, kind, default_limits: defaultLimits },
-                {
-                  onSuccess: () => {
-                    toast.success('Principal created');
-                    onOpenChange(false);
-                    reset();
-                  },
-                },
-              )
-            }
+            loading={creating}
+            onClick={submitCreate}
           >
-            Create
+            {creating ? 'Creating...' : 'Create'}
           </Button>
         </>
       }
@@ -2509,15 +2728,17 @@ function CreatePrincipalModal({
       <div className="space-y-3">
         <Field label="Name" required>
           <input
-            className={INPUT_CLASS}
+            className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="engineering-shared"
+            disabled={creating}
           />
         </Field>
         <Field label="Kind" required>
           <select
-            className={INPUT_CLASS}
+            className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+            disabled={creating}
             value={kind}
             onChange={(e) => setKind(e.target.value as typeof kind)}
           >
@@ -2530,7 +2751,11 @@ function CreatePrincipalModal({
           <span className="text-[11px] uppercase tracking-wider text-text-faint">
             Default limits
           </span>
-          <LimitsEditor value={defaultLimits} onChange={setDefaultLimits} />
+          <LimitsEditor
+            value={defaultLimits}
+            onChange={setDefaultLimits}
+            disabled={creating}
+          />
           <span className="text-[11px] text-text-faint">
             Optional. Applied to every API key issued for this principal.
           </span>

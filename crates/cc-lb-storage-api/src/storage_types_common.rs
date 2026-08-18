@@ -181,6 +181,38 @@ pub struct StoredHistoryEntry {
     pub summary: HistorySummary,
 }
 
+const UNKNOWN_USAGE_DIMENSION: &str = "unknown";
+const MAX_USAGE_DIMENSION_CHARS: usize = 64;
+
+/// Canonicalizes dimensions before they become usage-rollup keys.
+///
+/// Request-event queries that join back to rollups must use this same function
+/// so missing, truncated, or punctuation-bearing principal IDs cannot drift
+/// into a different dashboard series.
+pub fn normalize_usage_rollup_dimension(value: Option<&str>) -> String {
+    let Some(value) = value else {
+        return UNKNOWN_USAGE_DIMENSION.to_owned();
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return UNKNOWN_USAGE_DIMENSION.to_owned();
+    }
+
+    let mut normalized = String::new();
+    for ch in trimmed.chars().take(MAX_USAGE_DIMENSION_CHARS) {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '@') {
+            normalized.push(ch);
+        } else {
+            normalized.push('_');
+        }
+    }
+    if normalized.is_empty() {
+        UNKNOWN_USAGE_DIMENSION.to_owned()
+    } else {
+        normalized
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageRollupResolution {

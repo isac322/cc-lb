@@ -25,7 +25,7 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: hadolint/hadolint-action@v3.3.0
+      - uses: hadolint/hadolint-action@v3.4.0
         with:
           dockerfile: Dockerfile
 
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v3.16.4
+          version: v4.2.4
       - uses: bmuschko/setup-kubeconform@v1
         with:
           kubeconform-version: '0.8.0'

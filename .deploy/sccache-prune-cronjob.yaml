@@ -28,9 +28,9 @@ spec:
                 - name: SCCACHE_BUCKET
                   value: sccache
                 - name: PRUNE_THRESHOLD_GIB
-                  value: "80"     # start pruning above this
+                  value: "38"     # start pruning above this
                 - name: PRUNE_TARGET_GIB
-                  value: "60"     # prune down to this
+                  value: "28"     # prune down to this
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom: {secretKeyRef: {name: sccache-s3-creds, key: AWS_ACCESS_KEY_ID}}
                 - name: AWS_SECRET_ACCESS_KEY

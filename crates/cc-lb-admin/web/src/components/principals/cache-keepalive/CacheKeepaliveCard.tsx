@@ -6,6 +6,7 @@ import { ApiError } from '../../../lib/api';
 import {
   type Principal,
   useCacheKeepaliveSummary,
+  usePrincipalWritePending,
   useUpdatePrincipalCacheKeepalive,
 } from '../../../lib/queries';
 import {
@@ -127,6 +128,11 @@ export const CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS = 'min-h-[323px]';
 
 export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   const updateSettings = useUpdatePrincipalCacheKeepalive();
+  // Sibling principal writes bump the revision this toggle would submit, so the
+  // switch stays locked for the whole shared write, not just its own request.
+  const principalWritePending = usePrincipalWritePending(principal.id) > 0;
+  const togglePending = updateSettings.isPending;
+  const toggleLocked = togglePending || principalWritePending;
   const summaryQ = useCacheKeepaliveSummary(principal.id);
   const summary = summaryQ.data;
 
@@ -136,6 +142,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   const enabled = principal.cache_keepalive?.enabled ?? false;
 
   const handleToggle = () => {
+    if (toggleLocked) return;
     updateSettings.mutate(
       {
         id: principal.id,
@@ -188,6 +195,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   const headerActions = (
     <div className="flex items-center">
       <BaseSwitch.Root
+        aria-busy={togglePending || undefined}
         aria-label="Toggle cache keepalive"
         checked={enabled}
         className={cx(
@@ -197,7 +205,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
             : 'bg-overlay-5 border-subtle-strong hover:border-text-muted',
         )}
         data-testid="cache-keepalive-switch"
-        disabled={updateSettings.isPending}
+        disabled={toggleLocked}
         nativeButton
         onCheckedChange={handleToggle}
         render={<button type="button" />}

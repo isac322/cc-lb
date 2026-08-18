@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute } from '@tanstack/react-router';
 import { KeyRound, RefreshCw, ShieldOff } from 'lucide-react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
   Badge,
@@ -16,6 +16,7 @@ import {
   Section,
   Skeleton,
   SkeletonRow,
+  Spinner,
   StatusBadge,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
@@ -113,10 +114,45 @@ function CredentialsPage() {
       toast.success(`Credential ${vars.action}d`);
       qc.invalidateQueries({ queryKey: ['credentials'] });
       qc.invalidateQueries({ queryKey: ['oauth-status'] });
+      // Only success clears the target, so a failure leaves the credential in
+      // context for a retry instead of dropping the destructive intent.
       setConfirm(null);
     },
-    onError: (err) => toast.error(`Failed: ${String(err)}`),
+    // No local onError: the global MutationCache toast is the single error
+    // surface, so adding one here would double-report the same failure.
   });
+
+  // Rotate mints a replacement credential and revoke tears one down, so a
+  // duplicate request from one synchronous burst of clicks would strand an
+  // unreferenced credential or fire a second teardown. React Query publishes
+  // `isPending` only on the next render, which lands too late for that burst,
+  // so this ref latches the request until it settles.
+  const actionInFlight = useRef(false);
+  const pending = mut.isPending;
+  // Derived from the in-flight variables rather than `confirm` so the progress
+  // copy always names the request the server is actually running.
+  const inFlightAction = pending ? (mut.variables?.action ?? null) : null;
+
+  const submitConfirm = () => {
+    if (!confirm || actionInFlight.current || pending) return;
+    actionInFlight.current = true;
+    mut.mutate(
+      {
+        provider: confirm.cred.provider,
+        cred_id:
+          confirm.cred.cred_id ??
+          confirm.cred.identity ??
+          confirm.cred.principal_id ??
+          'default',
+        action: confirm.kind,
+      },
+      {
+        onSettled: () => {
+          actionInFlight.current = false;
+        },
+      },
+    );
+  };
 
   const apiKeyRows = (credsQ.data?.credentials ?? []).filter(
     (c) => (c as unknown as CredentialLike).kind !== 'oauth',
@@ -280,6 +316,7 @@ function CredentialsPage() {
                             <div className="flex items-center justify-end gap-1">
                               <Button
                                 size="sm"
+                                disabled={pending}
                                 iconLeft={<RefreshCw className="w-3 h-3" />}
                                 onClick={() =>
                                   setConfirm({ kind: 'rotate', cred: c })
@@ -290,6 +327,7 @@ function CredentialsPage() {
                               <Button
                                 size="sm"
                                 variant="danger"
+                                disabled={pending}
                                 iconLeft={<ShieldOff className="w-3 h-3" />}
                                 onClick={() =>
                                   setConfirm({ kind: 'revoke', cred: c })
@@ -396,6 +434,7 @@ function CredentialsPage() {
                     <div className="pt-2 border-t border-subtle/40 flex items-center justify-between gap-2">
                       <Button
                         size="sm"
+                        disabled={pending}
                         iconLeft={<RefreshCw className="w-3 h-3" />}
                         onClick={() => setConfirm({ kind: 'rotate', cred: o })}
                       >
@@ -404,6 +443,7 @@ function CredentialsPage() {
                       <Button
                         size="sm"
                         variant="danger"
+                        disabled={pending}
                         iconLeft={<ShieldOff className="w-3 h-3" />}
                         onClick={() => setConfirm({ kind: 'revoke', cred: o })}
                       >
@@ -432,8 +472,13 @@ function CredentialsPage() {
 
       <Modal
         open={!!confirm}
+        preventDismiss={pending}
         onOpenChange={(o) => {
-          if (!o) setConfirm(null);
+          if (o) return;
+          // Belt-and-braces with `preventDismiss`: no close path may drop the
+          // target while the write is still in flight.
+          if (pending) return;
+          setConfirm(null);
         }}
         title={
           confirm
@@ -443,22 +488,19 @@ function CredentialsPage() {
         footer={
           confirm ? (
             <>
-              <Button onClick={() => setConfirm(null)}>Cancel</Button>
+              <Button disabled={pending} onClick={() => setConfirm(null)}>
+                Cancel
+              </Button>
               <Button
                 variant={confirm.kind === 'revoke' ? 'danger' : 'primary'}
-                onClick={() =>
-                  mut.mutate({
-                    provider: confirm.cred.provider,
-                    cred_id:
-                      confirm.cred.cred_id ??
-                      confirm.cred.identity ??
-                      confirm.cred.principal_id ??
-                      'default',
-                    action: confirm.kind,
-                  })
-                }
+                loading={pending}
+                onClick={submitConfirm}
               >
-                Confirm {confirm.kind}
+                {inFlightAction === 'rotate'
+                  ? 'Rotating...'
+                  : inFlightAction === 'revoke'
+                    ? 'Revoking...'
+                    : `Confirm ${confirm.kind}`}
               </Button>
             </>
           ) : null
@@ -482,6 +524,18 @@ function CredentialsPage() {
                 </div>
               ) : null}
             </div>
+            {inFlightAction ? (
+              <p
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-2 text-xs text-text-faint"
+                data-testid="credential-action-progress"
+              >
+                <Spinner className="w-3 h-3" />
+                {inFlightAction === 'rotate' ? 'Rotating' : 'Revoking'}{' '}
+                {confirm.cred.provider} credential — waiting for the server.
+              </p>
+            ) : null}
           </div>
         ) : null}
       </Modal>

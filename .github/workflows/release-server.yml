@@ -45,6 +45,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: true
+      - uses: ./.github/actions/setup-rustup-home
       - uses: ./.github/actions/setup-gh
 
       - name: Validate release target
@@ -93,8 +94,10 @@ jobs:
           git checkout -B release-plz-server "$TARGET_SHA"
           git branch --set-upstream-to=origin/master release-plz-server
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@master
         if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
+        with:
+          toolchain: 1.97.1
 
       # release-plz 0.3.160 supports git-only releases, but its release command
       # still filters out manifest-private packages before applying that mode.

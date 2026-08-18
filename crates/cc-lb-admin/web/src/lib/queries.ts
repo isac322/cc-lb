@@ -8,6 +8,7 @@ import {
   queryOptions,
   experimental_streamedQuery as streamedQuery,
   useInfiniteQuery,
+  useIsMutating,
   useMutation,
   useQuery,
   useQueryClient,
@@ -60,6 +61,8 @@ import {
 } from './cacheKeepaliveApi';
 import { usePolledData } from './usePolledData';
 import { useVisibility } from './visibilityManager';
+
+const PRINCIPAL_WRITE_MUTATION_KEY = ['principal-write'] as const;
 
 export const POLLING_INTERVALS = {
   SUMMARY_MS: 5_000,
@@ -1104,9 +1107,22 @@ export function useCreatePrincipal() {
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.principals }),
   });
 }
+export function usePrincipalWritePending(id: string) {
+  return useIsMutating({
+    mutationKey: PRINCIPAL_WRITE_MUTATION_KEY,
+    predicate: (mutation) => {
+      const variables = mutation.state.variables;
+      if (variables === null || typeof variables !== 'object') return false;
+      if ('id' in variables && variables.id === id) return true;
+      return 'principalId' in variables && variables.principalId === id;
+    },
+  });
+}
+
 export function useDeletePrincipal() {
   const qc = useQueryClient();
   return useMutation({
+    mutationKey: PRINCIPAL_WRITE_MUTATION_KEY,
     mutationFn: ({ id, revision }: { id: string; revision: number }) =>
       deleteJson(`/admin/v1/principals/${id}`, { ifMatch: revision }),
     onSuccess: (_d, vars) => {
@@ -1119,6 +1135,7 @@ export function useDeletePrincipal() {
 export function useTogglePrincipal() {
   const qc = useQueryClient();
   return useMutation({
+    mutationKey: PRINCIPAL_WRITE_MUTATION_KEY,
     mutationFn: ({
       id,
       enabled,
@@ -1139,6 +1156,7 @@ export function useTogglePrincipal() {
 export function useSetAllowedModels() {
   const qc = useQueryClient();
   return useMutation({
+    mutationKey: PRINCIPAL_WRITE_MUTATION_KEY,
     mutationFn: ({
       id,
       models,
@@ -1161,6 +1179,7 @@ export function useSetAllowedModels() {
 export function useUpdatePrincipalDefaultLimits() {
   const qc = useQueryClient();
   return useMutation({
+    mutationKey: PRINCIPAL_WRITE_MUTATION_KEY,
     mutationFn: ({
       id,
       default_limits,
@@ -1185,6 +1204,7 @@ export function useUpdatePrincipalDefaultLimits() {
 export function useUpdatePrincipalCacheKeepalive() {
   const qc = useQueryClient();
   return useMutation({
+    mutationKey: PRINCIPAL_WRITE_MUTATION_KEY,
     mutationFn: ({
       id,
       cache_keepalive,
@@ -1415,6 +1435,7 @@ export function useDeleteChainEntry() {
 export function useUpdateRouterTerminalStrategy() {
   const qc = useQueryClient();
   return useMutation({
+    mutationKey: PRINCIPAL_WRITE_MUTATION_KEY,
     mutationFn: ({
       id,
       strategy,

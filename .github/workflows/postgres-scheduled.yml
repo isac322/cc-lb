@@ -2,6 +2,8 @@ name: postgres scheduled
 
 env:
   CC_LB_ADMIN_SKIP_SPA: "1"
+  # Scheduled storage/server scenarios do not run fixture-backed Wasmtime tests.
+  CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
 
 on:
   workflow_dispatch:
@@ -36,13 +38,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
 
       - uses: ./.github/actions/setup-rust-cache
         with:
-          rust-cache-key: postgres-storage-stress
+          stable-build-metadata: "true"
 
       - name: Run Postgres storage stress tests
         run: |
@@ -70,13 +75,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
 
       - uses: ./.github/actions/setup-rust-cache
         with:
-          rust-cache-key: postgres-e2e
+          stable-build-metadata: "true"
 
       - name: Start named Postgres container
         run: |

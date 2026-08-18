@@ -43,6 +43,7 @@ import {
   Modal,
   Section,
   Skeleton,
+  Spinner,
   StatusBadge,
 } from '../components/ui/primitives';
 import {
@@ -102,6 +103,10 @@ import {
 const upstreamSearchSchema = z.object({
   selectedId: z.string().optional(),
 });
+
+// INPUT_CLASS carries no disabled styling, but a control locked by an in-flight
+// mutation must read as unavailable rather than merely inert.
+const PENDING_INPUT_CLASS = 'disabled:opacity-50 disabled:cursor-not-allowed';
 
 export const Route = createFileRoute('/upstreams')({
   validateSearch: upstreamSearchSchema,
@@ -953,6 +958,17 @@ function DetailView({
     ? oauthBadge(principalEntry)
     : { tone: 'neutral', label: 'Not connected' };
 
+  // The toggle PATCH is not optimistic, so `upstream.enabled` still holds the
+  // pre-request value while it is in flight; the requested value lives in the
+  // in-flight mutation variables.
+  const toggleRequestedEnabled =
+    toggle.variables?.body.enabled ?? !upstream.enabled;
+  const togglePendingLabel = toggle.isPending
+    ? toggleRequestedEnabled
+      ? 'Enabling...'
+      : 'Disabling...'
+    : null;
+
   const renderHeader = () => {
     const fields: {
       label: string;
@@ -1098,7 +1114,8 @@ function DetailView({
               <InlineNameEditor upstream={upstream} />
               <Hint
                 label={
-                  upstream.enabled ? 'Click to disable' : 'Click to enable'
+                  togglePendingLabel ??
+                  (upstream.enabled ? 'Click to disable' : 'Click to enable')
                 }
               >
                 <BaseSwitch.Root
@@ -1159,6 +1176,17 @@ function DetailView({
                   </span>
                 </BaseSwitch.Root>
               </Hint>
+              {togglePendingLabel ? (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  data-testid="upstream-enabled-pending"
+                  className="inline-flex items-center gap-1.5 text-xs text-text-muted"
+                >
+                  <Spinner className="w-3 h-3 text-accent" />
+                  {togglePendingLabel}
+                </span>
+              ) : null}
               <Badge tone="mono">{upstream.kind}</Badge>
             </div>
           </div>
@@ -1866,6 +1894,7 @@ function DetailView({
                     <Button
                       size="sm"
                       className="self-center"
+                      loading={oauthStart.isPending}
                       iconLeft={<KeyRound className="h-3 w-3" />}
                       onClick={() => {
                         oauthStart.mutate(upstream.id, {
@@ -1880,7 +1909,11 @@ function DetailView({
                         });
                       }}
                     >
-                      {hasBoundToken ? 'Reconnect' : 'Connect'}
+                      {oauthStart.isPending
+                        ? 'Starting...'
+                        : hasBoundToken
+                          ? 'Reconnect'
+                          : 'Connect'}
                     </Button>
                   )
                 }
@@ -2075,11 +2108,18 @@ function DetailView({
         title="OAuth Authorization"
         description="Open the authorize URL, then paste the code below."
         size="lg"
+        preventDismiss={oauthComplete.isPending}
         footer={
           <>
-            <Button onClick={() => setOauthOpen(false)}>Cancel</Button>
+            <Button
+              disabled={oauthComplete.isPending}
+              onClick={() => setOauthOpen(false)}
+            >
+              Cancel
+            </Button>
             <Button
               variant="primary"
+              loading={oauthComplete.isPending}
               disabled={!oauthState.code || !oauthState.state_token}
               onClick={() => {
                 const token = oauthState.state_token;
@@ -2100,7 +2140,7 @@ function DetailView({
                 );
               }}
             >
-              Complete
+              {oauthComplete.isPending ? 'Completing...' : 'Complete'}
             </Button>
           </>
         }
@@ -2141,12 +2181,13 @@ function DetailView({
           </Field>
           <Field label="Authorization Code" required>
             <input
-              className={`${INPUT_CLASS} font-mono`}
+              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS, 'font-mono')}
               value={oauthState.code ?? ''}
               onChange={(e) =>
                 setOauthState((s) => ({ ...s, code: e.target.value }))
               }
               placeholder="paste code…"
+              disabled={oauthComplete.isPending}
             />
           </Field>
         </div>
@@ -2162,13 +2203,16 @@ function DetailView({
             permanently removed. This cannot be undone.
           </>
         }
-        confirmLabel="Delete"
+        confirmLabel={del.isPending ? 'Deleting...' : 'Delete'}
         destructive
+        pending={del.isPending}
+        closeOnConfirm={false}
         onConfirm={() =>
           del.mutate(
             { id: upstream.id, spec_revision: upstream.spec_revision },
             {
               onSuccess: () => {
+                setConfirmDeleteOpen(false);
                 toast.success('Upstream deleted');
                 onBack();
               },
@@ -2180,9 +2224,10 @@ function DetailView({
   );
 }
 
-// Invariant: `succeeded` MUST be set before any onOpenChange(false) on a
-// successful path, otherwise handleOpenChange will treat the close as a
-// cancel and delete the freshly-created upstream.
+// Invariant: every dismissal path is refused while the request owned by the
+// visible step is in flight. A mid-request close runs the reset effect, which
+// would clear the OAuth draft state and the pending-created id before the
+// response lands; both are only safe to discard once the step has settled.
 function CreateUpstreamModal({
   open,
   onOpenChange,
@@ -2223,6 +2268,21 @@ function CreateUpstreamModal({
   const [oauthName, setOauthName] = useState('');
   const [oauthError, setOauthError] = useState<string | null>(null);
 
+  const createPending = create.isPending;
+  const startDraftPending = startDraft.isPending;
+  const completeDraftPending = completeDraft.isPending;
+  const createFromDraftPending = createFromDraft.isPending;
+  // Only the request owned by the visible step may lock the modal, so a settled
+  // mutation from an earlier step can never keep the user trapped.
+  const stepPending =
+    step === 'configure_non_oauth'
+      ? createPending
+      : step === 'oauth_handshake'
+        ? startDraftPending || completeDraftPending
+        : step === 'oauth_confirm'
+          ? createFromDraftPending
+          : false;
+
   useEffect(() => {
     if (!open) {
       setStep('type');
@@ -2242,6 +2302,7 @@ function CreateUpstreamModal({
   }, [open, onPendingCreatedIdChange]);
 
   const handleOpenChange = (next: boolean) => {
+    if (!next && stepPending) return;
     onOpenChange(next);
   };
 
@@ -2310,9 +2371,9 @@ function CreateUpstreamModal({
           toast.success('OAuth upstream created');
           onOpenChange(false);
         },
-        onError: (err: unknown) => {
-          toast.error(err instanceof Error ? err.message : String(err));
-        },
+        // No local onError: a failure keeps the confirm step open and the
+        // global MutationCache toast is the single error surface, so adding one
+        // here would double-report the same failure.
       },
     );
   };
@@ -2374,17 +2435,19 @@ function CreateUpstreamModal({
             hint="A unique label, e.g. anthropic-prod"
           >
             <input
-              className={INPUT_CLASS}
+              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="anthropic-prod"
+              disabled={createPending}
             />
           </Field>
           <Field label="Base URL">
             <input
-              className={INPUT_CLASS}
+              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
+              disabled={createPending}
             />
           </Field>
           {kind === 'anthropic_api_key' ? (
@@ -2395,14 +2458,19 @@ function CreateUpstreamModal({
                 required
               >
                 <input
-                  className={`${INPUT_CLASS} font-mono`}
+                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS, 'font-mono')}
                   value={apiKeyEnv}
                   onChange={(e) => setApiKeyEnv(e.target.value)}
                   placeholder="ANTHROPIC_API_KEY"
+                  disabled={createPending}
                 />
                 <button
                   type="button"
-                  className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2"
+                  className={cx(
+                    'mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2',
+                    PENDING_INPUT_CLASS,
+                  )}
+                  disabled={createPending}
                   onClick={() => setUseEnvVar(false)}
                 >
                   Use literal value instead
@@ -2416,14 +2484,19 @@ function CreateUpstreamModal({
               >
                 <input
                   type="password"
-                  className={`${INPUT_CLASS} font-mono`}
+                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS, 'font-mono')}
                   value={apiKeyValue}
                   onChange={(e) => setApiKeyValue(e.target.value)}
                   placeholder="sk-ant-..."
+                  disabled={createPending}
                 />
                 <button
                   type="button"
-                  className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2"
+                  className={cx(
+                    'mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2',
+                    PENDING_INPUT_CLASS,
+                  )}
+                  disabled={createPending}
                   onClick={() => setUseEnvVar(true)}
                 >
                   Use environment variable instead
@@ -2446,19 +2519,25 @@ function CreateUpstreamModal({
           <Button
             variant="primary"
             onClick={handleAuthorizeClick}
-            disabled={startDraft.isPending}
+            disabled={completeDraftPending}
+            loading={startDraftPending}
           >
-            {startDraft.isPending ? 'Starting...' : 'Authorize with Anthropic'}
+            {startDraftPending ? 'Starting...' : 'Authorize with Anthropic'}
           </Button>
 
           {authState && (
             <div className="mt-4 space-y-3 p-4 border border-subtle rounded-md bg-overlay-1">
               <Field label="Authorization Code" required>
                 <textarea
-                  className={`${INPUT_CLASS} font-mono min-h-[80px]`}
+                  className={cx(
+                    INPUT_CLASS,
+                    PENDING_INPUT_CLASS,
+                    'font-mono min-h-[80px]',
+                  )}
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
                   placeholder="paste code..."
+                  disabled={completeDraftPending}
                 />
               </Field>
               {oauthError && (
@@ -2466,9 +2545,10 @@ function CreateUpstreamModal({
               )}
               <Button
                 onClick={handleVerifyCode}
-                disabled={!code.trim() || completeDraft.isPending}
+                disabled={!code.trim() || startDraftPending}
+                loading={completeDraftPending}
               >
-                {completeDraft.isPending
+                {completeDraftPending
                   ? 'Verifying...'
                   : 'Verify and fetch account'}
               </Button>
@@ -2530,9 +2610,10 @@ function CreateUpstreamModal({
 
           <Field label="Upstream Name" required>
             <input
-              className={INPUT_CLASS}
+              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
               value={oauthName}
               onChange={(e) => setOauthName(e.target.value)}
+              disabled={createFromDraftPending}
             />
           </Field>
         </div>
@@ -2544,7 +2625,12 @@ function CreateUpstreamModal({
     if (step === 'type') {
       return (
         <>
-          <Button onClick={() => handleOpenChange(false)}>Cancel</Button>
+          <Button
+            disabled={stepPending}
+            onClick={() => handleOpenChange(false)}
+          >
+            Cancel
+          </Button>
           <Button
             variant="primary"
             onClick={() =>
@@ -2563,35 +2649,50 @@ function CreateUpstreamModal({
     if (step === 'configure_non_oauth') {
       return (
         <>
-          <Button onClick={() => setStep('type')}>Back</Button>
+          <Button disabled={createPending} onClick={() => setStep('type')}>
+            Back
+          </Button>
           <Button
             variant="primary"
             disabled={
               !name.trim() ||
-              create.isPending ||
               (kind === 'anthropic_api_key' &&
                 (useEnvVar ? !apiKeyEnv.trim() : !apiKeyValue.trim()))
             }
+            loading={createPending}
             onClick={submitNonOauth}
           >
-            Create
+            {createPending ? 'Creating...' : 'Create'}
           </Button>
         </>
       );
     }
     if (step === 'oauth_handshake') {
-      return <Button onClick={() => setStep('type')}>Back</Button>;
+      return (
+        <Button
+          disabled={startDraftPending || completeDraftPending}
+          onClick={() => setStep('type')}
+        >
+          Back
+        </Button>
+      );
     }
     if (step === 'oauth_confirm') {
       return (
         <>
-          <Button onClick={() => setStep('oauth_handshake')}>Back</Button>
+          <Button
+            disabled={createFromDraftPending}
+            onClick={() => setStep('oauth_handshake')}
+          >
+            Back
+          </Button>
           <Button
             variant="primary"
-            disabled={!oauthName.trim() || createFromDraft.isPending}
+            disabled={!oauthName.trim()}
+            loading={createFromDraftPending}
             onClick={submitOauthConfirm}
           >
-            Save
+            {createFromDraftPending ? 'Saving...' : 'Save'}
           </Button>
         </>
       );
@@ -2602,6 +2703,7 @@ function CreateUpstreamModal({
     <Modal
       open={open}
       onOpenChange={handleOpenChange}
+      preventDismiss={stepPending}
       title="New upstream"
       description="Register an Anthropic API key or OAuth principal."
       size={

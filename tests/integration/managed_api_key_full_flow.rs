@@ -75,7 +75,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         litellm.uri(),
     );
     let (plaintext_key, key_id) = seed_runtime_state(&storage_path, upstream.uri(), "u1").await?;
-    let server = StartedServer::start(initial_config.clone()).await?;
+    let server = StartedServer::start(initial_config).await?;
     wait_for_price_catalog().await?;
     append_step(
         1,
@@ -459,6 +459,11 @@ fn decode_chunked(mut bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     }
 }
 
+struct ReservedConfig {
+    config: Config,
+    listener_reservations: [std::net::TcpListener; 2],
+}
+
 struct StartedServer {
     proxy_url: String,
     admin_url: String,
@@ -467,14 +472,21 @@ struct StartedServer {
 }
 
 impl StartedServer {
-    async fn start(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn start(reserved: ReservedConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let ReservedConfig {
+            config,
+            listener_reservations,
+        } = reserved;
         let proxy_addr = config.listener.proxy_addr;
         let admin_addr = config.listener.admin_addr;
         let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
         let app = build_app(config, clock).await?;
         let signal = app.signal_handle();
+        // Keep all selected ports reserved while build_app performs its async setup.
+        // App::start owns the real listeners immediately after this handoff.
+        drop(listener_reservations);
         let task = tokio::spawn(async move { app.start().await });
-        let server = Self {
+        let mut server = Self {
             proxy_url: format!("http://{proxy_addr}"),
             admin_url: format!("http://{admin_addr}"),
             signal,
@@ -484,24 +496,41 @@ impl StartedServer {
         Ok(server)
     }
 
-    async fn wait_ready(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn wait_ready(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let client = TestClient::new(Duration::from_secs(1));
         let ready_secs = std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
             .ok()
             .and_then(|raw| raw.parse::<u64>().ok())
             .unwrap_or(60);
         let deadline = Instant::now() + Duration::from_secs(ready_secs);
+        let proxy_url = self.proxy_url.clone();
+        let admin_url = self.admin_url.clone();
+        let task = self.task.as_mut().expect("server task must exist");
         loop {
-            let proxy_ok = client
-                .get_status(&format!("{}/healthz", self.proxy_url))
-                .await
-                .is_ok_and(|status| status == StatusCode::OK);
-            let admin_ok = client
-                .get_status(&format!("{}/admin/health", self.admin_url))
-                .await
-                .is_ok_and(|status| status == StatusCode::OK);
-            if proxy_ok && admin_ok {
-                return Ok(());
+            tokio::select! {
+                result = &mut *task => {
+                    let message = match result {
+                        Ok(Ok(())) => "server exited before becoming ready".to_owned(),
+                        Ok(Err(error)) => format!("server failed before becoming ready: {error}"),
+                        Err(error) => format!("server task failed before becoming ready: {error}"),
+                    };
+                    return Err(std::io::Error::other(message).into());
+                }
+                (proxy_ok, admin_ok) = async {
+                    let proxy_ok = client
+                        .get_status(&format!("{proxy_url}/healthz"))
+                        .await
+                        .is_ok_and(|status| status == StatusCode::OK);
+                    let admin_ok = client
+                        .get_status(&format!("{admin_url}/admin/health"))
+                        .await
+                        .is_ok_and(|status| status == StatusCode::OK);
+                    (proxy_ok, admin_ok)
+                } => {
+                    if proxy_ok && admin_ok {
+                        return Ok(());
+                    }
+                }
             }
             if Instant::now() >= deadline {
                 return Err("server did not become ready".into());
@@ -737,11 +766,14 @@ fn base_config(
     none_mode: Option<NoneModeConfig>,
     sqlite_path: std::path::PathBuf,
     litellm_url: String,
-) -> Config {
+) -> ReservedConfig {
+    let proxy_reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve proxy port");
+    let admin_reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve admin port");
+    let metrics_addr = free_addr();
     let mut config = Config::default();
-    config.listener.proxy_addr = free_addr();
-    config.listener.admin_addr = free_addr();
-    config.listener.metrics_addr = free_addr();
+    config.listener.proxy_addr = proxy_reservation.local_addr().expect("proxy addr");
+    config.listener.admin_addr = admin_reservation.local_addr().expect("admin addr");
+    config.listener.metrics_addr = metrics_addr;
     config.timeouts.upstream_total_secs = 10;
     config.downstream_auth.mode = mode;
     config.downstream_auth.none_mode = none_mode;
@@ -754,7 +786,14 @@ fn base_config(
         .expect("price cache tempdir")
         .keep()
         .join("prices.json");
-    config
+    ReservedConfig {
+        config,
+        listener_reservations: [proxy_reservation, admin_reservation],
+    }
+}
+fn free_addr() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
+    listener.local_addr().expect("free addr")
 }
 
 async fn sqlite_storage(
@@ -768,9 +807,4 @@ async fn sqlite_storage(
     .await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(Arc::new(storage))
-}
-
-fn free_addr() -> SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().expect("free addr")
 }

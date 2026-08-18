@@ -9,6 +9,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # The proxy RSS soak does not exercise the dashboard or Wasmtime fixtures.
+  CC_LB_ADMIN_SKIP_SPA: "1"
+  CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
+
 jobs:
   rss-soak:
     if: github.ref == 'refs/heads/master'
@@ -16,10 +21,13 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
       - uses: ./.github/actions/setup-rust-cache
         with:
-          rust-cache-key: soak-rss
+          stable-build-metadata: "true"
       - name: Run 24h RSS soak
         run: bash tests/soak/soak.sh 24h
       - name: Show sccache stats

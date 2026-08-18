@@ -11,6 +11,7 @@ type RegistryState = {
 
 let selectedPluginId: string | undefined;
 let registryState: RegistryState;
+let gcIsPending: boolean;
 const navigate = vi.fn();
 const gcMutate = vi.fn();
 
@@ -52,7 +53,7 @@ vi.mock('../../routes/plugins', () => ({
 vi.mock('../../lib/queries', () => ({
   usePluginRegistry: () => registryState,
   useGcPlugins: () => ({
-    isPending: false,
+    isPending: gcIsPending,
     mutate: gcMutate,
   }),
 }));
@@ -76,6 +77,7 @@ vi.mock('./PluginUploadCard', () => ({
 beforeEach(() => {
   selectedPluginId = undefined;
   registryState = { data: { entries: [] }, isLoading: false };
+  gcIsPending = false;
   navigate.mockReset();
   gcMutate.mockReset();
 });
@@ -106,6 +108,32 @@ describe('plugin loading geometry', () => {
     expect(screen.queryByText('Plugin library')).toBeNull();
     expect(screen.queryByTestId('plugin-upload-card')).toBeNull();
     expect(screen.queryByTestId('loaded-plugin-detail')).toBeNull();
+  });
+
+  test('shows GC progress and locks the action while deletion is pending', () => {
+    registryState = {
+      data: {
+        entries: [
+          { ...pluginEntry('unused-plugin', 'Unused plugin'), refcount: 0 },
+        ],
+      },
+      isLoading: false,
+    };
+    gcIsPending = true;
+
+    render(<PluginCatalog onSelectPlugin={vi.fn()} />);
+
+    const deleting = screen.getByRole('button', { name: 'Deleting...' });
+    expect(deleting.hasAttribute('disabled')).toBe(true);
+    expect(deleting.getAttribute('aria-busy')).toBe('true');
+    expect(deleting.querySelector('svg.animate-spin')).not.toBeNull();
+
+    const progress = screen.getByTestId('plugin-gc-progress');
+    expect(progress.textContent).toBe(
+      'Deleting unused uploads — waiting for the server.',
+    );
+    expect(progress.getAttribute('aria-live')).toBe('polite');
+    expect(screen.queryByText('Delete unused uploads')).toBeNull();
   });
 
   test('keeps catalog geometry stable while counts and rows load', () => {

@@ -36,11 +36,29 @@ jobs:
             bun-${{ runner.os }}-
       - name: Install dependencies
         run: bun install --frozen-lockfile
-      - name: Lint
-        run: bun run lint
-      - name: Typecheck
-        run: bun run typecheck
-      - name: Build
-        run: bun run build
-      - name: Unit tests
-        run: bunx --bun vitest run --passWithNoTests
+      - name: Run web validations
+        run: |
+          status=0
+          fail() {
+            echo "::error::web validation failed: $1"
+            status=1
+          }
+
+          # Vite's TanStack Router plugin updates routeTree.gen.ts. Settle that
+          # generated input before concurrent lint/typecheck/test readers start.
+          bun run --shell=bun build || fail build
+          git diff --exit-code -- src/routeTree.gen.ts ||
+            fail "generated route tree is stale"
+
+          bun run --shell=bun lint &
+          lint_pid=$!
+          bun run --shell=bun typecheck &
+          typecheck_pid=$!
+          bunx --bun vitest run --passWithNoTests &
+          test_pid=$!
+
+          wait "$lint_pid" || fail lint
+          wait "$typecheck_pid" || fail typecheck
+          wait "$test_pid" || fail "unit tests"
+
+          exit "$status"

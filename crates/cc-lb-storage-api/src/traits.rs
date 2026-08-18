@@ -3,8 +3,9 @@ use async_trait::async_trait;
 use crate::{
     BackendKind, CacheKeepaliveDecisionRow, RequestEventHistogramBucket,
     RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
-    RequestEventKeyUsageBucket, RequestEventKeyUsageQuery, RequestEventProjections,
-    RuntimeChangeNotifier, StorageError, StorageResult,
+    RequestEventKeyUsageBucket, RequestEventKeyUsageQuery, RequestEventPrincipalCostBucket,
+    RequestEventPrincipalCostQuery, RequestEventProjections, RuntimeChangeNotifier, StorageError,
+    StorageResult,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
     cache_keepalive_sessions::{CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore},
     organization_metadata::OrganizationMetadataStore,
@@ -160,6 +161,14 @@ pub trait RequestEventStore: Send + Sync {
             message: "request_event_key_usage is not implemented for this storage backend"
                 .to_owned(),
         })
+    }
+
+    async fn request_event_principal_costs(
+        &self,
+        query: &RequestEventPrincipalCostQuery,
+    ) -> StorageResult<Vec<RequestEventPrincipalCostBucket>> {
+        let _ = query;
+        Ok(Vec::new())
     }
 
     async fn request_event_histogram(

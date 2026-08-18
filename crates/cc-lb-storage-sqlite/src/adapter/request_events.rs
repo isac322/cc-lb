@@ -3,12 +3,13 @@ use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
     RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
     RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket, RequestEventKeyUsageQuery,
-    RequestEventListItem, RequestEventListQuery, RequestEventProjections, RequestEventStore,
+    RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
+    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
     RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_pattern,
-    model_filter_matches,
+    model_filter_matches, normalize_usage_rollup_dimension,
 };
-use sqlx::AssertSqlSafe;
-use std::time::Instant;
+use sqlx::{AssertSqlSafe, QueryBuilder, Sqlite};
+use std::{collections::BTreeMap, time::Instant};
 use uuid::Uuid;
 
 use super::request_event_list_sql;
@@ -192,6 +193,17 @@ impl RequestEventStore for SqliteStorage {
         result
     }
 
+    async fn request_event_principal_costs(
+        &self,
+        query: &RequestEventPrincipalCostQuery,
+    ) -> StorageResult<Vec<RequestEventPrincipalCostBucket>> {
+        let start = Instant::now();
+        let result = request_event_principal_costs(self, query).await;
+        record_storage_operation("request_event_principal_costs", start, &result);
+        self.record_pool_metrics();
+        result
+    }
+
     async fn request_event_histogram(
         &self,
         query: &RequestEventHistogramQuery,
@@ -319,6 +331,213 @@ async fn request_event_key_usage(
     }
 
     Ok(buckets)
+}
+
+const PRINCIPAL_COST_SOURCE_COLUMNS: &str = "principal_id, list_ts_ms, \
+    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+    list_cost_cache_read_micros";
+
+const NON_UUID_PRINCIPAL_PREDICATE: &str = "(principal_id IS NULL \
+    OR length(principal_id) <> 36 \
+    OR length(replace(principal_id, '-', '')) <> 32 \
+    OR substr(principal_id, 9, 1) <> '-' \
+    OR substr(principal_id, 14, 1) <> '-' \
+    OR substr(principal_id, 19, 1) <> '-' \
+    OR substr(principal_id, 24, 1) <> '-' \
+    OR lower(replace(principal_id, '-', '')) GLOB '*[^0-9a-f]*')";
+
+fn is_canonical_uuid_principal(value: &str) -> bool {
+    value.len() == 36 && Uuid::parse_str(value).is_ok()
+}
+
+async fn request_event_principal_costs(
+    storage: &SqliteStorage,
+    query: &RequestEventPrincipalCostQuery,
+) -> StorageResult<Vec<RequestEventPrincipalCostBucket>> {
+    if query.bucket_width_secs == 0
+        || query.until_unix_secs <= query.since_unix_secs
+        || query.principal_keys.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+
+    let range_start_ms = seconds_to_millis(
+        query.since_unix_secs,
+        "request event principal cost range start",
+    )?;
+    let range_end_ms = seconds_to_millis(
+        query.until_unix_secs,
+        "request event principal cost range end",
+    )?;
+    let bucket_width_ms = seconds_to_millis(
+        query.bucket_width_secs,
+        "request event principal cost bucket width",
+    )?;
+    let upstream_id = query.upstream_id.map(|id| id.to_string());
+    let uuid_keys = query
+        .principal_keys
+        .iter()
+        .filter(|key| is_canonical_uuid_principal(key))
+        .collect::<Vec<_>>();
+    let include_unknown = query.principal_keys.iter().any(|key| key == "unknown");
+    let mut builder = QueryBuilder::<Sqlite>::new(
+        "SELECT principal_id, \
+                ((list_ts_ms - ",
+    );
+    builder.push_bind(range_start_ms);
+    builder.push(") / ");
+    builder.push_bind(bucket_width_ms);
+    builder.push(
+        ") AS bucket_index, \
+                COALESCE(SUM(CASE WHEN list_cost_usd_micros > 0 \
+                    THEN list_cost_usd_micros ELSE 0 END), 0) AS total_cost_micros, \
+                MAX(CASE WHEN list_cost_input_micros IS NOT NULL \
+                    OR list_cost_output_micros IS NOT NULL \
+                    OR list_cost_cache_creation_5m_micros IS NOT NULL \
+                    OR list_cost_cache_creation_1h_micros IS NOT NULL \
+                    OR list_cost_cache_read_micros IS NOT NULL \
+                    THEN 1 ELSE 0 END) AS component_costs_recorded, \
+                COALESCE(SUM(CASE WHEN list_cost_input_micros > 0 \
+                    THEN list_cost_input_micros ELSE 0 END), 0) AS cost_input_micros, \
+                COALESCE(SUM(CASE WHEN list_cost_output_micros > 0 \
+                    THEN list_cost_output_micros ELSE 0 END), 0) AS cost_output_micros, \
+                COALESCE(SUM(CASE WHEN list_cost_cache_creation_5m_micros > 0 \
+                    THEN list_cost_cache_creation_5m_micros ELSE 0 END), 0) \
+                    AS cost_cache_creation_5m_micros, \
+                COALESCE(SUM(CASE WHEN list_cost_cache_creation_1h_micros > 0 \
+                    THEN list_cost_cache_creation_1h_micros ELSE 0 END), 0) \
+                    AS cost_cache_creation_1h_micros, \
+                COALESCE(SUM(CASE WHEN list_cost_cache_read_micros > 0 \
+                    THEN list_cost_cache_read_micros ELSE 0 END), 0) \
+                    AS cost_cache_read_micros \
+         FROM (",
+    );
+    if !uuid_keys.is_empty() {
+        builder.push("SELECT ");
+        builder.push(PRINCIPAL_COST_SOURCE_COLUMNS);
+        builder.push(
+            " FROM request_events_v1 \
+             WHERE list_ts_ms >= ",
+        );
+        builder.push_bind(range_start_ms);
+        builder.push(" AND list_ts_ms < ");
+        builder.push_bind(range_end_ms);
+        builder.push(" AND (");
+        builder.push_bind(upstream_id.as_deref());
+        builder.push(" IS NULL OR upstream_id = ");
+        builder.push_bind(upstream_id.as_deref());
+        builder.push(") AND principal_id IN (");
+        let mut separated = builder.separated(", ");
+        for key in &uuid_keys {
+            separated.push_bind(*key);
+        }
+        separated.push_unseparated(") UNION ALL ");
+    }
+    builder.push("SELECT ");
+    builder.push(PRINCIPAL_COST_SOURCE_COLUMNS);
+    builder.push(
+        " FROM request_events_v1 \
+         WHERE list_ts_ms >= ",
+    );
+    builder.push_bind(range_start_ms);
+    builder.push(" AND list_ts_ms < ");
+    builder.push_bind(range_end_ms);
+    builder.push(" AND (");
+    builder.push_bind(upstream_id.as_deref());
+    builder.push(" IS NULL OR upstream_id = ");
+    builder.push_bind(upstream_id.as_deref());
+    builder.push(") AND ");
+    builder.push(NON_UUID_PRINCIPAL_PREDICATE);
+    builder.push(" AND (principal_id IS NOT NULL OR ");
+    builder.push_bind(include_unknown);
+    builder.push(
+        ")) matched \
+         GROUP BY principal_id, bucket_index \
+         ORDER BY bucket_index ASC, principal_id ASC",
+    );
+    let rows = builder
+        .build_query_as::<(Option<String>, i64, i64, i64, i64, i64, i64, i64, i64)>()
+        .fetch_all(storage.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+
+    let mut buckets = BTreeMap::<(String, u64), RequestEventPrincipalCostBucket>::new();
+    for (
+        principal_id,
+        bucket_index,
+        total_cost_micros,
+        component_costs_recorded,
+        cost_input_micros,
+        cost_output_micros,
+        cost_cache_creation_5m_micros,
+        cost_cache_creation_1h_micros,
+        cost_cache_read_micros,
+    ) in rows
+    {
+        let principal = normalize_usage_rollup_dimension(principal_id.as_deref());
+        if !query
+            .principal_keys
+            .iter()
+            .any(|selected| selected == &principal)
+        {
+            continue;
+        }
+        let bucket_index = i64_to_u64(bucket_index, "request event principal cost bucket index")?;
+        let bucket_offset = bucket_index
+            .checked_mul(query.bucket_width_secs)
+            .ok_or_else(|| StorageError::Corrupted {
+                message: "request event principal cost bucket offset overflowed".to_owned(),
+            })?;
+        let bucket_start_unix_secs = query
+            .since_unix_secs
+            .checked_add(bucket_offset)
+            .filter(|bucket_start| *bucket_start < query.until_unix_secs)
+            .ok_or_else(|| StorageError::Corrupted {
+                message: "request event principal cost bucket is out of range".to_owned(),
+            })?;
+        let bucket = buckets
+            .entry((principal.clone(), bucket_start_unix_secs))
+            .or_insert_with(|| RequestEventPrincipalCostBucket {
+                principal,
+                bucket_start_unix_secs,
+                ..RequestEventPrincipalCostBucket::default()
+            });
+
+        add_principal_cost(
+            &mut bucket.total_cost_micros,
+            total_cost_micros,
+            "request event principal total cost",
+        )?;
+        bucket.component_costs_recorded |= component_costs_recorded != 0;
+        add_principal_cost(
+            &mut bucket.cost_input_micros,
+            cost_input_micros,
+            "request event principal input cost",
+        )?;
+        add_principal_cost(
+            &mut bucket.cost_output_micros,
+            cost_output_micros,
+            "request event principal output cost",
+        )?;
+        add_principal_cost(
+            &mut bucket.cost_cache_creation_5m_micros,
+            cost_cache_creation_5m_micros,
+            "request event principal cache creation 5m cost",
+        )?;
+        add_principal_cost(
+            &mut bucket.cost_cache_creation_1h_micros,
+            cost_cache_creation_1h_micros,
+            "request event principal cache creation 1h cost",
+        )?;
+        add_principal_cost(
+            &mut bucket.cost_cache_read_micros,
+            cost_cache_read_micros,
+            "request event principal cache read cost",
+        )?;
+    }
+
+    Ok(buckets.into_values().collect())
 }
 
 /// The histogram filters its window on `ts` (seconds), exactly like the list
@@ -842,6 +1061,25 @@ fn request_event_matches_filters(
         return false;
     }
     true
+}
+
+fn seconds_to_millis(value: u64, field: &str) -> StorageResult<i64> {
+    let value = value
+        .checked_mul(1_000)
+        .ok_or_else(|| StorageError::Fatal {
+            message: format!("{field} cannot be represented as milliseconds"),
+        })?;
+    u64_to_i64(value, field)
+}
+
+fn add_principal_cost(target: &mut u64, value: i64, field: &str) -> StorageResult<()> {
+    let value = i64_to_u64(value, field)?;
+    *target = target
+        .checked_add(value)
+        .ok_or_else(|| StorageError::Corrupted {
+            message: format!("{field} aggregate overflowed"),
+        })?;
+    Ok(())
 }
 
 fn option_u64_to_i64(value: Option<u64>, field: &str) -> StorageResult<Option<i64>> {

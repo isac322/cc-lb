@@ -31,8 +31,10 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.1
           components: rustfmt
       - uses: taiki-e/install-action@v2
         with:
@@ -108,6 +110,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
+      - uses: ./.github/actions/setup-rustup-home
       - uses: ./.github/actions/setup-gh
       - name: Attach release-plz validation branch
         run: |
@@ -126,9 +129,11 @@ jobs:
 
       - uses: azure/setup-helm@v5.0.1
         with:
-          version: v3.16.4
+          version: v4.2.4
 
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
 
       - name: Inspect release target
         id: release
@@ -269,14 +274,20 @@ jobs:
     strategy:
       matrix:
         features: [sqlite, postgres]
+    env:
+      # Clippy never runs fixture-backed WASM tests, so bypass that build-time
+      # prerequisite. The workflow-level env already skips the admin SPA.
+      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.1
           components: clippy
-      - name: Install wasm target for conformance fixtures
-        run: rustup target add wasm32-unknown-unknown
       - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
       - run: cargo clippy --workspace --all-targets --no-default-features --features ${{ matrix.features }} -- -D warnings
       - name: Show sccache stats
         if: always()
@@ -291,7 +302,10 @@ jobs:
     runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
@@ -309,9 +323,9 @@ jobs:
             exit 0
           fi
           curl -sSL -o /tmp/prometheus.tar.gz \
-            https://github.com/prometheus/prometheus/releases/download/v3.13.1/prometheus-3.13.1.linux-arm64.tar.gz
+            https://github.com/prometheus/prometheus/releases/download/v3.13.2/prometheus-3.13.2.linux-arm64.tar.gz
           tar -xzf /tmp/prometheus.tar.gz -C /tmp/
-          sudo mv /tmp/prometheus-3.13.1.linux-arm64/promtool /usr/local/bin/promtool
+          sudo mv /tmp/prometheus-3.13.2.linux-arm64/promtool /usr/local/bin/promtool
           promtool --version
       - name: Check alert rule syntax
         run: promtool check rules deploy/alerts/*.yml
@@ -385,20 +399,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.1
           components: llvm-tools-preview
       - name: Install wasm targets for pinned toolchain
         run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
-      # Registry-only: target/ must not be shared across branches. The
-      # Swatinem cache key hashes Cargo.lock/Cargo.toml but not the test
-      # file set, so a branch can otherwise leak its per-test binaries into
-      # target/llvm-cov-target/debug/deps/ and cargo invokes them on restore
-      # against a source tree that never contained those files.
+      # Unlike clippy, coverage executes fixture-backed WASM tests, so retain
+      # both targets installed above.
       - uses: ./.github/actions/setup-rust-cache
         with:
-          rust-cache-key: coverage
-          cache-targets: false
           stable-build-metadata: "true"
       - uses: taiki-e/install-action@v2
         with:
@@ -457,8 +468,13 @@ jobs:
 
   e2e:
     runs-on: oracle4-cc-lb
+    env:
+      # Real-client E2E builds the server but does not run the fixture-backed
+      # Wasmtime integration suite.
+      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -470,8 +486,12 @@ jobs:
         with:
           path: target/test-bins
           key: real-client-test-bins-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/real-client/install.sh') }}
-      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
       - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
       - name: Install pinned real clients
         run: tests/real-client/install.sh
       - name: Run real-client matrix
