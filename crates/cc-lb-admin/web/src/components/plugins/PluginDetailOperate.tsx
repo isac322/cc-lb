@@ -28,7 +28,6 @@ export function PluginDetailOperate({
           toast.success('Label updated');
           setIsEditingLabel(false);
         },
-        onError: (e) => toast.error(String(e)),
       },
     );
   };
@@ -50,20 +49,31 @@ export function PluginDetailOperate({
                 Built-in plugins cannot be edited or deleted.
               </span>
             ) : isEditingLabel ? (
-              <div className="flex gap-2">
+              <div
+                aria-busy={patch.isPending}
+                className="flex gap-2"
+                data-testid="plugin-label-edit-form"
+              >
                 <input
                   type="text"
                   value={editLabelValue}
                   onChange={(e) => setEditLabelValue(e.target.value)}
-                  className="flex-1 bg-bg-sub border border-subtle rounded-sm px-2 py-1 text-sm"
+                  disabled={patch.isPending}
+                  className="flex-1 bg-bg-sub border border-subtle rounded-sm px-2 py-1 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                   placeholder="Optional label"
                 />
-                <Button size="sm" onClick={handleSaveLabel}>
-                  Save
+                <Button
+                  size="sm"
+                  loading={patch.isPending}
+                  disabled={patch.isPending}
+                  onClick={handleSaveLabel}
+                >
+                  {patch.isPending ? 'Saving...' : 'Save'}
                 </Button>
                 <Button
                   size="sm"
                   variant="ghost"
+                  disabled={patch.isPending}
                   onClick={() => {
                     setIsEditingLabel(false);
                     setEditLabelValue(plugin.label ?? '');

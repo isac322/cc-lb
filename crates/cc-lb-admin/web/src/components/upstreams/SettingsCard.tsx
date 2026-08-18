@@ -84,7 +84,11 @@ export function SettingsCard({ upstream }: Props) {
       />
       <CardBody>
         {editing ? (
-          <div className="flex flex-col gap-4">
+          <div
+            aria-busy={update.isPending}
+            className="flex flex-col gap-4"
+            data-testid="upstream-settings-edit-form"
+          >
             <Field label="Base URL">
               <input
                 type="text"
@@ -155,8 +159,9 @@ export function SettingsCard({ upstream }: Props) {
               </Button>
               <Button
                 variant="primary"
-                onClick={handleSave}
+                loading={update.isPending}
                 disabled={update.isPending}
+                onClick={handleSave}
               >
                 {update.isPending ? 'Saving...' : 'Save'}
               </Button>

@@ -8,7 +8,7 @@ import {
   RefreshCw,
   Save,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
   Button,
@@ -23,6 +23,7 @@ import {
   Section,
   Skeleton,
   SkeletonRow,
+  Spinner,
   StatusBadge,
 } from '../components/ui/primitives';
 import {
@@ -216,6 +217,8 @@ export const Route = createFileRoute('/settings')({
 function SettingsPage() {
   const status = useStatus();
   const [rotateOpen, setRotateOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const exportingRef = useRef(false);
   const { locale, effective, setLocale } = useLocale();
   const { timezone, effective: effectiveTz, setTimezone } = useTimezone();
   const [now, setNow] = useState(new Date());
@@ -224,6 +227,21 @@ function SettingsPage() {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  // The export is a plain download rather than a mutation, so its in-flight
+  // state is local. The ref rejects a second click landing in the same tick,
+  // before React has re-rendered the Button as disabled.
+  const handleDownloadExport = async () => {
+    if (exportingRef.current) return;
+    exportingRef.current = true;
+    setExporting(true);
+    try {
+      await downloadExport();
+    } finally {
+      exportingRef.current = false;
+      setExporting(false);
+    }
+  };
 
   return (
     <PageContainer>
@@ -410,9 +428,10 @@ function SettingsPage() {
           <CardBody>
             <Button
               iconLeft={<Download className="w-4 h-4" />}
-              onClick={() => downloadExport()}
+              loading={exporting}
+              onClick={handleDownloadExport}
             >
-              Download export.json
+              {exporting ? 'Downloading...' : 'Download export.json'}
             </Button>
           </CardBody>
         </Card>
@@ -470,6 +489,25 @@ function ConfigDraftSection() {
       ? `rev ${lastValidatedRevision}`
       : '—';
 
+  // Save, validate, apply and reload all mutate the same draft revision, so
+  // they share one lock: a second operation launched mid-flight would race on
+  // a revision it can no longer trust.
+  const savePending = save.isPending;
+  const validatePending = validate.isPending;
+  const applyPending = apply.isPending;
+  const reloadPending = reload.isPending;
+  const configPending =
+    savePending || validatePending || applyPending || reloadPending;
+  const configPendingLabel = savePending
+    ? 'Saving draft...'
+    : validatePending
+      ? 'Validating draft...'
+      : applyPending
+        ? 'Applying revision...'
+        : reloadPending
+          ? 'Reloading configuration...'
+          : null;
+
   return (
     <Section
       title="Configuration Draft"
@@ -483,7 +521,8 @@ function ConfigDraftSection() {
               <Button
                 size="sm"
                 iconLeft={<Save className="w-3 h-3" />}
-                disabled={!text}
+                loading={savePending}
+                disabled={!text || configPending}
                 onClick={() => {
                   try {
                     const parsed = JSON.parse(text);
@@ -496,11 +535,13 @@ function ConfigDraftSection() {
                   }
                 }}
               >
-                Save
+                {savePending ? 'Saving...' : 'Save'}
               </Button>
               <Button
                 size="sm"
                 iconLeft={<CheckCircle2 className="w-3 h-3" />}
+                loading={validatePending}
+                disabled={configPending}
                 onClick={() =>
                   validate.mutate(draftRevision ?? 0, {
                     onSuccess: (r) =>
@@ -510,13 +551,14 @@ function ConfigDraftSection() {
                   })
                 }
               >
-                Validate
+                {validatePending ? 'Validating...' : 'Validate'}
               </Button>
               <Button
                 size="sm"
                 variant="primary"
                 iconLeft={<PlayCircle className="w-3 h-3" />}
-                disabled={!canApply}
+                loading={applyPending}
+                disabled={!canApply || configPending}
                 onClick={() =>
                   apply.mutate(lastValidatedRevision ?? 0, {
                     onSuccess: (r) =>
@@ -524,23 +566,25 @@ function ConfigDraftSection() {
                   })
                 }
               >
-                Apply
+                {applyPending ? 'Applying...' : 'Apply'}
               </Button>
               <Button
                 size="sm"
                 iconLeft={<RefreshCw className="w-3 h-3" />}
+                loading={reloadPending}
+                disabled={configPending}
                 onClick={() =>
                   reload.mutate(undefined, {
                     onSuccess: () => toast.success('Reload triggered'),
                   })
                 }
               >
-                Reload
+                {reloadPending ? 'Reloading...' : 'Reload'}
               </Button>
             </div>
           }
         />
-        <CardBody className="space-y-3">
+        <CardBody aria-busy={configPending} className="space-y-3">
           <div
             data-testid="draft-metadata"
             className="flex min-h-4 flex-wrap gap-4 text-xs text-text-faint"
@@ -593,9 +637,10 @@ function ConfigDraftSection() {
             </div>
           </div>
           <textarea
-            className="w-full min-h-[260px] p-3 text-xs font-mono bg-panel-strong border border-subtle rounded-sm placeholder:text-text-faint focus:border-accent focus:outline-none"
+            className="w-full min-h-[260px] p-3 text-xs font-mono bg-panel-strong border border-subtle rounded-sm placeholder:text-text-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
             style={{ lineHeight: 1.5 }}
             value={text}
+            disabled={configPending}
             onChange={(e) => setText(e.target.value)}
             placeholder={
               current.data
@@ -603,6 +648,19 @@ function ConfigDraftSection() {
                 : 'JSON config draft…'
             }
           />
+          <div
+            data-testid="config-pipeline-status"
+            role="status"
+            aria-live="polite"
+            className="min-h-4 text-xs text-text-muted"
+          >
+            {configPendingLabel ? (
+              <span className="inline-flex items-center gap-1.5">
+                <Spinner className="w-3 h-3 text-accent" />
+                {configPendingLabel}
+              </span>
+            ) : null}
+          </div>
           <div data-testid="config-checklist-slot" className="min-h-[20px]">
             {schema.isLoading ? (
               <Skeleton className="h-4 w-48" />

@@ -1,5 +1,5 @@
 import { Copy, Trash2 } from 'lucide-react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { useGcPlugins, usePluginRegistry } from '../../lib/queries';
 import { useCopyButton } from '../../lib/useCopyButton';
@@ -11,6 +11,7 @@ import {
   Hint,
   Skeleton,
   SkeletonRow,
+  Spinner,
 } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
 import { PluginDeleteDialog } from './PluginDeleteDialog';
@@ -67,6 +68,27 @@ export function PluginCatalog({
     name: string;
     refcount: number;
   } | null>(null);
+  const gcPending = gc.isPending;
+  // React Query publishes `isPending` on the next render, which lands after a
+  // synchronous burst of clicks. This ref latches the sweep until it settles so
+  // one click can never queue a second destructive server call.
+  const gcInFlight = useRef(false);
+
+  const runGc = () => {
+    if (gcInFlight.current || gcPending) return;
+    gcInFlight.current = true;
+    gc.mutate(undefined, {
+      onSuccess: (r) =>
+        toast.success(
+          `Deleted ${r.count} unused upload${r.count === 1 ? '' : 's'}`,
+        ),
+      // No local onError: the global MutationCache toast stays the single
+      // failure surface, so the latch only releases the click here.
+      onSettled: () => {
+        gcInFlight.current = false;
+      },
+    });
+  };
 
   return (
     <>
@@ -93,22 +115,29 @@ export function PluginCatalog({
             </span>
           }
           action={
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={unusedUploadCount === 0 || gc.isPending}
-              title="Delete uploaded plugins that are not used anywhere. Built-in plugins stay."
-              onClick={() =>
-                gc.mutate(undefined, {
-                  onSuccess: (r) =>
-                    toast.success(
-                      `Deleted ${r.count} unused upload${r.count === 1 ? '' : 's'}`,
-                    ),
-                })
-              }
-            >
-              Delete unused uploads
-            </Button>
+            <>
+              {gcPending ? (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className="flex items-center gap-2 text-xs text-text-faint"
+                  data-testid="plugin-gc-progress"
+                >
+                  <Spinner className="w-3 h-3" />
+                  Deleting unused uploads — waiting for the server.
+                </span>
+              ) : null}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={unusedUploadCount === 0 || gcPending}
+                loading={gcPending}
+                title="Delete uploaded plugins that are not used anywhere. Built-in plugins stay."
+                onClick={runGc}
+              >
+                {gcPending ? 'Deleting...' : 'Delete unused uploads'}
+              </Button>
+            </>
           }
         />
         <div className="min-h-72 overflow-x-auto">
@@ -244,12 +273,18 @@ export function PluginCatalog({
                           <button
                             type="button"
                             aria-label="Delete plugin"
+                            // The sweep deletes exactly the refcount === 0
+                            // uploads this row targets, so opening a delete
+                            // dialog mid-sweep would aim at a vanishing row.
+                            disabled={gcPending}
                             title={
-                              p.refcount > 0
-                                ? `In use by ${p.refcount} reference(s)`
-                                : 'Delete plugin'
+                              gcPending
+                                ? 'Sweeping unused plugins...'
+                                : p.refcount > 0
+                                  ? `In use by ${p.refcount} reference(s)`
+                                  : 'Delete plugin'
                             }
-                            className="transition-colors text-text-faint hover:text-red-400"
+                            className="transition-colors text-text-faint hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-text-faint"
                             onClick={(e) => {
                               e.stopPropagation();
                               setPendingDelete({

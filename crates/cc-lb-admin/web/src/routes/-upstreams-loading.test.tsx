@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
 import type React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { Upstream } from '../lib/queries';
@@ -97,13 +103,17 @@ function mutationResult() {
   };
 }
 
-function renderRoute() {
+function routeElement() {
   Object.assign(Route, { useSearch: () => searchState });
-  return render(
+  return (
     <QueryClientProvider client={queryClient}>
       <Component />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+}
+
+function renderRoute() {
+  return render(routeElement());
 }
 
 beforeEach(() => {
@@ -200,7 +210,10 @@ beforeEach(() => {
   );
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe('/upstreams cold-load geometry', () => {
   test('renders a structured detail shell before desktop auto-selection', () => {
@@ -372,5 +385,396 @@ describe('/upstreams cold-load geometry', () => {
     expect(
       screen.getByTestId('recent-requests-table-slot').className,
     ).toContain('min-h-48');
+  });
+});
+
+describe('/upstreams mutation pending UX', () => {
+  test('create pending locks resubmission and modal dismissal while showing progress', () => {
+    const mutate = vi.fn();
+    vi.mocked(queries.useCreateUpstream).mockReturnValue({
+      mutate,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+
+    const view = renderRoute();
+    fireEvent.click(screen.getByRole('button', { name: 'New' }));
+
+    let dialog = screen.getByRole('dialog', { name: 'New upstream' });
+    fireEvent.click(
+      within(dialog).getByRole('radio', { name: /Anthropic API Key/ }),
+    );
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    fireEvent.change(within(dialog).getByPlaceholderText('anthropic-prod'), {
+      target: { value: 'api-key-primary' },
+    });
+    fireEvent.change(within(dialog).getByPlaceholderText('sk-ant-...'), {
+      target: { value: 'sk-ant-test' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+    expect(mutate).toHaveBeenCalledTimes(1);
+
+    vi.mocked(queries.useCreateUpstream).mockReturnValue({
+      mutate,
+      isPending: true,
+      reset: vi.fn(),
+    } as never);
+    view.rerender(routeElement());
+
+    dialog = screen.getByRole('dialog', { name: 'New upstream' });
+    const creating = within(dialog).getByRole('button', {
+      name: 'Creating...',
+    });
+    expect(creating.hasAttribute('disabled')).toBe(true);
+    expect(creating.getAttribute('aria-busy')).toBe('true');
+    expect(creating.querySelector('svg.animate-spin')).not.toBeNull();
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Back' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Close dialog' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    for (const control of [
+      ...within(dialog).getAllByRole('textbox'),
+      within(dialog).getByPlaceholderText('sk-ant-...'),
+      within(dialog).getByRole('button', {
+        name: 'Use environment variable instead',
+      }),
+    ]) {
+      expect(control.hasAttribute('disabled')).toBe(true);
+    }
+
+    fireEvent.click(creating);
+    fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('dialog', { name: 'New upstream' })).toBeDefined();
+  });
+
+  test('OAuth final save retains its account context and submits once while pending', () => {
+    vi.spyOn(window, 'open').mockImplementation(() => null);
+    const startDraft = vi.fn(
+      (
+        _body: undefined,
+        options?: {
+          onSuccess?: (result: {
+            authorize_url: string;
+            state_token: string;
+          }) => void;
+        },
+      ) => {
+        options?.onSuccess?.({
+          authorize_url: 'https://example.com/authorize',
+          state_token: 'draft-state-token',
+        });
+      },
+    );
+    const completeDraft = vi.fn(
+      (
+        _body: unknown,
+        options?: {
+          onSuccess?: (result: {
+            state_token: string;
+            suggested_name: string;
+            subscription_metadata: null;
+            organization_metadata: null;
+          }) => void;
+        },
+      ) => {
+        options?.onSuccess?.({
+          state_token: 'draft-state-token',
+          suggested_name: 'OAuth Account',
+          subscription_metadata: null,
+          organization_metadata: null,
+        });
+      },
+    );
+    const createFromDraft = vi.fn();
+    vi.mocked(queries.useStartOauthDraft).mockReturnValue({
+      mutate: startDraft,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+    vi.mocked(queries.useCompleteOauthDraft).mockReturnValue({
+      mutate: completeDraft,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+    vi.mocked(queries.useCreateFromOauthDraft).mockReturnValue({
+      mutate: createFromDraft,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+
+    const view = renderRoute();
+    fireEvent.click(screen.getByRole('button', { name: 'New' }));
+
+    let dialog = screen.getByRole('dialog', { name: 'New upstream' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    fireEvent.click(
+      within(dialog).getByRole('button', {
+        name: 'Authorize with Anthropic',
+      }),
+    );
+    fireEvent.change(within(dialog).getByPlaceholderText('paste code...'), {
+      target: { value: 'oauth-code' },
+    });
+    fireEvent.click(
+      within(dialog).getByRole('button', {
+        name: 'Verify and fetch account',
+      }),
+    );
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+
+    expect(startDraft).toHaveBeenCalledTimes(1);
+    expect(completeDraft).toHaveBeenCalledTimes(1);
+    expect(createFromDraft).toHaveBeenCalledTimes(1);
+    expect(createFromDraft).toHaveBeenCalledWith(
+      {
+        state_token: 'draft-state-token',
+        name: 'OAuth Account',
+      },
+      expect.anything(),
+    );
+
+    vi.mocked(queries.useCreateFromOauthDraft).mockReturnValue({
+      mutate: createFromDraft,
+      isPending: true,
+      reset: vi.fn(),
+    } as never);
+    view.rerender(routeElement());
+
+    dialog = screen.getByRole('dialog', { name: 'New upstream' });
+    expect(within(dialog).getByText('Account Preview')).toBeDefined();
+    const saving = within(dialog).getByRole('button', { name: 'Saving...' });
+    expect(saving.hasAttribute('disabled')).toBe(true);
+    expect(saving.getAttribute('aria-busy')).toBe('true');
+    expect(saving.querySelector('svg.animate-spin')).not.toBeNull();
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Back' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Close dialog' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    expect(within(dialog).getByRole('textbox').hasAttribute('disabled')).toBe(
+      true,
+    );
+
+    fireEvent.click(saving);
+    fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+    expect(createFromDraft).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('dialog', { name: 'New upstream' })).toBeDefined();
+  });
+
+  test('toggle pending shows the requested progress and prevents a second change', () => {
+    const mutate = vi.fn();
+    vi.mocked(queries.useUpdateUpstreamWarmupSettings).mockReturnValue({
+      mutate,
+      isPending: false,
+      variables: undefined,
+      reset: vi.fn(),
+    } as never);
+
+    const view = renderRoute();
+    const toggle = screen.getByRole('switch', { name: 'Enabled' });
+    fireEvent.click(toggle);
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(mutate).toHaveBeenCalledWith(
+      {
+        id: upstream.id,
+        body: { enabled: false, warmup_enabled: false },
+        spec_revision: upstream.spec_revision,
+      },
+      expect.anything(),
+    );
+
+    vi.mocked(queries.useUpdateUpstreamWarmupSettings).mockReturnValue({
+      mutate,
+      isPending: true,
+      variables: { body: { enabled: false } },
+      reset: vi.fn(),
+    } as never);
+    view.rerender(routeElement());
+
+    const pendingToggle = screen.getByRole('switch', { name: 'Enabled' });
+    expect(pendingToggle.hasAttribute('disabled')).toBe(true);
+    const status = screen.getByTestId('upstream-enabled-pending');
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.textContent).toContain('Disabling...');
+    expect(status.querySelector('svg.animate-spin')).not.toBeNull();
+
+    fireEvent.click(pendingToggle);
+    expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
+  test('OAuth start shows progress and completion locks the authorization modal', () => {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue({
+      data: {
+        upstream_id: upstream.id,
+        kind: upstream.kind,
+        has_credentials: false,
+        status: 'missing',
+        expires_at_unix_secs: null,
+        refresh_token_present: false,
+        scopes: [],
+      },
+      isLoading: false,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    const start = vi.fn();
+    const complete = vi.fn();
+    vi.mocked(queries.useOAuthStart).mockReturnValue({
+      mutate: start,
+      isPending: true,
+      reset: vi.fn(),
+    } as never);
+    vi.mocked(queries.useOAuthComplete).mockReturnValue({
+      mutate: complete,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+
+    const view = renderRoute();
+    const starting = screen.getByRole('button', { name: 'Starting...' });
+    expect(starting.hasAttribute('disabled')).toBe(true);
+    expect(starting.getAttribute('aria-busy')).toBe('true');
+    expect(starting.querySelector('svg.animate-spin')).not.toBeNull();
+
+    vi.mocked(queries.useOAuthStart).mockReturnValue({
+      mutate: vi.fn(
+        (
+          _id: string,
+          options?: {
+            onSuccess?: (result: {
+              authorize_url: string;
+              state_token: string;
+              revision: number;
+            }) => void;
+          },
+        ) => {
+          options?.onSuccess?.({
+            authorize_url: 'https://example.com/authorize',
+            state_token: 'oauth-state-token',
+            revision: 2,
+          });
+        },
+      ),
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+    view.rerender(routeElement());
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    let dialog = screen.getByRole('dialog', {
+      name: 'OAuth Authorization',
+    });
+    fireEvent.change(within(dialog).getByPlaceholderText(/paste code/), {
+      target: { value: 'oauth-code' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledWith(
+      {
+        id: upstream.id,
+        state_token: 'oauth-state-token',
+        code: 'oauth-code',
+      },
+      expect.anything(),
+    );
+
+    vi.mocked(queries.useOAuthComplete).mockReturnValue({
+      mutate: complete,
+      isPending: true,
+      reset: vi.fn(),
+    } as never);
+    view.rerender(routeElement());
+
+    dialog = screen.getByRole('dialog', { name: 'OAuth Authorization' });
+    const completing = within(dialog).getByRole('button', {
+      name: 'Completing...',
+    });
+    expect(completing.hasAttribute('disabled')).toBe(true);
+    expect(completing.getAttribute('aria-busy')).toBe('true');
+    expect(completing.querySelector('svg.animate-spin')).not.toBeNull();
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Cancel' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Close dialog' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    expect(within(dialog).getByRole('textbox').hasAttribute('disabled')).toBe(
+      true,
+    );
+
+    fireEvent.click(completing);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole('dialog', { name: 'OAuth Authorization' }),
+    ).toBeDefined();
+  });
+
+  test('delete confirmation remains open and locked until deletion succeeds', () => {
+    const mutate = vi.fn();
+    vi.mocked(queries.useDeleteUpstream).mockReturnValue({
+      mutate,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+
+    const view = renderRoute();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+
+    let dialog = screen.getByRole('alertdialog', {
+      name: 'Delete upstream?',
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole('alertdialog', { name: 'Delete upstream?' }),
+    ).toBeDefined();
+
+    vi.mocked(queries.useDeleteUpstream).mockReturnValue({
+      mutate,
+      isPending: true,
+      reset: vi.fn(),
+    } as never);
+    view.rerender(routeElement());
+
+    dialog = screen.getByRole('alertdialog', { name: 'Delete upstream?' });
+    expect(within(dialog).getByText('OAuth Primary')).toBeDefined();
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Cancel' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    const deleting = within(dialog).getByRole('button', {
+      name: 'Deleting...',
+    });
+    expect(deleting.hasAttribute('disabled')).toBe(true);
+    expect(deleting.getAttribute('aria-busy')).toBe('true');
+    expect(deleting.querySelector('svg.animate-spin')).not.toBeNull();
+
+    fireEvent.click(deleting);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole('alertdialog', { name: 'Delete upstream?' }),
+    ).toBeDefined();
   });
 });

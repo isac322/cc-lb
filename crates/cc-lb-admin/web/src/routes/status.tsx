@@ -82,6 +82,12 @@ function StatusPage() {
   const kill = useKillswitch();
   const principalNameMap = usePrincipalNameMap();
   const [confirmEngageOpen, setConfirmEngageOpen] = useState(false);
+  // One killswitch request may be in flight at a time and it locks both entry
+  // points. The mutation's own variables name the requested direction, so the
+  // pending label stays stable while `status` refetches behind it.
+  const killRequestedEnable = kill.variables ?? !status.data?.killswitch;
+  const killEngagePending = kill.isPending && killRequestedEnable;
+  const killDisengagePending = kill.isPending && !killRequestedEnable;
 
   return (
     <PageContainer>
@@ -214,7 +220,8 @@ function StatusPage() {
                 aria-label={
                   status.isLoading ? 'Killswitch status loading' : undefined
                 }
-                disabled={status.isLoading}
+                disabled={status.isLoading || kill.isPending}
+                loading={kill.isPending}
                 variant={
                   status.isLoading
                     ? 'secondary'
@@ -235,6 +242,10 @@ function StatusPage() {
               >
                 {status.isLoading ? (
                   <Skeleton className="h-3 w-24" />
+                ) : killDisengagePending ? (
+                  'Disengaging...'
+                ) : killEngagePending ? (
+                  'Engaging...'
                 ) : status.data?.killswitch ? (
                   'Disengage'
                 ) : (
@@ -412,11 +423,16 @@ function StatusPage() {
         onOpenChange={setConfirmEngageOpen}
         title="Engage killswitch?"
         description="All proxy traffic will stop immediately. Inbound requests will be rejected until the killswitch is disengaged."
-        confirmLabel="Engage killswitch"
+        confirmLabel={killEngagePending ? 'Engaging...' : 'Engage killswitch'}
         destructive
+        pending={kill.isPending}
+        closeOnConfirm={false}
         onConfirm={() =>
           kill.mutate(true, {
-            onSuccess: () => toast.success('Killswitch engaged'),
+            onSuccess: () => {
+              setConfirmEngageOpen(false);
+              toast.success('Killswitch engaged');
+            },
           })
         }
       />

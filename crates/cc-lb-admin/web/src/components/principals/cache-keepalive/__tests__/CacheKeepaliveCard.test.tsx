@@ -57,6 +57,7 @@ describe('CacheKeepaliveCard', () => {
     } as unknown as ReturnType<
       typeof queries.useUpdatePrincipalCacheKeepalive
     >);
+    vi.spyOn(queries, 'usePrincipalWritePending').mockReturnValue(0);
     vi.spyOn(queries, 'useCacheKeepaliveSummary').mockReturnValue({
       data: {
         renewing_now: 1,
@@ -150,6 +151,25 @@ describe('CacheKeepaliveCard', () => {
     const toggle = screen.getByLabelText('Toggle cache keepalive');
     expect(toggle.getAttribute('role')).toBe('switch');
     expect(toggle.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('locks the toggle during another write to the same principal', () => {
+    const mutate = vi.fn();
+    vi.mocked(queries.usePrincipalWritePending).mockReturnValue(1);
+    vi.mocked(queries.useUpdatePrincipalCacheKeepalive).mockReturnValue({
+      mutate,
+      isPending: false,
+    } as never);
+
+    renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
+
+    expect(queries.usePrincipalWritePending).toHaveBeenCalledWith('p-123');
+
+    const toggle = screen.getByTestId('cache-keepalive-switch');
+    expect(toggle.hasAttribute('disabled')).toBe(true);
+    expect(toggle.getAttribute('aria-busy')).toBeNull();
+    fireEvent.click(toggle);
+    expect(mutate).not.toHaveBeenCalled();
   });
 
   it('has no Active badge and no live dot text/element', () => {
