@@ -85,6 +85,7 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   fullWidth?: boolean;
   iconLeft?: ReactNode;
   iconRight?: ReactNode;
+  loading?: boolean;
 }
 const BTN_VARIANTS: Record<ButtonVariant, string> = {
   primary:
@@ -108,11 +109,16 @@ export function Button({
   fullWidth,
   iconLeft,
   iconRight,
+  loading = false,
   className,
   children,
   type,
+  disabled,
+  'aria-busy': ariaBusy,
   ...rest
 }: ButtonProps) {
+  // `disabled` and `aria-busy` are applied after the prop spread so a loading
+  // Button can never be re-enabled or stripped of its busy state by callers.
   return (
     <BaseButton
       type={type ?? 'button'}
@@ -126,8 +132,10 @@ export function Button({
         className,
       )}
       {...rest}
+      disabled={loading || disabled}
+      aria-busy={loading ? true : ariaBusy}
     >
-      {iconLeft}
+      {loading ? <Spinner className="w-3 h-3" /> : iconLeft}
       {children}
       {iconRight}
     </BaseButton>
@@ -140,7 +148,7 @@ export function IconButton({
   label,
   type,
   ...rest
-}: ButtonProps & { label: string }) {
+}: Omit<ButtonProps, 'loading'> & { label: string }) {
   return (
     <BaseButton
       type={type ?? 'button'}
@@ -299,6 +307,7 @@ export function Modal({
   children,
   footer,
   size = 'md',
+  preventDismiss = false,
 }: {
   open: boolean;
   onOpenChange: (
@@ -310,11 +319,20 @@ export function Modal({
   children: ReactNode;
   footer?: ReactNode;
   size?: 'sm' | 'md' | 'lg';
+  preventDismiss?: boolean;
 }) {
   const sizeClass =
     size === 'sm' ? 'max-w-sm' : size === 'lg' ? 'max-w-2xl' : 'max-w-md';
   return (
-    <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
+    <BaseDialog.Root
+      open={open}
+      onOpenChange={(nextOpen, eventDetails) => {
+        // Swallow close requests while dismissal is locked: backdrop clicks,
+        // Escape and the X control must not interrupt in-flight work.
+        if (preventDismiss && !nextOpen) return;
+        onOpenChange(nextOpen, eventDetails);
+      }}
+    >
       <BaseDialog.Portal>
         <BaseDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop backdrop-blur-sm transition-opacity duration-150 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
         <BaseDialog.Popup
@@ -338,10 +356,13 @@ export function Modal({
             </div>
             <BaseDialog.Close
               aria-label="Close dialog"
+              disabled={preventDismiss}
+              aria-disabled={preventDismiss || undefined}
               className={cx(
                 'inline-flex items-center justify-center text-text-muted hover:text-text rounded-sm',
                 'h-9 w-9 md:h-8 md:w-8 hover:bg-overlay-5',
                 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
+                'disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-text-muted',
               )}
             >
               <X className="w-4 h-4" />
@@ -369,6 +390,8 @@ export function ConfirmDialog({
   destructive = false,
   onConfirm,
   confirmDisabled = false,
+  pending = false,
+  closeOnConfirm = true,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -379,9 +402,23 @@ export function ConfirmDialog({
   destructive?: boolean;
   onConfirm: () => void;
   confirmDisabled?: boolean;
+  pending?: boolean;
+  closeOnConfirm?: boolean;
 }) {
+  // While the confirmed action is in flight the dialog owns the interaction:
+  // no backdrop click, Escape or Cancel may tear it down mid-request.
+  const requestClose = () => {
+    if (pending) return;
+    onOpenChange(false);
+  };
   return (
-    <BaseAlertDialog.Root open={open} onOpenChange={onOpenChange}>
+    <BaseAlertDialog.Root
+      open={open}
+      onOpenChange={(nextOpen: boolean) => {
+        if (pending && !nextOpen) return;
+        onOpenChange(nextOpen);
+      }}
+    >
       <BaseAlertDialog.Portal>
         <BaseAlertDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop backdrop-blur-sm transition-opacity duration-150 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
         <BaseAlertDialog.Popup
@@ -406,15 +443,16 @@ export function ConfirmDialog({
             ) : null}
           </div>
           <div className="px-4 py-3 border-t border-subtle flex items-center justify-end gap-2">
-            <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            <Button variant="ghost" disabled={pending} onClick={requestClose}>
               {cancelLabel}
             </Button>
             <Button
               autoFocus
               disabled={confirmDisabled}
+              loading={pending}
               onClick={() => {
                 onConfirm();
-                onOpenChange(false);
+                if (closeOnConfirm) onOpenChange(false);
               }}
               variant={destructive ? 'danger' : 'primary'}
             >

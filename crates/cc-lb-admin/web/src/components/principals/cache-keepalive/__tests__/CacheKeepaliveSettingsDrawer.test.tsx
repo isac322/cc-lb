@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { ApiError } from '../../../../lib/api';
@@ -54,6 +60,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     } as unknown as ReturnType<
       typeof queries.useUpdatePrincipalCacheKeepalive
     >);
+    vi.spyOn(queries, 'usePrincipalWritePending').mockReturnValue(0);
   });
 
   it('renders exact field labels, helper text, and buttons', () => {
@@ -241,6 +248,89 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     const saveButtons = screen.getAllByText('Save changes');
     fireEvent.click(saveButtons[saveButtons.length - 1]);
 
+    expect(mutateMock).not.toHaveBeenCalled();
+  });
+
+  it('locks every control and retains the drawer while saving', () => {
+    cleanup();
+    const onOpenChange = vi.fn();
+    vi.mocked(queries.useUpdatePrincipalCacheKeepalive).mockReturnValue({
+      mutate: mutateMock,
+      isPending: true,
+    } as never);
+
+    renderWithProviders(
+      <CacheKeepaliveSettingsDrawer
+        open={true}
+        onOpenChange={onOpenChange}
+        principal={mockPrincipal}
+      />,
+    );
+
+    const drawer = screen.getByTestId('cache-keepalive-settings-drawer');
+    const fieldset = screen.getByTestId('cache-keepalive-settings-form');
+    expect(fieldset.hasAttribute('disabled')).toBe(true);
+    expect(fieldset.getAttribute('aria-busy')).toBe('true');
+    for (const control of [
+      ...screen.getAllByRole('spinbutton'),
+      ...screen.getAllByRole('switch'),
+      screen.getByPlaceholderText('Add tool...'),
+      screen.getByRole('button', { name: 'Remove custom_tool' }),
+    ]) {
+      expect(control.matches(':disabled')).toBe(true);
+    }
+
+    const close = screen.getByRole('button', { name: 'Close settings' });
+    const reset = screen.getByRole('button', { name: 'Reset' });
+    const saving = screen.getByRole('button', { name: 'Saving...' });
+    expect(close.hasAttribute('disabled')).toBe(true);
+    expect(close.getAttribute('aria-disabled')).toBe('true');
+    expect(reset.hasAttribute('disabled')).toBe(true);
+    expect(saving.hasAttribute('disabled')).toBe(true);
+    expect(saving.getAttribute('aria-busy')).toBe('true');
+    expect(saving.querySelector('svg.animate-spin')).not.toBeNull();
+
+    fireEvent.click(close);
+    fireEvent.keyDown(drawer, { key: 'Escape', code: 'Escape' });
+
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByTestId('cache-keepalive-settings-drawer')).toBeDefined();
+  });
+
+  it('honors the same-principal write lock without claiming save progress', () => {
+    const onOpenChange = vi.fn();
+    cleanup();
+    vi.mocked(queries.usePrincipalWritePending).mockReturnValue(1);
+
+    renderWithProviders(
+      <CacheKeepaliveSettingsDrawer
+        open={true}
+        onOpenChange={onOpenChange}
+        principal={mockPrincipal}
+      />,
+    );
+
+    expect(queries.usePrincipalWritePending).toHaveBeenCalledWith('p-123');
+
+    const drawer = screen.getByTestId('cache-keepalive-settings-drawer');
+    const fieldset = screen.getByTestId('cache-keepalive-settings-form');
+    expect(fieldset.hasAttribute('disabled')).toBe(true);
+    expect(fieldset.getAttribute('aria-busy')).toBe('false');
+    expect(drawer.contains(fieldset)).toBe(true);
+
+    const save = screen.getByRole('button', { name: 'Save changes' });
+    expect(save.hasAttribute('disabled')).toBe(true);
+    expect(save.getAttribute('aria-busy')).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Reset' }).hasAttribute('disabled'),
+    ).toBe(true);
+
+    const close = screen.getByRole('button', { name: 'Close settings' });
+    expect(close.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(close);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+
+    fireEvent.click(save);
     expect(mutateMock).not.toHaveBeenCalled();
   });
 

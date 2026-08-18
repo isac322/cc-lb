@@ -5,9 +5,14 @@ import { toast } from 'sonner';
 import { ApiError } from '../../../lib/api';
 import {
   type Principal,
+  usePrincipalWritePending,
   useUpdatePrincipalCacheKeepalive,
 } from '../../../lib/queries';
-import { cx } from '../../ui/primitives';
+import { Button, cx, INPUT_CLASS } from '../../ui/primitives';
+
+// INPUT_CLASS carries no disabled affordance of its own; a control locked by an
+// in-flight write must read as unavailable, not merely inert.
+const PENDING_INPUT_CLASS = 'disabled:opacity-50 disabled:cursor-not-allowed';
 
 interface Props {
   open: boolean;
@@ -21,6 +26,21 @@ export function CacheKeepaliveSettingsDrawer({
   principal,
 }: Props) {
   const updateMutation = useUpdatePrincipalCacheKeepalive();
+  const principalWritePending = usePrincipalWritePending(principal.id) > 0;
+  const saving = updateMutation.isPending;
+  // Any same-principal record write bumps the revision this drawer would
+  // submit, so every edit control follows the shared principal write lock: the
+  // draft fieldset locks the whole region and each control repeats `disabled`
+  // so its own state never depends on fieldset inheritance.
+  const busy = saving || principalWritePending;
+
+  // A save in flight owns the drawer: backdrop clicks, Escape and the X control
+  // must not discard the draft or hide the outcome mid-request. The success path
+  // calls `onOpenChange` directly, so it is never swallowed here.
+  const handleOpenChange = (next: boolean) => {
+    if (saving && !next) return;
+    onOpenChange(next);
+  };
 
   const [enabled, setEnabled] = useState(false);
   const [lead5m, setLead5m] = useState(30);
@@ -61,6 +81,7 @@ export function CacheKeepaliveSettingsDrawer({
   };
 
   const handleSave = () => {
+    if (busy) return;
     if (
       !Number.isFinite(lead5m) ||
       lead5m < 0 ||
@@ -131,7 +152,7 @@ export function CacheKeepaliveSettingsDrawer({
   };
 
   return (
-    <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
+    <BaseDialog.Root open={open} onOpenChange={handleOpenChange}>
       <BaseDialog.Portal>
         <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop transition-opacity duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
         <BaseDialog.Popup
@@ -156,15 +177,25 @@ export function CacheKeepaliveSettingsDrawer({
             </div>
             <button
               type="button"
-              onClick={() => onOpenChange(false)}
+              onClick={() => handleOpenChange(false)}
               aria-label="Close settings"
-              className="inline-flex items-center justify-center w-7 h-7 rounded-sm text-text-muted hover:text-text hover:bg-overlay-5 shrink-0"
+              disabled={saving}
+              aria-disabled={saving || undefined}
+              className={cx(
+                'inline-flex items-center justify-center w-7 h-7 rounded-sm text-text-muted hover:text-text hover:bg-overlay-5 shrink-0',
+                'disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-text-muted',
+              )}
             >
               <X className="w-4 h-4" />
             </button>
           </header>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-6">
+          <fieldset
+            aria-busy={saving}
+            className="flex-1 min-w-0 overflow-y-auto p-4 space-y-6"
+            data-testid="cache-keepalive-settings-form"
+            disabled={busy}
+          >
             <div className="flex items-center justify-between">
               <span className="text-[11px] uppercase tracking-wider text-text-faint">
                 Enabled
@@ -175,11 +206,13 @@ export function CacheKeepaliveSettingsDrawer({
                 aria-checked={enabled}
                 aria-label="Enable cache keepalive"
                 onClick={() => setEnabled(!enabled)}
+                disabled={busy}
                 className={cx(
                   'relative inline-flex h-5 w-9 shrink-0 items-center self-center rounded-full border transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent/40',
+                  PENDING_INPUT_CLASS,
                   enabled
                     ? 'bg-[var(--color-ok)] border-[var(--color-ok)]'
-                    : 'bg-overlay-5 border-subtle-strong hover:border-text-muted',
+                    : 'bg-overlay-5 border-subtle-strong hover:border-text-muted disabled:hover:border-subtle-strong',
                 )}
               >
                 <span
@@ -200,7 +233,8 @@ export function CacheKeepaliveSettingsDrawer({
                   type="number"
                   value={lead5m}
                   onChange={(e) => setLead5m(Number(e.target.value))}
-                  className="w-full h-9 px-2.5 text-sm bg-bg border border-subtle rounded-sm text-text placeholder:text-text-faint focus:border-accent focus:outline-none transition-colors"
+                  disabled={busy}
+                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
                 />
                 <span className="text-[11px] text-text-faint">
                   → renews 30s before the 5m cache expires
@@ -215,7 +249,8 @@ export function CacheKeepaliveSettingsDrawer({
                   type="number"
                   value={lead1h}
                   onChange={(e) => setLead1h(Number(e.target.value))}
-                  className="w-full h-9 px-2.5 text-sm bg-bg border border-subtle rounded-sm text-text placeholder:text-text-faint focus:border-accent focus:outline-none transition-colors"
+                  disabled={busy}
+                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
                 />
               </label>
 
@@ -227,7 +262,8 @@ export function CacheKeepaliveSettingsDrawer({
                   type="number"
                   value={maxRenewals}
                   onChange={(e) => setMaxRenewals(Number(e.target.value))}
-                  className="w-full h-9 px-2.5 text-sm bg-bg border border-subtle rounded-sm text-text placeholder:text-text-faint focus:border-accent focus:outline-none transition-colors"
+                  disabled={busy}
+                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
                 />
               </label>
 
@@ -239,7 +275,8 @@ export function CacheKeepaliveSettingsDrawer({
                   type="number"
                   value={maxDuration}
                   onChange={(e) => setMaxDuration(Number(e.target.value))}
-                  className="w-full h-9 px-2.5 text-sm bg-bg border border-subtle rounded-sm text-text placeholder:text-text-faint focus:border-accent focus:outline-none transition-colors"
+                  disabled={busy}
+                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
                 />
                 <span className="text-[11px] text-text-faint">= 4h</span>
               </label>
@@ -252,7 +289,8 @@ export function CacheKeepaliveSettingsDrawer({
                   type="number"
                   value={snapshotBytes}
                   onChange={(e) => setSnapshotBytes(Number(e.target.value))}
-                  className="w-full h-9 px-2.5 text-sm bg-bg border border-subtle rounded-sm text-text placeholder:text-text-faint focus:border-accent focus:outline-none transition-colors"
+                  disabled={busy}
+                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
                 />
                 <span className="text-[11px] text-text-faint">= 512 KiB</span>
               </label>
@@ -269,11 +307,20 @@ export function CacheKeepaliveSettingsDrawer({
                       key={tool}
                       className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-sm bg-overlay-4 text-text border border-subtle"
                     >
-                      {tool}{' '}
-                      <X
-                        className="w-3 h-3 cursor-pointer hover:text-text-muted"
+                      {tool}
+                      <button
+                        type="button"
                         onClick={() => removeTool(tool)}
-                      />
+                        aria-label={`Remove ${tool}`}
+                        disabled={busy}
+                        className={cx(
+                          'inline-flex items-center justify-center rounded-sm text-text hover:text-text-muted',
+                          'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
+                          PENDING_INPUT_CLASS,
+                        )}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
                     </span>
                   ))}
                   <input
@@ -281,7 +328,11 @@ export function CacheKeepaliveSettingsDrawer({
                     value={newTool}
                     onChange={(e) => setNewTool(e.target.value)}
                     onKeyDown={handleAddTool}
-                    className="flex-1 min-w-[100px] bg-transparent outline-none text-sm text-text"
+                    disabled={busy}
+                    className={cx(
+                      'flex-1 min-w-[100px] bg-transparent outline-none text-sm text-text',
+                      PENDING_INPUT_CLASS,
+                    )}
                     placeholder="Add tool..."
                   />
                 </div>
@@ -299,11 +350,13 @@ export function CacheKeepaliveSettingsDrawer({
                   aria-checked={treatAmbiguous}
                   aria-label="Treat end_turn as ambiguous"
                   onClick={() => setTreatAmbiguous(!treatAmbiguous)}
+                  disabled={busy}
                   className={cx(
                     'relative inline-flex h-5 w-9 shrink-0 items-center self-center rounded-full border transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent/40',
+                    PENDING_INPUT_CLASS,
                     treatAmbiguous
                       ? 'bg-[var(--color-ok)] border-[var(--color-ok)]'
-                      : 'bg-overlay-5 border-subtle-strong hover:border-text-muted',
+                      : 'bg-overlay-5 border-subtle-strong hover:border-text-muted disabled:hover:border-subtle-strong',
                   )}
                 >
                   <span
@@ -326,24 +379,20 @@ export function CacheKeepaliveSettingsDrawer({
                 </span>
               </div>
             </div>
-          </div>
+          </fieldset>
 
           <div className="px-4 py-3 border-t border-subtle flex items-center justify-end gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={reset}
-              className="inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none text-[var(--color-text-muted)] hover:bg-[var(--color-hover-bg)] hover:text-[var(--color-text)] h-9 px-3 text-sm"
-            >
+            <Button variant="ghost" onClick={reset} disabled={busy}>
               Reset
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="primary"
+              loading={saving}
+              disabled={busy}
               onClick={handleSave}
-              disabled={updateMutation.isPending}
-              className="inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none bg-[var(--color-text)] text-[var(--color-bg)] hover:opacity-90 h-9 px-3 text-sm disabled:opacity-50"
             >
-              Save changes
-            </button>
+              {saving ? 'Saving...' : 'Save changes'}
+            </Button>
           </div>
         </BaseDialog.Popup>
       </BaseDialog.Portal>
