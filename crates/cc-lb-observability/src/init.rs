@@ -20,6 +20,8 @@ use crate::cclb_metrics::{
 use crate::panic_hook::install_panic_hook;
 use crate::redaction::{RedactingMakeWriter, RedactionLayer, RedactionPolicy};
 
+type BoxedRegistryLayer = Box<dyn Layer<Registry> + Send + Sync>;
+
 static PANIC_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 const CACHE_TOKEN_DRIFT_BUCKETS: [f64; 11] = [
@@ -298,11 +300,8 @@ pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
         .with_ansi(false)
         .with_writer(RedactingMakeWriter::new(std::io::stdout, policy));
 
-    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = vec![
-        env_filter.boxed(),
-        RedactionLayer::new(policy).boxed(),
-        fmt_layer.boxed(),
-    ];
+    let mut layers: Vec<BoxedRegistryLayer> =
+        vec![RedactionLayer::new(policy).boxed(), fmt_layer.boxed()];
 
     let tracer_provider = if let Some(endpoint) = cfg.otlp_endpoint.as_deref() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
@@ -328,13 +327,24 @@ pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
         None
     };
 
-    let subscriber = Registry::default().with(layers);
+    let subscriber = filtered_subscriber(layers, env_filter);
     tracing::subscriber::set_global_default(subscriber)?;
 
     Ok(TracingGuard {
         prometheus_handle,
         tracer_provider,
     })
+}
+
+fn filtered_subscriber(
+    layers: Vec<BoxedRegistryLayer>,
+    env_filter: EnvFilter,
+) -> impl tracing::Subscriber + Send + Sync {
+    // Keep the global filter outside the dynamic layer collection. A `Vec<Layer>`
+    // combines callsite interest by taking the most permissive result, so placing
+    // `EnvFilter` inside the vector lets an unfiltered output layer enable events
+    // that the configured filter rejected.
+    Registry::default().with(layers).with(env_filter)
 }
 
 pub fn metric_definitions() -> &'static [MetricDefinition] {
@@ -653,4 +663,48 @@ fn touch_metrics() {
     )
     .increment(0);
     touch_prometheus14_metric_handles();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tracing::{Event, Level, Subscriber};
+    use tracing_subscriber::layer::Context;
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct RecordingLayer {
+        levels: Arc<Mutex<Vec<Level>>>,
+    }
+
+    impl<S> Layer<S> for RecordingLayer
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            self.levels
+                .lock()
+                .expect("recorded levels lock poisoned")
+                .push(*event.metadata().level());
+        }
+    }
+
+    #[test]
+    fn configured_filter_applies_to_dynamic_layers() {
+        let recording = RecordingLayer::default();
+        let levels = Arc::clone(&recording.levels);
+        let subscriber = filtered_subscriber(vec![recording.boxed()], EnvFilter::new("info"));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!("filtered debug event");
+            tracing::info!("retained info event");
+        });
+
+        assert_eq!(
+            *levels.lock().expect("recorded levels lock poisoned"),
+            vec![Level::INFO]
+        );
+    }
 }
