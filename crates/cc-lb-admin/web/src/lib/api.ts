@@ -232,6 +232,17 @@ export interface UsageBucket {
   cache_read_input_tokens: number;
   error_count: number;
   virtual_cost_micros: number;
+  /**
+   * Per-category cost in micros, aggregated from the request events behind the
+   * bucket. Populated only for principal-grouped `/admin/usage` buckets, and
+   * omitted for windows whose events predate per-category cost or whose event
+   * data disagrees with the rollup — `virtual_cost_micros` stays authoritative.
+   */
+  cost_input_micros?: number | null;
+  cost_output_micros?: number | null;
+  cost_cache_creation_5m_micros?: number | null;
+  cost_cache_creation_1h_micros?: number | null;
+  cost_cache_read_micros?: number | null;
   latency_ms_sum: number;
   latency_count: number;
   latency_ms_min?: number;

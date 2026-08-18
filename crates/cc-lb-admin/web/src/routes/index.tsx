@@ -26,6 +26,7 @@ import {
   YAxis,
 } from 'recharts';
 import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
+import { BreakdownPopover } from '../components/ui/BreakdownPopover';
 import {
   Card,
   CardHeader,
@@ -36,11 +37,19 @@ import {
   Sparkline,
 } from '../components/ui/primitives';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
+import {
+  addBucketCostMicros,
+  type CostComponentMicros,
+  costCategorySegments,
+  emptyCostComponents,
+  sumCostMicros,
+} from '../components/ui/usage/costCategories';
 import { type AggregateResponse, eventTime } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import {
   cacheHitRatio,
   cacheMissRatio,
+  formatCostMicros,
   formatCount,
   formatRate,
   formatUsdAmount,
@@ -394,17 +403,160 @@ export function ValueTile({
 export type TopPrincipal = {
   id: string;
   name: string;
-  cost_usd: number;
+  /** Authoritative rollup cost for the window, in micros. */
+  cost_micros: number;
+  /**
+   * Per-category cost summed over the window, or null when no bucket recorded
+   * any — legacy windows keep a single-tone bar instead of an invented split.
+   */
+  cost_components_micros: CostComponentMicros | null;
   tokens: number;
   requests: number;
   cache_hit_ratio: number | null;
-  primary_model: string;
   share_pct: number;
-  max_cost: number;
+  /** Largest `cost_micros` on the card: the full-length reference for a meter. */
+  max_cost_micros: number;
 };
 
 const TOP_PRINCIPAL_ROW_CLASS =
   'flex min-h-[66px] items-center gap-3 border-b border-subtle px-3 py-2 last:border-b-0';
+
+const PRINCIPAL_COST_NOTE = 'Per-category cost not recorded for this window';
+
+/**
+ * Cost meter for one principal row. Length is the principal's share of the
+ * largest principal; the filled part is subdivided into the request-log cost
+ * categories, with a neutral tail for cost the categories do not account for.
+ * Exact figures stay out of the row and live in the hover/focus breakdown and
+ * in the meter's value text, so the row keeps its geometry and its reading.
+ */
+function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
+  const [open, setOpen] = useState(false);
+  const hoverTimerRef = useRef<number | undefined>(undefined);
+  useEffect(
+    () => () => {
+      window.clearTimeout(hoverTimerRef.current);
+    },
+    [],
+  );
+  const totalMicros = principal.cost_micros;
+  const components = principal.cost_components_micros;
+  const attributedMicros = components ? sumCostMicros(components) : 0;
+  const unattributedMicros = components
+    ? Math.max(0, totalMicros - attributedMicros)
+    : 0;
+  const segments = components
+    ? costCategorySegments(components, unattributedMicros)
+    : [];
+  // Segments add up to this, so widths fill the bar exactly even if recorded
+  // components run past the rollup total.
+  const segmentBasisMicros = Math.max(totalMicros, attributedMicros);
+  const sharePct =
+    principal.max_cost_micros > 0
+      ? (totalMicros / principal.max_cost_micros) * 100
+      : 0;
+  const valueText = [
+    `Total ${formatCostMicros(totalMicros)}`,
+    `${fmtPercent(sharePct)} of the largest principal`,
+    components
+      ? segments
+          .map(
+            (segment) => `${segment.label} ${formatCostMicros(segment.value)}`,
+          )
+          .join(', ')
+      : PRINCIPAL_COST_NOTE,
+  ].join('; ');
+
+  return (
+    <BasePopover.Root open={open} onOpenChange={setOpen}>
+      <BasePopover.Trigger
+        aria-label={`${principal.name} cost breakdown`}
+        className="mt-1.5 block w-full cursor-help rounded-sm text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+        data-testid="top-principal-cost-trigger"
+        delay={200}
+        onBlur={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onPointerEnter={() => {
+          window.clearTimeout(hoverTimerRef.current);
+          hoverTimerRef.current = window.setTimeout(() => setOpen(true), 200);
+        }}
+        onPointerLeave={() => {
+          window.clearTimeout(hoverTimerRef.current);
+          setOpen(false);
+        }}
+        openOnHover
+        type="button"
+      >
+        <BaseMeter.Root
+          aria-label={`${principal.name} cost`}
+          data-cost-components={
+            components
+              ? unattributedMicros > 0
+                ? 'partial'
+                : 'complete'
+              : 'unavailable'
+          }
+          data-testid="top-principal-cost-meter"
+          getAriaValueText={() => valueText}
+          max={Math.max(1, principal.max_cost_micros)}
+          value={totalMicros}
+        >
+          <BaseMeter.Track className="relative w-full bg-overlay-3 rounded-full overflow-hidden h-1.5">
+            <BaseMeter.Indicator
+              className={cx(
+                'flex h-full rounded-full overflow-hidden transition-all',
+                components ? '' : 'bg-[color:var(--color-accent)]',
+              )}
+              data-slot="cost-meter-fill"
+            >
+              {segments.map((segment) =>
+                segment.value <= 0 ? null : (
+                  <span
+                    key={segment.key}
+                    className="h-full"
+                    data-category={segment.key}
+                    data-testid="top-principal-cost-segment"
+                    style={{
+                      backgroundColor: segment.color,
+                      width: `${(segment.value / segmentBasisMicros) * 100}%`,
+                    }}
+                  />
+                ),
+              )}
+            </BaseMeter.Indicator>
+          </BaseMeter.Track>
+        </BaseMeter.Root>
+      </BasePopover.Trigger>
+      <BasePopover.Portal>
+        <BasePopover.Positioner side="top" sideOffset={4}>
+          <BasePopover.Popup
+            className="z-50 rounded-sm border border-subtle-strong bg-bg-sub px-2 py-1 text-[11px] text-text shadow-lg"
+            initialFocus={false}
+          >
+            <div data-testid="top-principal-cost-details">
+              <BreakdownPopover
+                title="Cost"
+                showZeroRows={true}
+                note={components ? undefined : PRINCIPAL_COST_NOTE}
+                rows={segments.map((segment) => ({
+                  label: segment.label,
+                  value: segment.value,
+                  color: segment.color,
+                  fmt: formatCostMicros,
+                }))}
+                footer={{
+                  label: 'Total',
+                  value: totalMicros,
+                  fmt: formatCostMicros,
+                }}
+              />
+            </div>
+          </BasePopover.Popup>
+        </BasePopover.Positioner>
+      </BasePopover.Portal>
+    </BasePopover.Root>
+  );
+}
 
 export function TopPrincipalsCard({
   range,
@@ -463,34 +615,21 @@ export function TopPrincipalsCard({
               >
                 <div className="min-w-0 flex-1">
                   <div className="text-sm truncate">{principal.name}</div>
-                  <div className="text-[11px] text-text-faint truncate">
-                    {principal.primary_model} ·{' '}
+                  <div
+                    className="text-[11px] text-text-faint truncate"
+                    data-slot="principal-meta"
+                  >
                     {formatCount(principal.requests)} req ·{' '}
                     {formatCount(principal.tokens)} tok ·{' '}
                     <span>
                       {`${fmtRatioPercent(principal.cache_hit_ratio)} cache hit`}
                     </span>
                   </div>
-                  <BaseMeter.Root
-                    className="mt-1.5"
-                    max={100}
-                    value={Math.min(
-                      100,
-                      Math.max(
-                        0,
-                        (principal.cost_usd / Math.max(1, principal.max_cost)) *
-                          100 || 0,
-                      ),
-                    )}
-                  >
-                    <BaseMeter.Track className="relative w-full bg-overlay-3 rounded-full overflow-hidden h-1.5">
-                      <BaseMeter.Indicator className="h-full rounded-full transition-all bg-[color:var(--color-accent)]" />
-                    </BaseMeter.Track>
-                  </BaseMeter.Root>
+                  <PrincipalCostMeter principal={principal} />
                 </div>
                 <div className="text-right shrink-0">
                   <div className="text-sm font-mono tabular-nums">
-                    {formatUsdAmount(principal.cost_usd)}
+                    {formatUsdAmount(principal.cost_micros / 1_000_000)}
                   </div>
                   <div className="text-[11px] text-text-faint tabular-nums">
                     {principal.share_pct.toFixed(1)}%
@@ -1380,36 +1519,40 @@ function OverviewPage() {
     const series = principalUsage.data?.series ?? [];
     const byId = new Map<
       string,
-      Omit<TopPrincipal, 'share_pct' | 'max_cost'>
+      Omit<TopPrincipal, 'share_pct' | 'max_cost_micros'>
     >();
-    let maxCost = 0;
-    let totalCost = 0;
+    let maxCostMicros = 0;
+    let totalCostMicros = 0;
 
     for (const s of series) {
       if (!s.key) continue;
-      let cost = 0;
+      let costMicros = 0;
       let tokens = 0;
       let requests = 0;
       let inputTokens = 0;
       let cacheCreationTokens = 0;
       let cacheReadTokens = 0;
+      const components = emptyCostComponents();
+      let recordedComponents = false;
       for (const b of s.buckets) {
-        cost += (b.virtual_cost_micros ?? 0) / 1_000_000;
+        costMicros += b.virtual_cost_micros ?? 0;
         tokens += sumTokens(b);
         requests += b.request_count ?? 0;
         inputTokens += b.input_tokens ?? 0;
         cacheCreationTokens += b.cache_creation_input_tokens ?? 0;
         cacheReadTokens += b.cache_read_input_tokens ?? 0;
+        if (addBucketCostMicros(b, components)) recordedComponents = true;
       }
-      if (cost <= 0 && requests <= 0) continue;
+      if (costMicros <= 0 && requests <= 0) continue;
 
-      totalCost += cost;
-      if (cost > maxCost) maxCost = cost;
+      totalCostMicros += costMicros;
+      if (costMicros > maxCostMicros) maxCostMicros = costMicros;
 
       byId.set(s.key, {
         id: s.key,
         name: principalNameMap.get(s.key) ?? s.key,
-        cost_usd: cost,
+        cost_micros: costMicros,
+        cost_components_micros: recordedComponents ? components : null,
         tokens,
         requests,
         cache_hit_ratio: cacheHitRatio({
@@ -1417,17 +1560,17 @@ function OverviewPage() {
           cache_creation_input_tokens: cacheCreationTokens,
           cache_read_input_tokens: cacheReadTokens,
         }),
-        primary_model: '—', // Not available in this grouping
       });
     }
 
     return Array.from(byId.values())
-      .sort((a, b) => b.cost_usd - a.cost_usd)
+      .sort((a, b) => b.cost_micros - a.cost_micros)
       .slice(0, 5)
       .map((p) => ({
         ...p,
-        share_pct: totalCost > 0 ? (p.cost_usd / totalCost) * 100 : 0,
-        max_cost: maxCost,
+        share_pct:
+          totalCostMicros > 0 ? (p.cost_micros / totalCostMicros) * 100 : 0,
+        max_cost_micros: maxCostMicros,
       }));
   }, [principalUsage.data, principalNameMap]);
 

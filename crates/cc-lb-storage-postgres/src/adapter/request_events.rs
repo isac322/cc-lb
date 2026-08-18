@@ -3,12 +3,14 @@ use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
     RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
     RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket, RequestEventKeyUsageQuery,
-    RequestEventListItem, RequestEventListQuery, RequestEventProjections, RequestEventStore,
+    RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
+    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
     RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_pattern,
-    model_filter_matches,
+    model_filter_matches, normalize_usage_rollup_dimension,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{Postgres, QueryBuilder};
+use std::collections::BTreeMap;
 
 use super::request_event_list_sql::{self, status_class_range, upstream_as_str};
 use crate::{
@@ -247,6 +249,13 @@ impl RequestEventStore for PostgresStorage {
         request_event_key_usage(self, query).await
     }
 
+    async fn request_event_principal_costs(
+        &self,
+        query: &RequestEventPrincipalCostQuery,
+    ) -> StorageResult<Vec<RequestEventPrincipalCostBucket>> {
+        request_event_principal_costs(self, query).await
+    }
+
     async fn request_event_histogram(
         &self,
         query: &RequestEventHistogramQuery,
@@ -371,6 +380,150 @@ async fn request_event_key_usage(
     }
 
     Ok(buckets)
+}
+
+async fn request_event_principal_costs(
+    storage: &PostgresStorage,
+    query: &RequestEventPrincipalCostQuery,
+) -> StorageResult<Vec<RequestEventPrincipalCostBucket>> {
+    if query.bucket_width_secs == 0
+        || query.until_unix_secs <= query.since_unix_secs
+        || query.principal_keys.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+
+    let range_start_ms = seconds_to_millis(
+        query.since_unix_secs,
+        "request event principal cost range start",
+    )?;
+    let range_end_ms = seconds_to_millis(
+        query.until_unix_secs,
+        "request event principal cost range end",
+    )?;
+    let bucket_width_ms = seconds_to_millis(
+        query.bucket_width_secs,
+        "request event principal cost bucket width",
+    )?;
+    let rows = sqlx::query_as::<_, (Option<String>, i64, i64, bool, i64, i64, i64, i64, i64)>(
+        "SELECT principal_id, bucket_index, \
+                COALESCE(SUM(GREATEST(COALESCE( \
+                    (payload_jsonb ->> 'cost_usd_micros')::bigint, 0), 0)), 0)::bigint \
+                    AS total_cost_micros, \
+                BOOL_OR((payload_jsonb ->> 'cost_input_micros') IS NOT NULL \
+                    OR (payload_jsonb ->> 'cost_output_micros') IS NOT NULL \
+                    OR (payload_jsonb ->> 'cost_cache_creation_5m_micros') IS NOT NULL \
+                    OR (payload_jsonb ->> 'cost_cache_creation_1h_micros') IS NOT NULL \
+                    OR (payload_jsonb ->> 'cost_cache_read_micros') IS NOT NULL) \
+                    AS component_costs_recorded, \
+                COALESCE(SUM(GREATEST(COALESCE( \
+                    (payload_jsonb ->> 'cost_input_micros')::bigint, 0), 0)), 0)::bigint \
+                    AS cost_input_micros, \
+                COALESCE(SUM(GREATEST(COALESCE( \
+                    (payload_jsonb ->> 'cost_output_micros')::bigint, 0), 0)), 0)::bigint \
+                    AS cost_output_micros, \
+                COALESCE(SUM(GREATEST(COALESCE( \
+                    (payload_jsonb ->> 'cost_cache_creation_5m_micros')::bigint, 0), 0)), 0)::bigint \
+                    AS cost_cache_creation_5m_micros, \
+                COALESCE(SUM(GREATEST(COALESCE( \
+                    (payload_jsonb ->> 'cost_cache_creation_1h_micros')::bigint, 0), 0)), 0)::bigint \
+                    AS cost_cache_creation_1h_micros, \
+                COALESCE(SUM(GREATEST(COALESCE( \
+                    (payload_jsonb ->> 'cost_cache_read_micros')::bigint, 0), 0)), 0)::bigint \
+                    AS cost_cache_read_micros \
+         FROM ( \
+             SELECT principal_id, \
+                    ((list_ts_ms - $1) / $2)::bigint AS bucket_index, \
+                    convert_from(payload, 'UTF8')::jsonb AS payload_jsonb \
+             FROM request_events_v1 \
+             WHERE list_ts_ms >= $1 \
+               AND list_ts_ms < $3 \
+               AND ($4::uuid IS NULL OR upstream_id = $4) \
+               AND LEFT(REGEXP_REPLACE(COALESCE(NULLIF(BTRIM(principal_id COLLATE \"C\", U&'\\0009\\000A\\000B\\000C\\000D\\0020\\0085\\00A0\\1680\\2000\\2001\\2002\\2003\\2004\\2005\\2006\\2007\\2008\\2009\\200A\\2028\\2029\\202F\\205F\\3000'), ''), 'unknown'), \
+                   '[^A-Za-z0-9_.:@-]', '_', 'g'), 64) = ANY($5::text[]) \
+             OFFSET 0 \
+         ) matched \
+         GROUP BY principal_id, bucket_index \
+         ORDER BY bucket_index ASC, principal_id ASC",
+    )
+    .bind(range_start_ms)
+    .bind(bucket_width_ms)
+    .bind(range_end_ms)
+    .bind(query.upstream_id)
+    .bind(&query.principal_keys)
+    .fetch_all(&storage.pool)
+    .await
+    .map_err(map_sqlx_error)?;
+
+    let mut buckets = BTreeMap::<(String, u64), RequestEventPrincipalCostBucket>::new();
+    for (
+        principal_id,
+        bucket_index,
+        total_cost_micros,
+        component_costs_recorded,
+        cost_input_micros,
+        cost_output_micros,
+        cost_cache_creation_5m_micros,
+        cost_cache_creation_1h_micros,
+        cost_cache_read_micros,
+    ) in rows
+    {
+        let bucket_index = i64_to_u64(bucket_index, "request event principal cost bucket index")?;
+        let bucket_offset = bucket_index
+            .checked_mul(query.bucket_width_secs)
+            .ok_or_else(|| StorageError::Corrupted {
+                message: "request event principal cost bucket offset overflowed".to_owned(),
+            })?;
+        let bucket_start_unix_secs = query
+            .since_unix_secs
+            .checked_add(bucket_offset)
+            .filter(|bucket_start| *bucket_start < query.until_unix_secs)
+            .ok_or_else(|| StorageError::Corrupted {
+                message: "request event principal cost bucket is out of range".to_owned(),
+            })?;
+        let principal = normalize_usage_rollup_dimension(principal_id.as_deref());
+        let bucket = buckets
+            .entry((principal.clone(), bucket_start_unix_secs))
+            .or_insert_with(|| RequestEventPrincipalCostBucket {
+                principal,
+                bucket_start_unix_secs,
+                ..RequestEventPrincipalCostBucket::default()
+            });
+
+        add_principal_cost(
+            &mut bucket.total_cost_micros,
+            total_cost_micros,
+            "request event principal total cost",
+        )?;
+        bucket.component_costs_recorded |= component_costs_recorded;
+        add_principal_cost(
+            &mut bucket.cost_input_micros,
+            cost_input_micros,
+            "request event principal input cost",
+        )?;
+        add_principal_cost(
+            &mut bucket.cost_output_micros,
+            cost_output_micros,
+            "request event principal output cost",
+        )?;
+        add_principal_cost(
+            &mut bucket.cost_cache_creation_5m_micros,
+            cost_cache_creation_5m_micros,
+            "request event principal cache creation 5m cost",
+        )?;
+        add_principal_cost(
+            &mut bucket.cost_cache_creation_1h_micros,
+            cost_cache_creation_1h_micros,
+            "request event principal cache creation 1h cost",
+        )?;
+        add_principal_cost(
+            &mut bucket.cost_cache_read_micros,
+            cost_cache_read_micros,
+            "request event principal cache read cost",
+        )?;
+    }
+
+    Ok(buckets.into_values().collect())
 }
 
 /// See the SQLite adapter: the `list_ts_ms` bound in the histogram query is a
@@ -877,6 +1030,25 @@ impl PostgresStorage {
             .map_err(map_sqlx_error)?;
         Ok(result.rows_affected())
     }
+}
+
+fn seconds_to_millis(value: u64, field: &str) -> StorageResult<i64> {
+    let value = value
+        .checked_mul(1_000)
+        .ok_or_else(|| StorageError::Fatal {
+            message: format!("{field} cannot be represented as milliseconds"),
+        })?;
+    u64_to_i64(value, field)
+}
+
+fn add_principal_cost(target: &mut u64, value: i64, field: &str) -> StorageResult<()> {
+    let value = i64_to_u64(value, field)?;
+    *target = target
+        .checked_add(value)
+        .ok_or_else(|| StorageError::Corrupted {
+            message: format!("{field} aggregate overflowed"),
+        })?;
+    Ok(())
 }
 
 fn unix_millis_to_datetime(value: u64, field: &str) -> StorageResult<DateTime<Utc>> {

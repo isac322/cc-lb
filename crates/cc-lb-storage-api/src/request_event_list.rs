@@ -124,6 +124,30 @@ pub struct RequestEventKeyUsageBucket {
     pub cost_usd_micros: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestEventPrincipalCostQuery {
+    pub since_unix_secs: u64,
+    pub until_unix_secs: u64,
+    pub bucket_width_secs: u64,
+    pub upstream_id: Option<Uuid>,
+    /// Normalized usage-rollup principal keys whose component costs should be returned.
+    /// An empty selection returns no rows.
+    pub principal_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestEventPrincipalCostBucket {
+    pub principal: String,
+    pub bucket_start_unix_secs: u64,
+    pub total_cost_micros: u64,
+    pub component_costs_recorded: bool,
+    pub cost_input_micros: u64,
+    pub cost_output_micros: u64,
+    pub cost_cache_creation_5m_micros: u64,
+    pub cost_cache_creation_1h_micros: u64,
+    pub cost_cache_read_micros: u64,
+}
+
 /// Describes a histogram over the same inclusive, second-based time window as
 /// [`RequestEventListQuery`]. Storage backends apply
 /// `ts >= since_unix_secs AND ts <= until_unix_secs`, then use `list_ts_ms`
