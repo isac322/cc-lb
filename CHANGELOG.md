@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-08-18
+
+### Fixed
+
+- Runtime logging now enforces `RUST_LOG` or `observability.tracing_level` across the dynamic tracing layer stack, so `DEBUG` and `TRACE` events no longer bypass an `info` filter.
+
 ## [0.4.3] - 2026-08-18
 
 ### Fixed
