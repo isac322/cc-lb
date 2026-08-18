@@ -1561,7 +1561,6 @@ function OverviewPage() {
           cache_creation_input_tokens: cacheCreationTokens,
           cache_read_input_tokens: cacheReadTokens,
         }),
-
       });
     }
 
