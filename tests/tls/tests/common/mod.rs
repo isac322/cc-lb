@@ -91,8 +91,10 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
             async move { axum::serve(fake_listener, fake_anthropic_app(fake_config)).await },
         );
 
-    let proxy_addr = free_addr();
-    let admin_addr = free_addr();
+    // Keep the externally bound ports reserved while the app is built. Releasing
+    // bind(0) ports here lets a parallel test claim them before App::start binds.
+    let (proxy_addr, proxy_reservation) = reserve_addr();
+    let (admin_addr, admin_reservation) = reserve_addr();
     let metrics_addr = free_addr();
     let config_path = dir.path().join("cc-lb.toml");
     write_config(
@@ -110,12 +112,27 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         .await
         .expect("build app");
     let signals = app.signal_handle();
-    let server = tokio::spawn(async move { app.start().await });
+    // App::start owns the real listeners from this point; keep the release-to-bind
+    // window after the potentially expensive build as small as possible.
+    drop((proxy_reservation, admin_reservation));
+    let mut server = tokio::spawn(async move { app.start().await });
 
-    wait_tls_status(proxy_addr, &cert_path, "/healthz", 200).await;
-    wait_plain_status(admin_addr, "/admin/health", 200).await;
+    wait_while_server_running(
+        &mut server,
+        wait_tls_status(proxy_addr, &cert_path, "/healthz", 200),
+    )
+    .await;
+    wait_while_server_running(
+        &mut server,
+        wait_plain_status(admin_addr, "/admin/health", 200),
+    )
+    .await;
     seed_runtime(admin_addr, upstream_addr).await;
-    wait_tls_status(proxy_addr, &cert_path, "/v1/models", 200).await;
+    wait_while_server_running(
+        &mut server,
+        wait_tls_status(proxy_addr, &cert_path, "/v1/models", 200),
+    )
+    .await;
 
     RunningTlsApp {
         proxy_addr,
@@ -168,6 +185,20 @@ fn ready_timeout(default: Duration) -> Duration {
         .and_then(|raw| raw.parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or(default)
+}
+
+async fn wait_while_server_running<T>(
+    server: &mut JoinHandle<Result<(), BuildError>>,
+    wait: impl Future<Output = T>,
+) -> T {
+    tokio::select! {
+        result = server => match result {
+            Ok(Ok(())) => panic!("TLS server exited before becoming ready"),
+            Ok(Err(error)) => panic!("TLS server failed before becoming ready: {error}"),
+            Err(error) => panic!("TLS server task failed before becoming ready: {error}"),
+        },
+        output = wait => output,
+    }
 }
 
 pub async fn wait_for_reloaded_cert(
@@ -558,9 +589,14 @@ fn body(text: &str) -> String {
         .unwrap_or_default()
 }
 
+fn reserve_addr() -> (SocketAddr, std::net::TcpListener) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve free addr");
+    let addr = listener.local_addr().expect("reserved addr");
+    (addr, listener)
+}
+
 fn free_addr() -> SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free addr");
-    listener.local_addr().expect("free addr")
+    reserve_addr().0
 }
 
 fn write_config(
