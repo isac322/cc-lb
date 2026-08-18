@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-18
+
+### Added
+
+- Overview KPI cards now share synchronized hover/focus details with exact timestamps and values. Tokens also chart cache-miss ratio and show its period average, while Top principals show each principal's period-average cache-hit ratio.
+- Top principals now break virtual cost into Input, Output, Cache create 5m, Cache create 1h, Cache read, and any unattributed remainder. Pointer hover and keyboard focus expose exact category and total values without fabricating splits for legacy or incomplete data.
+- Hermes Agent requests now preserve the stable root conversation identity and classify main, subagent, session-title, and compaction traffic across Anthropic Messages and OpenAI-compatible chat-completions requests.
+
+### Fixed
+
+- Live Request Logs now re-render rows received over SSE and preserve correct pagination when a new live row displaces the historical page tail.
+- Admin operations that wait on the server now use single-flight submission, visible progress labels, disabled conflicting controls, and dismissal protection for pending or one-time-secret dialogs. This prevents duplicate API key issuance and other same-tick duplicate writes.
+
 ## [0.4.1] - 2026-07-31
 
 ### Added
