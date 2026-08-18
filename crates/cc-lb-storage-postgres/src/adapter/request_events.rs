@@ -175,14 +175,11 @@ impl RequestEventStore for PostgresStorage {
     /// returned by a between-cursors call using an equal-or-later snapshot,
     /// because `pg_snapshot_xmin` never decreases over time.
     async fn current_request_event_cursor(&self) -> StorageResult<u64> {
-        let cursor = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(MAX(seq) FILTER ( \
-                 WHERE COALESCE(tx_id, '0'::xid8) < pg_snapshot_xmin(pg_current_snapshot()) \
-             ), 0)::bigint FROM request_events_v1",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
+        let cursor = sqlx::query_scalar::<_, i64>(include_str!("current_request_event_cursor.sql"))
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?
+            .unwrap_or(0);
         i64_to_u64(cursor, "request event cursor")
     }
 
