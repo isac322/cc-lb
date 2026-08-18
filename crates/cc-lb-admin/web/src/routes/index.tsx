@@ -413,7 +413,6 @@ export type TopPrincipal = {
   tokens: number;
   requests: number;
   cache_hit_ratio: number | null;
-
   share_pct: number;
   /** Largest `cost_micros` on the card: the full-length reference for a meter. */
   max_cost_micros: number;

@@ -762,6 +762,7 @@ async function hoverPrincipalCostMeter(page: Page) {
   await trigger.hover();
   await expect(page.getByTestId('top-principal-cost-details')).toBeVisible();
 }
+
 test.describe('Overview KPI hover', () => {
   test('synchronizes KPI details in the dark and light themes', async ({
     page,
@@ -1045,6 +1046,7 @@ test.describe('Overview KPI hover', () => {
       page.getByTestId('top-principal-cost-details'),
     ).toHaveCount(0);
   });
+
   test('keeps the mobile Overview free of horizontal overflow', async ({
     page,
   }) => {
