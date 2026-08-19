@@ -209,7 +209,7 @@ async fn cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_genera
             cache_anchor_at_unix_secs: 150,
             run_at_unix_secs: 420,
             expires_at_unix_secs: 450,
-            encrypted_payload: b"stale".to_vec(),
+            encrypted_payload: None,
             now_unix_secs: 151,
         })
         .await
@@ -223,7 +223,7 @@ async fn cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_genera
             cache_anchor_at_unix_secs: 150,
             run_at_unix_secs: 420,
             expires_at_unix_secs: 450,
-            encrypted_payload: b"ciphertext-hit".to_vec(),
+            encrypted_payload: None,
             now_unix_secs: 151,
         })
         .await
@@ -235,7 +235,23 @@ async fn cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_genera
     assert_eq!(updated.first_scheduled_at_unix_secs, 100);
     assert_eq!(updated.cache_anchor_at_unix_secs, 150);
     assert_eq!(updated.run_at_unix_secs, 420);
-    assert_eq!(updated.encrypted_payload, b"ciphertext-hit");
+    assert_eq!(updated.encrypted_payload, b"ciphertext-one");
+    let migrated = storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: "session-hash".to_owned(),
+            generation: updated.generation,
+            cache_anchor_at_unix_secs: 151,
+            run_at_unix_secs: 421,
+            expires_at_unix_secs: 451,
+            encrypted_payload: Some(b"compressed-ciphertext".to_vec()),
+            now_unix_secs: 152,
+        })
+        .await
+        .expect("fresh payload migration")
+        .expect("row migrated");
+    assert_eq!(migrated.generation, 3);
+    assert_eq!(migrated.refresh_count, 2);
+    assert_eq!(migrated.encrypted_payload, b"compressed-ciphertext");
 }
 
 #[tokio::test]
@@ -274,6 +290,12 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe() {
             .await
             .expect("fresh terminal")
     );
+    let terminal = storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load terminal session")
+        .expect("terminal session exists");
+    assert!(terminal.encrypted_payload.is_empty());
     let check = storage
         .check_cache_keepalive_generation("session-hash")
         .await
@@ -342,6 +364,7 @@ async fn mark_latest_terminal_only_mutates_active_latest_session() {
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::Cancelled)
     );
+    assert!(record.encrypted_payload.is_empty());
 }
 
 #[tokio::test]

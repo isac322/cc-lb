@@ -1298,6 +1298,7 @@ dependencies = [
  "uuid",
  "wat",
  "xxhash-rust",
+ "zstd",
 ]
 
 [[package]]

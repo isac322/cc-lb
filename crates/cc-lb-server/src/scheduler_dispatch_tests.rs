@@ -787,7 +787,7 @@ fn saturate_lifecycle_bus(fixture: &Fixture) -> Vec<tokio::sync::mpsc::Receiver<
 }
 
 #[tokio::test]
-async fn durable_cache_keepalive_job_decrypts_resigns_dispatches_and_reschedules() {
+async fn durable_cache_keepalive_job_reschedules_without_rewriting_payload() {
     let fixture = Fixture::new().await;
     let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
@@ -795,26 +795,52 @@ async fn durable_cache_keepalive_job_decrypts_resigns_dispatches_and_reschedules
         .enqueue_cache_keepalive(fixture.enqueue_request())
         .await
         .expect("enqueue durable keepalive");
-    let first_job = fixture.pending_keepalive_job(1).await;
-    let dispatch = fixture.dispatch(Arc::clone(&pusher));
-
-    let outcome = dispatch
-        .dispatch_cache_keepalive(first_job)
-        .await
-        .expect("dispatch cache keepalive job");
-
-    assert!(matches!(outcome, JobOutcome::Done));
-    let record = fixture
+    let initial_payload = fixture
         .storage
         .get_cache_keepalive_session("session-hash")
         .await
-        .expect("load session")
-        .expect("session exists");
-    assert_eq!(record.generation, 2);
-    assert_eq!(record.status, CacheKeepaliveSessionStatus::Active);
-    fixture.pending_keepalive_job(2).await;
+        .expect("load initial session")
+        .expect("initial session exists")
+        .encrypted_payload;
+    let first_job = fixture.pending_keepalive_job(1).await;
+    let dispatch = fixture.dispatch(Arc::clone(&pusher));
+
+    let first_outcome = dispatch
+        .dispatch_cache_keepalive(first_job)
+        .await
+        .expect("dispatch first cache keepalive job");
+
+    assert!(matches!(first_outcome, JobOutcome::Done));
+    let first_record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load first rescheduled session")
+        .expect("first rescheduled session exists");
+    assert_eq!(first_record.generation, 2);
+    assert_eq!(first_record.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(first_record.encrypted_payload, initial_payload);
+
+    let second_job = fixture.pending_keepalive_job(2).await;
+    let second_outcome = dispatch
+        .dispatch_cache_keepalive(second_job)
+        .await
+        .expect("dispatch second cache keepalive job");
+
+    assert!(matches!(second_outcome, JobOutcome::Done));
+    let second_record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load second rescheduled session")
+        .expect("second rescheduled session exists");
+    assert_eq!(second_record.generation, 3);
+    assert_eq!(second_record.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(second_record.encrypted_payload, initial_payload);
+    fixture.pending_keepalive_job(3).await;
+
     let requests = fixture.http.requests.lock().expect("requests lock").clone();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].url, "http://fake-upstream.local/v1/messages");
     assert_eq!(requests[0].headers["x-api-key"], "sk-ant-rotated");
     assert_eq!(requests[0].headers["anthropic-version"], "2023-06-01");
@@ -822,7 +848,56 @@ async fn durable_cache_keepalive_job_decrypts_resigns_dispatches_and_reschedules
     assert_eq!(body["max_tokens"], 0);
     assert!(body.get("stream").is_none());
     let signer_calls = fixture.signer_calls.lock().expect("signer calls lock");
-    assert_eq!(signer_calls.as_slice(), &["fake-upstream:"]);
+    assert_eq!(signer_calls.as_slice(), &["fake-upstream:", "fake-upstream:"]);
+}
+
+#[tokio::test]
+async fn legacy_cache_keepalive_payload_migrates_on_first_cache_hit() {
+    let fixture = Fixture::new().await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    let request = fixture.enqueue_request();
+    let legacy_plaintext =
+        serde_json::to_vec(&request.snapshot.to_persisted()).expect("serialize legacy payload");
+    enqueuer
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("enqueue durable keepalive");
+    let legacy_payload = fixture.encrypt_generation_payload(1, &legacy_plaintext);
+    fixture
+        .replace_encrypted_payload(legacy_payload.clone())
+        .await;
+    let dispatch = fixture.dispatch(Arc::clone(&pusher));
+
+    let first_outcome = dispatch
+        .dispatch_cache_keepalive(fixture.pending_keepalive_job(1).await)
+        .await
+        .expect("dispatch legacy cache keepalive job");
+
+    assert!(matches!(first_outcome, JobOutcome::Done));
+    let migrated = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load migrated session")
+        .expect("migrated session exists");
+    assert_eq!(migrated.generation, 2);
+    assert_ne!(migrated.encrypted_payload, legacy_payload);
+
+    let second_outcome = dispatch
+        .dispatch_cache_keepalive(fixture.pending_keepalive_job(2).await)
+        .await
+        .expect("dispatch migrated cache keepalive job");
+
+    assert!(matches!(second_outcome, JobOutcome::Done));
+    let rescheduled = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load rescheduled migrated session")
+        .expect("rescheduled migrated session exists");
+    assert_eq!(rescheduled.generation, 3);
+    assert_eq!(rescheduled.encrypted_payload, migrated.encrypted_payload);
 }
 
 #[tokio::test]

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Cache keep-alive snapshots now use a compact, compressed ciphertext format, keep the same payload across synthetic refresh generations, and discard ciphertext when a session terminates. Legacy JSON ciphertext remains readable and is rewritten once if its session renews.
+
 ## [0.4.4] - 2026-08-18
 
 ### Fixed
