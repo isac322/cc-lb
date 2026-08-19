@@ -1,5 +1,6 @@
 const DAY_SECS: u64 = 86_400;
 const NOW_SECS: u64 = 2_000_000;
+const HOUSEKEEPING_REPEAT_COUNT: usize = 100;
 
 use super::{
     ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler,
@@ -13,8 +14,8 @@ mod sqlite {
 
     use super::{
         ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler,
-        ApalisHousekeepingJobResult, DAY_SECS, NOW_SECS, cache_keepalive_jobs, expected_job_ids,
-        expected_result, jobs, sessions, workers,
+        ApalisHousekeepingJobResult, DAY_SECS, HOUSEKEEPING_REPEAT_COUNT, NOW_SECS,
+        cache_keepalive_jobs, expected_job_ids, expected_result, jobs, sessions, workers,
     };
 
     #[tokio::test]
@@ -40,6 +41,29 @@ mod sqlite {
             session_hashes(&pool).await?,
             vec!["live-enqueued", "live-pending"]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remains_successful_across_repeated_runs() -> Result<(), Box<dyn std::error::Error>> {
+        let pool = SqlitePool::connect(":memory:").await?;
+        SqliteStorage::setup(&pool).await?;
+        create_cache_keepalive_sessions_table(&pool).await?;
+        seed_sqlite(&pool).await?;
+        seed_sqlite_cache_keepalive_cleanup(&pool).await?;
+
+        let handler = ApalisHousekeepingJobHandler::new(pool, ApalisHousekeepingConfig::new(1));
+        for _ in 0..HOUSEKEEPING_REPEAT_COUNT {
+            assert!(
+                matches!(
+                    handler
+                        .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+                        .await,
+                    ApalisHousekeepingJobResult::Done { .. }
+                ),
+                "housekeeping must remain successful across repeated runs"
+            );
+        }
         Ok(())
     }
 
@@ -305,7 +329,8 @@ mod postgres {
 
     use super::{
         ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler, DAY_SECS,
-        NOW_SECS, cache_keepalive_jobs, expected_job_ids, expected_result, jobs, sessions, workers,
+        HOUSEKEEPING_REPEAT_COUNT, NOW_SECS, cache_keepalive_jobs, expected_job_ids,
+        expected_result, jobs, sessions, workers,
     };
 
     #[tokio::test]
@@ -368,6 +393,19 @@ mod postgres {
         );
         assert_postgres_stale_running_keepalive_recovery(pool).await?;
         assert_postgres_stale_running_lock_recovery(pool).await?;
+        let handler =
+            ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(30));
+        for _ in 0..HOUSEKEEPING_REPEAT_COUNT {
+            assert!(
+                matches!(
+                    handler
+                        .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+                        .await,
+                    super::ApalisHousekeepingJobResult::Done { .. }
+                ),
+                "housekeeping must remain successful across repeated runs"
+            );
+        }
         Ok(())
     }
 
