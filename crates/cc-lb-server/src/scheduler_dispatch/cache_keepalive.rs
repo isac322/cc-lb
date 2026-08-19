@@ -1,8 +1,6 @@
 use cc_lb_control::api_keys::limit_engine::Reservation;
 use cc_lb_control::api_keys::principal_view::PrincipalStatus;
-use cc_lb_engine::cache_keepalive::{
-    DispatchOutcome, KeepaliveDispatchContext, RequestSnapshot,
-};
+use cc_lb_engine::cache_keepalive::{DispatchOutcome, KeepaliveDispatchContext, RequestSnapshot};
 use cc_lb_engine::clock::unix_secs;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
@@ -281,10 +279,9 @@ impl SchedulerDispatch {
             .max(now.saturating_add(1));
         let encrypted_payload = if needs_payload_rewrite {
             let payload_generation =
-                base_payload_generation(record.generation, record.refresh_count)
-                    .map_err(|error| {
-                        cc_lb_scheduler::error::SchedulerError::Job(error.to_string())
-                    })?;
+                base_payload_generation(record.generation, record.refresh_count).map_err(
+                    |error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()),
+                )?;
             Some(
                 encrypt_cache_keepalive_payload(
                     self.aead.as_ref(),
@@ -294,9 +291,7 @@ impl SchedulerDispatch {
                     payload_generation,
                     &snapshot.to_persisted(),
                 )
-                .map_err(|error| {
-                    cc_lb_scheduler::error::SchedulerError::Job(error.to_string())
-                })?,
+                .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?,
             )
         } else {
             None

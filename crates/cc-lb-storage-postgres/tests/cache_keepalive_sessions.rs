@@ -401,10 +401,7 @@ async fn concurrent_hit_reschedule_allows_only_one_generation_cas(
         async move {
             barrier.wait().await;
             storage
-                .reschedule_after_cache_hit(&hit_request(
-                    session_key_hash,
-                    original.generation,
-                ))
+                .reschedule_after_cache_hit(&hit_request(session_key_hash, original.generation))
                 .await
         }
     });
@@ -414,10 +411,7 @@ async fn concurrent_hit_reschedule_allows_only_one_generation_cas(
         async move {
             barrier.wait().await;
             storage
-                .reschedule_after_cache_hit(&hit_request(
-                    session_key_hash,
-                    original.generation,
-                ))
+                .reschedule_after_cache_hit(&hit_request(session_key_hash, original.generation))
                 .await
         }
     });
@@ -513,10 +507,7 @@ fn replace_request(
     }
 }
 
-fn hit_request(
-    session_key_hash: &str,
-    generation: u64,
-) -> CacheKeepaliveHitRefreshRequest {
+fn hit_request(session_key_hash: &str, generation: u64) -> CacheKeepaliveHitRefreshRequest {
     CacheKeepaliveHitRefreshRequest {
         session_key_hash: session_key_hash.to_owned(),
         generation,

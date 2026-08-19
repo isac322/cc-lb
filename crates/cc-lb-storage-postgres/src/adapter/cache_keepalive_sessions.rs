@@ -178,15 +178,15 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                     message: "cache keepalive generation overflow".to_owned(),
                 })?;
         let next_generation_db = u64_to_i64(next_generation, "cache keepalive generation")?;
-        let cache_anchor_at =
-            u64_to_i64(request.cache_anchor_at_unix_secs, "cache keepalive cache_anchor_at")?;
+        let cache_anchor_at = u64_to_i64(
+            request.cache_anchor_at_unix_secs,
+            "cache keepalive cache_anchor_at",
+        )?;
         let run_at = u64_to_i64(request.run_at_unix_secs, "cache keepalive run_at")?;
-        let expires_at =
-            u64_to_i64(request.expires_at_unix_secs, "cache keepalive expires_at")?;
+        let expires_at = u64_to_i64(request.expires_at_unix_secs, "cache keepalive expires_at")?;
         let updated_at = u64_to_i64(request.now_unix_secs, "cache keepalive updated_at")?;
         let generation = u64_to_i64(request.generation, "cache keepalive generation")?;
-        let current_job_key =
-            cache_keepalive_job_key(&request.session_key_hash, next_generation);
+        let current_job_key = cache_keepalive_job_key(&request.session_key_hash, next_generation);
         let result = if let Some(encrypted_payload) = request.encrypted_payload.as_deref() {
             sqlx::query(
                 "UPDATE cache_keepalive_sessions SET generation = $1, refresh_count = refresh_count + 1,

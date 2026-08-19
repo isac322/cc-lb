@@ -81,12 +81,7 @@ pub(crate) fn decrypt_cache_keepalive_payload(
     if !payload.starts_with(MAGIC) {
         let plaintext = aead.decrypt(
             payload,
-            &cache_keepalive_payload_aad(
-                principal_id,
-                session_key_hash,
-                upstream_id,
-                generation,
-            ),
+            &cache_keepalive_payload_aad(principal_id, session_key_hash, upstream_id, generation),
         )?;
         return Ok(DecodedCacheKeepalivePayload {
             snapshot: serde_json::from_slice(&plaintext)?,
@@ -226,12 +221,7 @@ mod tests {
         let legacy = aead
             .encrypt(
                 &serde_json::to_vec(&snapshot).expect("legacy JSON encodes"),
-                &cache_keepalive_payload_aad(
-                    "principal",
-                    "session",
-                    snapshot.upstream_id,
-                    6,
-                ),
+                &cache_keepalive_payload_aad("principal", "session", snapshot.upstream_id, 6),
             )
             .expect("legacy payload encrypts");
 
