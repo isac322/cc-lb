@@ -103,6 +103,9 @@ const DECOMPRESSION_OUTPUT_BUDGET_BODY_CAP_MULTIPLIER: usize = 4;
 const INCOMPLETE_SSE_EVENT_BUDGET_BODY_CAP_MULTIPLIER: usize = 1;
 const SSE_BUFFER_MAX_RETAINED_CAPACITY_BYTES: usize = 1024 * 1024;
 const SSE_BUFFER_SMALL_EVENT_CAPACITY_FRACTION: usize = 8;
+// `upstream_response` names the proxy leg where decoding failed. It does not
+// attribute the malformed bytes to the provider: transport corruption or a
+// local decoder defect can produce the same classification.
 const UPSTREAM_RESPONSE_BODY_ERROR_TYPE: &str = "upstream_response_body_error";
 const UPSTREAM_RESPONSE_DECODE_ERROR_TYPE: &str = "upstream_response_decode_error";
 const UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE: &str = "upstream_response_framing_error";
