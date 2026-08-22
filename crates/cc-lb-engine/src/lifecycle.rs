@@ -4179,7 +4179,6 @@ impl Lifecycle {
                     event_count: 1,
                     total_bytes: frame.len(),
                 });
-                stream_upstream_error_frame_emitted = true;
                 if let Some(o) = observer.as_ref()
                     && !upstream_error_status
                 {
