@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Streaming upstream body transport failures are now recorded as upstream stream failures instead of successful requests. Corrupt or truncated compressed SSE responses emit an identity-encoded `api_error` frame and are attributed to upstream decoding; unterminated SSE events emit the same client error and are attributed to upstream framing. Transform-hook and transform-local decode failures emit `response_transform_error` instead of replaying compressed bytes without `Content-Encoding`. Existing response-transform failures and HTTP error classifications remain authoritative.
+
 ## [0.4.4] - 2026-08-18
 
 ### Fixed

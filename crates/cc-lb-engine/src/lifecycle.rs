@@ -65,6 +65,7 @@ use crate::request_context::RequestContext;
 use crate::request_timing::{
     REQUEST_STAGE_TIMINGS, RequestStageTimings, finalize_connection_reused_if_unset,
 };
+use crate::sse_error_frame::make_error_frame;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{LifecycleContext, error_codes};
@@ -102,6 +103,19 @@ const DECOMPRESSION_OUTPUT_BUDGET_BODY_CAP_MULTIPLIER: usize = 4;
 const INCOMPLETE_SSE_EVENT_BUDGET_BODY_CAP_MULTIPLIER: usize = 1;
 const SSE_BUFFER_MAX_RETAINED_CAPACITY_BYTES: usize = 1024 * 1024;
 const SSE_BUFFER_SMALL_EVENT_CAPACITY_FRACTION: usize = 8;
+const UPSTREAM_RESPONSE_BODY_ERROR_TYPE: &str = "upstream_response_body_error";
+const UPSTREAM_RESPONSE_DECODE_ERROR_TYPE: &str = "upstream_response_decode_error";
+const UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE: &str = "upstream_response_framing_error";
+const UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE: &str = "api_error";
+
+fn is_upstream_response_decode_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::InvalidData
+            | std::io::ErrorKind::InvalidInput
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
 
 const fn decompression_output_budget_bytes(body_cap_bytes: usize) -> usize {
     body_cap_bytes.saturating_mul(DECOMPRESSION_OUTPUT_BUDGET_BODY_CAP_MULTIPLIER)
@@ -3421,7 +3435,10 @@ impl Lifecycle {
             incomplete_sse_event_budget_bytes(self.config.messages_body_cap_bytes);
         let usage_decoder =
             UsageDecoder::from_headers(&parts.headers, decompression_output_budget_bytes);
-        let transform_requested = transform_ctx.dialect.sse_event_transform_hook().is_some();
+        let downstream_stream_is_identity = matches!(&usage_decoder, UsageDecoder::Identity);
+        let upstream_is_sse = is_sse_response(&parts.headers);
+        let transform_requested =
+            upstream_is_sse && transform_ctx.dialect.sse_event_transform_hook().is_some();
         let transform_decode_supported = usage_decoder.unsupported_encoding().is_none();
         let response_headers = (transform_requested && transform_decode_supported)
             .then(|| sanitized_response_headers_for_plugin(&parts.headers));
@@ -3455,7 +3472,7 @@ impl Lifecycle {
             DownstreamStreamDropGuard::armed(observer.clone())
         };
         let upstream_error_status = status.is_client_error() || status.is_server_error();
-        let parse_sse_events = !upstream_error_status || is_sse_response(&parts.headers);
+        let parse_sse_events = !upstream_error_status || upstream_is_sse;
         let stream = async_stream::stream! {
             let mut downstream_drop_guard = downstream_drop_guard;
             let mut usage_decoder = usage_decoder;
@@ -3480,6 +3497,8 @@ impl Lifecycle {
             let mut sse_transform_active = transform_requested && transform_decode_supported;
             let mut transformed_output_started = false;
             let mut stream_transform_error: Option<ResponseTransformError> = None;
+            let mut stream_upstream_error: Option<cc_lb_lifecycle::StreamError> = None;
+            let mut stream_upstream_error_frame_emitted = false;
             let mut last_partial_at: Option<Instant> = None;
             let mut last_partial_output_tokens: u64 = 0;
             let mut upstream_error_body: Vec<u8> = Vec::new();
@@ -3512,27 +3531,85 @@ impl Lifecycle {
                                     }
                                 }
                                 Err(error) => {
+                                    let upstream_decode_failed =
+                                        is_upstream_response_decode_error(&error);
                                     tracing::warn!(
                                         request_id = %event_ctx.request_id,
                                         %error,
+                                        upstream_decode_failed,
                                         "skipping streaming usage extraction: chunk decode failed"
                                     );
                                     upstream_error_body_decode_failed = true;
                                     parse_sse_events_active = false;
                                     buffer.clear();
-                                    if sse_transform_active {
-                                        if transformed_output_started {
-                                            let transform_error = ResponseTransformError::Runtime {
-                                                reason: format!("streaming response decode failed after transform output: {error}"),
-                                            };
-                                            let frame = make_response_transform_error_frame(&transform_error);
-                                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                                batch_index,
-                                                event_count: 1,
-                                                total_bytes: frame.len(),
+                                    if upstream_decode_failed && sse_transform_active {
+                                        let error_message =
+                                            format!("upstream response decoding failed: {error}");
+                                        stream_upstream_error =
+                                            Some(cc_lb_lifecycle::StreamError {
+                                                error_type:
+                                                    UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
+                                                error_message: error_message.clone(),
                                             });
+                                        if transformed_output_started
+                                            || !downstream_stream_is_identity
+                                        {
+                                            let frame = make_error_frame(
+                                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                &error_message,
+                                            );
+                                            observe_many(
+                                                hooks.as_slice(),
+                                                ObserveEvent::Chunk {
+                                                    batch_index,
+                                                    event_count: 1,
+                                                    total_bytes: frame.len(),
+                                                },
+                                            );
+                                            stream_upstream_error_frame_emitted = true;
+                                            if let Some(o) = observer.as_ref()
+                                                && !upstream_error_status
+                                            {
+                                                o.set_terminal(
+                                                    status,
+                                                    error_codes::UPSTREAM_STREAM_ERROR,
+                                                );
+                                            }
+                                            downstream_drop_guard.disarm();
+                                            yield Ok::<Bytes, Infallible>(frame);
+                                            break 'upstream;
+                                        }
+                                    }
+                                    if sse_transform_active {
+                                        if transformed_output_started
+                                            || !downstream_stream_is_identity
+                                        {
+                                            let transform_error =
+                                                ResponseTransformError::Runtime {
+                                                    reason: if transformed_output_started {
+                                                        format!(
+                                                            "streaming response decode failed after transform output: {error}"
+                                                        )
+                                                    } else {
+                                                        format!(
+                                                            "streaming response decode failed before transform output: {error}"
+                                                        )
+                                                    },
+                                                };
+                                            let frame =
+                                                make_response_transform_error_frame(&transform_error);
+                                            observe_many(
+                                                hooks.as_slice(),
+                                                ObserveEvent::Chunk {
+                                                    batch_index,
+                                                    event_count: 1,
+                                                    total_bytes: frame.len(),
+                                                },
+                                            );
                                             stream_transform_error = Some(transform_error);
-                                            if let Some(o) = observer.as_ref() {
+                                            if let Some(o) = observer.as_ref()
+                                                && !upstream_error_status
+                                            {
                                                 o.set_terminal(
                                                     StatusCode::OK,
                                                     error_codes::UPSTREAM_STREAM_ERROR,
@@ -3542,17 +3619,9 @@ impl Lifecycle {
                                             yield Ok::<Bytes, Infallible>(frame);
                                             break 'upstream;
                                         }
+                                        debug_assert!(downstream_stream_is_identity);
                                         sse_transform_active = false;
                                         raw_passthrough_current_chunk = true;
-                                        for raw in raw_before_transform_output.drain(..) {
-                                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                                batch_index,
-                                                event_count: 1,
-                                                total_bytes: raw.len(),
-                                            });
-                                            batch_index = batch_index.saturating_add(1);
-                                            yield Ok::<Bytes, Infallible>(raw);
-                                        }
                                     }
                                 }
                             }
@@ -3573,10 +3642,12 @@ impl Lifecycle {
                                             error_message: err.error_message.clone().unwrap_or_default(),
                                         }),
                                     });
-                                    o.set_terminal(
-                                        StatusCode::OK,
-                                        error_codes::UPSTREAM_STREAM_ERROR,
-                                    );
+                                    if !upstream_error_status {
+                                        o.set_terminal(
+                                            StatusCode::OK,
+                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                        );
+                                    }
                                     downstream_drop_guard.disarm();
                                 }
                                 sse_event_count = sse_event_count.saturating_add(1);
@@ -3707,18 +3778,30 @@ impl Lifecycle {
                                                 continue;
                                             }
                                             SseTransformOutcome::FailOpen => {
-                                                if transformed_output_started {
+                                                if transformed_output_started
+                                                    || !downstream_stream_is_identity
+                                                {
                                                     let error = ResponseTransformError::Runtime {
-                                                        reason: "failed to parse SSE event after transform output started".to_owned(),
+                                                        reason: if transformed_output_started {
+                                                            "failed to parse SSE event after transform output started".to_owned()
+                                                        } else {
+                                                            "failed to parse SSE event before transform output".to_owned()
+                                                        },
                                                     };
-                                                    let frame = make_response_transform_error_frame(&error);
-                                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                                        batch_index,
-                                                        event_count: 1,
-                                                        total_bytes: frame.len(),
-                                                    });
+                                                    let frame =
+                                                        make_response_transform_error_frame(&error);
+                                                    observe_many(
+                                                        hooks.as_slice(),
+                                                        ObserveEvent::Chunk {
+                                                            batch_index,
+                                                            event_count: 1,
+                                                            total_bytes: frame.len(),
+                                                        },
+                                                    );
                                                     stream_transform_error = Some(error);
-                                                    if let Some(o) = observer.as_ref() {
+                                                    if let Some(o) = observer.as_ref()
+                                                        && !upstream_error_status
+                                                    {
                                                         o.set_terminal(
                                                             StatusCode::OK,
                                                             error_codes::UPSTREAM_STREAM_ERROR,
@@ -3749,15 +3832,23 @@ impl Lifecycle {
                                                     %error,
                                                     "sse response transform failed"
                                                 );
-                                                    if transformed_output_started {
-                                                    let frame = make_response_transform_error_frame(&error);
-                                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                                        batch_index,
-                                                        event_count: 1,
-                                                        total_bytes: frame.len(),
-                                                    });
+                                                if transformed_output_started
+                                                    || !downstream_stream_is_identity
+                                                {
+                                                    let frame =
+                                                        make_response_transform_error_frame(&error);
+                                                    observe_many(
+                                                        hooks.as_slice(),
+                                                        ObserveEvent::Chunk {
+                                                            batch_index,
+                                                            event_count: 1,
+                                                            total_bytes: frame.len(),
+                                                        },
+                                                    );
                                                     stream_transform_error = Some(error);
-                                                    if let Some(o) = observer.as_ref() {
+                                                    if let Some(o) = observer.as_ref()
+                                                        && !upstream_error_status
+                                                    {
                                                         o.set_terminal(
                                                             StatusCode::OK,
                                                             error_codes::UPSTREAM_STREAM_ERROR,
@@ -3812,11 +3903,19 @@ impl Lifecycle {
                                 parse_sse_events_active = false;
                                 buffer.clear();
                                 if sse_transform_active {
-                                    if transformed_output_started {
+                                    if transformed_output_started
+                                        || !downstream_stream_is_identity
+                                    {
                                         let error = ResponseTransformError::Runtime {
-                                            reason: format!(
-                                                "incomplete SSE event exceeds {incomplete_sse_event_budget_bytes}-byte budget after transform output"
-                                            ),
+                                            reason: if transformed_output_started {
+                                                format!(
+                                                    "incomplete SSE event exceeds {incomplete_sse_event_budget_bytes}-byte budget after transform output"
+                                                )
+                                            } else {
+                                                format!(
+                                                    "incomplete SSE event exceeds {incomplete_sse_event_budget_bytes}-byte budget before transform output"
+                                                )
+                                            },
                                         };
                                         let frame = make_response_transform_error_frame(&error);
                                         observe_many(hooks.as_slice(), ObserveEvent::Chunk {
@@ -3825,7 +3924,9 @@ impl Lifecycle {
                                             total_bytes: frame.len(),
                                         });
                                         stream_transform_error = Some(error);
-                                        if let Some(o) = observer.as_ref() {
+                                        if let Some(o) = observer.as_ref()
+                                            && !upstream_error_status
+                                        {
                                             o.set_terminal(
                                                 StatusCode::OK,
                                                 error_codes::UPSTREAM_STREAM_ERROR,
@@ -3861,7 +3962,40 @@ impl Lifecycle {
                             }
                         }
                     }
-                    Err(_source) => break,
+                    Err(source) => {
+                        let error_message = source.to_string();
+                        tracing::warn!(
+                            request_id = %event_ctx.request_id,
+                            error = %error_message,
+                            "upstream response body stream failed"
+                        );
+                        stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
+                            error_type: UPSTREAM_RESPONSE_BODY_ERROR_TYPE.to_owned(),
+                            error_message: error_message.clone(),
+                        });
+                        if upstream_is_sse
+                            && (sse_transform_active || downstream_stream_is_identity)
+                        {
+                            let frame = make_error_frame(
+                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                &error_message,
+                            );
+                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                batch_index,
+                                event_count: 1,
+                                total_bytes: frame.len(),
+                            });
+                            stream_upstream_error_frame_emitted = true;
+                            if let Some(o) = observer.as_ref()
+                                && !upstream_error_status
+                            {
+                                o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+                            }
+                            downstream_drop_guard.disarm();
+                            yield Ok::<Bytes, Infallible>(frame);
+                        }
+                        break;
+                    }
                 }
             }
             downstream_drop_guard.disarm();
@@ -3882,6 +4016,7 @@ impl Lifecycle {
                             keepalive_response.observe(sse_event_name(&raw), &raw);
                             if let Some(o) = observer.as_ref()
                                 && usage_parser::detect_mid_stream_error(&raw).is_some()
+                                && !upstream_error_status
                             {
                                 o.set_terminal(
                                     StatusCode::OK,
@@ -3899,11 +4034,19 @@ impl Lifecycle {
                             );
                             buffer.clear();
                             if sse_transform_active && stream_transform_error.is_none() {
-                                if transformed_output_started {
+                                if transformed_output_started
+                                    || !downstream_stream_is_identity
+                                {
                                     let error = ResponseTransformError::Runtime {
-                                        reason: format!(
-                                            "incomplete SSE event exceeds {incomplete_sse_event_budget_bytes}-byte budget after transform output"
-                                        ),
+                                        reason: if transformed_output_started {
+                                            format!(
+                                                "incomplete SSE event exceeds {incomplete_sse_event_budget_bytes}-byte budget after transform output"
+                                            )
+                                        } else {
+                                            format!(
+                                                "incomplete SSE event exceeds {incomplete_sse_event_budget_bytes}-byte budget before transform output"
+                                            )
+                                        },
                                     };
                                     let frame = make_response_transform_error_frame(&error);
                                     observe_many(hooks.as_slice(), ObserveEvent::Chunk {
@@ -3912,6 +4055,14 @@ impl Lifecycle {
                                         total_bytes: frame.len(),
                                     });
                                     stream_transform_error = Some(error);
+                                    if let Some(o) = observer.as_ref()
+                                        && !upstream_error_status
+                                    {
+                                        o.set_terminal(
+                                            StatusCode::OK,
+                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                        );
+                                    }
                                     yield Ok::<Bytes, Infallible>(frame);
                                 } else {
                                     for raw in raw_before_transform_output.drain(..) {
@@ -3931,17 +4082,63 @@ impl Lifecycle {
                 Ok(_) => {}
                 Err(error) => {
                     upstream_error_body_decode_failed = true;
+                    let upstream_decode_failed = is_upstream_response_decode_error(&error);
                     tracing::warn!(
                         request_id = %event_ctx.request_id,
                         %error,
+                        upstream_decode_failed,
                         "streaming usage extractor decoder finish failed"
                     );
-                    if sse_transform_active && stream_transform_error.is_none() {
-                        if transformed_output_started {
-                            let transform_error = ResponseTransformError::Runtime {
-                                reason: format!(
-                                    "streaming response decode failed after transform output: {error}"
+                    if upstream_decode_failed
+                        && sse_transform_active
+                        && stream_transform_error.is_none()
+                    {
+                        if stream_upstream_error.is_none() {
+                            stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
+                                error_type: UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
+                                error_message: format!(
+                                    "upstream response decoding failed: {error}"
                                 ),
+                            });
+                        }
+                        if upstream_is_sse
+                            && sse_transform_active
+                            && !stream_upstream_error_frame_emitted
+                        {
+                            let error_message = stream_upstream_error
+                                .as_ref()
+                                .expect("upstream stream error set above")
+                                .error_message
+                                .clone();
+                            let frame = make_error_frame(
+                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                &error_message,
+                            );
+                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                batch_index,
+                                event_count: 1,
+                                total_bytes: frame.len(),
+                            });
+                            if let Some(o) = observer.as_ref()
+                                && !upstream_error_status
+                            {
+                                o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+                            }
+                            yield Ok::<Bytes, Infallible>(frame);
+                        }
+                    }
+                    else if sse_transform_active && stream_transform_error.is_none() {
+                        if transformed_output_started || !downstream_stream_is_identity {
+                            let transform_error = ResponseTransformError::Runtime {
+                                reason: if transformed_output_started {
+                                    format!(
+                                        "streaming response decode failed after transform output: {error}"
+                                    )
+                                } else {
+                                    format!(
+                                        "streaming response decode failed before transform output: {error}"
+                                    )
+                                },
                             };
                             let frame = make_response_transform_error_frame(&transform_error);
                             observe_many(hooks.as_slice(), ObserveEvent::Chunk {
@@ -3952,18 +4149,44 @@ impl Lifecycle {
                             stream_transform_error = Some(transform_error);
                             yield Ok::<Bytes, Infallible>(frame);
                         } else {
-                            for raw in raw_before_transform_output.drain(..) {
-                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                    batch_index,
-                                    event_count: 1,
-                                    total_bytes: raw.len(),
-                                });
-                                batch_index = batch_index.saturating_add(1);
-                                yield Ok::<Bytes, Infallible>(raw);
-                            }
+                            debug_assert!(downstream_stream_is_identity);
                         }
                     }
                 }
+            }
+            if sse_transform_active
+                && !buffer.is_empty()
+                && stream_upstream_error.is_none()
+                && stream_transform_error.is_none()
+            {
+                let error_message = if transformed_output_started {
+                    "upstream SSE response ended with an incomplete event after transform output"
+                        .to_owned()
+                } else {
+                    "upstream SSE response ended with an incomplete event before transform output"
+                        .to_owned()
+                };
+                stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
+                    error_type: UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
+                    error_message: error_message.clone(),
+                });
+                let frame = make_error_frame(
+                    UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                    &error_message,
+                );
+                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                    batch_index,
+                    event_count: 1,
+                    total_bytes: frame.len(),
+                });
+                stream_upstream_error_frame_emitted = true;
+                if let Some(o) = observer.as_ref()
+                    && !upstream_error_status
+                {
+                    o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+                }
+                yield Ok::<Bytes, Infallible>(frame);
+                buffer.clear();
             }
             if status == StatusCode::OK
                 && prompt_cache_observations_buffered
@@ -4033,7 +4256,12 @@ impl Lifecycle {
                     let now_unix_secs = context.cache.clock_now_unix_secs();
                     record_thread_usage_from_response(&event_ctx, context, &usage, now_unix_secs);
                 }
-                if let Some(error) = stream_transform_error.as_ref() {
+                if let Some(error) = stream_upstream_error.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+                        event_id: o.event_id().to_owned(),
+                        result: Err(error.clone()),
+                    });
+                } else if let Some(error) = stream_transform_error.as_ref() {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                         event_id: o.event_id().to_owned(),
                         result: Err(cc_lb_lifecycle::StreamError {
@@ -4086,9 +4314,11 @@ impl Lifecycle {
                         },
                     );
                 }
-                if stream_transform_error.is_some() {
+                if stream_upstream_error.is_some() && !upstream_error_status {
+                    o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+                } else if stream_transform_error.is_some() && !upstream_error_status {
                     o.set_terminal(StatusCode::OK, error_codes::UPSTREAM_STREAM_ERROR);
-                } else if !status.is_client_error() && !status.is_server_error() {
+                } else if !upstream_error_status {
                     o.set_success_status(status);
                 }
                 o.finish();
