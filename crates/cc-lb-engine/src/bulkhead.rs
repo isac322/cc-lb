@@ -12,7 +12,7 @@ use http::{HeaderMap, Request, Response};
 use http_body_util::Full;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::{Connect, HttpConnector};
+use hyper_util::client::legacy::connect::Connect;
 use hyper_util::rt::TokioExecutor;
 use metrics::Unit;
 use thiserror::Error;
@@ -287,15 +287,6 @@ pub fn make_default_dispatcher(max_idle_per_host: usize) -> Arc<dyn UpstreamDisp
     })
 }
 
-pub fn make_http_dispatcher_with_connector(
-    connector: HttpConnector,
-    max_idle_per_host: usize,
-) -> Arc<dyn UpstreamDispatch> {
-    Arc::new(HttpHyperDispatcher {
-        client: build_client(connector, max_idle_per_host),
-    })
-}
-
 #[derive(Clone)]
 struct HttpsHyperDispatcher {
     client: Client<
@@ -304,20 +295,8 @@ struct HttpsHyperDispatcher {
     >,
 }
 
-#[derive(Clone)]
-struct HttpHyperDispatcher {
-    client: Client<HttpConnector, Full<Bytes>>,
-}
-
 #[async_trait]
 impl UpstreamDispatch for HttpsHyperDispatcher {
-    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
-        dispatch_with_client(&self.client, request).await
-    }
-}
-
-#[async_trait]
-impl UpstreamDispatch for HttpHyperDispatcher {
     async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
         dispatch_with_client(&self.client, request).await
     }
@@ -452,6 +431,7 @@ mod tests {
     use http::{HeaderMap, HeaderValue, Method, Response, header::CONTENT_ENCODING};
     use http_body_util::BodyExt;
     use hyper::{server::conn::http1, service::service_fn};
+    use hyper_util::client::legacy::connect::HttpConnector;
     use hyper_util::rt::TokioIo;
     use tokio::net::TcpListener;
     use url::Url;
@@ -566,11 +546,11 @@ mod tests {
                 .expect("HTTP/1.1 connection serves both responses");
         });
 
-        let dispatcher = make_http_dispatcher_with_connector(HttpConnector::new(), 1);
+        let client = build_client(HttpConnector::new(), 1);
         let base_url = Url::parse(&format!("http://{address}/")).expect("base URL parses");
         let first = tokio::time::timeout(
             Duration::from_secs(5),
-            dispatcher.dispatch(signed_request_for_url(base_url.clone()).await),
+            dispatch_with_client(&client, signed_request_for_url(base_url.clone()).await),
         )
         .await
         .expect("first dispatch completes")
@@ -585,7 +565,7 @@ mod tests {
 
         let second = tokio::time::timeout(
             Duration::from_secs(5),
-            dispatcher.dispatch(signed_request_for_url(base_url).await),
+            dispatch_with_client(&client, signed_request_for_url(base_url).await),
         )
         .await
         .expect("second dispatch completes on the reusable connection")
