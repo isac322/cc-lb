@@ -120,6 +120,56 @@ fn is_upstream_response_decode_error(error: &std::io::Error) -> bool {
     )
 }
 
+#[derive(Default)]
+struct SseDownstreamBoundaryTracker {
+    trailing: u32,
+    trailing_len: u8,
+    observed_bytes: bool,
+    at_event_boundary: bool,
+}
+
+impl SseDownstreamBoundaryTracker {
+    fn observe(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        if bytes.len() >= 4 {
+            let tail = &bytes[bytes.len() - 4..];
+            self.trailing = u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]]);
+            self.trailing_len = 4;
+        } else {
+            for &byte in bytes {
+                self.trailing = (self.trailing << 8) | u32::from(byte);
+                self.trailing_len = self.trailing_len.saturating_add(1).min(4);
+            }
+        }
+        self.observed_bytes = true;
+        self.at_event_boundary = (self.trailing_len >= 2
+            && matches!(self.trailing & 0xffff, 0x0a0a | 0x0d0d))
+            || (self.trailing_len == 4 && self.trailing == 0x0d0a0d0a);
+    }
+
+    const fn partial_event_pending(&self) -> bool {
+        self.observed_bytes && !self.at_event_boundary
+    }
+}
+
+fn make_stream_error_frame(
+    error_type: &str,
+    message: &str,
+    separate_from_partial_event: bool,
+) -> Bytes {
+    let frame = make_error_frame(error_type, message);
+    if !separate_from_partial_event {
+        return frame;
+    }
+
+    let mut separated = BytesMut::with_capacity(2 + frame.len());
+    separated.extend_from_slice(b"\n\n");
+    separated.extend_from_slice(&frame);
+    separated.freeze()
+}
+
 const fn decompression_output_budget_bytes(body_cap_bytes: usize) -> usize {
     body_cap_bytes.saturating_mul(DECOMPRESSION_OUTPUT_BUDGET_BODY_CAP_MULTIPLIER)
 }
@@ -3502,6 +3552,8 @@ impl Lifecycle {
             let mut stream_transform_error: Option<ResponseTransformError> = None;
             let mut stream_upstream_error: Option<cc_lb_lifecycle::StreamError> = None;
             let mut stream_upstream_error_frame_emitted = false;
+            let mut downstream_sse_boundary = SseDownstreamBoundaryTracker::default();
+            let mut stream_provider_error_seen = false;
             let mut last_partial_at: Option<Instant> = None;
             let mut last_partial_output_tokens: u64 = 0;
             let mut upstream_error_body: Vec<u8> = Vec::new();
@@ -3546,6 +3598,10 @@ impl Lifecycle {
                                     parse_sse_events_active = false;
                                     buffer.clear();
                                     if upstream_decode_failed && sse_transform_active {
+                                        if stream_provider_error_seen {
+                                            downstream_drop_guard.disarm();
+                                            break 'upstream;
+                                        }
                                         let error_message =
                                             format!("upstream response decoding failed: {error}");
                                         stream_upstream_error =
@@ -3634,24 +3690,33 @@ impl Lifecycle {
                                     };
                                 let raw = split_sse_event(&mut buffer, end);
                                 let usage_update = accumulate_sse_usage(&raw, &mut usage);
-                                if let Some(o) = observer.as_ref()
-                                    && let Some(err) =
-                                        usage_parser::detect_mid_stream_error(&raw)
-                                {
-                                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
-                                        event_id: o.event_id().to_owned(),
-                                        result: Err(cc_lb_lifecycle::StreamError {
-                                            error_type: err.error_type.clone().unwrap_or_default(),
-                                            error_message: err.error_message.clone().unwrap_or_default(),
-                                        }),
-                                    });
-                                    if !upstream_error_status {
-                                        o.set_terminal(
-                                            StatusCode::OK,
-                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                if let Some(err) = usage_parser::detect_mid_stream_error(&raw) {
+                                    stream_provider_error_seen = true;
+                                    if let Some(o) = observer.as_ref() {
+                                        let error = cc_lb_lifecycle::StreamError {
+                                            error_type: err
+                                                .error_type
+                                                .clone()
+                                                .unwrap_or_default(),
+                                            error_message: err
+                                                .error_message
+                                                .clone()
+                                                .unwrap_or_default(),
+                                        };
+                                        o.emit_lifecycle(
+                                            cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+                                                event_id: o.event_id().to_owned(),
+                                                result: Err(error),
+                                            },
                                         );
+                                        if !upstream_error_status {
+                                            o.set_terminal(
+                                                StatusCode::OK,
+                                                error_codes::UPSTREAM_STREAM_ERROR,
+                                            );
+                                        }
+                                        downstream_drop_guard.disarm();
                                     }
-                                    downstream_drop_guard.disarm();
                                 }
                                 sse_event_count = sse_event_count.saturating_add(1);
                                 let event_name = sse_event_name(&raw);
@@ -3819,6 +3884,7 @@ impl Lifecycle {
                                                 sse_transform_active = false;
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
+                                                    downstream_sse_boundary.observe(&raw);
                                                     observe_many(hooks.as_slice(), ObserveEvent::Chunk {
                                                         batch_index,
                                                         event_count: 1,
@@ -3866,6 +3932,7 @@ impl Lifecycle {
                                                 sse_transform_active = false;
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
+                                                    downstream_sse_boundary.observe(&raw);
                                                     observe_many(hooks.as_slice(), ObserveEvent::Chunk {
                                                         batch_index,
                                                         event_count: 1,
@@ -3941,6 +4008,7 @@ impl Lifecycle {
                                     }
                                     sse_transform_active = false;
                                     for raw in raw_before_transform_output.drain(..) {
+                                        downstream_sse_boundary.observe(&raw);
                                         observe_many(hooks.as_slice(), ObserveEvent::Chunk {
                                             batch_index,
                                             event_count: 1,
@@ -3953,6 +4021,9 @@ impl Lifecycle {
                             }
                             if !sse_transform_active {
                                 // Chunk fanout stays inline — high-volume, not bus-worthy.
+                                if upstream_is_sse && downstream_stream_is_identity {
+                                    downstream_sse_boundary.observe(&data);
+                                }
                                 observe_many(hooks.as_slice(), ObserveEvent::Chunk {
                                     batch_index,
                                     event_count: 1,
@@ -3972,16 +4043,24 @@ impl Lifecycle {
                             error = %error_message,
                             "upstream response body stream failed"
                         );
-                        stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
-                            error_type: UPSTREAM_RESPONSE_BODY_ERROR_TYPE.to_owned(),
-                            error_message: error_message.clone(),
-                        });
-                        if upstream_is_sse
+                        let body_error_is_primary =
+                            !stream_provider_error_seen && stream_upstream_error.is_none();
+                        if body_error_is_primary {
+                            stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
+                                error_type: UPSTREAM_RESPONSE_BODY_ERROR_TYPE.to_owned(),
+                                error_message: error_message.clone(),
+                            });
+                        }
+                        if body_error_is_primary
+                            && upstream_is_sse
                             && (sse_transform_active || downstream_stream_is_identity)
                         {
-                            let frame = make_error_frame(
+                            let frame = make_stream_error_frame(
                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                 &error_message,
+                                downstream_stream_is_identity
+                                    && !sse_transform_active
+                                    && downstream_sse_boundary.partial_event_pending(),
                             );
                             observe_many(hooks.as_slice(), ObserveEvent::Chunk {
                                 batch_index,
@@ -4017,14 +4096,27 @@ impl Lifecycle {
                             let raw = split_sse_event(&mut buffer, end);
                             let _ = accumulate_sse_usage(&raw, &mut usage);
                             keepalive_response.observe(sse_event_name(&raw), &raw);
-                            if let Some(o) = observer.as_ref()
-                                && usage_parser::detect_mid_stream_error(&raw).is_some()
-                                && !upstream_error_status
-                            {
-                                o.set_terminal(
-                                    StatusCode::OK,
-                                    error_codes::UPSTREAM_STREAM_ERROR,
-                                );
+                            if let Some(err) = usage_parser::detect_mid_stream_error(&raw) {
+                                stream_provider_error_seen = true;
+                                if let Some(o) = observer.as_ref() {
+                                    let error = cc_lb_lifecycle::StreamError {
+                                        error_type: err.error_type.clone().unwrap_or_default(),
+                                        error_message: err.error_message.clone().unwrap_or_default(),
+                                    };
+                                    o.emit_lifecycle(
+                                        cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+                                            event_id: o.event_id().to_owned(),
+                                            result: Err(error),
+                                        },
+                                    );
+                                    if !upstream_error_status {
+                                        o.set_terminal(
+                                            StatusCode::OK,
+                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                        );
+                                    }
+                                    downstream_drop_guard.disarm();
+                                }
                             }
                             sse_event_count = sse_event_count.saturating_add(1);
                         }
@@ -4069,6 +4161,7 @@ impl Lifecycle {
                                     yield Ok::<Bytes, Infallible>(frame);
                                 } else {
                                     for raw in raw_before_transform_output.drain(..) {
+                                        downstream_sse_boundary.observe(&raw);
                                         observe_many(hooks.as_slice(), ObserveEvent::Chunk {
                                             batch_index,
                                             event_count: 1,
@@ -4092,11 +4185,13 @@ impl Lifecycle {
                         upstream_decode_failed,
                         "streaming usage extractor decoder finish failed"
                     );
-                    if upstream_decode_failed
-                        && sse_transform_active
+                    if upstream_is_sse
+                        && upstream_decode_failed
                         && stream_transform_error.is_none()
                     {
-                        if stream_upstream_error.is_none() {
+                        let decode_error_is_primary =
+                            !stream_provider_error_seen && stream_upstream_error.is_none();
+                        if decode_error_is_primary {
                             stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
                                 error_type: UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
                                 error_message: format!(
@@ -4104,7 +4199,7 @@ impl Lifecycle {
                                 ),
                             });
                         }
-                        if upstream_is_sse
+                        if decode_error_is_primary
                             && sse_transform_active
                             && !stream_upstream_error_frame_emitted
                         {
@@ -4157,9 +4252,14 @@ impl Lifecycle {
                     }
                 }
             }
-            if sse_transform_active
-                && !buffer.is_empty()
+            if upstream_is_sse
+                && (!upstream_error_status || sse_transform_active)
+                && parse_sse_events_active
+                && buffer
+                    .iter()
+                    .any(|byte| !matches!(byte, b'\r' | b'\n'))
                 && stream_upstream_error.is_none()
+                && !stream_provider_error_seen
                 && stream_transform_error.is_none()
             {
                 let error_message = if transformed_output_started {
@@ -4173,21 +4273,26 @@ impl Lifecycle {
                     error_type: UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
                     error_message: error_message.clone(),
                 });
-                let frame = make_error_frame(
-                    UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
-                    &error_message,
-                );
-                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                    batch_index,
-                    event_count: 1,
-                    total_bytes: frame.len(),
-                });
-                if let Some(o) = observer.as_ref()
-                    && !upstream_error_status
-                {
-                    o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+                if sse_transform_active || downstream_stream_is_identity {
+                    let frame = make_stream_error_frame(
+                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                        &error_message,
+                        downstream_stream_is_identity
+                            && !sse_transform_active
+                            && downstream_sse_boundary.partial_event_pending(),
+                    );
+                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                        batch_index,
+                        event_count: 1,
+                        total_bytes: frame.len(),
+                    });
+                    if let Some(o) = observer.as_ref()
+                        && !upstream_error_status
+                    {
+                        o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+                    }
+                    yield Ok::<Bytes, Infallible>(frame);
                 }
-                yield Ok::<Bytes, Infallible>(frame);
                 buffer.clear();
             }
             if status == StatusCode::OK
@@ -5585,6 +5690,28 @@ mod tests {
         assert_eq!(raw.as_ref(), event);
         assert_eq!(buffer.as_ref(), b"partial");
         assert!(buffer.capacity() <= SSE_BUFFER_MAX_RETAINED_CAPACITY_BYTES);
+    }
+
+    #[test]
+    fn sse_downstream_boundary_tracker_handles_split_terminators() {
+        let mut tracker = SseDownstreamBoundaryTracker::default();
+
+        tracker.observe(b"event: ping\r\n");
+        assert!(tracker.partial_event_pending());
+        tracker.observe(b"\r");
+        assert!(tracker.partial_event_pending());
+        tracker.observe(b"\n");
+        assert!(!tracker.partial_event_pending());
+
+        tracker.observe(b"data: next\r");
+        assert!(tracker.partial_event_pending());
+        tracker.observe(b"\r");
+        assert!(!tracker.partial_event_pending());
+
+        tracker.observe(b"data: final\n");
+        assert!(tracker.partial_event_pending());
+        tracker.observe(b"\n");
+        assert!(!tracker.partial_event_pending());
     }
 
     #[test]

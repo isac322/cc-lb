@@ -550,6 +550,60 @@ async fn gzip_passthrough_preserves_upstream_bytes() {
 }
 
 #[tokio::test]
+async fn truncated_gzip_passthrough_is_recorded_as_upstream_decode_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
+    let body = incomplete_gzip_prefix(&plaintext);
+    let mut headers = sse_headers();
+    headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "truncated-gzip-passthrough.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let lifecycle = lifecycle_with_transforms(
+        None,
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers,
+            body: body.clone(),
+        }),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )))
+        .await
+        .expect("lifecycle handles truncated gzip passthrough");
+    let (_status, headers, output) = collect_body(response).await;
+
+    assert_eq!(
+        headers.get(CONTENT_ENCODING),
+        Some(&HeaderValue::from_static("gzip"))
+    );
+    assert_eq!(output, body);
+    let events = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].error_code.as_deref(),
+        Some("upstream_stream_error")
+    );
+    assert_eq!(
+        events[0].upstream_error_type.as_deref(),
+        Some("upstream_response_decode_error")
+    );
+    assert!(
+        events[0]
+            .upstream_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("matching checksum"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn sse_transform_decodes_brotli_and_emits_identity_sse() {
     let transform = Arc::new(SseToolNameTransform::default());
     let body = brotli_bytes(&sse_upstream_body(false));
@@ -934,6 +988,122 @@ async fn sse_unterminated_final_event_is_upstream_framing_error() {
 }
 
 #[tokio::test]
+async fn sse_unterminated_passthrough_is_upstream_framing_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = Bytes::from_static(b"event: message_stop\ndata: {}\n");
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "unterminated-passthrough.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let lifecycle = lifecycle_with_transforms(
+        None,
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: sse_headers(),
+            body: body.clone(),
+        }),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )))
+        .await
+        .expect("lifecycle handles unterminated passthrough SSE event");
+    let (_status, _headers, output) = collect_body(response).await;
+
+    let text = std::str::from_utf8(&output).expect("SSE output is utf8");
+    let error_offset = text.find("event: error\n").expect("error frame emitted");
+    assert!(
+        text[..error_offset].ends_with("\n\n"),
+        "error frame must start after an SSE event boundary: {text:?}",
+    );
+    let events = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].error_code.as_deref(),
+        Some("upstream_stream_error")
+    );
+    assert_eq!(
+        events[0].upstream_error_type.as_deref(),
+        Some("upstream_response_framing_error")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sse_trailing_line_terminators_remain_success() -> Result<(), Box<dyn std::error::Error>> {
+    let body = Bytes::from_static(b"event: message_stop\ndata: {}\n\n\r\n");
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "trailing-terminators.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let lifecycle = lifecycle_with_transforms(
+        None,
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: sse_headers(),
+            body: body.clone(),
+        }),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )))
+        .await
+        .expect("lifecycle handles trailing SSE line terminators");
+    let (_status, _headers, output) = collect_body(response).await;
+
+    assert_eq!(output, body);
+    let events = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].error_code, None);
+    assert_eq!(events[0].upstream_error_type, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn sse_body_failure_after_parser_budget_starts_separate_error_frame() {
+    let mut body = Vec::from(&b"data: "[..]);
+    body.extend(std::iter::repeat_n(b'x', 256));
+    let config = LifecycleConfig {
+        messages_body_cap_bytes: 128,
+        ..LifecycleConfig::default()
+    };
+    let lifecycle = lifecycle_with_transforms_and_config(
+        None,
+        None,
+        Arc::new(BodyThenFrameErrorDispatch {
+            status: StatusCode::OK,
+            headers: sse_headers(),
+            body: Bytes::from(body),
+        }),
+        config,
+    );
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )))
+        .await
+        .expect("lifecycle handles body failure after parser budget");
+    let (_status, _headers, output) = collect_body(response).await;
+
+    let text = std::str::from_utf8(&output).expect("SSE output is utf8");
+    let error_offset = text.find("event: error\n").expect("error frame emitted");
+    assert!(
+        text[..error_offset].ends_with("\n\n"),
+        "error frame must start after an SSE event boundary: {text:?}",
+    );
+    assert_eq!(text.matches("event: error\n").count(), 1);
+}
+
+#[tokio::test]
 async fn sse_gzip_unterminated_final_event_emits_upstream_framing_error() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let compressed = gzip_bytes(&Bytes::from_static(b"event: message_stop\ndata: {}\n"));
@@ -1006,6 +1176,53 @@ async fn sse_unterminated_http_error_preserves_upstream_status()
     assert_eq!(
         events[0].upstream_error_type.as_deref(),
         Some("upstream_response_framing_error")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sse_unterminated_http_error_passthrough_preserves_upstream_body()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "unterminated-http-passthrough.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let body = Bytes::from_static(
+        b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"forced fake rate limit response\"}}\n",
+    );
+    let lifecycle = lifecycle_with_transforms(
+        None,
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            headers: sse_headers(),
+            body: body.clone(),
+        }),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )))
+        .await
+        .expect("lifecycle handles unterminated HTTP error passthrough");
+    let (status, _headers, output) = collect_body(response).await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(output, body);
+    let events = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].error_code.as_deref(), Some("upstream_4xx"));
+    assert_ne!(
+        events[0].upstream_error_type.as_deref(),
+        Some("upstream_response_framing_error"),
+    );
+    assert!(
+        events[0]
+            .upstream_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("forced fake rate limit response")),
     );
     Ok(())
 }
@@ -1510,6 +1727,27 @@ impl UpstreamDispatch for ChunkedDispatch {
             for chunk in chunks {
                 yield Ok::<Bytes, std::convert::Infallible>(chunk);
             }
+        };
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.status_mut() = self.status;
+        *response.headers_mut() = self.headers.clone();
+        Ok(response)
+    }
+}
+
+struct BodyThenFrameErrorDispatch {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Bytes,
+}
+
+#[async_trait]
+impl UpstreamDispatch for BodyThenFrameErrorDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let body = self.body.clone();
+        let stream = async_stream::stream! {
+            yield Ok::<Bytes, std::io::Error>(body);
+            yield Err(std::io::Error::other("forced upstream frame error"));
         };
         let mut response = Response::new(Body::from_stream(stream));
         *response.status_mut() = self.status;

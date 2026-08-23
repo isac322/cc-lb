@@ -223,6 +223,37 @@ async fn upstream_frame_error_is_recorded_as_upstream_stream_error() {
 }
 
 #[tokio::test]
+async fn upstream_frame_error_after_partial_event_starts_separate_error_frame() {
+    let test_bus = TestLifecycleBus::new();
+    let lifecycle = lifecycle(
+        sse_dispatch(
+            StatusCode::OK,
+            upstream_frame_error_after(Bytes::from_static(
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"",
+            )),
+        ),
+        &test_bus,
+    );
+
+    let response = lifecycle
+        .handle(stream_request())
+        .await
+        .expect("lifecycle handles partial upstream event");
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("relay body collects")
+        .to_bytes();
+    let text = std::str::from_utf8(&body).expect("stream output is utf8");
+
+    assert!(
+        text.contains("\"content_block_delta\"\n\nevent: error\n"),
+        "error frame must start after an SSE event boundary: {text:?}",
+    );
+}
+
+#[tokio::test]
 async fn upstream_frame_error_preserves_http_error_classification()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -275,6 +306,53 @@ async fn upstream_frame_error_preserves_http_error_classification()
         rows[0].upstream_error_message.as_deref(),
         Some("forced upstream frame error")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_error_before_body_failure_preserves_provider_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
+        panic!("expected in-memory update receiver");
+    };
+    let lifecycle = lifecycle(
+        sse_dispatch(
+            StatusCode::OK,
+            upstream_frame_error_after(canonical_error_frame()),
+        ),
+        &test_bus,
+    );
+
+    let response = lifecycle
+        .handle(stream_request())
+        .await
+        .expect("lifecycle handles provider error before body failure");
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("relay body collects")
+        .to_bytes();
+    let text = std::str::from_utf8(&body).expect("relay body is SSE text");
+    assert_eq!(text.matches("event: error\n").count(), 1);
+
+    assert_one_final(&mut update_rx).await;
+    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].upstream_error_type.as_deref(),
+        Some("overloaded_error")
+    );
+    assert_eq!(
+        rows[0].upstream_error_message.as_deref(),
+        Some("forced stream error")
+    );
+    assert!(rows[0].body_bytes.is_some());
+    assert!(rows[0].body_chunk_count.is_some());
     Ok(())
 }
 
