@@ -194,7 +194,7 @@ pub struct CacheKeepaliveHitRefreshRequest {
     pub cache_anchor_at_unix_secs: u64,
     pub run_at_unix_secs: u64,
     pub expires_at_unix_secs: u64,
-    pub encrypted_payload: Vec<u8>,
+    pub encrypted_payload: Option<Vec<u8>>,
     pub now_unix_secs: u64,
 }
 
@@ -207,8 +207,8 @@ impl fmt::Debug for CacheKeepaliveHitRefreshRequest {
             .field("run_at_unix_secs", &self.run_at_unix_secs)
             .field("expires_at_unix_secs", &self.expires_at_unix_secs)
             .field(
-                "encrypted_payload",
-                &format_args!("<{} bytes redacted>", self.encrypted_payload.len()),
+                "encrypted_payload_bytes",
+                &self.encrypted_payload.as_ref().map(Vec::len),
             )
             .field("now_unix_secs", &self.now_unix_secs)
             .finish()

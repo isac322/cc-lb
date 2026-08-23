@@ -192,7 +192,7 @@ pub async fn seed_cache_keepalive_contract_rows(
             cache_anchor_at_unix_secs: SEEDED_AT_UNIX_SECS + 1,
             run_at_unix_secs: SEEDED_AT_UNIX_SECS + 271,
             expires_at_unix_secs: SEEDED_AT_UNIX_SECS + 301,
-            encrypted_payload: vec![2],
+            encrypted_payload: None,
             now_unix_secs: SEEDED_AT_UNIX_SECS + 1,
         })
         .await

@@ -1,8 +1,6 @@
 use cc_lb_control::api_keys::limit_engine::Reservation;
 use cc_lb_control::api_keys::principal_view::PrincipalStatus;
-use cc_lb_engine::cache_keepalive::{
-    DispatchOutcome, KeepaliveDispatchContext, PersistedRequestSnapshot, RequestSnapshot,
-};
+use cc_lb_engine::cache_keepalive::{DispatchOutcome, KeepaliveDispatchContext, RequestSnapshot};
 use cc_lb_engine::clock::unix_secs;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
@@ -13,7 +11,10 @@ use cc_lb_storage_api::{
     CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
 };
 
-use super::{SchedulerDispatch, cache_keepalive_payload_aad};
+use super::SchedulerDispatch;
+use crate::cache_keepalive_payload::{
+    base_payload_generation, decrypt_cache_keepalive_payload, encrypt_cache_keepalive_payload,
+};
 
 #[path = "cache_keepalive/finalizer.rs"]
 mod finalizer;
@@ -65,14 +66,16 @@ impl SchedulerDispatch {
             return Ok(JobOutcome::Done);
         }
 
-        let aad = cache_keepalive_payload_aad(
+        let decoded_payload = match decrypt_cache_keepalive_payload(
+            self.aead.as_ref(),
             &record.principal_id,
             &record.session_key_hash,
             record.upstream_id,
             record.generation,
-        );
-        let plaintext = match self.aead.decrypt(&record.encrypted_payload, &aad) {
-            Ok(plaintext) => plaintext,
+            record.refresh_count,
+            &record.encrypted_payload,
+        ) {
+            Ok(payload) => payload,
             Err(_) => {
                 self.mark_cache_keepalive_terminal(
                     &job,
@@ -82,12 +85,10 @@ impl SchedulerDispatch {
                 return Ok(JobOutcome::Done);
             }
         };
-        let snapshot = match serde_json::from_slice::<PersistedRequestSnapshot>(&plaintext)
-            .map_err(|_| ())
-            .and_then(|persisted| RequestSnapshot::from_persisted(persisted).map_err(|_| ()))
-        {
+        let needs_payload_rewrite = decoded_payload.needs_rewrite;
+        let snapshot = match RequestSnapshot::from_persisted(decoded_payload.snapshot) {
             Ok(snapshot) => snapshot,
-            Err(()) => {
+            Err(_) => {
                 self.mark_cache_keepalive_terminal(
                     &job,
                     CacheKeepaliveTerminalReason::DecryptFailed,
@@ -136,8 +137,14 @@ impl SchedulerDispatch {
                     "hit",
                 )
                 .await?;
-                self.reschedule_cache_keepalive_hit(job, record, snapshot, cache_anchor_age)
-                    .await
+                self.reschedule_cache_keepalive_hit(
+                    job,
+                    record,
+                    snapshot,
+                    cache_anchor_age,
+                    needs_payload_rewrite,
+                )
+                .await
             }
             DispatchOutcome::CacheMiss { finalization } => {
                 self.finalize_cache_keepalive_renewal(
@@ -252,6 +259,7 @@ impl SchedulerDispatch {
         record: cc_lb_storage_api::CacheKeepaliveSessionRecord,
         snapshot: RequestSnapshot,
         cache_anchor_age: std::time::Duration,
+        needs_payload_rewrite: bool,
     ) -> SchedulerResult<JobOutcome> {
         let now = unix_secs(self.clock.now());
         if record.refresh_count.saturating_add(1) >= job.max_refreshes {
@@ -269,25 +277,25 @@ impl SchedulerDispatch {
         let run_at_unix_secs = cache_anchor_at_unix_secs
             .saturating_add(job.refresh_delay_secs)
             .max(now.saturating_add(1));
-        let next_generation = job.generation.checked_add(1).ok_or_else(|| {
-            cc_lb_scheduler::error::SchedulerError::Job(
-                "cache keepalive generation overflow".to_owned(),
-            )
-        })?;
-        let plaintext = serde_json::to_vec(&snapshot.to_persisted())
-            .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
-        let encrypted_payload = self
-            .aead
-            .encrypt(
-                &plaintext,
-                &cache_keepalive_payload_aad(
+        let encrypted_payload = if needs_payload_rewrite {
+            let payload_generation =
+                base_payload_generation(record.generation, record.refresh_count).map_err(
+                    |error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()),
+                )?;
+            Some(
+                encrypt_cache_keepalive_payload(
+                    self.aead.as_ref(),
                     &record.principal_id,
                     &record.session_key_hash,
                     record.upstream_id,
-                    next_generation,
-                ),
+                    payload_generation,
+                    &snapshot.to_persisted(),
+                )
+                .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?,
             )
-            .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))?;
+        } else {
+            None
+        };
         let updated = CacheKeepaliveSessionStore::reschedule_after_cache_hit(
             self.storage.as_ref(),
             &CacheKeepaliveHitRefreshRequest {

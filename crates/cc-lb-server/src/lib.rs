@@ -13,6 +13,7 @@ pub mod bootstrap;
 pub mod build_meta;
 pub mod builtins;
 pub(crate) mod cache_keepalive_enqueuer;
+pub(crate) mod cache_keepalive_payload;
 pub mod chaos;
 pub mod cli;
 pub mod doctor;
