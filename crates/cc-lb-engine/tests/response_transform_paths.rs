@@ -31,7 +31,7 @@ use cc_lb_upstream::{
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue, Response, StatusCode};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use url::Url;
@@ -503,7 +503,7 @@ async fn sse_transform_decodes_gzip_and_emits_identity_sse() {
 }
 
 #[tokio::test]
-async fn gzip_passthrough_preserves_exact_predecode_chunks() {
+async fn gzip_passthrough_preserves_upstream_bytes() {
     let plaintext = sse_upstream_body(false);
     let compressed = gzip_bytes(&plaintext);
     let split_points = [
@@ -522,8 +522,6 @@ async fn gzip_passthrough_preserves_exact_predecode_chunks() {
             chunk
         })
         .collect::<Vec<_>>();
-    let expected_chunks = chunks.clone();
-    let capture = Arc::new(Mutex::new(Vec::<(usize, Bytes)>::new()));
     let mut headers = sse_headers();
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     let lifecycle = lifecycle_with_transforms(
@@ -533,7 +531,6 @@ async fn gzip_passthrough_preserves_exact_predecode_chunks() {
             status: StatusCode::OK,
             headers,
             chunks,
-            capture: Some(Arc::clone(&capture)),
         }),
     );
 
@@ -550,25 +547,6 @@ async fn gzip_passthrough_preserves_exact_predecode_chunks() {
         Some(&HeaderValue::from_static("gzip"))
     );
     assert_eq!(output, compressed);
-
-    let captured = capture.lock().expect("capture lock").clone();
-    assert_eq!(captured.len(), expected_chunks.len());
-    let mut expected_offset = 0;
-    let mut raw = Vec::new();
-    for ((offset, chunk), expected_chunk) in captured.iter().zip(&expected_chunks) {
-        assert_eq!(*offset, expected_offset);
-        assert_eq!(chunk, expected_chunk);
-        expected_offset += chunk.len();
-        raw.extend_from_slice(chunk);
-    }
-    assert_eq!(raw.as_slice(), compressed.as_ref());
-
-    let mut decoder = flate2::read::GzDecoder::new(raw.as_slice());
-    let mut decoded = Vec::new();
-    decoder
-        .read_to_end(&mut decoded)
-        .expect("captured pre-decode bytes independently gunzip");
-    assert_eq!(decoded.as_slice(), plaintext.as_ref());
 }
 
 #[tokio::test]
@@ -754,7 +732,6 @@ async fn gzip_transform_failure_preserves_transform_error() -> Result<(), Box<dy
             status: StatusCode::OK,
             headers,
             chunks,
-            capture: None,
         }),
     )
     .with_event_bus(test_bus.bus_arc());
@@ -1519,30 +1496,18 @@ impl UpstreamDispatch for FixedDispatch {
     }
 }
 
-type ChunkCapture = Arc<Mutex<Vec<(usize, Bytes)>>>;
-
 struct ChunkedDispatch {
     status: StatusCode,
     headers: HeaderMap,
     chunks: Vec<Bytes>,
-    capture: Option<ChunkCapture>,
 }
 
 #[async_trait]
 impl UpstreamDispatch for ChunkedDispatch {
     async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
         let chunks = self.chunks.clone();
-        let capture = self.capture.clone();
         let stream = async_stream::stream! {
-            let mut offset = 0;
             for chunk in chunks {
-                if let Some(capture) = capture.as_ref() {
-                    capture
-                        .lock()
-                        .expect("capture lock")
-                        .push((offset, chunk.clone()));
-                }
-                offset += chunk.len();
                 yield Ok::<Bytes, std::convert::Infallible>(chunk);
             }
         };

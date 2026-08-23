@@ -435,7 +435,9 @@ fn register_bulkhead_metrics() {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -446,7 +448,12 @@ mod tests {
         SignedRequest, Signer, SignerError, SigningCapability, UpstreamDialect, UpstreamError,
         shape_request, sign_request,
     };
-    use http::{HeaderMap, Method, Response};
+    use flate2::{Compression, read::GzDecoder, write::GzEncoder};
+    use http::{HeaderMap, HeaderValue, Method, Response, header::CONTENT_ENCODING};
+    use http_body_util::BodyExt;
+    use hyper::{server::conn::http1, service::service_fn};
+    use hyper_util::rt::TokioIo;
+    use tokio::net::TcpListener;
     use url::Url;
 
     use super::*;
@@ -514,6 +521,100 @@ mod tests {
             .expect("bulkhead execute succeeds");
     }
 
+    #[tokio::test]
+    async fn http_dispatcher_reuses_connection_without_corrupting_gzip_body() {
+        let plaintext = Bytes::from_static(b"second response over the reused connection");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&plaintext).expect("gzip write succeeds");
+        let compressed = Bytes::from(encoder.finish().expect("gzip finish succeeds"));
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test listener binds");
+        let address = listener.local_addr().expect("listener address");
+        let accepted_connections = Arc::new(AtomicUsize::new(0));
+        let response_index = Arc::new(AtomicUsize::new(0));
+        let server_compressed = compressed.clone();
+        let server_connections = Arc::clone(&accepted_connections);
+        let server_responses = Arc::clone(&response_index);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("client connects");
+            server_connections.fetch_add(1, Ordering::Relaxed);
+            http1::Builder::new()
+                .keep_alive(true)
+                .serve_connection(
+                    TokioIo::new(stream),
+                    service_fn(move |_request| {
+                        let index = server_responses.fetch_add(1, Ordering::Relaxed);
+                        let body = if index == 0 {
+                            Bytes::from_static(b"first response")
+                        } else {
+                            server_compressed.clone()
+                        };
+                        async move {
+                            let mut response = Response::new(Full::new(body));
+                            if index > 0 {
+                                response
+                                    .headers_mut()
+                                    .insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+                            }
+                            Ok::<_, std::convert::Infallible>(response)
+                        }
+                    }),
+                )
+                .await
+                .expect("HTTP/1.1 connection serves both responses");
+        });
+
+        let dispatcher = make_http_dispatcher_with_connector(HttpConnector::new(), 1);
+        let base_url = Url::parse(&format!("http://{address}/")).expect("base URL parses");
+        let first = tokio::time::timeout(
+            Duration::from_secs(5),
+            dispatcher.dispatch(signed_request_for_url(base_url.clone()).await),
+        )
+        .await
+        .expect("first dispatch completes")
+        .expect("first dispatch succeeds");
+        let first_body = first
+            .into_body()
+            .collect()
+            .await
+            .expect("first body reads")
+            .to_bytes();
+        assert_eq!(first_body, Bytes::from_static(b"first response"));
+
+        let second = tokio::time::timeout(
+            Duration::from_secs(5),
+            dispatcher.dispatch(signed_request_for_url(base_url).await),
+        )
+        .await
+        .expect("second dispatch completes on the reusable connection")
+        .expect("second dispatch succeeds");
+        assert_eq!(
+            second.headers().get(CONTENT_ENCODING),
+            Some(&HeaderValue::from_static("gzip"))
+        );
+        let second_body = second
+            .into_body()
+            .collect()
+            .await
+            .expect("second body reads")
+            .to_bytes();
+        assert_eq!(second_body, compressed);
+
+        let mut decoder = GzDecoder::new(second_body.as_ref());
+        let mut decoded = Vec::new();
+        decoder
+            .read_to_end(&mut decoded)
+            .expect("captured gzip body decompresses");
+        assert_eq!(decoded, plaintext);
+        assert_eq!(accepted_connections.load(Ordering::Relaxed), 1);
+        assert_eq!(response_index.load(Ordering::Relaxed), 2);
+
+        server.abort();
+        let _ = server.await;
+    }
+
     fn bulkhead_for_test(semaphore_permits: u32) -> Arc<Bulkhead> {
         Bulkhead::new(
             "test-upstream",
@@ -536,6 +637,10 @@ mod tests {
     }
 
     async fn signed_request() -> SignedRequest {
+        signed_request_for_url(Url::parse("http://upstream.local/").expect("test URL parses")).await
+    }
+
+    async fn signed_request_for_url(base_url: Url) -> SignedRequest {
         let upstream = Upstream::AnthropicDirect { base_url: None };
         let context = DialectShapeContext {
             request_id: "test-request".to_owned(),
@@ -550,15 +655,22 @@ mod tests {
             kind: PrincipalKind::ApiKey,
             claims: serde_json::Map::new(),
         };
-        let shaped = shape_request(&PassthroughDialect, &context, &upstream, &principal)
-            .expect("test request shapes");
+        let shaped = shape_request(
+            &PassthroughDialect { base_url },
+            &context,
+            &upstream,
+            &principal,
+        )
+        .expect("test request shapes");
 
         sign_request(&NoopSigner, shaped)
             .await
             .expect("test request signs")
     }
 
-    struct PassthroughDialect;
+    struct PassthroughDialect {
+        base_url: Url,
+    }
 
     impl UpstreamDialect for PassthroughDialect {
         fn shape(
@@ -568,7 +680,7 @@ mod tests {
             _principal: &Principal,
             builder: &mut ShapedRequestBuilder,
         ) -> Result<ShapedRequest, DialectError> {
-            let mut url = Url::parse("http://upstream.local/").expect("test URL parses");
+            let mut url = self.base_url.clone();
             url.set_path(context.path.trim_start_matches('/'));
             url.set_query(context.query.as_deref());
             Ok(builder.shaped_request(
