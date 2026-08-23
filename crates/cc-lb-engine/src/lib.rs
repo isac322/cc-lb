@@ -111,7 +111,7 @@ pub use anthropic_metadata::make_metadata_http_client;
 #[cfg(not(loom))]
 pub use bulkhead::{
     Bulkhead, BulkheadDispatch, BulkheadError, BulkheadRegistry, BulkheadRuntimeConfig,
-    ExecuteError, make_default_dispatcher, make_http_dispatcher_with_connector,
+    ExecuteError, make_default_dispatcher,
 };
 pub use cc_lb_control::audit_payload::AuditPayload;
 #[cfg(not(loom))]

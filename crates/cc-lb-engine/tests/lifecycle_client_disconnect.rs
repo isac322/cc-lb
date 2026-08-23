@@ -13,10 +13,10 @@ use http::StatusCode;
 use http_body_util::BodyExt;
 
 use client_disconnect_support::{
-    assert_dropped_terminal, assert_error_terminal, assert_one_final, assert_success_terminal,
-    canonical_error_frame, json_dispatch, lifecycle, lifecycle_receiver, normal_sse_frame,
-    pending_sse, sqlite_storage, sse_dispatch, transform_body, transform_lifecycle,
-    upstream_frame_error,
+    assert_dropped_terminal, assert_error_terminal, assert_one_final, assert_stream_error,
+    assert_success_terminal, canonical_error_frame, json_dispatch, lifecycle, lifecycle_receiver,
+    normal_sse_frame, pending_sse, sqlite_storage, sse_dispatch, transform_body,
+    transform_lifecycle, upstream_frame_error, upstream_frame_error_after,
 };
 use common::{TestLifecycleBus, messages_request};
 
@@ -191,11 +191,84 @@ async fn fatal_transform_frame_then_drop_remains_transform_error() {
 }
 
 #[tokio::test]
-async fn upstream_frame_error_remains_existing_success_outcome() {
+async fn upstream_frame_error_is_recorded_as_upstream_stream_error() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let lifecycle = lifecycle(
         sse_dispatch(StatusCode::OK, upstream_frame_error()),
+        &test_bus,
+    );
+
+    let response = lifecycle
+        .handle(stream_request())
+        .await
+        .expect("lifecycle handles request");
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("relay body collects")
+        .to_bytes();
+    let text = std::str::from_utf8(&body).expect("error frame is utf8");
+    assert!(text.contains("event: error\n"));
+    assert!(text.contains("\"api_error\""));
+
+    assert_stream_error(
+        &mut lifecycle_rx,
+        "upstream_response_body_error",
+        "forced upstream frame error",
+    )
+    .await;
+    assert_error_terminal(&mut lifecycle_rx, 200, "upstream_stream_error").await;
+}
+
+#[tokio::test]
+async fn upstream_frame_error_after_partial_event_starts_separate_error_frame() {
+    let test_bus = TestLifecycleBus::new();
+    let lifecycle = lifecycle(
+        sse_dispatch(
+            StatusCode::OK,
+            upstream_frame_error_after(Bytes::from_static(
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"",
+            )),
+        ),
+        &test_bus,
+    );
+
+    let response = lifecycle
+        .handle(stream_request())
+        .await
+        .expect("lifecycle handles partial upstream event");
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("relay body collects")
+        .to_bytes();
+    let text = std::str::from_utf8(&body).expect("stream output is utf8");
+
+    assert!(
+        text.contains("\"content_block_delta\"\n\nevent: error\n"),
+        "error frame must start after an SSE event boundary: {text:?}",
+    );
+}
+
+#[tokio::test]
+async fn upstream_frame_error_preserves_http_error_classification()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
+        panic!("expected in-memory update receiver");
+    };
+    let lifecycle = lifecycle(
+        sse_dispatch(
+            StatusCode::TOO_MANY_REQUESTS,
+            upstream_frame_error_after(normal_sse_frame()),
+        ),
         &test_bus,
     );
 
@@ -209,7 +282,78 @@ async fn upstream_frame_error_remains_existing_success_outcome() {
         .await
         .expect("relay body collects");
 
-    assert_success_terminal(&mut lifecycle_rx, 200).await;
+    assert_stream_error(
+        &mut lifecycle_rx,
+        "upstream_response_body_error",
+        "forced upstream frame error",
+    )
+    .await;
+    assert_error_terminal(
+        &mut lifecycle_rx,
+        StatusCode::TOO_MANY_REQUESTS.as_u16(),
+        "upstream_4xx",
+    )
+    .await;
+    assert_one_final(&mut update_rx).await;
+    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].error_code.as_deref(), Some("upstream_4xx"));
+    assert_eq!(
+        rows[0].upstream_error_type.as_deref(),
+        Some("upstream_response_body_error")
+    );
+    assert_eq!(
+        rows[0].upstream_error_message.as_deref(),
+        Some("forced upstream frame error")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_error_before_body_failure_preserves_provider_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
+        panic!("expected in-memory update receiver");
+    };
+    let lifecycle = lifecycle(
+        sse_dispatch(
+            StatusCode::OK,
+            upstream_frame_error_after(canonical_error_frame()),
+        ),
+        &test_bus,
+    );
+
+    let response = lifecycle
+        .handle(stream_request())
+        .await
+        .expect("lifecycle handles provider error before body failure");
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("relay body collects")
+        .to_bytes();
+    let text = std::str::from_utf8(&body).expect("relay body is SSE text");
+    assert_eq!(text.matches("event: error\n").count(), 1);
+
+    assert_one_final(&mut update_rx).await;
+    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].upstream_error_type.as_deref(),
+        Some("overloaded_error")
+    );
+    assert_eq!(
+        rows[0].upstream_error_message.as_deref(),
+        Some("forced stream error")
+    );
+    assert!(rows[0].body_bytes.is_some());
+    assert!(rows[0].body_chunk_count.is_some());
+    Ok(())
 }
 
 #[tokio::test]

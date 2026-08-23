@@ -953,8 +953,12 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             error_message,
             ..
         } => {
-            partial.stream_error_type = (!error_type.is_empty()).then_some(error_type);
-            partial.stream_error_message = Some(error_message);
+            if !error_type.is_empty() {
+                partial.stream_error_type = Some(error_type);
+                partial.stream_error_message = Some(error_message);
+            } else if partial.stream_error_message.is_none() {
+                partial.stream_error_message = Some(error_message);
+            }
         }
         LifecycleEvent::ProviderErrorObserved { .. } => {}
         LifecycleEvent::RequestTerminated { .. } => {}

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
-use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
+use cc_lb_lifecycle::{LifecycleEvent, StreamError, TerminationReason};
 use cc_lb_request_log::RequestEventUpdate;
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -15,6 +15,31 @@ pub fn lifecycle_receiver(test_bus: &TestLifecycleBus) -> broadcast::Receiver<Li
         panic!("expected in-memory lifecycle receiver");
     };
     rx
+}
+pub async fn assert_stream_error(
+    rx: &mut broadcast::Receiver<LifecycleEvent>,
+    expected_type: &str,
+    expected_message: &str,
+) {
+    let error = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let LifecycleEvent::StreamCompleted {
+                result: Err(error), ..
+            } = rx.recv().await.expect("lifecycle event delivered")
+            {
+                break error;
+            }
+        }
+    })
+    .await
+    .expect("stream error observed");
+    assert_eq!(
+        error,
+        StreamError {
+            error_type: expected_type.to_owned(),
+            error_message: expected_message.to_owned(),
+        }
+    );
 }
 
 pub async fn assert_error_terminal(
