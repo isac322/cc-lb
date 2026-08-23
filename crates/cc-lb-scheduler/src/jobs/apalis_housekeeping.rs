@@ -12,6 +12,7 @@ use sqlx::{Database, Pool};
 use crate::{
     error::{Result, SchedulerError},
     middleware::TraceparentCarrier,
+    worker::CACHE_KEEPALIVE_QUEUE,
 };
 
 pub const APALIS_WORKER_RETENTION_SECS: u64 = 3_600;
@@ -119,11 +120,11 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
     async fn prune(&self, now_unix_secs: u64) -> Result<ApalisHousekeepingJobStats> {
         let worker_cutoff = now_unix_secs.saturating_sub(APALIS_WORKER_RETENTION_SECS);
         let job_cutoff = retention_cutoff(now_unix_secs, self.config.dlq_retention_days);
-        let workers_removed = sqlx::query("DELETE FROM Workers WHERE last_seen < ?1")
-            .bind(unix_i64(worker_cutoff, "worker_cutoff")?)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
+        let reaped = self.reap_stale_locks(now_unix_secs).await?;
+        let cache_keepalive_sessions_removed = self
+            .prune_cache_keepalive_sessions(now_unix_secs, worker_cutoff)
+            .await?;
+        let workers_removed = self.prune_stale_workers(worker_cutoff).await?;
         let jobs_removed = sqlx::query(
             "DELETE FROM Jobs WHERE status IN ('Done','Failed') AND done_at IS NOT NULL AND done_at < ?1",
         )
@@ -131,10 +132,6 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
         .execute(&self.pool)
         .await?
         .rows_affected();
-        let reaped = self.reap_stale_locks(now_unix_secs).await?;
-        let cache_keepalive_sessions_removed = self
-            .prune_cache_keepalive_sessions(now_unix_secs, worker_cutoff)
-            .await?;
         let cache_keepalive_jobs_removed = self.prune_cache_keepalive_jobs(worker_cutoff).await?;
         log_reaped_rows(
             &reaped,
@@ -150,6 +147,26 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
             cache_keepalive_jobs_removed,
             cutoff_unix_secs: job_cutoff,
         })
+    }
+
+    async fn prune_stale_workers(&self, worker_cutoff: u64) -> Result<u64> {
+        let worker_cutoff = unix_i64(worker_cutoff, "worker_cutoff")?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE Jobs
+             SET lock_by = NULL
+             WHERE lock_by IN (SELECT id FROM Workers WHERE last_seen < ?1)",
+        )
+        .bind(worker_cutoff)
+        .execute(&mut *tx)
+        .await?;
+        let removed = sqlx::query("DELETE FROM Workers WHERE last_seen < ?1")
+            .bind(worker_cutoff)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+        Ok(removed)
     }
 
     async fn prune_cache_keepalive_sessions(
@@ -212,13 +229,14 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
     async fn prune_cache_keepalive_jobs(&self, cutoff_unix_secs: u64) -> Result<u64> {
         let result = sqlx::query(
             "DELETE FROM Jobs
-             WHERE job_type = 'adaptive'
-               AND idempotency_key LIKE ?1
+             WHERE job_type = ?1
+               AND idempotency_key LIKE ?2
                AND (
-                   (status IN ('Done','Failed','Killed') AND COALESCE(done_at, run_at, 0) < ?2)
-                   OR (status = 'Pending' AND run_at < ?2)
+                   (status IN ('Done','Failed','Killed') AND COALESCE(done_at, run_at, 0) < ?3)
+                   OR (status = 'Pending' AND run_at < ?3)
                )",
         )
+        .bind(CACHE_KEEPALIVE_QUEUE)
         .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
         .bind(unix_i64(cutoff_unix_secs, "cache_keepalive_job_cutoff")?)
         .execute(&self.pool)
@@ -298,17 +316,15 @@ impl ApalisHousekeepingJobHandler<Postgres> {
     }
 
     async fn prune(&self, now_unix_secs: u64) -> Result<ApalisHousekeepingJobStats> {
-        let worker_cutoff = utc_timestamp(
-            now_unix_secs.saturating_sub(APALIS_WORKER_RETENTION_SECS),
-            "worker_cutoff",
-        )?;
+        let worker_cutoff = now_unix_secs.saturating_sub(APALIS_WORKER_RETENTION_SECS);
+        let worker_cutoff_timestamp = utc_timestamp(worker_cutoff, "worker_cutoff")?;
         let job_cutoff = retention_cutoff(now_unix_secs, self.config.dlq_retention_days);
         let job_cutoff_timestamp = utc_timestamp(job_cutoff, "job_cutoff")?;
-        let workers_removed = sqlx::query("DELETE FROM apalis.workers WHERE last_seen < $1")
-            .bind(worker_cutoff)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
+        let reaped = self.reap_stale_locks(now_unix_secs).await?;
+        let cache_keepalive_sessions_removed = self
+            .prune_cache_keepalive_sessions(now_unix_secs, worker_cutoff)
+            .await?;
+        let workers_removed = self.prune_stale_workers(worker_cutoff_timestamp).await?;
         let jobs_removed = sqlx::query(
             "DELETE FROM apalis.jobs WHERE status IN ('Done','Failed') AND done_at IS NOT NULL AND done_at < $1",
         )
@@ -316,16 +332,7 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         .execute(&self.pool)
         .await?
         .rows_affected();
-        let reaped = self.reap_stale_locks(now_unix_secs).await?;
-        let cache_keepalive_sessions_removed = self
-            .prune_cache_keepalive_sessions(
-                now_unix_secs,
-                now_unix_secs.saturating_sub(APALIS_WORKER_RETENTION_SECS),
-            )
-            .await?;
-        let cache_keepalive_jobs_removed = self
-            .prune_cache_keepalive_jobs(now_unix_secs.saturating_sub(APALIS_WORKER_RETENTION_SECS))
-            .await?;
+        let cache_keepalive_jobs_removed = self.prune_cache_keepalive_jobs(worker_cutoff).await?;
         log_reaped_rows(
             &reaped,
             self.config.stale_lock_threshold_secs,
@@ -340,6 +347,25 @@ impl ApalisHousekeepingJobHandler<Postgres> {
             cache_keepalive_jobs_removed,
             cutoff_unix_secs: job_cutoff,
         })
+    }
+
+    async fn prune_stale_workers(&self, worker_cutoff: DateTime<Utc>) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE apalis.jobs
+             SET lock_by = NULL
+             WHERE lock_by IN (SELECT id FROM apalis.workers WHERE last_seen < $1)",
+        )
+        .bind(worker_cutoff)
+        .execute(&mut *tx)
+        .await?;
+        let removed = sqlx::query("DELETE FROM apalis.workers WHERE last_seen < $1")
+            .bind(worker_cutoff)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+        Ok(removed)
     }
 
     async fn prune_cache_keepalive_sessions(
@@ -403,13 +429,14 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         let cutoff = utc_timestamp(cutoff_unix_secs, "cache_keepalive_job_cutoff")?;
         let result = sqlx::query(
             "DELETE FROM apalis.jobs
-             WHERE job_type = 'adaptive'
-               AND idempotency_key LIKE $1
+             WHERE job_type = $1
+               AND idempotency_key LIKE $2
                AND (
-                   (status IN ('Done','Failed','Killed') AND COALESCE(done_at, run_at) < $2)
-                   OR (status = 'Pending' AND run_at < $2)
+                   (status IN ('Done','Failed','Killed') AND COALESCE(done_at, run_at) < $3)
+                   OR (status = 'Pending' AND run_at < $3)
                )",
         )
+        .bind(CACHE_KEEPALIVE_QUEUE)
         .bind(CACHE_KEEPALIVE_IDEMPOTENCY_PREFIX)
         .bind(cutoff)
         .execute(&self.pool)
@@ -428,7 +455,7 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         let now_ts = utc_timestamp(now_unix_secs, "now_unix_secs")?;
         let mut tx = self.pool.begin().await?;
         let rows =
-            sqlx::query_as::<_, (String, String, Option<String>, Option<DateTime<Utc>>, i64)>(
+            sqlx::query_as::<_, (String, String, Option<String>, Option<DateTime<Utc>>, i32)>(
                 "SELECT id, job_type, lock_by, lock_at, attempts
              FROM apalis.jobs
              WHERE status = 'Running'
@@ -472,7 +499,7 @@ impl ApalisHousekeepingJobHandler<Postgres> {
                 job_type,
                 lock_by,
                 lock_at_unix_secs: lock_at.map(|ts| ts.timestamp()),
-                attempts,
+                attempts: i64::from(attempts),
             })
             .collect())
     }
