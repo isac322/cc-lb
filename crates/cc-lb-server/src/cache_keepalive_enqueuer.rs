@@ -15,7 +15,7 @@ use cc_lb_storage_api::{
 };
 use uuid::Uuid;
 
-use crate::scheduler_dispatch::cache_keepalive_payload_aad;
+use crate::cache_keepalive_payload::encrypt_cache_keepalive_payload;
 
 #[async_trait]
 pub(crate) trait CacheKeepaliveTaskPusher: Send + Sync {
@@ -91,20 +91,15 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         )
         .await
         .map_err(cache_keepalive_enqueue_error)?;
-        let persisted = request.snapshot.to_persisted();
-        let plaintext = serde_json::to_vec(&persisted).map_err(cache_keepalive_enqueue_error)?;
-        let encrypted_payload = self
-            .aead
-            .encrypt(
-                &plaintext,
-                &cache_keepalive_payload_aad(
-                    &record.principal_id,
-                    &record.session_key_hash,
-                    record.upstream_id,
-                    record.generation,
-                ),
-            )
-            .map_err(cache_keepalive_enqueue_error)?;
+        let encrypted_payload = encrypt_cache_keepalive_payload(
+            self.aead.as_ref(),
+            &record.principal_id,
+            &record.session_key_hash,
+            record.upstream_id,
+            record.generation,
+            &request.snapshot.to_persisted(),
+        )
+        .map_err(cache_keepalive_enqueue_error)?;
         if !CacheKeepaliveSessionStore::update_cache_keepalive_payload(
             self.storage.as_ref(),
             &record.session_key_hash,

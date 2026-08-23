@@ -163,7 +163,7 @@ async fn cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_genera
             cache_anchor_at_unix_secs: 150,
             run_at_unix_secs: 420,
             expires_at_unix_secs: 450,
-            encrypted_payload: b"stale".to_vec(),
+            encrypted_payload: None,
             now_unix_secs: 151,
         })
         .await?;
@@ -176,7 +176,7 @@ async fn cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_genera
             cache_anchor_at_unix_secs: 150,
             run_at_unix_secs: 420,
             expires_at_unix_secs: 450,
-            encrypted_payload: b"ciphertext-hit".to_vec(),
+            encrypted_payload: None,
             now_unix_secs: 151,
         })
         .await?
@@ -187,7 +187,22 @@ async fn cache_hit_reschedule_preserves_duration_anchor_and_rejects_stale_genera
     assert_eq!(updated.first_scheduled_at_unix_secs, 100);
     assert_eq!(updated.cache_anchor_at_unix_secs, 150);
     assert_eq!(updated.run_at_unix_secs, 420);
-    assert_eq!(updated.encrypted_payload, b"ciphertext-hit");
+    assert_eq!(updated.encrypted_payload, b"ciphertext-one");
+    let migrated = storage
+        .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+            session_key_hash: "hit-session".to_owned(),
+            generation: updated.generation,
+            cache_anchor_at_unix_secs: 151,
+            run_at_unix_secs: 421,
+            expires_at_unix_secs: 451,
+            encrypted_payload: Some(b"compressed-ciphertext".to_vec()),
+            now_unix_secs: 152,
+        })
+        .await?
+        .expect("row migrated");
+    assert_eq!(migrated.generation, 3);
+    assert_eq!(migrated.refresh_count, 2);
+    assert_eq!(migrated.encrypted_payload, b"compressed-ciphertext");
     Ok(())
 }
 
@@ -223,6 +238,11 @@ async fn conditional_enqueue_terminal_and_purge_are_generation_safe(
             )
             .await?
     );
+    let terminal = storage
+        .get_cache_keepalive_session("terminal-session")
+        .await?
+        .expect("terminal row exists");
+    assert!(terminal.encrypted_payload.is_empty());
     let check = storage
         .check_cache_keepalive_generation("terminal-session")
         .await?
@@ -283,6 +303,7 @@ async fn mark_latest_terminal_only_mutates_active_latest_session(
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::Cancelled)
     );
+    assert!(record.encrypted_payload.is_empty());
     Ok(())
 }
 
@@ -380,11 +401,7 @@ async fn concurrent_hit_reschedule_allows_only_one_generation_cas(
         async move {
             barrier.wait().await;
             storage
-                .reschedule_after_cache_hit(&hit_request(
-                    session_key_hash,
-                    original.generation,
-                    b"first",
-                ))
+                .reschedule_after_cache_hit(&hit_request(session_key_hash, original.generation))
                 .await
         }
     });
@@ -394,11 +411,7 @@ async fn concurrent_hit_reschedule_allows_only_one_generation_cas(
         async move {
             barrier.wait().await;
             storage
-                .reschedule_after_cache_hit(&hit_request(
-                    session_key_hash,
-                    original.generation,
-                    b"second",
-                ))
+                .reschedule_after_cache_hit(&hit_request(session_key_hash, original.generation))
                 .await
         }
     });
@@ -494,18 +507,14 @@ fn replace_request(
     }
 }
 
-fn hit_request(
-    session_key_hash: &str,
-    generation: u64,
-    payload: &[u8],
-) -> CacheKeepaliveHitRefreshRequest {
+fn hit_request(session_key_hash: &str, generation: u64) -> CacheKeepaliveHitRefreshRequest {
     CacheKeepaliveHitRefreshRequest {
         session_key_hash: session_key_hash.to_owned(),
         generation,
         cache_anchor_at_unix_secs: 150,
         run_at_unix_secs: 420,
         expires_at_unix_secs: 450,
-        encrypted_payload: payload.to_vec(),
+        encrypted_payload: None,
         now_unix_secs: 151,
     }
 }

@@ -100,6 +100,7 @@ secrecy.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sonic-rs.workspace = true
+zstd.workspace = true
 sha2.workspace = true
 siphasher = "1"
 scheduler-sqlx = { package = "sqlx", version = "=0.8.6", optional = true, default-features = false, features = ["chrono", "json", "migrate", "runtime-tokio", "tls-rustls-ring", "uuid"] }

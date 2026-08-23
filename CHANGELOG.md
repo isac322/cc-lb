@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Cache keep-alive snapshots now use a compact, compressed ciphertext format, keep the same payload across synthetic refresh generations, and discard ciphertext when a session terminates. Legacy JSON ciphertext remains readable and is rewritten once if its session renews.
 - Streaming upstream body transport failures are now recorded as upstream stream failures instead of successful requests. Compressed SSE decode failures on the upstream-response leg are recorded as `upstream_response_decode_error`; this identifies the failing proxy leg, not whether malformed bytes originated at the provider, transport, or local decoder. When response transformation is active, cc-lb also emits an identity-encoded `api_error` frame; compressed passthrough responses remain byte-identical. Unterminated identity SSE and transform-active SSE responses emit the same client error and are recorded as upstream framing failures. Transform-hook and transform-local decode failures emit `response_transform_error` instead of replaying compressed bytes without `Content-Encoding`. Existing response-transform failures and HTTP error classifications remain authoritative.
 
 ## [0.4.4] - 2026-08-18

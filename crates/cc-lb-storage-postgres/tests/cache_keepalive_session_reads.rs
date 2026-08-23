@@ -52,7 +52,7 @@ async fn read_model_contract(url: &str) -> Result<()> {
             cache_anchor_at_unix_secs: 1_730_000_004,
             run_at_unix_secs: 1_730_000_274,
             expires_at_unix_secs: 1_730_000_304,
-            encrypted_payload: vec![2],
+            encrypted_payload: None,
             now_unix_secs: 1_730_000_004,
         })
         .await?;
