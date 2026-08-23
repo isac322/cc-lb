@@ -259,6 +259,72 @@ mod tests {
     }
 
     #[test]
+    fn gzip_missing_trailer_reports_checksum_mismatch() {
+        let plaintext = vec![b'a'; 256];
+        let mut compressed = gzip_test_bytes(&plaintext, flate2::Compression::default());
+        compressed.truncate(compressed.len() - 8);
+
+        let error = gzip_decode_error(&compressed);
+
+        assert_eq!(
+            error.to_string(),
+            "corrupt gzip stream does not have a matching checksum"
+        );
+    }
+
+    #[test]
+    fn gzip_mid_member_truncation_reports_checksum_mismatch() {
+        let plaintext = vec![b'b'; 256];
+        let mut compressed = gzip_test_bytes(&plaintext, flate2::Compression::none());
+        compressed.truncate(compressed.len() / 2);
+
+        let error = gzip_decode_error(&compressed);
+
+        assert_eq!(
+            error.to_string(),
+            "corrupt gzip stream does not have a matching checksum"
+        );
+    }
+
+    #[test]
+    fn gzip_flipped_payload_byte_reports_checksum_mismatch() {
+        let plaintext = vec![b'c'; 256];
+        let mut compressed = gzip_test_bytes(&plaintext, flate2::Compression::none());
+        let payload_start = compressed
+            .windows(plaintext.len())
+            .position(|window| window == plaintext)
+            .expect("uncompressed deflate block contains plaintext");
+        compressed[payload_start + plaintext.len() / 2] ^= 1;
+
+        let error = gzip_decode_error(&compressed);
+
+        assert_eq!(
+            error.to_string(),
+            "corrupt gzip stream does not have a matching checksum"
+        );
+    }
+
+    fn gzip_test_bytes(plaintext: &[u8], level: flate2::Compression) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), level);
+        encoder.write_all(plaintext).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn gzip_decode_error(compressed: &[u8]) -> std::io::Error {
+        let h = headers_with("gzip");
+        let mut decoder = UsageDecoder::from_headers(&h, TEST_OUTPUT_BUDGET_BYTES);
+        for chunk in compressed.chunks(3) {
+            match decoder.push(chunk) {
+                Ok(_) => {}
+                Err(error) => return error,
+            }
+        }
+        decoder
+            .finish()
+            .expect_err("damaged gzip stream must fail decoding")
+    }
+
+    #[test]
     fn deflate_round_trip() {
         let plaintext = b"hello deflate";
         let mut encoder =

@@ -1,8 +1,8 @@
 mod events;
 
 pub use events::{
-    assert_dropped_terminal, assert_error_terminal, assert_one_final, assert_success_terminal,
-    lifecycle_receiver, sqlite_storage,
+    assert_dropped_terminal, assert_error_terminal, assert_one_final, assert_stream_error,
+    assert_success_terminal, lifecycle_receiver, sqlite_storage,
 };
 
 use std::collections::HashMap;
@@ -146,6 +146,16 @@ pub fn pending_sse(waiting: Arc<Notify>) -> Body {
 
 pub fn upstream_frame_error() -> Body {
     let stream = async_stream::stream! {
+        yield Err::<Bytes, std::io::Error>(std::io::Error::other(
+            "forced upstream frame error",
+        ));
+    };
+    Body::from_stream(stream)
+}
+
+pub fn upstream_frame_error_after(frame: Bytes) -> Body {
+    let stream = async_stream::stream! {
+        yield Ok::<Bytes, std::io::Error>(frame);
         yield Err::<Bytes, std::io::Error>(std::io::Error::other(
             "forced upstream frame error",
         ));
