@@ -126,7 +126,7 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
             .await?;
         let workers_removed = self.prune_stale_workers(worker_cutoff).await?;
         let jobs_removed = sqlx::query(
-            "DELETE FROM Jobs WHERE status IN ('Done','Failed') AND done_at IS NOT NULL AND done_at < ?1",
+            "DELETE FROM Jobs WHERE status IN ('Done','Failed','Killed') AND done_at IS NOT NULL AND done_at < ?1",
         )
         .bind(unix_i64(job_cutoff, "job_cutoff")?)
         .execute(&self.pool)
@@ -326,7 +326,7 @@ impl ApalisHousekeepingJobHandler<Postgres> {
             .await?;
         let workers_removed = self.prune_stale_workers(worker_cutoff_timestamp).await?;
         let jobs_removed = sqlx::query(
-            "DELETE FROM apalis.jobs WHERE status IN ('Done','Failed') AND done_at IS NOT NULL AND done_at < $1",
+            "DELETE FROM apalis.jobs WHERE status IN ('Done','Failed','Killed') AND done_at IS NOT NULL AND done_at < $1",
         )
         .bind(job_cutoff_timestamp)
         .execute(&self.pool)

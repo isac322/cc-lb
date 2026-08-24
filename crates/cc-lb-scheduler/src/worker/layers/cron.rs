@@ -12,9 +12,9 @@ use crate::middleware::TraceparentLayer;
 use crate::retry::RetryClass;
 
 #[cfg(feature = "postgres")]
-use super::super::backend::PostgresCronApalisStorage;
+use super::super::backend::PostgresCronWorkerStorage;
 #[cfg(feature = "sqlite")]
-use super::super::backend::SqliteCronApalisStorage;
+use super::super::backend::SqliteCronWorkerStorage;
 use super::super::dispatch::{SingletonHandlerFn, singleton_job_handler};
 use super::super::{CRON_QUEUE, SchedulerBackend, SchedulerCtx};
 
@@ -45,7 +45,7 @@ pub fn build_cron_worker_named(
     match backend {
         #[cfg(feature = "sqlite")]
         SchedulerBackend::Sqlite(sqlite) => Ok(build_sqlite_singleton_worker(
-            sqlite.cron_storage(),
+            sqlite.cron_worker_storage(),
             ctx,
             worker_name,
         )),
@@ -60,7 +60,7 @@ pub fn build_cron_worker_named(
 
 #[cfg(feature = "sqlite")]
 fn build_sqlite_singleton_worker(
-    storage: SqliteCronApalisStorage,
+    storage: SqliteCronWorkerStorage,
     ctx: SchedulerCtx,
     worker_name: String,
 ) -> CronWorker {
@@ -90,7 +90,7 @@ fn build_sqlite_singleton_worker(
 
 #[cfg(feature = "postgres")]
 fn build_postgres_singleton_worker(
-    storage: PostgresCronApalisStorage,
+    storage: PostgresCronWorkerStorage,
     ctx: SchedulerCtx,
     worker_name: String,
 ) -> CronWorker {

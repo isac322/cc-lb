@@ -19,7 +19,7 @@ mod sqlite {
     };
 
     #[tokio::test]
-    async fn prunes_old_workers_done_and_failed_jobs() -> Result<(), Box<dyn std::error::Error>> {
+    async fn prunes_old_workers_and_terminal_jobs() -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
         SqliteStorage::setup(&pool).await?;
         create_cache_keepalive_sessions_table(&pool).await?;
@@ -334,7 +334,7 @@ mod postgres {
     };
 
     #[tokio::test]
-    async fn prunes_old_workers_done_and_failed_jobs() -> Result<(), Box<dyn std::error::Error>> {
+    async fn prunes_old_workers_and_terminal_jobs() -> Result<(), Box<dyn std::error::Error>> {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("SKIP: DATABASE_URL not set; skipping postgres housekeeping test");
             return Ok(());
@@ -623,7 +623,7 @@ mod postgres {
 fn expected_result() -> ApalisHousekeepingJobResult {
     ApalisHousekeepingJobResult::Done {
         workers_removed: 1,
-        jobs_removed: 2,
+        jobs_removed: 3,
         stale_locks_reaped: 0,
         cache_keepalive_sessions_removed: 3,
         cache_keepalive_jobs_removed: 2,
@@ -650,13 +650,14 @@ fn workers() -> [(&'static str, u64); 3] {
     ]
 }
 
-fn jobs() -> [(&'static str, &'static str, Option<u64>); 6] {
+fn jobs() -> [(&'static str, &'static str, Option<u64>); 7] {
     [
         ("active-pending", "Pending", Some(NOW_SECS - (2 * DAY_SECS))),
         ("active-queued", "Queued", Some(NOW_SECS - (2 * DAY_SECS))),
         ("active-running", "Running", Some(NOW_SECS - (2 * DAY_SECS))),
         ("old-done", "Done", Some(NOW_SECS - (2 * DAY_SECS))),
         ("old-failed", "Failed", Some(NOW_SECS - (2 * DAY_SECS))),
+        ("old-killed", "Killed", Some(NOW_SECS - (2 * DAY_SECS))),
         ("recent-done", "Done", Some(NOW_SECS - 60)),
     ]
 }

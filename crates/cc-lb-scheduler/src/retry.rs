@@ -166,8 +166,8 @@ impl JobOutcome {
 }
 
 pub trait RetryPayload {
+    /// Returns the one-based attempt number for the execution about to run.
     fn attempt_count(&self) -> u32;
-
     fn retry_seed(&self) -> u64 {
         u64::from(self.attempt_count())
     }

@@ -13,9 +13,9 @@ use crate::middleware::TraceparentLayer;
 use crate::retry::RetryClass;
 
 #[cfg(feature = "postgres")]
-use super::super::PostgresApalisStorage;
+use super::super::backend::PostgresAdaptiveWorkerStorage;
 #[cfg(feature = "sqlite")]
-use super::super::SqliteApalisStorage;
+use super::super::backend::SqliteAdaptiveWorkerStorage;
 use super::super::dispatch::{EntityHandlerFn, entity_job_handler};
 use super::super::{ADAPTIVE_QUEUE, SchedulerBackend, SchedulerCtx};
 
@@ -58,7 +58,7 @@ pub(in crate::worker) fn build_backend_adaptive_worker_named(
         SchedulerBackend::Sqlite(sqlite) => {
             let concurrency = ctx.config.entity_concurrency;
             Ok(build_sqlite_worker(
-                sqlite.adaptive_storage(),
+                sqlite.adaptive_worker_storage(),
                 ctx,
                 worker_name,
                 concurrency,
@@ -90,7 +90,7 @@ pub(in crate::worker) fn build_backend_keepalive_worker_named(
         #[cfg(feature = "sqlite")]
         SchedulerBackend::Sqlite(sqlite) => {
             let concurrency = ctx.config.keepalive_concurrency;
-            let storage = sqlite.keepalive_storage();
+            let storage = sqlite.keepalive_worker_storage();
             Ok(build_sqlite_worker(storage, ctx, worker_name, concurrency))
         }
         #[cfg(feature = "postgres")]
@@ -109,7 +109,7 @@ pub(in crate::worker) fn build_backend_keepalive_worker_named(
 
 #[cfg(feature = "sqlite")]
 fn build_sqlite_worker(
-    storage: SqliteApalisStorage,
+    storage: SqliteAdaptiveWorkerStorage,
     ctx: SchedulerCtx,
     worker_name: String,
     concurrency: usize,
@@ -139,7 +139,7 @@ fn build_sqlite_worker(
 
 #[cfg(feature = "postgres")]
 fn build_postgres_worker(
-    storage: PostgresApalisStorage,
+    storage: PostgresAdaptiveWorkerStorage,
     ctx: SchedulerCtx,
     worker_name: String,
     concurrency: usize,

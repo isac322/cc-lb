@@ -186,6 +186,29 @@ The "local vs durable" rule (defined in D-arch-3 and D-arch-1) governs where bac
 - **Local Rule**: Operations that are low-latency, per-replica, or critical to the request path must run in-process on each replica. They do not use the distributed scheduler. Examples include local price catalog installation (SLA <= 60s per D-cut-2) and dynamic view reconciliation.
 - **Durable Rule**: Operations that are heavy, cross-replica, or require strict coordination must be managed by the Apalis distributed scheduler. They use database-backed queues to ensure durability and cross-replica safety. Examples include warmup cycles, OAuth token refreshes, and price catalog fetching.
 
+### Durable retry acknowledgement
+
+Scheduler handlers return structured `JobOutcome` values. Apalis' stock SQL
+acknowledgers treat every successful handler return as `Done`, so they cannot
+interpret `JobOutcome::Retry { delay }`. cc-lb replaces the backend
+acknowledgement layer for both SQLite and PostgreSQL:
+
+- the retry policy evaluates the execution about to run as one-based attempt
+  `1`, so a freshly dequeued task can use the first backoff step.
+- `Retry { delay }` atomically re-arms the currently locked row in place:
+  `status = 'Pending'`, `attempts = current attempt`,
+  `run_at = database_now + delay`, and all lock/done fields are cleared.
+- `DeadLetter` becomes terminal `Killed`; normal DLQ retention prunes old
+  `Killed` rows alongside `Done` and `Failed`.
+- handler errors preserve Apalis' `Failed`/`Killed` max-attempt behavior.
+- successful `Done`, `Skip`, `Noop`, and `DuplicateEffect` outcomes become
+  terminal `Done`.
+
+The update is guarded by the task ID, `status = 'Running'`, and the current
+`lock_by` owner. It never inserts a replacement row, so the unconditional
+`UNIQUE (job_type, idempotency_key)` contract remains intact and the payload,
+task ID, and idempotency key remain stable across attempts.
+
 ## 10. Operator Runbook
 
 ### Scheduler Stuck

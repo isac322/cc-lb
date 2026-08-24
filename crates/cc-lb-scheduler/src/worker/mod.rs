@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::SchedulerError;
 use crate::retry::JobOutcome;
 
+mod ack;
 mod backend;
 mod backend_api;
 mod cron;

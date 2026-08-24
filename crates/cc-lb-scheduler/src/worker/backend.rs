@@ -1,6 +1,10 @@
 #[cfg(feature = "sqlite")]
 use cc_lb_clock::{Clock, ClockHandle};
 
+#[cfg(feature = "postgres")]
+use super::ack::RetryAwarePostgresBackend;
+#[cfg(feature = "sqlite")]
+use super::ack::RetryAwareSqliteBackend;
 use super::{ADAPTIVE_QUEUE, AdaptiveJob, CACHE_KEEPALIVE_QUEUE, CRON_QUEUE, CronJob};
 
 #[derive(Clone, Debug)]
@@ -17,6 +21,8 @@ pub type SqliteApalisStorage = apalis_sqlite::SqliteStorage<
     apalis_codec::json::JsonCodec<apalis_sqlite::CompactType>,
     apalis_sqlite::fetcher::SqliteFetcher,
 >;
+#[cfg(feature = "sqlite")]
+pub(crate) type SqliteAdaptiveWorkerStorage = RetryAwareSqliteBackend<SqliteApalisStorage>;
 
 #[cfg(feature = "sqlite")]
 pub(crate) type SqliteCronApalisStorage = apalis_sqlite::SqliteStorage<
@@ -24,6 +30,8 @@ pub(crate) type SqliteCronApalisStorage = apalis_sqlite::SqliteStorage<
     apalis_codec::json::JsonCodec<apalis_sqlite::CompactType>,
     apalis_sqlite::fetcher::SqliteFetcher,
 >;
+#[cfg(feature = "sqlite")]
+pub(crate) type SqliteCronWorkerStorage = RetryAwareSqliteBackend<SqliteCronApalisStorage>;
 
 #[cfg(feature = "sqlite")]
 #[derive(Clone)]
@@ -44,6 +52,18 @@ impl SqliteSchedulerBackend {
 
     pub(crate) fn clock(&self) -> &dyn Clock {
         &*self.clock
+    }
+
+    pub(crate) fn adaptive_worker_storage(&self) -> SqliteAdaptiveWorkerStorage {
+        RetryAwareSqliteBackend::new(self.adaptive_storage(), self.pool.clone())
+    }
+
+    pub(crate) fn keepalive_worker_storage(&self) -> SqliteAdaptiveWorkerStorage {
+        RetryAwareSqliteBackend::new(self.keepalive_storage(), self.pool.clone())
+    }
+
+    pub(crate) fn cron_worker_storage(&self) -> SqliteCronWorkerStorage {
+        RetryAwareSqliteBackend::new(self.cron_storage(), self.pool.clone())
     }
 
     pub(crate) fn adaptive_storage(&self) -> SqliteApalisStorage {
@@ -82,6 +102,8 @@ pub type PostgresApalisStorage = apalis_postgres::PostgresStorage<
     apalis_postgres::JsonCodec<apalis_postgres::CompactType>,
     apalis_postgres::PgNotify,
 >;
+#[cfg(feature = "postgres")]
+pub(crate) type PostgresAdaptiveWorkerStorage = RetryAwarePostgresBackend<PostgresApalisStorage>;
 
 #[cfg(feature = "postgres")]
 pub(crate) type PostgresCronApalisStorage = apalis_postgres::PostgresStorage<
@@ -90,6 +112,8 @@ pub(crate) type PostgresCronApalisStorage = apalis_postgres::PostgresStorage<
     apalis_postgres::JsonCodec<apalis_postgres::CompactType>,
     apalis_postgres::PgNotify,
 >;
+#[cfg(feature = "postgres")]
+pub(crate) type PostgresCronWorkerStorage = RetryAwarePostgresBackend<PostgresCronApalisStorage>;
 
 #[cfg(feature = "postgres")]
 #[derive(Clone)]
@@ -107,24 +131,33 @@ impl PostgresSchedulerBackend {
         &self.pool
     }
 
-    pub(crate) fn adaptive_worker_storage(&self) -> PostgresApalisStorage {
-        apalis_postgres::PostgresStorage::new_with_notify(
-            &self.pool,
-            &apalis_postgres::Config::new(ADAPTIVE_QUEUE),
+    pub(crate) fn adaptive_worker_storage(&self) -> PostgresAdaptiveWorkerStorage {
+        RetryAwarePostgresBackend::new(
+            apalis_postgres::PostgresStorage::new_with_notify(
+                &self.pool,
+                &apalis_postgres::Config::new(ADAPTIVE_QUEUE),
+            ),
+            self.pool.clone(),
         )
     }
 
-    pub(crate) fn keepalive_worker_storage(&self) -> PostgresApalisStorage {
-        apalis_postgres::PostgresStorage::new_with_notify(
-            &self.pool,
-            &apalis_postgres::Config::new(CACHE_KEEPALIVE_QUEUE),
+    pub(crate) fn keepalive_worker_storage(&self) -> PostgresAdaptiveWorkerStorage {
+        RetryAwarePostgresBackend::new(
+            apalis_postgres::PostgresStorage::new_with_notify(
+                &self.pool,
+                &apalis_postgres::Config::new(CACHE_KEEPALIVE_QUEUE),
+            ),
+            self.pool.clone(),
         )
     }
 
-    pub(crate) fn cron_worker_storage(&self) -> PostgresCronApalisStorage {
-        apalis_postgres::PostgresStorage::new_with_notify(
-            &self.pool,
-            &apalis_postgres::Config::new(CRON_QUEUE),
+    pub(crate) fn cron_worker_storage(&self) -> PostgresCronWorkerStorage {
+        RetryAwarePostgresBackend::new(
+            apalis_postgres::PostgresStorage::new_with_notify(
+                &self.pool,
+                &apalis_postgres::Config::new(CRON_QUEUE),
+            ),
+            self.pool.clone(),
         )
     }
 

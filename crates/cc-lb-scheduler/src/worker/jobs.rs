@@ -108,7 +108,7 @@ impl<Ctx, IdType> TraceparentCarrier for Task<AdaptiveJob, Ctx, IdType> {
 
 impl<Ctx, IdType> RetryPayload for Task<AdaptiveJob, Ctx, IdType> {
     fn attempt_count(&self) -> u32 {
-        u32::try_from(self.parts.attempt.current()).unwrap_or(u32::MAX)
+        u32::try_from(self.parts.attempt.current().saturating_add(1)).unwrap_or(u32::MAX)
     }
 }
 
@@ -158,14 +158,22 @@ impl<Ctx, IdType> TraceparentCarrier for Task<CronJob, Ctx, IdType> {
 
 impl<Ctx, IdType> RetryPayload for Task<CronJob, Ctx, IdType> {
     fn attempt_count(&self) -> u32 {
-        u32::try_from(self.parts.attempt.current()).unwrap_or(u32::MAX)
+        u32::try_from(self.parts.attempt.current().saturating_add(1)).unwrap_or(u32::MAX)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::convert::Infallible;
+    use std::time::Duration;
 
+    use apalis_core::task::builder::TaskBuilder;
+    use tower::{Layer as _, ServiceExt as _, service_fn};
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::jobs::oauth_refresh::OAuthRefreshJob;
+    use crate::retry::{JobOutcome, RetryClass};
     #[test]
     fn quota_gc_tombstone_preserves_serialized_shape() {
         let serialized =
@@ -176,5 +184,27 @@ mod tests {
         let deserialized: CronJob = serde_json::from_str(&serialized)
             .expect("deserialize quota_gc tombstone from cron queue payload");
         assert!(matches!(deserialized, CronJob::QuotaGc(_)));
+    }
+
+    #[tokio::test]
+    async fn fresh_task_retry_uses_first_attempt_delay() {
+        let task: Task<AdaptiveJob, (), ulid::Ulid> =
+            TaskBuilder::new(AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(Uuid::nil()))).build();
+        assert_eq!(task.attempt_count(), 1);
+
+        let service = RetryClass::Adaptive.layer().layer(service_fn(
+            |_task: Task<AdaptiveJob, (), ulid::Ulid>| async {
+                Ok::<_, Infallible>(JobOutcome::Retry {
+                    delay: Duration::ZERO,
+                })
+            },
+        ));
+        let result = service.oneshot(task).await.expect("handler succeeds");
+
+        let JobOutcome::Retry { delay } = result else {
+            panic!("fresh task retry must remain retryable, got {result:?}");
+        };
+        assert!(delay >= Duration::from_secs(27));
+        assert!(delay <= Duration::from_secs(33));
     }
 }

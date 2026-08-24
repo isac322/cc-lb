@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### Fixed
+
+- Scheduler retry outcomes now apply the first backoff step on a job's first execution and re-arm the same SQLite or PostgreSQL row with the requested delay instead of being acknowledged as terminal `Done`. Exhausted retries become retention-managed `Killed` rows, while task IDs, payloads, and idempotency keys remain stable across attempts.
+
 
 ## [0.4.5] - 2026-08-24
 
