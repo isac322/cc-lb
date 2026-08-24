@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/isac322/cc-lb/compare/cc-lb-pdk-wasmtime-macros-v0.1.2...cc-lb-pdk-wasmtime-macros-v0.1.3) - 2026-08-24
+
+### Other
+
+- *(deps)* bump the cargo-workspace group across 1 directory with 18 updates ([#492](https://github.com/isac322/cc-lb/pull/492))
+
 ## [0.1.2](https://github.com/isac322/cc-lb/compare/cc-lb-pdk-wasmtime-macros-v0.1.1...cc-lb-pdk-wasmtime-macros-v0.1.2) - 2026-07-15
 
 ### Added
