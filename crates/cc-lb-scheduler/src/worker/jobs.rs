@@ -74,6 +74,15 @@ impl AdaptiveJob {
             Self::CacheKeepalive(_) => "cache_keepalive",
         }
     }
+
+    pub(crate) fn idempotency_key(&self, run_at_unix_secs: u64) -> String {
+        match self {
+            Self::Warmup(job) => job.idempotency_key(job.cycle_key),
+            Self::OAuthRefresh(job) => job.idempotency_key(run_at_unix_secs),
+            Self::MetadataRefresh(job) => job.idempotency_key(),
+            Self::CacheKeepalive(job) => job.idempotency_key(),
+        }
+    }
 }
 
 impl TraceparentCarrier for AdaptiveJob {

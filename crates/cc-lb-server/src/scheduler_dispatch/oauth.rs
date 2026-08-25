@@ -27,17 +27,14 @@ impl SchedulerDispatch {
         &self,
         job: OAuthRefreshJob,
     ) -> SchedulerResult<JobOutcome> {
-        let replica_id = self
-            .replica_id
-            .ok_or_else(|| SchedulerError::Job("scheduler replica id is unavailable".to_owned()))?;
-        OAuthRefreshJobHandler::new(StorageHandle::new(self.storage.clone()), replica_id)
+        OAuthRefreshJobHandler::new(StorageHandle::new(self.storage.clone()))
             .handle(
                 job,
                 unix_secs(self.clock.now()),
                 |upstream| self.refresh_upstream(upstream),
                 |metadata_job| self.enqueue_metadata_refresh(metadata_job),
-                |upstream_id, expires_at_unix_secs| {
-                    self.push_next_oauth_refresh_task(upstream_id, expires_at_unix_secs)
+                |upstream_id, generation, expires_at_unix_secs| {
+                    self.push_next_oauth_refresh_task(upstream_id, generation, expires_at_unix_secs)
                 },
             )
             .await
@@ -58,6 +55,7 @@ impl SchedulerDispatch {
         let refreshed = refreshed_token_parts(
             ExistingTokenParts {
                 refresh_token: bundle.refresh_token,
+                refresh_token_expires_at_unix_secs: bundle.refresh_token_expires_at_unix_secs,
                 scopes: bundle.scopes,
             },
             response,
@@ -67,6 +65,7 @@ impl SchedulerDispatch {
             access_token: refreshed.access_token,
             refresh_token: refreshed.refresh_token,
             expires_at_unix_secs: refreshed.expires_at_unix_secs,
+            refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
             scopes: refreshed.scopes,
         };
         let encrypted_tokens =
@@ -87,9 +86,10 @@ impl SchedulerDispatch {
     async fn push_next_oauth_refresh_task(
         &self,
         upstream_id: uuid::Uuid,
+        expected_generation: u64,
         expires_at_unix_secs: u64,
     ) -> SchedulerResult<()> {
-        let job = OAuthRefreshJob::new(upstream_id);
+        let job = OAuthRefreshJob::for_generation(upstream_id, expected_generation);
         let idempotency_key = job.idempotency_key(expires_at_unix_secs);
         let task = SchedulerPushTask {
             args: AdaptiveJob::OAuthRefresh(job),

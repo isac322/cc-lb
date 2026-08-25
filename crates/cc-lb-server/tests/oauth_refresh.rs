@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
@@ -29,14 +30,18 @@ use cc_lb_scheduler::worker::{
     AdaptiveJob, SchedulerCtx, SchedulerPushTask, build_adaptive_worker,
 };
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
-use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
+use cc_lb_server::refresh::{
+    LazyRefreshClaimGuard, LazyRefreshTaskState, LazyRefresher, LazyRefresherDeps,
+    LazyRefresherParams,
+};
 use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerBackend};
 use cc_lb_signer_anthropic_oauth::{
-    AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh,
+    AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshError,
+    LazyRefreshHandle,
 };
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamRecord,
-    UpstreamStore,
+    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, StorageResult, UpstreamCreate,
+    UpstreamRecord, UpstreamStore,
     types::{KeyStatus, PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
 };
 use cc_lb_upstream::{
@@ -185,6 +190,7 @@ impl Fixture {
                 access_token: tokens.access_token,
                 refresh_token: tokens.refresh_token,
                 expires_at_unix_secs: expires_at,
+                refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
             },
         );
@@ -214,21 +220,158 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn lazy_refresh_done_state_race_observes_generation_advance() {
+    let fixture = Fixture::new_without_scheduler(AppConfig::default()).await;
+    let upstream_id = fixture
+        .create_oauth_upstream("generation-race", now_secs(fixture.clock.as_ref()))
+        .await;
+    let starting_generation = fixture
+        .storage
+        .read_oauth_token_generation(upstream_id)
+        .await
+        .expect("generation reads")
+        .expect("oauth upstream exists");
+    let refresher = race_done_refresher(&fixture, upstream_id, starting_generation, true);
+
+    refresher
+        .refresh_one(upstream_id)
+        .await
+        .expect("lazy refresh observes the racing winner's generation advance");
+
+    assert_eq!(
+        fixture
+            .storage
+            .read_oauth_token_generation(upstream_id)
+            .await
+            .expect("generation reads after race"),
+        Some(starting_generation + 1),
+    );
+}
+
+#[tokio::test]
+async fn lazy_refresh_done_without_generation_advance_fails() {
+    let fixture = Fixture::new_without_scheduler(AppConfig::default()).await;
+    let upstream_id = fixture
+        .create_oauth_upstream("generation-stalled", now_secs(fixture.clock.as_ref()))
+        .await;
+    let starting_generation = fixture
+        .storage
+        .read_oauth_token_generation(upstream_id)
+        .await
+        .expect("generation reads")
+        .expect("oauth upstream exists");
+    let refresher = race_done_refresher(&fixture, upstream_id, starting_generation, false);
+
+    let error = refresher
+        .refresh_one(upstream_id)
+        .await
+        .expect_err("done without a generation advance must fail closed");
+    assert!(matches!(
+        error,
+        LazyRefreshError::Failed { reason }
+            if reason == "oauth refresh job completed without advancing generation"
+    ));
+}
+
+fn race_done_refresher(
+    fixture: &Fixture,
+    upstream_id: Uuid,
+    expected_generation: u64,
+    advance_generation: bool,
+) -> LazyRefresher {
+    let claims: Arc<dyn LazyRefreshClaimGuard> = Arc::new(RaceDoneClaims {
+        storage: fixture.storage.clone(),
+        aead: fixture.aead.clone(),
+        upstream_id,
+        expected_generation,
+        holder: Uuid::new_v4(),
+        advance_generation,
+        invoked: AtomicBool::new(false),
+    });
+    LazyRefresher::new_with_claim_guard(
+        LazyRefresherDeps {
+            stores: fixture.stores.clone(),
+            aead: fixture.aead.clone(),
+            clock: fixture.clock.clone(),
+        },
+        CancellationToken::new(),
+        claims,
+        fixture.scheduler_backend.clone(),
+    )
+}
+
+struct RaceDoneClaims {
+    storage: Arc<Storage>,
+    aead: Arc<AeadService>,
+    upstream_id: Uuid,
+    expected_generation: u64,
+    holder: Uuid,
+    advance_generation: bool,
+    invoked: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl LazyRefreshClaimGuard for RaceDoneClaims {
+    async fn begin_refresh(
+        &self,
+        upstream_id: Uuid,
+        expected_generation: u64,
+        _expires_at_unix_secs: u64,
+        _now_unix_secs: u64,
+    ) -> StorageResult<String> {
+        assert_eq!(upstream_id, self.upstream_id);
+        assert_eq!(expected_generation, self.expected_generation);
+        Ok("race:done".to_owned())
+    }
+
+    async fn task_state(&self, _idempotency_key: &str) -> StorageResult<LazyRefreshTaskState> {
+        if self.advance_generation && !self.invoked.swap(true, Ordering::SeqCst) {
+            assert!(
+                UpstreamStore::claim_refresh_lease(
+                    self.storage.as_ref(),
+                    self.upstream_id,
+                    self.holder,
+                    self.expected_generation,
+                    60,
+                )
+                .await?,
+                "racing worker claims the expected generation",
+            );
+            let rotated = encrypted(
+                self.aead.as_ref(),
+                self.upstream_id,
+                &OAuthTokenBundle {
+                    access_token: "sk-ant-oat01-rotated".to_owned(),
+                    refresh_token: "sk-ant-ort01-rotated".to_owned(),
+                    expires_at_unix_secs: 9_999_999_999,
+                    refresh_token_expires_at_unix_secs: None,
+                    scopes: vec!["messages".to_owned()],
+                },
+            );
+            UpstreamStore::complete_refresh(
+                self.storage.as_ref(),
+                self.upstream_id,
+                self.holder,
+                rotated,
+            )
+            .await?;
+        }
+        Ok(LazyRefreshTaskState::Done)
+    }
+}
+
+#[tokio::test]
 async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
     let fixture = Fixture::new().await;
     let upstream_id = fixture
         .create_oauth_upstream("lazy", now_secs(fixture.clock.as_ref()))
         .await;
-    let replica_id = Uuid::new_v4();
     let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
             stores: fixture.stores.clone(),
             aead: fixture.aead.clone(),
-            oauth_cfg: fixture.oauth_cfg.clone(),
             clock: fixture.clock.clone(),
         },
-        replica_id,
-        metadata_hook: None,
         cancel: CancellationToken::new(),
         apalis_handle: fixture.scheduler_backend.clone(),
     }));
@@ -268,16 +411,12 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         )
         .await;
     let cancel = CancellationToken::new();
-    let replica_id = Uuid::new_v4();
     let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
             stores: fixture.stores.clone(),
             aead: fixture.aead.clone(),
-            oauth_cfg: fixture.oauth_cfg.clone(),
             clock: fixture.clock.clone(),
         },
-        replica_id,
-        metadata_hook: None,
         cancel,
         apalis_handle: fixture.scheduler_backend.clone(),
     }));
@@ -595,7 +734,7 @@ async fn dispatch_oauth_refresh_job(
     };
     let now = now_secs(clock.as_ref());
     let refresh_clock = clock.clone();
-    OAuthRefreshJobHandler::new(TestOAuthRefreshUpstreams { storage }, Uuid::new_v4())
+    OAuthRefreshJobHandler::new(TestOAuthRefreshUpstreams { storage })
         .handle(
             job,
             now,
@@ -604,8 +743,8 @@ async fn dispatch_oauth_refresh_job(
                 let backend = backend.clone();
                 move |metadata_job| enqueue_metadata_refresh(backend.clone(), metadata_job)
             },
-            move |upstream_id, expires_at_unix_secs| {
-                enqueue_next_oauth_refresh(backend, upstream_id, expires_at_unix_secs)
+            move |upstream_id, generation, expires_at_unix_secs| {
+                enqueue_next_oauth_refresh(backend, upstream_id, generation, expires_at_unix_secs)
             },
         )
         .await
@@ -623,6 +762,44 @@ impl OAuthRefreshUpstreams for TestOAuthRefreshUpstreams {
             .map_err(storage_scheduler_error)
     }
 
+    async fn claim_refresh_lease(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        expected_generation: u64,
+        ttl_secs: u64,
+    ) -> SchedulerResult<bool> {
+        UpstreamStore::claim_refresh_lease(
+            self.storage.as_ref(),
+            id,
+            holder,
+            expected_generation,
+            ttl_secs,
+        )
+        .await
+        .map_err(storage_scheduler_error)
+    }
+
+    async fn read_oauth_refresh_terminal_failure(
+        &self,
+        id: Uuid,
+    ) -> SchedulerResult<Option<cc_lb_storage_api::OAuthRefreshTerminalFailure>> {
+        UpstreamStore::read_oauth_refresh_terminal_failure(self.storage.as_ref(), id)
+            .await
+            .map_err(storage_scheduler_error)
+    }
+
+    async fn fail_refresh(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        terminal_error: Option<String>,
+    ) -> SchedulerResult<bool> {
+        UpstreamStore::fail_refresh(self.storage.as_ref(), id, holder, terminal_error)
+            .await
+            .map_err(storage_scheduler_error)
+    }
+
     async fn complete_refresh(
         &self,
         id: Uuid,
@@ -630,12 +807,6 @@ impl OAuthRefreshUpstreams for TestOAuthRefreshUpstreams {
         tokens: EncryptedOAuthTokens,
     ) -> SchedulerResult<UpstreamRecord> {
         UpstreamStore::complete_refresh(self.storage.as_ref(), id, holder, tokens)
-            .await
-            .map_err(storage_scheduler_error)
-    }
-
-    async fn read_oauth_token_generation(&self, id: Uuid) -> SchedulerResult<Option<u64>> {
-        UpstreamStore::read_oauth_token_generation(self.storage.as_ref(), id)
             .await
             .map_err(storage_scheduler_error)
     }
@@ -657,6 +828,7 @@ async fn refresh_tokens(
     let refreshed = refreshed_token_parts(
         ExistingTokenParts {
             refresh_token: previous.refresh_token,
+            refresh_token_expires_at_unix_secs: previous.refresh_token_expires_at_unix_secs,
             scopes: previous.scopes,
         },
         response,
@@ -669,6 +841,7 @@ async fn refresh_tokens(
             access_token: refreshed.access_token,
             refresh_token: refreshed.refresh_token,
             expires_at_unix_secs,
+            refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
             scopes: refreshed.scopes,
         },
         upstream.id.as_bytes(),
@@ -713,14 +886,14 @@ async fn enqueue_metadata_refresh(
 async fn enqueue_next_oauth_refresh(
     backend: SchedulerBackend,
     upstream_id: Uuid,
+    expected_generation: u64,
     expires_at_unix_secs: u64,
 ) -> SchedulerResult<()> {
-    let job = OAuthRefreshJob::new(upstream_id);
+    let job = OAuthRefreshJob::for_generation(upstream_id, expected_generation);
+    let idempotency_key = job.idempotency_key(expires_at_unix_secs);
     let task = SchedulerPushTask {
         args: AdaptiveJob::OAuthRefresh(job),
-        idempotency_key: Some(
-            OAuthRefreshJob::new(upstream_id).idempotency_key(expires_at_unix_secs),
-        ),
+        idempotency_key: Some(idempotency_key),
         run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(expires_at_unix_secs)),
         max_attempts: None,
     };

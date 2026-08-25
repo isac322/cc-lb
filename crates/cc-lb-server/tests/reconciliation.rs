@@ -440,6 +440,38 @@ impl UpstreamStore for BlockingUpstreamStore {
         unimplemented!()
     }
 
+    async fn claim_refresh_lease(
+        &self,
+        _id: Uuid,
+        _holder: Uuid,
+        _expected_generation: u64,
+        _ttl_secs: u64,
+    ) -> StorageResult<bool> {
+        unimplemented!()
+    }
+
+    async fn fail_refresh(
+        &self,
+        _id: Uuid,
+        _holder: Uuid,
+        _terminal_error: Option<String>,
+    ) -> StorageResult<bool> {
+        unimplemented!()
+    }
+
+    async fn read_oauth_refresh_terminal_failure(
+        &self,
+        _id: Uuid,
+    ) -> StorageResult<Option<cc_lb_storage_api::OAuthRefreshTerminalFailure>> {
+        unimplemented!()
+    }
+
+    async fn list_oauth_refresh_terminal_failures(
+        &self,
+    ) -> StorageResult<Vec<cc_lb_storage_api::OAuthRefreshTerminalFailure>> {
+        unimplemented!()
+    }
+
     async fn complete_refresh(
         &self,
         _id: Uuid,

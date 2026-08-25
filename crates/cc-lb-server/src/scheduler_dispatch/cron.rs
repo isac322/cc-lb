@@ -17,6 +17,7 @@ use cc_lb_scheduler::jobs::usage_prune::handle_usage_prune_job;
 use cc_lb_scheduler::jobs::usage_rollup::handle_usage_rollup_job;
 use cc_lb_scheduler::jobs::watchdog::{
     OAuthRefreshWatchdogJob, WarmupWatchdogJob, WatchdogEntityKind, run_entity_watchdog,
+    run_oauth_refresh_watchdog,
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::state_stores::{
@@ -166,11 +167,10 @@ impl SchedulerDispatch {
         &self,
         job: OAuthRefreshWatchdogJob,
     ) -> SchedulerResult<JobOutcome> {
-        let upstream_ids = self.list_oauth_watchdog_upstream_ids().await?;
-        let stats = run_entity_watchdog(
+        let upstream_generations = self.list_oauth_watchdog_upstream_generations().await?;
+        let stats = run_oauth_refresh_watchdog(
             &self.backend,
-            WatchdogEntityKind::OAuthRefresh,
-            &upstream_ids,
+            &upstream_generations,
             job.tick_unix_secs,
             unix_secs(self.clock.now()),
         )

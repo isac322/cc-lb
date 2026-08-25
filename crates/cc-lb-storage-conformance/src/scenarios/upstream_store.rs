@@ -60,6 +60,9 @@ where
     set_enabled_toggle(Arc::clone(&backend)).await?;
     store_oauth_tokens_roundtrip(Arc::clone(&backend)).await?;
     complete_refresh_stores_tokens(Arc::clone(&backend)).await?;
+    refresh_lease_fencing(Arc::clone(&backend)).await?;
+    refresh_failure_releases_lease(Arc::clone(&backend)).await?;
+    manual_token_replacement_invalidates_refresh_lease(Arc::clone(&backend)).await?;
     set_last_apply_error_roundtrip(Arc::clone(&backend)).await?;
     status_update_does_not_bump_spec_revision(Arc::clone(&backend)).await?;
     secret_and_token_updates_do_not_bump_spec_revision(Arc::clone(&backend)).await?;
@@ -234,6 +237,12 @@ scenario!(complete_refresh_stores_tokens, |store| async move {
     let aead = AeadService::from_master_key([44; 32]);
     let bundle = token_bundle("access-b", "refresh-b");
     let encrypted = EncryptedOAuthTokens::encrypt(&aead, &bundle, record.id.as_bytes())?;
+    ensure!(
+        store
+            .claim_refresh_lease(record.id, holder, record.oauth_token_generation, 3_600)
+            .await?,
+        "refresh lease should be claimed"
+    );
     let refreshed = store.complete_refresh(record.id, holder, encrypted).await?;
     ensure!(
         refreshed
@@ -245,6 +254,204 @@ scenario!(complete_refresh_stores_tokens, |store| async move {
     );
     Ok(())
 });
+
+scenario!(refresh_lease_fencing, |store| async move {
+    let record = create_named(store.as_ref(), "upstream-refresh-fencing").await?;
+    store
+        .set_last_apply_error(record.id, Some("previous refresh error".to_owned()))
+        .await?;
+    let holder = Uuid::new_v4();
+    let contender = Uuid::new_v4();
+    let wrong_holder = Uuid::new_v4();
+    ensure!(
+        store
+            .claim_refresh_lease(record.id, holder, record.oauth_token_generation, 3_600)
+            .await?,
+        "first holder should claim refresh lease"
+    );
+    ensure!(
+        !store
+            .claim_refresh_lease(record.id, contender, record.oauth_token_generation, 3_600)
+            .await?,
+        "contender must not claim a live refresh lease"
+    );
+    ensure!(
+        !store.fail_refresh(record.id, wrong_holder, None).await?,
+        "wrong holder must not fail refresh"
+    );
+
+    let aead = AeadService::from_master_key([46; 32]);
+    let wrong_tokens = EncryptedOAuthTokens::encrypt(
+        &aead,
+        &token_bundle("access-wrong", "refresh-wrong"),
+        record.id.as_bytes(),
+    )?;
+    let wrong_error = store
+        .complete_refresh(record.id, wrong_holder, wrong_tokens)
+        .await
+        .expect_err("wrong holder must not complete refresh");
+    ensure!(
+        matches!(wrong_error, StorageError::Conflict { .. }),
+        "wrong holder completion should conflict"
+    );
+
+    let fresh_bundle = token_bundle("access-fresh", "refresh-fresh");
+    let fresh_tokens = EncryptedOAuthTokens::encrypt(&aead, &fresh_bundle, record.id.as_bytes())?;
+    let refreshed = store
+        .complete_refresh(record.id, holder, fresh_tokens)
+        .await?;
+    ensure!(
+        refreshed.oauth_token_generation == record.oauth_token_generation + 1,
+        "refresh completion must advance token generation exactly once"
+    );
+    ensure!(
+        refreshed.last_apply_error.is_none(),
+        "successful refresh should clear last_apply_error"
+    );
+    ensure!(
+        refreshed
+            .oauth_credentials
+            .expect("tokens")
+            .decrypt(&aead, record.id.as_bytes())?
+            == fresh_bundle,
+        "refresh completion stored unexpected tokens"
+    );
+
+    let stale_tokens = EncryptedOAuthTokens::encrypt(
+        &aead,
+        &token_bundle("access-stale", "refresh-stale"),
+        record.id.as_bytes(),
+    )?;
+    let stale_error = store
+        .complete_refresh(record.id, holder, stale_tokens)
+        .await
+        .expect_err("second completion must be rejected");
+    ensure!(
+        matches!(stale_error, StorageError::Conflict { .. }),
+        "stale completion should conflict"
+    );
+    ensure!(
+        store
+            .read_oauth_token_generation(record.id)
+            .await?
+            .expect("generation")
+            == record.oauth_token_generation + 1,
+        "stale completion must not advance token generation"
+    );
+    Ok(())
+});
+
+scenario!(refresh_failure_releases_lease, |store| async move {
+    let record = create_named(store.as_ref(), "upstream-refresh-failure").await?;
+    let holder = Uuid::new_v4();
+    let next_holder = Uuid::new_v4();
+    ensure!(
+        store
+            .claim_refresh_lease(record.id, holder, record.oauth_token_generation, 3_600)
+            .await?,
+        "refresh lease should be claimed"
+    );
+    ensure!(
+        store.fail_refresh(record.id, holder, None).await?,
+        "matching live holder should fail refresh"
+    );
+    ensure!(
+        store
+            .claim_refresh_lease(record.id, next_holder, record.oauth_token_generation, 3_600,)
+            .await?,
+        "failed refresh should release the lease"
+    );
+    Ok(())
+});
+
+scenario!(
+    manual_token_replacement_invalidates_refresh_lease,
+    |store| async move {
+        let record = create_named(store.as_ref(), "upstream-refresh-manual").await?;
+        let old_holder = Uuid::new_v4();
+        let new_holder = Uuid::new_v4();
+        ensure!(
+            store
+                .claim_refresh_lease(record.id, old_holder, record.oauth_token_generation, 3_600)
+                .await?,
+            "old holder should claim refresh lease"
+        );
+        ensure!(
+            store
+                .fail_refresh(record.id, old_holder, Some("invalid_grant".to_owned()),)
+                .await?,
+            "terminal refresh failure should release the old lease"
+        );
+        ensure!(
+            store
+                .list_oauth_refresh_terminal_failures()
+                .await?
+                .iter()
+                .any(|failure| {
+                    failure.upstream_id == record.id
+                        && failure.expected_generation == record.oauth_token_generation
+                        && failure.code == "invalid_grant"
+                }),
+            "terminal refresh failure should be persisted for the credential generation"
+        );
+        ensure!(
+            !store
+                .claim_refresh_lease(record.id, new_holder, record.oauth_token_generation, 3_600,)
+                .await?,
+            "terminal refresh failure should block the same credential generation"
+        );
+
+        let aead = AeadService::from_master_key([47; 32]);
+        let manual_tokens = EncryptedOAuthTokens::encrypt(
+            &aead,
+            &token_bundle("access-manual", "refresh-manual"),
+            record.id.as_bytes(),
+        )?;
+        let manually_updated = store.update_oauth_token(record.id, manual_tokens).await?;
+        ensure!(
+            manually_updated.oauth_token_generation == record.oauth_token_generation + 1,
+            "manual token replacement should advance the credential generation"
+        );
+        ensure!(
+            manually_updated.last_apply_error.is_none(),
+            "manual token replacement should clear the prior refresh error"
+        );
+        ensure!(
+            store
+                .list_oauth_refresh_terminal_failures()
+                .await?
+                .iter()
+                .all(|failure| failure.upstream_id != record.id),
+            "manual token replacement should clear the terminal refresh failure"
+        );
+        ensure!(
+            store
+                .claim_refresh_lease(
+                    record.id,
+                    new_holder,
+                    manually_updated.oauth_token_generation,
+                    3_600,
+                )
+                .await?,
+            "manual token replacement should invalidate the old lease"
+        );
+
+        let stale_tokens = EncryptedOAuthTokens::encrypt(
+            &aead,
+            &token_bundle("access-old", "refresh-old"),
+            record.id.as_bytes(),
+        )?;
+        let stale_error = store
+            .complete_refresh(record.id, old_holder, stale_tokens)
+            .await
+            .expect_err("invalidated old holder must not complete refresh");
+        ensure!(
+            matches!(stale_error, StorageError::Conflict { .. }),
+            "invalidated old holder completion should conflict"
+        );
+        Ok(())
+    }
+);
 
 scenario!(set_last_apply_error_roundtrip, |store| async move {
     let record = create_named(store.as_ref(), "upstream-apply-error").await?;
@@ -491,6 +698,19 @@ scenario!(
 
 scenario!(hard_delete_removes_row, |store| async move {
     let record = create_named(store.as_ref(), "upstream-hard-delete").await?;
+    let holder = Uuid::new_v4();
+    ensure!(
+        store
+            .claim_refresh_lease(record.id, holder, record.oauth_token_generation, 60,)
+            .await?,
+        "refresh lease should be claimed before hard delete"
+    );
+    ensure!(
+        store
+            .fail_refresh(record.id, holder, Some("invalid_grant".to_owned()),)
+            .await?,
+        "terminal refresh failure should be recorded before hard delete"
+    );
     store.hard_delete(record.id).await?;
     ensure!(
         store.get_by_id(record.id).await?.is_none(),
@@ -499,6 +719,14 @@ scenario!(hard_delete_removes_row, |store| async move {
     ensure!(
         store.get_by_name("upstream-hard-delete").await?.is_none(),
         "name row should be removed"
+    );
+    ensure!(
+        store
+            .list_oauth_refresh_terminal_failures()
+            .await?
+            .into_iter()
+            .all(|failure| failure.upstream_id != record.id),
+        "terminal refresh failure should be removed"
     );
     Ok(())
 });
@@ -555,6 +783,7 @@ fn token_bundle(access_token: &str, refresh_token: &str) -> OAuthTokenBundle {
         access_token: access_token.to_owned(),
         refresh_token: refresh_token.to_owned(),
         expires_at_unix_secs: 1_900_000_000,
+        refresh_token_expires_at_unix_secs: None,
         scopes: vec!["org:profile".to_owned()],
     }
 }

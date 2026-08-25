@@ -19,7 +19,6 @@ use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerBackend};
 use cc_lb_storage_api::UpstreamRecord;
 use url::Url;
-use uuid::Uuid;
 
 use super::common::now_secs;
 use super::fake::raw_http;
@@ -68,7 +67,6 @@ impl OAuthWorkerProbe {
 impl<Upstreams> OAuthWorkerState<Upstreams> {
     pub fn new(
         upstreams: Upstreams,
-        replica_id: Uuid,
         aead: Arc<AeadService>,
         oauth_cfg: Arc<AnthropicOAuthConfig>,
         backend: SchedulerBackend,
@@ -78,7 +76,7 @@ impl<Upstreams> OAuthWorkerState<Upstreams> {
             retry_delay: super::common::POLL_INTERVAL,
         };
         Self {
-            handler: OAuthRefreshJobHandler::with_config(upstreams, replica_id, config),
+            handler: OAuthRefreshJobHandler::with_config(upstreams, config),
             aead,
             oauth_cfg,
             backend,
@@ -108,7 +106,7 @@ where
                 now_secs(),
                 move |upstream| refresh_tokens(aead, oauth_cfg, upstream),
                 move |metadata| enqueue_metadata(backend, metadata),
-                |_upstream_id, _expires_at_unix_secs| async { Ok(()) },
+                |_upstream_id, _generation, _expires_at_unix_secs| async { Ok(()) },
             )
             .await
     })
@@ -138,6 +136,7 @@ async fn refresh_tokens(
     let refreshed = refreshed_token_parts(
         ExistingTokenParts {
             refresh_token: previous.refresh_token,
+            refresh_token_expires_at_unix_secs: previous.refresh_token_expires_at_unix_secs,
             scopes: previous.scopes,
         },
         response,
@@ -150,6 +149,7 @@ async fn refresh_tokens(
             access_token: refreshed.access_token,
             refresh_token: refreshed.refresh_token,
             expires_at_unix_secs,
+            refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
             scopes: refreshed.scopes,
         },
         upstream.id.as_bytes(),

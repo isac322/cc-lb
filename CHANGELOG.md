@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 - Scheduler retry outcomes now apply the first backoff step on a job's first execution and re-arm the same SQLite or PostgreSQL row with the requested delay instead of being acknowledged as terminal `Done`. Exhausted retries become retention-managed `Killed` rows, while task IDs, payloads, and idempotency keys remain stable across attempts.
 
 
+### Fixed
+
+- Anthropic OAuth refresh now uses generation-fenced database leases across proactive and request-triggered scheduling, so concurrent workers cannot refresh the same credential generation or overwrite a newer manual replacement. Terminal token-endpoint failures such as `invalid_grant` stop retry and watchdog reseeding until credentials are replaced, while transient failures release ownership for a scheduled retry.
+
 ## [0.4.5] - 2026-08-24
 
 ### Fixed

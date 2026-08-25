@@ -4,10 +4,18 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "postgres")]
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "postgres")]
 use apalis::prelude::TaskSink;
+#[cfg(feature = "postgres")]
+use apalis_core::backend::TaskSinkError;
+#[cfg(feature = "postgres")]
+use apalis_core::task::builder::TaskBuilder;
+#[cfg(feature = "postgres")]
+use cc_lb_clock::unix_secs;
 use cc_lb_clock::{Clock, ClockHandle, unix_millis};
 use cc_lb_config::{Config, SchedulerConfig};
 use tokio::task::JoinHandle;
@@ -100,11 +108,19 @@ impl SchedulerBackend {
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
+                let run_at_unix_secs = unix_secs(SystemTime::now());
+                let idempotency_key = job.idempotency_key(run_at_unix_secs);
+                let task = TaskBuilder::new(job)
+                    .run_at_timestamp(run_at_unix_secs)
+                    .with_idempotency_key(idempotency_key)
+                    .build();
                 let mut storage = postgres.adaptive_operation_storage();
-                storage
-                    .push(job)
-                    .await
-                    .map_err(|error| SchedulerError::Job(error.to_string()))?;
+                match storage.push_task(task).await {
+                    Ok(()) => {}
+                    Err(TaskSinkError::PushError(sqlx::Error::Database(error)))
+                        if error.is_unique_violation() => {}
+                    Err(error) => return Err(SchedulerError::Job(error.to_string())),
+                }
             }
         }
         Ok(())

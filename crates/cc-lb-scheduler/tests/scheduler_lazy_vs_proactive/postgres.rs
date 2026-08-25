@@ -11,7 +11,7 @@ use cc_lb_scheduler::retry::RetryClass;
 use cc_lb_scheduler::worker::{
     ADAPTIVE_QUEUE, AdaptiveJob, PostgresApalisStorage, PostgresSchedulerBackend, SchedulerBackend,
 };
-use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
+use cc_lb_server::refresh::{ApalisLazyRefreshClaimGuard, LazyRefresher, LazyRefresherDeps};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use sqlx::postgres::PgPoolOptions;
 use storage_sqlx::postgres::PgPoolOptions as StoragePgPoolOptions;
@@ -28,7 +28,7 @@ use super::common::{
     TestResult, create_oauth_upstream, read_upstream_generation, stores_from_storage,
 };
 use super::fake::FakeAnthropic;
-use super::scenario::run_race_scenario;
+use super::scenario::{ClaimContentionObserver, run_race_scenario};
 use super::worker::{OAuthWorkerProbe, OAuthWorkerState, entity_job_handler};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -65,7 +65,7 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
         redirect_uri: Url::parse("http://localhost/callback")?,
         scopes: vec!["messages".to_owned()],
     });
-    let upstream_id = create_oauth_upstream(
+    let (upstream_id, expires_at_unix_secs) = create_oauth_upstream(
         storage.as_ref(),
         aead.as_ref(),
         fake.initial_tokens().await?,
@@ -74,7 +74,6 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
     let probe = OAuthWorkerProbe::new();
     let state = OAuthWorkerState::new(
         storage.as_ref().clone(),
-        Uuid::new_v4(),
         aead.clone(),
         oauth_cfg.clone(),
         backend.clone(),
@@ -86,24 +85,27 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
         state,
         cancel.clone(),
     );
-    let lazy = LazyRefresher::new(LazyRefresherParams {
-        deps: LazyRefresherDeps {
-            stores: stores_from_storage(storage.clone()),
+    let stores = stores_from_storage(storage.clone());
+    let claim_guard =
+        ClaimContentionObserver::new(Arc::new(ApalisLazyRefreshClaimGuard::new(backend.clone())));
+    let lazy = LazyRefresher::new_with_claim_guard(
+        LazyRefresherDeps {
+            stores,
             aead,
-            oauth_cfg,
             clock: Arc::new(cc_lb_clock::SystemClock),
         },
-        replica_id: Uuid::new_v4(),
-        metadata_hook: None,
-        cancel: CancellationToken::new(),
-        apalis_handle: backend.clone(),
-    });
+        CancellationToken::new(),
+        claim_guard.clone(),
+        backend.clone(),
+    );
 
     let result = run_race_scenario(
         &fake,
         backend,
         lazy,
+        claim_guard,
         upstream_id,
+        expires_at_unix_secs,
         || {
             let storage = storage.clone();
             async move { read_upstream_generation(storage.as_ref(), upstream_id).await }
@@ -201,6 +203,9 @@ where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = TestResult<()>>,
 {
+    if let Ok(url) = std::env::var("CI_POSTGRES_URL") {
+        return run(url).await;
+    }
     let docker_host = match std::env::var("DOCKER_HOST") {
         Ok(value) => value,
         Err(error) => {

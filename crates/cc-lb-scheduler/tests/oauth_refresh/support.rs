@@ -1,10 +1,9 @@
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use cc_lb_aead::EncryptedOAuthTokens;
-use cc_lb_scheduler::error::Result;
+use cc_lb_scheduler::error::{Result, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshUpstreams;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
@@ -19,8 +18,13 @@ pub struct FakeUpstreams {
 struct FakeUpstreamsState {
     record: UpstreamRecord,
     completed_generation: u64,
+    lease_holder: Option<Uuid>,
+    claim_calls: usize,
     complete_calls: usize,
-    read_generations: VecDeque<Option<u64>>,
+    fail_calls: usize,
+    failure_reason: Option<String>,
+    failure_generation: Option<u64>,
+    replacement_generation_on_claim: Option<u64>,
 }
 
 impl FakeUpstreams {
@@ -29,19 +33,56 @@ impl FakeUpstreams {
             state: Arc::new(Mutex::new(FakeUpstreamsState {
                 record,
                 completed_generation,
+                lease_holder: None,
+                claim_calls: 0,
                 complete_calls: 0,
-                read_generations: VecDeque::new(),
+                fail_calls: 0,
+                failure_reason: None,
+                failure_generation: None,
+                replacement_generation_on_claim: None,
             })),
         }
     }
 
-    pub fn with_read_generations<const N: usize>(self, generations: [Option<u64>; N]) -> Self {
-        self.state.lock().expect("upstreams lock").read_generations = generations.into();
+    pub fn with_busy_lease(self) -> Self {
+        self.state.lock().expect("upstreams lock").lease_holder = Some(Uuid::new_v4());
+        self
+    }
+
+    pub fn with_replacement_after_claim(self, generation: u64) -> Self {
+        self.state
+            .lock()
+            .expect("upstreams lock")
+            .replacement_generation_on_claim = Some(generation);
         self
     }
 
     pub fn complete_calls(&self) -> usize {
         self.state.lock().expect("upstreams lock").complete_calls
+    }
+
+    pub fn claim_calls(&self) -> usize {
+        self.state.lock().expect("upstreams lock").claim_calls
+    }
+
+    pub fn fail_calls(&self) -> usize {
+        self.state.lock().expect("upstreams lock").fail_calls
+    }
+
+    pub fn failure_reason(&self) -> Option<String> {
+        self.state
+            .lock()
+            .expect("upstreams lock")
+            .failure_reason
+            .clone()
+    }
+
+    pub fn replace_credentials(&self, generation: u64) {
+        let mut state = self.state.lock().expect("upstreams lock");
+        state.record.oauth_token_generation = generation;
+        state.lease_holder = None;
+        state.failure_generation = None;
+        state.failure_reason = None;
     }
 }
 
@@ -52,24 +93,83 @@ impl OAuthRefreshUpstreams for FakeUpstreams {
         ))
     }
 
+    async fn claim_refresh_lease(
+        &self,
+        _id: Uuid,
+        holder: Uuid,
+        expected_generation: u64,
+        _ttl_secs: u64,
+    ) -> Result<bool> {
+        let mut state = self.state.lock().expect("upstreams lock");
+        state.claim_calls += 1;
+        if state.lease_holder.is_some()
+            || state.record.oauth_token_generation != expected_generation
+            || state.failure_generation == Some(expected_generation)
+        {
+            return Ok(false);
+        }
+        state.lease_holder = Some(holder);
+        if let Some(generation) = state.replacement_generation_on_claim.take() {
+            state.record.oauth_token_generation = generation;
+            state.lease_holder = None;
+        }
+        Ok(true)
+    }
+
+    async fn read_oauth_refresh_terminal_failure(
+        &self,
+        _id: Uuid,
+    ) -> Result<Option<cc_lb_storage_api::OAuthRefreshTerminalFailure>> {
+        let state = self.state.lock().expect("upstreams lock");
+        Ok(state
+            .failure_generation
+            .zip(state.failure_reason.clone())
+            .map(
+                |(expected_generation, code)| cc_lb_storage_api::OAuthRefreshTerminalFailure {
+                    upstream_id: state.record.id,
+                    expected_generation,
+                    code,
+                },
+            ))
+    }
+
+    async fn fail_refresh(
+        &self,
+        _id: Uuid,
+        holder: Uuid,
+        terminal_error: Option<String>,
+    ) -> Result<bool> {
+        let mut state = self.state.lock().expect("upstreams lock");
+        state.fail_calls += 1;
+        if state.lease_holder != Some(holder) {
+            return Ok(false);
+        }
+        state.lease_holder = None;
+        state.failure_generation = terminal_error
+            .as_ref()
+            .map(|_| state.record.oauth_token_generation);
+        state.failure_reason = terminal_error;
+        Ok(true)
+    }
+
     async fn complete_refresh(
         &self,
         _id: Uuid,
-        _holder: Uuid,
+        holder: Uuid,
         _tokens: EncryptedOAuthTokens,
     ) -> Result<UpstreamRecord> {
         let mut state = self.state.lock().expect("upstreams lock");
+        if state.lease_holder != Some(holder) {
+            return Err(SchedulerError::Conflict(
+                "oauth refresh lease fence failed".to_owned(),
+            ));
+        }
+        state.lease_holder = None;
         state.complete_calls += 1;
         state.record.oauth_token_generation = state.completed_generation;
+        state.failure_generation = None;
+        state.failure_reason = None;
         Ok(state.record.clone())
-    }
-
-    async fn read_oauth_token_generation(&self, _id: Uuid) -> Result<Option<u64>> {
-        let mut state = self.state.lock().expect("upstreams lock");
-        Ok(state
-            .read_generations
-            .pop_front()
-            .unwrap_or(Some(state.record.oauth_token_generation)))
     }
 }
 

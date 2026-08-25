@@ -951,16 +951,13 @@ async fn build_app_with_storage_inner(
     let lazy_refresher_concrete: Option<Arc<LazyRefresher>> = lifecycle_config
         .replica_identity
         .as_ref()
-        .map(|identity| match lazy_refresh_claim_guard.clone() {
+        .map(|_| match lazy_refresh_claim_guard.clone() {
             Some(claim_guard) => Arc::new(LazyRefresher::new_with_claim_guard(
                 crate::refresh::LazyRefresherDeps {
                     stores: stores.clone(),
                     aead: aead.clone(),
-                    oauth_cfg: oauth_cfg.clone(),
                     clock: clock.clone(),
                 },
-                identity.id,
-                subscription_metadata_hook.clone(),
                 refresh_cancel.clone(),
                 claim_guard,
                 scheduler_lazy_handle.clone(),
@@ -969,11 +966,8 @@ async fn build_app_with_storage_inner(
                 deps: crate::refresh::LazyRefresherDeps {
                     stores: stores.clone(),
                     aead: aead.clone(),
-                    oauth_cfg: oauth_cfg.clone(),
                     clock: clock.clone(),
                 },
-                replica_id: identity.id,
-                metadata_hook: subscription_metadata_hook.clone(),
                 cancel: refresh_cancel.clone(),
                 apalis_handle: scheduler_lazy_handle.clone(),
             })),

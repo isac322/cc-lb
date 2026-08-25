@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_storage_api::upstream::{
-    UpstreamKind, UpstreamStatusUpdate, UpstreamWarmupDialectPlugin,
+    OAuthRefreshTerminalFailure, UpstreamKind, UpstreamStatusUpdate, UpstreamWarmupDialectPlugin,
 };
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
@@ -115,6 +115,37 @@ impl UpstreamStore for SqliteStorage {
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
         update_split_oauth_token(self, id, tokens, Some(expected_revision)).await
+    }
+
+    async fn claim_refresh_lease(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        expected_generation: u64,
+        ttl_secs: u64,
+    ) -> StorageResult<bool> {
+        claim_split_refresh_lease(self, id, holder, expected_generation, ttl_secs).await
+    }
+
+    async fn fail_refresh(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        terminal_error: Option<String>,
+    ) -> StorageResult<bool> {
+        fail_split_refresh(self, id, holder, terminal_error).await
+    }
+    async fn read_oauth_refresh_terminal_failure(
+        &self,
+        id: Uuid,
+    ) -> StorageResult<Option<OAuthRefreshTerminalFailure>> {
+        read_split_oauth_refresh_terminal_failure(self.pool(), id).await
+    }
+
+    async fn list_oauth_refresh_terminal_failures(
+        &self,
+    ) -> StorageResult<Vec<OAuthRefreshTerminalFailure>> {
+        list_split_oauth_refresh_terminal_failures(self.pool()).await
     }
 
     async fn complete_refresh(
@@ -432,11 +463,20 @@ async fn update_split_oauth_token(
         ensure_split_spec_active_in_tx(&mut tx, id).await?;
     }
     sqlx::query(
-        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, refreshed_at, created_at, updated_at)
-         VALUES (?, ?, 1, unixepoch(), unixepoch(), unixepoch())
+        "INSERT INTO upstream_oauth_token_v1 (
+             upstream_id,
+             oauth_credentials_ciphertext,
+             token_revision,
+             oauth_token_generation,
+             refreshed_at,
+             created_at,
+             updated_at
+         )
+         VALUES (?, ?, 1, 1, unixepoch(), unixepoch(), unixepoch())
          ON CONFLICT (upstream_id) DO UPDATE
          SET oauth_credentials_ciphertext = excluded.oauth_credentials_ciphertext,
              token_revision = upstream_oauth_token_v1.token_revision + 1,
+             oauth_token_generation = upstream_oauth_token_v1.oauth_token_generation + 1,
              refreshed_at = unixepoch(),
              updated_at = unixepoch()",
     )
@@ -445,6 +485,9 @@ async fn update_split_oauth_token(
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
+    delete_split_refresh_lease_in_tx(&mut tx, id).await?;
+    delete_split_terminal_refresh_failure_in_tx(&mut tx, id).await?;
+    clear_split_refresh_error_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     get_split_by_id(storage.pool(), id)
         .await?
@@ -469,42 +512,271 @@ async fn update_split_oauth_token_generation_in_tx(
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
+    delete_split_refresh_lease_in_tx(tx, id).await?;
+    delete_split_terminal_refresh_failure_in_tx(tx, id).await?;
     Ok(())
+}
+
+async fn claim_split_refresh_lease(
+    storage: &SqliteStorage,
+    id: Uuid,
+    holder: Uuid,
+    expected_generation: u64,
+    ttl_secs: u64,
+) -> StorageResult<bool> {
+    let mut tx = storage.begin_immediate().await?;
+    let expected_generation = u64_to_i64(expected_generation, "oauth token generation")?;
+    let ttl_secs = u64_to_i64(ttl_secs, "oauth refresh lease ttl")?;
+    let result = sqlx::query(
+        "INSERT INTO oauth_refresh_leases_v1 (
+             upstream_id,
+             holder,
+             expected_generation,
+             lease_until_unix_secs
+         )
+         SELECT spec.id, ?, ?, unixepoch() + ?
+           FROM upstream_spec_v1 spec
+           LEFT JOIN upstream_oauth_token_v1 token ON token.upstream_id = spec.id
+          WHERE spec.id = ?
+            AND spec.deleted_at IS NULL
+            AND COALESCE(token.oauth_token_generation, 0) = ?
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM oauth_refresh_terminal_failures_v1 terminal
+                 WHERE terminal.upstream_id = spec.id
+                   AND terminal.expected_generation = ?
+            )
+         ON CONFLICT (upstream_id) DO UPDATE
+         SET holder = excluded.holder,
+             expected_generation = excluded.expected_generation,
+             lease_until_unix_secs = excluded.lease_until_unix_secs
+         WHERE oauth_refresh_leases_v1.lease_until_unix_secs <= unixepoch()",
+    )
+    .bind(holder.to_string())
+    .bind(expected_generation)
+    .bind(ttl_secs)
+    .bind(id.to_string())
+    .bind(expected_generation)
+    .bind(expected_generation)
+    .execute(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let claimed = result.rows_affected() == 1;
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(claimed)
+}
+
+async fn fail_split_refresh(
+    storage: &SqliteStorage,
+    id: Uuid,
+    holder: Uuid,
+    terminal_error: Option<String>,
+) -> StorageResult<bool> {
+    let mut tx = storage.begin_immediate().await?;
+    let expected_generation = sqlx::query_scalar::<_, i64>(
+        "DELETE FROM oauth_refresh_leases_v1
+          WHERE upstream_id = ?
+            AND holder = ?
+            AND lease_until_unix_secs > unixepoch()
+            AND EXISTS (
+                SELECT 1
+                  FROM upstream_spec_v1 spec
+                 WHERE spec.id = oauth_refresh_leases_v1.upstream_id
+                   AND spec.deleted_at IS NULL
+            )
+         RETURNING expected_generation",
+    )
+    .bind(id.to_string())
+    .bind(holder.to_string())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    let Some(expected_generation) = expected_generation else {
+        tx.commit().await.map_err(map_sqlx_error)?;
+        return Ok(false);
+    };
+    if let Some(error_code) = terminal_error {
+        sqlx::query(
+            "INSERT INTO oauth_refresh_terminal_failures_v1 (
+                 upstream_id, expected_generation, error_code, failed_at_unix_secs
+             )
+             VALUES (?, ?, ?, unixepoch())
+             ON CONFLICT (upstream_id) DO UPDATE
+             SET expected_generation = excluded.expected_generation,
+                 error_code = excluded.error_code,
+                 failed_at_unix_secs = excluded.failed_at_unix_secs",
+        )
+        .bind(id.to_string())
+        .bind(expected_generation)
+        .bind(error_code)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(true)
 }
 
 async fn complete_split_refresh(
     storage: &SqliteStorage,
     id: Uuid,
-    _holder: Uuid,
+    holder: Uuid,
     tokens: EncryptedOAuthTokens,
 ) -> StorageResult<()> {
     let mut tx = storage.begin_immediate().await?;
-    ensure_split_spec_active_in_tx(&mut tx, id).await?;
-    sqlx::query(
-        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at)
-         VALUES (?, ?, 1, 1, unixepoch(), unixepoch(), unixepoch())
+    let result = sqlx::query(
+        "INSERT INTO upstream_oauth_token_v1 (
+             upstream_id,
+             oauth_credentials_ciphertext,
+             token_revision,
+             oauth_token_generation,
+             refreshed_at,
+             created_at,
+             updated_at
+         )
+         SELECT lease.upstream_id,
+                ?,
+                1,
+                lease.expected_generation + 1,
+                unixepoch(),
+                unixepoch(),
+                unixepoch()
+           FROM oauth_refresh_leases_v1 lease
+           JOIN upstream_spec_v1 spec ON spec.id = lease.upstream_id
+           LEFT JOIN upstream_oauth_token_v1 current_token
+             ON current_token.upstream_id = lease.upstream_id
+          WHERE lease.upstream_id = ?
+            AND lease.holder = ?
+            AND lease.lease_until_unix_secs > unixepoch()
+            AND spec.deleted_at IS NULL
+            AND lease.expected_generation = COALESCE(current_token.oauth_token_generation, 0)
          ON CONFLICT (upstream_id) DO UPDATE
          SET oauth_credentials_ciphertext = excluded.oauth_credentials_ciphertext,
              token_revision = upstream_oauth_token_v1.token_revision + 1,
-             oauth_token_generation = upstream_oauth_token_v1.oauth_token_generation + 1,
+             oauth_token_generation = excluded.oauth_token_generation,
              refreshed_at = unixepoch(),
              updated_at = unixepoch()",
     )
-    .bind(id.to_string())
     .bind(tokens.ciphertext())
+    .bind(id.to_string())
+    .bind(holder.to_string())
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
-    set_split_status_in_tx(
-        &mut tx,
-        id,
-        UpstreamStatusUpdate {
-            last_apply_error: Some(None),
-            ..UpstreamStatusUpdate::default()
-        },
-    )
-    .await?;
+    if result.rows_affected() != 1 {
+        return Err(conflict("oauth refresh lease fence failed"));
+    }
+    clear_split_refresh_error_in_tx(&mut tx, id).await?;
+    delete_split_terminal_refresh_failure_in_tx(&mut tx, id).await?;
+    let deleted =
+        sqlx::query("DELETE FROM oauth_refresh_leases_v1 WHERE upstream_id = ? AND holder = ?")
+            .bind(id.to_string())
+            .bind(holder.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+    if deleted.rows_affected() != 1 {
+        return Err(conflict("oauth refresh lease fence failed"));
+    }
     tx.commit().await.map_err(map_sqlx_error)
+}
+
+async fn delete_split_refresh_lease_in_tx(
+    tx: &mut Transaction<'static, Sqlite>,
+    id: Uuid,
+) -> StorageResult<()> {
+    sqlx::query("DELETE FROM oauth_refresh_leases_v1 WHERE upstream_id = ?")
+        .bind(id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+async fn delete_split_terminal_refresh_failure_in_tx(
+    tx: &mut Transaction<'static, Sqlite>,
+    id: Uuid,
+) -> StorageResult<()> {
+    sqlx::query("DELETE FROM oauth_refresh_terminal_failures_v1 WHERE upstream_id = ?")
+        .bind(id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+async fn read_split_oauth_refresh_terminal_failure(
+    pool: &SqlitePool,
+    id: Uuid,
+) -> StorageResult<Option<OAuthRefreshTerminalFailure>> {
+    let row = sqlx::query(
+        "SELECT expected_generation, error_code
+           FROM oauth_refresh_terminal_failures_v1
+          WHERE upstream_id = ?",
+    )
+    .bind(id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+    row.map(|row| {
+        Ok(OAuthRefreshTerminalFailure {
+            upstream_id: id,
+            expected_generation: i64_to_u64(
+                row.try_get("expected_generation").map_err(map_sqlx_error)?,
+                "oauth refresh expected generation",
+            )?,
+            code: row.try_get("error_code").map_err(map_sqlx_error)?,
+        })
+    })
+    .transpose()
+}
+
+async fn list_split_oauth_refresh_terminal_failures(
+    pool: &SqlitePool,
+) -> StorageResult<Vec<OAuthRefreshTerminalFailure>> {
+    let rows = sqlx::query(
+        "SELECT upstream_id, expected_generation, error_code
+           FROM oauth_refresh_terminal_failures_v1",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(OAuthRefreshTerminalFailure {
+                upstream_id: row
+                    .try_get::<String, _>("upstream_id")
+                    .map_err(map_sqlx_error)?
+                    .parse()
+                    .map_err(|_| StorageError::Corrupted {
+                        message: "invalid upstream id".to_owned(),
+                    })?,
+                expected_generation: i64_to_u64(
+                    row.try_get("expected_generation").map_err(map_sqlx_error)?,
+                    "oauth refresh expected generation",
+                )?,
+                code: row.try_get("error_code").map_err(map_sqlx_error)?,
+            })
+        })
+        .collect()
+}
+
+async fn clear_split_refresh_error_in_tx(
+    tx: &mut Transaction<'static, Sqlite>,
+    id: Uuid,
+) -> StorageResult<()> {
+    sqlx::query(
+        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, updated_at)
+         VALUES (?, NULL, unixepoch())
+         ON CONFLICT (upstream_id) DO UPDATE
+         SET last_apply_error = NULL,
+             updated_at = excluded.updated_at",
+    )
+    .bind(id.to_string())
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
 }
 
 async fn read_split_oauth_token_generation(

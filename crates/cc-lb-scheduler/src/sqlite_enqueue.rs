@@ -204,12 +204,7 @@ fn singleton_tick_idempotency_key(job: &CronJob, tick_unix_secs: u64) -> String 
 fn entity_idempotency_key(job: &AdaptiveJob, run_at_unix_secs: i64) -> Result<String> {
     let run_at_unix_secs = u64::try_from(run_at_unix_secs)
         .map_err(|_| SchedulerError::Job("run_at_unix_secs is negative".to_owned()))?;
-    match job {
-        AdaptiveJob::Warmup(job) => Ok(job.idempotency_key(job.cycle_key)),
-        AdaptiveJob::OAuthRefresh(job) => Ok(job.idempotency_key(run_at_unix_secs)),
-        AdaptiveJob::MetadataRefresh(job) => Ok(job.idempotency_key()),
-        AdaptiveJob::CacheKeepalive(job) => Ok(job.idempotency_key()),
-    }
+    Ok(job.idempotency_key(run_at_unix_secs))
 }
 
 fn now_unix_secs(clock: &dyn Clock) -> Result<i64> {

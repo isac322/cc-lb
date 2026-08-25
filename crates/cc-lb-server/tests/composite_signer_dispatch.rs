@@ -195,6 +195,7 @@ impl Fixture {
                         access_token: tokens.access_token,
                         refresh_token: tokens.refresh_token,
                         expires_at_unix_secs: expires_at,
+                        refresh_token_expires_at_unix_secs: None,
                         scopes: vec!["messages".to_owned()],
                     },
                 ),
@@ -291,6 +292,45 @@ impl UpstreamStore for OrderedUpstreamStore {
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
         UpstreamStore::store_oauth_tokens(self.inner.as_ref(), id, expected_revision, tokens).await
+    }
+
+    async fn claim_refresh_lease(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        expected_generation: u64,
+        ttl_secs: u64,
+    ) -> StorageResult<bool> {
+        UpstreamStore::claim_refresh_lease(
+            self.inner.as_ref(),
+            id,
+            holder,
+            expected_generation,
+            ttl_secs,
+        )
+        .await
+    }
+
+    async fn fail_refresh(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        terminal_error: Option<String>,
+    ) -> StorageResult<bool> {
+        UpstreamStore::fail_refresh(self.inner.as_ref(), id, holder, terminal_error).await
+    }
+
+    async fn read_oauth_refresh_terminal_failure(
+        &self,
+        id: Uuid,
+    ) -> StorageResult<Option<cc_lb_storage_api::OAuthRefreshTerminalFailure>> {
+        UpstreamStore::read_oauth_refresh_terminal_failure(self.inner.as_ref(), id).await
+    }
+
+    async fn list_oauth_refresh_terminal_failures(
+        &self,
+    ) -> StorageResult<Vec<cc_lb_storage_api::OAuthRefreshTerminalFailure>> {
+        UpstreamStore::list_oauth_refresh_terminal_failures(self.inner.as_ref()).await
     }
 
     async fn complete_refresh(

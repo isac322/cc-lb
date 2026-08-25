@@ -1179,6 +1179,45 @@ mod tests {
             .await
         }
 
+        async fn claim_refresh_lease(
+            &self,
+            id: UpstreamRecordId,
+            _holder: UpstreamRecordId,
+            expected_generation: u64,
+            _ttl_secs: u64,
+        ) -> StorageResult<bool> {
+            Ok(self.records.lock().await.iter().any(|record| {
+                record.id == id && record.oauth_token_generation == expected_generation
+            }))
+        }
+
+        async fn fail_refresh(
+            &self,
+            id: UpstreamRecordId,
+            _holder: UpstreamRecordId,
+            _terminal_error: Option<String>,
+        ) -> StorageResult<bool> {
+            Ok(self
+                .records
+                .lock()
+                .await
+                .iter()
+                .any(|record| record.id == id))
+        }
+
+        async fn read_oauth_refresh_terminal_failure(
+            &self,
+            _id: UpstreamRecordId,
+        ) -> StorageResult<Option<cc_lb_storage_api::OAuthRefreshTerminalFailure>> {
+            Ok(None)
+        }
+
+        async fn list_oauth_refresh_terminal_failures(
+            &self,
+        ) -> StorageResult<Vec<cc_lb_storage_api::OAuthRefreshTerminalFailure>> {
+            Ok(Vec::new())
+        }
+
         async fn complete_refresh(
             &self,
             id: UpstreamRecordId,
@@ -1629,6 +1668,7 @@ mod tests {
             access_token: "access-token".to_owned(),
             refresh_token: "refresh-token".to_owned(),
             expires_at: expires_at_unix_secs,
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec!["messages".to_owned()],
         })
         .unwrap();
@@ -1801,6 +1841,7 @@ mod tests {
                 access_token: access_token.to_owned(),
                 refresh_token: "refresh-token".to_owned(),
                 expires_at_unix_secs,
+                refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
             },
             upstream_id.as_bytes(),

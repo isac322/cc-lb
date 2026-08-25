@@ -69,6 +69,7 @@ mod tests {
 
     use crate::error::SchedulerError;
     use crate::jobs::metadata_refresh::MetadataRefreshJob;
+    use crate::jobs::oauth_refresh::OAUTH_REFRESH_LEASE_TTL_SECS;
     use crate::jobs::usage_prune::UsagePruneJob;
     use crate::retry::JobOutcome;
     use crate::worker::{AdaptiveJob, CronJob, SchedulerCtx};
@@ -192,5 +193,13 @@ mod tests {
             }
             other => panic!("expected SchedulerError::JobTimeout, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn oauth_refresh_lease_outlives_entity_timeout() {
+        assert!(
+            Duration::from_secs(OAUTH_REFRESH_LEASE_TTL_SECS) > ENTITY_TIMEOUT,
+            "refresh lease must remain owned until a timed-out entity handler is cancelled",
+        );
     }
 }

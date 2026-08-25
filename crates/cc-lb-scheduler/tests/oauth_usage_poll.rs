@@ -1,7 +1,10 @@
+#[cfg(feature = "sqlite")]
 use cc_lb_scheduler::error::Result;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
+#[cfg(feature = "sqlite")]
 use cc_lb_scheduler::state_stores::OAuthUsagePollCursorsStore;
 use cc_lb_scheduler::worker::CronJob;
+#[cfg(feature = "sqlite")]
 use uuid::Uuid;
 
 #[cfg(feature = "sqlite")]

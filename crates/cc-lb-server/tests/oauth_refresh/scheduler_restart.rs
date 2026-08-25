@@ -131,11 +131,8 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
         deps: LazyRefresherDeps {
             stores: fixture.stores.clone(),
             aead: fixture.aead.clone(),
-            oauth_cfg: fixture.oauth_cfg.clone(),
             clock: fixture.clock.clone(),
         },
-        replica_id: Uuid::new_v4(),
-        metadata_hook: None,
         cancel: lazy_cancel.clone(),
         apalis_handle: fixture.scheduler_backend.clone(),
     }));

@@ -3,11 +3,12 @@ use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_oauth_protocol::{
     TokenEndpointResponse, parse_token_endpoint_response, refresh_token_form_body,
+    terminal_token_endpoint_error_code,
 };
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::UpstreamRecord;
 use http::{Request, StatusCode};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -18,6 +19,7 @@ use url::Url;
 
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const MAX_TOKEN_ENDPOINT_BODY_BYTES: usize = 64 * 1024;
 
 pub(super) type JsonHttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
@@ -47,19 +49,34 @@ pub(super) async fn request_refresh(
     }
     .map_err(|_| SchedulerError::Job("oauth refresh request timed out".to_owned()))?
     .map_err(|error| SchedulerError::Job(error.to_string()))?;
-    if !response.status().is_success() {
-        return Err(SchedulerError::Job(format!(
-            "oauth token endpoint returned {}",
-            response.status()
-        )));
+    let status = response.status();
+    let bytes = tokio::select! {
+        _ = cancel.cancelled() => {
+            return Err(SchedulerError::Job("oauth refresh cancelled".to_owned()));
+        }
+        body = tokio::time::timeout(
+            Duration::from_secs(30),
+            Limited::new(response.into_body(), MAX_TOKEN_ENDPOINT_BODY_BYTES).collect(),
+        ) => {
+            body
+                .map_err(|_| SchedulerError::Job("oauth refresh response body timed out".to_owned()))?
+                .map_err(|error| SchedulerError::Job(error.to_string()))?
+                .to_bytes()
+        }
+    };
+    if !status.is_success() {
+        return Err(token_endpoint_status_error(status, &bytes));
     }
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .map_err(|error| SchedulerError::Job(error.to_string()))?
-        .to_bytes();
     parse_token_endpoint_response(&bytes).map_err(|error| SchedulerError::Job(error.to_string()))
+}
+
+fn token_endpoint_status_error(status: StatusCode, body: &[u8]) -> SchedulerError {
+    let message = format!("oauth token endpoint returned {status}");
+    let terminal_code = terminal_token_endpoint_error_code(status.as_u16(), body);
+    match terminal_code {
+        Some(code) => SchedulerError::TerminalJob(code.to_owned()),
+        None => SchedulerError::Job(message),
+    }
 }
 
 pub(super) async fn fetch_usage(
@@ -119,4 +136,49 @@ pub(super) fn json_http_client() -> JsonHttpClient {
         .enable_http2()
         .build();
     Client::builder(TokioExecutor::new()).build(connector)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_endpoint_terminal_codes_are_dead_letter_errors() {
+        for code in ["invalid_grant", "invalid_client", "unauthorized_client"] {
+            let body = format!(r#"{{"error":"{code}"}}"#);
+            assert!(matches!(
+                token_endpoint_status_error(StatusCode::BAD_REQUEST, body.as_bytes()),
+                SchedulerError::TerminalJob(message) if message.contains(code)
+            ));
+        }
+    }
+
+    #[test]
+    fn token_endpoint_unknown_or_absent_codes_are_retryable_errors() {
+        for (status, body) in [
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"unknown_error"}"#.as_slice(),
+            ),
+            (StatusCode::REQUEST_TIMEOUT, br#"{}"#.as_slice()),
+            (StatusCode::TOO_MANY_REQUESTS, br#"not json"#.as_slice()),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                br#"{"error":"temporarily_unavailable"}"#.as_slice(),
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                br#"{"error":"invalid_grant"}"#.as_slice(),
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                br#"{"error":"invalid_grant"}"#.as_slice(),
+            ),
+        ] {
+            assert!(matches!(
+                token_endpoint_status_error(status, body),
+                SchedulerError::Job(_)
+            ));
+        }
+    }
 }

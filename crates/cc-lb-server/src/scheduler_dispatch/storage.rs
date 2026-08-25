@@ -30,6 +30,44 @@ impl OAuthRefreshUpstreams for StorageHandle {
             .map_err(storage_scheduler_error)
     }
 
+    async fn claim_refresh_lease(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        expected_generation: u64,
+        ttl_secs: u64,
+    ) -> SchedulerResult<bool> {
+        UpstreamStore::claim_refresh_lease(
+            self.storage.as_ref(),
+            id,
+            holder,
+            expected_generation,
+            ttl_secs,
+        )
+        .await
+        .map_err(storage_scheduler_error)
+    }
+
+    async fn read_oauth_refresh_terminal_failure(
+        &self,
+        id: Uuid,
+    ) -> SchedulerResult<Option<cc_lb_storage_api::OAuthRefreshTerminalFailure>> {
+        UpstreamStore::read_oauth_refresh_terminal_failure(self.storage.as_ref(), id)
+            .await
+            .map_err(storage_scheduler_error)
+    }
+
+    async fn fail_refresh(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        terminal_error: Option<String>,
+    ) -> SchedulerResult<bool> {
+        UpstreamStore::fail_refresh(self.storage.as_ref(), id, holder, terminal_error)
+            .await
+            .map_err(storage_scheduler_error)
+    }
+
     async fn complete_refresh(
         &self,
         id: Uuid,
@@ -37,12 +75,6 @@ impl OAuthRefreshUpstreams for StorageHandle {
         tokens: EncryptedOAuthTokens,
     ) -> SchedulerResult<UpstreamRecord> {
         UpstreamStore::complete_refresh(self.storage.as_ref(), id, holder, tokens)
-            .await
-            .map_err(storage_scheduler_error)
-    }
-
-    async fn read_oauth_token_generation(&self, id: Uuid) -> SchedulerResult<Option<u64>> {
-        UpstreamStore::read_oauth_token_generation(self.storage.as_ref(), id)
             .await
             .map_err(storage_scheduler_error)
     }

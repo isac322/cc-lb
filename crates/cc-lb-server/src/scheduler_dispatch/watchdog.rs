@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{UpstreamRecord, UpstreamStore};
@@ -11,20 +13,54 @@ const UPSTREAM_PAGE_LIMIT: usize = 1_000;
 
 impl SchedulerDispatch {
     pub(super) async fn list_warmup_watchdog_upstream_ids(&self) -> SchedulerResult<Vec<Uuid>> {
-        self.list_watchdog_upstream_ids(WatchdogUpstreamFilter::Warmup)
-            .await
+        Ok(self
+            .list_watchdog_upstreams(WatchdogUpstreamFilter::Warmup)
+            .await?
+            .into_iter()
+            .map(|upstream| upstream.id)
+            .collect())
     }
 
     pub(super) async fn list_oauth_watchdog_upstream_ids(&self) -> SchedulerResult<Vec<Uuid>> {
-        self.list_watchdog_upstream_ids(WatchdogUpstreamFilter::OAuth)
-            .await
+        Ok(self
+            .list_watchdog_upstreams(WatchdogUpstreamFilter::OAuth)
+            .await?
+            .into_iter()
+            .map(|upstream| upstream.id)
+            .collect())
     }
 
-    async fn list_watchdog_upstream_ids(
+    pub(super) async fn list_oauth_watchdog_upstream_generations(
+        &self,
+    ) -> SchedulerResult<Vec<(Uuid, u64)>> {
+        Ok(self
+            .list_oauth_watchdog_upstreams()
+            .await?
+            .into_iter()
+            .map(|upstream| (upstream.id, upstream.oauth_token_generation))
+            .collect())
+    }
+
+    async fn list_oauth_watchdog_upstreams(&self) -> SchedulerResult<Vec<UpstreamRecord>> {
+        let blocked = UpstreamStore::list_oauth_refresh_terminal_failures(self.storage.as_ref())
+            .await
+            .map_err(storage_scheduler_error)?
+            .into_iter()
+            .map(|failure| (failure.upstream_id, failure.expected_generation))
+            .collect::<HashSet<_>>();
+        Ok(self
+            .list_watchdog_upstreams(WatchdogUpstreamFilter::OAuth)
+            .await?
+            .into_iter()
+            .filter(|upstream| !blocked.contains(&(upstream.id, upstream.oauth_token_generation)))
+            .collect())
+    }
+
+    async fn list_watchdog_upstreams(
         &self,
         filter: WatchdogUpstreamFilter,
-    ) -> SchedulerResult<Vec<Uuid>> {
-        let mut upstream_ids = Vec::new();
+    ) -> SchedulerResult<Vec<UpstreamRecord>> {
+        let mut upstreams = Vec::new();
         let mut after = None;
         loop {
             let page = UpstreamStore::list(self.storage.as_ref(), after, UPSTREAM_PAGE_LIMIT)
@@ -33,17 +69,17 @@ impl SchedulerDispatch {
             if page.is_empty() {
                 break;
             }
-            upstream_ids.extend(
+            upstreams.extend(
                 page.iter()
                     .filter(|upstream| filter.matches(upstream))
-                    .map(|upstream| upstream.id),
+                    .cloned(),
             );
             after = page.last().map(|upstream| upstream.id);
             if page.len() < UPSTREAM_PAGE_LIMIT {
                 break;
             }
         }
-        Ok(upstream_ids)
+        Ok(upstreams)
     }
 }
 

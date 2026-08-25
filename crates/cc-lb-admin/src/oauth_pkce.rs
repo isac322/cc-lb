@@ -368,6 +368,7 @@ fn parse_token_response(
     let refreshed = refreshed_token_parts(
         ExistingTokenParts {
             refresh_token: String::new(),
+            refresh_token_expires_at_unix_secs: None,
             scopes: Vec::new(),
         },
         parsed,
@@ -378,6 +379,7 @@ fn parse_token_response(
         access_token: refreshed.access_token,
         refresh_token: refreshed.refresh_token,
         expires_at: refreshed.expires_at_unix_secs,
+        refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
         scopes: refreshed.scopes,
     })
 }

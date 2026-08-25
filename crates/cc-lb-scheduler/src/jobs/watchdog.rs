@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::middleware::TraceparentCarrier;
 
 mod runner;
-pub use runner::{WatchdogEntityKind, WatchdogSeedStats, run_entity_watchdog};
+pub use runner::{
+    WatchdogEntityKind, WatchdogSeedStats, run_entity_watchdog, run_oauth_refresh_watchdog,
+};
 
 /// Monitors upstream warmup cycle health and enqueues missing cycles.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

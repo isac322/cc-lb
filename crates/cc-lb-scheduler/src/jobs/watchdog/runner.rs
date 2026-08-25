@@ -38,20 +38,26 @@ impl WatchdogEntityKind {
             tick_unix_secs
         )
     }
-
-    fn job(self, upstream_id: Uuid, tick_unix_secs: u64) -> AdaptiveJob {
-        match self {
-            Self::Warmup => {
-                AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, tick_unix_secs))
-            }
-            Self::OAuthRefresh => AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WatchdogSeedStats {
     pub seeded: usize,
+}
+
+#[derive(Debug, Default)]
+struct ActiveOAuthRefreshes {
+    generation_pairs: HashSet<(Uuid, u64)>,
+    legacy_upstream_ids: HashSet<Uuid>,
+}
+
+impl ActiveOAuthRefreshes {
+    fn contains(&self, upstream_id: Uuid, expected_generation: u64) -> bool {
+        self.legacy_upstream_ids.contains(&upstream_id)
+            || self
+                .generation_pairs
+                .contains(&(upstream_id, expected_generation))
+    }
 }
 
 pub async fn run_entity_watchdog(
@@ -61,6 +67,11 @@ pub async fn run_entity_watchdog(
     tick_unix_secs: u64,
     run_at_unix_secs: u64,
 ) -> Result<WatchdogSeedStats> {
+    let WatchdogEntityKind::Warmup = kind else {
+        return Err(SchedulerError::Job(
+            "generic watchdog only supports warmup jobs".to_owned(),
+        ));
+    };
     let active = active_entity_ids(backend, kind).await?;
     let mut seeded = 0;
     for upstream_id in upstream_ids {
@@ -68,7 +79,7 @@ pub async fn run_entity_watchdog(
             continue;
         }
         let task = SchedulerPushTask {
-            args: kind.job(*upstream_id, tick_unix_secs),
+            args: AdaptiveJob::Warmup(UpstreamWarmupJob::new(*upstream_id, tick_unix_secs)),
             idempotency_key: Some(kind.bootstrap_key(*upstream_id, tick_unix_secs)),
             run_at_unix_secs: Some(run_at_unix_secs),
             max_attempts: None,
@@ -80,6 +91,69 @@ pub async fn run_entity_watchdog(
         }
     }
     Ok(WatchdogSeedStats { seeded })
+}
+
+pub async fn run_oauth_refresh_watchdog(
+    backend: &SchedulerBackend,
+    upstream_generations: &[(Uuid, u64)],
+    tick_unix_secs: u64,
+    run_at_unix_secs: u64,
+) -> Result<WatchdogSeedStats> {
+    let kind = WatchdogEntityKind::OAuthRefresh;
+    let active = active_oauth_refreshes(backend).await?;
+    let mut seeded = 0;
+    for &(upstream_id, expected_generation) in upstream_generations {
+        if active.contains(upstream_id, expected_generation) {
+            continue;
+        }
+        let task = SchedulerPushTask {
+            args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::for_generation(
+                upstream_id,
+                expected_generation,
+            )),
+            idempotency_key: Some(kind.bootstrap_key(upstream_id, tick_unix_secs)),
+            run_at_unix_secs: Some(run_at_unix_secs),
+            max_attempts: None,
+        };
+        match backend.push_adaptive_task(task).await {
+            Ok(()) => seeded += 1,
+            Err(SchedulerError::Conflict(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(WatchdogSeedStats { seeded })
+}
+
+async fn active_oauth_refreshes(backend: &SchedulerBackend) -> Result<ActiveOAuthRefreshes> {
+    let mut active = ActiveOAuthRefreshes::default();
+    for status in ACTIVE_STATUSES {
+        let mut page = 1;
+        loop {
+            let filter = Filter {
+                status: Some(status.clone()),
+                page,
+                page_size: Some(PAGE_SIZE),
+            };
+            let tasks = backend.list_adaptive_tasks(&filter).await?;
+            for task in &tasks {
+                let AdaptiveJob::OAuthRefresh(job) = &task.args else {
+                    continue;
+                };
+                if let Some(expected_generation) = job.expected_generation {
+                    active
+                        .generation_pairs
+                        .insert((job.upstream_id, expected_generation));
+                } else {
+                    active.legacy_upstream_ids.insert(job.upstream_id);
+                }
+            }
+            if tasks.len() < PAGE_SIZE as usize {
+                break;
+            }
+            page += 1;
+        }
+    }
+    Ok(active)
 }
 
 async fn active_entity_ids(

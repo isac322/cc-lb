@@ -93,13 +93,14 @@ With these defaults, the system easily scales up to 10 replicas:
 
 ## 4. Idempotency and Scheduling State
 
-The scheduler now relies on Apalis Jobs as the durable coordination point for scheduler-side effects that do not require separate domain cursors. This keeps queueing, retry attempts, and idempotency keys in one table.
+The scheduler uses Apalis Jobs for durable queueing, retry attempts, and idempotency. Operations that also mutate versioned domain state add a storage-backed ownership fence so an at-least-once task cannot apply stale work.
 
-- **Scheduling State (Apalis)**: Apalis owns the queueing state, visibility timeouts, retry attempts, and full `(job_type, idempotency_key)` uniqueness. Warmup and OAuth refresh coordination use this path.
+- **Scheduling State (Apalis)**: Apalis owns queueing state, visibility timeouts, retry attempts, and full `(job_type, idempotency_key)` uniqueness. Warmup and OAuth refresh use this transport path.
+- **OAuth Refresh Fence (`oauth_refresh_leases_v1`)**: Proactive, watchdog, and request-triggered refreshes enqueue an `OAuthRefreshJob` carrying the credential generation they observed. The worker atomically claims that `(upstream_id, expected_generation)` before calling the provider; a stale job becomes a no-op, one live holder calls the provider, and completion updates tokens only while the same holder still owns the same generation. Transient failures release the lease for retry. Terminal token-endpoint errors persist the failed generation and provider code in `oauth_refresh_terminal_failures_v1`, so lazy refresh and the watchdog stop reseeding until credential replacement advances the generation and clears the failure.
 - **Domain Cursor State (cc-lb)**: Jobs that need domain progress markers, such as OAuth usage polling, keep their own cursor tables. Those tables track business progress, not duplicate scheduler queues.
 - **Cache Keepalive Fence (`cache_keepalive_sessions`)**: Prompt-cache keepalive uses Apalis for timer transport only. The current session generation, encrypted payload, TTL anchor, and enqueue state live in `cache_keepalive_sessions`. Every new real request and every successful cache-hit self-reschedule bumps the generation, and each Apalis row is keyed as `cache_keepalive:<session_key_hash>:<generation>` so stale queued/running work becomes a no-op instead of refreshing the wrong cache prefix.
 
-This design ensures duplicate enqueues collapse at the Jobs table while retryable `Failed` rows can still be treated as active work. It preserves the at-least-once external execution model defined in D-arch-1 without redundant scheduler-side state tables.
+This design collapses duplicate enqueues in the Jobs table, preserves retryable `Failed` rows as active work, and fences domain mutations at their storage boundary. It preserves the at-least-once external execution model defined in D-arch-1 without allowing stale OAuth refreshes to overwrite newer credentials.
 
 ## 5. Cluster Coordination via Idempotency
 

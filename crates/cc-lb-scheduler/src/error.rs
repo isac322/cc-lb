@@ -11,6 +11,9 @@ pub enum SchedulerError {
 
     #[error("job error: {0}")]
     Job(String),
+    /// The job reached a provider- or contract-level failure that cannot heal by retrying.
+    #[error("terminal job error: {0}")]
+    TerminalJob(String),
 
     #[error("scheduler task conflict: {0}")]
     Conflict(String),

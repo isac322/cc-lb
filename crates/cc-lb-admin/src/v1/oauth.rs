@@ -385,6 +385,7 @@ async fn complete_oauth_draft(
         access_token: credentials.access_token,
         refresh_token: credentials.refresh_token,
         expires_at_unix_secs: credentials.expires_at,
+        refresh_token_expires_at_unix_secs: credentials.refresh_token_expires_at_unix_secs,
         scopes: credentials.scopes,
     };
     let encrypted_tokens = match AeadEncryptedField::<OAuthTokenBundle>::encrypt(
@@ -722,6 +723,7 @@ async fn complete_oauth(
         access_token: credentials.access_token,
         refresh_token: credentials.refresh_token,
         expires_at_unix_secs: credentials.expires_at,
+        refresh_token_expires_at_unix_secs: credentials.refresh_token_expires_at_unix_secs,
         scopes: credentials.scopes,
     };
     let encrypted = match cc_lb_aead::AeadEncryptedField::<OAuthTokenBundle>::encrypt(
@@ -960,7 +962,7 @@ async fn seed_oauth_bootstrap_tasks(
         return Ok(());
     };
     let seed_secs = cc_lb_clock::unix_secs(state.clock.now());
-    for task in oauth_bootstrap_tasks(upstream.id, seed_secs) {
+    for task in oauth_bootstrap_tasks(upstream.id, upstream.oauth_token_generation, seed_secs) {
         match scheduler.push_adaptive_task(task).await {
             Ok(()) | Err(SchedulerError::Conflict(_)) => {}
             Err(error) => return Err(error),
@@ -980,9 +982,16 @@ async fn seed_oauth_bootstrap_tasks(
     Ok(())
 }
 
-fn oauth_bootstrap_tasks(upstream_id: Uuid, seed_secs: u64) -> [SchedulerPushTask<AdaptiveJob>; 1] {
+fn oauth_bootstrap_tasks(
+    upstream_id: Uuid,
+    expected_generation: u64,
+    seed_secs: u64,
+) -> [SchedulerPushTask<AdaptiveJob>; 1] {
     [SchedulerPushTask {
-        args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+        args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::for_generation(
+            upstream_id,
+            expected_generation,
+        )),
         idempotency_key: Some(format!(
             "adaptive:oauth_refresh:{upstream_id}:bootstrap:{seed_secs}"
         )),
@@ -1201,7 +1210,8 @@ mod tests {
             Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("uuid parses");
         let seed_secs = 1_800_000_000;
 
-        let [refresh] = oauth_bootstrap_tasks(upstream_id, seed_secs);
+        let expected_generation = 7;
+        let [refresh] = oauth_bootstrap_tasks(upstream_id, expected_generation, seed_secs);
 
         assert_eq!(
             refresh.idempotency_key.as_deref(),
@@ -1214,6 +1224,7 @@ mod tests {
             panic!("expected oauth refresh job");
         };
         assert_eq!(refresh_job.upstream_id, upstream_id);
+        assert_eq!(refresh_job.expected_generation, Some(expected_generation));
     }
 
     fn org_meta(

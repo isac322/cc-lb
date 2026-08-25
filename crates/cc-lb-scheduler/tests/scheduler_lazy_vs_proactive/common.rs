@@ -15,8 +15,6 @@ use uuid::Uuid;
 
 use super::fake::InitialTokens;
 
-pub const LAZY_REQUEST_DELAY: Duration = Duration::from_millis(10);
-pub const LOSER_SETTLE_DELAY: Duration = Duration::from_millis(50);
 pub const WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 pub const POLL_INTERVAL: Duration = Duration::from_millis(25);
 pub const NEAR_EXPIRY_OFFSET_SECS: u64 = 5;
@@ -78,7 +76,7 @@ pub async fn create_oauth_upstream<Storage>(
     storage: &Storage,
     aead: &AeadService,
     tokens: InitialTokens,
-) -> TestResult<Uuid>
+) -> TestResult<(Uuid, u64)>
 where
     Storage: UpstreamStore + ?Sized,
 {
@@ -93,12 +91,14 @@ where
             warmup_dialect_plugin: None,
         })
         .await?;
+    let expires_at_unix_secs = near_expiry_secs();
     let encrypted = EncryptedOAuthTokens::encrypt(
         aead,
         &OAuthTokenBundle {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
-            expires_at_unix_secs: near_expiry_secs(),
+            expires_at_unix_secs,
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec!["messages".to_owned()],
         },
         record.id.as_bytes(),
@@ -106,7 +106,7 @@ where
     storage
         .store_oauth_tokens(record.id, record.revision, encrypted)
         .await?;
-    Ok(record.id)
+    Ok((record.id, expires_at_unix_secs))
 }
 
 pub async fn read_upstream_generation<Storage>(
@@ -122,6 +122,7 @@ where
     Ok(record.oauth_token_generation)
 }
 
+#[cfg(feature = "sqlite")]
 pub fn metadata_key_prefix(upstream_id: Uuid) -> String {
     format!("adaptive:metadata_refresh:{upstream_id}:%")
 }

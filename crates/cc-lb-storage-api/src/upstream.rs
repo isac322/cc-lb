@@ -112,6 +112,13 @@ pub struct UpstreamStatusUpdate {
     pub last_warmup_at_unix_secs: Option<Option<u64>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthRefreshTerminalFailure {
+    pub upstream_id: Uuid,
+    pub expected_generation: u64,
+    pub code: String,
+}
+
 #[async_trait]
 pub trait UpstreamStore: Send + Sync {
     async fn create(&self, create: UpstreamCreate) -> StorageResult<UpstreamRecord>;
@@ -153,6 +160,26 @@ pub trait UpstreamStore: Send + Sync {
         expected_revision: u64,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord>;
+    async fn claim_refresh_lease(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        expected_generation: u64,
+        ttl_secs: u64,
+    ) -> StorageResult<bool>;
+    async fn fail_refresh(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        terminal_error: Option<String>,
+    ) -> StorageResult<bool>;
+    async fn read_oauth_refresh_terminal_failure(
+        &self,
+        id: Uuid,
+    ) -> StorageResult<Option<OAuthRefreshTerminalFailure>>;
+    async fn list_oauth_refresh_terminal_failures(
+        &self,
+    ) -> StorageResult<Vec<OAuthRefreshTerminalFailure>>;
     async fn complete_refresh(
         &self,
         id: Uuid,
