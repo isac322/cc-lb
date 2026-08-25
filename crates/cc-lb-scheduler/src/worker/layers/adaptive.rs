@@ -5,8 +5,9 @@ use std::time::Duration;
 use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::layers::limit::ConcurrencyLimitLayer;
 use apalis::layers::prometheus::PrometheusLayer;
-use apalis::prelude::{WorkerBuilder as ApalisWorkerBuilder, WorkerError};
+use apalis::prelude::{WorkerBuilder as ApalisWorkerBuilder, WorkerError, task_fn};
 use tokio_util::sync::CancellationToken;
+use tower::Layer as _;
 
 use crate::error::SchedulerError;
 use crate::middleware::TraceparentLayer;
@@ -117,15 +118,16 @@ fn build_sqlite_worker(
     AdaptiveWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
+                let handler = RetryClass::Adaptive.layer().layer(
+                    CatchPanicLayer::new().layer(task_fn(entity_job_handler as EntityHandlerFn)),
+                );
                 let worker = ApalisWorkerBuilder::new(worker_name)
                     .backend(storage)
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
-                    .layer(RetryClass::Adaptive.layer())
-                    .layer(CatchPanicLayer::new())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
-                    .build(entity_job_handler as EntityHandlerFn);
+                    .build(handler);
                 worker
                     .run_until(async move {
                         cancel.cancelled().await;
@@ -147,15 +149,16 @@ fn build_postgres_worker(
     AdaptiveWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
+                let handler = RetryClass::Adaptive.layer().layer(
+                    CatchPanicLayer::new().layer(task_fn(entity_job_handler as EntityHandlerFn)),
+                );
                 let worker = ApalisWorkerBuilder::new(worker_name)
                     .backend(storage)
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
-                    .layer(RetryClass::Adaptive.layer())
-                    .layer(CatchPanicLayer::new())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
-                    .build(entity_job_handler as EntityHandlerFn);
+                    .build(handler);
                 worker
                     .run_until(async move {
                         cancel.cancelled().await;

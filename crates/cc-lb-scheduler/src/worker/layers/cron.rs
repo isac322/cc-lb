@@ -4,8 +4,9 @@ use std::pin::Pin;
 use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::layers::limit::ConcurrencyLimitLayer;
 use apalis::layers::prometheus::PrometheusLayer;
-use apalis::prelude::{WorkerBuilder as ApalisWorkerBuilder, WorkerError};
+use apalis::prelude::{WorkerBuilder as ApalisWorkerBuilder, WorkerError, task_fn};
 use tokio_util::sync::CancellationToken;
+use tower::Layer as _;
 
 use crate::error::SchedulerError;
 use crate::middleware::TraceparentLayer;
@@ -68,15 +69,17 @@ fn build_sqlite_singleton_worker(
     CronWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
+                let handler = RetryClass::Maintenance.layer().layer(
+                    CatchPanicLayer::new()
+                        .layer(task_fn(singleton_job_handler as SingletonHandlerFn)),
+                );
                 let worker = ApalisWorkerBuilder::new(worker_name)
                     .backend(storage)
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
-                    .layer(RetryClass::Maintenance.layer())
-                    .layer(CatchPanicLayer::new())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
-                    .build(singleton_job_handler as SingletonHandlerFn);
+                    .build(handler);
                 worker
                     .run_until(async move {
                         cancel.cancelled().await;
@@ -98,15 +101,17 @@ fn build_postgres_singleton_worker(
     CronWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
+                let handler = RetryClass::Maintenance.layer().layer(
+                    CatchPanicLayer::new()
+                        .layer(task_fn(singleton_job_handler as SingletonHandlerFn)),
+                );
                 let worker = ApalisWorkerBuilder::new(worker_name)
                     .backend(storage)
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
-                    .layer(RetryClass::Maintenance.layer())
-                    .layer(CatchPanicLayer::new())
                     .layer(PrometheusLayer::default())
                     .layer(ConcurrencyLimitLayer::new(concurrency))
-                    .build(singleton_job_handler as SingletonHandlerFn);
+                    .build(handler);
                 worker
                     .run_until(async move {
                         cancel.cancelled().await;

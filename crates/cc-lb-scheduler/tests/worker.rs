@@ -15,8 +15,8 @@ use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{
-    ADAPTIVE_QUEUE, AdaptiveJob, CronJob, SchedulerBackend, SchedulerCtx, SchedulerPushTask,
-    SqliteSchedulerBackend, build_adaptive_worker,
+    ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, CronJob, SchedulerBackend, SchedulerCtx,
+    SchedulerPushTask, SqliteSchedulerBackend, build_adaptive_worker, build_cron_worker,
 };
 use cc_lb_storage_api::CacheTtl;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -79,6 +79,170 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
             "warmup"
         ]),
         "worker must run one of each entity job to Ok(JobOutcome::Done)",
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_sqlite_applies_retry_policy_before_acknowledgement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite_test_db().await?;
+    let pool = db.pool.clone();
+    let config = fast_queue_config(ADAPTIVE_QUEUE);
+    let mut storage =
+        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(&pool, &config);
+    storage
+        .push(AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(
+            Uuid::new_v4(),
+            1,
+        )))
+        .await?;
+
+    let before_retry: i64 = sqlx::query_scalar("SELECT CAST(strftime('%s', 'now') AS INTEGER)")
+        .fetch_one(&pool)
+        .await?;
+    let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+        pool.clone(),
+        Arc::new(SystemClock),
+    ));
+    let (dispatch_tx, mut dispatch_rx) = mpsc::channel(1);
+    let ctx = SchedulerCtx::new(
+        SchedulerConfig::default(),
+        Arc::new(move |_job| {
+            let dispatch_tx = dispatch_tx.clone();
+            Box::pin(async move {
+                dispatch_tx
+                    .send(())
+                    .await
+                    .expect("dispatch receiver remains open until the handler returns");
+                Ok(JobOutcome::Retry {
+                    delay: Duration::ZERO,
+                })
+            })
+        }),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(SystemClock),
+    );
+    let worker = build_adaptive_worker(&backend, ctx)?;
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(worker.run_until_cancelled(cancel.clone()));
+
+    timeout(COMPLETION_TIMEOUT, dispatch_rx.recv())
+        .await
+        .map_err(|_| "timed out waiting for retrying entity-job dispatch")?
+        .ok_or("dispatch channel closed before retrying entity job ran")?;
+    let row = timeout(COMPLETION_TIMEOUT, async {
+        loop {
+            let row: (String, i64, i64) = sqlx::query_as(
+                "SELECT status, attempts, run_at FROM Jobs WHERE job_type = 'adaptive'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            if row.0 == "Pending" && row.1 == 1 {
+                return Ok::<_, sqlx::Error>(row);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "timed out waiting for retry acknowledgement")??;
+    cancel.cancel();
+    handle.abort();
+    let _ = handle.await;
+
+    let after_retry: i64 = sqlx::query_scalar("SELECT CAST(strftime('%s', 'now') AS INTEGER)")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(row.0, "Pending");
+    assert_eq!(row.1, 1);
+    assert!(
+        row.2 >= before_retry + 27,
+        "retry policy delay must be persisted before acknowledgement: {row:?}",
+    );
+    assert!(
+        row.2 <= after_retry + 33,
+        "retry policy delay exceeded the adaptive jitter bound: {row:?}",
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cron_worker_sqlite_applies_retry_policy_before_acknowledgement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite_test_db().await?;
+    let pool = db.pool.clone();
+    let config = fast_queue_config(CRON_QUEUE);
+    let mut storage =
+        apalis_sqlite::SqliteStorage::<CronJob, (), ()>::new_with_config(&pool, &config);
+    storage
+        .push(CronJob::UsagePrune(UsagePruneJob::default()))
+        .await?;
+
+    let before_retry: i64 = sqlx::query_scalar("SELECT CAST(strftime('%s', 'now') AS INTEGER)")
+        .fetch_one(&pool)
+        .await?;
+    let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+        pool.clone(),
+        Arc::new(SystemClock),
+    ));
+    let (dispatch_tx, mut dispatch_rx) = mpsc::channel(1);
+    let ctx = SchedulerCtx::new(
+        SchedulerConfig::default(),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(move |_job| {
+            let dispatch_tx = dispatch_tx.clone();
+            Box::pin(async move {
+                dispatch_tx
+                    .send(())
+                    .await
+                    .expect("dispatch receiver remains open until the handler returns");
+                Ok(JobOutcome::Retry {
+                    delay: Duration::ZERO,
+                })
+            })
+        }),
+        Arc::new(SystemClock),
+    );
+    let worker = build_cron_worker(&backend, ctx)?;
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(worker.run_until_cancelled(cancel.clone()));
+
+    timeout(COMPLETION_TIMEOUT, dispatch_rx.recv())
+        .await
+        .map_err(|_| "timed out waiting for retrying cron-job dispatch")?
+        .ok_or("dispatch channel closed before retrying cron job ran")?;
+    let row = timeout(COMPLETION_TIMEOUT, async {
+        loop {
+            let row: (String, i64, i64) =
+                sqlx::query_as("SELECT status, attempts, run_at FROM Jobs WHERE job_type = 'cron'")
+                    .fetch_one(&pool)
+                    .await?;
+            if row.0 == "Pending" && row.1 == 1 {
+                return Ok::<_, sqlx::Error>(row);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "timed out waiting for cron retry acknowledgement")??;
+    cancel.cancel();
+    handle.abort();
+    let _ = handle.await;
+
+    let after_retry: i64 = sqlx::query_scalar("SELECT CAST(strftime('%s', 'now') AS INTEGER)")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(row.0, "Pending");
+    assert_eq!(row.1, 1);
+    assert!(
+        row.2 >= before_retry + 54,
+        "maintenance retry delay must be persisted before acknowledgement: {row:?}",
+    );
+    assert!(
+        row.2 <= after_retry + 66,
+        "retry policy delay exceeded the maintenance jitter bound: {row:?}",
     );
     Ok(())
 }
