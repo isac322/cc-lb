@@ -75,6 +75,7 @@ struct UpstreamOAuthStatusResponse {
     status: &'static str,
     expires_at_unix_secs: Option<u64>,
     refresh_token_present: bool,
+    refresh_token_expires_at_unix_secs: Option<u64>,
     scopes: Vec<String>,
 }
 
@@ -799,6 +800,7 @@ async fn get_oauth_status(
             status: "wrong_kind",
             expires_at_unix_secs: None,
             refresh_token_present: false,
+            refresh_token_expires_at_unix_secs: None,
             scopes: Vec::new(),
         })
         .into_response();
@@ -812,6 +814,7 @@ async fn get_oauth_status(
             status: "missing",
             expires_at_unix_secs: None,
             refresh_token_present: false,
+            refresh_token_expires_at_unix_secs: None,
             scopes: Vec::new(),
         })
         .into_response();
@@ -832,6 +835,7 @@ async fn get_oauth_status(
                 status,
                 expires_at_unix_secs: Some(bundle.expires_at_unix_secs),
                 refresh_token_present: !bundle.refresh_token.is_empty(),
+                refresh_token_expires_at_unix_secs: bundle.refresh_token_expires_at_unix_secs,
                 scopes: bundle.scopes,
             })
             .into_response()
@@ -849,6 +853,7 @@ async fn get_oauth_status(
                 status: "corrupted",
                 expires_at_unix_secs: None,
                 refresh_token_present: false,
+                refresh_token_expires_at_unix_secs: None,
                 scopes: Vec::new(),
             })
             .into_response()
