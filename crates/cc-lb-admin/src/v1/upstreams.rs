@@ -2056,6 +2056,7 @@ mod tests {
             access_token: "test-access-token".to_owned(),
             refresh_token: "test-refresh-token".to_owned(),
             expires_at_unix_secs: u64::MAX / 2,
+            refresh_token_expires_at_unix_secs: None,
             scopes: Vec::new(),
         };
         let encrypted =

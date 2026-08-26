@@ -185,6 +185,7 @@ impl Fixture {
                 access_token: tokens.access_token,
                 refresh_token: tokens.refresh_token,
                 expires_at_unix_secs: expires_at,
+                refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
             },
         );
@@ -657,6 +658,7 @@ async fn refresh_tokens(
     let refreshed = refreshed_token_parts(
         ExistingTokenParts {
             refresh_token: previous.refresh_token,
+            refresh_token_expires_at_unix_secs: None,
             scopes: previous.scopes,
         },
         response,
@@ -669,6 +671,7 @@ async fn refresh_tokens(
             access_token: refreshed.access_token,
             refresh_token: refreshed.refresh_token,
             expires_at_unix_secs,
+            refresh_token_expires_at_unix_secs: None,
             scopes: refreshed.scopes,
         },
         upstream.id.as_bytes(),

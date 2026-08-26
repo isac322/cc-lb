@@ -373,6 +373,7 @@ fn tokens(label: &str) -> EncryptedOAuthTokens {
             access_token: format!("access-{label}"),
             refresh_token: format!("refresh-{label}"),
             expires_at_unix_secs: 1234,
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec!["org:profile".to_owned()],
         },
         b"upstream-id",

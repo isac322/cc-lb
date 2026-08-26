@@ -99,6 +99,7 @@ where
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
             expires_at_unix_secs: near_expiry_secs(),
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec!["messages".to_owned()],
         },
         record.id.as_bytes(),

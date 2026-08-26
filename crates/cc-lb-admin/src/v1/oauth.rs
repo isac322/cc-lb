@@ -385,6 +385,7 @@ async fn complete_oauth_draft(
         access_token: credentials.access_token,
         refresh_token: credentials.refresh_token,
         expires_at_unix_secs: credentials.expires_at,
+        refresh_token_expires_at_unix_secs: credentials.refresh_token_expires_at_unix_secs,
         scopes: credentials.scopes,
     };
     let encrypted_tokens = match AeadEncryptedField::<OAuthTokenBundle>::encrypt(
@@ -722,6 +723,7 @@ async fn complete_oauth(
         access_token: credentials.access_token,
         refresh_token: credentials.refresh_token,
         expires_at_unix_secs: credentials.expires_at,
+        refresh_token_expires_at_unix_secs: credentials.refresh_token_expires_at_unix_secs,
         scopes: credentials.scopes,
     };
     let encrypted = match cc_lb_aead::AeadEncryptedField::<OAuthTokenBundle>::encrypt(

@@ -8,6 +8,8 @@ pub struct OAuthCredentials {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token_expires_at_unix_secs: Option<u64>,
     pub scopes: Vec<String>,
 }
 

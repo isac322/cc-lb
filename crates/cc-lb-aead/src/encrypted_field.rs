@@ -132,6 +132,8 @@ pub struct OAuthTokenBundle {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at_unix_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token_expires_at_unix_secs: Option<u64>,
     pub scopes: Vec<String>,
 }
 
@@ -153,6 +155,7 @@ mod tests {
             access_token: "sk-test-access".to_string(),
             refresh_token: "sk-test-refresh".to_string(),
             expires_at_unix_secs: 1234567890,
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec!["scope1".to_string(), "scope2".to_string()],
         };
         let aad = b"upstream-id-001";
@@ -177,6 +180,7 @@ mod tests {
             access_token: "sk-test".to_string(),
             refresh_token: "sk-test-refresh".to_string(),
             expires_at_unix_secs: 1234567890,
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec![],
         };
 
@@ -194,6 +198,7 @@ mod tests {
             access_token: "sk-test".to_string(),
             refresh_token: "sk-test-refresh".to_string(),
             expires_at_unix_secs: 1234567890,
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec![],
         };
         let aad = b"upstream-001";
@@ -216,6 +221,7 @@ mod tests {
             access_token: "sk-test".to_string(),
             refresh_token: "sk-test-refresh".to_string(),
             expires_at_unix_secs: 1234567890,
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec!["scope1".to_string()],
         };
         let aad = b"upstream-001";
@@ -247,6 +253,7 @@ mod tests {
             access_token: "sk-test".to_string(),
             refresh_token: "sk-test-refresh".to_string(),
             expires_at_unix_secs: 1234567890,
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec!["scope1".to_string()],
         };
         let aad = b"upstream-001";
@@ -272,6 +279,7 @@ mod tests {
             access_token: "sk-secret-token-that-must-not-appear".to_string(),
             refresh_token: "sk-refresh-secret".to_string(),
             expires_at_unix_secs: 1234567890,
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec![],
         };
         let aad = b"upstream-001";
