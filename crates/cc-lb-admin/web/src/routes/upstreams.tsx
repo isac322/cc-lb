@@ -603,8 +603,21 @@ function UpstreamDetailLoadingShell() {
 }
 
 const OAUTH_EXPIRING_SOON_SECS = 600;
+// Refresh tokens live on a multi-week clock, so "soon" is days, not minutes.
+// Anthropic's absolute expiry is not extended by refreshing, and a lapsed
+// refresh token can only be recovered by reauthorizing the upstream.
+const OAUTH_REFRESH_EXPIRING_SOON_SECS = 7 * 24 * 60 * 60;
 
 type OAuthBadge = { tone: 'ok' | 'warn' | 'danger' | 'neutral'; label: string };
+
+function refreshTokenExpiryTone(
+  expiresAtUnixSecs: number,
+): 'ok' | 'warn' | 'danger' {
+  const now = Math.floor(Date.now() / 1000);
+  if (expiresAtUnixSecs <= now) return 'danger';
+  if (expiresAtUnixSecs - now < OAUTH_REFRESH_EXPIRING_SOON_SECS) return 'warn';
+  return 'ok';
+}
 
 function oauthBadge(entry: {
   status: string;
@@ -1987,6 +2000,31 @@ function DetailView({
                             <span className="text-amber-400">missing</span>
                           )}
                         </div>
+                        {principalEntry.refresh_token_expires_at_unix_secs !=
+                        null ? (
+                          <div
+                            data-testid="oauth-refresh-token-expiry"
+                            className="mt-1 flex items-center gap-1.5 text-xs"
+                          >
+                            <span className="text-text-faint">expires</span>
+                            <span className="font-mono">
+                              <Badge
+                                tone={refreshTokenExpiryTone(
+                                  principalEntry.refresh_token_expires_at_unix_secs,
+                                )}
+                              >
+                                <RelativeTime
+                                  ts={
+                                    new Date(
+                                      principalEntry.refresh_token_expires_at_unix_secs *
+                                        1000,
+                                    )
+                                  }
+                                />
+                              </Badge>
+                            </span>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                     {principalEntry.scopes.length ? (

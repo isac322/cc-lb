@@ -262,6 +262,7 @@ backend = 'sqlite'"
         access_token: "access-token".to_owned(),
         refresh_token: "refresh-token".to_owned(),
         expires_at: 1_716_086_400,
+        refresh_token_expires_at_unix_secs: None,
         scopes: vec!["openid".to_owned(), "profile".to_owned()],
     });
     assert_json_roundtrip(AnthropicApiKeyCredential {

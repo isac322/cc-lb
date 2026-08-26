@@ -195,6 +195,7 @@ impl Fixture {
             access_token: "sk-ant-oat01-expired-seed".to_owned(),
             refresh_token: "sk-ant-ort01-expired-seed".to_owned(),
             expires_at_unix_secs: expired_at,
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec!["org:profile".to_owned()],
         };
         let encrypted = AeadEncryptedField::<OAuthTokenBundle>::encrypt(

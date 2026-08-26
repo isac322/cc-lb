@@ -690,6 +690,7 @@ export interface UpstreamOAuthStatusResponse {
   status: string;
   expires_at_unix_secs: number | null;
   refresh_token_present: boolean;
+  refresh_token_expires_at_unix_secs: number | null;
   scopes: string[];
 }
 

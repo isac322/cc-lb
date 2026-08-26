@@ -58,6 +58,7 @@ impl SchedulerDispatch {
         let refreshed = refreshed_token_parts(
             ExistingTokenParts {
                 refresh_token: bundle.refresh_token,
+                refresh_token_expires_at_unix_secs: bundle.refresh_token_expires_at_unix_secs,
                 scopes: bundle.scopes,
             },
             response,
@@ -67,6 +68,7 @@ impl SchedulerDispatch {
             access_token: refreshed.access_token,
             refresh_token: refreshed.refresh_token,
             expires_at_unix_secs: refreshed.expires_at_unix_secs,
+            refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
             scopes: refreshed.scopes,
         };
         let encrypted_tokens =

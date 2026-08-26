@@ -1629,6 +1629,7 @@ mod tests {
             access_token: "access-token".to_owned(),
             refresh_token: "refresh-token".to_owned(),
             expires_at: expires_at_unix_secs,
+            refresh_token_expires_at_unix_secs: None,
             scopes: vec!["messages".to_owned()],
         })
         .unwrap();
@@ -1801,6 +1802,7 @@ mod tests {
                 access_token: access_token.to_owned(),
                 refresh_token: "refresh-token".to_owned(),
                 expires_at_unix_secs,
+                refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
             },
             upstream_id.as_bytes(),
