@@ -52,6 +52,10 @@ export const queryClient = new QueryClient({
   mutationCache: new MutationCache({
     onError: (error, _vars, _ctx, mutation) => {
       if (isSilencedError(error)) return;
+      // Mutations that render their own error next to the offending input opt
+      // out here. Per-call mutate(..., { onError }) callbacks are stored on
+      // MutationObserver's private options and are invisible to this handler.
+      if (mutation.options.meta?.inlineError === true) return;
       // If the mutation defines its own onError, assume it already handles UX.
       if (mutation.options.onError) return;
       toast.error(messageOf(error));

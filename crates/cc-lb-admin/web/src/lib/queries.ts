@@ -1521,6 +1521,7 @@ export function useReloadConfig() {
 export function useStartOauthDraft() {
   return useMutation({
     mutationFn: () => startOauthDraft(),
+    meta: { inlineError: true },
   });
 }
 
@@ -1528,6 +1529,7 @@ export function useCompleteOauthDraft() {
   return useMutation({
     mutationFn: (body: { state_token: string; code: string }) =>
       completeOauthDraft(body),
+    meta: { inlineError: true },
   });
 }
 

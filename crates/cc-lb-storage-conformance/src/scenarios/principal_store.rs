@@ -37,6 +37,7 @@ where
     router_terminal_strategy_roundtrip(Arc::clone(&backend)).await?;
     subscription_preference_is_seeded_as_router_entry(Arc::clone(&backend)).await?;
     soft_delete_excludes_default_list(Arc::clone(&backend)).await?;
+    recreate_same_name_after_soft_delete_creates_new_principal(Arc::clone(&backend)).await?;
     soft_delete_cascades_plugin_chains(Arc::clone(&backend)).await?;
     hard_delete_removes_unreferenced(Arc::clone(&backend)).await?;
     hard_delete_cascades_plugin_chains(Arc::clone(&backend)).await?;
@@ -354,6 +355,116 @@ where
                 .is_empty()
         );
         ensure!(PrincipalStore::list(&*storage, 0, 10, true).await?.len() == 1);
+        Ok(())
+    })
+    .await
+}
+
+async fn recreate_same_name_after_soft_delete_creates_new_principal<B>(
+    backend: Arc<B>,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore,
+{
+    with_fixture(backend, |storage| async move {
+        const NAME: &str = "principal-name-reuse";
+        let input = || {
+            let mut input = principal_create(18);
+            input.name = NAME.to_owned();
+            input
+        };
+
+        let first = PrincipalStore::create(&*storage, input(), BASE_TS).await?;
+        PrincipalStore::soft_delete(&*storage, first.id, first.revision, BASE_TS + 1)
+            .await?
+            .expect("first principal should soft delete");
+
+        ensure!(
+            PrincipalStore::get_by_name(&*storage, NAME)
+                .await?
+                .is_none(),
+            "soft-deleted principal must be hidden from get_by_name"
+        );
+
+        let second = PrincipalStore::create(&*storage, input(), BASE_TS + 2).await?;
+        ensure!(
+            second.id != first.id,
+            "recreating a soft-deleted principal name must allocate a new id"
+        );
+        ensure!(
+            second.deleted_at_unix_secs.is_none(),
+            "recreated principal must be live"
+        );
+        ensure!(
+            PrincipalStore::get_by_name(&*storage, NAME)
+                .await?
+                .is_some_and(|record| record.id == second.id),
+            "get_by_name must return the recreated live principal"
+        );
+        ensure!(
+            PrincipalStore::get_by_id(&*storage, first.id)
+                .await?
+                .is_some_and(|record| record.deleted_at_unix_secs.is_some()),
+            "first soft-deleted principal must remain addressable by id"
+        );
+
+        let error = PrincipalStore::create(&*storage, input(), BASE_TS + 3)
+            .await
+            .expect_err("creating a duplicate of a live principal name must fail");
+        ensure!(
+            matches!(error, StorageError::Conflict { .. }),
+            "expected live duplicate name conflict, got {error:?}"
+        );
+
+        PrincipalStore::soft_delete(&*storage, second.id, second.revision, BASE_TS + 4)
+            .await?
+            .expect("second principal should soft delete");
+        let third = PrincipalStore::create(&*storage, input(), BASE_TS + 5).await?;
+        ensure!(
+            third.id != first.id && third.id != second.id,
+            "each recreation must allocate a new principal id"
+        );
+        ensure!(
+            third.deleted_at_unix_secs.is_none(),
+            "third principal must be live"
+        );
+        ensure!(
+            PrincipalStore::get_by_id(&*storage, second.id)
+                .await?
+                .is_some_and(|record| record.deleted_at_unix_secs.is_some()),
+            "second soft-deleted principal must remain addressable by id"
+        );
+        ensure!(
+            PrincipalStore::get_by_id(&*storage, first.id)
+                .await?
+                .is_some_and(|record| record.deleted_at_unix_secs.is_some()),
+            "first tombstone must remain after a second recreation"
+        );
+        ensure!(
+            PrincipalStore::get_by_name(&*storage, NAME)
+                .await?
+                .is_some_and(|record| record.id == third.id),
+            "get_by_name must return the third live principal"
+        );
+        ensure!(
+            PrincipalStore::list(&*storage, 0, 10, false)
+                .await?
+                .iter()
+                .filter(|record| record.name == NAME)
+                .count()
+                == 1,
+            "only the third principal may be live"
+        );
+        ensure!(
+            PrincipalStore::list(&*storage, 0, 10, true)
+                .await?
+                .iter()
+                .filter(|record| record.name == NAME)
+                .count()
+                == 3,
+            "two tombstones and one live principal must coexist"
+        );
         Ok(())
     })
     .await

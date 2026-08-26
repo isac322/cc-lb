@@ -151,6 +151,7 @@ async fn create_principal(
     if unsupported_llm_judge(body.cache_keepalive.as_ref()) {
         return unsupported_llm_judge_response();
     }
+    let name = body.name.clone();
 
     let input = PrincipalCreate {
         name: body.name,
@@ -178,6 +179,13 @@ async fn create_principal(
                 (StatusCode::CREATED, headers, Json(summary_response(record))).into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
+        }
+        Err(error @ StorageError::Conflict { .. }) => {
+            match PrincipalStore::get_by_name(storage, &name).await {
+                Ok(Some(existing)) => principal_name_conflict(name, existing.id),
+                Ok(None) => storage_error(error),
+                Err(lookup_error) => storage_error(lookup_error),
+            }
         }
         Err(error) => storage_error(error),
     }
@@ -673,6 +681,19 @@ fn storage_error(storage_error: StorageError) -> axum::response::Response {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
         }
     }
+}
+
+fn principal_name_conflict(name: String, existing_id: Uuid) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": "principal_name_conflict",
+            "name": name,
+            "existing_principal_id": existing_id,
+            "detail": "An active principal already uses this name."
+        })),
+    )
+        .into_response()
 }
 
 fn storage_unavailable() -> axum::response::Response {

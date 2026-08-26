@@ -68,7 +68,7 @@ where
     set_status_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
     secret_update_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
     double_soft_delete_returns_not_found(Arc::clone(&backend)).await?;
-    recreate_same_name_after_soft_delete_fails(Arc::clone(&backend)).await?;
+    recreate_same_name_after_soft_delete_creates_new_upstream(Arc::clone(&backend)).await?;
     hard_delete_removes_row(Arc::clone(&backend)).await?;
     validate_identifier_rejects_bad_name(backend).await
 }
@@ -465,13 +465,47 @@ scenario!(double_soft_delete_returns_not_found, |store| async move {
 });
 
 scenario!(
-    recreate_same_name_after_soft_delete_fails,
+    recreate_same_name_after_soft_delete_creates_new_upstream,
     |store| async move {
-        let record = create_named(store.as_ref(), "upstream-name-reservation").await?;
-        store.soft_delete(record.id, record.revision).await?;
+        const NAME: &str = "upstream-name-reuse";
+
+        let first = create_named(store.as_ref(), NAME).await?;
+        store.soft_delete(first.id, first.revision).await?;
+
+        ensure!(
+            store.get_by_name(NAME).await?.is_none(),
+            "soft-deleted upstream must be hidden from get_by_name"
+        );
+
+        let second = create_named(store.as_ref(), NAME).await?;
+        ensure!(
+            second.id != first.id,
+            "recreating a soft-deleted upstream name must allocate a new id"
+        );
+        ensure!(
+            second.deleted_at_unix_secs.is_none(),
+            "recreated upstream must be live"
+        );
+        let live = store
+            .get_by_name(NAME)
+            .await?
+            .expect("recreated upstream must be found by name");
+        ensure!(
+            live.id == second.id,
+            "get_by_name must return the recreated live upstream"
+        );
+        let first_tombstone = store
+            .get_by_id(first.id)
+            .await?
+            .expect("first soft-deleted upstream must remain addressable by id");
+        ensure!(
+            first_tombstone.deleted_at_unix_secs.is_some(),
+            "first upstream must remain soft deleted"
+        );
+
         let error = store
             .create(UpstreamCreate {
-                name: "upstream-name-reservation".to_owned(),
+                name: NAME.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
@@ -480,10 +514,43 @@ scenario!(
                 warmup_dialect_plugin: None,
             })
             .await
-            .expect_err("creating upstream with reserved name should fail");
+            .expect_err("creating a duplicate of a live upstream name must fail");
         ensure!(
             matches!(error, StorageError::Conflict { .. }),
-            "expected conflict error, got {error:?}"
+            "expected live duplicate name conflict, got {error:?}"
+        );
+
+        store.soft_delete(second.id, second.revision).await?;
+        let third = create_named(store.as_ref(), NAME).await?;
+        ensure!(
+            third.id != first.id && third.id != second.id,
+            "each recreation must allocate a new upstream id"
+        );
+        ensure!(
+            third.deleted_at_unix_secs.is_none(),
+            "third upstream must be live"
+        );
+        let second_tombstone = store
+            .get_by_id(second.id)
+            .await?
+            .expect("second soft-deleted upstream must remain addressable by id");
+        ensure!(
+            second_tombstone.deleted_at_unix_secs.is_some(),
+            "second upstream must remain soft deleted"
+        );
+        ensure!(
+            store
+                .get_by_id(first.id)
+                .await?
+                .is_some_and(|record| record.deleted_at_unix_secs.is_some()),
+            "first tombstone must remain after a second recreation"
+        );
+        ensure!(
+            store
+                .get_by_name(NAME)
+                .await?
+                .is_some_and(|record| record.id == third.id),
+            "get_by_name must return the third live upstream"
         );
         Ok(())
     }

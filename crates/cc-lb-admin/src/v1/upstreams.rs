@@ -201,6 +201,8 @@ enum UpstreamError {
     BadRequest { error: &'static str, detail: String },
     MissingIfMatch,
     StaleRevision { current_revision: u64 },
+    InvalidInput { field: String, reason: String },
+    NameConflict { name: String, existing_id: Uuid },
     Conflict { detail: String },
     NotOauthUpstream,
     CredentialDecrypt,
@@ -238,6 +240,21 @@ impl IntoResponse for UpstreamError {
             Self::StaleRevision { current_revision } => (
                 StatusCode::CONFLICT,
                 Json(json!({ "error": "stale_revision", "current_revision": current_revision })),
+            )
+                .into_response(),
+            Self::InvalidInput { field, reason } => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_input", "field": field, "reason": reason })),
+            )
+                .into_response(),
+            Self::NameConflict { name, existing_id } => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "upstream_name_conflict",
+                    "name": name,
+                    "existing_upstream_id": existing_id,
+                    "detail": "An active upstream already uses this name."
+                })),
             )
                 .into_response(),
             Self::Conflict { detail } => (
@@ -292,6 +309,7 @@ impl From<StorageError> for UpstreamError {
     fn from(error: StorageError) -> Self {
         match error {
             StorageError::Conflict { message } => Self::Conflict { detail: message },
+            StorageError::InvalidInput { field, reason } => Self::InvalidInput { field, reason },
             other => Self::Storage(other),
         }
     }
@@ -311,11 +329,12 @@ async fn create_upstream(
 ) -> Result<Response, UpstreamError> {
     let storage = storage(&state)?;
     let api_key_ciphertext = api_key_ciphertext_for_create(&state, &body)?;
+    let name = body.name.clone();
     let kind = body.kind;
     let warmup_enabled = body
         .warmup_enabled
         .unwrap_or(kind == UpstreamKind::AnthropicOauth);
-    let created = UpstreamStore::create(
+    let created = match UpstreamStore::create(
         storage,
         UpstreamCreate {
             name: body.name,
@@ -327,7 +346,22 @@ async fn create_upstream(
             warmup_dialect_plugin: body.warmup_dialect_plugin,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(created) => created,
+        Err(error @ StorageError::Conflict { .. }) => {
+            match UpstreamStore::get_by_name(storage, &name).await? {
+                Some(existing) => {
+                    return Err(UpstreamError::NameConflict {
+                        name,
+                        existing_id: existing.id,
+                    });
+                }
+                None => return Err(error.into()),
+            }
+        }
+        Err(error) => return Err(error.into()),
+    };
     enqueue_upstream_audit(
         &state,
         &created,
