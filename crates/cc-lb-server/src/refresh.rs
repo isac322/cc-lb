@@ -666,6 +666,7 @@ async fn refresh_flow(
             let refreshed = refreshed_token_parts(
                 ExistingTokenParts {
                     refresh_token: previous.refresh_token,
+                    refresh_token_expires_at_unix_secs: previous.refresh_token_expires_at_unix_secs,
                     scopes: previous.scopes,
                 },
                 response,
@@ -675,6 +676,7 @@ async fn refresh_flow(
                 access_token: refreshed.access_token,
                 refresh_token: refreshed.refresh_token,
                 expires_at_unix_secs: refreshed.expires_at_unix_secs,
+                refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
                 scopes: refreshed.scopes,
             };
             let fingerprint = access_token_fingerprint(&bundle.access_token);
@@ -1125,6 +1127,7 @@ mod tests {
                     access_token: "sk-ant-oat01-old".to_owned(),
                     refresh_token: "sk-ant-ort01-old".to_owned(),
                     expires_at_unix_secs: 1,
+                    refresh_token_expires_at_unix_secs: None,
                     scopes: vec!["messages".to_owned()],
                 },
                 record.id.as_bytes(),
@@ -1395,6 +1398,7 @@ mod tests {
                         access_token: "sk-ant-oat01-rotated".to_owned(),
                         refresh_token: "sk-ant-ort01-rotated".to_owned(),
                         expires_at_unix_secs: 9_999_999_999,
+                        refresh_token_expires_at_unix_secs: None,
                         scopes: vec!["messages".to_owned()],
                     },
                     self.upstream_id.as_bytes(),

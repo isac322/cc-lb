@@ -173,6 +173,7 @@ pub fn creds(access_token: &str, refresh_token: &str, expires_at: u64) -> OAuthC
         access_token: access_token.to_owned(),
         refresh_token: refresh_token.to_owned(),
         expires_at,
+        refresh_token_expires_at_unix_secs: None,
         scopes: vec!["messages".to_owned()],
     }
 }

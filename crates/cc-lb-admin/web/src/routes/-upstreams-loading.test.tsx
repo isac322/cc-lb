@@ -346,6 +346,7 @@ describe('/upstreams cold-load geometry', () => {
         status: 'valid',
         expires_at_unix_secs: 2_000_000_000,
         refresh_token_present: true,
+        refresh_token_expires_at_unix_secs: 2_100_000_000,
         scopes: ['user:inference'],
       },
       isLoading: false,
@@ -776,5 +777,44 @@ describe('/upstreams mutation pending UX', () => {
     expect(
       screen.getByRole('alertdialog', { name: 'Delete upstream?' }),
     ).toBeDefined();
+  });
+});
+
+describe('/upstreams OAuth card', () => {
+  function mockOAuthStatus(refreshTokenExpiresAt: number | null) {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue({
+      data: {
+        upstream_id: upstream.id,
+        kind: upstream.kind,
+        has_credentials: true,
+        status: 'valid',
+        expires_at_unix_secs: 2_000_000_000,
+        refresh_token_present: true,
+        refresh_token_expires_at_unix_secs: refreshTokenExpiresAt,
+        scopes: ['user:inference'],
+      },
+      isLoading: false,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+  }
+
+  test('shows the refresh-token expiry as a relative time when known', () => {
+    mockOAuthStatus(Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60);
+
+    renderRoute();
+
+    const expiry = screen.getByTestId('oauth-refresh-token-expiry');
+    expect(expiry.textContent).toContain('expires');
+    expect(expiry.textContent).toMatch(/in \d+ (weeks?|months?|days?)/);
+  });
+
+  test('omits the refresh-token expiry when the endpoint never reported one', () => {
+    mockOAuthStatus(null);
+
+    renderRoute();
+
+    expect(screen.queryByTestId('oauth-refresh-token-expiry')).toBeNull();
+    expect(screen.getByTestId('oauth-status-loaded-grid')).toBeDefined();
   });
 });

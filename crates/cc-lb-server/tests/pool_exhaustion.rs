@@ -180,6 +180,7 @@ async fn seed_oauth_credentials(postgres_url: &str) {
         access_token: "pool-exhaustion-access-token".to_owned(),
         refresh_token: "pool-exhaustion-refresh-token".to_owned(),
         expires_at: 4_102_444_800,
+        refresh_token_expires_at_unix_secs: None,
         scopes: vec!["user:inference".to_owned()],
     };
     let plaintext = serde_json::to_vec(&credentials).expect("serialize oauth credentials");

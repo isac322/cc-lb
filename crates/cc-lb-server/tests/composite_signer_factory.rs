@@ -105,6 +105,7 @@ impl Fixture {
                 access_token: access_token.to_owned(),
                 refresh_token: format!("sk-ant-ort01-{name}-refresh-token-123456789"),
                 expires_at_unix_secs: now_secs() + 3600,
+                refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
             },
         );
