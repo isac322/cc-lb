@@ -479,10 +479,14 @@ async fn create_upstream_from_oauth_draft(
     State(state): State<AdminState>,
     Json(payload): Json<CreateFromDraftRequest>,
 ) -> Response {
-    if let Err(error) = validate_identifier("name", &payload.name) {
+    if let Err(error) = validate_identifier("upstream.name", &payload.name) {
+        let (field, reason) = match error {
+            StorageError::InvalidInput { field, reason } => (field, reason),
+            other => ("upstream.name".to_owned(), other.to_string()),
+        };
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "invalid_name", "detail": error.to_string() })),
+            Json(json!({ "error": "invalid_input", "field": field, "reason": reason })),
         )
             .into_response();
     }
@@ -503,6 +507,7 @@ async fn create_upstream_from_oauth_draft(
     let Some(storage) = state.storage.as_ref() else {
         return StatusCode::NOT_IMPLEMENTED.into_response();
     };
+    let name = payload.name.clone();
     let base_url = match payload.base_url {
         Some(base_url) => Some(base_url),
         None => match Url::parse(DEFAULT_OAUTH_UPSTREAM_BASE_URL) {
@@ -525,6 +530,24 @@ async fn create_upstream_from_oauth_draft(
     .await
     {
         Ok(created) => created,
+        Err(error @ StorageError::Conflict { .. }) => {
+            match UpstreamStore::get_by_name(storage.as_ref(), &name).await {
+                Ok(Some(existing)) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "error": "upstream_name_conflict",
+                            "name": name,
+                            "existing_upstream_id": existing.id,
+                            "detail": "An active upstream already uses this name."
+                        })),
+                    )
+                        .into_response();
+                }
+                Ok(None) => return storage_error_response(&error),
+                Err(lookup_error) => return storage_error_response(&lookup_error),
+            }
+        }
         Err(error) => return storage_error_response(&error),
     };
     let bundle = match completion

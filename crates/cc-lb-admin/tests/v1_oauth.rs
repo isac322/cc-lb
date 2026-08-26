@@ -457,6 +457,47 @@ async fn create_from_incomplete_draft_returns_invalid_state() {
 }
 
 #[tokio::test]
+async fn create_from_draft_with_invalid_name_returns_structured_bad_request() {
+    let fixture = Fixture::new().await;
+
+    let (status, body) = fixture
+        .create_from_draft("unused-state-token", "system.blocked")
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_input");
+    assert_eq!(body["field"], "upstream.name");
+    assert!(
+        body["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("system"))
+    );
+}
+
+#[tokio::test]
+async fn create_from_completed_draft_with_active_name_returns_name_conflict() {
+    let fixture = Fixture::new().await;
+    let existing = fixture
+        .create_upstream("draft-name-conflict", UpstreamKind::AnthropicOauth)
+        .await;
+    let (status, start) = fixture.start_draft().await;
+    assert_eq!(status, StatusCode::OK);
+    let state_token = start["state_token"].as_str().expect("state token");
+    let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
+    let (status, _) = fixture.complete_draft(state_token, &code).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = fixture
+        .create_from_draft(state_token, "draft-name-conflict")
+        .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "upstream_name_conflict");
+    assert_eq!(body["name"], "draft-name-conflict");
+    assert_eq!(body["existing_upstream_id"], existing.id.to_string());
+}
+
+#[tokio::test]
 async fn oauth_status_reflects_completion_realtime() {
     let fixture = Fixture::new().await;
     let upstream = fixture

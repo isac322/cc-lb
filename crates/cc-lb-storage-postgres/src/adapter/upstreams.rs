@@ -237,7 +237,7 @@ async fn get_split_by_name(
         "SELECT ",
         split_upstream_columns!(),
         split_upstream_joins!(),
-        "WHERE spec.name = $1"
+        "WHERE spec.name = $1 AND spec.deleted_at IS NULL"
     ))
     .bind(name)
     .fetch_optional(pool)
