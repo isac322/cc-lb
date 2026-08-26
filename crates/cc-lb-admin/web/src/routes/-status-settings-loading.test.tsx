@@ -130,6 +130,8 @@ function setSettingsLoaded() {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-06-18T00:00:01.000Z'));
   vi.clearAllMocks();
   apiMocks.downloadJson.mockResolvedValue(undefined);
 
@@ -151,7 +153,10 @@ beforeEach(() => {
   queryMocks.useValidateConfig.mockReturnValue(mutationResult());
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 test('status cold load reserves restart, system, credentials, and OAuth geometry', () => {
   render(<StatusComponent />);

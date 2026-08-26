@@ -117,6 +117,8 @@ function renderRoute() {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-06-18T00:00:01.000Z'));
   vi.clearAllMocks();
   queryClient.clear();
   searchState = { selectedId: upstream.id };
@@ -213,6 +215,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe('/upstreams cold-load geometry', () => {

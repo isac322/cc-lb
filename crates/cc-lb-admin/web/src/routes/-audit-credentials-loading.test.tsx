@@ -71,6 +71,8 @@ function renderCredentials() {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-06-18T00:00:01.000Z'));
   vi.clearAllMocks();
   apiMocks.postJson.mockResolvedValue(undefined);
   vi.mocked(queries.useAudit).mockReturnValue({
@@ -96,7 +98,10 @@ beforeEach(() => {
   vi.mocked(queries.useUpstreamNameMap).mockReturnValue(new Map());
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 test('audit loading reserves the resolved count width and keeps the nine-column table', () => {
   const { rerender } = renderAudit();
