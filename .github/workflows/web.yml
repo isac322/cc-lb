@@ -28,10 +28,6 @@ jobs:
         working-directory: .
         run: |
           set -euo pipefail
-          if command -v bun >/dev/null 2>&1; then
-            bun --version
-            exit 0
-          fi
           arch=$(uname -m)
           os=$(uname -s)
           case "$os-$arch" in
@@ -65,8 +61,10 @@ jobs:
           else:
               raise SystemExit(f"bun binary not in {asset}: {zf.namelist()}")
           PY
+          ln -sfn "$dest/bun" "$dest/bunx"
           echo "$dest" >> "$GITHUB_PATH"
           "$dest/bun" --version
+          "$dest/bunx" --version
       - name: Cache Bun install store
         uses: actions/cache@v6
         with:
