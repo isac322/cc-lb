@@ -434,8 +434,8 @@ jobs:
           echo "No docker daemon; starting user-space PostgreSQL"
           arch=$(uname -m)
           case "$arch" in
-            aarch64|arm64) triple=aarch64-unknown-linux-musl ;;
-            x86_64) triple=x86_64-unknown-linux-musl ;;
+            aarch64|arm64) triple=aarch64-unknown-linux-gnu ;;
+            x86_64) triple=x86_64-unknown-linux-gnu ;;
             *) echo "unsupported arch: $arch" >&2; exit 1 ;;
           esac
           pg_ver=18.6.0
@@ -452,6 +452,15 @@ jobs:
           fi
           echo "$bindir" >> "$GITHUB_PATH"
           export PATH="${bindir}:$PATH"
+          libs="${RUNNER_TEMP}/pg-libs"
+          mkdir -p "$libs"
+          if ldd "${bindir}/postgres" | grep -q 'not found'; then
+            (cd "$libs" && apt-get download libxml2)
+            dpkg-deb -x "$libs"/libxml2_*.deb "$libs/root"
+            libdir=$(find "$libs/root" -name 'libxml2.so.2' -printf '%h\n' -quit)
+            export LD_LIBRARY_PATH="${libdir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          fi
           data="${RUNNER_TEMP}/pgdata"
           initdb -D "$data" --auth=trust -U postgres --no-locale --encoding=UTF8
           pg_ctl -D "$data" -l "${RUNNER_TEMP}/pg.log" -w start \
