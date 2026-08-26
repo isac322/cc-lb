@@ -341,19 +341,11 @@ jobs:
   nextest-cov:
     runs-on: oracle4-cc-lb
 
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: testpw
-          POSTGRES_DB: cc_lb_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
+    # GHA `services:` shells out to `docker` before any step. The oracle4-cc-lb
+    # host runner (/var/lib/github-actions, machine macmini) has no docker CLI,
+    # so the job dies in ~8s with `docker: command not found`. Start Postgres
+    # from a step instead, same as postgres-scheduled.yml's e2e job.
+
 
     env:
       # Raised from 2 to 4 to use the full 4-core node when nextest-cov runs as
@@ -399,6 +391,53 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+      - name: Start Postgres
+        run: |
+          set -euo pipefail
+          if ! command -v docker >/dev/null 2>&1; then
+            arch=$(uname -m)
+            case "$arch" in
+              aarch64|arm64) asset=aarch64 ;;
+              x86_64) asset=x86_64 ;;
+              *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+            esac
+            bin_dir="${RUNNER_TEMP}/docker-cli"
+            mkdir -p "$bin_dir"
+            curl -fsSL "https://download.docker.com/linux/static/stable/${asset}/docker-27.5.1.tgz" \
+              | tar -xz -C "$bin_dir" --strip-components=1 docker/docker
+            chmod +x "$bin_dir/docker"
+            echo "$bin_dir" >> "$GITHUB_PATH"
+            export PATH="$bin_dir:$PATH"
+          fi
+          if ! docker info >/dev/null 2>&1; then
+            if DOCKER_HOST=tcp://127.0.0.1:2375 docker info >/dev/null 2>&1; then
+              export DOCKER_HOST=tcp://127.0.0.1:2375
+              echo "DOCKER_HOST=tcp://127.0.0.1:2375" >> "$GITHUB_ENV"
+            elif DOCKER_HOST=unix:///var/run/docker.sock docker info >/dev/null 2>&1; then
+              export DOCKER_HOST=unix:///var/run/docker.sock
+              echo "DOCKER_HOST=unix:///var/run/docker.sock" >> "$GITHUB_ENV"
+            else
+              echo "docker CLI is present but no daemon answered" >&2
+              docker info || true
+              exit 1
+            fi
+          fi
+          docker rm -f cc-lb-nextest-cov-pg >/dev/null 2>&1 || true
+          docker run -d \
+            --name cc-lb-nextest-cov-pg \
+            -e POSTGRES_PASSWORD=testpw \
+            -e POSTGRES_DB=cc_lb_test \
+            -p 5432:5432 \
+            postgres:18
+          for _ in $(seq 1 30); do
+            if docker exec cc-lb-nextest-cov-pg pg_isready -U postgres -d cc_lb_test; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs cc-lb-nextest-cov-pg
+          exit 1
+
       - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -418,9 +457,10 @@ jobs:
       - name: Preflight - CI_POSTGRES_URL must be set
         run: |
           if [ -z "${CI_POSTGRES_URL:-}" ]; then
-            echo "CI_POSTGRES_URL is empty; postgres service container did not configure the env." >&2
+            echo "CI_POSTGRES_URL is empty." >&2
             exit 1
           fi
+
 
       - name: Run Postgres migrations
         run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
@@ -465,6 +505,10 @@ jobs:
           name: task-43-coverage-lcov
           path: target/coverage.lcov
           if-no-files-found: error
+      - name: Stop Postgres
+        if: always()
+        run: docker rm -f cc-lb-nextest-cov-pg >/dev/null 2>&1 || true
+
 
   e2e:
     runs-on: oracle4-cc-lb
