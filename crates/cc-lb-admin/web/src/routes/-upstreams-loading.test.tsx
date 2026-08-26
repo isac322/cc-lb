@@ -117,8 +117,10 @@ function renderRoute() {
 }
 
 beforeEach(() => {
-  vi.useFakeTimers({ toFake: ['Date'] });
-  vi.setSystemTime(new Date('2026-06-18T00:00:01.000Z'));
+  vi.useFakeTimers({
+    toFake: ['Date'],
+    now: new Date('2026-06-18T00:00:01.000Z'),
+  });
   vi.clearAllMocks();
   queryClient.clear();
   searchState = { selectedId: upstream.id };
@@ -803,7 +805,7 @@ describe('/upstreams OAuth card', () => {
   }
 
   test('shows the refresh-token expiry as a relative time when known', () => {
-    mockOAuthStatus(Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60);
+    mockOAuthStatus(Math.floor(Date.now() / 1000) + 29 * 24 * 60 * 60);
 
     renderRoute();
 

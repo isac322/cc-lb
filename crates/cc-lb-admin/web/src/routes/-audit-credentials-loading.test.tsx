@@ -71,8 +71,10 @@ function renderCredentials() {
 }
 
 beforeEach(() => {
-  vi.useFakeTimers({ toFake: ['Date'] });
-  vi.setSystemTime(new Date('2026-06-18T00:00:01.000Z'));
+  vi.useFakeTimers({
+    toFake: ['Date'],
+    now: new Date('2026-06-18T00:00:01.000Z'),
+  });
   vi.clearAllMocks();
   apiMocks.postJson.mockResolvedValue(undefined);
   vi.mocked(queries.useAudit).mockReturnValue({
