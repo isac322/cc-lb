@@ -402,6 +402,64 @@ async fn delete_principal_cascades_owned_plugin_chains() {
     assert_eq!(body["error"], "unknown_principal");
 }
 
+#[tokio::test]
+async fn recreate_after_delete_returns_created_then_name_conflict() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let (status, headers, first) = create_principal(&server.client, "primary").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let first_id = created_id(&first);
+    let first_etag = server
+        .client
+        .header_str(&headers, header::ETAG.as_str())
+        .to_owned();
+
+    let (status, _, body) = server
+        .client
+        .delete(&format!("/admin/v1/principals/{first_id}"), &first_etag)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, Value::Null);
+
+    let (status, _, body) = server.client.get("/admin/v1/principals").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["principals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|principal| principal["id"] != first_id)
+    );
+
+    let (status, _, second) = create_principal(&server.client, "primary").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let second_id = created_id(&second);
+    assert_ne!(second_id, first_id);
+
+    let (status, _, conflict) = create_principal(&server.client, "primary").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["error"], "principal_name_conflict");
+    assert_eq!(conflict["existing_principal_id"], second_id);
+}
+
+#[tokio::test]
+async fn concurrent_same_name_create_has_one_winner() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let (left, right) = tokio::join!(
+        create_principal(&server.client, "concurrent-name"),
+        create_principal(&server.client, "concurrent-name")
+    );
+    let (created, conflict) = if left.0 == StatusCode::CREATED {
+        (&left, &right)
+    } else {
+        (&right, &left)
+    };
+
+    assert_eq!(created.0, StatusCode::CREATED);
+    assert_eq!(conflict.0, StatusCode::CONFLICT);
+    assert_eq!(conflict.2["error"], "principal_name_conflict");
+    assert_eq!(conflict.2["existing_principal_id"], created.2["id"]);
+}
+
 async fn create_principal(
     client: &admin_test_common::AdminClient,
     name: &str,

@@ -1046,7 +1046,7 @@ mod tests {
                 .lock()
                 .await
                 .iter()
-                .find(|record| record.name == name)
+                .find(|record| record.name == name && record.deleted_at_unix_secs.is_none())
                 .cloned())
         }
 

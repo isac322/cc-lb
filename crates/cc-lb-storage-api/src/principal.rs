@@ -72,7 +72,10 @@ pub trait PrincipalStore: Send + Sync {
     ) -> StorageResult<PrincipalRecord>;
 
     async fn get_by_id(&self, id: Uuid) -> StorageResult<Option<PrincipalRecord>>;
-
+    /// Returns the live (non-soft-deleted) record with this name.
+    ///
+    /// Soft-deleted rows are never returned; look them up by id with [`Self::get_by_id`].
+    /// Names are unique only among live rows, so a soft-deleted name is reusable.
     async fn get_by_name(&self, name: &str) -> StorageResult<Option<PrincipalRecord>>;
 
     async fn list(

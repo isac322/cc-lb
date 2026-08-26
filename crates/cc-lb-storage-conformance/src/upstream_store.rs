@@ -22,7 +22,10 @@ impl UpstreamStore for MemoryUpstreamStore {
     async fn create(&self, create: UpstreamCreate) -> StorageResult<UpstreamRecord> {
         validate_identifier("upstream.name", &create.name)?;
         let mut records = self.records.lock().await;
-        if records.iter().any(|record| record.name == create.name) {
+        if records
+            .iter()
+            .any(|record| record.name == create.name && record.deleted_at_unix_secs.is_none())
+        {
             return Err(conflict("upstream name already exists"));
         }
         let now = unix_secs(self.clock.now());
@@ -55,7 +58,7 @@ impl UpstreamStore for MemoryUpstreamStore {
             .lock()
             .await
             .iter()
-            .find(|record| record.name == name)
+            .find(|record| record.name == name && record.deleted_at_unix_secs.is_none())
             .cloned())
     }
 
@@ -298,7 +301,7 @@ impl MemoryUpstreamStore {
         let mut records = self.records.lock().await;
         let duplicate_names: Vec<String> = records
             .iter()
-            .filter(|record| record.id != id)
+            .filter(|record| record.id != id && record.deleted_at_unix_secs.is_none())
             .map(|record| record.name.clone())
             .collect();
         let record = records
@@ -583,6 +586,54 @@ scenario!(
             .await
             .unwrap_err();
         assert!(matches!(e, StorageError::InvalidInput { .. }));
+    }
+);
+scenario!(
+    upstream_store_21_recreate_same_name_after_soft_delete,
+    async {
+        let s = store();
+        let first = create_default(&s, "primary").await;
+        s.soft_delete(first.id, first.revision).await.unwrap();
+
+        assert!(
+            s.get_by_name("primary").await.unwrap().is_none(),
+            "soft-deleted upstream must be hidden from get_by_name"
+        );
+        assert!(
+            s.get_by_id(first.id)
+                .await
+                .unwrap()
+                .is_some_and(|record| record.deleted_at_unix_secs.is_some()),
+            "soft-deleted upstream must remain addressable by id"
+        );
+
+        let second = create_default(&s, "primary").await;
+        assert_ne!(
+            second.id, first.id,
+            "recreating a soft-deleted name must allocate a new id"
+        );
+        assert_eq!(
+            s.get_by_name("primary").await.unwrap().unwrap().id,
+            second.id,
+            "get_by_name must return the recreated live upstream"
+        );
+
+        let error = s
+            .create(UpstreamCreate {
+                name: "primary".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_token_generation: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+            })
+            .await
+            .expect_err("creating a duplicate of a live upstream name must fail");
+        assert!(
+            matches!(error, StorageError::Conflict { .. }),
+            "expected live duplicate name conflict, got {error:?}"
+        );
     }
 );
 

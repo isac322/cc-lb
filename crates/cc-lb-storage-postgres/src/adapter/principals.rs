@@ -76,7 +76,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_name(&self, name: &str) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE name = $1")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE name = $1 AND deleted_at IS NULL")
             .bind(name)
             .fetch_optional(&self.pool)
             .await

@@ -245,7 +245,7 @@ async fn get_split_by_name(pool: &SqlitePool, name: &str) -> StorageResult<Optio
         "SELECT ",
         split_upstream_columns!(),
         split_upstream_joins!(),
-        "WHERE spec.name = ?"
+        "WHERE spec.name = ? AND spec.deleted_at IS NULL"
     ))
     .bind(name)
     .fetch_optional(pool)

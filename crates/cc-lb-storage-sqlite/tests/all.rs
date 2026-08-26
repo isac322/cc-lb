@@ -2,6 +2,8 @@
 mod api_key_usage;
 #[path = "cache_keepalive_session_reads.rs"]
 mod cache_keepalive_session_reads;
+#[path = "name_active_unique_migrations.rs"]
+mod name_active_unique_migrations;
 #[path = "price_catalog_retention.rs"]
 mod price_catalog_retention;
 #[path = "principal_terminal_strategy.rs"]

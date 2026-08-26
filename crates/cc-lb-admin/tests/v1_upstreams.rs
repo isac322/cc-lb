@@ -131,6 +131,34 @@ async fn create_returns_201_with_body_and_location_header() {
 }
 
 #[tokio::test]
+async fn create_with_invalid_name_returns_structured_bad_request() {
+    let (_dir, storage) = new_store().await;
+    let app = router(test_state(storage, None));
+
+    let response = request(
+        app,
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "system.blocked",
+            "kind": "anthropic_api_key",
+            "api_key_value": "sk-ant-api03-test"
+        })),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body(&response)["error"], "invalid_input");
+    assert_eq!(body(&response)["field"], "upstream.name");
+    assert!(
+        body(&response)["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("system"))
+    );
+}
+
+#[tokio::test]
 async fn get_after_create_returns_etag_with_revision() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage, None));
@@ -368,4 +396,79 @@ async fn delete_soft_deletes_upstream() {
 
     let list = request(app, "GET", "/admin/v1/upstreams", None, None).await;
     assert_eq!(body(&list)["upstreams"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn recreate_after_delete_returns_created_then_name_conflict() {
+    let (_dir, storage) = new_store().await;
+    let app = router(test_state(storage, None));
+    let first = create(app.clone(), "primary").await;
+    assert_eq!(first.status, StatusCode::CREATED);
+    let first_id = body(&first)["id"].as_str().unwrap().to_owned();
+    let current = request(
+        app.clone(),
+        "GET",
+        &format!("/admin/v1/upstreams/{first_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(current.status, StatusCode::OK);
+    let first_etag = current
+        .headers
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let deleted = request(
+        app.clone(),
+        "DELETE",
+        &format!("/admin/v1/upstreams/{first_id}"),
+        None,
+        Some(&first_etag),
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+
+    let list = request(app.clone(), "GET", "/admin/v1/upstreams", None, None).await;
+    assert_eq!(list.status, StatusCode::OK);
+    assert!(
+        body(&list)["upstreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|upstream| upstream["id"] != first_id)
+    );
+
+    let second = create(app.clone(), "primary").await;
+    assert_eq!(second.status, StatusCode::CREATED);
+    let second_id = body(&second)["id"].as_str().unwrap().to_owned();
+    assert_ne!(second_id, first_id);
+
+    let conflict = create(app, "primary").await;
+    assert_eq!(conflict.status, StatusCode::CONFLICT);
+    assert_eq!(body(&conflict)["error"], "upstream_name_conflict");
+    assert_eq!(body(&conflict)["existing_upstream_id"], second_id);
+}
+
+#[tokio::test]
+async fn concurrent_same_name_create_has_one_winner() {
+    let (_dir, storage) = new_store().await;
+    let app = router(test_state(storage, None));
+    let (left, right) = tokio::join!(
+        create(app.clone(), "concurrent-name"),
+        create(app, "concurrent-name")
+    );
+    let (created, conflict) = if left.status == StatusCode::CREATED {
+        (&left, &right)
+    } else {
+        (&right, &left)
+    };
+
+    assert_eq!(created.status, StatusCode::CREATED);
+    assert_eq!(conflict.status, StatusCode::CONFLICT);
+    assert_eq!(body(conflict)["error"], "upstream_name_conflict");
+    assert_eq!(body(conflict)["existing_upstream_id"], body(created)["id"]);
 }
