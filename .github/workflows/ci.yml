@@ -342,8 +342,10 @@ jobs:
     runs-on: oracle4-cc-lb
 
     # GHA `services:` shells out to `docker` before any step. The oracle4-cc-lb
-    # host runner has no docker daemon, so start Postgres from a step: docker
-    # when a daemon exists, otherwise apt-installed host PostgreSQL.
+    # runner has no docker daemon and sudo is blocked (no new privileges).
+    # Start Postgres from a step: docker when a daemon exists, otherwise
+    # user-space PostgreSQL binaries (no root).
+
 
 
 
@@ -429,28 +431,35 @@ jobs:
             start_docker_postgres
             exit 0
           fi
-          echo "No docker daemon; installing host PostgreSQL"
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends postgresql
-          sudo pg_ctlcluster --all start >/dev/null 2>&1 || sudo service postgresql start || true
-          for _ in $(seq 1 30); do
-            if pg_isready -h 127.0.0.1 -p 5432 -U postgres; then
-              break
-            fi
-            sleep 2
-          done
-          pg_isready -h 127.0.0.1 -p 5432 -U postgres
-          sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'testpw';"
-          if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='cc_lb_test'" | grep -q 1; then
-            sudo -u postgres createdb -O postgres cc_lb_test
+          echo "No docker daemon; starting user-space PostgreSQL"
+          arch=$(uname -m)
+          case "$arch" in
+            aarch64|arm64) triple=aarch64-unknown-linux-gnu ;;
+            x86_64) triple=x86_64-unknown-linux-gnu ;;
+            *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+          esac
+          pg_ver=18.6.0
+          pg_root="${RUNNER_TEMP}/pg-${pg_ver}"
+          mkdir -p "$pg_root"
+          curl -fsSL -o "${pg_root}.tar.gz" \
+            "https://github.com/theseus-rs/postgresql-binaries/releases/download/${pg_ver}/postgresql-${pg_ver}-${triple}.tar.gz"
+          tar -xzf "${pg_root}.tar.gz" -C "$pg_root"
+          bindir=$(dirname "$(find "$pg_root" -type f -name initdb -print -quit)")
+          if [ ! -x "${bindir}/initdb" ]; then
+            echo "initdb not found in ${pg_root}" >&2
+            find "$pg_root" | head
+            exit 1
           fi
-          if ! PGPASSWORD=testpw psql -h 127.0.0.1 -U postgres -d cc_lb_test -c 'SELECT 1' >/dev/null; then
-            hba=$(sudo -u postgres psql -tAc "SHOW hba_file")
-            printf '%s\n' "host all postgres 127.0.0.1/32 scram-sha-256" "host all postgres ::1/128 scram-sha-256" \
-              | sudo tee -a "$hba" >/dev/null
-            sudo -u postgres psql -c "SELECT pg_reload_conf();" >/dev/null
-            PGPASSWORD=testpw psql -h 127.0.0.1 -U postgres -d cc_lb_test -c 'SELECT 1' >/dev/null
-          fi
+          echo "$bindir" >> "$GITHUB_PATH"
+          export PATH="${bindir}:$PATH"
+          data="${RUNNER_TEMP}/pgdata"
+          initdb -D "$data" --auth=trust -U postgres --no-locale --encoding=UTF8
+          pg_ctl -D "$data" -l "${RUNNER_TEMP}/pg.log" -w start \
+            -o "-p 5432 -h 127.0.0.1 -k ${RUNNER_TEMP}"
+          createdb -h 127.0.0.1 -p 5432 -U postgres cc_lb_test
+          echo "CC_LB_PG_BIN=${bindir}" >> "$GITHUB_ENV"
+          echo "CC_LB_PG_DATA=${data}" >> "$GITHUB_ENV"
+
 
 
       - uses: ./.github/actions/setup-rustup-home
@@ -522,7 +531,11 @@ jobs:
           if-no-files-found: warn
       - name: Stop Postgres
         if: always()
-        run: docker rm -f cc-lb-nextest-cov-pg >/dev/null 2>&1 || true
+        run: |
+          if [ -n "${CC_LB_PG_DATA:-}" ] && [ -n "${CC_LB_PG_BIN:-}" ]; then
+            "${CC_LB_PG_BIN}/pg_ctl" -D "$CC_LB_PG_DATA" -m fast stop || true
+          fi
+          docker rm -f cc-lb-nextest-cov-pg >/dev/null 2>&1 || true
 
 
   e2e:
