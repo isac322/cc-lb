@@ -9,12 +9,16 @@ on:
     paths:
       - '.github/runner-image/**'
       - '.github/workflows/runner-image.yml'
+      - '.github/actions/setup-rustup-home/**'
+      - 'rust-toolchain.toml'
   push:
     branches:
       - master
     paths:
       - '.github/runner-image/**'
       - '.github/workflows/runner-image.yml'
+      - '.github/actions/setup-rustup-home/**'
+      - 'rust-toolchain.toml'
   workflow_dispatch:
 
 concurrency:
@@ -44,6 +48,12 @@ jobs:
           version=$(sed -nE 's|^FROM ghcr.io/actions/actions-runner:([^@]+)@sha256:[0-9a-f]+$|\1|p' "$dockerfile")
           if [ -z "$version" ]; then
             echo "::error::$dockerfile must pin FROM ghcr.io/actions/actions-runner:<tag>@sha256:<digest>"
+            exit 1
+          fi
+          channel=$(sed -nE 's/^channel = "([^"]+)"/\1/p' rust-toolchain.toml)
+          image_toolchain=$(sed -nE 's/^ARG RUST_TOOLCHAIN=//p' "$dockerfile")
+          if [ "$channel" != "$image_toolchain" ]; then
+            echo "::error::rust-toolchain.toml channel '$channel' != Dockerfile RUST_TOOLCHAIN '$image_toolchain'"
             exit 1
           fi
           sha=$(git rev-parse --short=12 HEAD)
@@ -80,7 +90,7 @@ jobs:
             type=raw,value=${{ steps.meta.outputs.immutable_tag }}
             type=raw,value=${{ steps.meta.outputs.version }}-cclb,enable=${{ steps.meta.outputs.push == 'true' }}
           labels: |
-            org.opencontainers.image.description=ARC runner image for cc-lb with clang, mold, and sccache
+            org.opencontainers.image.description=ARC runner image for cc-lb with clang, mold, sccache, and the workspace Rust toolchain
             org.opencontainers.image.source=https://github.com/isac322/cc-lb
             org.opencontainers.image.revision=${{ github.sha }}
 
@@ -114,14 +124,24 @@ jobs:
             id -u
             command -v cc
             command -v clang
-            command -v clang++
             command -v mold
             command -v sccache
             command -v psql
+            command -v rustc
+            command -v cargo
+            command -v cargo-nextest
+            command -v cargo-llvm-cov
+            command -v cargo-deny
             test -x /usr/local/bin/clang-mold
             cc --version
             clang --version
             mold --version
             sccache --version
             psql --version
+            rustc --version
+            cargo --version
+            cargo-nextest --version
+            cargo llvm-cov --version
+            cargo-deny --version
+            rustup show
           '
