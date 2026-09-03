@@ -32,6 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
+      - uses: ./.github/actions/setup-clang
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -111,6 +112,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
       - uses: ./.github/actions/setup-rustup-home
+      - uses: ./.github/actions/setup-clang
       - uses: ./.github/actions/setup-gh
       - name: Attach release-plz validation branch
         run: |
@@ -281,6 +283,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
+      - uses: ./.github/actions/setup-clang
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -303,6 +306,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
+      - uses: ./.github/actions/setup-clang
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -400,6 +404,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
+      - uses: ./.github/actions/setup-clang
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -475,6 +480,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
+      - uses: ./.github/actions/setup-clang
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
