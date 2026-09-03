@@ -1,22 +1,9 @@
-name: Setup Rustup home
-description: Use the runner image toolchain when present; otherwise isolate rustup in RUNNER_TEMP
+name: Setup isolated Rustup home
+description: Put Rustup state in runner-managed temporary storage
 
 runs:
   using: composite
   steps:
-    - name: Export Rustup home
+    - name: Export isolated Rustup home
       shell: bash
-      run: |
-        set -euo pipefail
-        # The cc-lb ARC image ships rustup + 1.97.1 under /home/runner.
-        # Pointing RUSTUP_HOME at an empty RUNNER_TEMP directory would discard
-        # that and re-download the toolchain on every job.
-        if [ -x /home/runner/.cargo/bin/rustc ] && [ -d /home/runner/.rustup ]; then
-          {
-            echo "RUSTUP_HOME=/home/runner/.rustup"
-            echo "CARGO_HOME=/home/runner/.cargo"
-          } >> "$GITHUB_ENV"
-          echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
-        else
-          echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
-        fi
+      run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
