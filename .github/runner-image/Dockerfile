@@ -17,9 +17,11 @@ ARG RUNNER_CONTAINER_HOOKS_VERSION=0.7.0
 ARG DOCKER_VERSION=29.7.2
 ARG BUILDX_VERSION=0.36.1
 ARG SCCACHE_VERSION=0.17.0
+ARG PROMETHEUS_VERSION=3.13.2
 
 # linux-arm64 runner tarball SHA-256 from the v2.337.0 release notes.
 ARG RUNNER_SHA256_ARM64=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
+ARG PROMETHEUS_SHA256_ARM64=7cecb17a6f41d59814e1a0581a1f81f79051ad5973d1ecf39e23a9f747d6572a
 
 ENV RUNNER_MANUALLY_TRAP_SIG=1 \
     ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1
@@ -76,7 +78,8 @@ RUN set -eux; \
         runner_sha256="${RUNNER_SHA256_ARM64}"; \
         docker_arch=aarch64; \
         sccache_target="aarch64-unknown-linux-musl"; \
-        sccache_sha256="821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77" \
+        sccache_sha256="821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77"; \
+        prometheus_sha256="${PROMETHEUS_SHA256_ARM64}" \
         ;; \
       *) \
         echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; \
@@ -117,10 +120,18 @@ RUN set -eux; \
     tar -xzf /tmp/sccache.tar.gz -C /tmp; \
     install -m 0755 /tmp/sccache-v${SCCACHE_VERSION}-${sccache_target}/sccache /usr/local/bin/sccache; \
     rm -rf /tmp/sccache.tar.gz /tmp/sccache-v${SCCACHE_VERSION}-${sccache_target}; \
+    curl --fail --silent --show-error --location \
+      "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-${runner_arch}.tar.gz" \
+      --output /tmp/prometheus.tar.gz; \
+    printf '%s  %s\n' "${prometheus_sha256}" /tmp/prometheus.tar.gz | sha256sum --check; \
+    tar -xzf /tmp/prometheus.tar.gz -C /tmp; \
+    install -m 0755 /tmp/prometheus-${PROMETHEUS_VERSION}.linux-${runner_arch}/promtool /usr/local/bin/promtool; \
+    rm -rf /tmp/prometheus.tar.gz /tmp/prometheus-${PROMETHEUS_VERSION}.linux-${runner_arch}; \
     chown -R runner:runner /home/runner; \
     chmod 0777 /home/runner; \
     docker --version; \
     sccache --version; \
+    promtool --version; \
     test -x /home/runner/run.sh
 
 WORKDIR /home/runner

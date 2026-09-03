@@ -118,6 +118,7 @@ jobs:
             command -v mold
             command -v sccache
             command -v psql
+            command -v promtool
             command -v docker
             command -v git
             command -v sudo
@@ -128,6 +129,7 @@ jobs:
             mold --version
             sccache --version
             psql --version
+            promtool --version
             docker --version
             printf "%s\\n" "int main(void) { return 0; }" > /tmp/t.c
             clang -fuse-ld=mold -o /tmp/t /tmp/t.c
