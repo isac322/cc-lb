@@ -330,9 +330,7 @@ jobs:
       - name: Check alert rule syntax
         run: promtool check rules deploy/alerts/*.yml
       - name: Validate Grafana dashboards
-        run: |
-          sudo apt-get update && sudo apt-get install -y jq python3
-          scripts/validate-grafana-dashboard.sh
+        run: scripts/validate-grafana-dashboard.sh
 
   # A sharded, multi-node version of this job is prepared (inactive) in
   # coverage-sharded.yml — enable it once the ARC pool has more than one node.

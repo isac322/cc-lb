@@ -118,14 +118,12 @@ jobs:
         run: cargo test -p cc-lb-server --features postgres --test db_unreachable_503 -- --ignored
         continue-on-error: true
 
-      # Fallback in case the ARC pod has not yet picked up the cc-lb-actions-runner
-      # image revision that bakes postgresql-client in. The smoke script hard-requires
-      # psql; this keeps the workflow robust against stale pod image caches.
       - name: Ensure psql is available
         run: |
+          set -euo pipefail
           if ! command -v psql >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends postgresql-client
+            echo "::error::psql is required on the runner image"
+            exit 1
           fi
           psql --version
 
