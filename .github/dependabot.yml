@@ -8,6 +8,7 @@
 #   - Fuzz workspace (excluded from the root workspace, so registered separately)
 #   - Bun-based admin web app (uses bun.lock; officially supported by Dependabot
 #     as of 2025-02-13 via package-ecosystem: "bun")
+#   - ARC runner image at .github/runner-image/Dockerfile
 
 version: 2
 updates:
@@ -23,6 +24,15 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/.github/runner-image"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 5
 
   - package-ecosystem: "cargo"
     directory: "/"

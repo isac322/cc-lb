@@ -1,0 +1,127 @@
+name: runner-image
+
+# Build the ARC runner image whenever its Dockerfile or this workflow changes.
+# Pull requests compile and smoke-test without publishing. Pushes to master
+# publish ghcr.io/isac322/cc-lb-actions-runner. `latest` is never published.
+
+on:
+  pull_request:
+    paths:
+      - '.github/runner-image/**'
+      - '.github/workflows/runner-image.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/runner-image/**'
+      - '.github/workflows/runner-image.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  build:
+    # Native arm64 only: the oracle4 pool is aarch64, and QEMU amd64 builds
+    # of apt-based runner images are slow and easy to get wrong.
+    runs-on: oracle4-cc-lb
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve runner version and publish flag
+        id: meta
+        run: |
+          set -euo pipefail
+          dockerfile=.github/runner-image/Dockerfile
+          version=$(sed -nE 's|^FROM ghcr.io/actions/actions-runner:([^@]+)@sha256:[0-9a-f]+$|\1|p' "$dockerfile")
+          if [ -z "$version" ]; then
+            echo "::error::$dockerfile must pin FROM ghcr.io/actions/actions-runner:<tag>@sha256:<digest>"
+            exit 1
+          fi
+          sha=$(git rev-parse --short=12 HEAD)
+          image=ghcr.io/isac322/cc-lb-actions-runner
+          immutable_tag="${version}-cclb-${sha}"
+          {
+            echo "version=$version"
+            echo "image=$image"
+            echo "immutable_tag=$immutable_tag"
+            if [ "${GITHUB_REF}" = refs/heads/master ] && [ "${GITHUB_EVENT_NAME}" != pull_request ]; then
+              echo "push=true"
+            else
+              echo "push=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        if: steps.meta.outputs.push == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: docker_meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.meta.outputs.image }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ steps.meta.outputs.immutable_tag }}
+            type=raw,value=${{ steps.meta.outputs.version }}-cclb,enable=${{ steps.meta.outputs.push == 'true' }}
+          labels: |
+            org.opencontainers.image.description=ARC runner image for cc-lb with clang, mold, and sccache
+            org.opencontainers.image.source=https://github.com/isac322/cc-lb
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build runner image
+        uses: docker/build-push-action@v7
+        with:
+          context: .github/runner-image
+          file: .github/runner-image/Dockerfile
+          platforms: linux/arm64
+          provenance: false
+          load: ${{ steps.meta.outputs.push != 'true' }}
+          push: ${{ steps.meta.outputs.push == 'true' }}
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+
+      - name: Smoke test
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          IMMUTABLE_TAG: ${{ steps.meta.outputs.immutable_tag }}
+          PUSH: ${{ steps.meta.outputs.push }}
+        run: |
+          set -euo pipefail
+          if [ "$PUSH" = true ]; then
+            ref="$IMAGE:$IMMUTABLE_TAG"
+            docker pull "$ref"
+          else
+            ref="$IMAGE:$IMMUTABLE_TAG"
+          fi
+          docker run --rm --entrypoint /bin/bash "$ref" -lc '
+            set -euo pipefail
+            id -u
+            command -v cc
+            command -v clang
+            command -v clang++
+            command -v mold
+            command -v sccache
+            command -v psql
+            test -x /usr/local/bin/clang-mold
+            cc --version
+            clang --version
+            mold --version
+            sccache --version
+            psql --version
+          '

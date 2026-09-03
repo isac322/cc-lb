@@ -1,15 +1,17 @@
 # syntax=docker/dockerfile:1.25
 #
-# Self-hosted GitHub Actions runner image, based on falcondev-oss/actions-runner.
-# Adds clang + mold for fast Rust builds and a verified, preinstalled sccache.
-# Deliberately does NOT install rustup,
-# language runtimes, or project-specific libraries — workflows stay portable
-# (they still use dtolnay/rust-toolchain, actions/setup-node, etc.).
+# Actions Runner Controller image for cc-lb. GitHub-hosted Ubuntu 24.04
+# already ships clang; ghcr.io/actions/actions-runner does not, so rustc
+# and cc-rs fail with `linker `cc` not found` on the official ARC image.
+#
+# Start from the official runner and add only general-purpose Rust build
+# tools. Do not install rustup, language runtimes, or project libraries —
+# workflows stay portable (dtolnay/rust-toolchain, actions/setup-node, …).
+#
+# Keep the FROM tag and digest in lockstep. CI reads the tag for GHCR
+# image names; Dependabot updates this line.
 
-ARG BASE_IMAGE=ghcr.io/falcondev-oss/actions-runner
-ARG BASE_TAG=latest
-
-FROM ${BASE_IMAGE}:${BASE_TAG}
+FROM ghcr.io/actions/actions-runner:2.337.0@sha256:e5496277be5d09bc968b3d64911b74e219ac4a3f2edce956a3ecf9271bea1ef4
 
 ARG SCCACHE_VERSION=0.17.0
 ARG TARGETARCH
@@ -17,22 +19,22 @@ ARG TARGETARCH
 USER root
 
 # General-purpose Rust build prerequisites only:
-#   clang / clang++   : C/C++ compiler used by cc-rs build scripts (replaces gcc)
-#   mold              : fast linker; large wins on link-heavy Rust workloads
+#   clang / clang++   : C/C++ compiler used by cc-rs (and as `cc`)
+#   mold              : fast linker for link-heavy Rust workloads
 #   libc6-dev         : libc headers needed by clang
 #   pkg-config        : nearly every *-sys crate uses it
 #   libssl-dev        : openssl-sys, extremely common transitive dep
-#   ca-certificates, curl, git, make, xz-utils : baseline build/network tools
+#   ca-certificates, curl, git, make, xz-utils, zstd : baseline tools
 #
-# Deliberately NOT installed (keep workflows portable):
-#   rustup / rust toolchain     -> managed by dtolnay/rust-toolchain action
-#   gcc                         -> clang replaces it (CC=clang below)
+# Deliberately NOT installed:
+#   rustup / rust toolchain     -> dtolnay/rust-toolchain
+#   gcc                         -> clang replaces it
 #   project-specific libs (libpq-dev, node, python, ...)
 #
-# `postgresql-client` (psql) is intentionally included: the postgres-conformance
-# workflow's E2E smoke step shells out to `psql` against the service container
-# for direct meta-table assertions. Without it the script silently falls back
-# to empty values (psql 127 -> `|| echo ""`) and step 4 misreports the failure.
+# `postgresql-client` (psql) is included because the postgres-conformance
+# E2E smoke step shells out to `psql` against the service container.
+# Without it the script falls back to empty values (psql 127 -> `|| echo ""`)
+# and misreports the failure.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -50,7 +52,10 @@ RUN set -eux; \
       postgresql-client \
     ; \
     rm -rf /var/lib/apt/lists/*; \
+    ln -sfn "$(command -v clang)" /usr/local/bin/cc; \
+    ln -sfn "$(command -v clang++)" /usr/local/bin/c++; \
     clang --version; \
+    cc --version; \
     mold --version; \
     psql --version
 
