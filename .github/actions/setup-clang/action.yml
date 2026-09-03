@@ -1,0 +1,36 @@
+name: Setup clang
+description: >
+  Ensure clang is the C/C++ compiler. GitHub-hosted Ubuntu images already
+  ship clang; the official ARC runner image does not. Install only when
+  missing so the same workflow runs on both.
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure clang and cc
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v clang >/dev/null 2>&1; then
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            clang \
+            mold \
+            libc6-dev \
+            pkg-config \
+            libssl-dev \
+            make
+        fi
+        clang_bin="$(command -v clang)"
+        clangxx_bin="$(command -v clang++)"
+        if ! command -v cc >/dev/null 2>&1; then
+          sudo ln -sfn "$clang_bin" /usr/local/bin/cc
+        fi
+        if ! command -v c++ >/dev/null 2>&1; then
+          sudo ln -sfn "$clangxx_bin" /usr/local/bin/c++
+        fi
+        {
+          echo "CC=clang"
+          echo "CXX=clang++"
+        } >> "$GITHUB_ENV"
+        clang --version
