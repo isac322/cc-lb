@@ -46,6 +46,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
       - uses: ./.github/actions/setup-rustup-home
+      - uses: ./.github/actions/setup-clang
       - uses: ./.github/actions/setup-gh
 
       - name: Validate release target

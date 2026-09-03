@@ -82,6 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
+      - uses: ./.github/actions/setup-clang
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -156,6 +157,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
+      - uses: ./.github/actions/setup-clang
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -194,6 +196,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
+      - uses: ./.github/actions/setup-clang
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
