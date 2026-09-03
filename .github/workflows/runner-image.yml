@@ -25,8 +25,7 @@ permissions: {}
 
 jobs:
   build:
-    # Native arm64 only: the oracle4 pool is aarch64, and QEMU amd64 builds
-    # of apt-based runner images are slow and easy to get wrong.
+    # Native arm64 only: the oracle4 pool is aarch64.
     runs-on: oracle4-cc-lb
     permissions:
       contents: read
@@ -41,9 +40,9 @@ jobs:
         run: |
           set -euo pipefail
           dockerfile=.github/runner-image/Dockerfile
-          version=$(sed -nE 's|^FROM ghcr.io/actions/actions-runner:([^@]+)@sha256:[0-9a-f]+$|\1|p' "$dockerfile")
+          version=$(sed -nE 's/^ARG RUNNER_VERSION=//p' "$dockerfile")
           if [ -z "$version" ]; then
-            echo "::error::$dockerfile must pin FROM ghcr.io/actions/actions-runner:<tag>@sha256:<digest>"
+            echo "::error::$dockerfile must set ARG RUNNER_VERSION="
             exit 1
           fi
           sha=$(git rev-parse --short=12 HEAD)
@@ -80,7 +79,7 @@ jobs:
             type=raw,value=${{ steps.meta.outputs.immutable_tag }}
             type=raw,value=${{ steps.meta.outputs.version }}-cclb,enable=${{ steps.meta.outputs.push == 'true' }}
           labels: |
-            org.opencontainers.image.description=ARC runner image for cc-lb with clang, mold, and sccache
+            org.opencontainers.image.description=Wolfi ARC runner image for cc-lb with clang 22, mold, and sccache
             org.opencontainers.image.source=https://github.com/isac322/cc-lb
             org.opencontainers.image.revision=${{ github.sha }}
 
@@ -111,13 +110,17 @@ jobs:
           fi
           docker run --rm --entrypoint /bin/bash "$ref" -lc '
             set -euo pipefail
-            id -u
+            test "$(id -u)" = 1001
+            test -x /home/runner/run.sh
             command -v cc
             command -v clang
             command -v clang++
             command -v mold
             command -v sccache
             command -v psql
+            command -v docker
+            command -v git
+            command -v sudo
             test -x /usr/local/bin/clang-mold
             test ! -e /home/runner/.rustup
             cc --version
@@ -125,4 +128,8 @@ jobs:
             mold --version
             sccache --version
             psql --version
+            docker --version
+            printf "%s\\n" "int main(void) { return 0; }" > /tmp/t.c
+            clang -fuse-ld=mold -o /tmp/t /tmp/t.c
+            /tmp/t
           '
