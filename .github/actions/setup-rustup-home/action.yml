@@ -20,13 +20,13 @@ runs:
         fi
         real_ldd="$(command -v ldd)"
         ver="$(ldd --version 2>&1 | awk 'NR==1 { print $NF; exit }')"
-        sudo tee /usr/local/bin/ldd >/dev/null <<EOF
-#!/usr/bin/env bash
-if [[ "\${1:-}" == "--version" || "\${1:-}" == "-v" ]]; then
-  echo "ldd (GNU libc) ${ver}"
-  exit 0
-fi
-exec ${real_ldd} "\$@"
-EOF
+        printf '%s\n' \
+          '#!/usr/bin/env bash' \
+          'if [[ "${1:-}" == "--version" || "${1:-}" == "-v" ]]; then' \
+          "  echo \"ldd (GNU libc) ${ver}\"" \
+          '  exit 0' \
+          'fi' \
+          "exec ${real_ldd} \"\$@\"" \
+          | sudo tee /usr/local/bin/ldd >/dev/null
         sudo chmod 0755 /usr/local/bin/ldd
         ldd --version | grep -Eq 'GLIBC|GNU libc'
