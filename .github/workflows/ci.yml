@@ -252,7 +252,7 @@ jobs:
           .github/workflows/release-plz.yml
 
   clippy:
-    runs-on: cc-lb-4
+    runs-on: cc-lb-2
     strategy:
       matrix:
         features: [sqlite, postgres]
@@ -350,11 +350,9 @@ jobs:
           --health-retries 10
 
     env:
-      # Raised from 2 to 4 to use the full 4-core node when nextest-cov runs as
-      # the long-pole job alone. Risk: if it overlaps clippy/e2e it can saturate
-      # the shared node that also hosts the k3s control plane → API starvation
-      # (TLS timeouts). Dial back toward 2 if CI shows that; see
-      # isac322/homelab values/gha-runner-scale-set/cc-lb-heavy.yaml.
+      # nextest-cov is the remaining 4-core job (clippy/e2e moved to cc-lb-2).
+      # CARGO_BUILD_JOBS=4 matches the cc-lb-4 request. Dial back toward 2 if
+      # postgres visibility tests start timing out under llvm-cov.
       CARGO_BUILD_JOBS: "4"
       # Coverage maps counters via embedded __llvm_covmap sections, not DWARF,
       # so debuginfo only bloats object size and slows linking here. Drop it
@@ -461,7 +459,7 @@ jobs:
           if-no-files-found: error
 
   e2e:
-    runs-on: cc-lb-4
+    runs-on: cc-lb-2
     env:
       # Real-client E2E builds the server but does not run the fixture-backed
       # Wasmtime integration suite.
