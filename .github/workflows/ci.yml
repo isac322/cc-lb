@@ -358,7 +358,7 @@ jobs:
       # the long-pole job alone. Risk: if it overlaps clippy/e2e it can saturate
       # the shared node that also hosts the k3s control plane → API starvation
       # (TLS timeouts). Dial back toward 2 if CI shows that; see
-      # .deploy/arc-cc-lb-values.yaml for the node-protection rationale.
+      # isac322/homelab values/gha-runner-scale-set/cc-lb-heavy.yaml.
       CARGO_BUILD_JOBS: "4"
       # Coverage maps counters via embedded __llvm_covmap sections, not DWARF,
       # so debuginfo only bloats object size and slows linking here. Drop it

@@ -125,7 +125,7 @@ jobs:
             command -v python3
             test -x /usr/local/bin/clang-mold
             test ! -e /home/runner/.rustup
-            test "$(awk -F: '/^docker:/{print $3}' /etc/group)" = 123
+            test "$(grep ^docker: /etc/group | cut -d: -f3)" = 123
             cc --version
             clang --version
             mold --version
