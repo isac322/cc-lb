@@ -45,14 +45,14 @@ opentelemetry_sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "runtime-tokio", "tls-rustls-ring", "uuid"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["chrono", "json", "runtime-tokio", "tls-rustls-ring", "uuid"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
-ulid = "1"
+ulid = "3"
 uuid = { workspace = true }
 
 [[test]]

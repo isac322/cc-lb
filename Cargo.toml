@@ -49,11 +49,11 @@ cc-lb-plugin-conformance = { version = "0.2", path = "crates/cc-lb-plugin-confor
 # External wasmtime/rkyv ecosystem — wired up by cc-lb-runtime-wasmtime in Phase 1+.
 # Phase 0 declares them here so member crates can opt in via `<name>.workspace = true`
 # without churning the manifest.
-wasmtime  = "47"
+wasmtime  = "48"
 rkyv      = { version = "0.8", default-features = false }
 bytecheck = { version = "0.8", default-features = false }
 blake3    = { version = "1", default-features = false }
-wasmparser = "0.256"
+wasmparser = "0.258"
 
 anyhow = "1"
 arc-swap = "1"
