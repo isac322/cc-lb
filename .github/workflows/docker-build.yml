@@ -33,6 +33,7 @@ jobs:
     runs-on: cc-lb-500m
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/export-sccache-env
       - name: Resolve source revision
         id: source
         run: |

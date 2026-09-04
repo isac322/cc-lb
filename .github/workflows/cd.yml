@@ -48,6 +48,7 @@ jobs:
         with:
           ref: ${{ inputs.source_ref }}
           persist-credentials: false
+      - uses: ./.github/actions/export-sccache-env
 
       - name: Resolve source revision
         id: source

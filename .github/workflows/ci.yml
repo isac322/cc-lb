@@ -107,6 +107,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
+      - uses: ./.github/actions/export-sccache-env
       - uses: ./.github/actions/setup-rustup-home
       - uses: ./.github/actions/setup-gh
       - name: Attach release-plz validation branch
