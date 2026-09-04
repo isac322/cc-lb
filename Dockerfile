@@ -243,3 +243,12 @@ USER 65532:65532
 EXPOSE 8080 9090 9091
 ENTRYPOINT ["/usr/local/bin/cc-lb"]
 CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
+
+# ---- CI smoke: run the static binary on BuildKit without a local Docker daemon ----
+FROM alpine:3.22 AS smoke
+ARG EXPECTED_VERSION=
+COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
+RUN /usr/local/bin/cc-lb --version && \
+    if [ -n "$EXPECTED_VERSION" ]; then \
+      /usr/local/bin/cc-lb --version | grep -Fq "$EXPECTED_VERSION"; \
+    fi

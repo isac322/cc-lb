@@ -1,0 +1,100 @@
+name: runner-image
+
+# Build the ARC runner image whenever its Dockerfile or this workflow changes.
+# Pull requests compile and smoke-test without publishing. Pushes to master
+# publish ghcr.io/isac322/cc-lb-actions-runner. `latest` is never published.
+
+on:
+  pull_request:
+    paths:
+      - '.github/runner-image/**'
+      - '.github/workflows/runner-image.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/runner-image/**'
+      - '.github/workflows/runner-image.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  build:
+    # Native arm64 only: the self-hosted pool is aarch64.
+    runs-on: cc-lb-500m
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve runner version and publish flag
+        id: meta
+        run: |
+          set -euo pipefail
+          dockerfile=.github/runner-image/Dockerfile
+          version=$(sed -nE 's/^ARG RUNNER_VERSION=//p' "$dockerfile")
+          if [ -z "$version" ]; then
+            echo "::error::$dockerfile must set ARG RUNNER_VERSION="
+            exit 1
+          fi
+          sha=$(git rev-parse --short=12 HEAD)
+          image=ghcr.io/isac322/cc-lb-actions-runner
+          immutable_tag="${version}-cclb-${sha}"
+          {
+            echo "version=$version"
+            echo "image=$image"
+            echo "immutable_tag=$immutable_tag"
+            if [ "${GITHUB_REF}" = refs/heads/master ] && [ "${GITHUB_EVENT_NAME}" != pull_request ]; then
+              echo "push=true"
+            else
+              echo "push=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver: remote
+          endpoint: ${{ vars.CC_LB_BUILDKIT_ENDPOINT }}
+
+      - name: Log in to ghcr.io
+        if: steps.meta.outputs.push == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: docker_meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.meta.outputs.image }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ steps.meta.outputs.immutable_tag }}
+            type=raw,value=${{ steps.meta.outputs.version }}-cclb,enable=${{ steps.meta.outputs.push == 'true' }}
+          labels: |
+            org.opencontainers.image.description=Wolfi ARC runner image for cc-lb with clang 22, mold, and sccache
+            org.opencontainers.image.source=https://github.com/isac322/cc-lb
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build runner image
+        uses: docker/build-push-action@v7
+        with:
+          context: .github/runner-image
+          file: .github/runner-image/Dockerfile
+          platforms: linux/arm64
+          provenance: false
+          load: false
+          push: ${{ steps.meta.outputs.push == 'true' }}
+          outputs: ${{ steps.meta.outputs.push == 'true' && '' || 'type=cacheonly' }}
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}

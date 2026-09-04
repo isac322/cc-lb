@@ -75,7 +75,7 @@ jobs:
   # instead of recompiling the workspace, which is what makes sharding a net
   # win (fan-out of run time, not N-times-duplicated build time).
   coverage-build:
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-4
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -114,7 +114,10 @@ jobs:
   # archive (no rebuild) and keeps its raw profiles (--no-report) for the merge.
   coverage-shard:
     needs: coverage-build
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-4
+    container:
+      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-eadffd458017@sha256:628482521262ff2d2ad2f5b7ba6475145773acb5a8bef0275ae7e9bbf33f113b
+
     strategy:
       # Let every shard finish even if one fails, so the merge sees full data
       # and one flaky shard does not mask the others.
@@ -187,7 +190,7 @@ jobs:
   # shard's profraw into one target dir, then a single report pass merges them.
   coverage-merge:
     needs: coverage-shard
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-4
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
