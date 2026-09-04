@@ -2,14 +2,15 @@
 #
 # cc-lb Actions Runner Controller image on Wolfi (glibc).
 #
-# ARC needs /home/runner/run.sh, uid 1001, and Docker CLI for DinD. This image
-# installs those plus clang 22 / mold 2.42 from Wolfi apk. Do not bake rustc;
-# rust-toolchain.toml moves independently.
+# ARC needs /home/runner/run.sh and uid 1001. Clang 22 / mold link Rust;
+# gcc remains the default cc so autotools (jemalloc) configure correctly.
+# Do not bake rustc; rust-toolchain.toml moves independently.
 #
 # Keep ARG RUNNER_VERSION in lockstep with the runner tarball digest. CI reads
 # that ARG for GHCR tags.
 
 FROM cgr.dev/chainguard/wolfi-base:latest@sha256:103eb3f4444c68ea2453bf3aad09d860eaa5a698effb3e656cd607f630f0e46d
+LABEL org.opencontainers.image.source="https://github.com/isac322/cc-lb"
 
 ARG TARGETARCH
 ARG RUNNER_VERSION=2.337.0
@@ -18,10 +19,12 @@ ARG DOCKER_VERSION=29.7.2
 ARG BUILDX_VERSION=0.36.1
 ARG SCCACHE_VERSION=0.17.0
 ARG PROMETHEUS_VERSION=3.13.2
+ARG HADOLINT_VERSION=2.15.1
 
 # linux-arm64 runner tarball SHA-256 from the v2.337.0 release notes.
 ARG RUNNER_SHA256_ARM64=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
 ARG PROMETHEUS_SHA256_ARM64=7cecb17a6f41d59814e1a0581a1f81f79051ad5973d1ecf39e23a9f747d6572a
+ARG HADOLINT_SHA256_ARM64=f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d
 
 ENV RUNNER_MANUALLY_TRAP_SIG=1 \
     ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1
@@ -36,8 +39,10 @@ RUN set -eux; \
       coreutils \
       curl \
       findutils \
+      gcc \
       git \
       glibc-2.44-dev \
+      grep \
       icu \
       jq \
       libstdc++ \
@@ -46,21 +51,24 @@ RUN set -eux; \
       openssl \
       openssl-dev \
       pkgconf \
+      posix-libc-utils \
       postgresql-18-client \
       python-3.13 \
+      ripgrep \
       shadow \
       sudo \
       unzip \
       xz \
       zlib \
       zstd; \
-    ln -sfn "$(command -v clang)" /usr/local/bin/cc; \
-    ln -sfn "$(command -v clang++)" /usr/local/bin/c++; \
     if ! command -v python3 >/dev/null; then \
       ln -sfn "$(command -v python3.13)" /usr/local/bin/python3; \
     fi; \
     clang --version; \
+    gcc --version; \
     cc --version; \
+    rg --version; \
+    grep --version; \
     mold --version; \
     psql --version; \
     python3 --version
@@ -71,9 +79,7 @@ RUN printf '%s\n' \
       > /usr/local/bin/clang-mold; \
     chmod 0755 /usr/local/bin/clang-mold
 
-ENV CC=clang \
-    CXX=clang++ \
-    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold \
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold
 
 RUN set -eux; \
@@ -84,7 +90,8 @@ RUN set -eux; \
         docker_arch=aarch64; \
         sccache_target="aarch64-unknown-linux-musl"; \
         sccache_sha256="821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77"; \
-        prometheus_sha256="${PROMETHEUS_SHA256_ARM64}" \
+        prometheus_sha256="${PROMETHEUS_SHA256_ARM64}"; \
+        hadolint_sha256="${HADOLINT_SHA256_ARM64}" \
         ;; \
       *) \
         echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; \
@@ -134,11 +141,18 @@ RUN set -eux; \
     tar -xzf /tmp/prometheus.tar.gz -C /tmp; \
     install -m 0755 /tmp/prometheus-${PROMETHEUS_VERSION}.linux-${runner_arch}/promtool /usr/local/bin/promtool; \
     rm -rf /tmp/prometheus.tar.gz /tmp/prometheus-${PROMETHEUS_VERSION}.linux-${runner_arch}; \
+    curl --fail --silent --show-error --location \
+      "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-${runner_arch}" \
+      --output /tmp/hadolint; \
+    printf '%s  %s\n' "${hadolint_sha256}" /tmp/hadolint | sha256sum --check; \
+    install -m 0755 /tmp/hadolint /usr/local/bin/hadolint; \
+    rm -f /tmp/hadolint; \
     chown -R runner:runner /home/runner; \
     chmod 0777 /home/runner; \
     docker --version; \
     sccache --version; \
     promtool --version; \
+    hadolint --version; \
     test -x /home/runner/run.sh
 
 WORKDIR /home/runner
@@ -147,25 +161,28 @@ RUN set -eux; \
     test "$(id -u)" = 1001; \
     test -x /home/runner/run.sh; \
     command -v cc; \
+    command -v gcc; \
     command -v clang; \
-    command -v clang++; \
     command -v mold; \
     command -v sccache; \
     command -v psql; \
     command -v promtool; \
+    command -v hadolint; \
     command -v docker; \
     command -v git; \
     command -v sudo; \
     command -v python3; \
+    command -v rg; \
     test -x /usr/local/bin/clang-mold; \
     test ! -e /home/runner/.rustup; \
     test "$(grep ^docker: /etc/group | cut -d: -f3)" = 123; \
-    cc --version; \
+    gcc --version; \
     clang --version; \
     mold --version; \
     sccache --version; \
     psql --version; \
     promtool --version; \
+    hadolint --version; \
     docker --version; \
     python3 --version; \
     printf '%s\n' 'int main(void) { return 0; }' > /tmp/t.c; \

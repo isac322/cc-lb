@@ -36,9 +36,8 @@ jobs:
         with:
           toolchain: 1.97.1
           components: rustfmt
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: ripgrep
+      - name: Ensure ripgrep is available
+        run: rg --version
       - run: cargo fmt --check
       - name: Audit-redaction lint
         run: bash scripts/lint-audit-redaction.sh
@@ -103,6 +102,9 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
     steps:
       - uses: actions/checkout@v7
         with:
