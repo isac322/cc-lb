@@ -119,7 +119,7 @@ jobs:
     needs: coverage-build
     runs-on: cc-lb-4
     container:
-      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-eadffd458017@sha256:628482521262ff2d2ad2f5b7ba6475145773acb5a8bef0275ae7e9bbf33f113b
+      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-91f8035a0c5f@sha256:508df5d4504e09e2d560b61ef297e2fa77f5e671409c4d8214887a3d8e7327d0
 
     strategy:
       # Let every shard finish even if one fails, so the merge sees full data

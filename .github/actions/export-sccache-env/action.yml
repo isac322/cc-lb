@@ -1,0 +1,20 @@
+name: Export sccache env
+description: Promote runner-pod sccache S3 env into the Actions env context.
+
+# ${{ env.X }} only sees workflow/job/step/GITHUB_ENV values, not the
+# process environment Kubernetes injected on the runner. Write those
+# through so later build-args and secret-envs resolve.
+
+runs:
+  using: composite
+  steps:
+    - name: Export sccache S3 env
+      shell: bash
+      run: |
+        set -euo pipefail
+        for k in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL SCCACHE_S3_KEY_PREFIX; do
+          eval "v=\${$k-}"
+          if [ -n "$v" ]; then
+            printf '%s=%s\n' "$k" "$v" >> "$GITHUB_ENV"
+          fi
+        done

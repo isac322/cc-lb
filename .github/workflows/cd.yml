@@ -35,7 +35,7 @@ permissions: {}
 jobs:
   publish:
     name: build & push image
-    # Runs in-cluster so the build can reach the garage-S3 sccache warmed by
+    # Runs in-cluster so the build can reach the versitygw COSI sccache warmed by
     # Docker PR builds. The runner pool may schedule either x86_64 or arm64;
     # the source Dockerfile isolates host-only Cargo configuration and xx
     # cross-compiles all four target architectures with no QEMU.
@@ -48,6 +48,7 @@ jobs:
         with:
           ref: ${{ inputs.source_ref }}
           persist-credentials: false
+      - uses: ./.github/actions/export-sccache-env
 
       - name: Resolve source revision
         id: source
@@ -134,12 +135,11 @@ jobs:
           build-args: |
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
-            SCCACHE_BUCKET=sccache
-            SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
-            SCCACHE_REGION=garage
-            SCCACHE_S3_USE_SSL=false
-            REQUIRE_SCCACHE=1
-            SCCACHE_S3_KEY_PREFIX=cc-lb
+            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
+            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
+            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
+            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
+            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
@@ -156,13 +156,12 @@ jobs:
           build-args: |
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
+            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
+            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
+            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
+            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
             EXPECTED_VERSION=${{ inputs.version }}
-            SCCACHE_BUCKET=sccache
-            SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
-            SCCACHE_REGION=garage
-            SCCACHE_S3_USE_SSL=false
-            REQUIRE_SCCACHE=1
-            SCCACHE_S3_KEY_PREFIX=cc-lb
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
