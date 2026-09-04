@@ -45,7 +45,9 @@ BEGIN {
 # path segment (the tracefile is already filtered by --ignore-filename-regex).
 /^SF:/ {
   cur = ""
-  if (match($0, /\/crates\/[^/]+\//)) {
+  # String regexp: busybox awk treats /\/crates\/[^/]+\// as an unterminated
+  # pattern because / inside [^/] closes the slash-delimited regex.
+  if (match($0, "/crates/[^/]+/")) {
     cur = substr($0, RSTART + 8, RLENGTH - 9)
   }
   next
