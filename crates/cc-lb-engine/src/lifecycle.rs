@@ -778,8 +778,8 @@ mod cache_score_tests {
         );
         assert_eq!(
             anthropic_family_input_micros_per_million("claude-sonnet-5"),
-            Some(2_000_000),
-            "Sonnet 5 introductory pricing through 2026-08-31"
+            Some(3_000_000),
+            "Sonnet 5 uses standard Sonnet rates after 2026-08-31"
         );
         assert_eq!(
             anthropic_family_input_micros_per_million("claude-sonnet-4-6"),
@@ -1356,7 +1356,6 @@ fn anthropic_family_input_micros_per_million(model: &str) -> Option<u64> {
     const FABLE_AND_MYTHOS: u64 = 10_000_000;
     const OPUS_CURRENT: u64 = 5_000_000;
     const OPUS_LEGACY: u64 = 15_000_000;
-    const SONNET_INTRODUCTORY: u64 = 2_000_000;
     const SONNET_STANDARD: u64 = 3_000_000;
     const HAIKU_CURRENT: u64 = 1_000_000;
     const HAIKU_LEGACY: u64 = 800_000;
@@ -1378,7 +1377,7 @@ fn anthropic_family_input_micros_per_million(model: &str) -> Option<u64> {
         // lose cache pricing entirely, disabling cache-value scoring for that model; inheriting
         // current pricing is the cheaper wrong answer.
         ("claude-opus", OPUS_CURRENT),
-        ("claude-sonnet-5", SONNET_INTRODUCTORY),
+        ("claude-sonnet-5", SONNET_STANDARD),
         ("claude-sonnet", SONNET_STANDARD),
         // Haiku 3.5 is addressed as `claude-3-5-haiku-*`; `claude-haiku-3-5` is not an id
         // Anthropic emits.

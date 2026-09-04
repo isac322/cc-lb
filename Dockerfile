@@ -248,6 +248,7 @@ CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
 FROM alpine:3.22 AS smoke
 ARG EXPECTED_VERSION=
 COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
 RUN /usr/local/bin/cc-lb --version && \
     if [ -n "$EXPECTED_VERSION" ]; then \
       /usr/local/bin/cc-lb --version | grep -Fq "$EXPECTED_VERSION"; \

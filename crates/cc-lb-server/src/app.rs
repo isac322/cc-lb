@@ -2259,7 +2259,7 @@ fn claude_default_snapshot(clock: &dyn cc_lb_engine::Clock) -> cc_lb_pricing::Ca
             6_250_000,
             500_000,
         ),
-        ("claude-sonnet-5", 2_000_000, 10_000_000, 2_500_000, 200_000),
+        ("claude-sonnet-5", 3_000_000, 15_000_000, 3_750_000, 300_000),
         (
             "claude-sonnet-4-6",
             3_000_000,
@@ -3208,11 +3208,11 @@ mod tests {
             ),
             (
                 "claude-sonnet-5",
-                2_000_000,
-                2_500_000,
-                4_000_000,
-                200_000,
-                10_000_000,
+                3_000_000,
+                3_750_000,
+                6_000_000,
+                300_000,
+                15_000_000,
             ),
             (
                 "claude-sonnet-4-6",
@@ -3278,16 +3278,6 @@ mod tests {
                 .filter(|model| model.starts_with("claude-fable"))
                 .count(),
             1
-        );
-
-        const SONNET_5_INTRODUCTORY_PRICE_CUTOVER_UNIX_SECS: u64 = 1_788_220_800;
-        assert!(
-            cc_lb_engine::clock::unix_secs(cc_lb_engine::Clock::now(&clock))
-                < SONNET_5_INTRODUCTORY_PRICE_CUTOVER_UNIX_SECS,
-            "claude-sonnet-5 introductory pricing expired on 2026-09-01. Two sites hardcode it: \
-             the fallback catalog rates in this file (2/2.50/4/0.20/10 -> 3/3.75/6/0.30/15), and \
-             SONNET_INTRODUCTORY in cc-lb-engine's anthropic_family_input_micros_per_million. \
-             This is the only tripwire for both; update them together."
         );
     }
 

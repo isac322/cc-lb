@@ -25,10 +25,11 @@ jobs:
     runs-on: cc-lb-500m
     steps:
       - uses: actions/checkout@v7
-      - uses: hadolint/hadolint-action@v3.4.0
-        with:
-          dockerfile: Dockerfile
-
+      - name: Lint Dockerfiles
+        run: |
+          set -euo pipefail
+          hadolint --version
+          hadolint Dockerfile
   helm:
     runs-on: cc-lb-500m
     env:
