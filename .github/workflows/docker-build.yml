@@ -11,6 +11,7 @@ on:
       - '.dockerignore'
       - '.cargo/config.toml'
       - '.github/workflows/docker-build.yml'
+      - '.github/actions/setup-remote-buildx/**'
   push:
     branches:
       - master
@@ -19,6 +20,7 @@ on:
       - '.dockerignore'
       - '.cargo/config.toml'
       - '.github/workflows/docker-build.yml'
+      - '.github/actions/setup-remote-buildx/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -30,7 +32,7 @@ jobs:
     # Dockerfile isolates host-only Cargo linker configuration, cross-compiles
     # the static musl binary with both storage backends, builds the SPA, and
     # runs a smoke test. Runner pods carry the in-cluster sccache S3 credentials.
-    runs-on: oracle4-cc-lb-2
+    runs-on: oracle4-cc-lb-500m
     steps:
       - uses: actions/checkout@v7
       - name: Resolve source revision
@@ -40,12 +42,8 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "source_date_epoch=$(git log -1 --format=%ct)" >> "$GITHUB_OUTPUT"
 
-      # network=host + the network.host entitlement let the in-Docker build
-      # reach the in-cluster Garage S3 endpoint (garage.arc-systems.svc).
-      - uses: docker/setup-buildx-action@v4
-        with:
-          driver-opts: network=host
-          buildkitd-flags: --allow-insecure-entitlement network.host
+      # Builds run on the in-cluster BuildKit daemon (same namespace as Garage).
+      - uses: ./.github/actions/setup-remote-buildx
 
       # Build every release target on Dockerfile changes so cross-compilation
       # failures are caught before publication.
@@ -56,8 +54,6 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le
           target: builder
           outputs: type=cacheonly
-          network: host
-          allow: network.host
           build-args: |
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
@@ -71,14 +67,12 @@ jobs:
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
 
-      - name: Build image
+      - name: Build image and smoke-test binary
         uses: docker/build-push-action@v7
         with:
           context: .
-          load: true
-          tags: cc-lb:ci
-          network: host
-          allow: network.host
+          target: smoke
+          outputs: type=cacheonly
           build-args: |
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
@@ -91,8 +85,3 @@ jobs:
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
-
-      # A successful build already proves both storage backends compile (default
-      # FEATURES=sqlite,postgres); this just confirms the static binary runs.
-      - name: Smoke test
-        run: docker run --rm cc-lb:ci --version

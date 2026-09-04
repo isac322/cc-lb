@@ -99,12 +99,10 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       startsWith(github.event.pull_request.title, 'chore: release cc-lb v')
-    runs-on: oracle4-cc-lb-2
+    runs-on: oracle4-cc-lb-500m
     permissions:
       contents: read
       pull-requests: read
-    env:
-      IMAGE: cc-lb:release-pr-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -120,10 +118,7 @@ jobs:
           git branch --set-upstream-to="origin/$GITHUB_BASE_REF" release-plz-validation
 
 
-      - uses: docker/setup-buildx-action@v4
-        with:
-          driver-opts: network=host
-          buildkitd-flags: --allow-insecure-entitlement network.host
+      - uses: ./.github/actions/setup-remote-buildx
 
       - uses: ./.github/actions/setup-actionlint
 
@@ -199,17 +194,16 @@ jobs:
           git diff --exit-code -- crates/cc-lb-server/Cargo.toml
 
 
-      - name: Build production image
+      - name: Build and smoke-test production image
         uses: docker/build-push-action@v7
         with:
           context: .
-          load: true
-          tags: ${{ env.IMAGE }}
-          network: host
-          allow: network.host
+          target: smoke
+          outputs: type=cacheonly
           build-args: |
             GIT_SHA=${{ steps.release.outputs.target_sha }}
             SOURCE_DATE_EPOCH=${{ steps.release.outputs.source_date_epoch }}
+            EXPECTED_VERSION=${{ steps.release.outputs.version }}
             SCCACHE_BUCKET=sccache
             SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
             SCCACHE_REGION=garage
@@ -217,18 +211,6 @@ jobs:
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
-
-      - name: Smoke-test production image
-        env:
-          VERSION: ${{ steps.release.outputs.version }}
-        run: |
-          set -euo pipefail
-          output=$(docker run --rm "$IMAGE" --version)
-          printf '%s\n' "$output"
-          if ! printf '%s' "$output" | grep -Fq "cc-lb $VERSION ("; then
-            echo "::error::binary version output '$output' does not contain '$VERSION'"
-            exit 1
-          fi
 
       - name: Lint and verify release chart
         env:
@@ -264,10 +246,6 @@ jobs:
           .github/workflows/publish-chart.yml
           .github/workflows/release-server.yml
           .github/workflows/release-plz.yml
-
-      - name: Clean release image
-        if: always()
-        run: docker image rm -f "$IMAGE" || true
 
   clippy:
     runs-on: oracle4-cc-lb-4
@@ -338,6 +316,8 @@ jobs:
   # the same coverage gate.
   nextest-cov:
     runs-on: oracle4-cc-lb-4
+    container:
+      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-20f79911f8e8@sha256:d4b215346fc04e7271816c5f9e6c132f7d7b47e629cef2864c4b516441980139
 
     services:
       postgres:

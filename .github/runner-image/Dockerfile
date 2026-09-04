@@ -142,3 +142,31 @@ RUN set -eux; \
 
 WORKDIR /home/runner
 USER runner
+RUN set -eux; \
+    test "$(id -u)" = 1001; \
+    test -x /home/runner/run.sh; \
+    command -v cc; \
+    command -v clang; \
+    command -v clang++; \
+    command -v mold; \
+    command -v sccache; \
+    command -v psql; \
+    command -v promtool; \
+    command -v docker; \
+    command -v git; \
+    command -v sudo; \
+    command -v python3; \
+    test -x /usr/local/bin/clang-mold; \
+    test ! -e /home/runner/.rustup; \
+    test "$(grep ^docker: /etc/group | cut -d: -f3)" = 123; \
+    cc --version; \
+    clang --version; \
+    mold --version; \
+    sccache --version; \
+    psql --version; \
+    promtool --version; \
+    docker --version; \
+    python3 --version; \
+    printf '%s\n' 'int main(void) { return 0; }' > /tmp/t.c; \
+    clang -fuse-ld=mold -o /tmp/t /tmp/t.c; \
+    /tmp/t

@@ -18,6 +18,8 @@ jobs:
   postgres-storage-stress:
     name: Postgres storage stress
     runs-on: oracle4-cc-lb-4
+    container:
+      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-20f79911f8e8@sha256:d4b215346fc04e7271816c5f9e6c132f7d7b47e629cef2864c4b516441980139
 
     services:
       postgres:
@@ -68,9 +70,24 @@ jobs:
   postgres-e2e:
     name: Postgres E2E and chaos
     runs-on: oracle4-cc-lb-4
+    container:
+      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-20f79911f8e8@sha256:d4b215346fc04e7271816c5f9e6c132f7d7b47e629cef2864c4b516441980139
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: testpw
+          POSTGRES_DB: cc_lb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
 
     env:
-      DOCKER_HOST: tcp://localhost:2375
       CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
 
     steps:
@@ -86,24 +103,6 @@ jobs:
         with:
           stable-build-metadata: "true"
 
-      - name: Start named Postgres container
-        run: |
-          docker rm -f cc-lb-postgres >/dev/null 2>&1 || true
-          docker run -d \
-            --name cc-lb-postgres \
-            -e POSTGRES_PASSWORD=testpw \
-            -e POSTGRES_DB=cc_lb_test \
-            -p 5432:5432 \
-            postgres:18
-          for _ in $(seq 1 30); do
-            if docker exec cc-lb-postgres pg_isready -U postgres -d cc_lb_test; then
-              exit 0
-            fi
-            sleep 2
-          done
-          docker logs cc-lb-postgres
-          exit 1
-
       - name: Install sqlx-cli
         uses: taiki-e/install-action@v2
         with:
@@ -114,9 +113,8 @@ jobs:
         env:
           DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
 
-      - name: Run cc-lb-server DB unreachable chaos test (ignored)
-        run: cargo test -p cc-lb-server --features postgres --test db_unreachable_503 -- --ignored
-        continue-on-error: true
+      # db_unreachable_503 stops Postgres via docker CLI; kubernetes service
+      # containers are not stoppable from the job, so this chaos case stays skipped.
 
       - name: Ensure psql is available
         run: |
@@ -129,10 +127,6 @@ jobs:
 
       - name: E2E smoke - cc-lb binary against postgres backend
         run: ./tests/real-client/postgres-smoke.sh
-
-      - name: Stop named Postgres container
-        if: always()
-        run: docker rm -f cc-lb-postgres >/dev/null 2>&1 || true
 
       - name: Show sccache stats
         if: always()

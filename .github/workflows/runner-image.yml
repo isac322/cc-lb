@@ -26,7 +26,7 @@ permissions: {}
 jobs:
   build:
     # Native arm64 only: the oracle4 pool is aarch64.
-    runs-on: oracle4-cc-lb-2
+    runs-on: oracle4-cc-lb-500m
     permissions:
       contents: read
       packages: write
@@ -59,7 +59,7 @@ jobs:
             fi
           } >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: ./.github/actions/setup-remote-buildx
 
       - name: Log in to ghcr.io
         if: steps.meta.outputs.push == 'true'
@@ -90,51 +90,8 @@ jobs:
           file: .github/runner-image/Dockerfile
           platforms: linux/arm64
           provenance: false
-          load: ${{ steps.meta.outputs.push != 'true' }}
+          load: false
           push: ${{ steps.meta.outputs.push == 'true' }}
+          outputs: ${{ steps.meta.outputs.push == 'true' && '' || 'type=cacheonly' }}
           tags: ${{ steps.docker_meta.outputs.tags }}
           labels: ${{ steps.docker_meta.outputs.labels }}
-
-      - name: Smoke test
-        env:
-          IMAGE: ${{ steps.meta.outputs.image }}
-          IMMUTABLE_TAG: ${{ steps.meta.outputs.immutable_tag }}
-          PUSH: ${{ steps.meta.outputs.push }}
-        run: |
-          set -euo pipefail
-          if [ "$PUSH" = true ]; then
-            ref="$IMAGE:$IMMUTABLE_TAG"
-            docker pull "$ref"
-          else
-            ref="$IMAGE:$IMMUTABLE_TAG"
-          fi
-          docker run --rm --entrypoint /bin/bash "$ref" -lc '
-            set -euo pipefail
-            test "$(id -u)" = 1001
-            test -x /home/runner/run.sh
-            command -v cc
-            command -v clang
-            command -v clang++
-            command -v mold
-            command -v sccache
-            command -v psql
-            command -v promtool
-            command -v docker
-            command -v git
-            command -v sudo
-            command -v python3
-            test -x /usr/local/bin/clang-mold
-            test ! -e /home/runner/.rustup
-            test "$(grep ^docker: /etc/group | cut -d: -f3)" = 123
-            cc --version
-            clang --version
-            mold --version
-            sccache --version
-            psql --version
-            promtool --version
-            docker --version
-            python3 --version
-            printf "%s\\n" "int main(void) { return 0; }" > /tmp/t.c
-            clang -fuse-ld=mold -o /tmp/t /tmp/t.c
-            /tmp/t
-          '
