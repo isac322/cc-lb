@@ -39,7 +39,7 @@ jobs:
     # Docker PR builds. The runner pool may schedule either x86_64 or arm64;
     # the source Dockerfile isolates host-only Cargo configuration and xx
     # cross-compiles all four target architectures with no QEMU.
-    runs-on: oracle4-cc-lb-heavy
+    runs-on: oracle4-cc-lb-4
     permissions:
       contents: read
       packages: write

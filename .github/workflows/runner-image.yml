@@ -26,7 +26,7 @@ permissions: {}
 jobs:
   build:
     # Native arm64 only: the oracle4 pool is aarch64.
-    runs-on: oracle4-cc-lb-heavy
+    runs-on: oracle4-cc-lb-2
     permissions:
       contents: read
       packages: write

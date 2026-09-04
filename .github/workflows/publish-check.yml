@@ -60,7 +60,7 @@ concurrency:
 jobs:
   semver:
     name: semver ${{ matrix.crate }}
-    runs-on: oracle4-cc-lb-heavy
+    runs-on: oracle4-cc-lb-2
     strategy:
       fail-fast: false
       matrix:
@@ -94,7 +94,7 @@ jobs:
 
   dry-run:
     name: dry-run cc-lb-plugin-wire
-    runs-on: oracle4-cc-lb-heavy
+    runs-on: oracle4-cc-lb-2
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
