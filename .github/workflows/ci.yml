@@ -102,9 +102,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -208,6 +205,11 @@ jobs:
           build-args: |
             GIT_SHA=${{ steps.release.outputs.target_sha }}
             SOURCE_DATE_EPOCH=${{ steps.release.outputs.source_date_epoch }}
+            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
+            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
+            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
+            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
+            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
             EXPECTED_VERSION=${{ steps.release.outputs.version }}
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
