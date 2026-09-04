@@ -137,11 +137,6 @@ jobs:
           build-args: |
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
-            SCCACHE_BUCKET=sccache
-            SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
-            SCCACHE_REGION=garage
-            SCCACHE_S3_USE_SSL=false
-            SCCACHE_S3_KEY_PREFIX=cc-lb
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
@@ -159,11 +154,6 @@ jobs:
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
             EXPECTED_VERSION=${{ inputs.version }}
-            SCCACHE_BUCKET=sccache
-            SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
-            SCCACHE_REGION=garage
-            SCCACHE_S3_USE_SSL=false
-            SCCACHE_S3_KEY_PREFIX=cc-lb
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY

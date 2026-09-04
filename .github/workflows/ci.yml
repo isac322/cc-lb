@@ -209,10 +209,6 @@ jobs:
             GIT_SHA=${{ steps.release.outputs.target_sha }}
             SOURCE_DATE_EPOCH=${{ steps.release.outputs.source_date_epoch }}
             EXPECTED_VERSION=${{ steps.release.outputs.version }}
-            SCCACHE_BUCKET=sccache
-            SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
-            SCCACHE_REGION=garage
-            SCCACHE_S3_USE_SSL=false
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
