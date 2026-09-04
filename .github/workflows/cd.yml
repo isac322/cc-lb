@@ -39,7 +39,7 @@ jobs:
     # Docker PR builds. The runner pool may schedule either x86_64 or arm64;
     # the source Dockerfile isolates host-only Cargo configuration and xx
     # cross-compiles all four target architectures with no QEMU.
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-500m
     permissions:
       contents: read
       packages: write
@@ -79,11 +79,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # network=host lets the build reach the in-cluster garage sccache endpoint.
       - uses: docker/setup-buildx-action@v4
         with:
-          driver-opts: network=host
-          buildkitd-flags: --allow-insecure-entitlement network.host
+          driver: remote
+          endpoint: tcp://buildkit.arc-systems.svc.cluster.local:1234
 
       - name: Inspect existing exact image
         id: existing
@@ -95,10 +94,8 @@ jobs:
           set -euo pipefail
           error_file="$RUNNER_TEMP/image-inspect-error"
           if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>"$error_file"; then
-            docker pull "$IMAGE:$VERSION"
-            revision=$(docker image inspect \
-              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-              "$IMAGE:$VERSION")
+            revision=$(docker buildx imagetools inspect "$IMAGE:$VERSION" \
+              --format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}')
             if [ "$revision" != "$SOURCE_SHA" ]; then
               echo "::error::existing $IMAGE:$VERSION points to revision '$revision', expected '$SOURCE_SHA'"
               exit 1
@@ -132,13 +129,34 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le
           push: true
           provenance: false
-          network: host
-          allow: network.host
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+            SCCACHE_BUCKET=sccache
+            SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
+            SCCACHE_REGION=garage
+            SCCACHE_S3_USE_SSL=false
+            REQUIRE_SCCACHE=1
+            SCCACHE_S3_KEY_PREFIX=cc-lb
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      - name: Smoke-test binary version
+        if: steps.existing.outputs.already_published != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: smoke
+          outputs: type=cacheonly
+          platforms: linux/arm64
+          provenance: false
+          build-args: |
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+            EXPECTED_VERSION=${{ inputs.version }}
             SCCACHE_BUCKET=sccache
             SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
             SCCACHE_REGION=garage
@@ -205,17 +223,10 @@ jobs:
             tags+=("$alias")
           done
           for tag in "${tags[@]}"; do
-            docker pull "$IMAGE:$tag"
-            revision=$(docker image inspect \
-              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-              "$IMAGE:$tag")
+            revision=$(docker buildx imagetools inspect "$IMAGE:$tag" \
+              --format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}')
             if [ "$revision" != "$SOURCE_SHA" ]; then
               echo "::error::$IMAGE:$tag revision '$revision' does not match '$SOURCE_SHA'"
               exit 1
             fi
           done
-          output=$(docker run --rm "$IMAGE:$VERSION" --version)
-          if ! printf '%s\n' "$output" | grep -Fq "$VERSION"; then
-            echo "::error::binary version output '$output' does not contain '$VERSION'"
-            exit 1
-          fi

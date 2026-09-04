@@ -31,7 +31,7 @@ permissions: {}
 jobs:
   publish:
     name: package & push chart
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-500m
     permissions:
       contents: read
       packages: write

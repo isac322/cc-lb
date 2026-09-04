@@ -1,106 +1,173 @@
 # syntax=docker/dockerfile:1.25
 #
-# Self-hosted GitHub Actions runner image, based on falcondev-oss/actions-runner.
-# Adds clang + mold for fast Rust builds and a verified, preinstalled sccache.
-# Deliberately does NOT install rustup,
-# language runtimes, or project-specific libraries — workflows stay portable
-# (they still use dtolnay/rust-toolchain, actions/setup-node, etc.).
+# cc-lb Actions Runner Controller image on Wolfi (glibc).
+#
+# ARC needs /home/runner/run.sh, uid 1001, and Docker CLI for DinD. This image
+# installs those plus clang 22 / mold 2.42 from Wolfi apk. Do not bake rustc;
+# rust-toolchain.toml moves independently.
+#
+# Keep ARG RUNNER_VERSION in lockstep with the runner tarball digest. CI reads
+# that ARG for GHCR tags.
 
-ARG BASE_IMAGE=ghcr.io/falcondev-oss/actions-runner
-ARG BASE_TAG=latest
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:103eb3f4444c68ea2453bf3aad09d860eaa5a698effb3e656cd607f630f0e46d
 
-FROM ${BASE_IMAGE}:${BASE_TAG}
-
-ARG SCCACHE_VERSION=0.17.0
 ARG TARGETARCH
+ARG RUNNER_VERSION=2.337.0
+ARG RUNNER_CONTAINER_HOOKS_VERSION=0.7.0
+ARG DOCKER_VERSION=29.7.2
+ARG BUILDX_VERSION=0.36.1
+ARG SCCACHE_VERSION=0.17.0
+ARG PROMETHEUS_VERSION=3.13.2
 
-USER root
+# linux-arm64 runner tarball SHA-256 from the v2.337.0 release notes.
+ARG RUNNER_SHA256_ARM64=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
+ARG PROMETHEUS_SHA256_ARM64=7cecb17a6f41d59814e1a0581a1f81f79051ad5973d1ecf39e23a9f747d6572a
 
-# General-purpose Rust build prerequisites only:
-#   clang / clang++   : C/C++ compiler used by cc-rs build scripts (replaces gcc)
-#   mold              : fast linker; large wins on link-heavy Rust workloads
-#   libc6-dev         : libc headers needed by clang
-#   pkg-config        : nearly every *-sys crate uses it
-#   libssl-dev        : openssl-sys, extremely common transitive dep
-#   ca-certificates, curl, git, make, xz-utils : baseline build/network tools
-#
-# Deliberately NOT installed (keep workflows portable):
-#   rustup / rust toolchain     -> managed by dtolnay/rust-toolchain action
-#   gcc                         -> clang replaces it (CC=clang below)
-#   project-specific libs (libpq-dev, node, python, ...)
-#
-# `postgresql-client` (psql) is intentionally included: the postgres-conformance
-# workflow's E2E smoke step shells out to `psql` against the service container
-# for direct meta-table assertions. Without it the script silently falls back
-# to empty values (psql 127 -> `|| echo ""`) and step 4 misreports the failure.
+ENV RUNNER_MANUALLY_TRAP_SIG=1 \
+    ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1
+
 RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-      clang \
-      mold \
-      libc6-dev \
-      pkg-config \
-      libssl-dev \
-      ca-certificates \
+    apk add --no-cache \
+      bash \
+      busybox \
+      ca-certificates-bundle \
+      clang-22 \
+      compiler-rt-22 \
+      coreutils \
       curl \
+      findutils \
       git \
+      glibc-2.44-dev \
+      icu \
+      jq \
+      libstdc++ \
       make \
-      xz-utils \
-      zstd \
-      postgresql-client \
-    ; \
-    rm -rf /var/lib/apt/lists/*; \
+      mold \
+      openssl \
+      openssl-dev \
+      pkgconf \
+      postgresql-18-client \
+      python-3.13 \
+      shadow \
+      sudo \
+      unzip \
+      xz \
+      zlib \
+      zstd; \
+    ln -sfn "$(command -v clang)" /usr/local/bin/cc; \
+    ln -sfn "$(command -v clang++)" /usr/local/bin/c++; \
+    if ! command -v python3 >/dev/null; then \
+      ln -sfn "$(command -v python3.13)" /usr/local/bin/python3; \
+    fi; \
     clang --version; \
+    cc --version; \
     mold --version; \
-    psql --version
+    psql --version; \
+    python3 --version
 
-# Preinstall the static upstream sccache binary for both runner architectures.
-# Digests are from the SHA-256 files published with the v0.17.0 release assets.
-RUN set -eux; \
-    case "${TARGETARCH}" in \
-      amd64) \
-        sccache_target="x86_64-unknown-linux-musl"; \
-        sccache_sha256="67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006" \
-        ;; \
-      arm64) \
-        sccache_target="aarch64-unknown-linux-musl"; \
-        sccache_sha256="821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77" \
-        ;; \
-      *) \
-        echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; \
-        exit 1 \
-        ;; \
-    esac; \
-    archive="sccache-v${SCCACHE_VERSION}-${sccache_target}.tar.gz"; \
-    archive_path="/tmp/${archive}"; \
-    install_root="/tmp/sccache-v${SCCACHE_VERSION}-${sccache_target}"; \
-    curl --fail --silent --show-error --location \
-      "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${archive}" \
-      --output "${archive_path}"; \
-    printf '%s  %s\n' "${sccache_sha256}" "${archive_path}" > /tmp/sccache.sha256; \
-    sha256sum --check /tmp/sccache.sha256; \
-    tar -xzf "${archive_path}" -C /tmp; \
-    install -m 0755 "${install_root}/sccache" /usr/local/bin/sccache; \
-    rm -rf "${archive_path}" "${install_root}" /tmp/sccache.sha256; \
-    sccache --version
-
-# Make clang the default C/C++ compiler for cc-rs and similar Rust build scripts.
-ENV CC=clang \
-    CXX=clang++
-
-# Keep the mold choice in Cargo's linker executable rather than target
-# RUSTFLAGS, which tools such as cargo-llvm-cov replace.
 RUN printf '%s\n' \
       '#!/bin/sh' \
       'exec clang -fuse-ld=mold "$@"' \
       > /usr/local/bin/clang-mold; \
     chmod 0755 /usr/local/bin/clang-mold
 
-# For the two main Linux glibc Rust targets, drive linking through the
-# clang-mold wrapper. Scoped per-target on purpose: cross-compile to musl,
-# wasi, windows, etc. is left untouched so workflows stay portable.
-ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold \
+ENV CC=clang \
+    CXX=clang++ \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold
 
-# Restore the unprivileged runner user defined by the base image.
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      arm64) \
+        runner_arch=arm64; \
+        runner_sha256="${RUNNER_SHA256_ARM64}"; \
+        docker_arch=aarch64; \
+        sccache_target="aarch64-unknown-linux-musl"; \
+        sccache_sha256="821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77"; \
+        prometheus_sha256="${PROMETHEUS_SHA256_ARM64}" \
+        ;; \
+      *) \
+        echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; \
+        exit 1 \
+        ;; \
+    esac; \
+    groupmod -g 124 ntp; \
+    addgroup -g 123 docker; \
+    adduser -D -u 1001 -h /home/runner -s /bin/bash runner; \
+    addgroup runner docker; \
+    echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner; \
+    chmod 0440 /etc/sudoers.d/runner; \
+    mkdir -p /home/runner /usr/local/lib/docker/cli-plugins; \
+    curl --fail --silent --show-error --location \
+      "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${runner_arch}-${RUNNER_VERSION}.tar.gz" \
+      --output /tmp/runner.tar.gz; \
+    printf '%s  %s\n' "${runner_sha256}" /tmp/runner.tar.gz | sha256sum --check; \
+    tar -xzf /tmp/runner.tar.gz -C /home/runner; \
+    rm -f /tmp/runner.tar.gz; \
+    sed -i 's/\x41\x00\x43\x00\x54\x00\x49\x00\x4F\x00\x4E\x00\x53\x00\x5F\x00\x52\x00\x45\x00\x53\x00\x55\x00\x4C\x00\x54\x00\x53\x00\x5F\x00\x55\x00\x52\x00\x4C\x00/\x41\x00\x43\x00\x54\x00\x49\x00\x4F\x00\x4E\x00\x53\x00\x5F\x00\x52\x00\x45\x00\x53\x00\x55\x00\x4C\x00\x54\x00\x53\x00\x5F\x00\x4F\x00\x52\x00\x4C\x00/g' /home/runner/bin/Runner.Worker.dll; \
+    curl --fail --silent --show-error --location \
+      "https://github.com/actions/runner-container-hooks/releases/download/v${RUNNER_CONTAINER_HOOKS_VERSION}/actions-runner-hooks-k8s-${RUNNER_CONTAINER_HOOKS_VERSION}.zip" \
+      --output /tmp/hooks.zip; \
+    unzip -q /tmp/hooks.zip -d /home/runner/k8s; \
+    rm -f /tmp/hooks.zip; \
+    curl --fail --silent --show-error --location \
+      "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz" \
+      --output /tmp/docker.tgz; \
+    tar -xzf /tmp/docker.tgz -C /tmp; \
+    install -m 0755 /tmp/docker/docker /usr/bin/docker; \
+    rm -rf /tmp/docker /tmp/docker.tgz; \
+    curl --fail --silent --show-error --location \
+      "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-${TARGETARCH}" \
+      --output /usr/local/lib/docker/cli-plugins/docker-buildx; \
+    chmod 0755 /usr/local/lib/docker/cli-plugins/docker-buildx; \
+    curl --fail --silent --show-error --location \
+      "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${sccache_target}.tar.gz" \
+      --output /tmp/sccache.tar.gz; \
+    printf '%s  %s\n' "${sccache_sha256}" /tmp/sccache.tar.gz | sha256sum --check; \
+    tar -xzf /tmp/sccache.tar.gz -C /tmp; \
+    install -m 0755 /tmp/sccache-v${SCCACHE_VERSION}-${sccache_target}/sccache /usr/local/bin/sccache; \
+    rm -rf /tmp/sccache.tar.gz /tmp/sccache-v${SCCACHE_VERSION}-${sccache_target}; \
+    curl --fail --silent --show-error --location \
+      "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-${runner_arch}.tar.gz" \
+      --output /tmp/prometheus.tar.gz; \
+    printf '%s  %s\n' "${prometheus_sha256}" /tmp/prometheus.tar.gz | sha256sum --check; \
+    tar -xzf /tmp/prometheus.tar.gz -C /tmp; \
+    install -m 0755 /tmp/prometheus-${PROMETHEUS_VERSION}.linux-${runner_arch}/promtool /usr/local/bin/promtool; \
+    rm -rf /tmp/prometheus.tar.gz /tmp/prometheus-${PROMETHEUS_VERSION}.linux-${runner_arch}; \
+    chown -R runner:runner /home/runner; \
+    chmod 0777 /home/runner; \
+    docker --version; \
+    sccache --version; \
+    promtool --version; \
+    test -x /home/runner/run.sh
+
+WORKDIR /home/runner
 USER runner
+RUN set -eux; \
+    test "$(id -u)" = 1001; \
+    test -x /home/runner/run.sh; \
+    command -v cc; \
+    command -v clang; \
+    command -v clang++; \
+    command -v mold; \
+    command -v sccache; \
+    command -v psql; \
+    command -v promtool; \
+    command -v docker; \
+    command -v git; \
+    command -v sudo; \
+    command -v python3; \
+    test -x /usr/local/bin/clang-mold; \
+    test ! -e /home/runner/.rustup; \
+    test "$(grep ^docker: /etc/group | cut -d: -f3)" = 123; \
+    cc --version; \
+    clang --version; \
+    mold --version; \
+    sccache --version; \
+    psql --version; \
+    promtool --version; \
+    docker --version; \
+    python3 --version; \
+    printf '%s\n' 'int main(void) { return 0; }' > /tmp/t.c; \
+    clang -fuse-ld=mold -o /tmp/t /tmp/t.c; \
+    /tmp/t

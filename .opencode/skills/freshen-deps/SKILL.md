@@ -231,7 +231,7 @@ or poll:
 gh pr view <num> --json statusCheckRollup,mergeStateStatus
 ```
 
-The cc-lb self-hosted runner (`oracle4-cc-lb`) can be backed up by concurrent master pushes. Be patient — checks often sit `QUEUED` for minutes. As long as `failed=0` and progress is happening, keep watching.
+The cc-lb self-hosted runner (`cc-lb`) can be backed up by concurrent master pushes. Be patient — checks often sit `QUEUED` for minutes. As long as `failed=0` and progress is happening, keep watching.
 
 If any required check fails: open `gh run view <id> --log-failed`, fix the root cause, push, resume watch. Do NOT report "done" while anything is red.
 

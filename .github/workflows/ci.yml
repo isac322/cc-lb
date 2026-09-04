@@ -28,7 +28,7 @@ env:
 
 jobs:
   fmt:
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-500m
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -51,7 +51,7 @@ jobs:
     # the shared workspace version for cc-lb-server after strict validation.
     # release-plz's own PRs remain exempt.
     if: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') }}
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-500m
     steps:
       - uses: actions/checkout@v7
         with:
@@ -99,12 +99,10 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       startsWith(github.event.pull_request.title, 'chore: release cc-lb v')
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-500m
     permissions:
       contents: read
       pull-requests: read
-    env:
-      IMAGE: cc-lb:release-pr-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -122,8 +120,8 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
         with:
-          driver-opts: network=host
-          buildkitd-flags: --allow-insecure-entitlement network.host
+          driver: remote
+          endpoint: tcp://buildkit.arc-systems.svc.cluster.local:1234
 
       - uses: ./.github/actions/setup-actionlint
 
@@ -199,17 +197,16 @@ jobs:
           git diff --exit-code -- crates/cc-lb-server/Cargo.toml
 
 
-      - name: Build production image
+      - name: Build and smoke-test production image
         uses: docker/build-push-action@v7
         with:
           context: .
-          load: true
-          tags: ${{ env.IMAGE }}
-          network: host
-          allow: network.host
+          target: smoke
+          outputs: type=cacheonly
           build-args: |
             GIT_SHA=${{ steps.release.outputs.target_sha }}
             SOURCE_DATE_EPOCH=${{ steps.release.outputs.source_date_epoch }}
+            EXPECTED_VERSION=${{ steps.release.outputs.version }}
             SCCACHE_BUCKET=sccache
             SCCACHE_ENDPOINT=http://garage.arc-systems.svc.cluster.local:3900
             SCCACHE_REGION=garage
@@ -217,18 +214,6 @@ jobs:
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
-
-      - name: Smoke-test production image
-        env:
-          VERSION: ${{ steps.release.outputs.version }}
-        run: |
-          set -euo pipefail
-          output=$(docker run --rm "$IMAGE" --version)
-          printf '%s\n' "$output"
-          if ! printf '%s' "$output" | grep -Fq "cc-lb $VERSION ("; then
-            echo "::error::binary version output '$output' does not contain '$VERSION'"
-            exit 1
-          fi
 
       - name: Lint and verify release chart
         env:
@@ -265,12 +250,8 @@ jobs:
           .github/workflows/release-server.yml
           .github/workflows/release-plz.yml
 
-      - name: Clean release image
-        if: always()
-        run: docker image rm -f "$IMAGE" || true
-
   clippy:
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-4
     strategy:
       matrix:
         features: [sqlite, postgres]
@@ -299,7 +280,7 @@ jobs:
           fi
 
   cargo-deny:
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-1
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -312,10 +293,10 @@ jobs:
       - run: cargo deny check
 
   promtool:
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-500m
     steps:
       - uses: actions/checkout@v7
-      - name: Install promtool
+      - name: Ensure promtool is available
         run: |
           set -euo pipefail
           if command -v promtool >/dev/null 2>&1; then
@@ -330,16 +311,16 @@ jobs:
       - name: Check alert rule syntax
         run: promtool check rules deploy/alerts/*.yml
       - name: Validate Grafana dashboards
-        run: |
-          sudo apt-get update && sudo apt-get install -y jq python3
-          scripts/validate-grafana-dashboard.sh
+        run: scripts/validate-grafana-dashboard.sh
 
   # A sharded, multi-node version of this job is prepared (inactive) in
   # coverage-sharded.yml — enable it once the ARC pool has more than one node.
   # See that file's header for the exact steps. Do not run both: they enforce
   # the same coverage gate.
   nextest-cov:
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-4
+    container:
+      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-eadffd458017@sha256:628482521262ff2d2ad2f5b7ba6475145773acb5a8bef0275ae7e9bbf33f113b
 
     services:
       postgres:
@@ -360,7 +341,7 @@ jobs:
       # the long-pole job alone. Risk: if it overlaps clippy/e2e it can saturate
       # the shared node that also hosts the k3s control plane → API starvation
       # (TLS timeouts). Dial back toward 2 if CI shows that; see
-      # .deploy/arc-cc-lb-values.yaml for the node-protection rationale.
+      # isac322/homelab values/gha-runner-scale-set/cc-lb-heavy.yaml.
       CARGO_BUILD_JOBS: "4"
       # Coverage maps counters via embedded __llvm_covmap sections, not DWARF,
       # so debuginfo only bloats object size and slows linking here. Drop it
@@ -467,7 +448,7 @@ jobs:
           if-no-files-found: error
 
   e2e:
-    runs-on: oracle4-cc-lb
+    runs-on: cc-lb-4
     env:
       # Real-client E2E builds the server but does not run the fixture-backed
       # Wasmtime integration suite.
