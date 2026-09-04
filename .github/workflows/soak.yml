@@ -17,7 +17,7 @@ env:
 jobs:
   rss-soak:
     if: github.ref == 'refs/heads/master'
-    runs-on: cc-lb-4
+    runs-on: cc-lb-2
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
