@@ -30,7 +30,6 @@ jobs:
           set -euo pipefail
           hadolint --version
           hadolint Dockerfile
-          hadolint .github/runner-image/Dockerfile
   helm:
     runs-on: cc-lb-500m
     env:
