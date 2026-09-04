@@ -25,8 +25,8 @@ permissions: {}
 
 jobs:
   build:
-    # Native arm64 only: the oracle4 pool is aarch64.
-    runs-on: oracle4-cc-lb-500m
+    # Native arm64 only: the self-hosted pool is aarch64.
+    runs-on: cc-lb-500m
     permissions:
       contents: read
       packages: write

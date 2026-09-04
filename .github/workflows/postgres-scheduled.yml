@@ -17,7 +17,7 @@ concurrency:
 jobs:
   postgres-storage-stress:
     name: Postgres storage stress
-    runs-on: oracle4-cc-lb-4
+    runs-on: cc-lb-4
     container:
       image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-20f79911f8e8@sha256:d4b215346fc04e7271816c5f9e6c132f7d7b47e629cef2864c4b516441980139
 
@@ -69,7 +69,7 @@ jobs:
 
   postgres-e2e:
     name: Postgres E2E and chaos
-    runs-on: oracle4-cc-lb-4
+    runs-on: cc-lb-4
     container:
       image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-20f79911f8e8@sha256:d4b215346fc04e7271816c5f9e6c132f7d7b47e629cef2864c4b516441980139
 

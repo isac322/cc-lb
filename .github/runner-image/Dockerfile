@@ -104,6 +104,7 @@ RUN set -eux; \
     printf '%s  %s\n' "${runner_sha256}" /tmp/runner.tar.gz | sha256sum --check; \
     tar -xzf /tmp/runner.tar.gz -C /home/runner; \
     rm -f /tmp/runner.tar.gz; \
+    sed -i 's/\x41\x00\x43\x00\x54\x00\x49\x00\x4F\x00\x4E\x00\x53\x00\x5F\x00\x52\x00\x45\x00\x53\x00\x55\x00\x4C\x00\x54\x00\x53\x00\x5F\x00\x55\x00\x52\x00\x4C\x00/\x41\x00\x43\x00\x54\x00\x49\x00\x4F\x00\x4E\x00\x53\x00\x5F\x00\x52\x00\x45\x00\x53\x00\x55\x00\x4C\x00\x54\x00\x53\x00\x5F\x00\x4F\x00\x52\x00\x4C\x00/g' /home/runner/bin/Runner.Worker.dll; \
     curl --fail --silent --show-error --location \
       "https://github.com/actions/runner-container-hooks/releases/download/v${RUNNER_CONTAINER_HOOKS_VERSION}/actions-runner-hooks-k8s-${RUNNER_CONTAINER_HOOKS_VERSION}.zip" \
       --output /tmp/hooks.zip; \

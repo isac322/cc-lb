@@ -28,7 +28,7 @@ env:
 
 jobs:
   fmt:
-    runs-on: oracle4-cc-lb-500m
+    runs-on: cc-lb-500m
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -51,7 +51,7 @@ jobs:
     # the shared workspace version for cc-lb-server after strict validation.
     # release-plz's own PRs remain exempt.
     if: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') }}
-    runs-on: oracle4-cc-lb-500m
+    runs-on: cc-lb-500m
     steps:
       - uses: actions/checkout@v7
         with:
@@ -99,7 +99,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       startsWith(github.event.pull_request.title, 'chore: release cc-lb v')
-    runs-on: oracle4-cc-lb-500m
+    runs-on: cc-lb-500m
     permissions:
       contents: read
       pull-requests: read
@@ -251,7 +251,7 @@ jobs:
           .github/workflows/release-plz.yml
 
   clippy:
-    runs-on: oracle4-cc-lb-4
+    runs-on: cc-lb-4
     strategy:
       matrix:
         features: [sqlite, postgres]
@@ -280,7 +280,7 @@ jobs:
           fi
 
   cargo-deny:
-    runs-on: oracle4-cc-lb-1
+    runs-on: cc-lb-1
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -293,7 +293,7 @@ jobs:
       - run: cargo deny check
 
   promtool:
-    runs-on: oracle4-cc-lb-500m
+    runs-on: cc-lb-500m
     steps:
       - uses: actions/checkout@v7
       - name: Ensure promtool is available
@@ -318,7 +318,7 @@ jobs:
   # See that file's header for the exact steps. Do not run both: they enforce
   # the same coverage gate.
   nextest-cov:
-    runs-on: oracle4-cc-lb-4
+    runs-on: cc-lb-4
     container:
       image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-20f79911f8e8@sha256:d4b215346fc04e7271816c5f9e6c132f7d7b47e629cef2864c4b516441980139
 
@@ -448,7 +448,7 @@ jobs:
           if-no-files-found: error
 
   e2e:
-    runs-on: oracle4-cc-lb-4
+    runs-on: cc-lb-4
     env:
       # Real-client E2E builds the server but does not run the fixture-backed
       # Wasmtime integration suite.
