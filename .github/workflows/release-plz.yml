@@ -36,7 +36,7 @@ concurrency:
 jobs:
   preflight:
     name: preflight publish-check
-    runs-on: cc-lb-2
+    runs-on: cc-lb-4
     permissions:
       contents: read
     env:

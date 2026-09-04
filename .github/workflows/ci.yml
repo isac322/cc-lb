@@ -252,7 +252,7 @@ jobs:
           .github/workflows/release-plz.yml
 
   clippy:
-    runs-on: cc-lb-2
+    runs-on: cc-lb-4
     strategy:
       matrix:
         features: [sqlite, postgres]
@@ -459,7 +459,7 @@ jobs:
           if-no-files-found: error
 
   e2e:
-    runs-on: cc-lb-2
+    runs-on: cc-lb-4
     env:
       # Real-client E2E builds the server but does not run the fixture-backed
       # Wasmtime integration suite.
