@@ -28,7 +28,7 @@ env:
 
 jobs:
   fmt:
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-light
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -51,7 +51,7 @@ jobs:
     # the shared workspace version for cc-lb-server after strict validation.
     # release-plz's own PRs remain exempt.
     if: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') }}
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-light
     steps:
       - uses: actions/checkout@v7
         with:
@@ -99,7 +99,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       startsWith(github.event.pull_request.title, 'chore: release cc-lb v')
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-heavy
     permissions:
       contents: read
       pull-requests: read
@@ -270,7 +270,7 @@ jobs:
         run: docker image rm -f "$IMAGE" || true
 
   clippy:
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-heavy
     strategy:
       matrix:
         features: [sqlite, postgres]
@@ -299,7 +299,7 @@ jobs:
           fi
 
   cargo-deny:
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-light
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -312,7 +312,7 @@ jobs:
       - run: cargo deny check
 
   promtool:
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-light
     steps:
       - uses: actions/checkout@v7
       - name: Ensure promtool is available
@@ -337,7 +337,7 @@ jobs:
   # See that file's header for the exact steps. Do not run both: they enforce
   # the same coverage gate.
   nextest-cov:
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-heavy
 
     services:
       postgres:
@@ -465,7 +465,7 @@ jobs:
           if-no-files-found: error
 
   e2e:
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-heavy
     env:
       # Real-client E2E builds the server but does not run the fixture-backed
       # Wasmtime integration suite.

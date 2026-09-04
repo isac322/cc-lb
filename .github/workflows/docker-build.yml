@@ -30,7 +30,7 @@ jobs:
     # Dockerfile isolates host-only Cargo linker configuration, cross-compiles
     # the static musl binary with both storage backends, builds the SPA, and
     # runs a smoke test. Runner pods carry the in-cluster sccache S3 credentials.
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-heavy
     steps:
       - uses: actions/checkout@v7
       - name: Resolve source revision

@@ -47,6 +47,7 @@ RUN set -eux; \
       openssl-dev \
       pkgconf \
       postgresql-18-client \
+      python-3.13 \
       shadow \
       sudo \
       unzip \
@@ -55,10 +56,14 @@ RUN set -eux; \
       zstd; \
     ln -sfn "$(command -v clang)" /usr/local/bin/cc; \
     ln -sfn "$(command -v clang++)" /usr/local/bin/c++; \
+    if ! command -v python3 >/dev/null; then \
+      ln -sfn "$(command -v python3.13)" /usr/local/bin/python3; \
+    fi; \
     clang --version; \
     cc --version; \
     mold --version; \
-    psql --version
+    psql --version; \
+    python3 --version
 
 RUN printf '%s\n' \
       '#!/bin/sh' \
@@ -86,7 +91,8 @@ RUN set -eux; \
         exit 1 \
         ;; \
     esac; \
-    addgroup docker; \
+    groupmod -g 124 ntp; \
+    addgroup -g 123 docker; \
     adduser -D -u 1001 -h /home/runner -s /bin/bash runner; \
     addgroup runner docker; \
     echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner; \

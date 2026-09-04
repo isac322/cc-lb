@@ -1,3 +1,4 @@
 self-hosted-runner:
   labels:
-    - oracle4-cc-lb
+    - oracle4-cc-lb-light
+    - oracle4-cc-lb-heavy

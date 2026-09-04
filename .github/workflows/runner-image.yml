@@ -26,7 +26,7 @@ permissions: {}
 jobs:
   build:
     # Native arm64 only: the oracle4 pool is aarch64.
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-heavy
     permissions:
       contents: read
       packages: write
@@ -122,8 +122,10 @@ jobs:
             command -v docker
             command -v git
             command -v sudo
+            command -v python3
             test -x /usr/local/bin/clang-mold
             test ! -e /home/runner/.rustup
+            test "$(awk -F: '/^docker:/{print $3}' /etc/group)" = 123
             cc --version
             clang --version
             mold --version
@@ -131,6 +133,7 @@ jobs:
             psql --version
             promtool --version
             docker --version
+            python3 --version
             printf "%s\\n" "int main(void) { return 0; }" > /tmp/t.c
             clang -fuse-ld=mold -o /tmp/t /tmp/t.c
             /tmp/t

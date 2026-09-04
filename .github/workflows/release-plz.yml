@@ -36,7 +36,7 @@ concurrency:
 jobs:
   preflight:
     name: preflight publish-check
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-heavy
     permissions:
       contents: read
     env:
@@ -79,7 +79,7 @@ jobs:
   release:
     name: release-plz release
     needs: preflight
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-heavy
     permissions:
       contents: write
       pull-requests: write
@@ -111,7 +111,7 @@ jobs:
 
   release-pr:
     name: release-plz release-pr
-    runs-on: oracle4-cc-lb
+    runs-on: oracle4-cc-lb-heavy
     permissions:
       contents: write
       pull-requests: write
