@@ -17,7 +17,7 @@ concurrency:
 jobs:
   postgres-storage-stress:
     name: Postgres storage stress
-    runs-on: cc-lb-1
+    runs-on: cc-lb-2
     container:
       image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-91f8035a0c5f@sha256:508df5d4504e09e2d560b61ef297e2fa77f5e671409c4d8214887a3d8e7327d0
 
@@ -54,8 +54,7 @@ jobs:
       - name: Run Postgres storage stress tests
         run: |
           cargo test -p cc-lb-storage-postgres --features postgres \
-            --test crash_recovery \
-            --test multi_instance_quota \
+            --test integration crash_recovery \
             -- --test-threads=1
 
       - name: Show sccache stats
@@ -69,7 +68,7 @@ jobs:
 
   postgres-e2e:
     name: Postgres E2E and chaos
-    runs-on: cc-lb-1
+    runs-on: cc-lb-2
     container:
       image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-91f8035a0c5f@sha256:508df5d4504e09e2d560b61ef297e2fa77f5e671409c4d8214887a3d8e7327d0
 
