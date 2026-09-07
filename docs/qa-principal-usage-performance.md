@@ -93,6 +93,7 @@
 - PostgreSQL 영구 plan test는 parallel snapshot에 따라 달라지는 visibility-map 수치를
   고정하지 않고 네 production SQL shape의 Index Only Scan을 검증한다. Heap fetch 0은
   격리된 scratch VACUUM 측정으로 확인했다.
+- GitHub Actions: 최종 코드 head `35d050373a23`에서 CI 전체 통과.
 
 ## 종료 게이트
 
@@ -102,4 +103,4 @@
 - [x] Admin API point-in-time 및 state-transition QA 통과
 - [x] Overview frontend는 변경하지 않았으며 API JSON byte parity와 기존 web suite로 비회귀를 확인했다.
 - [x] 독립 코드 리뷰 finding 0건
-- [ ] GitHub CI 전체 통과
+- [x] GitHub CI 전체 통과
