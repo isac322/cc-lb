@@ -164,6 +164,43 @@ impl UsageRollupStore for PostgresStorage {
 
         rows.into_iter().map(row_to_usage_rollup).collect()
     }
+
+    async fn query_usage_rollups_for_upstreams_in_range(
+        &self,
+        upstream_ids: &[Uuid],
+        resolution: UsageRollupResolution,
+        window_start_unix_secs: u64,
+        window_end_unix_secs: u64,
+    ) -> StorageResult<Vec<UsageRollup>> {
+        if upstream_ids.is_empty() || window_end_unix_secs < window_start_unix_secs {
+            return Ok(Vec::new());
+        }
+
+        let rows = sqlx::query(
+            "SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, \
+              request_count, input_tokens, output_tokens, cache_creation_input_tokens, \
+              cache_read_input_tokens, error_count, latency_count, latency_ms_sum, \
+              latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, \
+              shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, \
+              upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
+              upstream_body_ms_sum, virtual_cost_micros \
+              FROM usage_rollups_v2 \
+              WHERE upstream_id = ANY($1::uuid[]) \
+                AND resolution = $2 \
+                AND bucket_start_unix_secs >= $3 \
+                AND bucket_start_unix_secs < $4 \
+              ORDER BY upstream_id ASC, bucket_start_unix_secs ASC",
+        )
+        .bind(upstream_ids)
+        .bind(resolution.as_str())
+        .bind(u64_to_i64(window_start_unix_secs, "usage rollup range start")?)
+        .bind(u64_to_i64(window_end_unix_secs, "usage rollup range end")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.into_iter().map(row_to_usage_rollup).collect()
+    }
     async fn query_overview_excluded_error_buckets_in_range(
         &self,
         resolution: UsageRollupResolution,

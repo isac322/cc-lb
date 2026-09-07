@@ -452,6 +452,59 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('/upstreams quota request cadence', () => {
+  test('keeps stable series and analysis range identities across wall-clock ticks', () => {
+    vi.setSystemTime(new Date('2026-06-18T00:00:01.000Z'));
+    renderRoute();
+
+    const firstSeriesParams = vi
+      .mocked(queries.useSubscriptionQuotaSeries)
+      .mock.calls.at(-1)?.[0];
+    const firstAnalysisParams = vi
+      .mocked(queries.useSubscriptionQuotaAnalysis)
+      .mock.calls.at(-1)?.[0];
+
+    cleanup();
+    vi.clearAllMocks();
+    vi.setSystemTime(new Date('2026-06-18T00:01:01.000Z'));
+    renderRoute();
+
+    const secondSeriesParams = vi
+      .mocked(queries.useSubscriptionQuotaSeries)
+      .mock.calls.at(-1)?.[0];
+    const secondAnalysisParams = vi
+      .mocked(queries.useSubscriptionQuotaAnalysis)
+      .mock.calls.at(-1)?.[0];
+
+    expect(firstSeriesParams).toMatchObject({
+      rangeSecs: 604800,
+      bucketSecs: 1800,
+    });
+    expect(firstAnalysisParams).toMatchObject({ rangeSecs: 604800 });
+    expect(secondSeriesParams).toEqual(firstSeriesParams);
+    expect(secondAnalysisParams).toEqual(firstAnalysisParams);
+  });
+
+  test('updates both stable range identities when the visible range changes', () => {
+    renderRoute();
+
+    fireEvent.click(screen.getByRole('button', { name: '1h' }));
+
+    const seriesParams = vi
+      .mocked(queries.useSubscriptionQuotaSeries)
+      .mock.calls.at(-1)?.[0];
+    const analysisParams = vi
+      .mocked(queries.useSubscriptionQuotaAnalysis)
+      .mock.calls.at(-1)?.[0];
+
+    expect(seriesParams).toMatchObject({
+      rangeSecs: 3600,
+      bucketSecs: 60,
+    });
+    expect(analysisParams).toMatchObject({ rangeSecs: 3600 });
+  });
+});
+
 describe('/upstreams cold-load geometry', () => {
   test('renders a structured detail shell before desktop auto-selection', () => {
     searchState = {};
