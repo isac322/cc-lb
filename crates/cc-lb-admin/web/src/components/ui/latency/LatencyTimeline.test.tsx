@@ -251,6 +251,7 @@ describe('LatencyTimeline', () => {
     expect(screen.getByText('Body')).toBeTruthy();
     expect(screen.getByText('Internal post')).toBeTruthy();
     expect(screen.getByText('SSE markers')).toBeTruthy();
+    expect(screen.queryByText('Observability post')).toBeNull();
   });
 
   it('keeps the latency region height reserved while detail hydrates', () => {
