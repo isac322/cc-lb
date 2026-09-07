@@ -20,6 +20,8 @@ mod principal_terminal_strategy;
 mod prompt_cache_observation;
 #[path = "quota_aggregates.rs"]
 mod quota_aggregates;
+#[path = "request_event_cost_components.rs"]
+mod request_event_cost_components;
 #[path = "request_event_projections.rs"]
 mod request_event_projections;
 #[path = "request_events_cursor.rs"]

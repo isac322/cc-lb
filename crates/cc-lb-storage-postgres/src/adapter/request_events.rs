@@ -330,24 +330,23 @@ async fn request_event_key_usage(
     }
 
     let rows = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
-        "SELECT LEAST(((event_ts_ms - $1) / $2), $3)::bigint AS bucket_index, \
+        "SELECT LEAST(((list_ts_ms - $1) / $2), $3)::bigint AS bucket_index, \
                 COUNT(*)::bigint AS request_count, \
                 COALESCE(SUM(COALESCE(input_tokens, 0) \
                     + COALESCE(cache_creation_input_tokens, 0) \
                     + COALESCE(cache_read_input_tokens, 0)), 0)::bigint AS input_tokens, \
                 COALESCE(SUM(COALESCE(output_tokens, 0)), 0)::bigint AS output_tokens, \
-                COALESCE(SUM(COALESCE((payload_jsonb ->> 'cost_usd_micros')::bigint, 0)), 0)::bigint AS cost_usd_micros \
-         FROM ( \
-             SELECT COALESCE((convert_from(payload, 'UTF8')::jsonb ->> 'ts_ms')::bigint, EXTRACT(EPOCH FROM ts)::bigint * 1000) AS event_ts_ms, \
-                    convert_from(payload, 'UTF8')::jsonb AS payload_jsonb, \
-                    input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens \
-             FROM request_events_v1 \
-             WHERE principal_id = $4 AND key_id = $5 \
-         ) matched \
-         WHERE event_ts_ms >= $6 AND event_ts_ms <= $7 \
+                COALESCE(SUM(COALESCE(list_cost_usd_micros, 0)), 0)::bigint AS cost_usd_micros \
+         FROM request_events_v1 \
+         WHERE principal_id = $4 \
+           AND key_id = $5 \
+           AND list_ts_ms BETWEEN $6 AND $7 \
          GROUP BY bucket_index",
     )
-    .bind(u64_to_i64(query.range_start_ms, "request event key usage range start")?)
+    .bind(u64_to_i64(
+        query.range_start_ms,
+        "request event key usage range start",
+    )?)
     .bind(u64_to_i64(query.step_ms, "request event key usage step")?)
     .bind(u64_to_i64(
         query.bucket_count.saturating_sub(1),
@@ -355,8 +354,14 @@ async fn request_event_key_usage(
     )?)
     .bind(query.principal_id.as_str())
     .bind(query.key_id.as_str())
-    .bind(u64_to_i64(query.range_start_ms, "request event key usage lower bound")?)
-    .bind(u64_to_i64(query.range_end_ms, "request event key usage upper bound")?)
+    .bind(u64_to_i64(
+        query.range_start_ms,
+        "request event key usage lower bound",
+    )?)
+    .bind(u64_to_i64(
+        query.range_end_ms,
+        "request event key usage upper bound",
+    )?)
     .fetch_all(&storage.pool)
     .await
     .map_err(map_sqlx_error)?;
@@ -382,6 +387,11 @@ async fn request_event_key_usage(
 fn is_canonical_uuid_principal(value: &str) -> bool {
     value.len() == 36 && uuid::Uuid::parse_str(value).is_ok()
 }
+
+const PRINCIPAL_COST_SOURCE_COLUMNS: &str = "principal_id, list_ts_ms, \
+    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+    list_cost_cache_read_micros";
 
 async fn request_event_principal_costs(
     storage: &PostgresStorage,
@@ -420,43 +430,39 @@ async fn request_event_principal_costs(
         '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'";
     let sql = format!(
         "SELECT principal_id, bucket_index, \
-                COALESCE(SUM(GREATEST(COALESCE( \
-                    (payload_jsonb ->> 'cost_usd_micros')::bigint, 0), 0)), 0)::bigint \
+                COALESCE(SUM(GREATEST(COALESCE(list_cost_usd_micros, 0), 0)), 0)::bigint \
                     AS total_cost_micros, \
-                BOOL_OR((payload_jsonb ->> 'cost_input_micros') IS NOT NULL \
-                    OR (payload_jsonb ->> 'cost_output_micros') IS NOT NULL \
-                    OR (payload_jsonb ->> 'cost_cache_creation_5m_micros') IS NOT NULL \
-                    OR (payload_jsonb ->> 'cost_cache_creation_1h_micros') IS NOT NULL \
-                    OR (payload_jsonb ->> 'cost_cache_read_micros') IS NOT NULL) \
+                BOOL_OR(list_cost_input_micros IS NOT NULL \
+                    OR list_cost_output_micros IS NOT NULL \
+                    OR list_cost_cache_creation_5m_micros IS NOT NULL \
+                    OR list_cost_cache_creation_1h_micros IS NOT NULL \
+                    OR list_cost_cache_read_micros IS NOT NULL) \
                     AS component_costs_recorded, \
-                COALESCE(SUM(GREATEST(COALESCE( \
-                    (payload_jsonb ->> 'cost_input_micros')::bigint, 0), 0)), 0)::bigint \
+                COALESCE(SUM(GREATEST(COALESCE(list_cost_input_micros, 0), 0)), 0)::bigint \
                     AS cost_input_micros, \
-                COALESCE(SUM(GREATEST(COALESCE( \
-                    (payload_jsonb ->> 'cost_output_micros')::bigint, 0), 0)), 0)::bigint \
+                COALESCE(SUM(GREATEST(COALESCE(list_cost_output_micros, 0), 0)), 0)::bigint \
                     AS cost_output_micros, \
-                COALESCE(SUM(GREATEST(COALESCE( \
-                    (payload_jsonb ->> 'cost_cache_creation_5m_micros')::bigint, 0), 0)), 0)::bigint \
+                COALESCE(SUM(GREATEST(COALESCE(list_cost_cache_creation_5m_micros, 0), 0)), 0)::bigint \
                     AS cost_cache_creation_5m_micros, \
-                COALESCE(SUM(GREATEST(COALESCE( \
-                    (payload_jsonb ->> 'cost_cache_creation_1h_micros')::bigint, 0), 0)), 0)::bigint \
+                COALESCE(SUM(GREATEST(COALESCE(list_cost_cache_creation_1h_micros, 0), 0)), 0)::bigint \
                     AS cost_cache_creation_1h_micros, \
-                COALESCE(SUM(GREATEST(COALESCE( \
-                    (payload_jsonb ->> 'cost_cache_read_micros')::bigint, 0), 0)), 0)::bigint \
+                COALESCE(SUM(GREATEST(COALESCE(list_cost_cache_read_micros, 0), 0)), 0)::bigint \
                     AS cost_cache_read_micros \
          FROM ( \
              SELECT principal_id, \
                     ((list_ts_ms - $1) / $2)::bigint AS bucket_index, \
-                    convert_from(payload, 'UTF8')::jsonb AS payload_jsonb \
+                    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+                    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+                    list_cost_cache_read_micros \
              FROM ( \
-                 SELECT principal_id, list_ts_ms, payload \
+                 SELECT {PRINCIPAL_COST_SOURCE_COLUMNS} \
                  FROM request_events_v1 \
                  WHERE list_ts_ms >= $1 \
                    AND list_ts_ms < $3 \
                    AND ($4::uuid IS NULL OR upstream_id = $4) \
                    AND principal_id = ANY($5::text[]) \
                  UNION ALL \
-                 SELECT principal_id, list_ts_ms, payload \
+                 SELECT {PRINCIPAL_COST_SOURCE_COLUMNS} \
                  FROM request_events_v1 \
                  WHERE list_ts_ms >= $1 \
                    AND list_ts_ms < $3 \
@@ -464,7 +470,6 @@ async fn request_event_principal_costs(
                    AND ({NON_UUID_PRINCIPAL}) \
                    AND {NORMALIZED_PRINCIPAL} = ANY($6::text[]) \
              ) selected \
-             OFFSET 0 \
          ) matched \
          GROUP BY principal_id, bucket_index \
          ORDER BY bucket_index ASC, principal_id ASC",
@@ -738,8 +743,11 @@ async fn insert_request_event_in_tx(
                    lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, \
                    thinking_budget_tokens, reasoning_effort, \
                    observed_session_id, request_kind, \
-                   list_ts_ms, list_event_key, list_upstream, list_status, payload, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, created_at) \
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,NOW()) \
+                   list_ts_ms, list_event_key, list_upstream, list_status, \
+                   list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+                   list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, \
+                   list_cost_components_materialized, payload, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, created_at) \
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,NOW()) \
                ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
                RETURNING seq",
         )
@@ -906,6 +914,13 @@ async fn insert_request_event_in_tx(
             cc_lb_storage_api::RequestEventUpstream::AnthropicDirect => "anthropic_direct",
         }))
         .bind(i32::from(event.status))
+        .bind(event.cost_usd_micros)
+        .bind(event.cost_input_micros)
+        .bind(event.cost_output_micros)
+        .bind(event.cost_cache_creation_5m_micros)
+        .bind(event.cost_cache_creation_1h_micros)
+        .bind(event.cost_cache_read_micros)
+        .bind(true)
         .bind(payload)
         .bind(event.claude_agent_id.as_deref())
         .bind(event.claude_parent_agent_id.as_deref())

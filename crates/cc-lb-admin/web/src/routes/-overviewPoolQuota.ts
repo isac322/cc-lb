@@ -58,8 +58,9 @@ export function poolQuotaChartMax(
   return Math.ceil(max / 10) * 10;
 }
 
-export function poolQuotaChartLatest(
-  rows: readonly PoolQuotaChartRow[],
+export function poolQuotaResponseLatest(
+  windows: readonly PoolHistoryWindowResponse[] | undefined,
+  visibleRows: readonly PoolQuotaChartRow[],
   includeFable: boolean,
 ): PoolQuotaLatest {
   const latest: PoolQuotaLatest = {
@@ -67,11 +68,12 @@ export function poolQuotaChartLatest(
     '7d': null,
     '7d_fable': null,
   };
-  for (const row of rows) {
-    for (const window of POOL_QUOTA_WINDOWS) {
-      if (window === '7d_fable' && !includeFable) continue;
-      if (row[window] != null) latest[window] = row[window];
-    }
+  for (const window of POOL_QUOTA_WINDOWS) {
+    if (window === '7d_fable' && !includeFable) continue;
+    if (!visibleRows.some((row) => row[window] != null)) continue;
+    latest[window] =
+      windows?.find((entry) => entry.window === window)?.latest
+        ?.utilization_percent ?? null;
   }
   return latest;
 }

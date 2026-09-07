@@ -129,6 +129,7 @@ async function installAppFixtures(
 ) {
   const upstreams = options.upstreams ?? [oauthHealthy(), oauthDisabled(), apiKeyUpstream()];
   const plugins = options.plugins ?? [shapePlugin('anthropic-shape-v2'), routerPlugin()];
+  let warmupAttemptRequests = 0;
 
   await page.addInitScript(() => {
     window.localStorage.setItem('cc-lb-admin-token', 'mock-token');
@@ -182,6 +183,13 @@ async function installAppFixtures(
     if (pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)\/warmup\/fire-now$/) && method === 'POST') {
       const response = await (options.onFireNow?.(request) ?? { status: 200, body: { fired: true, cycle_key: 1718380800 } });
       return json(response.status, response.body);
+    }
+    if (
+      pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)\/warmup\/attempts$/) &&
+      method === 'GET'
+    ) {
+      warmupAttemptRequests += 1;
+      return json(200, { attempts: [], next_cursor: null });
     }
     if (pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)\/oauth\/status$/)) {
       return json(200, {
@@ -237,6 +245,9 @@ async function installAppFixtures(
     }
     return json(200, {});
   });
+  return {
+    warmupAttemptRequests: () => warmupAttemptRequests,
+  };
 }
 
 async function openUpstreams(page: Page, selectedId = 'oauth-healthy') {
@@ -277,6 +288,18 @@ test.describe('WarmupCard', () => {
     await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('anthropic-shape-v2');
     await expect(page.getByTestId('warmup-fire-now')).toBeEnabled();
     await page.screenshot({ path: evidencePath('scenario-1-steady-state.png'), fullPage: true });
+  });
+
+  test('Scenario 1b: History data loads only after opening the drawer', async ({
+    page,
+  }) => {
+    const fixtures = await installAppFixtures(page);
+    await openUpstreams(page);
+
+    expect(fixtures.warmupAttemptRequests()).toBe(0);
+    await page.getByTestId('warmup-history-button').click();
+    await expect(page.getByTestId('warmup-history-drawer')).toBeVisible();
+    await expect.poll(() => fixtures.warmupAttemptRequests()).toBe(1);
   });
 
   test('Scenario 2: Fire-now confirm + 200 success', async ({ page }) => {

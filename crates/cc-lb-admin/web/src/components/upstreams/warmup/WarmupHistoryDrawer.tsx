@@ -179,10 +179,14 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
   const [horizon, setHorizon] = useState<Horizon>('24h');
   const [selected, setSelected] = useState<WarmupAttempt | null>(null);
 
-  const query = useWarmupAttempts(upstream.id, {
-    status: filter === 'all' ? null : filter,
-    limit: 50,
-  });
+  const query = useWarmupAttempts(
+    upstream.id,
+    {
+      status: filter === 'all' ? null : filter,
+      limit: 50,
+    },
+    open,
+  );
   const attemptsPending = query.isPending;
 
   const allAttempts = useMemo(() => {

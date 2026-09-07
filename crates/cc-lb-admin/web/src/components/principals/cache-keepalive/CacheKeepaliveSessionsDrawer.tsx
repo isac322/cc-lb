@@ -371,12 +371,16 @@ export function CacheKeepaliveSessionsDrawer({
   const [selected, setSelected] = useState<CacheKeepaliveRow | null>(null);
   const listRef = React.useRef<HTMLUListElement>(null);
 
-  const query = useCacheKeepaliveSessions(principal.id, {
-    horizon,
-    status:
-      filter === 'all' ? undefined : filter === 'error' ? undefined : filter,
-    error: filter === 'error' ? true : undefined,
-  });
+  const query = useCacheKeepaliveSessions(
+    principal.id,
+    {
+      horizon,
+      status:
+        filter === 'all' ? undefined : filter === 'error' ? undefined : filter,
+      error: filter === 'error' ? true : undefined,
+    },
+    open,
+  );
 
   const allRows = useMemo(() => {
     const rawRows = query.data?.pages.flatMap((p) => p.rows ?? []) ?? [];

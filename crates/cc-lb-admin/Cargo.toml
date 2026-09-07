@@ -88,4 +88,5 @@ cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 apalis-postgres = "^1.0.0-rc.8"
 apalis-sqlite = "^1.0.0-rc.8"
 metrics-exporter-prometheus.workspace = true
+sqlx.workspace = true
 scheduler-sqlx = { package = "sqlx", version = "=0.8.6", default-features = false, features = ["chrono", "json", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring", "uuid"] }
