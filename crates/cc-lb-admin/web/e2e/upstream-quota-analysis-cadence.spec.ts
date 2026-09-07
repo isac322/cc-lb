@@ -16,7 +16,40 @@ function requestBounds(url: URL): RequestBounds {
   };
 }
 
-async function installAppFixtures(page: Page) {
+type AppFixtureOptions = {
+  delayAnalysis?: boolean;
+  delaySeries?: boolean;
+};
+
+function createResponseGate(initiallyBlocked = false) {
+  let blocked = initiallyBlocked;
+  const waiters: Array<() => void> = [];
+
+  return {
+    block: () => {
+      blocked = true;
+    },
+    release: () => {
+      blocked = false;
+      for (const resolve of waiters.splice(0)) resolve();
+    },
+    wait: () =>
+      blocked
+        ? new Promise<void>((resolve) => {
+            waiters.push(resolve);
+          })
+        : Promise.resolve(),
+  };
+}
+
+async function installAppFixtures(
+  page: Page,
+  options: AppFixtureOptions = {},
+) {
+  const analysisGate = createResponseGate(options.delayAnalysis);
+  const seriesGate = createResponseGate(options.delaySeries);
+  let analysisResponse: 'data' | 'error' = 'data';
+  let seriesResponse: 'data' | 'empty' = 'data';
   const seriesRequests: RequestBounds[] = [];
   const analysisRequests: RequestBounds[] = [];
   let updatedAnalysis = false;
@@ -185,35 +218,45 @@ async function installAppFixtures(page: Page) {
     }
     if (pathname === '/admin/v1/subscription-quotas/series') {
       const bounds = requestBounds(url);
+      const responseMode = seriesResponse;
       seriesRequests.push(bounds);
+      await seriesGate.wait();
       return json(200, {
         since_unix_secs: bounds.sinceUnixSecs,
         until_unix_secs: bounds.untilUnixSecs,
         bucket_secs: Number(url.searchParams.get('bucket_secs')),
         source: 'merged',
-        series: [
-          {
-            upstream_id: UPSTREAM_ID,
-            upstream_name: upstream.name,
-            window: '5h',
-            buckets: [
-              {
-                bucket_start_unix_secs: bounds.sinceUnixSecs,
-                utilization_last: 0.2,
-              },
-              {
-                bucket_start_unix_secs: bounds.untilUnixSecs,
-                utilization_last: 0.25,
-              },
-            ],
-            markers: [],
-          },
-        ],
+        series:
+          responseMode === 'empty'
+            ? []
+            : [
+                {
+                  upstream_id: UPSTREAM_ID,
+                  upstream_name: upstream.name,
+                  window: '5h',
+                  buckets: [
+                    {
+                      bucket_start_unix_secs: bounds.sinceUnixSecs,
+                      utilization_last: 0.2,
+                    },
+                    {
+                      bucket_start_unix_secs: bounds.untilUnixSecs,
+                      utilization_last: 0.25,
+                    },
+                  ],
+                  markers: [],
+                },
+              ],
       });
     }
     if (pathname === '/admin/v1/subscription-quotas/analysis') {
       const bounds = requestBounds(url);
+      const responseMode = analysisResponse;
       analysisRequests.push(bounds);
+      await analysisGate.wait();
+      if (responseMode === 'error') {
+        return json(500, { message: 'Mock quota analysis failure' });
+      }
       return json(200, {
         since_unix_secs: bounds.sinceUnixSecs,
         until_unix_secs: bounds.untilUnixSecs,
@@ -270,15 +313,221 @@ async function installAppFixtures(page: Page) {
 
   return {
     analysisRequests,
+    blockAnalysisResponses: analysisGate.block,
+    blockSeriesResponses: seriesGate.block,
+    releaseAnalysisResponses: analysisGate.release,
+    releaseSeriesResponses: seriesGate.release,
     seriesRequests,
+    showAnalysisData: () => {
+      analysisResponse = 'data';
+    },
+    showAnalysisError: () => {
+      analysisResponse = 'error';
+    },
+    showEmptySeries: () => {
+      seriesResponse = 'empty';
+    },
+    showSeriesData: () => {
+      seriesResponse = 'data';
+    },
     showUpdatedAnalysis: () => {
       updatedAnalysis = true;
     },
   };
 }
 
-test.describe('Upstream quota analysis cadence', () => {
-  test('keeps the key stable for 60 seconds and refetches exact bounds at 120 seconds', async ({
+// These route-mocked tests are browser-layer evidence for request and DOM
+// behavior; backend storage and server transitions are covered separately.
+test.describe('Upstream quota analysis browser behavior (mock API)', () => {
+  const rangeCases = [
+    { label: '1h', durationSecs: 60 * 60 },
+    { label: '6h', durationSecs: 6 * 60 * 60 },
+    { label: '24h', durationSecs: 24 * 60 * 60 },
+    { label: '7d', durationSecs: 7 * 24 * 60 * 60 },
+  ] as const;
+
+  for (const { label, durationSecs } of rangeCases) {
+    test(`uses exact ${label} series and analysis bounds in the mock API browser layer`, async ({
+      page,
+    }) => {
+      const fixtures = await installAppFixtures(page);
+      const pageErrors: string[] = [];
+      page.on('pageerror', (error) => pageErrors.push(error.message));
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await page.goto(`/upstreams?selectedId=${UPSTREAM_ID}`);
+
+      const quotaSection = page
+        .getByRole('heading', { name: 'Subscription Quota' })
+        .locator('xpath=ancestor::section');
+      const rangeControl = page.getByTestId('quota-history-range-control');
+      const chart = quotaSection.locator('.recharts-responsive-container');
+      await expect(rangeControl).toBeVisible();
+
+      let seriesRequestsBefore: RequestBounds[] = [];
+      let analysisRequestsBefore: RequestBounds[] = [];
+      if (label !== '7d') {
+        await expect(chart).toBeVisible();
+        seriesRequestsBefore = [...fixtures.seriesRequests];
+        analysisRequestsBefore = [...fixtures.analysisRequests];
+        await rangeControl
+          .getByRole('button', { name: label, exact: true })
+          .click();
+      }
+
+      let seriesBounds: RequestBounds | undefined;
+      await expect
+        .poll(() => {
+          seriesBounds = fixtures.seriesRequests.find(
+            (bounds) =>
+              !seriesRequestsBefore.includes(bounds) &&
+              bounds.untilUnixSecs - bounds.sinceUnixSecs === durationSecs,
+          );
+          return seriesBounds;
+        })
+        .toBeDefined();
+      if (!seriesBounds) {
+        throw new Error(`${label} series request was not observed`);
+      }
+      const selectedSeriesBounds = seriesBounds;
+
+      let analysisBounds: RequestBounds | undefined;
+      await expect
+        .poll(() => {
+          analysisBounds = fixtures.analysisRequests.find(
+            (bounds) =>
+              !analysisRequestsBefore.includes(bounds) &&
+              bounds.sinceUnixSecs === selectedSeriesBounds.sinceUnixSecs &&
+              bounds.untilUnixSecs === selectedSeriesBounds.untilUnixSecs,
+          );
+          return analysisBounds;
+        })
+        .toBeDefined();
+      if (!analysisBounds) {
+        throw new Error(`${label} analysis request was not observed`);
+      }
+
+      expect(seriesBounds.untilUnixSecs - seriesBounds.sinceUnixSecs).toBe(
+        durationSecs,
+      );
+      expect(analysisBounds).toEqual(seriesBounds);
+      expect(analysisBounds.untilUnixSecs - analysisBounds.sinceUnixSecs).toBe(
+        durationSecs,
+      );
+      await expect(chart).toBeVisible();
+      await expect(quotaSection.getByText('No data in range')).toHaveCount(0);
+      expect(pageErrors).toEqual([]);
+    });
+  }
+
+  test('shows loading, empty, analysis error, previous data, and recovery in the mock API browser layer', async ({
+    page,
+  }) => {
+    const fixtures = await installAppFixtures(page, {
+      delayAnalysis: true,
+      delaySeries: true,
+    });
+    fixtures.showUpdatedAnalysis();
+    const pageErrors: string[] = [];
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`/upstreams?selectedId=${UPSTREAM_ID}`);
+
+    const quotaSection = page
+      .getByRole('heading', { name: 'Subscription Quota' })
+      .locator('xpath=ancestor::section');
+    const rangeControl = page.getByTestId('quota-history-range-control');
+    const chart = quotaSection.locator('.recharts-responsive-container');
+    await expect.poll(() => fixtures.seriesRequests.length).toBeGreaterThan(0);
+    await expect
+      .poll(() => fixtures.analysisRequests.length)
+      .toBeGreaterThan(0);
+    await expect(rangeControl).toBeVisible();
+    await expect(quotaSection.getByTestId('quota-snapshot-grid')).toBeVisible();
+    await expect(quotaSection.getByText('25.0%')).toBeVisible();
+    await expect(chart).toHaveCount(0);
+    await expect(quotaSection.getByText('No data in range')).toHaveCount(0);
+    await expect(quotaSection.getByText(/error/i)).toHaveCount(0);
+
+    fixtures.releaseSeriesResponses();
+    fixtures.releaseAnalysisResponses();
+    await expect(chart).toBeVisible();
+    await expect(page.getByText('Quota deficit')).toBeVisible();
+    await expect(page.getByText('1,234 tokens')).toBeVisible();
+    await expect(page.getByText('Cadence QA caveat')).toBeVisible();
+
+    const loadedSeriesBounds = fixtures.seriesRequests.at(-1);
+    if (!loadedSeriesBounds) {
+      throw new Error('initial loaded series request was not observed');
+    }
+    fixtures.showEmptySeries();
+    fixtures.blockSeriesResponses();
+    const seriesRequestsBeforeEmpty = [...fixtures.seriesRequests];
+    await page.clock.runFor(30_000);
+    await expect
+      .poll(() =>
+        fixtures.seriesRequests.find(
+          (bounds) =>
+            !seriesRequestsBeforeEmpty.includes(bounds) &&
+            bounds.sinceUnixSecs === loadedSeriesBounds.sinceUnixSecs &&
+            bounds.untilUnixSecs === loadedSeriesBounds.untilUnixSecs,
+        ),
+      )
+      .toBeDefined();
+    await expect(chart).toBeVisible();
+    await expect(page.getByText('Quota deficit')).toBeVisible();
+    await expect(page.getByText('1,234 tokens')).toBeVisible();
+    await expect(quotaSection.getByText('No data in range')).toHaveCount(0);
+    fixtures.releaseSeriesResponses();
+    await expect(quotaSection.getByText('No data in range')).toBeVisible();
+    await expect(chart).toHaveCount(0);
+
+    fixtures.showSeriesData();
+    fixtures.showAnalysisError();
+    fixtures.blockAnalysisResponses();
+    const analysisCountBeforeFailure = fixtures.analysisRequests.length;
+    await rangeControl.getByRole('button', { name: '6h', exact: true }).click();
+    await expect
+      .poll(() => fixtures.analysisRequests.length)
+      .toBeGreaterThan(analysisCountBeforeFailure);
+    await expect(chart).toBeVisible();
+    await expect(page.getByText('Quota deficit')).toBeVisible();
+    await expect(page.getByText('1,234 tokens')).toBeVisible();
+    await expect(page.getByText('Cadence QA caveat')).toBeVisible();
+
+    const firstAnalysisFailurePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === '/admin/v1/subscription-quotas/analysis' &&
+        response.status() === 500
+      );
+    });
+    fixtures.releaseAnalysisResponses();
+    const firstAnalysisFailure = await firstAnalysisFailurePromise;
+    await firstAnalysisFailure.finished();
+    await expect(chart).toBeVisible();
+    await expect(page.getByText('Quota deficit')).toBeVisible();
+    await expect(page.getByText('1,234 tokens')).toBeVisible();
+    await page.clock.runFor(2_000);
+    await expect(
+      page
+        .locator('[data-sonner-toast][data-type="error"]')
+        .filter({ hasText: 'Mock quota analysis failure' }),
+    ).toBeVisible();
+
+    fixtures.showAnalysisData();
+    const analysisCountBeforeRecovery = fixtures.analysisRequests.length;
+    await rangeControl.getByRole('button', { name: '24h', exact: true }).click();
+    await expect
+      .poll(() => fixtures.analysisRequests.length)
+      .toBeGreaterThan(analysisCountBeforeRecovery);
+    await expect(chart).toBeVisible();
+    await expect(page.getByText('Quota deficit')).toBeVisible();
+    await expect(page.getByText('1,234 tokens')).toBeVisible();
+    await expect(page.getByText('Cadence QA caveat')).toBeVisible();
+    expect(pageErrors).toEqual([]);
+  });
+
+  test('keeps the key stable for 60 seconds and refetches exact bounds at 120 seconds in the mock API browser layer', async ({
     page,
   }) => {
     const fixtures = await installAppFixtures(page);
