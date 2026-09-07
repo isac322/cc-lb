@@ -468,8 +468,8 @@ test.describe('Upstream quota analysis browser behavior (mock API)', () => {
         fixtures.seriesRequests.find(
           (bounds) =>
             !seriesRequestsBeforeEmpty.includes(bounds) &&
-            bounds.sinceUnixSecs === loadedSeriesBounds.sinceUnixSecs &&
-            bounds.untilUnixSecs === loadedSeriesBounds.untilUnixSecs,
+            bounds.untilUnixSecs - bounds.sinceUnixSecs === RANGE_SECS &&
+            bounds.untilUnixSecs > loadedSeriesBounds.untilUnixSecs,
         ),
       )
       .toBeDefined();

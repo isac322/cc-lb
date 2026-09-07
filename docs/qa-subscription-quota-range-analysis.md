@@ -14,7 +14,7 @@
 - Reset, gap, source merge, tie-breaking, downsampling 결과가 기존 요청 범위 의미를 유지한다.
 - PostgreSQL과 SQLite가 동일 결과를 반환한다.
 - `/analysis`는 요청한 upstream만 storage query에서 읽는다.
-- Frontend series freshness 30초는 유지하고 analysis key만 120초 quantum을 사용한다.
+- Frontend series freshness 30초와 analysis 120초 poll을 유지하고, 두 query key는 absolute clock 대신 stable range identity를 사용한다.
 
 ## 저장소·도메인 QA
 

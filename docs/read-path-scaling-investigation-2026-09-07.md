@@ -31,7 +31,7 @@ Scratch public SQLite path에서 최근 1시간/60초/6 windows 요청은 정상
 - 실제 bucket loop는 `floor(since / bucket_secs)`에서 시작한다.
 - 요청 범위 전체의 dense carry-forward, reset/gap/source merge, exact anchor timestamp/source/value 계약을 유지한다.
 - `/analysis` 전용 upstream-filtered rollup storage API를 추가하고 upstream별로 한 번만 partition해 borrow한다.
-- Analysis query timestamp는 120초 quantum으로 분리한다.
+- Series와 analysis query identity는 stable `range_secs`를 사용하고, 각 refetch가 시작될 때 최신 exact `since/until`을 계산한다.
 - 신규 series 인덱스, 단순 ETag, endpoint mega-merge, response field 축소는 근본 해결책으로 사용하지 않는다.
 
 ## Principal usage 결론
