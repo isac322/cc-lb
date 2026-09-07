@@ -119,7 +119,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 47] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 54] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -279,6 +279,41 @@ const METRIC_DEFINITIONS: [MetricDefinition; 47] = [
     PROMETHEUS14_METRIC_DEFINITIONS[16],
     PROMETHEUS14_METRIC_DEFINITIONS[17],
     PROMETHEUS14_METRIC_DEFINITIONS[18],
+    MetricDefinition {
+        name: "cc_lb_prompt_cache_analysis_duration_seconds",
+        kind: MetricKind::Histogram,
+        description: "Prompt-cache analysis duration in seconds.",
+    },
+    MetricDefinition {
+        name: "cc_lb_prompt_cache_token_count_cache_total",
+        kind: MetricKind::Counter,
+        description: "Prompt-cache token count cache lookups by result.",
+    },
+    MetricDefinition {
+        name: "cc_lb_prompt_cache_tokenizer_inflight",
+        kind: MetricKind::Gauge,
+        description: "Current number of in-flight prompt-cache tokenizer operations.",
+    },
+    MetricDefinition {
+        name: "cc_lb_prompt_cache_tokenized_bytes_total",
+        kind: MetricKind::Counter,
+        description: "Total bytes processed by the prompt-cache tokenizer.",
+    },
+    MetricDefinition {
+        name: "cc_lb_prompt_cache_tokenized_tokens_total",
+        kind: MetricKind::Counter,
+        description: "Total tokens produced by the prompt-cache tokenizer.",
+    },
+    MetricDefinition {
+        name: "cc_lb_prompt_cache_tokenizer_fallback_prefixes_total",
+        kind: MetricKind::Counter,
+        description: "Total prompt-cache prefixes counted by the exact fallback path.",
+    },
+    MetricDefinition {
+        name: "cc_lb_prompt_cache_analysis_worker_failed_total",
+        kind: MetricKind::Counter,
+        description: "Total prompt-cache analysis worker failures recovered by exact fallback.",
+    },
 ];
 
 pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
@@ -497,6 +532,41 @@ pub fn register_metrics() {
         Unit::Count,
         "Virtual cost in micro-USD attributed to proxied responses by principal, upstream, and model."
     );
+    metrics::describe_histogram!(
+        "cc_lb_prompt_cache_analysis_duration_seconds",
+        Unit::Seconds,
+        "Prompt-cache analysis duration in seconds."
+    );
+    metrics::describe_counter!(
+        "cc_lb_prompt_cache_token_count_cache_total",
+        Unit::Count,
+        "Prompt-cache token count cache lookups by result."
+    );
+    metrics::describe_gauge!(
+        "cc_lb_prompt_cache_tokenizer_inflight",
+        Unit::Count,
+        "Current number of in-flight prompt-cache tokenizer operations."
+    );
+    metrics::describe_counter!(
+        "cc_lb_prompt_cache_tokenized_bytes_total",
+        Unit::Bytes,
+        "Total bytes processed by the prompt-cache tokenizer."
+    );
+    metrics::describe_counter!(
+        "cc_lb_prompt_cache_tokenized_tokens_total",
+        Unit::Count,
+        "Total tokens produced by the prompt-cache tokenizer."
+    );
+    metrics::describe_counter!(
+        "cc_lb_prompt_cache_tokenizer_fallback_prefixes_total",
+        Unit::Count,
+        "Total prompt-cache prefixes counted by the exact fallback path."
+    );
+    metrics::describe_counter!(
+        "cc_lb_prompt_cache_analysis_worker_failed_total",
+        Unit::Count,
+        "Total prompt-cache analysis worker failures recovered by exact fallback."
+    );
     metrics::describe_counter!(
         "cc_lb_limit_reservation_ttl_evicted_total",
         Unit::Count,
@@ -662,6 +732,25 @@ fn touch_metrics() {
         "model" => "unknown"
     )
     .increment(0);
+    for stage in ["queue", "tokenize", "total"] {
+        metrics::histogram!(
+            "cc_lb_prompt_cache_analysis_duration_seconds",
+            "stage" => stage
+        )
+        .record(0.0);
+    }
+    for result in ["hit", "miss", "coalesced"] {
+        metrics::counter!(
+            "cc_lb_prompt_cache_token_count_cache_total",
+            "result" => result
+        )
+        .increment(0);
+    }
+    metrics::gauge!("cc_lb_prompt_cache_tokenizer_inflight").set(0.0);
+    metrics::counter!("cc_lb_prompt_cache_tokenized_bytes_total").increment(0);
+    metrics::counter!("cc_lb_prompt_cache_tokenized_tokens_total").increment(0);
+    metrics::counter!("cc_lb_prompt_cache_tokenizer_fallback_prefixes_total").increment(0);
+    metrics::counter!("cc_lb_prompt_cache_analysis_worker_failed_total").increment(0);
     touch_prometheus14_metric_handles();
 }
 

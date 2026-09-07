@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - Overview requests principal totals without dense time-series buckets and caps pooled-quota chart points while preserving bucket peaks and exact latest values. Pool-history defaults remain unchanged.
 - Rollup-backed Overview polling now revalidates with weak ETags derived from the persisted rollup checkpoint before response construction; live principal-cost reads remain uncached.
 - Warmup history and cache keepalive session lists now load only when their drawers open, eliminating hidden detail-page reads.
+- Prompt-cache request analysis now reuses exact token-prefix counts, incrementally tokenizes nested breakpoints on a bounded blocking executor, and exposes low-cardinality Prometheus work metrics. Cache-control hashes, token estimates, routing, observations, and upstream request bytes remain unchanged; Request Log timelines exclude post-response observability work.
 
 ## [0.4.5] - 2026-08-24
 

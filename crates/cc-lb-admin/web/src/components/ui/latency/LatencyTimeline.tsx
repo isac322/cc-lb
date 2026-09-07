@@ -9,7 +9,10 @@ import {
 import { fmtMs, fmtN } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Skeleton } from '../primitives';
-import { deriveSetupOverhead } from './computeStageGroups';
+import {
+  deriveProxyTimelineDuration,
+  deriveSetupOverhead,
+} from './computeStageGroups';
 
 // -----------------------------------------------------------------------------
 // Group / stage taxonomy
@@ -81,8 +84,6 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
     'Total SSE relay: response headers → last downstream chunk. This is what the client experiences as streaming duration.',
   body_collect:
     'Non-stream body download: response headers → fully collected body.',
-  observability_post:
-    'Post-response observability hook (logging, metrics, storage write).',
   limit_reconcile:
     'Reconcile actual token usage against the reserved budget so remaining quota is accurate.',
 };
@@ -182,12 +183,6 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
       e._phase === 'final' ? e.upstream_body_ms : undefined,
     );
   }
-  push(
-    'observability_post',
-    'Observability post',
-    'internal_post',
-    e._phase === 'final' ? e.observability_post_ms : undefined,
-  );
   push(
     'limit_reconcile',
     'Limit reconcile',
@@ -1201,9 +1196,7 @@ export function LatencyTimeline({
   isPartial?: boolean;
   isLoading?: boolean;
 }) {
-  const total = isPartial
-    ? event.elapsed_ms || 0
-    : (event._phase === 'final' ? event.duration_ms : 0) || 0;
+  const total = deriveProxyTimelineDuration(event);
   const stages = useMemo(() => buildStageDetails(event), [event]);
   const markers = useMemo(() => buildSseMarkers(event), [event]);
   const positioned = useMemo(() => {

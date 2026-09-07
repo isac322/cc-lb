@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { RequestEvent } from '../../../lib/api';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
-import { computeStageGroups, deriveSetupOverhead } from './computeStageGroups';
+import {
+  computeStageGroups,
+  deriveProxyTimelineDuration,
+  deriveSetupOverhead,
+} from './computeStageGroups';
 
 function ev(overrides: Partial<RequestEvent>): RequestEventWithPhase {
   return {
@@ -81,17 +85,18 @@ describe('computeStageGroups', () => {
     expect(r.upstream).toBe(300);
   });
 
-  it('reports body and internalPost', () => {
-    const r = computeStageGroups(
-      ev({
-        upstream_body_ms: 200,
-        observability_post_ms: 15,
-        limit_reconcile_ms: 10,
-        duration_ms: 1000,
-      }),
-    );
+  it('excludes post-response observability from timeline stages', () => {
+    const event = ev({
+      upstream_body_ms: 200,
+      observability_post_ms: 15,
+      limit_reconcile_ms: 10,
+      duration_ms: 1000,
+    });
+    const r = computeStageGroups(event);
+    expect(deriveProxyTimelineDuration(event)).toBe(1000);
     expect(r.body).toBe(200);
-    expect(r.internalPost).toBe(25);
+    expect(r.internalPost).toBe(10);
+    expect(r.unaccounted).toBe(790);
   });
 
   it('computes unaccounted as duration minus sum', () => {

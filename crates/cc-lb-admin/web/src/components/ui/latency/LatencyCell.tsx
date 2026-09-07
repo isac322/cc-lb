@@ -3,7 +3,11 @@ import { fmtMs, fmtMsCompact } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Hint } from '../primitives';
 import { Sparkline } from '../Sparkline';
-import { computeStageGroups, deriveSetupOverhead } from './computeStageGroups';
+import {
+  computeStageGroups,
+  deriveProxyTimelineDuration,
+  deriveSetupOverhead,
+} from './computeStageGroups';
 
 function pctOf(value: number | null | undefined, denom: number): number {
   if (denom <= 0 || value == null || value <= 0) return 0;
@@ -77,14 +81,12 @@ export function LatencyCell({
   isPartial?: boolean;
 }) {
   const groups = computeStageGroups(e);
-  const { value, unit } = fmtMsCompact(
-    e._phase === 'final' ? e.duration_ms : 0,
-  );
   const duration = isPartial
-    ? (e.elapsed_ms ?? 0)
+    ? deriveProxyTimelineDuration(e)
     : e._phase === 'final'
-      ? e.duration_ms
+      ? deriveProxyTimelineDuration(e)
       : 0;
+  const { value, unit } = fmtMsCompact(e._phase === 'final' ? duration : 0);
 
   const setup_overhead_ms = deriveSetupOverhead(e);
 
@@ -182,10 +184,6 @@ export function LatencyCell({
           duration={duration}
           items={[
             {
-              label: 'Observability',
-              value: e._phase === 'final' ? e.observability_post_ms : undefined,
-            },
-            {
               label: 'Limit reconcile',
               value: e._phase === 'final' ? e.limit_reconcile_ms : undefined,
             },
@@ -198,7 +196,7 @@ export function LatencyCell({
           <span className="h-2 w-2 shrink-0" />
           <span className="text-text-faint flex-1">Total</span>
           <span className="tabular-nums text-text w-14 text-right">
-            {fmtMs(e._phase === 'final' ? e.duration_ms : 0)}
+            {fmtMs(duration)}
           </span>
           <span className="tabular-nums text-text-faint w-9 text-right">
             {duration > 0 ? '100%' : '—'}

@@ -60,10 +60,17 @@ fn describes_all_required_metrics() {
             "cc_lb_cache_token_drift",
             "cc_lb_cache_observation_dropped_total",
             "cc_lb_cache_observation_write_failed_total",
+            "cc_lb_prompt_cache_analysis_duration_seconds",
+            "cc_lb_prompt_cache_token_count_cache_total",
+            "cc_lb_prompt_cache_tokenizer_inflight",
+            "cc_lb_prompt_cache_tokenized_bytes_total",
+            "cc_lb_prompt_cache_tokenized_tokens_total",
+            "cc_lb_prompt_cache_tokenizer_fallback_prefixes_total",
+            "cc_lb_prompt_cache_analysis_worker_failed_total",
         ]
     );
 
-    assert_eq!(definitions.len(), 47);
+    assert_eq!(definitions.len(), 54);
     assert_eq!(definitions[0].kind, MetricKind::Counter);
     assert_eq!(definitions[1].kind, MetricKind::Histogram);
     assert_eq!(definitions[3].kind, MetricKind::Gauge);

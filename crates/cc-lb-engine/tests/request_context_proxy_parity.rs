@@ -50,6 +50,28 @@ async fn fixed_request_preserves_routing_shape_and_signing_observables() {
         }],
     );
 }
+#[tokio::test]
+async fn four_breakpoint_request_preserves_upstream_bytes_and_response() {
+    let state = ParityState::default();
+    let lifecycle = lifecycle(state.clone());
+    let body = Bytes::from_static(
+        br#"{"model":"claude-test","system":[{"type":"text","text":"tools boundary","cache_control":{"type":"ephemeral"}},{"type":"text","text":"system boundary","cache_control":{"type":"ephemeral"}},{"type":"text","text":"history boundary","cache_control":{"type":"ephemeral"}},{"type":"text","text":"current boundary","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}"#,
+    );
+    let request = messages_request(body.clone());
+
+    let response = lifecycle
+        .handle(request)
+        .await
+        .expect("lifecycle handles cache-control request");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(state.dispatched().len(), 1);
+    assert_eq!(state.dispatched()[0].body, body);
+    assert_eq!(
+        state.filter_outcomes(),
+        vec![("keep-fixture".to_owned(), Vec::new())]
+    );
+}
 
 fn lifecycle(state: ParityState) -> Lifecycle {
     let filter: Arc<dyn FilterPlugin> = Arc::new(RecordingFilter {
