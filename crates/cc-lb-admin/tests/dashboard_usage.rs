@@ -12,6 +12,7 @@ use config_admin_common::{
     app, authed_bytes, authed_bytes_with_headers, authed_json, temp_storage,
     temp_storage_with_clock, test_state, test_state_with_clock,
 };
+use serde_json::Value;
 use uuid::Uuid;
 
 const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
@@ -275,89 +276,16 @@ async fn usage_totals_projection_preserves_full_series_totals() {
 
     assert_eq!(full_status, StatusCode::OK);
     assert_eq!(totals_status, StatusCode::OK);
-    assert_eq!(
-        full["window_start_unix_secs"],
-        totals["window_start_unix_secs"]
-    );
-    assert_eq!(full["window_end_unix_secs"], totals["window_end_unix_secs"]);
-    assert_eq!(
-        full["truncated_series_count"],
-        totals["truncated_series_count"]
-    );
-    assert_eq!(full["observed"], totals["observed"]);
-
-    let full_series = full["series"].as_array().unwrap();
-    let totals_series = totals["series"].as_array().unwrap();
-    assert_eq!(full_series.len(), totals_series.len());
+    assert_usage_totals_match_full_collapse(&full, &totals);
     assert!(
-        full_series[0]["buckets"].as_array().unwrap().len() > 1,
+        full["series"][0]["buckets"].as_array().unwrap().len() > 1,
         "the default response must retain its dense full-series contract"
-    );
-    let total_buckets = totals_series[0]["buckets"].as_array().unwrap();
-    assert_eq!(total_buckets.len(), 1);
-    assert_eq!(
-        total_buckets[0]["bucket_start_unix_secs"],
-        totals["window_start_unix_secs"]
-    );
-
-    let full_buckets = full_series[0]["buckets"].as_array().unwrap();
-    for field in [
-        "request_count",
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-        "error_count",
-        "virtual_cost_micros",
-        "latency_ms_sum",
-        "latency_count",
-        "proxy_setup_ms_sum",
-        "proxy_setup_ms_count",
-        "shape_ms_sum",
-        "shape_ms_count",
-        "sign_ms_sum",
-        "sign_ms_count",
-        "upstream_ttfb_ms_sum",
-        "upstream_ttfb_ms_count",
-        "upstream_body_ms_sum",
-        "upstream_body_ms_count",
-        "cost_input_micros",
-        "cost_output_micros",
-        "cost_cache_creation_5m_micros",
-        "cost_cache_creation_1h_micros",
-        "cost_cache_read_micros",
-    ] {
-        let full_sum = full_buckets
-            .iter()
-            .filter_map(|bucket| bucket[field].as_u64())
-            .sum::<u64>();
-        assert_eq!(
-            total_buckets[0][field].as_u64(),
-            Some(full_sum),
-            "totals projection changed {field}"
-        );
-    }
-    let full_latency_min = full_buckets
-        .iter()
-        .filter_map(|bucket| bucket["latency_ms_min"].as_u64())
-        .min();
-    let full_latency_max = full_buckets
-        .iter()
-        .filter_map(|bucket| bucket["latency_ms_max"].as_u64())
-        .max();
-    assert_eq!(
-        total_buckets[0]["latency_ms_min"].as_u64(),
-        full_latency_min
-    );
-    assert_eq!(
-        total_buckets[0]["latency_ms_max"].as_u64(),
-        full_latency_max
     );
 }
 
 #[tokio::test]
 async fn usage_totals_projection_preserves_components_across_rollup_lag() {
-    let clock = test_clock();
+    let clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
     let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(11);
     let now = current_unix_secs(clock.as_ref());
@@ -378,6 +306,28 @@ async fn usage_totals_projection_preserves_components_across_rollup_lag() {
     storage.append_request_event(&rolled).await.unwrap();
     storage.rollup_usage_once().await.unwrap();
 
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage.clone()),
+        clock.clone(),
+    ));
+    let uri = "/admin/usage?range=1h&step=minute&group_by=principal";
+    let (baseline_full, baseline_totals) = usage_projection_pair(&admin_app, uri).await;
+    assert_usage_totals_match_full_collapse(&baseline_full, &baseline_totals);
+    assert_usage_bucket_fields(
+        &baseline_totals["series"][0]["buckets"][0],
+        &[
+            ("request_count", 1),
+            ("input_tokens", 1),
+            ("virtual_cost_micros", 10),
+            ("cost_input_micros", 1),
+            ("cost_output_micros", 2),
+            ("cost_cache_creation_5m_micros", 3),
+            ("cost_cache_creation_1h_micros", 4),
+            ("cost_cache_read_micros", 0),
+        ],
+    );
+
     let mut unrolled = rolled.clone();
     unrolled.request_id = "req-totals-lag-unrolled".to_owned();
     unrolled.event_id = None;
@@ -389,49 +339,202 @@ async fn usage_totals_projection_preserves_components_across_rollup_lag() {
     unrolled.cost_cache_creation_1h_micros = Some(0);
     unrolled.cost_cache_read_micros = Some(0);
     storage.append_request_event(&unrolled).await.unwrap();
+    clock.advance_secs(60);
+
+    let (live_full, live_totals) = usage_projection_pair(&admin_app, uri).await;
+    assert_usage_totals_match_full_collapse(&live_full, &live_totals);
+    assert_usage_bucket_fields(
+        &live_totals["series"][0]["buckets"][0],
+        &[
+            ("request_count", 1),
+            ("input_tokens", 1),
+            ("virtual_cost_micros", 10),
+            ("cost_input_micros", 1),
+            ("cost_output_micros", 2),
+            ("cost_cache_creation_5m_micros", 3),
+            ("cost_cache_creation_1h_micros", 4),
+            ("cost_cache_read_micros", 0),
+        ],
+    );
+
+    storage.rollup_usage_once().await.unwrap();
+    clock.advance_secs(60);
+    let (caught_up_full, caught_up_totals) = usage_projection_pair(&admin_app, uri).await;
+    assert_usage_totals_match_full_collapse(&caught_up_full, &caught_up_totals);
+    assert_usage_bucket_fields(
+        &caught_up_totals["series"][0]["buckets"][0],
+        &[
+            ("request_count", 2),
+            ("input_tokens", 2),
+            ("virtual_cost_micros", 15),
+            ("cost_input_micros", 6),
+            ("cost_output_micros", 2),
+            ("cost_cache_creation_5m_micros", 3),
+            ("cost_cache_creation_1h_micros", 4),
+            ("cost_cache_read_micros", 0),
+        ],
+    );
+}
+
+#[tokio::test]
+async fn usage_totals_projection_preserves_unrolled_recorded_zero_components() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(15);
+    let now = current_unix_secs(clock.as_ref());
+
+    let rolled = usage_event(
+        now.saturating_sub(120),
+        "req-totals-zero-rolled",
+        upstream_id,
+        "target-upstream",
+        1,
+    );
+    storage.append_request_event(&rolled).await.unwrap();
+    storage.rollup_usage_once().await.unwrap();
+
+    let mut zero_tail = rolled.clone();
+    zero_tail.request_id = "req-totals-zero-tail".to_owned();
+    zero_tail.event_id = None;
+    zero_tail.ts_ms = Some(now.saturating_sub(1) * 1_000);
+    zero_tail.cost_input_micros = Some(0);
+    zero_tail.cost_output_micros = Some(0);
+    zero_tail.cost_cache_creation_5m_micros = Some(0);
+    zero_tail.cost_cache_creation_1h_micros = Some(0);
+    zero_tail.cost_cache_read_micros = Some(0);
+    storage.append_request_event(&zero_tail).await.unwrap();
 
     let admin_app = app(test_state_with_clock(
         Config::default(),
         Some(storage),
         clock,
     ));
-    let (full_status, _, full, _) = authed_json(
-        admin_app.clone(),
-        "GET",
+    let (full, totals) = usage_projection_pair(
+        &admin_app,
         "/admin/usage?range=1h&step=minute&group_by=principal",
-        None,
     )
     .await;
-    let (totals_status, _, totals, _) = authed_json(
-        admin_app,
-        "GET",
-        "/admin/usage?range=1h&step=minute&group_by=principal&projection=totals",
-        None,
-    )
-    .await;
+    assert_usage_totals_match_full_collapse(&full, &totals);
+    assert_usage_bucket_fields(
+        &totals["series"][0]["buckets"][0],
+        &[
+            ("request_count", 1),
+            ("input_tokens", 1),
+            ("virtual_cost_micros", 0),
+            ("cost_input_micros", 0),
+            ("cost_output_micros", 0),
+            ("cost_cache_creation_5m_micros", 0),
+            ("cost_cache_creation_1h_micros", 0),
+            ("cost_cache_read_micros", 0),
+        ],
+    );
+}
 
-    assert_eq!(full_status, StatusCode::OK);
-    assert_eq!(totals_status, StatusCode::OK);
-    let full_buckets = full["series"][0]["buckets"].as_array().unwrap();
-    let totals_bucket = &totals["series"][0]["buckets"][0];
-    for (field, expected) in [
-        ("cost_input_micros", 1),
-        ("cost_output_micros", 2),
-        ("cost_cache_creation_5m_micros", 3),
-        ("cost_cache_creation_1h_micros", 4),
-        ("cost_cache_read_micros", 0),
-    ] {
-        let full_sum = full_buckets
-            .iter()
-            .filter_map(|bucket| bucket[field].as_u64())
-            .sum::<u64>();
-        assert_eq!(full_sum, expected, "unexpected full-series {field}");
-        assert_eq!(
-            totals_bucket[field].as_u64(),
-            Some(expected),
-            "totals projection changed {field} during rollup lag"
-        );
-    }
+#[tokio::test]
+async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() {
+    let clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let target_upstream_id = Uuid::from_u128(12);
+    let other_upstream_id = Uuid::from_u128(13);
+    let initially_empty_upstream_id = Uuid::from_u128(14);
+    let now = current_unix_secs(clock.as_ref());
+
+    let mut target = usage_event(
+        now.saturating_sub(120),
+        "req-totals-filter-target",
+        target_upstream_id,
+        "target-upstream",
+        3,
+    );
+    target.output_tokens = Some(5);
+    target.cache_creation_input_tokens = Some(7);
+    target.cache_read_input_tokens = Some(11);
+    target.cost_usd_micros = Some(15);
+    target.cost_input_micros = Some(1);
+    target.cost_output_micros = Some(2);
+    target.cost_cache_creation_5m_micros = Some(3);
+    target.cost_cache_creation_1h_micros = Some(4);
+    target.cost_cache_read_micros = Some(5);
+    storage.append_request_event(&target).await.unwrap();
+
+    let mut other = usage_event(
+        now.saturating_sub(60),
+        "req-totals-filter-other",
+        other_upstream_id,
+        "other-upstream",
+        100,
+    );
+    other.principal_id = Some("principal-b".to_owned());
+    other.cost_usd_micros = Some(100);
+    other.cost_input_micros = Some(100);
+    storage.append_request_event(&other).await.unwrap();
+    storage.rollup_usage_once().await.unwrap();
+
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage.clone()),
+        clock.clone(),
+    ));
+    let target_uri = format!(
+        "/admin/usage?range=1h&step=minute&group_by=principal&upstream_id={target_upstream_id}"
+    );
+    let (target_full, target_totals) = usage_projection_pair(&admin_app, target_uri.as_str()).await;
+    assert_usage_totals_match_full_collapse(&target_full, &target_totals);
+    assert_eq!(target_totals["series"].as_array().unwrap().len(), 1);
+    assert_eq!(target_totals["series"][0]["key"], "principal-a");
+    assert_usage_bucket_fields(
+        &target_totals["series"][0]["buckets"][0],
+        &[
+            ("request_count", 1),
+            ("input_tokens", 3),
+            ("output_tokens", 5),
+            ("cache_creation_input_tokens", 7),
+            ("cache_read_input_tokens", 11),
+            ("virtual_cost_micros", 15),
+            ("cost_input_micros", 1),
+            ("cost_output_micros", 2),
+            ("cost_cache_creation_5m_micros", 3),
+            ("cost_cache_creation_1h_micros", 4),
+            ("cost_cache_read_micros", 5),
+        ],
+    );
+
+    let empty_uri = format!(
+        "/admin/usage?range=1h&step=minute&group_by=principal&upstream_id={initially_empty_upstream_id}"
+    );
+    let (empty_full, empty_totals) = usage_projection_pair(&admin_app, empty_uri.as_str()).await;
+    assert_usage_totals_match_full_collapse(&empty_full, &empty_totals);
+    assert_eq!(empty_totals["observed"], false);
+    assert!(empty_totals["series"].as_array().unwrap().is_empty());
+
+    let mut newly_observed = usage_event(
+        now.saturating_sub(1),
+        "req-totals-filter-new",
+        initially_empty_upstream_id,
+        "new-upstream",
+        17,
+    );
+    newly_observed.principal_id = Some("principal-c".to_owned());
+    newly_observed.cost_usd_micros = Some(9);
+    newly_observed.cost_input_micros = Some(9);
+    storage.append_request_event(&newly_observed).await.unwrap();
+    storage.rollup_usage_once().await.unwrap();
+    clock.advance_secs(60);
+
+    let (observed_full, observed_totals) =
+        usage_projection_pair(&admin_app, empty_uri.as_str()).await;
+    assert_usage_totals_match_full_collapse(&observed_full, &observed_totals);
+    assert_eq!(observed_totals["observed"], true);
+    assert_eq!(observed_totals["series"][0]["key"], "principal-c");
+    assert_usage_bucket_fields(
+        &observed_totals["series"][0]["buckets"][0],
+        &[
+            ("request_count", 1),
+            ("input_tokens", 17),
+            ("virtual_cost_micros", 9),
+            ("cost_input_micros", 9),
+        ],
+    );
 }
 
 #[tokio::test]
@@ -776,6 +879,121 @@ fn test_clock() -> ClockHandle {
 
 fn current_unix_secs(clock: &dyn cc_lb_clock::Clock) -> u64 {
     cc_lb_clock::unix_secs(clock.now())
+}
+
+async fn usage_projection_pair(admin_app: &axum::Router, full_uri: &str) -> (Value, Value) {
+    let (full_status, _, full, _) = authed_json(admin_app.clone(), "GET", full_uri, None).await;
+    let totals_uri = format!("{full_uri}&projection=totals");
+    let (totals_status, _, totals, _) =
+        authed_json(admin_app.clone(), "GET", totals_uri.as_str(), None).await;
+    assert_eq!(full_status, StatusCode::OK);
+    assert_eq!(totals_status, StatusCode::OK);
+    (full, totals)
+}
+
+fn assert_usage_totals_match_full_collapse(full: &Value, totals: &Value) {
+    for field in [
+        "range",
+        "step",
+        "group_by",
+        "window_start_unix_secs",
+        "window_end_unix_secs",
+        "truncated_series_count",
+        "observed",
+    ] {
+        assert_eq!(full.get(field), totals.get(field), "response field {field}");
+    }
+
+    let full_series = full["series"].as_array().expect("full series array");
+    let totals_series = totals["series"].as_array().expect("totals series array");
+    assert_eq!(full_series.len(), totals_series.len());
+    for (full_item, totals_item) in full_series.iter().zip(totals_series) {
+        assert_eq!(full_item.get("key"), totals_item.get("key"));
+        assert_eq!(
+            full_item.get("upstream_name"),
+            totals_item.get("upstream_name")
+        );
+
+        let full_buckets = full_item["buckets"].as_array().expect("full buckets array");
+        let totals_buckets = totals_item["buckets"]
+            .as_array()
+            .expect("totals buckets array");
+        assert_eq!(totals_buckets.len(), 1);
+        let totals_bucket = &totals_buckets[0];
+        assert_eq!(
+            totals_bucket["bucket_start_unix_secs"],
+            totals["window_start_unix_secs"]
+        );
+
+        for field in [
+            "request_count",
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+            "error_count",
+            "virtual_cost_micros",
+            "latency_ms_sum",
+            "latency_count",
+            "proxy_setup_ms_sum",
+            "proxy_setup_ms_count",
+            "shape_ms_sum",
+            "shape_ms_count",
+            "sign_ms_sum",
+            "sign_ms_count",
+            "upstream_ttfb_ms_sum",
+            "upstream_ttfb_ms_count",
+            "upstream_body_ms_sum",
+            "upstream_body_ms_count",
+            "cost_input_micros",
+            "cost_output_micros",
+            "cost_cache_creation_5m_micros",
+            "cost_cache_creation_1h_micros",
+            "cost_cache_read_micros",
+        ] {
+            let expected = full_buckets
+                .iter()
+                .filter_map(|bucket| bucket.get(field).and_then(Value::as_u64))
+                .sum::<u64>();
+            let expected = full_buckets
+                .iter()
+                .any(|bucket| bucket.get(field).is_some())
+                .then_some(expected);
+            assert_eq!(
+                totals_bucket.get(field).and_then(Value::as_u64),
+                expected,
+                "collapsed field {field} for {}",
+                full_item["key"]
+            );
+        }
+
+        let expected_latency_min = full_buckets
+            .iter()
+            .filter_map(|bucket| bucket["latency_ms_min"].as_u64())
+            .min();
+        let expected_latency_max = full_buckets
+            .iter()
+            .filter_map(|bucket| bucket["latency_ms_max"].as_u64())
+            .max();
+        assert_eq!(
+            totals_bucket["latency_ms_min"].as_u64(),
+            expected_latency_min
+        );
+        assert_eq!(
+            totals_bucket["latency_ms_max"].as_u64(),
+            expected_latency_max
+        );
+    }
+}
+
+fn assert_usage_bucket_fields(bucket: &Value, expected: &[(&str, u64)]) {
+    for (field, expected) in expected {
+        assert_eq!(
+            bucket.get(field).and_then(Value::as_u64),
+            Some(*expected),
+            "usage bucket field {field}"
+        );
+    }
 }
 
 fn usage_event(

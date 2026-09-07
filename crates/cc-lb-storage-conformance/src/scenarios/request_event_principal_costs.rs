@@ -28,6 +28,7 @@ where
         let padded_uuid_raw = format!(" {padded_uuid_principal} ");
         let compact_uuid_principal = Uuid::from_u128(0x55).simple().to_string();
         let extra_hyphen_principal = "1234-678-0123-5678-9abc-def012345678".to_owned();
+        let partial_principal = normalize_usage_rollup_dimension(Some("negative/partial"));
 
         storage
             .append_request_event(&cost_event(
@@ -139,6 +140,21 @@ where
                 None,
             ))
             .await?;
+        let mut partial_event = cost_event(
+            range_start + 80,
+            "principal-cost-negative-partial",
+            Some("negative/partial"),
+            upstream_id,
+            Some(-11),
+            None,
+            None,
+        );
+        partial_event.cost_input_micros = Some(-1);
+        partial_event.cost_output_micros = None;
+        partial_event.cost_cache_creation_5m_micros = Some(4);
+        partial_event.cost_cache_creation_1h_micros = None;
+        partial_event.cost_cache_read_micros = Some(0);
+        storage.append_request_event(&partial_event).await?;
         storage
             .append_request_event(&cost_event(
                 range_start + 120,
@@ -157,6 +173,7 @@ where
             normalized_principal.clone(),
             normalized_long_principal.clone(),
             "unknown".to_owned(),
+            partial_principal.clone(),
         ];
 
         let buckets = storage
@@ -235,6 +252,29 @@ where
                 && truncated.cost_output_micros == 1
                 && truncated.cost_cache_creation_5m_micros == 1,
             "truncated principal components mismatch"
+        );
+        let partial = buckets
+            .iter()
+            .find(|bucket| {
+                bucket.principal == partial_principal
+                    && bucket.bucket_start_unix_secs == range_start + 60
+            })
+            .expect("negative and partially recorded component bucket");
+        ensure!(
+            partial.total_cost_micros == 0,
+            "negative total cost must clamp to zero"
+        );
+        ensure!(
+            partial.component_costs_recorded,
+            "partially recorded components must retain coverage"
+        );
+        ensure!(
+            partial.cost_input_micros == 0
+                && partial.cost_output_micros == 0
+                && partial.cost_cache_creation_5m_micros == 4
+                && partial.cost_cache_creation_1h_micros == 0
+                && partial.cost_cache_read_micros == 0,
+            "negative and NULL components must clamp or coalesce without fabrication"
         );
 
         ensure!(
@@ -341,6 +381,31 @@ where
                 && extra_hyphen_buckets[0].cost_cache_creation_1h_micros == 3
                 && extra_hyphen_buckets[0].cost_cache_read_micros == 5,
             "extra-hyphen principal component costs mismatch"
+        );
+        let mixed_shape_buckets = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: range_start,
+                until_unix_secs: range_start + 120,
+                bucket_width_secs: 60,
+                upstream_id: Some(upstream_id),
+                principal_keys: vec![uuid_principal.clone(), normalized_principal.clone()],
+            })
+            .await?;
+        ensure!(
+            mixed_shape_buckets.len() == 2,
+            "mixed UUID and non-UUID selection must return both static-query branches"
+        );
+        ensure!(
+            mixed_shape_buckets.iter().any(|bucket| {
+                bucket.principal == uuid_principal && bucket.total_cost_micros == 13
+            }),
+            "mixed selection must retain UUID costs"
+        );
+        ensure!(
+            mixed_shape_buckets.iter().any(|bucket| {
+                bucket.principal == normalized_principal && bucket.total_cost_micros == 25
+            }),
+            "mixed selection must retain normalized non-UUID costs"
         );
 
         let filtered_buckets = storage

@@ -388,10 +388,82 @@ fn is_canonical_uuid_principal(value: &str) -> bool {
     value.len() == 36 && uuid::Uuid::parse_str(value).is_ok()
 }
 
-const PRINCIPAL_COST_SOURCE_COLUMNS: &str = "principal_id, list_ts_ms, \
-    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
-    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
-    list_cost_cache_read_micros";
+type PrincipalCostRow = (Option<String>, i64, i64, bool, i64, i64, i64, i64, i64);
+
+const PRINCIPAL_COST_AGGREGATE_PREFIX: &str = "SELECT principal_id, bucket_index, \
+        COALESCE(SUM(GREATEST(COALESCE(list_cost_usd_micros, 0), 0)), 0)::bigint \
+            AS total_cost_micros, \
+        BOOL_OR(list_cost_input_micros IS NOT NULL \
+            OR list_cost_output_micros IS NOT NULL \
+            OR list_cost_cache_creation_5m_micros IS NOT NULL \
+            OR list_cost_cache_creation_1h_micros IS NOT NULL \
+            OR list_cost_cache_read_micros IS NOT NULL) \
+            AS component_costs_recorded, \
+        COALESCE(SUM(GREATEST(COALESCE(list_cost_input_micros, 0), 0)), 0)::bigint \
+            AS cost_input_micros, \
+        COALESCE(SUM(GREATEST(COALESCE(list_cost_output_micros, 0), 0)), 0)::bigint \
+            AS cost_output_micros, \
+        COALESCE(SUM(GREATEST(COALESCE(list_cost_cache_creation_5m_micros, 0), 0)), 0)::bigint \
+            AS cost_cache_creation_5m_micros, \
+        COALESCE(SUM(GREATEST(COALESCE(list_cost_cache_creation_1h_micros, 0), 0)), 0)::bigint \
+            AS cost_cache_creation_1h_micros, \
+        COALESCE(SUM(GREATEST(COALESCE(list_cost_cache_read_micros, 0), 0)), 0)::bigint \
+            AS cost_cache_read_micros \
+    FROM (";
+
+const PRINCIPAL_COST_AGGREGATE_SUFFIX: &str = ") matched \
+    GROUP BY principal_id, bucket_index \
+    ORDER BY bucket_index ASC, principal_id ASC";
+
+const UUID_PRINCIPAL_COST_SOURCE_SQL: &str = include_str!("request_event_principal_cost_uuid.sql");
+const FILTERED_UUID_PRINCIPAL_COST_SOURCE_SQL: &str =
+    include_str!("request_event_principal_cost_uuid_filtered.sql");
+const NON_UUID_PRINCIPAL_COST_SOURCE_SQL: &str =
+    include_str!("request_event_principal_cost_normalized.sql");
+const FILTERED_NON_UUID_PRINCIPAL_COST_SOURCE_SQL: &str =
+    include_str!("request_event_principal_cost_normalized_filtered.sql");
+
+async fn fetch_principal_cost_rows(
+    storage: &PostgresStorage,
+    source_sql: &'static str,
+    range_start_ms: i64,
+    bucket_width_ms: i64,
+    range_end_ms: i64,
+    principal_keys: &Vec<String>,
+) -> StorageResult<Vec<PrincipalCostRow>> {
+    sqlx::query_as::<_, PrincipalCostRow>(AssertSqlSafe(format!(
+        "{PRINCIPAL_COST_AGGREGATE_PREFIX}{source_sql}{PRINCIPAL_COST_AGGREGATE_SUFFIX}"
+    )))
+    .bind(range_start_ms)
+    .bind(bucket_width_ms)
+    .bind(range_end_ms)
+    .bind(principal_keys)
+    .fetch_all(&storage.pool)
+    .await
+    .map_err(map_sqlx_error)
+}
+
+async fn fetch_filtered_principal_cost_rows(
+    storage: &PostgresStorage,
+    source_sql: &'static str,
+    range_start_ms: i64,
+    bucket_width_ms: i64,
+    range_end_ms: i64,
+    upstream_id: uuid::Uuid,
+    principal_keys: &Vec<String>,
+) -> StorageResult<Vec<PrincipalCostRow>> {
+    sqlx::query_as::<_, PrincipalCostRow>(AssertSqlSafe(format!(
+        "{PRINCIPAL_COST_AGGREGATE_PREFIX}{source_sql}{PRINCIPAL_COST_AGGREGATE_SUFFIX}"
+    )))
+    .bind(range_start_ms)
+    .bind(bucket_width_ms)
+    .bind(range_end_ms)
+    .bind(upstream_id)
+    .bind(principal_keys)
+    .fetch_all(&storage.pool)
+    .await
+    .map_err(map_sqlx_error)
+}
 
 async fn request_event_principal_costs(
     storage: &PostgresStorage,
@@ -422,70 +494,60 @@ async fn request_event_principal_costs(
         .filter(|key| is_canonical_uuid_principal(key))
         .cloned()
         .collect::<Vec<_>>();
-    const NORMALIZED_PRINCIPAL: &str = "LEFT(REGEXP_REPLACE(COALESCE(NULLIF(\
-        BTRIM(principal_id COLLATE \"C\", U&'\\0009\\000A\\000B\\000C\\000D\\0020\\0085\\00A0\
-        \\1680\\2000\\2001\\2002\\2003\\2004\\2005\\2006\\2007\\2008\\2009\\200A\\2028\\2029\
-        \\202F\\205F\\3000'), ''), 'unknown'), '[^A-Za-z0-9_.:@-]', '_', 'g'), 64)";
-    const NON_UUID_PRINCIPAL: &str = "principal_id IS NULL OR principal_id !~* \
-        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'";
-    let sql = format!(
-        "SELECT principal_id, bucket_index, \
-                COALESCE(SUM(GREATEST(COALESCE(list_cost_usd_micros, 0), 0)), 0)::bigint \
-                    AS total_cost_micros, \
-                BOOL_OR(list_cost_input_micros IS NOT NULL \
-                    OR list_cost_output_micros IS NOT NULL \
-                    OR list_cost_cache_creation_5m_micros IS NOT NULL \
-                    OR list_cost_cache_creation_1h_micros IS NOT NULL \
-                    OR list_cost_cache_read_micros IS NOT NULL) \
-                    AS component_costs_recorded, \
-                COALESCE(SUM(GREATEST(COALESCE(list_cost_input_micros, 0), 0)), 0)::bigint \
-                    AS cost_input_micros, \
-                COALESCE(SUM(GREATEST(COALESCE(list_cost_output_micros, 0), 0)), 0)::bigint \
-                    AS cost_output_micros, \
-                COALESCE(SUM(GREATEST(COALESCE(list_cost_cache_creation_5m_micros, 0), 0)), 0)::bigint \
-                    AS cost_cache_creation_5m_micros, \
-                COALESCE(SUM(GREATEST(COALESCE(list_cost_cache_creation_1h_micros, 0), 0)), 0)::bigint \
-                    AS cost_cache_creation_1h_micros, \
-                COALESCE(SUM(GREATEST(COALESCE(list_cost_cache_read_micros, 0), 0)), 0)::bigint \
-                    AS cost_cache_read_micros \
-         FROM ( \
-             SELECT principal_id, \
-                    ((list_ts_ms - $1) / $2)::bigint AS bucket_index, \
-                    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
-                    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
-                    list_cost_cache_read_micros \
-             FROM ( \
-                 SELECT {PRINCIPAL_COST_SOURCE_COLUMNS} \
-                 FROM request_events_v1 \
-                 WHERE list_ts_ms >= $1 \
-                   AND list_ts_ms < $3 \
-                   AND ($4::uuid IS NULL OR upstream_id = $4) \
-                   AND principal_id = ANY($5::text[]) \
-                 UNION ALL \
-                 SELECT {PRINCIPAL_COST_SOURCE_COLUMNS} \
-                 FROM request_events_v1 \
-                 WHERE list_ts_ms >= $1 \
-                   AND list_ts_ms < $3 \
-                   AND ($4::uuid IS NULL OR upstream_id = $4) \
-                   AND ({NON_UUID_PRINCIPAL}) \
-                   AND {NORMALIZED_PRINCIPAL} = ANY($6::text[]) \
-             ) selected \
-         ) matched \
-         GROUP BY principal_id, bucket_index \
-         ORDER BY bucket_index ASC, principal_id ASC",
-    );
-    let rows = sqlx::query_as::<_, (Option<String>, i64, i64, bool, i64, i64, i64, i64, i64)>(
-        AssertSqlSafe(sql),
-    )
-    .bind(range_start_ms)
-    .bind(bucket_width_ms)
-    .bind(range_end_ms)
-    .bind(query.upstream_id)
-    .bind(&uuid_keys)
-    .bind(&query.principal_keys)
-    .fetch_all(&storage.pool)
-    .await
-    .map_err(map_sqlx_error)?;
+    let mut rows = Vec::<PrincipalCostRow>::new();
+
+    if !uuid_keys.is_empty() {
+        rows.extend(match query.upstream_id {
+            Some(upstream_id) => {
+                fetch_filtered_principal_cost_rows(
+                    storage,
+                    FILTERED_UUID_PRINCIPAL_COST_SOURCE_SQL,
+                    range_start_ms,
+                    bucket_width_ms,
+                    range_end_ms,
+                    upstream_id,
+                    &uuid_keys,
+                )
+                .await?
+            }
+            None => {
+                fetch_principal_cost_rows(
+                    storage,
+                    UUID_PRINCIPAL_COST_SOURCE_SQL,
+                    range_start_ms,
+                    bucket_width_ms,
+                    range_end_ms,
+                    &uuid_keys,
+                )
+                .await?
+            }
+        });
+    }
+    rows.extend(match query.upstream_id {
+        Some(upstream_id) => {
+            fetch_filtered_principal_cost_rows(
+                storage,
+                FILTERED_NON_UUID_PRINCIPAL_COST_SOURCE_SQL,
+                range_start_ms,
+                bucket_width_ms,
+                range_end_ms,
+                upstream_id,
+                &query.principal_keys,
+            )
+            .await?
+        }
+        None => {
+            fetch_principal_cost_rows(
+                storage,
+                NON_UUID_PRINCIPAL_COST_SOURCE_SQL,
+                range_start_ms,
+                bucket_width_ms,
+                range_end_ms,
+                &query.principal_keys,
+            )
+            .await?
+        }
+    });
 
     let mut buckets = BTreeMap::<(String, u64), RequestEventPrincipalCostBucket>::new();
     for (

@@ -26,6 +26,8 @@ mod config_schema;
 mod config_validate;
 #[path = "credentials.rs"]
 mod credentials;
+#[path = "dashboard_principal_totals_cache.rs"]
+mod dashboard_principal_totals_cache;
 #[path = "dashboard_summary.rs"]
 mod dashboard_summary;
 #[path = "dashboard_usage.rs"]
