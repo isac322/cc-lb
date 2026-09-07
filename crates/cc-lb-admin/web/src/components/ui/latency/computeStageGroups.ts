@@ -24,6 +24,11 @@ export function deriveSetupOverhead(e: RequestEventWithPhase): number {
       (e.limit_reserve_ms ?? 0),
   );
 }
+export function deriveProxyTimelineDuration(e: RequestEventWithPhase): number {
+  if (e._phase === 'partial') return Math.max(0, e.elapsed_ms ?? 0);
+  if (e._phase !== 'final') return 0;
+  return Math.max(0, e.duration_ms ?? 0);
+}
 
 export function computeStageGroups(e: RequestEventWithPhase): StageGroups {
   if (e._phase === 'partial') {
@@ -55,10 +60,9 @@ export function computeStageGroups(e: RequestEventWithPhase): StageGroups {
   );
   const upstream = (e.connect_ms ?? 0) + upstream_post_handshake;
   const body = e.upstream_body_ms ?? 0;
-  const internalPost =
-    (e.observability_post_ms ?? 0) + (e.limit_reconcile_ms ?? 0);
+  const internalPost = e.limit_reconcile_ms ?? 0;
   const sum = internalPre + wait + upstream + body + internalPost;
-  const unaccounted = Math.max(0, (e.duration_ms ?? 0) - sum);
+  const unaccounted = Math.max(0, deriveProxyTimelineDuration(e) - sum);
   return {
     internalPre,
     setupOverhead,

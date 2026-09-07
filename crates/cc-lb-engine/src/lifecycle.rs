@@ -58,7 +58,8 @@ use crate::error_normalizer::ErrorNormalizer;
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
-    V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
+    PromptCacheAnalysisExecutor, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis,
+    V3PromptCacheBlockSource, analyze_v3_prompt_cache,
 };
 use crate::request_classification::classify_client_request_kind;
 use crate::request_context::RequestContext;
@@ -1767,6 +1768,7 @@ pub struct Lifecycle {
     subscription_metadata_hook: Option<MetadataHookHandle>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     cache_keepalive_enqueuer: Option<Arc<dyn crate::cache_keepalive::CacheKeepaliveEnqueuer>>,
+    prompt_cache_analysis_executor: PromptCacheAnalysisExecutor,
     clock: ClockHandle,
     rng: Mutex<StdRng>,
 }
@@ -1807,6 +1809,7 @@ impl Lifecycle {
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
             cache_keepalive_enqueuer: None,
+            prompt_cache_analysis_executor: PromptCacheAnalysisExecutor::default(),
             clock,
             rng: Mutex::new(rand::make_rng()),
         }
@@ -1832,6 +1835,7 @@ impl Lifecycle {
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
             cache_keepalive_enqueuer: None,
+            prompt_cache_analysis_executor: PromptCacheAnalysisExecutor::default(),
             clock,
             rng: Mutex::new(rand::make_rng()),
         }
@@ -2131,8 +2135,28 @@ impl Lifecycle {
                 "request body must be valid JSON",
             ));
         }
-        let mut cache_metadata =
-            request_cache_metadata_from_value(&ctx.downstream_headers, body_view.value());
+        let prompt_cache_token_scope = prompt_cache_token_scope(&ctx.downstream_headers);
+        let prompt_cache_analysis = match body_view.value_arc() {
+            Some(value) => {
+                let canonical_model = value
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(canonical_model_id)
+                    .unwrap_or_default()
+                    .to_owned();
+                Some(
+                    self.prompt_cache_analysis_executor
+                        .analyze(value, canonical_model, prompt_cache_token_scope)
+                        .await,
+                )
+            }
+            None => None,
+        };
+        let mut cache_metadata = request_cache_metadata_from_value_with_analysis(
+            &ctx.downstream_headers,
+            body_view.value(),
+            prompt_cache_analysis,
+        );
         if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                 event_id: o.event_id().to_owned(),
@@ -4891,18 +4915,22 @@ fn system_time_to_unix_millis(value: SystemTime) -> u64 {
 // `serde_json::Value` so all downstream consumers stay compatible without
 // touching the serialization side (see `docs/adr/0002-json-library-strategy.md`).
 struct RequestBodyView {
-    parsed: Result<Value, sonic_rs::Error>,
+    parsed: Result<Arc<Value>, sonic_rs::Error>,
 }
 
 impl RequestBodyView {
     fn new(body: &Bytes) -> Self {
         Self {
-            parsed: sonic_rs::from_slice::<Value>(body),
+            parsed: sonic_rs::from_slice::<Value>(body).map(Arc::new),
         }
     }
 
     fn value(&self) -> Option<&Value> {
-        self.parsed.as_ref().ok()
+        self.parsed.as_deref().ok()
+    }
+
+    fn value_arc(&self) -> Option<Arc<Value>> {
+        self.parsed.as_ref().ok().cloned()
     }
 
     fn is_valid_json(&self) -> bool {
@@ -5048,6 +5076,57 @@ fn plugin_ttl_class(ttl: Option<&str>) -> TtlClass {
         _ => TtlClass::Ephemeral5m,
     }
 }
+fn prompt_cache_token_scope(headers: &HeaderMap) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"cc-lb-token-cache-scope-v1\0");
+    let credential = headers
+        .get("x-api-key")
+        .map(|value| ("x-api-key", value))
+        .or_else(|| {
+            headers
+                .get("authorization")
+                .map(|value| ("authorization", value))
+        });
+    if let Some((name, value)) = credential {
+        hasher.update(&(name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update(&(value.as_bytes().len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    } else {
+        hasher.update(b"unauthenticated");
+    }
+    *hasher.finalize().as_bytes()
+}
+#[cfg(test)]
+mod prompt_cache_token_scope_tests {
+    use super::*;
+
+    #[test]
+    fn x_api_key_scope_ignores_lower_precedence_authorization() {
+        let mut first = HeaderMap::new();
+        first.insert("x-api-key", HeaderValue::from_static("stable-key"));
+        first.insert("authorization", HeaderValue::from_static("Bearer first"));
+        let mut second = HeaderMap::new();
+        second.insert("x-api-key", HeaderValue::from_static("stable-key"));
+        second.insert("authorization", HeaderValue::from_static("Bearer second"));
+        assert_eq!(
+            prompt_cache_token_scope(&first),
+            prompt_cache_token_scope(&second)
+        );
+    }
+
+    #[test]
+    fn authorization_scope_changes_without_x_api_key() {
+        let mut first = HeaderMap::new();
+        first.insert("authorization", HeaderValue::from_static("Bearer first"));
+        let mut second = HeaderMap::new();
+        second.insert("authorization", HeaderValue::from_static("Bearer second"));
+        assert_ne!(
+            prompt_cache_token_scope(&first),
+            prompt_cache_token_scope(&second)
+        );
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct AttemptTimings {
@@ -5084,6 +5163,22 @@ fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMeta
 fn request_cache_metadata_from_value(
     headers: &HeaderMap,
     value: Option<&Value>,
+) -> RequestCacheMetadata {
+    let analysis = value.map(|value| {
+        let canonical_model = value
+            .get("model")
+            .and_then(Value::as_str)
+            .map(canonical_model_id)
+            .unwrap_or_default();
+        analyze_v3_prompt_cache(value, canonical_model)
+    });
+    request_cache_metadata_from_value_with_analysis(headers, value, analysis)
+}
+
+fn request_cache_metadata_from_value_with_analysis(
+    headers: &HeaderMap,
+    value: Option<&Value>,
+    analysis: Option<V3PromptCacheAnalysis>,
 ) -> RequestCacheMetadata {
     let metadata = value.map(metadata_identity).unwrap_or_default();
     let (observed_session_id, session_id_source) =
@@ -5138,7 +5233,7 @@ fn request_cache_metadata_from_value(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
 
-    let analysis = analyze_v3_prompt_cache(value, &canonical_model_id);
+    let analysis = analysis.unwrap_or_else(|| analyze_v3_prompt_cache(value, &canonical_model_id));
     let cache_breakpoints = analysis
         .breakpoints
         .iter()

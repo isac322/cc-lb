@@ -14,6 +14,9 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::tokenizer::PrefixTokenizer;
+mod optimized;
+
+pub(crate) use optimized::PromptCacheAnalysisExecutor;
 
 pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "local_tiktoken_v1";
 
@@ -22,7 +25,6 @@ pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "local_tiktoken_v1";
 pub const MAX_EXPLICIT_BREAKPOINTS: usize = 4;
 
 const SERIALIZATION_SCRATCH_INITIAL_CAPACITY: usize = 4 * 1024;
-const SERIALIZATION_SCRATCH_MAX_RETAINED_CAPACITY: usize = 256 * 1024;
 const DEFAULT_CACHE_TTL: &str = "5m";
 const DEFAULT_SPEED: &str = "standard";
 const INVALIDATOR_SALT_COUNT: usize = 4;
@@ -146,6 +148,10 @@ pub struct V3PromptCacheAnalysis {
     pub blocks: Vec<V3PromptCacheBlock>,
     pub breakpoints: Vec<V3PromptCacheBreakpoint>,
 }
+struct V3StructuralAnalysis<'a> {
+    blocks: Vec<CacheBlockRef<'a>>,
+    breakpoints: Vec<V3StructuralBreakpoint>,
+}
 
 #[derive(Clone, Copy)]
 enum CacheBlockValueRef<'a> {
@@ -212,11 +218,7 @@ impl SerializationScratch {
     }
 
     fn clear_for_reuse(&mut self) {
-        if self.bytes.capacity() > SERIALIZATION_SCRATCH_MAX_RETAINED_CAPACITY {
-            self.bytes = Vec::with_capacity(SERIALIZATION_SCRATCH_INITIAL_CAPACITY);
-        } else {
-            self.bytes.clear();
-        }
+        self.bytes.clear();
     }
 }
 
@@ -484,20 +486,43 @@ fn non_default_string_invalidator<'a>(
 /// upstream still serves. `lifecycle::build_cache_score_from_match` applies the ordering rule
 /// where it actually matters, when pricing a matched prefix.
 pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3PromptCacheAnalysis {
-    let blocks = flatten_prefix_blocks(value);
-    let Some(resolved_breakpoints) = resolve_breakpoints(value, &blocks) else {
+    let mut serialization_scratch = SerializationScratch::default();
+    let Some(structural) =
+        analyze_v3_prompt_cache_structure(value, canonical_model, &mut serialization_scratch)
+    else {
         return unanalyzable_prompt_cache();
     };
+    let prefix_token_counts = structural
+        .breakpoints
+        .iter()
+        .map(|breakpoint| {
+            breakpoint_prefix_token_count(
+                canonical_model,
+                &structural.blocks,
+                breakpoint.block_index as usize,
+                &mut serialization_scratch,
+            )
+        })
+        .collect();
+    finish_structural_analysis(structural, prefix_token_counts)
+        .unwrap_or_else(unanalyzable_prompt_cache)
+}
 
-    let mut serialization_scratch = SerializationScratch::default();
+fn analyze_v3_prompt_cache_structure<'a>(
+    value: &'a Value,
+    canonical_model: &str,
+    serialization_scratch: &mut SerializationScratch,
+) -> Option<V3StructuralAnalysis<'a>> {
+    let blocks = flatten_prefix_blocks(value);
+    let resolved_breakpoints = resolve_breakpoints(value, &blocks)?;
     let salts = request_invalidator_salts(value, canonical_model);
     let chain = PromptCachePrefixChain::from_request_blocks(
         PromptCacheSimulatorKey::seed(canonical_model),
         &blocks,
         &salts,
-        &mut serialization_scratch,
+        serialization_scratch,
     );
-    let structural_breakpoints = resolved_breakpoints
+    let breakpoints = resolved_breakpoints
         .into_iter()
         .filter_map(|resolved| {
             let block = blocks.get(resolved.block_index)?;
@@ -512,29 +537,43 @@ pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3Prompt
                 lookback_prefixes: lookback_prefixes(&chain, resolved.block_index),
             })
         })
-        .collect::<Vec<_>>();
-    let breakpoints = structural_breakpoints
+        .collect();
+    Some(V3StructuralAnalysis {
+        blocks,
+        breakpoints,
+    })
+}
+
+fn finish_structural_analysis(
+    structural: V3StructuralAnalysis<'_>,
+    prefix_token_counts: Vec<u64>,
+) -> Option<V3PromptCacheAnalysis> {
+    if structural.breakpoints.len() != prefix_token_counts.len() {
+        return None;
+    }
+    let breakpoints = structural
+        .breakpoints
         .into_iter()
-        .map(|breakpoint| V3PromptCacheBreakpoint {
+        .zip(prefix_token_counts)
+        .map(|(breakpoint, prefix_token_count)| V3PromptCacheBreakpoint {
             block_index: breakpoint.block_index,
             source: breakpoint.source,
             path: breakpoint.path,
             message_index: breakpoint.message_index,
             ttl: breakpoint.ttl,
             prefix_key: breakpoint.prefix_key,
-            prefix_token_count: breakpoint_prefix_token_count(
-                canonical_model,
-                &blocks,
-                breakpoint.block_index as usize,
-                &mut serialization_scratch,
-            ),
+            prefix_token_count,
             lookback_prefixes: breakpoint.lookback_prefixes,
         })
         .collect();
-    V3PromptCacheAnalysis {
-        blocks: blocks.into_iter().map(CacheBlockRef::into_owned).collect(),
+    Some(V3PromptCacheAnalysis {
+        blocks: structural
+            .blocks
+            .into_iter()
+            .map(CacheBlockRef::into_owned)
+            .collect(),
         breakpoints,
-    }
+    })
 }
 
 fn unanalyzable_prompt_cache() -> V3PromptCacheAnalysis {
