@@ -519,14 +519,20 @@ export function TimeRangeStrip({
         </div>
       ) : null}
       {failed ? (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <div
+          className="pointer-events-none absolute right-2 top-2 z-10"
+          data-testid="time-range-strip-error"
+        >
           <span className="rounded-sm border border-subtle bg-panel-strong px-2 py-1 text-[11px] text-[color:var(--color-danger)]">
             Failed to load request density
           </span>
         </div>
       ) : null}
       {loading && !failed ? (
-        <div className="pointer-events-none absolute inset-0 bg-[color:var(--color-overlay-1)]" />
+        <div
+          className="pointer-events-none absolute inset-0 bg-[color:var(--color-overlay-1)]"
+          data-testid="time-range-strip-loading"
+        />
       ) : null}
     </div>
   );

@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Admin charts and request lists retain successful data during background refreshes instead of replacing it with skeletons. Rolling quota queries now keep stable cache keys and update their time bounds when responses arrive; range changes preserve the displayed chart until replacement data is ready.
+- Histogram and detail queries no longer reuse another filter or entity's data. Query cancellation also preserves the existing 30-second request timeout.
 - PostgreSQL principal-cost aggregation now reads materialized cost columns from a covering index instead of decoding request payloads, while a compatibility trigger protects rolling deployments.
 - PostgreSQL read-path migrations now allow 90 seconds for backfills and index builds, and can be replayed after a rollback rewinds their migration registry entries.
 - Overview requests principal totals without dense time-series buckets and caps pooled-quota chart points while preserving bucket peaks and exact latest values. Pool-history defaults remain unchanged.
