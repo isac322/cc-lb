@@ -95,6 +95,238 @@ const apiKeyUpstream: Upstream = {
   warmup_enabled: false,
 };
 
+const secondOauthUpstream: Upstream = {
+  ...upstream,
+  id: 'upstream-3',
+  name: 'OAuth Secondary',
+  spec_revision: 2,
+};
+
+const NOW_UNIX_SECS = Date.UTC(2026, 5, 18, 0, 0, 1) / 1000;
+
+function queryResult(data: unknown, overrides: Record<string, unknown> = {}) {
+  return {
+    data,
+    isLoading: false,
+    isPending: false,
+    isPlaceholderData: false,
+    ...overrides,
+  } as never;
+}
+
+function quotaSnapshot(window: '5h' | '7d', utilization: number) {
+  return {
+    window,
+    state: 'fresh',
+    source: 'api',
+    utilization,
+    status: null,
+    resets_at_unix_secs: NOW_UNIX_SECS + 3_600,
+    surpassed_threshold: false,
+    representative_claim: null,
+    disabled_reason: null,
+    extra_usage_enabled: null,
+    extra_usage_monthly_limit: null,
+    extra_usage_used_credits: null,
+    observed_at_unix_millis: NOW_UNIX_SECS * 1_000,
+    age_secs: 0,
+  };
+}
+
+function quotaLatestData(
+  target: Upstream,
+  utilization: number,
+  additionalUpstreams: unknown[] = [],
+) {
+  return {
+    now_unix_secs: NOW_UNIX_SECS,
+    max_staleness_secs: 300,
+    upstreams: [
+      {
+        upstream_id: target.id,
+        upstream_name: target.name,
+        windows: [
+          quotaSnapshot('5h', utilization),
+          quotaSnapshot('7d', utilization / 2),
+        ],
+      },
+      ...additionalUpstreams,
+    ],
+  };
+}
+
+function quotaSeriesData(
+  target: Upstream,
+  utilization: number,
+  rangeSecs = 604_800,
+) {
+  const since = NOW_UNIX_SECS - rangeSecs;
+  return {
+    since_unix_secs: since,
+    until_unix_secs: NOW_UNIX_SECS,
+    bucket_secs: 1_800,
+    source: 'merged',
+    series: [
+      {
+        upstream_id: target.id,
+        upstream_name: target.name,
+        window: '5h',
+        buckets: [
+          {
+            bucket_start_unix_secs: since + 1_800,
+            utilization_last: utilization,
+          },
+        ],
+        markers: [],
+      },
+      {
+        upstream_id: target.id,
+        upstream_name: target.name,
+        window: '7d',
+        buckets: [
+          {
+            bucket_start_unix_secs: since + 1_800,
+            utilization_last: utilization / 2,
+          },
+        ],
+        markers: [],
+      },
+    ],
+  };
+}
+
+function quotaAnalysisData(target: Upstream, utilization: number) {
+  const burn = {
+    utilization_per_second: 0.0001,
+    utilization_per_hour: 0.36,
+    eta_to_limit_secs: 3_600,
+    resets_before_limit: false,
+    confidence: 'high',
+    sample_count: 2,
+    reason: null,
+  };
+  return {
+    since_unix_secs: NOW_UNIX_SECS - 604_800,
+    until_unix_secs: NOW_UNIX_SECS,
+    now_unix_secs: NOW_UNIX_SECS,
+    max_staleness_secs: 300,
+    upstreams: [
+      {
+        upstream_id: target.id,
+        upstream_name: target.name,
+        windows: [
+          {
+            window: '5h',
+            current_utilization: utilization,
+            resets_at_unix_secs: NOW_UNIX_SECS + 3_600,
+            data_state: 'fresh',
+            actual_account_burn: burn,
+            proxy_projected_burn: {
+              proxy_tokens_per_second: 10,
+              proxy_tokens_per_hour: 36_000,
+              effective_limit_tokens_estimate: 100_000,
+              utilization_per_hour: 0.36,
+              eta_to_limit_secs: 3_600,
+              resets_before_limit: false,
+              confidence: 'high',
+              sample_count: 2,
+              reason: null,
+            },
+            deficit: null,
+            caveats: [],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function metadataData(target: Upstream, plan: string, accountEmail: string) {
+  return {
+    upstream_id: target.id,
+    subscription_metadata: {
+      organization_role: 'member',
+      workspace_role: 'user',
+    },
+    organization_metadata: {
+      organization_type: plan,
+      rate_limit_tier: 'tier-1',
+      account_display_name: target.name,
+      account_email: accountEmail,
+      organization_name: `${target.name} Org`,
+      billing_type: 'invoice',
+      has_extra_usage_enabled: false,
+    },
+  };
+}
+
+function oauthStatusData(target: Upstream, scope: string) {
+  return {
+    upstream_id: target.id,
+    kind: target.kind,
+    has_credentials: true,
+    status: 'valid',
+    expires_at_unix_secs: 2_000_000_000,
+    refresh_token_present: true,
+    refresh_token_expires_at_unix_secs: 2_100_000_000,
+    scopes: [scope],
+  };
+}
+
+function usageData(key: string, bucketTokens: number, costMicros: number) {
+  return {
+    range: '24h',
+    step: 'hour',
+    group_by: 'model',
+    series: [
+      {
+        key,
+        buckets: [
+          {
+            bucket_start_unix_secs: NOW_UNIX_SECS - 3_600,
+            request_count: 1,
+            input_tokens: bucketTokens,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            error_count: 0,
+            virtual_cost_micros: costMicros,
+            latency_ms_sum: 100,
+            latency_count: 1,
+            proxy_setup_ms_sum: 0,
+            proxy_setup_ms_count: 0,
+            shape_ms_sum: 0,
+            shape_ms_count: 0,
+            sign_ms_sum: 0,
+            sign_ms_count: 0,
+            upstream_ttfb_ms_sum: 0,
+            upstream_ttfb_ms_count: 0,
+            upstream_body_ms_sum: 0,
+            upstream_body_ms_count: 0,
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function recentData(target: Upstream, model: string) {
+  return {
+    events: [
+      {
+        event_id: `event-${model}`,
+        request_id: `request-${model}`,
+        ts: NOW_UNIX_SECS - 30,
+        ts_ms: (NOW_UNIX_SECS - 30) * 1_000,
+        upstream: target.id,
+        model,
+        status: 200,
+        duration_ms: 100,
+      },
+    ],
+  };
+}
+
 function mutationResult() {
   return {
     mutate: vi.fn(),
@@ -391,6 +623,351 @@ describe('/upstreams cold-load geometry', () => {
     expect(
       screen.getByTestId('recent-requests-table-slot').className,
     ).toContain('min-h-48');
+  });
+});
+
+describe('/upstreams refresh retention', () => {
+  test('keeps OAuth detail data during a delayed range refresh and swaps it only after success', () => {
+    let phase: 'old' | 'new' = 'old';
+    let isPlaceholderData = false;
+    const phaseData = {
+      old: {
+        utilization: 0.42,
+        accountEmail: 'old@example.com',
+        scope: 'old-scope',
+        requestModel: 'old-quota-model',
+      },
+      new: {
+        utilization: 0.68,
+        accountEmail: 'new@example.com',
+        scope: 'new-scope',
+        requestModel: 'new-quota-model',
+      },
+    } as const;
+
+    vi.mocked(queries.useStatus).mockImplementation(() =>
+      queryResult(
+        {
+          upstreams: [
+            {
+              id: upstream.id,
+              status: 'active',
+              last_apply_error: null,
+            },
+            {
+              id: apiKeyUpstream.id,
+              status: 'active',
+              last_apply_error: null,
+            },
+          ],
+        },
+        { isPlaceholderData },
+      ),
+    );
+    vi.mocked(queries.useSubscriptionQuotaLatest).mockImplementation(() =>
+      queryResult(quotaLatestData(upstream, phaseData[phase].utilization), {
+        isPlaceholderData,
+      }),
+    );
+    vi.mocked(queries.useSubscriptionQuotaSeries).mockImplementation(() =>
+      queryResult(
+        quotaSeriesData(
+          upstream,
+          phaseData[phase].utilization,
+          phase === 'old' ? 604_800 : 3_600,
+        ),
+        { isPlaceholderData },
+      ),
+    );
+    vi.mocked(queries.useSubscriptionQuotaAnalysis).mockImplementation(() =>
+      queryResult(quotaAnalysisData(upstream, phaseData[phase].utilization), {
+        isPlaceholderData,
+      }),
+    );
+    vi.mocked(queries.useUpstreamSubscriptionMetadata).mockImplementation(() =>
+      queryResult(
+        metadataData(
+          upstream,
+          phase === 'old' ? 'Pro-old' : 'Pro-new',
+          phaseData[phase].accountEmail,
+        ),
+        { isPlaceholderData },
+      ),
+    );
+    vi.mocked(queries.useUpstreamOAuthStatus).mockImplementation(() =>
+      queryResult(oauthStatusData(upstream, phaseData[phase].scope), {
+        isPlaceholderData,
+      }),
+    );
+    vi.mocked(queries.useRecentEvents).mockImplementation(() =>
+      queryResult(recentData(upstream, phaseData[phase].requestModel), {
+        isPlaceholderData,
+      }),
+    );
+
+    const view = renderRoute();
+
+    expect(screen.getByText(/old@example\.com/)).toBeDefined();
+    expect(screen.getByText('old-scope')).toBeDefined();
+    expect(screen.getByText('old-quota-model')).toBeDefined();
+    expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
+      '42.0%',
+    );
+    const oauthSidebarRow = screen.getByRole('button', {
+      name: /OAuth Primary/,
+    });
+    expect(oauthSidebarRow.textContent).toContain('42%');
+    expect(
+      screen.getByTestId('quota-history-legend-slot').textContent,
+    ).toContain('5h');
+
+    isPlaceholderData = true;
+    const oneHourRange = screen.getByRole('button', { name: '1h' });
+    fireEvent.click(oneHourRange);
+    expect(oneHourRange.getAttribute('aria-pressed')).toBe('true');
+
+    expect(screen.getByText(/old@example\.com/)).toBeDefined();
+    expect(screen.getByText('old-scope')).toBeDefined();
+    expect(screen.getByText('old-quota-model')).toBeDefined();
+    expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
+      '42.0%',
+    );
+    expect(
+      screen.getByTestId('quota-history-legend-slot').textContent,
+    ).toContain('5h');
+    expect(
+      screen
+        .getByTestId('upstream-metadata-strip')
+        .querySelectorAll('.skeleton'),
+    ).toHaveLength(0);
+    expect(
+      screen
+        .getByTestId('quota-history-legend-slot')
+        .querySelectorAll('.skeleton'),
+    ).toHaveLength(0);
+    expect(
+      screen.getByTestId('quota-snapshot-grid').querySelectorAll('.skeleton'),
+    ).toHaveLength(0);
+    expect(
+      screen
+        .getByTestId('oauth-status-card-body')
+        .querySelectorAll('.skeleton'),
+    ).toHaveLength(0);
+    expect(
+      screen
+        .getByTestId('recent-requests-table-slot')
+        .querySelectorAll('.skeleton'),
+    ).toHaveLength(0);
+    expect(oauthSidebarRow.querySelectorAll('.skeleton')).toHaveLength(0);
+
+    phase = 'new';
+    isPlaceholderData = false;
+    view.rerender(routeElement());
+
+    expect(screen.queryByText(/old@example\.com/)).toBeNull();
+    expect(screen.queryByText('old-scope')).toBeNull();
+    expect(screen.queryByText('old-quota-model')).toBeNull();
+    expect(screen.getByText(/new@example\.com/)).toBeDefined();
+    expect(screen.getByText('new-scope')).toBeDefined();
+    expect(screen.getByText('new-quota-model')).toBeDefined();
+    expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
+      '68.0%',
+    );
+  });
+
+  test('keeps API usage, sidebar totals, and recent rows during placeholder refresh', () => {
+    searchState = { selectedId: apiKeyUpstream.id };
+    let phase: 'old' | 'new' = 'old';
+    let isPlaceholderData = false;
+
+    vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+      queryResult({
+        now_unix_secs: NOW_UNIX_SECS,
+        max_staleness_secs: 300,
+        upstreams: [],
+      }),
+    );
+    vi.mocked(queries.useStatus).mockReturnValue(
+      queryResult({
+        upstreams: [
+          {
+            id: upstream.id,
+            status: 'active',
+            last_apply_error: null,
+          },
+          {
+            id: apiKeyUpstream.id,
+            status: 'active',
+            last_apply_error: null,
+          },
+        ],
+      }),
+    );
+    vi.mocked(queries.useUsage).mockImplementation((_range, _step, groupBy) => {
+      const old = phase === 'old';
+      const data =
+        groupBy === 'upstream'
+          ? usageData(
+              apiKeyUpstream.id,
+              old ? 100 : 200,
+              old ? 1_500_000 : 2_500_000,
+            )
+          : usageData(
+              old ? 'old-usage-model' : 'new-usage-model',
+              old ? 100 : 200,
+              old ? 1_500_000 : 2_500_000,
+            );
+      return queryResult(data, { isPlaceholderData });
+    });
+    vi.mocked(queries.useRecentEvents).mockImplementation(() =>
+      queryResult(
+        recentData(
+          apiKeyUpstream,
+          phase === 'old' ? 'old-request-model' : 'new-request-model',
+        ),
+        { isPlaceholderData },
+      ),
+    );
+
+    const view = renderRoute();
+
+    expect(screen.getByText('old-usage-model')).toBeDefined();
+    expect(screen.getByText('old-request-model')).toBeDefined();
+    const apiSidebarRow = screen.getByRole('button', {
+      name: /API Key Backup/,
+    });
+    expect(apiSidebarRow.textContent).toContain('$1.50 · 100 tok');
+
+    isPlaceholderData = true;
+    fireEvent.click(screen.getByRole('button', { name: '7d' }));
+
+    expect(screen.getByText('old-usage-model')).toBeDefined();
+    expect(screen.getByText('old-request-model')).toBeDefined();
+    expect(apiSidebarRow.textContent).toContain('$1.50 · 100 tok');
+    expect(
+      screen.getByTestId('api-usage-card').querySelectorAll('.skeleton'),
+    ).toHaveLength(0);
+    expect(
+      screen
+        .getByTestId('recent-requests-table-slot')
+        .querySelectorAll('.skeleton'),
+    ).toHaveLength(0);
+    expect(apiSidebarRow.querySelectorAll('.skeleton')).toHaveLength(0);
+
+    phase = 'new';
+    isPlaceholderData = false;
+    view.rerender(routeElement());
+
+    expect(screen.queryByText('old-usage-model')).toBeNull();
+    expect(screen.queryByText('old-request-model')).toBeNull();
+    expect(screen.getByText('new-usage-model')).toBeDefined();
+    expect(screen.getByText('new-request-model')).toBeDefined();
+    expect(apiSidebarRow.textContent).toContain('$2.50 · 200 tok');
+  });
+
+  test('resets detail-local state and never renders the previous OAuth identity after selection changes', () => {
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      queryResult({ upstreams: [upstream, secondOauthUpstream] }),
+    );
+    vi.mocked(queries.useStatus).mockReturnValue(
+      queryResult({
+        upstreams: [
+          {
+            id: upstream.id,
+            status: 'active',
+            last_apply_error: null,
+          },
+          {
+            id: secondOauthUpstream.id,
+            status: 'active',
+            last_apply_error: null,
+          },
+        ],
+      }),
+    );
+    vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+      queryResult(quotaLatestData(upstream, 0.42)),
+    );
+    vi.mocked(queries.useSubscriptionQuotaSeries).mockImplementation(
+      (options) =>
+        options.upstreamIds === upstream.id
+          ? queryResult(quotaSeriesData(upstream, 0.42))
+          : queryResult(undefined, { isLoading: true, isPending: true }),
+    );
+    vi.mocked(queries.useSubscriptionQuotaAnalysis).mockImplementation(
+      (options) =>
+        options.upstreamIds === upstream.id
+          ? queryResult(quotaAnalysisData(upstream, 0.42))
+          : queryResult(undefined, { isLoading: true, isPending: true }),
+    );
+    vi.mocked(queries.useUpstreamSubscriptionMetadata).mockImplementation(
+      (upstreamId) =>
+        upstreamId === upstream.id
+          ? queryResult(
+              metadataData(
+                upstream,
+                'Identity-old',
+                'identity-old@example.com',
+              ),
+            )
+          : queryResult(undefined, { isLoading: true, isPending: true }),
+    );
+    vi.mocked(queries.useUpstreamOAuthStatus).mockImplementation(
+      (upstreamId) =>
+        upstreamId === upstream.id
+          ? queryResult(oauthStatusData(upstream, 'identity-old-scope'))
+          : queryResult(undefined, { isLoading: true, isPending: true }),
+    );
+    vi.mocked(queries.useRecentEvents).mockImplementation((options) =>
+      options.upstream_id === upstream.id
+        ? queryResult(recentData(upstream, 'identity-old-model'))
+        : queryResult(undefined, { isLoading: true, isPending: true }),
+    );
+
+    const view = renderRoute();
+    expect(screen.getByText(/identity-old@example\.com/)).toBeDefined();
+    expect(screen.getByText('identity-old-scope')).toBeDefined();
+    expect(screen.getByText('identity-old-model')).toBeDefined();
+
+    const oneHourRange = screen.getByRole('button', { name: '1h' });
+    fireEvent.click(oneHourRange);
+    expect(oneHourRange.getAttribute('aria-pressed')).toBe('true');
+
+    searchState = { selectedId: secondOauthUpstream.id };
+    view.rerender(routeElement());
+
+    const resetRangeControl = screen.getByTestId('quota-history-range-control');
+    expect(
+      within(resetRangeControl)
+        .getByRole('button', { name: '7d' })
+        .getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(
+      within(resetRangeControl)
+        .getByRole('button', { name: '1h' })
+        .getAttribute('aria-pressed'),
+    ).toBe('false');
+    expect(screen.queryByText(/identity-old@example\.com/)).toBeNull();
+    expect(screen.queryByText('identity-old-scope')).toBeNull();
+    expect(screen.queryByText('identity-old-model')).toBeNull();
+    expect(screen.queryByText('42.0%')).toBeNull();
+    expect(screen.getByTestId('upstream-metadata-loading')).toBeDefined();
+    expect(
+      screen
+        .getByTestId('quota-history-legend-slot')
+        .querySelectorAll('.skeleton'),
+    ).toHaveLength(2);
+    expect(screen.getByTestId('oauth-status-loading-grid')).toBeDefined();
+    expect(
+      screen
+        .getByTestId('recent-requests-table-slot')
+        .querySelectorAll('tbody tr'),
+    ).toHaveLength(5);
+    expect(
+      screen.getByText(
+        `No subscription quota data for ${secondOauthUpstream.name}`,
+      ),
+    ).toBeDefined();
   });
 });
 

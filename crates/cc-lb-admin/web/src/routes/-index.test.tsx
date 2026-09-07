@@ -5,11 +5,13 @@ import {
   render,
   screen,
 } from '@testing-library/react';
-import type { ComponentType } from 'react';
+import type { ComponentType, ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
+  AggregateResponse,
   DashboardSummaryResponse,
   DashboardUsageResponse,
+  PoolHistoryResponse,
   UsageBucket,
 } from '../lib/api';
 import * as queries from '../lib/queries';
@@ -38,6 +40,47 @@ vi.mock('../lib/queries', async () => {
 
 vi.mock('../lib/useLiveEventStream', () => ({
   useLiveEventStream: vi.fn(),
+}));
+
+const rechartsMock = vi.hoisted(() => ({
+  data: [] as readonly Record<string, unknown>[],
+}));
+
+vi.mock('recharts', () => ({
+  AreaChart: ({
+    children,
+    className,
+    data = [],
+  }: {
+    children?: ReactNode;
+    className?: string;
+    data?: readonly Record<string, unknown>[];
+  }) => {
+    rechartsMock.data = data;
+    return (
+      <svg className={className} data-testid="pool-quota-area-chart">
+        {children}
+      </svg>
+    );
+  },
+  Area: ({ dataKey }: { dataKey: string }) => {
+    const path = rechartsMock.data
+      .map(
+        (row) =>
+          `${String(row.unix)}:${String(row[dataKey] === null ? '' : row[dataKey])}`,
+      )
+      .join('|');
+    return <path d={path} data-testid={`pool-quota-area-${dataKey}`} />;
+  },
+  XAxis: ({ domain }: { domain: readonly number[] }) => (
+    <g data-domain={JSON.stringify(domain)} data-testid="pool-quota-x-axis" />
+  ),
+  ResponsiveContainer: ({ children }: { children?: ReactNode }) => children,
+  CartesianGrid: () => null,
+  ReferenceArea: () => null,
+  ReferenceLine: () => null,
+  Tooltip: () => null,
+  YAxis: () => null,
 }));
 
 const OverviewPage = Route.options.component as ComponentType;
@@ -185,6 +228,90 @@ const PRINCIPAL_USAGE_FIXTURE: DashboardUsageResponse = {
   ],
 };
 
+const POOL_HISTORY_NOW = Date.UTC(2026, 7, 17, 15, 30) / 1000;
+
+function poolHistoryResponse(
+  nowUnixSecs: number,
+  utilizationPercent: number,
+  seriesUnixSecs = nowUnixSecs - 86400 + 30,
+  rangeSecs = 86400,
+): PoolHistoryResponse & { readonly range_secs: number } {
+  return {
+    range_secs: rangeSecs,
+    now_unix_secs: nowUnixSecs,
+    windows: [
+      { window: '5h', value: utilizationPercent },
+      { window: '7d', value: utilizationPercent + 10 },
+      { window: '7d_fable', value: utilizationPercent + 20 },
+    ].map(({ window, value }) => ({
+      window,
+      latest: {
+        snapshot_at_unix_secs: nowUnixSecs - 30,
+        utilization: value / 100,
+        utilization_percent: value,
+        contributing_upstreams: 1,
+        eligible_upstreams: 1,
+        stale_upstreams: 0,
+        max_observed_at_unix_millis: (nowUnixSecs - 30) * 1000,
+      },
+      series: [
+        {
+          snapshot_at_unix_secs: seriesUnixSecs,
+          utilization_percent: value,
+        },
+      ],
+    })),
+  };
+}
+
+function aggregateResponse(
+  nowUnixSecs: number,
+  utilizationPercent: number,
+): AggregateResponse {
+  return {
+    now_unix_secs: nowUnixSecs,
+    window_anchor_unix_secs: nowUnixSecs,
+    max_staleness_secs: 300,
+    upstream_count: 1,
+    caveats: [],
+    windows: ['5h', '7d', '7d_fable'].map((window) => ({
+      window,
+      cc_window_start_unix_secs: nowUnixSecs - 3600,
+      cc_window_reset_unix_secs: nowUnixSecs + 3600,
+      used_tokens: 100,
+      utilization: utilizationPercent / 100,
+      utilization_percent: utilizationPercent,
+      capacity_to_now_tokens_estimate: 500,
+      projected_capacity_tokens_estimate: 1000,
+      remaining_to_now_tokens_estimate: 400,
+      confidence: 'high',
+      contributing_upstreams: 1,
+      stale_upstreams: 0,
+      missing_capacity_upstreams: 0,
+      provider_lots: [
+        {
+          upstream_id: 'upstream-1',
+          upstream_name: 'Upstream One',
+          window,
+          source: 'oauth',
+          state: 'ready',
+          provider_start_unix_secs: nowUnixSecs - 3600,
+          provider_reset_unix_secs: nowUnixSecs + 3600,
+          observed_at_unix_millis: nowUnixSecs * 1000,
+          utilization: utilizationPercent / 100,
+          capacity_estimate_tokens: 1000,
+          used_before_cc_window_tokens: 0,
+          capacity_to_now_tokens_estimate: 500,
+          projected_capacity_tokens_estimate: 1000,
+          confidence: 'high',
+          capacity_ratio: 1,
+        },
+      ],
+      caveats: [],
+    })),
+  };
+}
+
 function mockPendingOverviewQueries() {
   vi.mocked(queries.useSummary).mockReturnValue({
     data: undefined,
@@ -231,12 +358,23 @@ function mockPendingOverviewQueries() {
 
 function mockResolvedEmptyQuotaQueries() {
   vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
-    data: { upstream_count: 0, windows: [] },
+    data: {
+      now_unix_secs: POOL_HISTORY_NOW,
+      window_anchor_unix_secs: POOL_HISTORY_NOW,
+      max_staleness_secs: 300,
+      upstream_count: 0,
+      windows: [],
+      caveats: [],
+    },
     isPending: false,
     isPlaceholderData: false,
   } as never);
   vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
-    data: { windows: [] },
+    data: {
+      now_unix_secs: POOL_HISTORY_NOW,
+      windows: [],
+      range_secs: 86400,
+    },
     isPending: false,
     isPlaceholderData: false,
   } as never);
@@ -548,7 +686,7 @@ describe('Overview loading geometry', () => {
         isPlaceholderData: false,
       } as never);
       vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
-        data: historyPending ? undefined : { windows: [] },
+        data: historyPending ? undefined : { windows: [], range_secs: 86400 },
         isPending: historyPending,
         isPlaceholderData: false,
       } as never);
@@ -624,6 +762,286 @@ describe('Overview loading geometry', () => {
     expect(resolvedCard.textContent).toContain(
       'No timeline data yet for this range',
     );
+  });
+
+  it('keeps successful quota and principal content mounted through a placeholder refresh', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(POOL_HISTORY_NOW * 1000);
+    try {
+      const initialAggregate = aggregateResponse(POOL_HISTORY_NOW, 20);
+      const initialHistory = poolHistoryResponse(POOL_HISTORY_NOW, 20);
+      mockResolvedKpiQueries();
+      vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+        data: initialAggregate,
+        isPending: false,
+        isPlaceholderData: false,
+      } as never);
+      vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+        data: initialHistory,
+        isPending: false,
+        isPlaceholderData: false,
+      } as never);
+
+      const { rerender } = render(<OverviewPage />);
+      const quotaCard = screen.getByTestId('pool-quota-card');
+      const chartSlot = screen.getByTestId('pool-quota-chart-slot');
+      const chartInstance = chartSlot.firstElementChild;
+      expect(chartInstance).not.toBeNull();
+      const principalRow = screen.getByTestId('top-principal-row');
+
+      expect(quotaCard.getAttribute('aria-busy')).toBe('false');
+      expect(quotaCard.querySelector('.skeleton')).toBeNull();
+      expect(quotaCard.textContent).not.toContain(
+        'No timeline data yet for this range',
+      );
+      expect(
+        quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
+          ?.textContent,
+      ).toBe('5h · 20%');
+      expect(
+        quotaCard.querySelectorAll(
+          '[data-testid="pool-quota-snapshot-slot"]',
+        )[0]?.textContent,
+      ).toContain('20.0%');
+      expect(principalRow.textContent).toContain('Principal Alpha');
+      expect(principalRow.textContent).toContain('$3.00');
+
+      vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+        data: initialAggregate,
+        isPending: false,
+        isPlaceholderData: true,
+      } as never);
+      vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+        data: initialHistory,
+        isPending: false,
+        isPlaceholderData: true,
+      } as never);
+      vi.mocked(queries.useUsage).mockReturnValue({
+        data: PRINCIPAL_USAGE_FIXTURE,
+        isPending: false,
+        isPlaceholderData: true,
+      } as never);
+
+      act(() => vi.advanceTimersByTime(60_000));
+      rerender(<OverviewPage />);
+
+      expect(screen.getByTestId('pool-quota-card')).toBe(quotaCard);
+      expect(screen.getByTestId('pool-quota-chart-slot')).toBe(chartSlot);
+      expect(chartSlot.firstElementChild).toBe(chartInstance);
+      expect(quotaCard.getAttribute('aria-busy')).toBe('false');
+      expect(quotaCard.querySelector('.skeleton')).toBeNull();
+      expect(quotaCard.textContent).not.toContain(
+        'No timeline data yet for this range',
+      );
+      expect(
+        quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
+          ?.textContent,
+      ).toBe('5h · 20%');
+      expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
+      expect(screen.queryByTestId('top-principal-skeleton-row')).toBeNull();
+      expect(principalRow.textContent).toContain('$3.00');
+
+      const refreshedPrincipalUsage: DashboardUsageResponse = {
+        ...PRINCIPAL_USAGE_FIXTURE,
+        series: PRINCIPAL_USAGE_FIXTURE.series.map((series) => ({
+          ...series,
+          buckets: series.buckets.map((bucket, index) => ({
+            ...bucket,
+            virtual_cost_micros: index === 0 ? 4_000_000 : 5_000_000,
+          })),
+        })),
+      };
+      vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+        data: aggregateResponse(POOL_HISTORY_NOW + 60, 55),
+        isPending: false,
+        isPlaceholderData: false,
+      } as never);
+      vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+        data: poolHistoryResponse(POOL_HISTORY_NOW + 60, 55),
+        isPending: false,
+        isPlaceholderData: false,
+      } as never);
+      vi.mocked(queries.useUsage).mockReturnValue({
+        data: refreshedPrincipalUsage,
+        isPending: false,
+        isPlaceholderData: false,
+      } as never);
+
+      rerender(<OverviewPage />);
+
+      expect(chartSlot.firstElementChild).toBe(chartInstance);
+      expect(
+        quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
+          ?.textContent,
+      ).toBe('5h · 55%');
+      expect(
+        quotaCard.querySelectorAll(
+          '[data-testid="pool-quota-snapshot-slot"]',
+        )[0]?.textContent,
+      ).toContain('55.0%');
+      expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
+      expect(principalRow.textContent).toContain('$9.00');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the successful pool plot context while 1h expands to 7d', () => {
+    const initialAggregate = aggregateResponse(POOL_HISTORY_NOW, 20);
+    const initialHistory = poolHistoryResponse(
+      POOL_HISTORY_NOW,
+      20,
+      POOL_HISTORY_NOW - 1800,
+    );
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: initialAggregate,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: initialHistory,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    const { rerender } = render(<OverviewPage />);
+    const quotaCard = screen.getByTestId('pool-quota-card');
+    const chartSlot = screen.getByTestId('pool-quota-chart-slot');
+    const chartInstance = chartSlot.firstElementChild;
+    expect(chartInstance).not.toBeNull();
+    const principalRow = screen.getByTestId('top-principal-row');
+
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: initialAggregate,
+      isPending: false,
+      isPlaceholderData: true,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: initialHistory,
+      isPending: false,
+      isPlaceholderData: true,
+    } as never);
+    vi.mocked(queries.useUsage).mockReturnValue({
+      data: PRINCIPAL_USAGE_FIXTURE,
+      isPending: false,
+      isPlaceholderData: true,
+    } as never);
+
+    fireEvent.click(screen.getByText('1h'));
+    expect(screen.getByText('Trend · 24h')).toBeDefined();
+
+    const oneHourHistory = poolHistoryResponse(
+      POOL_HISTORY_NOW + 60,
+      35,
+      POOL_HISTORY_NOW - 900,
+      3600,
+    );
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregateResponse(POOL_HISTORY_NOW + 60, 35),
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: oneHourHistory,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useUsage).mockReturnValue({
+      data: PRINCIPAL_USAGE_FIXTURE,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    rerender(<OverviewPage />);
+
+    expect(screen.getByText('Trend · 1h')).toBeDefined();
+    const oneHourDomain = screen
+      .getByTestId('pool-quota-x-axis')
+      .getAttribute('data-domain');
+    const oneHourPath = screen
+      .getByTestId('pool-quota-area-5h')
+      .getAttribute('d');
+    expect(oneHourDomain).toBe(
+      JSON.stringify([
+        oneHourHistory.now_unix_secs - oneHourHistory.range_secs,
+        oneHourHistory.now_unix_secs,
+      ]),
+    );
+
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregateResponse(POOL_HISTORY_NOW + 60, 35),
+      isPending: false,
+      isPlaceholderData: true,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: oneHourHistory,
+      isPending: false,
+      isPlaceholderData: true,
+    } as never);
+    vi.mocked(queries.useUsage).mockReturnValue({
+      data: PRINCIPAL_USAGE_FIXTURE,
+      isPending: false,
+      isPlaceholderData: true,
+    } as never);
+
+    const sevenDayButton = screen.getByRole('button', { name: '7d' });
+    fireEvent.click(sevenDayButton);
+
+    expect(sevenDayButton.hasAttribute('data-pressed')).toBe(true);
+    expect(screen.getByText('Trend · 1h')).toBeDefined();
+    expect(screen.getByText('by virtual cost · 7d')).toBeDefined();
+    expect(chartSlot.firstElementChild).toBe(chartInstance);
+    expect(
+      screen.getByTestId('pool-quota-x-axis').getAttribute('data-domain'),
+    ).toBe(oneHourDomain);
+    expect(screen.getByTestId('pool-quota-area-5h').getAttribute('d')).toBe(
+      oneHourPath,
+    );
+    expect(quotaCard.querySelector('.skeleton')).toBeNull();
+    expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
+
+    const sevenDayHistory = poolHistoryResponse(
+      POOL_HISTORY_NOW + 120,
+      55,
+      POOL_HISTORY_NOW - 6 * 86400,
+      604800,
+    );
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregateResponse(POOL_HISTORY_NOW + 120, 55),
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: sevenDayHistory,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useUsage).mockReturnValue({
+      data: PRINCIPAL_USAGE_FIXTURE,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    rerender(<OverviewPage />);
+
+    expect(screen.getByText('Trend · 7d')).toBeDefined();
+    expect(chartSlot.firstElementChild).toBe(chartInstance);
+    expect(
+      screen.getByTestId('pool-quota-x-axis').getAttribute('data-domain'),
+    ).toBe(
+      JSON.stringify([
+        sevenDayHistory.now_unix_secs - sevenDayHistory.range_secs,
+        sevenDayHistory.now_unix_secs,
+      ]),
+    );
+    expect(screen.getByTestId('pool-quota-area-5h').getAttribute('d')).not.toBe(
+      oneHourPath,
+    );
+    expect(
+      quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
+        ?.textContent,
+    ).toBe('5h · 55%');
+    expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
   });
 
   it('keeps the Recent Requests scroll box height fixed while data resolves', () => {

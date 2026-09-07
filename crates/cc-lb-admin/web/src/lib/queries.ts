@@ -4,7 +4,6 @@
 
 import {
   type InfiniteData,
-  keepPreviousData,
   queryOptions,
   experimental_streamedQuery as streamedQuery,
   useInfiniteQuery,
@@ -246,6 +245,68 @@ interface StatusResponse {
   }[];
 }
 
+interface QuotaQueryIdentity {
+  readonly upstreamIds?: string;
+  readonly windows?: string;
+  readonly source?: string;
+}
+
+function hasSameQuotaIdentity(
+  previousQueryKey: readonly unknown[] | undefined,
+  resource: 'latest' | 'series' | 'analysis' | 'aggregate' | 'pool-history',
+  currentParams: QuotaQueryIdentity,
+): boolean {
+  const previousParams = previousQueryKey?.[2];
+  if (
+    previousQueryKey?.[0] !== 'subscription-quota' ||
+    previousQueryKey[1] !== resource ||
+    previousParams === null ||
+    typeof previousParams !== 'object' ||
+    Array.isArray(previousParams)
+  ) {
+    return false;
+  }
+  const previous = previousParams as QuotaQueryIdentity;
+  return (
+    previous.upstreamIds === currentParams.upstreamIds &&
+    previous.windows === currentParams.windows &&
+    previous.source === currentParams.source
+  );
+}
+
+function effectiveFilterEntries(
+  filters: Record<string, string | undefined>,
+): [string, string][] {
+  return Object.entries(filters)
+    .filter((entry): entry is [string, string] => Boolean(entry[1]))
+    .sort(([left], [right]) => left.localeCompare(right));
+}
+
+function hasSameEventFilters(
+  previousFilters: unknown,
+  currentFilters: Record<string, string | undefined>,
+): boolean {
+  if (
+    previousFilters === null ||
+    typeof previousFilters !== 'object' ||
+    Array.isArray(previousFilters)
+  ) {
+    return false;
+  }
+  const previousEntries = effectiveFilterEntries(
+    previousFilters as Record<string, string | undefined>,
+  );
+  const currentEntries = effectiveFilterEntries(currentFilters);
+  return (
+    previousEntries.length === currentEntries.length &&
+    previousEntries.every(
+      ([key, value], index) =>
+        key === currentEntries[index]?.[0] &&
+        value === currentEntries[index]?.[1],
+    )
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Query keys
 
@@ -362,7 +423,7 @@ export function useUsage(
   return usePolledData(
     {
       queryKey: qk.usage(range, step, group, upstreamId, projection),
-      queryFn: () => {
+      queryFn: ({ signal }) => {
         const params = new URLSearchParams({
           range,
           step,
@@ -372,7 +433,17 @@ export function useUsage(
         if (projection) params.set('projection', projection);
         return getJson<DashboardUsageResponse>(
           `/admin/usage?${params.toString()}`,
+          { signal },
         );
+      },
+      placeholderData: (previousData, previousQuery) => {
+        const previousKey = previousQuery?.queryKey;
+        return previousKey?.[0] === 'usage' &&
+          previousKey[3] === group &&
+          previousKey[4] === (upstreamId ?? null) &&
+          previousKey[5] === (projection ?? 'full')
+          ? previousData
+          : undefined;
       },
     },
     POLLING_INTERVALS.USAGE_MS,
@@ -442,10 +513,16 @@ export function useRecentEvents(filters: Record<string, string | undefined>) {
   return usePolledData(
     {
       queryKey: qk.events(filters),
-      queryFn: () =>
+      queryFn: ({ signal }) =>
         getJson<RecentEventsPayload>(
           `/admin/events/recent?${params.toString()}`,
+          { signal },
         ),
+      placeholderData: (previousData, previousQuery) =>
+        previousQuery?.queryKey[0] === 'events' &&
+        hasSameEventFilters(previousQuery.queryKey[1], filters)
+          ? previousData
+          : undefined,
     },
     POLLING_INTERVALS.RECENT_EVENTS_MS,
   );
@@ -471,7 +548,12 @@ export function useEventsHistogram(
     // historical view does not poll: those buckets cannot change.
     refetchInterval:
       options?.poll === false ? false : POLLING_INTERVALS.RECENT_EVENTS_MS,
-    placeholderData: keepPreviousData,
+    placeholderData: (previousData, previousQuery) =>
+      previousQuery?.queryKey[0] === 'events' &&
+      previousQuery.queryKey[1] === 'histogram' &&
+      hasSameEventFilters(previousQuery.queryKey[2], filters)
+        ? previousData
+        : undefined,
   });
 }
 
@@ -697,10 +779,16 @@ export function useOAuthStatus() {
 export function useUpstreamOAuthStatus(id: string | null | undefined) {
   return useQuery({
     queryKey: qk.upstreamOauthStatus(id ?? ''),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       getJson<UpstreamOAuthStatusResponse>(
         `/admin/v1/upstreams/${id}/oauth/status`,
+        { signal },
       ),
+    placeholderData: (previousData, previousQuery) =>
+      previousQuery?.queryKey[0] === 'upstream-oauth-status' &&
+      previousQuery.queryKey[1] === (id ?? '')
+        ? previousData
+        : undefined,
     enabled: Boolean(id),
   });
 }
@@ -708,10 +796,16 @@ export function useUpstreamSubscriptionMetadata(upstreamId: string) {
   return usePolledData(
     {
       queryKey: qk.upstreamSubscriptionMetadata(upstreamId),
-      queryFn: () =>
+      queryFn: ({ signal }) =>
         getJson<SubscriptionMetadataResponse>(
           `/admin/v1/upstreams/${upstreamId}/subscription-metadata`,
+          { signal },
         ),
+      placeholderData: (previousData, previousQuery) =>
+        previousQuery?.queryKey[0] === 'upstream-subscription-metadata' &&
+        previousQuery.queryKey[1] === upstreamId
+          ? previousData
+          : undefined,
       enabled: !!upstreamId,
     },
     POLLING_INTERVALS.UPSTREAM_SUB_META_MS,
@@ -782,10 +876,15 @@ export function useSubscriptionQuotaLatest(params: {
   return usePolledData(
     {
       queryKey: qk.subscriptionQuotaLatest(params),
-      queryFn: () =>
+      queryFn: ({ signal }) =>
         getJson<LatestResponse>(
           `/admin/v1/subscription-quotas/latest?${searchParams.toString()}`,
+          { signal },
         ),
+      placeholderData: (previousData, previousQuery) =>
+        hasSameQuotaIdentity(previousQuery?.queryKey, 'latest', params)
+          ? previousData
+          : undefined,
     },
     params.refetchInterval ?? POLLING_INTERVALS.QUOTA_LATEST_MS,
   );
@@ -795,32 +894,41 @@ export function useSubscriptionQuotaSeries(params: {
   upstreamIds?: string;
   windows?: string;
   source?: string;
-  sinceUnixSecs: number;
-  untilUnixSecs: number;
+  rangeSecs: number;
   bucketSecs?: number;
   maxPointsPerSeries?: number;
 }) {
-  const searchParams = new URLSearchParams();
-  if (params.upstreamIds) searchParams.set('upstream_ids', params.upstreamIds);
-  if (params.windows) searchParams.set('windows', params.windows);
-  if (params.source) searchParams.set('source', params.source);
-  searchParams.set('since_unix_secs', String(params.sinceUnixSecs));
-  searchParams.set('until_unix_secs', String(params.untilUnixSecs));
-  if (params.bucketSecs !== undefined)
-    searchParams.set('bucket_secs', String(params.bucketSecs));
-  if (params.maxPointsPerSeries !== undefined)
-    searchParams.set(
-      'max_points_per_series',
-      String(params.maxPointsPerSeries),
-    );
-
   return usePolledData(
     {
       queryKey: qk.subscriptionQuotaSeries(params),
-      queryFn: () =>
-        getJson<SeriesResponse>(
+      queryFn: ({ signal }) => {
+        const untilUnixSecs = Math.floor(Date.now() / 1000);
+        const searchParams = new URLSearchParams();
+        if (params.upstreamIds)
+          searchParams.set('upstream_ids', params.upstreamIds);
+        if (params.windows) searchParams.set('windows', params.windows);
+        if (params.source) searchParams.set('source', params.source);
+        searchParams.set(
+          'since_unix_secs',
+          String(untilUnixSecs - params.rangeSecs),
+        );
+        searchParams.set('until_unix_secs', String(untilUnixSecs));
+        if (params.bucketSecs !== undefined)
+          searchParams.set('bucket_secs', String(params.bucketSecs));
+        if (params.maxPointsPerSeries !== undefined)
+          searchParams.set(
+            'max_points_per_series',
+            String(params.maxPointsPerSeries),
+          );
+        return getJson<SeriesResponse>(
           `/admin/v1/subscription-quotas/series?${searchParams.toString()}`,
-        ),
+          { signal },
+        );
+      },
+      placeholderData: (previousData, previousQuery) =>
+        hasSameQuotaIdentity(previousQuery?.queryKey, 'series', params)
+          ? previousData
+          : undefined,
     },
     POLLING_INTERVALS.QUOTA_SERIES_MS,
   );
@@ -830,23 +938,32 @@ export function useSubscriptionQuotaAnalysis(params: {
   upstreamIds?: string;
   windows?: string;
   source?: string;
-  sinceUnixSecs: number;
-  untilUnixSecs: number;
+  rangeSecs: number;
 }) {
-  const searchParams = new URLSearchParams();
-  if (params.upstreamIds) searchParams.set('upstream_ids', params.upstreamIds);
-  if (params.windows) searchParams.set('windows', params.windows);
-  if (params.source) searchParams.set('source', params.source);
-  searchParams.set('since_unix_secs', String(params.sinceUnixSecs));
-  searchParams.set('until_unix_secs', String(params.untilUnixSecs));
-
   return usePolledData(
     {
       queryKey: qk.subscriptionQuotaAnalysis(params),
-      queryFn: () =>
-        getJson<AnalysisResponse>(
+      queryFn: ({ signal }) => {
+        const untilUnixSecs = Math.floor(Date.now() / 1000);
+        const searchParams = new URLSearchParams();
+        if (params.upstreamIds)
+          searchParams.set('upstream_ids', params.upstreamIds);
+        if (params.windows) searchParams.set('windows', params.windows);
+        if (params.source) searchParams.set('source', params.source);
+        searchParams.set(
+          'since_unix_secs',
+          String(untilUnixSecs - params.rangeSecs),
+        );
+        searchParams.set('until_unix_secs', String(untilUnixSecs));
+        return getJson<AnalysisResponse>(
           `/admin/v1/subscription-quotas/analysis?${searchParams.toString()}`,
-        ),
+          { signal },
+        );
+      },
+      placeholderData: (previousData, previousQuery) =>
+        hasSameQuotaIdentity(previousQuery?.queryKey, 'analysis', params)
+          ? previousData
+          : undefined,
     },
     POLLING_INTERVALS.QUOTA_ANALYSIS_MS,
   );
@@ -868,41 +985,66 @@ export function useSubscriptionQuotaAggregate(params: {
   return usePolledData(
     {
       queryKey: qk.subscriptionQuotaAggregate(params),
-      queryFn: () =>
+      queryFn: ({ signal }) =>
         getJson<AggregateResponse>(
           `/admin/v1/subscription-quotas/aggregate?${searchParams.toString()}`,
+          { signal },
         ),
+      placeholderData: (previousData, previousQuery) =>
+        hasSameQuotaIdentity(previousQuery?.queryKey, 'aggregate', params)
+          ? previousData
+          : undefined,
     },
     POLLING_INTERVALS.QUOTA_AGGREGATE_MS,
   );
 }
 
+type PoolHistoryQueryData = PoolHistoryResponse & {
+  readonly range_secs: number;
+};
+
 export function useSubscriptionQuotaPoolHistory(params: {
   windows?: string;
-  sinceUnixSecs?: number;
-  untilUnixSecs?: number;
+  rangeSecs: number;
+  windowQuantumSecs?: number;
   maxPointsPerSeries?: number;
 }) {
-  const searchParams = new URLSearchParams();
-  searchParams.set('series_projection', 'chart');
-  if (params.windows) searchParams.set('windows', params.windows);
-  if (params.sinceUnixSecs !== undefined)
-    searchParams.set('since_unix_secs', String(params.sinceUnixSecs));
-  if (params.untilUnixSecs !== undefined)
-    searchParams.set('until_unix_secs', String(params.untilUnixSecs));
-  if (params.maxPointsPerSeries !== undefined)
-    searchParams.set(
-      'max_points_per_series',
-      String(params.maxPointsPerSeries),
-    );
-
   return usePolledData(
     {
       queryKey: qk.subscriptionQuotaPoolHistory(params),
-      queryFn: () =>
-        getJson<PoolHistoryResponse>(
+      queryFn: async ({ signal }) => {
+        const nowUnixSecs = Math.floor(Date.now() / 1000);
+        const quantumSecs = params.windowQuantumSecs ?? 0;
+        const untilUnixSecs =
+          quantumSecs > 0
+            ? Math.ceil(nowUnixSecs / quantumSecs) * quantumSecs
+            : nowUnixSecs;
+        const searchParams = new URLSearchParams();
+        searchParams.set('series_projection', 'chart');
+        if (params.windows) searchParams.set('windows', params.windows);
+        searchParams.set(
+          'since_unix_secs',
+          String(untilUnixSecs - params.rangeSecs - quantumSecs),
+        );
+        searchParams.set('until_unix_secs', String(untilUnixSecs));
+        if (params.maxPointsPerSeries !== undefined)
+          searchParams.set(
+            'max_points_per_series',
+            String(params.maxPointsPerSeries),
+          );
+        const response = await getJson<PoolHistoryResponse>(
           `/admin/v1/subscription-quotas/pool-history?${searchParams.toString()}`,
-        ),
+          { signal },
+        );
+        return {
+          ...response,
+          range_secs: params.rangeSecs,
+        } satisfies PoolHistoryQueryData;
+      },
+      placeholderData: (previousData, previousQuery) =>
+        hasSameQuotaIdentity(previousQuery?.queryKey, 'pool-history', params)
+          ? previousData
+          : undefined,
     },
     POLLING_INTERVALS.QUOTA_POOL_HISTORY_MS,
   );

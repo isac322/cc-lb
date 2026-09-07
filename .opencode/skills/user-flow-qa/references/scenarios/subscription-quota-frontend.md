@@ -206,3 +206,33 @@ Verdict: **PASS**. Fix isolated to the detail Quota History `<XAxis allowDataOve
 - Unified header parsing: `crates/cc-lb-engine/src/rate_limit_headers.rs`.
 - Fable routing preference: `crates/cc-lb-engine/src/builtin_filters/subscription_preference/tests.rs`.
 - Proxy path E2E: `crates/cc-lb-server/tests/claude_fable_5_proxy_path.rs`.
+
+## 5. TC-12 — 폴링 중 성공 데이터 유지와 응답 후 교체
+
+### 환경과 데이터
+
+- 신규 SQLite와 별도 proxy/admin/metrics 포트를 사용하는 격리 인스턴스만 사용한다. 상세 구동 방법은 `principal-api-key-issuance.md`의 격리 환경 절차를 따른다. Vite의 `CC_LB_ADMIN_URL`은 이 인스턴스를 가리켜야 한다.
+- 실제 admin API로 OAuth upstream, API-key upstream, principal을 생성한다. 실제 공급자 자격 증명은 사용하지 않는다.
+- `subscription-quota-fullstack.md` §2의 SQL로 OAuth `5h`/`7d` checkpoint와 latest를 준비한다. `/latest`는 캐시를 읽으므로 초기 seed 후 격리 서버를 재시작하고, API가 `fresh` 상태를 반환하는지 확인한다.
+- `pool_subscription_quota_history_v1`에 두 시점 이상의 non-null utilization, `usage_rollups_v2`에 모델별 token/cost, `request_events_v1`에 해당 principal의 요청을 준비한다. 요청 seed는 payload뿐 아니라 `list_ts_ms`, `list_event_key`, `list_status`, `list_duration_ms`도 채워야 한다.
+- storage 조회, 실제 API 응답, 브라우저의 값과 시계열이 일치하는 상태를 baseline으로 기록한다. 호출 횟수나 HTTP 200만으로 성공을 판정하지 않는다.
+
+### 상태 전이 절차
+
+1. 초기 렌더 완료 후 Playwright route gate를 설정한다. 첫 요청이나 StrictMode의 취소된 초기 요청을 baseline으로 삼지 않는다. 정상 응답은 `route.fetch()`로 실제 backend에서 가져오며, gate는 응답 보류 또는 HTTP 500 주입에만 사용한다.
+2. Overview pool-history와 upstream quota series의 다음 폴링 응답을 보류한다. SVG 노드, path, 축, 범례가 유지되고 skeleton으로 교체되지 않는지 확인한다. Logs live 모드에서는 histogram canvas와 기존 bucket 표현이 유지되며 dimming overlay가 없어야 한다.
+3. 보류 중 격리 DB에 새 quota checkpoint/pool snapshot 또는 요청 이벤트를 추가한다. gate 해제 후 실제 API의 변경 값과 브라우저 path/canvas/행의 변경을 확인한다. 기존 노드가 유지되면서 데이터가 교체되어야 한다.
+4. 연속 두 번 HTTP 500을 반환하여 기본 retry까지 소진한다. 성공 데이터는 남아 있어야 하며, 다음 200 응답 후 다시 갱신되어야 한다. backend의 pool snapshot writer가 새 값을 추가할 수 있으므로 복구 후 기대값은 과거 payload가 아니라 실제 복구 응답에서 구한다.
+5. Overview `1h → 7d`, API Usage `24h → 7d`를 보류한다. 같은 entity의 기존 차트는 남아 있어야 한다. Overview는 기존 표시 범위도 유지하고, 성공 응답 후 새 범위를 적용한다.
+6. upstream 또는 principal을 바꾸어 새 identity의 응답을 보류한다. 이전 entity의 차트나 요청 행이 새 이름 아래 나타나서는 안 된다. 데이터 없는 entity의 성공 응답은 정상 empty state여야 한다.
+7. Logs의 목록 검증은 live histogram 검증과 분리한다. live tail을 끈 뒤 `Refresh`로 실제 paginated 요청을 보류한다. 요청 matcher는 해당 Logs 페이지에서 관찰한 query를 사용한다. Overview의 `limit=200`과 Logs의 `limit=50`을 혼동하지 않는다.
+8. Logs model 필터를 일치하는 요청이 없는 값으로 바꾸고 recent/histogram 응답을 보류한다. 이전 필터의 행과 density가 없어야 하며, 빈 성공 응답 후 loading overlay가 사라져야 한다.
+
+### 판정과 회귀 테스트
+
+- **2026-09-07 PASS:** 격리 SQLite → 실제 admin API → 실제 브라우저로 Overview, OAuth Quota History, API Usage, principal Recent Requests, Logs histogram/목록의 지연·실패·복구·데이터 교체를 검증했다. 범위 및 entity/filter 전환도 통과했다.
+- Desktop 1440×1000에서 전이를 검증하고, upstream 화면은 mobile 390×844에서도 확인했다. 성공 응답 보류·오류 주입은 브라우저 gate를 사용했으며 정상 payload는 모의 응답으로 대체하지 않았다.
+- `src/lib/hooks/__tests__/polling-retention.test.ts`: 상대시간 폴링, 실패 후 유지/복구, 범위 및 upstream 경계.
+- `src/lib/hooks/__tests__/histogram-retention.test.ts`: 같은 필터의 poll/pan 유지, 필터 전환과 지연 응답 격리.
+- `src/routes/-index.test.tsx`, `-upstreams-loading.test.tsx`, `-principals-loading.test.tsx`, `-logs-polling.test.tsx`: 실제 소비자의 로딩·placeholder·성공 데이터 렌더링.
+- `src/lib/api.test.ts`: 외부 취소 신호와 30초 timeout의 동시 보장.

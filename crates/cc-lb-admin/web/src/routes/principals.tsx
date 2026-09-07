@@ -607,7 +607,7 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
       _phase: 'final' as const,
     }));
   }, [recent.data]);
-  const loading = recent.isPending || recent.isPlaceholderData;
+  const loading = recent.data === undefined && recent.isPending;
   return (
     <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}>
       <CardHeader
@@ -633,7 +633,7 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
         data-testid="recent-requests-table-slot"
       >
         <RequestEventsTable
-          events={recent.isPlaceholderData ? [] : events}
+          events={events}
           principalNameMap={principalNameMap}
           upstreamNameMap={upstreamNameMap}
           loading={loading}
