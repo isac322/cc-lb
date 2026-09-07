@@ -79,6 +79,7 @@ async fn append_request_event_leaves_unrecorded_cost_components_null() -> TestRe
     result?;
     teardown
 }
+
 #[tokio::test]
 async fn legacy_insert_trigger_materializes_cost_components() -> TestResult {
     let Some(fixture) = Fixture::create().await? else {
@@ -125,6 +126,93 @@ async fn legacy_insert_trigger_materializes_cost_components() -> TestResult {
     result?;
     teardown
 }
+
+#[tokio::test]
+async fn cost_component_migrations_reapply_after_registry_rewind() -> TestResult {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let backfill_event = RequestEvent {
+        cost_usd_micros: Some(301),
+        cost_input_micros: Some(302),
+        cost_output_micros: Some(303),
+        cost_cache_creation_5m_micros: Some(304),
+        cost_cache_creation_1h_micros: Some(305),
+        cost_cache_read_micros: Some(306),
+        ..request_event("cost-components-reapply-backfill")
+    };
+    let trigger_event = RequestEvent {
+        cost_usd_micros: Some(401),
+        cost_input_micros: Some(402),
+        cost_output_micros: Some(403),
+        cost_cache_creation_5m_micros: Some(404),
+        cost_cache_creation_1h_micros: Some(405),
+        cost_cache_read_micros: Some(406),
+        ..request_event("cost-components-reapply-trigger")
+    };
+
+    let result: TestResult = async {
+        disable_compatibility_trigger(&fixture).await?;
+        insert_legacy_event(&fixture, &backfill_event).await?;
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version BETWEEN 108 AND 111")
+            .execute(fixture.storage.pool())
+            .await?;
+
+        fixture.storage.initialize(BackendKind::Postgres).await?;
+
+        let reapplied_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version BETWEEN 108 AND 111",
+        )
+        .fetch_one(fixture.storage.pool())
+        .await?;
+        assert_eq!(reapplied_count, 4);
+        assert_eq!(
+            select_cost_components(&fixture, &backfill_event).await?,
+            (
+                Some(301),
+                Some(302),
+                Some(303),
+                Some(304),
+                Some(305),
+                Some(306),
+                true,
+            )
+        );
+
+        insert_legacy_event(&fixture, &trigger_event).await?;
+        assert_eq!(
+            select_cost_components(&fixture, &trigger_event).await?,
+            (
+                Some(401),
+                Some(402),
+                Some(403),
+                Some(404),
+                Some(405),
+                Some(406),
+                true,
+            )
+        );
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+async fn insert_legacy_event(fixture: &Fixture, event: &RequestEvent) -> TestResult {
+    let payload = serde_json::to_vec(event)?;
+    sqlx::query(
+        "INSERT INTO request_events_v1 (ts, event_id, payload, list_ts_ms) \
+         VALUES (NOW(), $1, $2, (EXTRACT(EPOCH FROM now()) * 1000)::bigint)",
+    )
+    .bind(event.event_id.as_deref())
+    .bind(payload)
+    .execute(fixture.storage.pool())
+    .await?;
+    Ok(())
+}
+
 async fn disable_compatibility_trigger(fixture: &Fixture) -> TestResult {
     sqlx::query(
         "ALTER TABLE request_events_v1 \
