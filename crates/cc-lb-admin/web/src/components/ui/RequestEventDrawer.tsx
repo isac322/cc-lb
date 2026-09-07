@@ -1,6 +1,6 @@
 import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { Copy, X } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { type ReactNode, useRef } from 'react';
 import { fmtBytes, fmtMs } from '../../lib/format';
 import { useRequestEventDetail } from '../../lib/queries';
 import { useCopyButton } from '../../lib/useCopyButton';
@@ -69,6 +69,25 @@ function RequestDetail({
   const { copy } = useCopyButton();
   const usageControl = useActiveSlice();
   const isPartial = event._phase === 'partial';
+  const snapshotKey =
+    event.event_id ??
+    `${event.request_id}:${event.ts_ms ?? event.ts ?? 'unknown'}`;
+  const lastKnownEventRef = useRef<{
+    key: string;
+    event: RequestEventWithPhase;
+  } | null>(null);
+
+  // Partial and slim final list payloads describe the same request
+  // incrementally. Preserve fields already shown for that identity until the
+  // detail payload arrives, but reset immediately when the drawer switches to
+  // another request.
+  const previousEvent =
+    lastKnownEventRef.current?.key === snapshotKey
+      ? lastKnownEventRef.current.event
+      : null;
+  const listEvent = previousEvent
+    ? ({ ...previousEvent, ...event } as RequestEventWithPhase)
+    : event;
 
   // The list view only carries the fields it displays (see RequestEventListItem
   // in cc-lb-storage-api); fetch the full payload here, on the single-item
@@ -80,9 +99,18 @@ function RequestDetail({
     : (event.event_id ?? (event.request_id || null));
   const detail = useRequestEventDetail(detailId);
   const merged: RequestEventWithPhase = detail.data
-    ? ({ ...event, ...detail.data, _phase: 'final' } as RequestEventWithPhase)
-    : event;
+    ? ({
+        ...listEvent,
+        ...detail.data,
+        _phase: 'final',
+      } as RequestEventWithPhase)
+    : listEvent;
+  lastKnownEventRef.current = { key: snapshotKey, event: merged };
+
   const isDetailPending = Boolean(detailId) && detail.isPending;
+  const hasLatencyTimelineData = isPartial
+    ? (merged.elapsed_ms ?? 0) > 0
+    : merged._phase === 'final' && merged.duration_ms > 0;
   const hasUpstreamFailure = Boolean(
     merged.upstream_error_type || merged.upstream_error_message,
   );
@@ -199,7 +227,7 @@ function RequestDetail({
           <LatencyTimeline
             event={merged}
             isPartial={isPartial}
-            isLoading={isDetailPending}
+            isLoading={isDetailPending && !hasLatencyTimelineData}
           />
         </DetailSection>
       </div>

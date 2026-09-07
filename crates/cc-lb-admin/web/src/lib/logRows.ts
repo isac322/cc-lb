@@ -46,6 +46,26 @@ export function filterLiveEventsByUnixSeconds(
   return filtered;
 }
 
+// Map.set keeps an existing key in place, so taking the tail highlights newly
+// inserted rows without making a partial-to-final update look newly arrived.
+export function newestLiveEventIds(
+  liveEvents: LiveEventMap,
+  limit = 20,
+): Set<string> {
+  if (limit <= 0) return new Set();
+  const entries = Array.from(liveEvents.values());
+  const ids = new Set<string>();
+  for (
+    let index = Math.max(0, entries.length - limit);
+    index < entries.length;
+    index += 1
+  ) {
+    const entry = entries[index];
+    if (entry) ids.add(eventIdentity(entry.event));
+  }
+  return ids;
+}
+
 export function filterLogRowsByStatusClass(
   rows: readonly RequestEventWithPhase[],
   statusClass?: LogStatusClass,
@@ -112,6 +132,28 @@ function wrapPartial(event: RequestEventPartial): RequestEventWithPhase {
   const wrapped: RequestEventWithPhase = { ...event, _phase: 'partial' };
   partialRowCache.set(event, wrapped);
   return wrapped;
+}
+
+// Pick one page from sources whose ordering contract is already known. Page 0
+// selects its live and historical identities from the full sorted rows. Later
+// pages preserve the API's cursor order and wrap rows without another sort.
+export function selectLogRowsForPage(
+  sortedRows: readonly RequestEventWithPhase[],
+  liveEvents: LiveEventMap | undefined,
+  historicalEvents: readonly RequestEvent[],
+): RequestEventWithPhase[] {
+  if (liveEvents === undefined) {
+    return historicalEvents.map(wrapFinal);
+  }
+
+  const pageEventIds = new Set<string>();
+  for (const entry of liveEvents.values()) {
+    pageEventIds.add(eventIdentity(entry.event));
+  }
+  for (const event of historicalEvents) {
+    pageEventIds.add(eventIdentity(event));
+  }
+  return sortedRows.filter((row) => pageEventIds.has(eventIdentity(row)));
 }
 
 export function mergeLogRows(

@@ -18,21 +18,46 @@ import {
   SkeletonRow,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
+import { TimeRangeBounds } from '../components/ui/TimeRangeBounds';
 import { eventTime } from '../lib/api';
 import {
   useAudit,
   usePrincipalNameMap,
   usePrincipals,
   useUpstreamNameMap,
-  useUpstreams,
 } from '../lib/queries';
+import { MAX_FORMATTABLE_UNIX_SECONDS } from '../lib/timezone';
 
-const auditSearchSchema = z.object({
-  principal_id: z.string().optional(),
-  upstream: z.string().optional(),
-  route: z.string().optional(),
-  status_class: z.enum(['2xx', '4xx', '5xx']).optional(),
-});
+const unixSecondsSearchParam = z.preprocess((value) => {
+  if (value == null || value === '') return undefined;
+  const number = Number(value);
+  return Number.isSafeInteger(number) &&
+    number >= 0 &&
+    number <= MAX_FORMATTABLE_UNIX_SECONDS
+    ? number
+    : undefined;
+}, z.number().optional());
+
+const auditSearchSchema = z
+  .object({
+    principal_id: z.string().optional(),
+    since: unixSecondsSearchParam,
+    until: unixSecondsSearchParam,
+  })
+  .transform((filters) => {
+    if (
+      filters.since != null &&
+      filters.until != null &&
+      filters.since > filters.until
+    ) {
+      return {
+        ...filters,
+        since: undefined,
+        until: undefined,
+      };
+    }
+    return filters;
+  });
 
 export const Route = createFileRoute('/audit')({
   validateSearch: auditSearchSchema,
@@ -107,32 +132,62 @@ function AuditPage() {
   const filters = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const principals = usePrincipals();
-  const upstreams = useUpstreams();
-  const audit = useAudit({ limit: '200', ...filters });
+  const audit = useAudit({
+    limit: '200',
+    principal_id: filters.principal_id,
+    since: filters.since?.toString(),
+    until: filters.until?.toString(),
+  });
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
   const [selected, setSelected] = useState<AuditEntryLike | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const refreshInFlightRef = useRef(false);
 
-  const setFilter = <K extends keyof typeof filters>(key: K, value: string) => {
-    navigate({ search: { ...filters, [key]: value || undefined } });
+  const setPrincipalFilter = (value: string) => {
+    navigate({
+      search: { ...filters, principal_id: value || undefined },
+    });
   };
 
   const rows = (audit.data?.entries ?? []) as unknown as AuditEntryLike[];
   const adminRows = rows.filter(
     (r) => (r.admin_action ?? null) != null || (r.kind ?? null) != null,
   );
-  const sortedRows = useMemo(
-    () =>
-      [...adminRows].sort(
+  const renderRows = useMemo(() => {
+    const identityOccurrences = new Map<string, number>();
+    return adminRows
+      .map((entry) => {
+        const identity = JSON.stringify([
+          entry.request_id,
+          entry.ts_ms ?? null,
+          entry.ts ?? null,
+          entry.principal_id ?? null,
+          entry.actor ?? null,
+          entry.route ?? null,
+          entry.upstream ?? null,
+          entry.admin_action ?? null,
+          entry.kind ?? null,
+          entry.status,
+        ])!;
+        const occurrence = identityOccurrences.get(identity) ?? 0;
+        identityOccurrences.set(identity, occurrence + 1);
+        return {
+          entry,
+          key: `${identity}:${occurrence}`,
+        };
+      })
+      .sort(
         (a, b) =>
-          (eventTime(b)?.getTime() ?? 0) - (eventTime(a)?.getTime() ?? 0),
-      ),
-    [adminRows],
-  );
+          (eventTime(b.entry)?.getTime() ?? 0) -
+          (eventTime(a.entry)?.getTime() ?? 0),
+      );
+  }, [adminRows]);
 
-  const activeFilterCount = Object.values(filters).filter(Boolean).length;
+  const activeFilterCount =
+    Number(Boolean(filters.principal_id)) +
+    Number(filters.since != null) +
+    Number(filters.until != null);
 
   const refreshAudit = async () => {
     if (refreshInFlightRef.current) return;
@@ -161,7 +216,7 @@ function AuditPage() {
               {audit.isLoading ? (
                 <span className="skeleton h-3 flex-1" aria-hidden="true" />
               ) : (
-                sortedRows.length
+                renderRows.length
               )}
             </span>
             <span>
@@ -187,13 +242,13 @@ function AuditPage() {
         }
       >
         <Card className="flex-1 flex flex-col min-h-0">
-          <div className="grid shrink-0 grid-cols-2 items-end gap-3 border-b border-subtle p-3 md:flex md:flex-wrap">
-            <div className="min-w-0">
+          <div className="flex shrink-0 flex-wrap items-end gap-3 border-b border-subtle p-3">
+            <div className="w-full min-w-0 sm:w-auto">
               <Field label="Principal">
                 <select
-                  className={`${INPUT_CLASS} w-full md:w-44`}
+                  className={`${INPUT_CLASS} w-full sm:w-44`}
                   value={filters.principal_id ?? ''}
-                  onChange={(e) => setFilter('principal_id', e.target.value)}
+                  onChange={(e) => setPrincipalFilter(e.target.value)}
                 >
                   <option value="">All principals</option>
                   {principals.data?.principals.map((p) => (
@@ -204,56 +259,27 @@ function AuditPage() {
                 </select>
               </Field>
             </div>
-            <div className="min-w-0">
-              <Field label="Upstream">
-                <select
-                  className={`${INPUT_CLASS} w-full md:w-44`}
-                  value={filters.upstream ?? ''}
-                  onChange={(e) => setFilter('upstream', e.target.value)}
-                >
-                  <option value="">All upstreams</option>
-                  {upstreams.data?.upstreams.map((u) => (
-                    <option key={u.id} value={u.name}>
-                      {u.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            </div>
-            <div className="min-w-0">
-              <Field label="Route">
-                <input
-                  className={`${INPUT_CLASS} w-full font-mono md:w-44`}
-                  value={filters.route ?? ''}
-                  onChange={(e) => setFilter('route', e.target.value)}
-                  placeholder="/v1/messages"
-                />
-              </Field>
-            </div>
-            <div className="min-w-0">
-              <Field label="Status">
-                <select
-                  className={`${INPUT_CLASS} w-full md:w-32`}
-                  value={filters.status_class ?? ''}
-                  onChange={(e) => setFilter('status_class', e.target.value)}
-                >
-                  <option value="">All</option>
-                  <option value="2xx">2xx</option>
-                  <option value="4xx">4xx</option>
-                  <option value="5xx">5xx</option>
-                </select>
-              </Field>
-            </div>
+            <TimeRangeBounds
+              since={filters.since}
+              until={filters.until}
+              onCommit={({ since, until }) => {
+                navigate({
+                  search: (prev) => ({
+                    ...prev,
+                    since,
+                    until,
+                  }),
+                });
+              }}
+            />
             {activeFilterCount ? (
-              <div className="col-span-2 md:col-auto">
-                <Button
-                  size="sm"
-                  iconLeft={<X className="w-3 h-3" />}
-                  onClick={() => navigate({ search: {} })}
-                >
-                  Clear
-                </Button>
-              </div>
+              <Button
+                size="sm"
+                iconLeft={<X className="w-3 h-3" />}
+                onClick={() => navigate({ search: {} })}
+              >
+                Clear
+              </Button>
             ) : null}
           </div>
 
@@ -340,10 +366,10 @@ function AuditPage() {
                       skeletonClassNames={AUDIT_SKELETON_CLASS_NAMES}
                     />
                   ))
-                ) : sortedRows.length ? (
-                  sortedRows.map((e) => (
+                ) : renderRows.length ? (
+                  renderRows.map(({ entry: e, key }) => (
                     <tr
-                      key={e.request_id}
+                      key={key}
                       className="border-b border-row hover:bg-overlay-3 cursor-pointer"
                       onClick={() => setSelected(e)}
                     >
@@ -443,7 +469,7 @@ function AuditPage() {
                     </td>
                   </tr>
                 )}
-                {sortedRows.length > 0 && (
+                {renderRows.length > 0 && (
                   <tr>
                     <td
                       colSpan={9}

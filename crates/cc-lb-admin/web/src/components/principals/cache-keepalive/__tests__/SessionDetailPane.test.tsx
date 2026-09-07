@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CacheKeepaliveDetail } from '../../../../lib/cacheKeepaliveApi';
 import * as queries from '../../../../lib/queries';
@@ -39,6 +39,8 @@ describe('SessionDetailPane', () => {
     const pane = screen.getByTestId('session-detail-loading');
     expect(pane.className).toBe('flex-1 min-w-0 overflow-y-auto');
     expect(pane.getAttribute('aria-busy')).toBe('true');
+    expect(pane.getAttribute('role')).toBe('region');
+    expect(pane.getAttribute('aria-label')).toBe('Session detail');
 
     const content = screen.getByTestId('session-detail-loading-content');
     expect(content.className).toBe('flex flex-col gap-3 p-3');
@@ -47,6 +49,12 @@ describe('SessionDetailPane', () => {
     expect(header?.className).toContain('sticky');
     expect(header?.className).toContain('px-3');
     expect(screen.getByText('Close ▶')).toBeDefined();
+    expect(
+      screen.getByRole('button', { name: 'Back to sessions' }),
+    ).toBeDefined();
+    expect(screen.getByRole('status').textContent).toBe(
+      'Loading session detail',
+    );
 
     const overview = screen.getByTestId('session-detail-overview-skeleton');
     expect(overview.className).toContain('p-3');
@@ -69,6 +77,37 @@ describe('SessionDetailPane', () => {
 
     expect(container.querySelector('svg.animate-spin')).toBeNull();
   });
+
+  it('keeps the named detail region and Back action available on query error', () => {
+    const onClose = vi.fn();
+    vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+    } as unknown as PolledDataResult<CacheKeepaliveDetail, Error>);
+
+    renderWithProviders(
+      <SessionDetailPane
+        principalId="p-123"
+        sessionId="missing"
+        onClose={onClose}
+      />,
+    );
+
+    const pane = screen.getByTestId('session-detail-error');
+    expect(pane.getAttribute('role')).toBe('region');
+    expect(pane.getAttribute('aria-label')).toBe('Session detail');
+    expect(pane.getAttribute('aria-busy')).toBe('false');
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Failed to load session detail.',
+    );
+
+    const mobileBackLabel = screen.getByText('◀ Back');
+    expect(mobileBackLabel.className).toContain('max-[960px]:inline');
+    fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   it('renders Renewed active pending with exact labels and formatting', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessionDetail').mockReturnValue({
       data: {
@@ -150,6 +189,10 @@ describe('SessionDetailPane', () => {
 
     expect(screen.getByText('Session detail')).toBeDefined();
     expect(screen.getByText('Close ▶')).toBeDefined();
+    const pane = screen.getByTestId('session-detail-content');
+    expect(pane.getAttribute('role')).toBe('region');
+    expect(pane.getAttribute('aria-busy')).toBe('false');
+    expect(pane.getAttribute('aria-label')).toBe('Session detail');
 
     // Exact overview labels
     expect(screen.getByText('Session ID')).toBeDefined();

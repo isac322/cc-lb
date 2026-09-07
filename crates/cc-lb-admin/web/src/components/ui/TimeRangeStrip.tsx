@@ -124,20 +124,28 @@ export function TimeRangeStrip({
   const dragRef = useRef<DragState | null>(null);
   const widthRef = useRef(0);
   const lastPointerXRef = useRef(0);
+  const bucketsRef = useRef(buckets);
+  const bucketMsRef = useRef(bucketMs);
+  const viewRef = useRef(view);
+  const selectionRef = useRef(selection);
+  const draftRef = useRef<{ a: number; b: number } | null>(null);
+  const onViewChangeRef = useRef(onViewChange);
+  const onSelectionCommitRef = useRef(onSelectionCommit);
   const [palette, setPalette] = useState<Palette | null>(null);
   const [width, setWidth] = useState(0);
+  const [dpr, setDpr] = useState(1);
   /** Non-null only while dragging; the committed selection stays authoritative. */
   const [draft, setDraft] = useState<{ a: number; b: number } | null>(null);
   const [hint, setHint] = useState<{ x: number; text: string } | null>(null);
 
   // Latest values for listeners that are attached once.
-  const viewRef = useRef(view);
+  bucketsRef.current = buckets;
+  bucketMsRef.current = bucketMs;
   viewRef.current = view;
-  const selectionRef = useRef(selection);
   selectionRef.current = selection;
-  const draftRef = useRef(draft);
   draftRef.current = draft;
-
+  onViewChangeRef.current = onViewChange;
+  onSelectionCommitRef.current = onSelectionCommit;
   useEffect(() => {
     setPalette(readPalette());
     const observer = new MutationObserver(() => setPalette(readPalette()));
@@ -152,15 +160,31 @@ export function TimeRangeStrip({
     const shell = shellRef.current;
     if (shell == null) return;
     const apply = () => {
-      const next = shell.clientWidth;
-      widthRef.current = next;
-      setWidth(next);
+      const nextWidth = shell.clientWidth;
+      const nextDpr = window.devicePixelRatio || 1;
+      widthRef.current = nextWidth;
+      setWidth((current) => (current === nextWidth ? current : nextWidth));
+      setDpr((current) => (current === nextDpr ? current : nextDpr));
     };
     apply();
     const observer = new ResizeObserver(apply);
     observer.observe(shell);
-    return () => observer.disconnect();
+    window.addEventListener('resize', apply);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', apply);
+    };
   }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas == null || width <= 0) return;
+    const pixelWidth = Math.floor(width * dpr);
+    const pixelHeight = Math.floor(STRIP_H * dpr);
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+    canvas.style.height = `${STRIP_H}px`;
+  }, [dpr, width]);
 
   const active = draft ?? selection;
 
@@ -177,10 +201,6 @@ export function TimeRangeStrip({
     const ctx = canvas.getContext('2d');
     if (ctx == null) return;
 
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(STRIP_H * dpr);
-    canvas.style.height = `${STRIP_H}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, STRIP_H);
 
@@ -289,7 +309,7 @@ export function TimeRangeStrip({
         ctx.fillRect(Math.round(x) - 2.5, TOTAL_BASELINE_Y / 2 - 11, 5, 22);
       }
     }
-  }, [buckets, bucketMs, view, active, palette, width, tz, timeToX]);
+  }, [buckets, bucketMs, view, active, palette, width, dpr, tz, timeToX]);
 
   const hitKind = useCallback(
     (x: number, y: number): DragKind => {
@@ -312,25 +332,24 @@ export function TimeRangeStrip({
    * Approximate count for the in-flight drag. Whole buckets only, so it is
    * labelled with a tilde: the committed range is what the table counts.
    */
-  const approximateCount = useCallback(
-    (a: number, b: number) => {
-      let total = 0;
-      let errors = 0;
-      for (const bucket of buckets) {
-        const mid = bucket.bucket_start_unix_secs * 1000 + bucketMs / 2;
-        if (mid >= a && mid < b) {
-          total += bucket.total_count;
-          errors += bucket.error_count;
-        }
+  const approximateCount = useCallback((a: number, b: number) => {
+    let total = 0;
+    let errors = 0;
+    const currentBucketMs = bucketMsRef.current;
+    for (const bucket of bucketsRef.current) {
+      const mid = bucket.bucket_start_unix_secs * 1000 + currentBucketMs / 2;
+      if (mid >= a && mid < b) {
+        total += bucket.total_count;
+        errors += bucket.error_count;
       }
-      return { total, errors };
-    },
-    [buckets, bucketMs],
-  );
+    }
+    return { total, errors };
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (canvas == null) return;
+    const canvasElement = canvas;
 
     const xToTime = (x: number) => {
       const domain = viewRef.current;
@@ -354,34 +373,24 @@ export function TimeRangeStrip({
         viewA: viewRef.current.a,
         viewB: viewRef.current.b,
       };
+      lastPointerXRef.current = x;
+      attachDragListeners();
       if (kind === 'new') setDraft({ a: t, b: t });
       canvas.style.cursor = kind === 'new' ? 'crosshair' : 'grabbing';
       event.preventDefault();
     };
 
-    const onMouseMove = (event: MouseEvent) => {
+    const onDragMouseMove = (event: MouseEvent) => {
+      const drag = dragRef.current;
+      if (drag == null) return;
       const rect = canvas.getBoundingClientRect();
       const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      const drag = dragRef.current;
-      if (drag == null) {
-        if (x >= 0 && x <= widthRef.current && y >= 0 && y <= STRIP_H) {
-          const kind = hitKind(x, y);
-          canvas.style.cursor =
-            kind === 'edge-a' || kind === 'edge-b'
-              ? 'ew-resize'
-              : kind === 'move' || kind === 'pan'
-                ? 'grab'
-                : 'crosshair';
-        }
-        return;
-      }
       const t = xToTime(x);
       if (drag.kind === 'pan') {
         const delta = drag.origin - t;
         const nextA = drag.viewA + delta;
         const nextB = drag.viewB + delta;
-        if (nextA >= 0) onViewChange({ a: nextA, b: nextB });
+        if (nextA >= 0) onViewChangeRef.current({ a: nextA, b: nextB });
         return;
       }
       let next: { a: number; b: number };
@@ -406,18 +415,50 @@ export function TimeRangeStrip({
       });
     };
 
-    const onMouseUp = () => {
+    const onCanvasMouseMove = (event: MouseEvent) => {
+      if (dragRef.current != null) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      if (x >= 0 && x <= widthRef.current && y >= 0 && y <= STRIP_H) {
+        const kind = hitKind(x, y);
+        canvas.style.cursor =
+          kind === 'edge-a' || kind === 'edge-b'
+            ? 'ew-resize'
+            : kind === 'move' || kind === 'pan'
+              ? 'grab'
+              : 'crosshair';
+      }
+    };
+
+    let dragListenersAttached = false;
+    const detachDragListeners = () => {
+      if (!dragListenersAttached) return;
+      window.removeEventListener('mousemove', onDragMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      dragListenersAttached = false;
+    };
+
+    const attachDragListeners = () => {
+      if (dragListenersAttached) return;
+      window.addEventListener('mousemove', onDragMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+      dragListenersAttached = true;
+    };
+
+    function onMouseUp() {
+      detachDragListeners();
       const drag = dragRef.current;
       if (drag == null) return;
       dragRef.current = null;
-      canvas.style.cursor = 'crosshair';
+      canvasElement.style.cursor = 'crosshair';
       setHint(null);
       if (drag.kind === 'pan') return;
       const next = draftRef.current;
       setDraft(null);
       if (next == null) return;
       if (drag.kind === 'new' && next.b - next.a < MIN_DRAG_MS) {
-        onSelectionCommit(null);
+        onSelectionCommitRef.current(null);
         return;
       }
       // Releasing against the right edge of the strip means "up to the end of
@@ -427,8 +468,11 @@ export function TimeRangeStrip({
       const releasedAtRightEdge =
         lastPointerXRef.current >= widthRef.current - EDGE_PX;
       const end = releasedAtRightEdge ? viewRef.current.b : next.b;
-      onSelectionCommit({ a: Math.round(next.a), b: Math.round(end) });
-    };
+      onSelectionCommitRef.current({
+        a: Math.round(next.a),
+        b: Math.round(end),
+      });
+    }
 
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
@@ -443,7 +487,7 @@ export function TimeRangeStrip({
         a = center - MIN_VIEW_MS / 2;
         b = center + MIN_VIEW_MS / 2;
       }
-      onViewChange({ a: Math.max(0, a), b });
+      onViewChangeRef.current({ a: Math.max(0, a), b });
     };
 
     const onDoubleClick = (event: MouseEvent) => {
@@ -460,7 +504,10 @@ export function TimeRangeStrip({
         x < timeToX(sel.b, widthRef.current, viewRef.current)
       ) {
         const pad = (sel.b - sel.a) * 0.3;
-        onViewChange({ a: Math.max(0, sel.a - pad), b: sel.b + pad });
+        onViewChangeRef.current({
+          a: Math.max(0, sel.a - pad),
+          b: sel.b + pad,
+        });
       }
     };
 
@@ -471,27 +518,27 @@ export function TimeRangeStrip({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && selectionRef.current != null) {
         setDraft(null);
-        onSelectionCommit(null);
+        onSelectionCommitRef.current(null);
       }
     };
 
     canvas.addEventListener('mousedown', onMouseDown);
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
+    canvas.addEventListener('mousemove', onCanvasMouseMove);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('dblclick', onDoubleClick);
     canvas.addEventListener('mouseleave', onMouseLeave);
     window.addEventListener('keydown', onKeyDown);
     return () => {
+      dragRef.current = null;
+      detachDragListeners();
       canvas.removeEventListener('mousedown', onMouseDown);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
+      canvas.removeEventListener('mousemove', onCanvasMouseMove);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('dblclick', onDoubleClick);
       canvas.removeEventListener('mouseleave', onMouseLeave);
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [hitKind, approximateCount, onViewChange, onSelectionCommit, timeToX]);
+  }, [hitKind, approximateCount, timeToX]);
 
   const ariaLabel =
     active != null

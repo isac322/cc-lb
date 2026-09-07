@@ -9,7 +9,13 @@ export default defineConfig({
         test: {
           name: 'lib',
           environment: 'node',
-          include: ['src/lib/**/*.test.ts', 'src/components/ui/latency/**/*.test.ts', 'src/routes/**/*.test.ts', 'src/components/upstreams/**/*.test.ts'],
+          include: [
+            'src/lib/**/*.test.ts',
+            'src/components/ui/latency/**/*.test.ts',
+            'src/routes/**/*.test.ts',
+            'src/components/upstreams/**/*.test.ts',
+            'src/components/principals/cache-keepalive/__tests__/liveMergeSessions.test.ts',
+          ],
           exclude: ['src/lib/hooks/__tests__/**'],
         },
       },
@@ -21,6 +27,7 @@ export default defineConfig({
           setupFiles: ['./vitest.setup.ts'],
           include: [
             'src/lib/hooks/__tests__/**/*.test.ts',
+            'src/lib/**/*.test.tsx',
             'src/components/__tests__/**/*.test.tsx',
             'src/components/**/*.test.tsx',
             // Route-adjacent tests use the TanStack `-` prefix (e.g. `-plugins.test.tsx`).

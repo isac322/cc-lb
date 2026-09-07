@@ -1510,9 +1510,18 @@ export function useDeletePlugin() {
         headers,
       });
     },
-    onSuccess: (_data, vars) => {
-      qc.invalidateQueries({ queryKey: qk.pluginRegistry });
-      qc.invalidateQueries({ queryKey: ['plugin-references', vars.id] });
+    onSuccess: async (_data, vars) => {
+      const invalidations = [
+        qc.invalidateQueries({ queryKey: qk.pluginRegistry }),
+        qc.invalidateQueries({ queryKey: ['plugin-references', vars.id] }),
+      ];
+      if (vars.cascade) {
+        invalidations.push(
+          qc.invalidateQueries({ queryKey: ['plugin-chain'] }),
+          qc.invalidateQueries({ queryKey: qk.upstreams }),
+        );
+      }
+      await Promise.all(invalidations);
     },
   });
 }

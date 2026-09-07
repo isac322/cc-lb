@@ -17,11 +17,13 @@ import {
   RouterSlotEditor,
 } from './principals';
 
+const navigateMock = vi.fn();
+
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router');
   return {
     ...actual,
-    useNavigate: () => vi.fn(),
+    useNavigate: () => navigateMock,
   };
 });
 
@@ -119,6 +121,7 @@ function cardNamed(title: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  navigateMock.mockReset();
   queryClient.clear();
   Object.assign(Route, { useSearch: () => ({}) });
   vi.mocked(queries.usePrincipals).mockReturnValue({
@@ -835,6 +838,247 @@ test('addFilter no-ops when entry is disabled', () => {
   expect(insertMock).not.toHaveBeenCalled();
 });
 
+test('opens the new-principal modal from URL intent and consumes only the action', async () => {
+  const search = { selectedId: principal.id, action: 'new' as const };
+  Object.assign(Route, { useSearch: () => search });
+  vi.mocked(queries.usePrincipals).mockReturnValue({
+    data: undefined,
+    isLoading: true,
+    isPending: true,
+  } as never);
+
+  renderWithProviders(<Component />);
+
+  expect(
+    await screen.findByRole('dialog', { name: 'New principal' }),
+  ).toBeDefined();
+  await waitFor(() => expect(navigateMock).toHaveBeenCalledTimes(1));
+
+  const navigation = navigateMock.mock.calls[0]?.[0] as {
+    replace: boolean;
+    search: (previous: typeof search) => {
+      selectedId?: string;
+      action?: 'new';
+    };
+  };
+  expect(navigation.replace).toBe(true);
+  expect(navigation.search(search)).toEqual({
+    selectedId: principal.id,
+    action: undefined,
+  });
+});
+
+test('isolates allowed-model and default-limit drafts when principal identity changes', () => {
+  const setAllowed = vi.fn();
+  const updateLimits = vi.fn();
+  const principalA = principalFixture({
+    id: 'principal-a',
+    name: 'Ada',
+    revision: 3,
+    allowed_models: ['a-server'],
+    default_limits: [],
+  });
+  const principalB = principalFixture({
+    id: 'principal-b',
+    name: 'Grace',
+    revision: 8,
+    allowed_models: ['b-server'],
+    default_limits: [{ kind: 'requests', window_secs: 60, cap_micros: 250 }],
+  });
+  let selectedId = principalA.id;
+  Object.assign(Route, { useSearch: () => ({ selectedId }) });
+  vi.mocked(queries.usePrincipals).mockImplementation(
+    () =>
+      ({
+        data: { principals: [principalA, principalB] },
+        isLoading: false,
+        isPending: false,
+      }) as never,
+  );
+  vi.mocked(queries.useSetAllowedModels).mockReturnValue({
+    mutate: setAllowed,
+    isPending: false,
+  } as never);
+  vi.mocked(queries.useUpdatePrincipalDefaultLimits).mockReturnValue({
+    mutate: updateLimits,
+    isPending: false,
+  } as never);
+  const view = renderWithProviders(<Component />);
+
+  fireEvent.click(
+    cardNamed('Allowed Models').getByRole('button', { name: 'Edit' }),
+  );
+  fireEvent.change(cardNamed('Allowed Models').getByRole('textbox'), {
+    target: { value: 'a-draft' },
+  });
+  fireEvent.click(
+    cardNamed('Default Limits').getByRole('button', { name: 'Edit' }),
+  );
+  fireEvent.click(
+    cardNamed('Default Limits').getByRole('button', { name: 'Add limit' }),
+  );
+
+  selectedId = principalB.id;
+  view.rerender(withProviders(<Component />));
+
+  expect(screen.getByRole('heading', { name: principalB.name })).toBeDefined();
+  const allowedModels = cardNamed('Allowed Models');
+  expect(allowedModels.queryByRole('textbox')).toBeNull();
+  fireEvent.click(allowedModels.getByRole('button', { name: 'Edit' }));
+  expect(
+    (allowedModels.getByRole('textbox') as HTMLTextAreaElement).value,
+  ).toBe('b-server');
+  fireEvent.click(allowedModels.getByRole('button', { name: 'Save' }));
+
+  const defaultLimits = cardNamed('Default Limits');
+  fireEvent.click(defaultLimits.getByRole('button', { name: 'Edit' }));
+  expect(defaultLimits.getAllByRole('button', { name: 'Remove' })).toHaveLength(
+    1,
+  );
+  fireEvent.click(defaultLimits.getByRole('button', { name: 'Save' }));
+
+  expect(setAllowed).toHaveBeenCalledWith(
+    {
+      id: principalB.id,
+      models: ['b-server'],
+      expected_revision: principalB.revision,
+    },
+    expect.anything(),
+  );
+  expect(updateLimits).toHaveBeenCalledWith(
+    {
+      id: principalB.id,
+      default_limits: principalB.default_limits,
+      expected_revision: principalB.revision,
+    },
+    expect.anything(),
+  );
+});
+
+test('keeps dirty drafts and their starting revision until cancel, then re-enters from latest server state', () => {
+  const setAllowed = vi.fn();
+  const updateLimits = vi.fn();
+  let current = principalFixture({
+    id: 'principal-a',
+    name: 'Ada',
+    revision: 7,
+    allowed_models: ['server-old'],
+    default_limits: [{ kind: 'requests', window_secs: 60, cap_micros: 100 }],
+  });
+  Object.assign(Route, { useSearch: () => ({ selectedId: current.id }) });
+  vi.mocked(queries.usePrincipals).mockImplementation(
+    () =>
+      ({
+        data: { principals: [current] },
+        isLoading: false,
+        isPending: false,
+      }) as never,
+  );
+  vi.mocked(queries.useSetAllowedModels).mockReturnValue({
+    mutate: setAllowed,
+    isPending: false,
+  } as never);
+  vi.mocked(queries.useUpdatePrincipalDefaultLimits).mockReturnValue({
+    mutate: updateLimits,
+    isPending: false,
+  } as never);
+  const view = renderWithProviders(<Component />);
+
+  fireEvent.click(
+    cardNamed('Allowed Models').getByRole('button', { name: 'Edit' }),
+  );
+  fireEvent.change(cardNamed('Allowed Models').getByRole('textbox'), {
+    target: { value: 'operator-draft' },
+  });
+  fireEvent.click(
+    cardNamed('Default Limits').getByRole('button', { name: 'Edit' }),
+  );
+  fireEvent.click(
+    cardNamed('Default Limits').getByRole('button', { name: 'Add limit' }),
+  );
+
+  current = {
+    ...current,
+    revision: 8,
+    allowed_models: ['server-new'],
+    default_limits: [{ kind: 'requests', window_secs: 60, cap_micros: 900 }],
+  };
+  view.rerender(withProviders(<Component />));
+
+  const allowedModels = cardNamed('Allowed Models');
+  expect(
+    (allowedModels.getByRole('textbox') as HTMLTextAreaElement).value,
+  ).toBe('operator-draft');
+  const defaultLimits = cardNamed('Default Limits');
+  expect(defaultLimits.getAllByRole('button', { name: 'Remove' })).toHaveLength(
+    2,
+  );
+
+  fireEvent.click(allowedModels.getByRole('button', { name: 'Save' }));
+  fireEvent.click(defaultLimits.getByRole('button', { name: 'Save' }));
+  expect(setAllowed).toHaveBeenLastCalledWith(
+    {
+      id: current.id,
+      models: ['operator-draft'],
+      expected_revision: 7,
+    },
+    expect.anything(),
+  );
+  expect(updateLimits).toHaveBeenLastCalledWith(
+    {
+      id: current.id,
+      default_limits: [
+        { kind: 'requests', window_secs: 60, cap_micros: 100 },
+        { kind: 'requests', window_secs: 60, cap_micros: 0 },
+      ],
+      expected_revision: 7,
+    },
+    expect.anything(),
+  );
+
+  fireEvent.click(allowedModels.getByRole('button', { name: 'Cancel' }));
+  fireEvent.click(defaultLimits.getByRole('button', { name: 'Cancel' }));
+  fireEvent.click(
+    cardNamed('Allowed Models').getByRole('button', { name: 'Edit' }),
+  );
+  fireEvent.click(
+    cardNamed('Default Limits').getByRole('button', { name: 'Edit' }),
+  );
+
+  expect(
+    (cardNamed('Allowed Models').getByRole('textbox') as HTMLTextAreaElement)
+      .value,
+  ).toBe('server-new');
+  expect(
+    cardNamed('Default Limits').getAllByRole('button', { name: 'Remove' }),
+  ).toHaveLength(1);
+
+  setAllowed.mockClear();
+  updateLimits.mockClear();
+  fireEvent.click(
+    cardNamed('Allowed Models').getByRole('button', { name: 'Save' }),
+  );
+  fireEvent.click(
+    cardNamed('Default Limits').getByRole('button', { name: 'Save' }),
+  );
+  expect(setAllowed).toHaveBeenCalledWith(
+    {
+      id: current.id,
+      models: ['server-new'],
+      expected_revision: 8,
+    },
+    expect.anything(),
+  );
+  expect(updateLimits).toHaveBeenCalledWith(
+    {
+      id: current.id,
+      default_limits: current.default_limits,
+      expected_revision: 8,
+    },
+    expect.anything(),
+  );
+});
+
 test('create pending locks the modal draft and dismissal controls', () => {
   const mutate = vi.fn();
   vi.mocked(queries.useCreatePrincipal).mockReturnValue({
@@ -1052,6 +1296,15 @@ test('principal-wide pending writes lock every principal record control without 
       .getAllByRole('radio', { hidden: true })
       .filter((radio) => radio.hasAttribute('disabled')),
   ).toHaveLength(2);
+  const addFilter = cardNamed('Router')
+    .getByText('Add filter')
+    .closest('[role="button"]');
+  expect(addFilter?.getAttribute('aria-disabled')).toBe('true');
+  expect(
+    cardNamed('Shape')
+      .getAllByRole('radio', { hidden: true })
+      .filter((radio) => radio.hasAttribute('disabled')),
+  ).toHaveLength(1);
   expect(screen.queryByText('Updating strategy...')).toBeNull();
 
   vi.mocked(queries.usePrincipalWritePending).mockReturnValue(0);

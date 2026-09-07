@@ -91,4 +91,14 @@
 
 ## 구현 및 검증 결과
 
-아직 구현 전이다. 위 원장 전 항목의 판정과 실행한 검증을 최종 PR에 기록한다.
+기반 플리커링 변경은 PR #705 (`isac322/fix-flickering`, commit `6dbb0dcc`)에 분리했다. 본 문서는 후속 `isac322/frontend-state-boundaries` 브랜치에 먼저 커밋했고, 파일별 단일 소유자로 병렬 구현했다.
+
+- S01–S11, P01–P08, T01: 구현 및 관련 회귀 검증 완료. S07은 잘못 복제된 request-log 필터를 제거하고 실제 Audit API의 principal/since/until 계약을 사용한다. S11은 지원하지 않는 회전을 새로 구현하지 않고 정확한 환경변수/서비스 재시작 안내로 교정한다.
+- 독립 리뷰에서 추가 확인한 empty-cursor backfill 정지, pause 중 실패 시간 누적, 초기 draft 조회 오류의 영구 loading, 폐기된 concurrent render의 pagination checkpoint, upload modal 전환 중 mutation callback 유실도 수정했다.
+- 실제 브라우저 검증에서 Audit `request_id` 중복에 따른 ghost row를 발견했다. API 13행이 화면 17행으로 남던 결함을 composite+occurrence identity로 수정했으며, 이벤트 삭제/dedupe 없이 필터 전환 뒤 API와 화면 행 수가 일치함을 확인했다.
+- 최종 로컬 gates: `bun run typecheck`, `bun run lint`, `bun run build` 통과. `bun run test --run`: 70개 파일, 633개 테스트 통과. 기존 Biome schema 버전 안내 1건은 오류가 아니며 이 작업에서 의존성을 변경하지 않았다.
+- 실제 SQLite/admin API/browser: Principal A/B 초안 격리, 실제 409 `storage_conflict`와 dirty draft 보존, 설정 초안 저장, locale/timezone/Toaster 동기화, 모바일 session error/Back 통과.
+- production preview/browser: lazy chunk를 350ms 이상 보류한 command action, Logs cursor/filter/Canvas DPR·drag·polling 및 실제 DB→API→UI 변경, Audit principal/시간 필터와 중복 ID 행 보존 통과.
+- request partial→final은 실제 compiled component browser harness와 실제 backend detail 응답으로 검증했다. backend in-process partial bus를 외부 SQLite 쓰기로 발행할 수 없어 proxy/SSE full-stack 검증으로 표현하지 않는다.
+- 독립 counterproof: 동일 payload query render 0회, 변경 payload 1회; 200행 table의 동일 props 계산 0회, 한 행 변경 계산 1회(나머지 199행 DOM 유지); heartbeat/cursor 추가 render 0회; grace 이내 hide/show 연결 1개 유지, close 0회.
+- 원문 실행 로그 및 화면 증거는 격리 QA 산출물로 보존했고, 재현 절차는 `.opencode/skills/user-flow-qa/references/scenarios/frontend-state-boundaries.md`에 정리했다.

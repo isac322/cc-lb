@@ -8,6 +8,15 @@ import {
 } from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
+
+vi.mock('sonner', () => ({
+  toast: {
+    error: vi.fn(),
+    success: vi.fn(),
+  },
+}));
+
+import { toast } from 'sonner';
 import { ApiError } from '../../../../lib/api';
 import * as queries from '../../../../lib/queries';
 import { CacheKeepaliveSettingsDrawer } from '../CacheKeepaliveSettingsDrawer';
@@ -54,6 +63,8 @@ describe('CacheKeepaliveSettingsDrawer', () => {
 
   beforeEach(() => {
     mutateMock = vi.fn();
+    vi.mocked(toast.error).mockReset();
+    vi.mocked(toast.success).mockReset();
     vi.spyOn(queries, 'useUpdatePrincipalCacheKeepalive').mockReturnValue({
       mutate: mutateMock,
       isPending: false,
@@ -192,6 +203,124 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     );
   });
 
+  it('keeps a same-principal draft and its opening revision until the drawer is reopened', () => {
+    const latestPrincipal: queries.Principal = {
+      ...mockPrincipal,
+      revision: 43,
+      cache_keepalive: {
+        ...mockPrincipal.cache_keepalive!,
+        refresh_lead_time_5m_secs: 30,
+      },
+    };
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const drawer = (open: boolean, principal: queries.Principal) => (
+      <QueryClientProvider client={queryClient}>
+        <CacheKeepaliveSettingsDrawer
+          open={open}
+          onOpenChange={() => {}}
+          principal={principal}
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(drawer(true, mockPrincipal));
+
+    const initialInputs = screen.getAllByRole(
+      'spinbutton',
+    ) as HTMLInputElement[];
+    fireEvent.change(initialInputs[0], { target: { value: '77' } });
+
+    rerender(drawer(true, latestPrincipal));
+
+    const liveInputs = screen.getAllByRole('spinbutton') as HTMLInputElement[];
+    expect(liveInputs[0].value).toBe('77');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(mutateMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: 'p-123',
+        expected_revision: 42,
+        cache_keepalive: expect.objectContaining({
+          refresh_lead_time_5m_secs: 77,
+        }),
+      }),
+      expect.any(Object),
+    );
+
+    mutateMock.mockClear();
+    rerender(drawer(false, latestPrincipal));
+    rerender(drawer(true, latestPrincipal));
+
+    const reopenedInputs = screen.getAllByRole(
+      'spinbutton',
+    ) as HTMLInputElement[];
+    expect(reopenedInputs[0].value).toBe('30');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(mutateMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: 'p-123',
+        expected_revision: 43,
+        cache_keepalive: expect.objectContaining({
+          refresh_lead_time_5m_secs: 30,
+        }),
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('starts a fresh draft and revision when the open principal identity changes', () => {
+    const otherPrincipal: queries.Principal = {
+      ...mockPrincipal,
+      id: 'p-456',
+      name: 'Other Principal',
+      revision: 9,
+      cache_keepalive: {
+        ...mockPrincipal.cache_keepalive!,
+        refresh_lead_time_5m_secs: 88,
+      },
+    };
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <CacheKeepaliveSettingsDrawer
+          open={true}
+          onOpenChange={() => {}}
+          principal={mockPrincipal}
+        />
+      </QueryClientProvider>,
+    );
+    const initialInputs = screen.getAllByRole(
+      'spinbutton',
+    ) as HTMLInputElement[];
+    fireEvent.change(initialInputs[0], { target: { value: '77' } });
+
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <CacheKeepaliveSettingsDrawer
+          open={true}
+          onOpenChange={() => {}}
+          principal={otherPrincipal}
+        />
+      </QueryClientProvider>,
+    );
+
+    const otherInputs = screen.getAllByRole('spinbutton') as HTMLInputElement[];
+    expect(otherInputs[0].value).toBe('88');
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(mutateMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: 'p-456',
+        expected_revision: 9,
+        cache_keepalive: expect.objectContaining({
+          refresh_lead_time_5m_secs: 88,
+        }),
+      }),
+      expect.any(Object),
+    );
+  });
+
   it('resets fields on reset click', () => {
     renderWithProviders(
       <CacheKeepaliveSettingsDrawer
@@ -210,10 +339,59 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     expect(inputs[0].value).toBe('45');
   });
 
-  it('handles stale revision error', async () => {
+  it('handles the backend storage conflict without discarding the draft', () => {
+    const onOpenChange = vi.fn();
     mutateMock.mockImplementation(
       (_vars: unknown, options: { onError: (err: Error) => void }) => {
-        options.onError(new ApiError(412, 'conflict', null, 'Stale revision'));
+        options.onError(
+          new ApiError(
+            409,
+            'storage_conflict',
+            {
+              error: 'storage_conflict',
+              message: 'principal revision changed',
+            },
+            'principal revision changed',
+          ),
+        );
+      },
+    );
+
+    renderWithProviders(
+      <CacheKeepaliveSettingsDrawer
+        open={true}
+        onOpenChange={onOpenChange}
+        principal={mockPrincipal}
+      />,
+    );
+
+    const inputs = screen.getAllByRole('spinbutton') as HTMLInputElement[];
+    fireEvent.change(inputs[0], { target: { value: '77' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(mutateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expected_revision: 42,
+        cache_keepalive: expect.objectContaining({
+          refresh_lead_time_5m_secs: 77,
+        }),
+      }),
+      expect.any(Object),
+    );
+    expect(inputs[0].value).toBe('77');
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith(
+      'Principal was modified by another user. Please refresh and try again.',
+    );
+  });
+
+  it.each([
+    [412, 'precondition_failed'],
+    [409, 'stale_revision'],
+  ])('keeps legacy conflict handling for HTTP %i %s', (status, code) => {
+    mutateMock.mockImplementation(
+      (_vars: unknown, options: { onError: (err: Error) => void }) => {
+        options.onError(new ApiError(status, code, { error: code }, code));
       },
     );
 
@@ -225,12 +403,38 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       />,
     );
 
-    const saveButtons = screen.getAllByText('Save changes');
-    fireEvent.click(saveButtons[saveButtons.length - 1]);
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
-    // The toast is rendered outside the component, so we just verify the mutation was called
-    // and the error handler was triggered.
-    expect(mutateMock).toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith(
+      'Principal was modified by another user. Please refresh and try again.',
+    );
+  });
+
+  it('surfaces an unrelated 409 error instead of treating every conflict as stale', () => {
+    mutateMock.mockImplementation(
+      (_vars: unknown, options: { onError: (err: Error) => void }) => {
+        options.onError(
+          new ApiError(
+            409,
+            'principal_in_use',
+            { error: 'principal_in_use', message: 'Principal is in use' },
+            'Principal is in use',
+          ),
+        );
+      },
+    );
+
+    renderWithProviders(
+      <CacheKeepaliveSettingsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(toast.error).toHaveBeenCalledWith('Principal is in use');
   });
 
   it('validates numeric inputs before saving', async () => {

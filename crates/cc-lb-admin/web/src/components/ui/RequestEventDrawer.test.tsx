@@ -1,9 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
+  act,
   cleanup,
   type RenderOptions,
   render as rtlRender,
   screen,
+  waitFor,
 } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +19,13 @@ function render(ui: ReactElement, options?: RenderOptions) {
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     ),
     ...options,
+  });
+}
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
   });
 }
 
@@ -81,6 +90,92 @@ describe('RequestEventDrawer', () => {
     expect(screen.getAllByText('150 ms').length).toBeGreaterThan(0);
   });
 
+  it('keeps same-request timeline data visible until final detail arrives', async () => {
+    let resolveDetail: ((response: Response) => void) | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveDetail = resolve;
+          }),
+      ),
+    );
+    const partialEvent = {
+      event_id: 'evt_progressive_detail',
+      request_id: 'req_progressive_detail',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      elapsed_ms: 120,
+      auth_ms: 10,
+      route_ms: 5,
+      upstream_ttfb_ms: 80,
+      _phase: 'partial',
+    } satisfies RequestEventWithPhase;
+    const { rerender } = render(
+      <RequestEventDrawer
+        event={partialEvent}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    const partialTimeline = screen.getByTestId('latency-timeline-region');
+    expect(screen.getByText('Internal pre')).toBeDefined();
+    expect(partialTimeline.textContent).toContain('Upstream');
+
+    const finalSlimEvent = {
+      event_id: 'evt_progressive_detail',
+      request_id: 'req_progressive_detail',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      status: 200,
+      duration_ms: 150,
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+    rerender(
+      <RequestEventDrawer
+        event={finalSlimEvent}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    const pendingTimeline = screen.getByTestId('latency-timeline-region');
+    expect(pendingTimeline).toBe(partialTimeline);
+    expect(pendingTimeline.querySelectorAll('.skeleton')).toHaveLength(0);
+    expect(screen.getByText('Internal pre')).toBeDefined();
+    expect(pendingTimeline.textContent).toContain('Upstream');
+    expect(screen.queryByText('Internal post')).toBeNull();
+
+    await waitFor(() => expect(resolveDetail).toBeDefined());
+    const resolvePendingDetail = resolveDetail;
+    if (!resolvePendingDetail) throw new Error('Expected detail request');
+    await act(async () => {
+      resolvePendingDetail(
+        jsonResponse({
+          ...finalSlimEvent,
+          duration_ms: 200,
+          auth_ms: 20,
+          route_ms: 5,
+          upstream_ttfb_ms: 90,
+          upstream_body_ms: 40,
+          observability_post_ms: 7,
+          body_bytes: 2048,
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText('Internal post')).toBeDefined(),
+    );
+    expect(screen.getAllByText('200 ms').length).toBeGreaterThan(0);
+    const bodyRow = screen.getByText('Body bytes').parentElement;
+    expect(bodyRow?.querySelectorAll('.skeleton')).toHaveLength(0);
+    expect(bodyRow?.textContent).toContain('2.0 KB');
+  });
+
   it('does not speculate upstream failure while detail-only fields are pending', () => {
     vi.stubGlobal(
       'fetch',
@@ -129,13 +224,61 @@ describe('RequestEventDrawer', () => {
     expect(bodyRow?.querySelectorAll('.skeleton')).toHaveLength(1);
 
     const latency = screen.getByTestId('latency-timeline-region');
-    expect(latency.getAttribute('aria-busy')).toBe('true');
-    expect(latency.querySelectorAll('.skeleton').length).toBeGreaterThan(0);
+    expect(latency.getAttribute('aria-busy')).toBeNull();
+    expect(latency.querySelectorAll('.skeleton')).toHaveLength(0);
     expect(screen.queryByText('No latency data recorded.')).toBeNull();
 
     const dialog = screen.getByRole('dialog', { name: 'Request detail' });
     expect(dialog.className).toContain('w-full');
     expect(dialog.className).toContain('max-w-lg');
+  });
+
+  it('does not reuse a previous request timeline for a new request', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    const firstEvent = {
+      event_id: 'evt_first',
+      request_id: 'req_first',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      status: 200,
+      duration_ms: 400,
+      auth_ms: 20,
+      upstream_ttfb_ms: 200,
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+    const { rerender } = render(
+      <RequestEventDrawer
+        event={firstEvent}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText('Internal pre')).toBeDefined();
+
+    const newEvent = {
+      event_id: 'evt_new',
+      request_id: 'req_new',
+      ts: 1718553130,
+      ts_ms: 1718553130000,
+      status: 200,
+      duration_ms: 0,
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+    rerender(
+      <RequestEventDrawer
+        event={newEvent}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    const latency = screen.getByTestId('latency-timeline-region');
+    expect(latency.getAttribute('aria-busy')).toBe('true');
+    expect(latency.querySelectorAll('.skeleton').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Internal pre')).toBeNull();
   });
 
   it('renders known upstream failure details immediately while detail is pending', () => {

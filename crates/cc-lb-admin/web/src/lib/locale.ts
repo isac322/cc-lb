@@ -1,10 +1,23 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 
 export type Locale = 'auto' | string;
 export type Timezone = 'auto' | string;
 
 const STORAGE_KEY = 'cclb.locale';
 const TZ_STORAGE_KEY = 'cclb.timezone';
+
+type PreferenceSnapshot<T extends string> = {
+  value: T;
+  effective: string;
+};
+
+type StoredPreferenceStore<T extends string> = {
+  getSnapshot: () => PreferenceSnapshot<T>;
+  getServerSnapshot: () => PreferenceSnapshot<T>;
+  initialize: () => void;
+  set: (next: T) => void;
+  subscribe: (listener: () => void) => () => void;
+};
 
 function readStoredLocale(): Locale {
   if (typeof window === 'undefined') return 'auto';
@@ -36,52 +49,132 @@ function resolveEffectiveTimezone(tz: Timezone): string {
   return tz;
 }
 
+function createStoredPreferenceStore<T extends string>({
+  key,
+  read,
+  resolve,
+  serverSnapshot,
+}: {
+  key: string;
+  read: () => T;
+  resolve: (value: T) => string;
+  serverSnapshot: PreferenceSnapshot<T>;
+}): StoredPreferenceStore<T> {
+  let snapshot: PreferenceSnapshot<T> | undefined;
+  const listeners = new Set<() => void>();
+
+  const readSnapshot = (): PreferenceSnapshot<T> => {
+    const value = read();
+    const effective = resolve(value);
+    if (snapshot?.value === value && snapshot.effective === effective) {
+      return snapshot;
+    }
+    snapshot = { value, effective };
+    return snapshot;
+  };
+
+  const notify = () => {
+    for (const listener of listeners) listener();
+  };
+
+  const refresh = () => {
+    const previous = snapshot;
+    readSnapshot();
+    if (snapshot !== previous) notify();
+  };
+
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === key || event.key === null) refresh();
+  };
+
+  return {
+    getSnapshot: () =>
+      typeof window === 'undefined'
+        ? serverSnapshot
+        : (snapshot ?? readSnapshot()),
+    getServerSnapshot: () => serverSnapshot,
+    initialize: refresh,
+    set: (next) => {
+      window.localStorage.setItem(key, next);
+      const previous = snapshot;
+      const effective = resolve(next);
+      if (snapshot?.value !== next || snapshot.effective !== effective) {
+        snapshot = { value: next, effective };
+      }
+      if (snapshot !== previous) notify();
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      if (listeners.size === 1 && typeof window !== 'undefined') {
+        window.addEventListener('storage', onStorage);
+        refresh();
+      }
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          if (typeof window !== 'undefined') {
+            window.removeEventListener('storage', onStorage);
+          }
+          snapshot = undefined;
+        }
+      };
+    },
+  };
+}
+
+const localeStore = createStoredPreferenceStore<Locale>({
+  key: STORAGE_KEY,
+  read: readStoredLocale,
+  resolve: resolveEffectiveLocale,
+  serverSnapshot: { value: 'auto', effective: 'en-US' },
+});
+
+const timezoneStore = createStoredPreferenceStore<Timezone>({
+  key: TZ_STORAGE_KEY,
+  read: readStoredTimezone,
+  resolve: resolveEffectiveTimezone,
+  serverSnapshot: { value: 'auto', effective: 'UTC' },
+});
+
 export function initLocale() {
-  readStoredLocale();
+  localeStore.initialize();
 }
 
 export function initTimezone() {
-  readStoredTimezone();
+  timezoneStore.initialize();
 }
 
 export function useLocale() {
-  const [locale, setLocaleState] = useState<Locale>(() => readStoredLocale());
-  const [effective, setEffective] = useState<string>(() =>
-    resolveEffectiveLocale(readStoredLocale()),
+  const snapshot = useSyncExternalStore(
+    localeStore.subscribe,
+    localeStore.getSnapshot,
+    localeStore.getServerSnapshot,
   );
+  const setLocale = useCallback((next: Locale) => localeStore.set(next), []);
 
-  const setLocale = useCallback((next: Locale) => {
-    setLocaleState(next);
-    window.localStorage.setItem(STORAGE_KEY, next);
-    setEffective(resolveEffectiveLocale(next));
-  }, []);
-
-  useEffect(() => {
-    setEffective(resolveEffectiveLocale(locale));
-  }, [locale]);
-
-  return { locale, effective, setLocale };
+  return {
+    locale: snapshot.value,
+    effective: snapshot.effective,
+    setLocale,
+  };
 }
 
 export function useTimezone() {
-  const [timezone, setTimezoneState] = useState<Timezone>(() =>
-    readStoredTimezone(),
+  const snapshot = useSyncExternalStore(
+    timezoneStore.subscribe,
+    timezoneStore.getSnapshot,
+    timezoneStore.getServerSnapshot,
   );
-  const [effective, setEffective] = useState<string>(() =>
-    resolveEffectiveTimezone(readStoredTimezone()),
+  const setTimezone = useCallback(
+    (next: Timezone) => timezoneStore.set(next),
+    [],
   );
 
-  const setTimezone = useCallback((next: Timezone) => {
-    setTimezoneState(next);
-    window.localStorage.setItem(TZ_STORAGE_KEY, next);
-    setEffective(resolveEffectiveTimezone(next));
-  }, []);
-
-  useEffect(() => {
-    setEffective(resolveEffectiveTimezone(timezone));
-  }, [timezone]);
-
-  return { timezone, effective, setTimezone };
+  return {
+    timezone: snapshot.value,
+    effective: snapshot.effective,
+    setTimezone,
+  };
 }
 
 export function formatAbsolute(

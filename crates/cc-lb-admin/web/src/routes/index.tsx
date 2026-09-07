@@ -14,7 +14,7 @@ import {
   TrendingUp,
   Users,
 } from 'lucide-react';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -44,7 +44,7 @@ import {
   emptyCostComponents,
   sumCostMicros,
 } from '../components/ui/usage/costCategories';
-import { type AggregateResponse, eventTime } from '../lib/api';
+import type { AggregateResponse } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import {
   cacheHitRatio,
@@ -55,6 +55,7 @@ import {
   formatUsdAmount,
   sumTokens,
 } from '../lib/format';
+import { mergeLogRows, newestLiveEventIds } from '../lib/logRows';
 import {
   usePrincipalNameMap,
   useRecentEventsInfinite,
@@ -64,7 +65,6 @@ import {
   useUpstreamNameMap,
   useUsage,
 } from '../lib/queries';
-import type { RequestEventWithPhase } from '../lib/RequestEventTypes';
 import { useLiveEventStream } from '../lib/useLiveEventStream';
 import {
   buildPoolQuotaChartData,
@@ -88,6 +88,7 @@ const RANGE_SECONDS: Record<Range, number> = {
   '24h': 86400,
   '7d': 604800,
 };
+const OVERVIEW_TABLE_COLUMNS = { cost: true, tokens: true } as const;
 
 const stepFor = (r: Range): 'hour' | 'minute' =>
   r === '7d' || r === '24h' ? 'hour' : 'minute';
@@ -960,27 +961,29 @@ export function PoolQuotaStackedBar({
   );
 }
 
-function PoolQuotaCard({
+type PoolQuotaChartProps = {
+  data: PoolQuotaChartRow[];
+  maxValue: number;
+  rangeStartUnix: number;
+  rangeEndUnix: number;
+  range: string;
+  latest: PoolQuotaLatest;
+  showFable: boolean;
+};
+
+const PoolQuotaCard = memo(function PoolQuotaCard({
   aggregate,
   chart,
   loading,
 }: {
-  aggregate: { data: AggregateResponse | undefined };
-  chart: {
-    data: PoolQuotaChartRow[];
-    maxValue: number;
-    rangeStartUnix: number;
-    rangeEndUnix: number;
-    range: string;
-    latest: PoolQuotaLatest;
-    showFable: boolean;
-  };
+  aggregate: AggregateResponse | undefined;
+  chart: PoolQuotaChartProps;
   loading: boolean;
 }) {
-  const w5h = aggregate.data?.windows.find((x) => x.window === '5h');
-  const w7d = aggregate.data?.windows.find((x) => x.window === '7d');
-  const wFable = aggregate.data?.windows.find((x) => x.window === '7d_fable');
-  const upstreamCount = aggregate.data?.upstream_count ?? 0;
+  const w5h = aggregate?.windows.find((x) => x.window === '5h');
+  const w7d = aggregate?.windows.find((x) => x.window === '7d');
+  const wFable = aggregate?.windows.find((x) => x.window === '7d_fable');
+  const upstreamCount = aggregate?.upstream_count ?? 0;
   const contributingCount = Math.max(
     w5h?.contributing_upstreams ?? 0,
     w7d?.contributing_upstreams ?? 0,
@@ -1019,7 +1022,7 @@ function PoolQuotaCard({
               >
                 <PoolQuotaStackedBar
                   window={window}
-                  w={aggregate.data?.windows.find(
+                  w={aggregate?.windows.find(
                     (entry) => entry.window === window,
                   )}
                   loading={loading}
@@ -1060,7 +1063,7 @@ function PoolQuotaCard({
       </div>
     </Card>
   );
-}
+});
 
 export function PoolQuotaThemedChart({
   seriesData,
@@ -1399,42 +1402,18 @@ function OverviewPage() {
   }, [events.hasNextPage, events.isFetchingNextPage, events.fetchNextPage]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: live.eventsMap is a stable Map ref mutated in place by useLiveEventStream; live.version is bumped on every upsert so it is the real re-run trigger.
-  const recentRows = useMemo(() => {
-    const historical = events.data?.pages.flatMap((p) => p.events) ?? [];
-    const seen = new Set<string>();
-    const out: RequestEventWithPhase[] = [];
-    for (const entry of live.eventsMap.values()) {
-      const ev = entry.event;
-      const key = ev.event_id ?? ev.request_id;
-      if (!seen.has(key)) {
-        seen.add(key);
-        if (entry.phase === 'final') {
-          out.push({ ...entry.event, _phase: 'final' });
-        } else {
-          out.push({ ...entry.event, _phase: 'partial' });
-        }
-      }
-    }
-    for (const ev of historical) {
-      const key = ev.event_id ?? ev.request_id;
-      if (!seen.has(key)) {
-        seen.add(key);
-        out.push({ ...ev, _phase: 'final' });
-      }
-    }
-    return out.sort(
-      (a, b) => (eventTime(b)?.getTime() ?? 0) - (eventTime(a)?.getTime() ?? 0),
-    );
-  }, [live.eventsMap, live.version, events.data]);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: same rationale — live.version is the mutation counter for the stable eventsMap ref.
-  const recentLiveIds = useMemo(
+  const recentRows = useMemo(
     () =>
-      new Set(
-        Array.from(live.eventsMap.values())
-          .slice(0, 20)
-          .map((e) => e.event.event_id ?? e.event.request_id),
+      mergeLogRows(
+        live.eventsMap,
+        events.data?.pages.flatMap((page) => page.events) ?? [],
       ),
+    [live.eventsMap, live.version, events.data],
+  );
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: live.version is the mutation counter for the stable eventsMap ref.
+  const recentLiveIds = useMemo(
+    () => newestLiveEventIds(live.eventsMap),
     [live.eventsMap, live.version],
   );
 
@@ -1539,6 +1518,26 @@ function OverviewPage() {
         showFable,
       ),
     [quotaPoolHistory.data, visibleChartData, showFable],
+  );
+  const poolQuotaChart = useMemo<PoolQuotaChartProps>(
+    () => ({
+      data: visibleChartData,
+      maxValue: chartMaxValue,
+      rangeStartUnix: poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
+      rangeEndUnix: poolHistoryNowUnixSecs,
+      range: displayedPoolHistoryRange,
+      latest: chartLatest,
+      showFable,
+    }),
+    [
+      chartLatest,
+      chartMaxValue,
+      displayedPoolHistoryRange,
+      displayedPoolHistoryRangeSecs,
+      poolHistoryNowUnixSecs,
+      showFable,
+      visibleChartData,
+    ],
   );
 
   // Principals Data
@@ -1712,18 +1711,9 @@ function OverviewPage() {
 
       <div className="grid grid-cols-1 xl:grid-cols-[2fr_1fr] gap-4 min-w-0">
         <PoolQuotaCard
-          aggregate={quotaAggregate}
+          aggregate={quotaAggregate.data}
           loading={quotaLoading}
-          chart={{
-            data: visibleChartData,
-            maxValue: chartMaxValue,
-            rangeStartUnix:
-              poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
-            rangeEndUnix: poolHistoryNowUnixSecs,
-            range: displayedPoolHistoryRange,
-            latest: chartLatest,
-            showFable,
-          }}
+          chart={poolQuotaChart}
         />
 
         <TopPrincipalsCard
@@ -1783,7 +1773,7 @@ function OverviewPage() {
               upstreamNameMap={upstreamNameMap}
               loading={events.isLoading}
               liveFlashIds={recentLiveIds}
-              columns={{ cost: true, tokens: true }}
+              columns={OVERVIEW_TABLE_COLUMNS}
               sentinelRef={sentinelRef}
               loadingMore={events.isFetchingNextPage}
               hasMore={events.hasNextPage}

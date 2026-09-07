@@ -14,6 +14,7 @@ let registryState: RegistryState;
 let gcIsPending: boolean;
 const navigate = vi.fn();
 const gcMutate = vi.fn();
+const uploadMutate = vi.fn();
 
 const pluginEntry = (id: string, name: string): PluginEntry => ({
   id,
@@ -56,6 +57,10 @@ vi.mock('../../lib/queries', () => ({
     isPending: gcIsPending,
     mutate: gcMutate,
   }),
+  useUploadWasm: () => ({
+    isPending: false,
+    mutate: uploadMutate,
+  }),
 }));
 
 vi.mock('../../lib/useCopyButton', () => ({
@@ -80,6 +85,7 @@ beforeEach(() => {
   gcIsPending = false;
   navigate.mockReset();
   gcMutate.mockReset();
+  uploadMutate.mockReset();
 });
 
 afterEach(cleanup);

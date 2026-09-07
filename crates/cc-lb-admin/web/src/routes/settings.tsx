@@ -1,7 +1,6 @@
 import { Collapsible as BaseCollapsible } from '@base-ui/react/collapsible';
 import { createFileRoute } from '@tanstack/react-router';
 import {
-  AlertTriangle,
   CheckCircle2,
   Download,
   PlayCircle,
@@ -18,7 +17,6 @@ import {
   cx,
   Field,
   INPUT_CLASS,
-  Modal,
   PageContainer,
   Section,
   Skeleton,
@@ -216,7 +214,6 @@ export const Route = createFileRoute('/settings')({
 
 function SettingsPage() {
   const status = useStatus();
-  const [rotateOpen, setRotateOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const exportingRef = useRef(false);
   const { locale, effective, setLocale } = useLocale();
@@ -327,22 +324,25 @@ function SettingsPage() {
           </CardBody>
         </Card>
 
-        {/* Token rotation */}
-        <Card>
+        {/* Admin token */}
+        <Card data-testid="admin-token-card">
           <CardHeader
             title="Admin Token"
-            subtitle="Rotate the primary bearer token. All current admin sessions will be invalidated."
+            subtitle="The admin bearer token is loaded from the environment when cc-lb starts."
           />
           <CardBody>
-            <Button
-              id="btn-rotate-token"
-              variant="danger"
-              size="md"
-              iconLeft={<AlertTriangle className="w-4 h-4" />}
-              onClick={() => setRotateOpen(true)}
+            <p
+              data-testid="admin-token-guidance"
+              className="text-sm text-text-muted"
             >
-              Rotate token
-            </Button>
+              Update the environment variable named by{' '}
+              <code className="font-mono text-text">admin.token_env</code>{' '}
+              (default:{' '}
+              <code className="font-mono text-text">CC_LB_ADMIN_TOKEN</code>) in
+              your service&apos;s secret manager, then restart the cc-lb
+              process. The token is loaded only at startup and cannot be rotated
+              from this dashboard.
+            </p>
           </CardBody>
         </Card>
 
@@ -435,31 +435,6 @@ function SettingsPage() {
             </Button>
           </CardBody>
         </Card>
-
-        <Modal
-          open={rotateOpen}
-          onOpenChange={setRotateOpen}
-          title="Rotate admin token?"
-          footer={
-            <>
-              <Button onClick={() => setRotateOpen(false)}>Cancel</Button>
-              <Button
-                variant="danger"
-                onClick={() => {
-                  toast.success('Token rotation queued (mock)');
-                  setRotateOpen(false);
-                }}
-              >
-                Confirm rotate
-              </Button>
-            </>
-          }
-        >
-          <p className="text-sm text-text-muted">
-            Rotation invalidates the current admin token. You will need the new
-            token to access this dashboard.
-          </p>
-        </Modal>
       </Section>
     </PageContainer>
   );
@@ -473,16 +448,106 @@ function ConfigDraftSection() {
   const validate = useValidateConfig();
   const apply = useApplyConfig();
   const reload = useReloadConfig();
-  const [text, setText] = useState('');
+  const [editor, setEditor] = useState<{
+    text: string;
+    savedText: string;
+    revision: number;
+    savedAtUnixSecs: number | null;
+    hasSavedDraft: boolean;
+  } | null>(null);
+  const [localValidation, setLocalValidation] = useState<{
+    revision: number;
+    error: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    const draftData = draft.data;
+    if (!draftData) return;
+
+    const source = draftData.draft ?? current.data;
+    if (source === undefined) return;
+
+    const sourceText = JSON.stringify(source, null, 2);
+    if (sourceText === undefined) return;
+
+    setEditor((existing) => {
+      if (existing && existing.text !== existing.savedText) return existing;
+      // A successful save can advance the editor before an invalidated draft
+      // query finishes. Never replace that confirmed revision with stale data.
+      if (existing && existing.revision > draftData.revision) return existing;
+
+      const hasSavedDraft = draftData.draft != null;
+      const savedAtUnixSecs = hasSavedDraft
+        ? draftData.saved_at_unix_secs
+        : null;
+      if (
+        existing?.text === sourceText &&
+        existing.savedText === sourceText &&
+        existing.revision === draftData.revision &&
+        existing.savedAtUnixSecs === savedAtUnixSecs &&
+        existing.hasSavedDraft === hasSavedDraft
+      ) {
+        return existing;
+      }
+
+      return {
+        text: sourceText,
+        savedText: sourceText,
+        revision: draftData.revision,
+        savedAtUnixSecs,
+        hasSavedDraft,
+      };
+    });
+  }, [current.data, draft.data]);
+
+  const draftUnavailable = draft.data === undefined;
+  const currentConfigRequired = draft.data?.draft == null;
+  const currentUnavailable =
+    currentConfigRequired && current.data === undefined;
+  const editorPending =
+    editor == null &&
+    ((draftUnavailable && draft.isPending) ||
+      (currentUnavailable && current.isPending));
+  const editorLoadError =
+    editor == null &&
+    ((draftUnavailable && draft.isError) ||
+      (currentUnavailable && current.isError));
+  const editorRetrying =
+    (draftUnavailable && draft.isFetching) ||
+    (currentUnavailable && current.isFetching);
 
   const draftRevision = draft.data?.revision ?? null;
-  const lastValidatedRevision = draft.data?.last_validated_revision ?? null;
-  const lastValidationError = draft.data?.last_validation_error ?? null;
+  const editorRevision = editor?.revision ?? null;
+  const editorDirty = editor ? editor.text !== editor.savedText : false;
+  const serverRevisionChanged =
+    draftRevision != null &&
+    editorRevision != null &&
+    draftRevision !== editorRevision;
+  const canSave =
+    editor != null &&
+    (editorDirty || (!editor.hasSavedDraft && !serverRevisionChanged));
+  const editorValidation =
+    localValidation?.revision === editorRevision ? localValidation : null;
+  const serverValidationMatchesEditor =
+    draftRevision != null && draftRevision === editorRevision;
+  const lastValidatedRevision = editorValidation
+    ? editorValidation.revision
+    : serverValidationMatchesEditor
+      ? (draft.data?.last_validated_revision ?? null)
+      : null;
+  const lastValidationError = editorValidation
+    ? editorValidation.error
+    : serverValidationMatchesEditor
+      ? (draft.data?.last_validation_error ?? null)
+      : null;
+  const canValidate =
+    editor?.hasSavedDraft === true && !editorDirty && !serverRevisionChanged;
   const canApply =
+    editor != null &&
+    canValidate &&
     lastValidatedRevision != null &&
     lastValidationError == null &&
-    draftRevision != null &&
-    lastValidatedRevision === draftRevision;
+    lastValidatedRevision === editor.revision;
   const lastValidatedLabel = lastValidationError
     ? `error @ rev ${lastValidatedRevision ?? '—'}`
     : lastValidatedRevision != null
@@ -507,6 +572,84 @@ function ConfigDraftSection() {
         : reloadPending
           ? 'Reloading configuration...'
           : null;
+  const editorGuidance = editorDirty
+    ? serverRevisionChanged
+      ? `The server draft is revision ${draftRevision}, while this editor started from revision ${editorRevision}. Save checks revision ${editorRevision}; Validate and Apply stay disabled until these changes are saved.`
+      : 'Save your editor changes before validating or applying. Validate and Apply use the saved server draft.'
+    : serverRevisionChanged
+      ? `Waiting for server draft revision ${draftRevision} to match editor revision ${editorRevision} before validating or applying.`
+      : editor && !editor.hasSavedDraft
+        ? 'Save this configuration as a server draft before validating or applying.'
+        : null;
+
+  const handleRetryEditor = () => {
+    if (draftUnavailable) void draft.refetch();
+    if (currentUnavailable) void current.refetch();
+  };
+
+  const handleSave = () => {
+    if (!editor || !canSave) return;
+
+    const savedText = editor.text;
+    const startRevision = editor.revision;
+    try {
+      const parsed = JSON.parse(savedText) as Record<string, unknown>;
+      save.mutate(
+        { draft: parsed, expected_revision: startRevision },
+        {
+          onSuccess: (response) => {
+            setEditor((active) => {
+              if (
+                !active ||
+                active.text !== savedText ||
+                active.revision !== startRevision
+              ) {
+                return active;
+              }
+              return {
+                ...active,
+                savedText,
+                revision: response.revision,
+                savedAtUnixSecs: response.saved_at_unix_secs,
+                hasSavedDraft: true,
+              };
+            });
+            setLocalValidation(null);
+            toast.success('Draft saved');
+          },
+        },
+      );
+    } catch {
+      toast.error('Draft is not valid JSON');
+    }
+  };
+
+  const handleValidate = () => {
+    if (!editor || !canValidate) return;
+
+    validate.mutate(editor.revision, {
+      onSuccess: (result) => {
+        const error = result.valid
+          ? null
+          : (result.error ?? 'Validation failed');
+        setLocalValidation({ revision: result.revision, error });
+        if (result.valid) {
+          toast.success('Draft valid');
+        } else {
+          toast.error(`Invalid: ${error}`);
+        }
+      },
+    });
+  };
+
+  const handleApply = () => {
+    if (!editor || !canApply) return;
+
+    apply.mutate(editor.revision, {
+      onSuccess: (result) =>
+        toast.success(`Applied revision ${result.applied_revision}`),
+    });
+  };
 
   return (
     <Section
@@ -522,18 +665,8 @@ function ConfigDraftSection() {
                 size="sm"
                 iconLeft={<Save className="w-3 h-3" />}
                 loading={savePending}
-                disabled={!text || configPending}
-                onClick={() => {
-                  try {
-                    const parsed = JSON.parse(text);
-                    save.mutate(
-                      { draft: parsed, expected_revision: draftRevision ?? 0 },
-                      { onSuccess: () => toast.success('Draft saved') },
-                    );
-                  } catch {
-                    toast.error('Draft is not valid JSON');
-                  }
-                }}
+                disabled={!canSave || !editor.text || configPending}
+                onClick={handleSave}
               >
                 {savePending ? 'Saving...' : 'Save'}
               </Button>
@@ -541,15 +674,9 @@ function ConfigDraftSection() {
                 size="sm"
                 iconLeft={<CheckCircle2 className="w-3 h-3" />}
                 loading={validatePending}
-                disabled={configPending}
-                onClick={() =>
-                  validate.mutate(draftRevision ?? 0, {
-                    onSuccess: (r) =>
-                      toast.success(
-                        r.valid ? 'Draft valid' : `Invalid: ${r.error}`,
-                      ),
-                  })
-                }
+                disabled={!canValidate || configPending}
+                aria-describedby="config-pipeline-status"
+                onClick={handleValidate}
               >
                 {validatePending ? 'Validating...' : 'Validate'}
               </Button>
@@ -559,12 +686,8 @@ function ConfigDraftSection() {
                 iconLeft={<PlayCircle className="w-3 h-3" />}
                 loading={applyPending}
                 disabled={!canApply || configPending}
-                onClick={() =>
-                  apply.mutate(lastValidatedRevision ?? 0, {
-                    onSuccess: (r) =>
-                      toast.success(`Applied revision ${r.applied_revision}`),
-                  })
-                }
+                aria-describedby="config-pipeline-status"
+                onClick={handleApply}
               >
                 {applyPending ? 'Applying...' : 'Apply'}
               </Button>
@@ -595,10 +718,10 @@ function ConfigDraftSection() {
                 data-testid="draft-revision-slot"
                 className="inline-flex h-4 min-w-8 items-center font-mono"
               >
-                {draft.isLoading ? (
+                {editorPending ? (
                   <Skeleton className="h-3 w-8" />
                 ) : (
-                  (draftRevision ?? '—')
+                  (editor?.revision ?? '—')
                 )}
               </div>
             </div>
@@ -611,7 +734,7 @@ function ConfigDraftSection() {
                   lastValidationError ? 'text-red-400' : undefined,
                 )}
               >
-                {draft.isLoading ? (
+                {editorPending ? (
                   <Skeleton className="h-3 w-20" />
                 ) : (
                   lastValidatedLabel
@@ -624,31 +747,51 @@ function ConfigDraftSection() {
                 data-testid="draft-saved-at-slot"
                 className="inline-flex h-4 min-w-24 items-center font-mono"
               >
-                {draft.isLoading ? (
+                {editorPending ? (
                   <Skeleton className="h-3 w-20" />
-                ) : draft.data?.saved_at_unix_secs ? (
-                  <RelativeTime
-                    ts={new Date(draft.data.saved_at_unix_secs * 1000)}
-                  />
+                ) : editor?.savedAtUnixSecs ? (
+                  <RelativeTime ts={new Date(editor.savedAtUnixSecs * 1000)} />
                 ) : (
                   '—'
                 )}
               </div>
             </div>
           </div>
+          {editorLoadError ? (
+            <div
+              className="flex items-center justify-between gap-3 rounded-sm border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
+              role="alert"
+            >
+              <span>
+                {draftUnavailable && draft.isError
+                  ? 'Failed to load the configuration draft.'
+                  : 'Failed to load the current configuration.'}
+              </span>
+              <Button
+                size="sm"
+                loading={editorRetrying}
+                disabled={editorRetrying || configPending}
+                onClick={handleRetryEditor}
+              >
+                {editorRetrying ? 'Retrying...' : 'Retry'}
+              </Button>
+            </div>
+          ) : null}
           <textarea
+            data-testid="config-draft-editor"
             className="w-full min-h-[260px] p-3 text-xs font-mono bg-panel-strong border border-subtle rounded-sm placeholder:text-text-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
             style={{ lineHeight: 1.5 }}
-            value={text}
-            disabled={configPending}
-            onChange={(e) => setText(e.target.value)}
-            placeholder={
-              current.data
-                ? JSON.stringify(current.data, null, 2)
-                : 'JSON config draft…'
+            value={editor?.text ?? ''}
+            disabled={configPending || !editor}
+            onChange={(event) =>
+              setEditor((active) =>
+                active ? { ...active, text: event.target.value } : active,
+              )
             }
+            placeholder="JSON config draft…"
           />
           <div
+            id="config-pipeline-status"
             data-testid="config-pipeline-status"
             role="status"
             aria-live="polite"
@@ -659,7 +802,9 @@ function ConfigDraftSection() {
                 <Spinner className="w-3 h-3 text-accent" />
                 {configPendingLabel}
               </span>
-            ) : null}
+            ) : (
+              editorGuidance
+            )}
           </div>
           <div data-testid="config-checklist-slot" className="min-h-[20px]">
             {schema.isLoading ? (
@@ -672,8 +817,8 @@ function ConfigDraftSection() {
                 </BaseCollapsible.Trigger>
                 <BaseCollapsible.Panel className="overflow-hidden h-[var(--collapsible-panel-height)] transition-[height] duration-150 ease-out data-[ending-style]:h-0 data-[starting-style]:h-0">
                   <ul className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-1 font-mono">
-                    {schema.data.coverage_checklist.map((f) => (
-                      <li key={f}>· {f}</li>
+                    {schema.data.coverage_checklist.map((field) => (
+                      <li key={field}>· {field}</li>
                     ))}
                   </ul>
                 </BaseCollapsible.Panel>

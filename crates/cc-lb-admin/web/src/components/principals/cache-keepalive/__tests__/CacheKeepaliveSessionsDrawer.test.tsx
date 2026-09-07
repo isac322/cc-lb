@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as queries from '../../../../lib/queries';
+import { cacheKeepaliveApiRows } from '../../../../lib/test-utils/cacheKeepalive-fixtures';
 import * as visibilityManager from '../../../../lib/visibilityManager';
 import { cacheKeepaliveRows } from '../__fixtures__/cacheKeepaliveFixtures';
 import { CacheKeepaliveSessionsDrawer } from '../CacheKeepaliveSessionsDrawer';
@@ -326,6 +327,34 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     const listContainer = row.closest('.overflow-y-auto');
     expect(listContainer?.className).toContain('max-[960px]:hidden');
     expect(listContainer?.className).toContain('w-[440px]');
+  });
+
+  it('returns from a detail query error through the responsive Back action', () => {
+    vi.mocked(queries.useCacheKeepaliveSessionDetail).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+    } as never);
+    renderWithProviders(
+      <CacheKeepaliveSessionsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    const row = screen.getByText('a1f39c2b7e04');
+    fireEvent.click(row);
+
+    const listContainer = row.closest('.overflow-y-auto');
+    expect(listContainer?.className).toContain('max-[960px]:hidden');
+    expect(screen.getByTestId('session-detail-error')).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
+
+    expect(screen.queryByTestId('session-detail-error')).toBeNull();
+    expect(listContainer?.className).toContain('flex-1');
+    expect(listContainer?.className).not.toContain('max-[960px]:hidden');
   });
 
   it('renders drawer with correct max-w, title, principal name, horizon pills, and close button', () => {
@@ -672,6 +701,138 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     );
 
     expect(screen.getAllByText('9/12')[0]).toBeDefined();
+  });
+
+  it('reads all FLIP geometry before writes and only animates moved rows', () => {
+    const initialRows = cacheKeepaliveApiRows.slice(0, 2);
+    let currentRows = initialRows;
+    vi.mocked(queries.useCacheKeepaliveSessions).mockImplementation(
+      () =>
+        ({
+          data: {
+            pages: [
+              {
+                summary: {
+                  renewing_now: 1,
+                  sessions_last_5m: 2,
+                  renewals_fired: 3,
+                  cost_saved: 4.56,
+                },
+                rows: currentRows,
+                next_cursor: null,
+              },
+            ],
+          },
+          isLoading: false,
+          hasNextPage: false,
+          isFetchingNextPage: false,
+          fetchNextPage: vi.fn(),
+        }) as never,
+    );
+
+    const beforePositions = {
+      a1f39c2b7e04: 0,
+      '7b204de1c83f': 100,
+    } satisfies Record<string, number>;
+    const afterPositions = {
+      a1f39c2b7e04: 100,
+      '7b204de1c83f': 0,
+    } satisfies Record<string, number>;
+    const expectedTranslateY = {
+      a1f39c2b7e04: beforePositions.a1f39c2b7e04 - afterPositions.a1f39c2b7e04,
+      '7b204de1c83f':
+        beforePositions['7b204de1c83f'] - afterPositions['7b204de1c83f'],
+    } satisfies Record<string, number>;
+    let positions: Record<string, number> = beforePositions;
+    const events: string[] = [];
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        const key = this.dataset.key;
+        if (key) events.push(`read:${key}`);
+        const top = key ? (positions[key] ?? 0) : 0;
+        return {
+          x: 0,
+          y: top,
+          top,
+          left: 0,
+          right: 440,
+          bottom: top + 68,
+          width: 440,
+          height: 68,
+          toJSON: () => ({}),
+        } as DOMRect;
+      });
+    const rafSpy = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation(() => 1);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const drawer = () => (
+      <QueryClientProvider client={queryClient}>
+        <CacheKeepaliveSessionsDrawer
+          open={true}
+          onOpenChange={() => {}}
+          principal={mockPrincipal}
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(drawer());
+
+    const transforms = new Map<string, string>();
+    const renderedRows = screen
+      .getByTestId('cache-keepalive-session-list-region')
+      .querySelectorAll<HTMLElement>('li[data-key]');
+    for (const row of renderedRows) {
+      const key = row.dataset.key;
+      if (!key) continue;
+      transforms.set(key, row.style.transform);
+      Object.defineProperty(row.style, 'transform', {
+        configurable: true,
+        get: () => transforms.get(key) ?? '',
+        set: (value: string) => {
+          transforms.set(key, value);
+          events.push(`write:${key}`);
+        },
+      });
+    }
+
+    currentRows = [initialRows[1]!, initialRows[0]!];
+    positions = afterPositions;
+    events.length = 0;
+    rafSpy.mockClear();
+    rerender(drawer());
+
+    expect(events.slice(0, 2)).toEqual([
+      'read:7b204de1c83f',
+      'read:a1f39c2b7e04',
+    ]);
+    expect(events.slice(2)).toEqual([
+      'write:7b204de1c83f',
+      'write:a1f39c2b7e04',
+    ]);
+    expect(transforms.get('7b204de1c83f')).toBe(
+      `translateY(${expectedTranslateY['7b204de1c83f']}px)`,
+    );
+    expect(transforms.get('a1f39c2b7e04')).toBe(
+      `translateY(${expectedTranslateY.a1f39c2b7e04}px)`,
+    );
+    expect(rafSpy).toHaveBeenCalledTimes(2);
+
+    currentRows = currentRows.map((row) => ({
+      ...row,
+      reason: `${row.reason} updated`,
+    }));
+    events.length = 0;
+    rafSpy.mockClear();
+    rerender(drawer());
+
+    expect(events).toEqual(['read:7b204de1c83f', 'read:a1f39c2b7e04']);
+    expect(rafSpy).not.toHaveBeenCalled();
+
+    rectSpy.mockRestore();
+    rafSpy.mockRestore();
   });
 
   it('Given PAUSE_ANIMATIONS=true, When data changes, Then no animation is applied', () => {

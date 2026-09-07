@@ -116,14 +116,21 @@ describe('quota polling retention', () => {
     const rangeSecs = 3_600;
     const upstreamId = 'upstream-alpha';
     const { result, unmount } = renderHook(
-      () =>
-        useSubscriptionQuotaSeries({
+      () => {
+        const query = useSubscriptionQuotaSeries({
           upstreamIds: upstreamId,
           windows: '5h',
           source: 'merged',
           rangeSecs,
           bucketSecs: 60,
-        }),
+        });
+        return {
+          data: query.data,
+          isError: query.isError,
+          isFetching: query.isFetching,
+          isPlaceholderData: query.isPlaceholderData,
+        };
+      },
       { wrapper },
     );
 
@@ -191,14 +198,20 @@ describe('quota polling retention', () => {
     const initialRangeSecs = 3_600;
     const expandedRangeSecs = 21_600;
     const { result, rerender, unmount } = renderHook(
-      ({ upstreamId, rangeSecs }) =>
-        useSubscriptionQuotaSeries({
+      ({ upstreamId, rangeSecs }) => {
+        const query = useSubscriptionQuotaSeries({
           upstreamIds: upstreamId,
           windows: '5h',
           source: 'merged',
           rangeSecs,
           bucketSecs: 60,
-        }),
+        });
+        return {
+          data: query.data,
+          isPending: query.isPending,
+          isPlaceholderData: query.isPlaceholderData,
+        };
+      },
       {
         initialProps: {
           upstreamId: 'upstream-alpha',

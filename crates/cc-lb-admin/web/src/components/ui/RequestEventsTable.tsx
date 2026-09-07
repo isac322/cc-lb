@@ -1,5 +1,5 @@
 import type React from 'react';
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { eventTime } from '../../lib/api';
 import { getRequestOutcome, requestOutcomeTone } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
@@ -60,6 +60,146 @@ interface RequestEventsTableProps {
   /** Focus the surrounding time range on a row, in seconds either side. */
   onAnchorRange?: (tsMs: number, radiusSecs: number) => void;
 }
+
+interface RequestEventRowProps {
+  event: RequestEventWithPhase;
+  eventKey: string;
+  principalName: string;
+  upstreamName: string;
+  showPrincipal: boolean;
+  showUpstream: boolean;
+  showSession: boolean;
+  showTokens: boolean;
+  showCost: boolean;
+  selected: boolean;
+  flash: boolean;
+  selectEvent: React.Dispatch<React.SetStateAction<string | null>>;
+  onAnchorRange?: (tsMs: number, radiusSecs: number) => void;
+}
+
+const RequestEventRow = memo(function RequestEventRow({
+  event,
+  eventKey,
+  principalName,
+  upstreamName,
+  showPrincipal,
+  showUpstream,
+  showSession,
+  showTokens,
+  showCost,
+  selected,
+  flash,
+  selectEvent,
+  onAnchorRange,
+}: RequestEventRowProps) {
+  const isPartial = event._phase === 'partial';
+  const outcome = getRequestOutcome(
+    isPartial,
+    event._phase === 'final' ? event.status : 0,
+    event._phase === 'final' ? event.error_code : undefined,
+    event._phase === 'final' ? event.upstream_error_type : undefined,
+  );
+  const tierBadge = serviceTierBadgeText(event.service_tier);
+  const requestKindBadge = requestKindBadgeText(event.request_kind);
+  const at = eventTime(event);
+
+  return (
+    <tr
+      className={cx(
+        'border-b border-row hover:bg-overlay-1 focus:bg-overlay-1 focus:outline-none cursor-pointer',
+        flash ? 'flash-in' : '',
+      )}
+      style={REQUEST_EVENT_ROW_STYLE}
+      onClick={() => selectEvent(eventKey)}
+      tabIndex={0}
+      onKeyDown={(keyboardEvent) => {
+        if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
+          keyboardEvent.preventDefault();
+          selectEvent(eventKey);
+        }
+      }}
+      aria-selected={selected}
+      aria-label={`View request ${eventKey}`}
+    >
+      <td className="group/ts relative px-3 py-2 text-text-faint whitespace-nowrap">
+        <span
+          className={cx(
+            'status-dot mr-2',
+            outcome.type === 'partial'
+              ? 'neutral animate-pulse'
+              : requestOutcomeTone(outcome),
+          )}
+        />
+        <RelativeTime compact ts={at} />
+        {onAnchorRange != null && at != null ? (
+          <span className="absolute inset-y-0 right-0 hidden items-center gap-0.5 bg-[color:var(--color-panel-strong)] pl-2 pr-1 group-hover/ts:flex group-focus-within/ts:flex">
+            {ANCHOR_RADII_SECS.map(([label, radius]) => (
+              <button
+                key={label}
+                type="button"
+                className="rounded-sm border border-subtle px-1 text-[10px] leading-4 hover:bg-[color:var(--color-hover-bg)]"
+                title={`Show ${label} around this request`}
+                onClick={(clickEvent) => {
+                  clickEvent.stopPropagation();
+                  onAnchorRange(at.getTime(), radius);
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </span>
+        ) : null}
+      </td>
+      {showPrincipal && (
+        <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">
+          {principalName}
+        </td>
+      )}
+      {showUpstream && (
+        <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
+          {upstreamName}
+        </td>
+      )}
+      {showSession && (
+        <td className="px-3 py-2 whitespace-nowrap">
+          <SessionChip sessionId={event.thread_id ?? null} />
+        </td>
+      )}
+      <td className="px-3 py-2 whitespace-nowrap">
+        {requestKindBadge != null ? (
+          <Badge tone="mono" className="shrink-0">
+            {requestKindBadge}
+          </Badge>
+        ) : (
+          <span className="text-text-faint">{DASH}</span>
+        )}
+      </td>
+      <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
+        <span className="flex items-center gap-2 min-w-0">
+          <span className="truncate">{event.model ?? DASH}</span>
+          {tierBadge != null && (
+            <Badge tone="neutral" className="shrink-0">
+              {tierBadge}
+            </Badge>
+          )}
+        </span>
+      </td>
+      <td
+        className={cx(
+          'px-3 py-2 text-right tabular-nums whitespace-nowrap',
+          outcome.type === 'partial'
+            ? 'text-text-faint'
+            : STATUS_TONE_TEXT[requestOutcomeTone(outcome)],
+        )}
+      >
+        <RequestOutcomeTableCell outcome={outcome} />
+      </td>
+      <LatencyCell event={event} isPartial={isPartial} />
+      {showTokens && <TokenCell event={event} isPartial={isPartial} />}
+      {showCost && <CostCell event={event} isPartial={isPartial} />}
+    </tr>
+  );
+});
 
 export function RequestEventsTable({
   events,
@@ -165,121 +305,35 @@ export function RequestEventsTable({
               />
             ))
           ) : events.length ? (
-            events.map((e) => {
-              const isPartial = e._phase === 'partial';
-              const key = e.event_id ?? e.request_id;
-              const outcome = getRequestOutcome(
-                isPartial,
-                e._phase === 'final' ? e.status : 0,
-                e._phase === 'final' ? e.error_code : undefined,
-                e._phase === 'final' ? e.upstream_error_type : undefined,
-              );
-              const tierBadge = serviceTierBadgeText(e.service_tier);
-              const requestKindBadge = requestKindBadgeText(e.request_kind);
+            events.map((event) => {
+              const eventKey = event.event_id ?? event.request_id;
               return (
-                <tr
-                  key={key}
-                  className={cx(
-                    'border-b border-row hover:bg-overlay-1 focus:bg-overlay-1 focus:outline-none cursor-pointer',
-                    liveFlashIds?.has(key) ? 'flash-in' : '',
-                  )}
-                  style={REQUEST_EVENT_ROW_STYLE}
-                  onClick={() => setSelectedId(key)}
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      setSelectedId(key);
-                    }
-                  }}
-                  aria-selected={selectedId === key}
-                  aria-label={`View request ${key}`}
-                >
-                  <td className="group/ts relative px-3 py-2 text-text-faint whitespace-nowrap">
-                    <span
-                      className={cx(
-                        'status-dot mr-2',
-                        outcome.type === 'partial'
-                          ? 'neutral animate-pulse'
-                          : requestOutcomeTone(outcome),
-                      )}
-                    />
-                    <RelativeTime compact ts={eventTime(e)} />
-                    {onAnchorRange != null && eventTime(e) != null ? (
-                      <span className="absolute inset-y-0 right-0 hidden items-center gap-0.5 bg-[color:var(--color-panel-strong)] pl-2 pr-1 group-hover/ts:flex group-focus-within/ts:flex">
-                        {ANCHOR_RADII_SECS.map(([label, radius]) => (
-                          <button
-                            key={label}
-                            type="button"
-                            className="rounded-sm border border-subtle px-1 text-[10px] leading-4 hover:bg-[color:var(--color-hover-bg)]"
-                            title={`Show ${label} around this request`}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              const at = eventTime(e);
-                              if (at != null)
-                                onAnchorRange(at.getTime(), radius);
-                            }}
-                          >
-                            {label}
-                          </button>
-                        ))}
-                      </span>
-                    ) : null}
-                  </td>
-                  {showPrincipal && (
-                    <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">
-                      {(e.principal_id &&
-                        principalNameMap.get(e.principal_id)) ??
-                        e.principal_id ??
-                        DASH}
-                    </td>
-                  )}
-                  {showUpstream && (
-                    <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
-                      {upstreamNameMap.get(e.upstream ?? '') ??
-                        e.upstream_name ??
-                        e.upstream ??
-                        DASH}
-                    </td>
-                  )}
-                  {showSession && (
-                    <td className="px-3 py-2 whitespace-nowrap">
-                      <SessionChip sessionId={e.thread_id ?? null} />
-                    </td>
-                  )}
-                  <td className="px-3 py-2 whitespace-nowrap">
-                    {requestKindBadge != null ? (
-                      <Badge tone="mono" className="shrink-0">
-                        {requestKindBadge}
-                      </Badge>
-                    ) : (
-                      <span className="text-text-faint">{DASH}</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
-                    <span className="flex items-center gap-2 min-w-0">
-                      <span className="truncate">{e.model ?? DASH}</span>
-                      {tierBadge != null && (
-                        <Badge tone="neutral" className="shrink-0">
-                          {tierBadge}
-                        </Badge>
-                      )}
-                    </span>
-                  </td>
-                  <td
-                    className={cx(
-                      'px-3 py-2 text-right tabular-nums whitespace-nowrap',
-                      outcome.type === 'partial'
-                        ? 'text-text-faint'
-                        : STATUS_TONE_TEXT[requestOutcomeTone(outcome)],
-                    )}
-                  >
-                    <RequestOutcomeTableCell outcome={outcome} />
-                  </td>
-                  <LatencyCell event={e} isPartial={isPartial} />
-                  {showTokens && <TokenCell event={e} isPartial={isPartial} />}
-                  {showCost && <CostCell event={e} isPartial={isPartial} />}
-                </tr>
+                <RequestEventRow
+                  key={eventKey}
+                  event={event}
+                  eventKey={eventKey}
+                  principalName={
+                    (event.principal_id &&
+                      principalNameMap.get(event.principal_id)) ??
+                    event.principal_id ??
+                    DASH
+                  }
+                  upstreamName={
+                    upstreamNameMap.get(event.upstream ?? '') ??
+                    event.upstream_name ??
+                    event.upstream ??
+                    DASH
+                  }
+                  showPrincipal={showPrincipal}
+                  showUpstream={showUpstream}
+                  showSession={showSession}
+                  showTokens={showTokens}
+                  showCost={showCost}
+                  selected={selectedId === eventKey}
+                  flash={liveFlashIds?.has(eventKey) ?? false}
+                  selectEvent={setSelectedId}
+                  onAnchorRange={onAnchorRange}
+                />
               );
             })
           ) : (
