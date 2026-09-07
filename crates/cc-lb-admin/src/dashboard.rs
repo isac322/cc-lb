@@ -41,6 +41,15 @@ pub enum UsageGroupBy {
     Upstream,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UsageProjection {
+    Full,
+    Totals,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParseUsageProjectionError;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardSummaryResponse {
     pub range: &'static str,
@@ -181,6 +190,16 @@ pub fn parse_group_by(value: &str) -> Result<UsageGroupBy, DashboardQueryError> 
     }
 }
 
+pub(crate) fn parse_usage_projection(
+    value: Option<&str>,
+) -> Result<UsageProjection, ParseUsageProjectionError> {
+    match value {
+        None | Some("full") => Ok(UsageProjection::Full),
+        Some("totals") => Ok(UsageProjection::Totals),
+        Some(_) => Err(ParseUsageProjectionError),
+    }
+}
+
 pub fn validate_step_for_range(
     range: DashboardRange,
     step: UsageRollupResolution,
@@ -253,6 +272,27 @@ pub async fn build_dashboard_usage(
     upstream_id: Option<Uuid>,
     now_unix_secs: u64,
 ) -> Result<DashboardUsageResponse, StorageError> {
+    build_dashboard_usage_with_projection(
+        storage,
+        range,
+        step,
+        group_by,
+        upstream_id,
+        now_unix_secs,
+        UsageProjection::Full,
+    )
+    .await
+}
+
+async fn build_dashboard_usage_with_projection(
+    storage: &dyn Storage,
+    range: DashboardRange,
+    step: UsageRollupResolution,
+    group_by: UsageGroupBy,
+    upstream_id: Option<Uuid>,
+    now_unix_secs: u64,
+    projection: UsageProjection,
+) -> Result<DashboardUsageResponse, StorageError> {
     let (window_start_unix_secs, window_end_unix_secs) =
         build_window_for_step(range, step, now_unix_secs);
     let rollups = storage
@@ -272,16 +312,20 @@ pub async fn build_dashboard_usage(
     );
     if group_by == UsageGroupBy::Principal && !series.is_empty() {
         let principal_keys = selected_principal_cost_keys(&series);
+        let bucket_width_secs = step_width_secs(step);
         let costs = storage
             .request_event_principal_costs(&RequestEventPrincipalCostQuery {
                 since_unix_secs: window_start_unix_secs,
                 until_unix_secs: window_end_unix_secs,
-                bucket_width_secs: step_width_secs(step),
+                bucket_width_secs,
                 upstream_id,
                 principal_keys,
             })
             .await?;
         enrich_principal_costs(&mut series, costs);
+    }
+    if projection == UsageProjection::Totals {
+        collapse_usage_series(&mut series, window_start_unix_secs);
     }
 
     Ok(DashboardUsageResponse {
@@ -308,6 +352,29 @@ pub async fn build_dashboard_usage_checked(
     build_dashboard_usage(storage, range, step, group_by, upstream_id, now_unix_secs)
         .await
         .map_err(Into::into)
+}
+
+pub(crate) async fn build_dashboard_usage_projected_checked(
+    storage: &dyn Storage,
+    range: DashboardRange,
+    step: UsageRollupResolution,
+    group_by: UsageGroupBy,
+    upstream_id: Option<Uuid>,
+    now_unix_secs: u64,
+    projection: UsageProjection,
+) -> Result<DashboardUsageResponse, DashboardBuildError> {
+    validate_step_for_range(range, step)?;
+    build_dashboard_usage_with_projection(
+        storage,
+        range,
+        step,
+        group_by,
+        upstream_id,
+        now_unix_secs,
+        projection,
+    )
+    .await
+    .map_err(Into::into)
 }
 
 #[derive(Debug)]
@@ -462,6 +529,10 @@ fn add_rollup_to_buckets(
         return;
     }
 
+    add_rollup_to_bucket(bucket, rollup);
+}
+
+fn add_rollup_to_bucket(bucket: &mut UsageBucket, rollup: &UsageRollup) {
     bucket.request_count += rollup.request_count;
     bucket.input_tokens += rollup.input_tokens;
     bucket.output_tokens += rollup.output_tokens;
@@ -636,6 +707,62 @@ pub(crate) fn build_usage_series(
         Some(truncated_count as u64)
     };
     (series, truncated_series_count)
+}
+
+fn collapse_usage_series(series: &mut [UsageSeries], window_start_unix_secs: u64) {
+    for item in series {
+        let mut total = empty_bucket(window_start_unix_secs);
+        for bucket in &item.buckets {
+            add_usage_bucket_to_bucket(&mut total, bucket);
+        }
+        item.buckets.clear();
+        item.buckets.push(total);
+    }
+}
+
+fn add_usage_bucket_to_bucket(total: &mut UsageBucket, bucket: &UsageBucket) {
+    total.request_count += bucket.request_count;
+    total.input_tokens += bucket.input_tokens;
+    total.output_tokens += bucket.output_tokens;
+    total.cache_creation_input_tokens += bucket.cache_creation_input_tokens;
+    total.cache_read_input_tokens += bucket.cache_read_input_tokens;
+    total.error_count += bucket.error_count;
+    total.virtual_cost_micros += bucket.virtual_cost_micros;
+    total.cost_input_micros = sum_optional(total.cost_input_micros, bucket.cost_input_micros);
+    total.cost_output_micros = sum_optional(total.cost_output_micros, bucket.cost_output_micros);
+    total.cost_cache_creation_5m_micros = sum_optional(
+        total.cost_cache_creation_5m_micros,
+        bucket.cost_cache_creation_5m_micros,
+    );
+    total.cost_cache_creation_1h_micros = sum_optional(
+        total.cost_cache_creation_1h_micros,
+        bucket.cost_cache_creation_1h_micros,
+    );
+    total.cost_cache_read_micros =
+        sum_optional(total.cost_cache_read_micros, bucket.cost_cache_read_micros);
+    total.latency_ms_sum += bucket.latency_ms_sum;
+    total.latency_count += bucket.latency_count;
+    total.latency_ms_min = min_option(total.latency_ms_min, bucket.latency_ms_min);
+    total.latency_ms_max = max_option(total.latency_ms_max, bucket.latency_ms_max);
+    total.proxy_setup_ms_sum += bucket.proxy_setup_ms_sum;
+    total.proxy_setup_ms_count += bucket.proxy_setup_ms_count;
+    total.shape_ms_sum += bucket.shape_ms_sum;
+    total.shape_ms_count += bucket.shape_ms_count;
+    total.sign_ms_sum += bucket.sign_ms_sum;
+    total.sign_ms_count += bucket.sign_ms_count;
+    total.upstream_ttfb_ms_sum += bucket.upstream_ttfb_ms_sum;
+    total.upstream_ttfb_ms_count += bucket.upstream_ttfb_ms_count;
+    total.upstream_body_ms_sum += bucket.upstream_body_ms_sum;
+    total.upstream_body_ms_count += bucket.upstream_body_ms_count;
+}
+
+fn sum_optional(current: Option<u64>, next: Option<u64>) -> Option<u64> {
+    match (current, next) {
+        (Some(current), Some(next)) => Some(current + next),
+        (Some(current), None) => Some(current),
+        (None, Some(next)) => Some(next),
+        (None, None) => None,
+    }
 }
 
 fn selected_principal_cost_keys(series: &[UsageSeries]) -> Vec<String> {

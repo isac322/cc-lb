@@ -6,7 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- PostgreSQL principal-cost aggregation now reads materialized cost columns from a covering index instead of decoding request payloads, while a compatibility trigger protects rolling deployments. Pool quota history batches all requested windows, and Overview opts into a compact chart projection without changing the endpoint's default response.
+- PostgreSQL principal-cost aggregation now reads materialized cost columns from a covering index instead of decoding request payloads, while a compatibility trigger protects rolling deployments.
+- Overview requests principal totals without dense time-series buckets and caps pooled-quota chart points while preserving bucket peaks and exact latest values. Pool-history defaults remain unchanged.
+- Warmup history and cache keepalive session lists now load only when their drawers open, eliminating hidden detail-page reads.
 
 ## [0.4.5] - 2026-08-24
 

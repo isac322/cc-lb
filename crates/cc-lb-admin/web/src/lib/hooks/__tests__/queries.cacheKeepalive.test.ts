@@ -81,6 +81,27 @@ describe('useCacheKeepaliveSummary', () => {
 });
 
 describe('useCacheKeepaliveSessions', () => {
+  test('does not fetch until its drawer is open', async () => {
+    const fetchMock = stubFetchOnce(cacheKeepaliveListResponseFixture);
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useCacheKeepaliveSessions(PRINCIPAL_ID, {}, enabled),
+      {
+        initialProps: { enabled: false },
+        wrapper: makeWrapper(makeClient()),
+      },
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.current.fetchStatus).toBe('idle');
+
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(urlFrom(fetchMock)).toBe(
+      `/admin/v1/principals/${PRINCIPAL_ID}/cache-keepalive`,
+    );
+  });
+
   test('fetches the session list and decodes every frozen fixture row', async () => {
     const fetchMock = stubFetchOnce(cacheKeepaliveListResponseFixture);
     const { result } = renderHook(

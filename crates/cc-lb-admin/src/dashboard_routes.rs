@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 use crate::AdminState;
 use crate::dashboard::{
-    DashboardBuildError, auto_step, build_dashboard_summary, build_dashboard_usage_checked,
-    parse_group_by, parse_range, parse_step,
+    DashboardBuildError, auto_step, build_dashboard_summary,
+    build_dashboard_usage_projected_checked, parse_group_by, parse_range, parse_step,
+    parse_usage_projection,
 };
 
 pub fn router() -> Router<AdminState> {
@@ -62,6 +63,8 @@ pub(crate) struct UsageQuery {
     step: Option<String>,
     #[serde(default)]
     upstream_id: Option<String>,
+    #[serde(default)]
+    projection: Option<String>,
 }
 
 pub(crate) async fn handle_dashboard_usage(
@@ -96,13 +99,18 @@ pub(crate) async fn handle_dashboard_usage(
         },
         None => None,
     };
-    match build_dashboard_usage_checked(
+    let projection = match parse_usage_projection(query.projection.as_deref()) {
+        Ok(projection) => projection,
+        Err(_) => return bad_request("invalid_projection"),
+    };
+    match build_dashboard_usage_projected_checked(
         storage.as_ref(),
         range,
         step,
         group_by,
         upstream_id,
         cc_lb_clock::unix_secs(state.clock.now()),
+        projection,
     )
     .await
     {

@@ -461,6 +461,7 @@ struct PoolHistoryQuery {
     since_unix_secs: Option<i64>,
     until_unix_secs: Option<i64>,
     series_projection: Option<String>,
+    max_points_per_series: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -523,19 +524,37 @@ async fn build_pool_history_response(
         .since_unix_secs
         .unwrap_or(now_unix_secs.saturating_sub(default_lookback_secs));
     let until_unix_secs = query.until_unix_secs.unwrap_or(now_unix_secs);
+    let bucket_secs = match query.max_points_per_series {
+        None => None,
+        Some(_) if !compact_series => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "pool history max_points_per_series requires series_projection=chart".to_owned(),
+            )
+                .into_response());
+        }
+        Some(value) if !(2..=10_000).contains(&value) => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "pool history max_points_per_series must be between 2 and 10000".to_owned(),
+            )
+                .into_response());
+        }
+        Some(value) => {
+            let divisor = i64::try_from(value - 1).expect("validated point limit fits i64");
+            let range_secs = until_unix_secs.saturating_sub(since_unix_secs);
+            Some(range_secs.saturating_add(divisor - 1) / divisor.max(1))
+        }
+    };
 
-    let latest_records =
-        PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries(storage, &windows)
-            .await
-            .map_err(storage_error)?;
-    let series_records = PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range(
-        storage,
-        &windows,
-        since_unix_secs,
-        until_unix_secs,
-    )
-    .await
-    .map_err(storage_error)?;
+    let latest_records = storage
+        .list_latest_pool_quota_snapshot_summaries(&windows)
+        .await
+        .map_err(storage_error)?;
+    let series_records = storage
+        .list_pool_quota_snapshot_summaries_in_range(&windows, since_unix_secs, until_unix_secs)
+        .await
+        .map_err(storage_error)?;
 
     let mut latest_by_window = latest_records
         .into_iter()
@@ -562,12 +581,16 @@ async fn build_pool_history_response(
                 window: window.as_str().to_owned(),
                 latest: latest_by_window.remove(&window),
                 series: if compact_series {
-                    PoolHistorySeries::Chart(
-                        series
-                            .iter()
-                            .map(pool_history_series_point_from_record)
-                            .collect(),
-                    )
+                    let points = series
+                        .iter()
+                        .map(pool_history_series_point_from_record)
+                        .collect();
+                    PoolHistorySeries::Chart(match bucket_secs {
+                        Some(bucket_secs) if bucket_secs > 0 => {
+                            bucket_pool_history_series_points(points, bucket_secs)
+                        }
+                        _ => points,
+                    })
                 } else {
                     PoolHistorySeries::Full(
                         series.iter().map(pool_history_point_from_record).collect(),
@@ -583,6 +606,31 @@ async fn build_pool_history_response(
     })
 }
 
+fn bucket_pool_history_series_points(
+    points: Vec<PoolHistorySeriesPoint>,
+    bucket_secs: i64,
+) -> Vec<PoolHistorySeriesPoint> {
+    let mut max_by_bucket = BTreeMap::<i64, Option<f64>>::new();
+    for point in points {
+        let bucket_start = point
+            .snapshot_at_unix_secs
+            .div_euclid(bucket_secs)
+            .saturating_mul(bucket_secs);
+        let utilization = max_by_bucket.entry(bucket_start).or_default();
+        if let Some(next) = point.utilization_percent {
+            *utilization = Some(utilization.map_or(next, |current| current.max(next)));
+        }
+    }
+    max_by_bucket
+        .into_iter()
+        .map(
+            |(snapshot_at_unix_secs, utilization_percent)| PoolHistorySeriesPoint {
+                snapshot_at_unix_secs,
+                utilization_percent,
+            },
+        )
+        .collect()
+}
 fn parse_pool_history_windows(raw: Option<&str>) -> Result<Vec<SubscriptionQuotaWindow>, Response> {
     let default_windows = vec![
         SubscriptionQuotaWindow::FiveHour,

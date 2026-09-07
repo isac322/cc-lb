@@ -253,8 +253,21 @@ export const qk = {
   health: ['health'] as const,
   status: ['status'] as const,
   summary: (range: string) => ['summary', range] as const,
-  usage: (range: string, step: string, group: string, upstreamId?: string) =>
-    ['usage', range, step, group, upstreamId ?? null] as const,
+  usage: (
+    range: string,
+    step: string,
+    group: string,
+    upstreamId?: string,
+    projection?: 'full' | 'totals',
+  ) =>
+    [
+      'usage',
+      range,
+      step,
+      group,
+      upstreamId ?? null,
+      projection ?? 'full',
+    ] as const,
   upstreams: ['upstreams'] as const,
   upstream: (id: string) => ['upstream', id] as const,
   principals: ['principals'] as const,
@@ -344,10 +357,11 @@ export function useUsage(
   step: string,
   group: 'none' | 'model' | 'principal' | 'upstream',
   upstreamId?: string,
+  projection?: 'full' | 'totals',
 ) {
   return usePolledData(
     {
-      queryKey: qk.usage(range, step, group, upstreamId),
+      queryKey: qk.usage(range, step, group, upstreamId, projection),
       queryFn: () => {
         const params = new URLSearchParams({
           range,
@@ -355,6 +369,7 @@ export function useUsage(
           group_by: group,
         });
         if (upstreamId) params.set('upstream_id', upstreamId);
+        if (projection) params.set('projection', projection);
         return getJson<DashboardUsageResponse>(
           `/admin/usage?${params.toString()}`,
         );
@@ -866,6 +881,7 @@ export function useSubscriptionQuotaPoolHistory(params: {
   windows?: string;
   sinceUnixSecs?: number;
   untilUnixSecs?: number;
+  maxPointsPerSeries?: number;
 }) {
   const searchParams = new URLSearchParams();
   searchParams.set('series_projection', 'chart');
@@ -874,6 +890,11 @@ export function useSubscriptionQuotaPoolHistory(params: {
     searchParams.set('since_unix_secs', String(params.sinceUnixSecs));
   if (params.untilUnixSecs !== undefined)
     searchParams.set('until_unix_secs', String(params.untilUnixSecs));
+  if (params.maxPointsPerSeries !== undefined)
+    searchParams.set(
+      'max_points_per_series',
+      String(params.maxPointsPerSeries),
+    );
 
   return usePolledData(
     {
@@ -1667,10 +1688,11 @@ export function useWarmupSummary(upstreamId: string) {
 export function useWarmupAttempts(
   upstreamId: string,
   filters: { status?: WarmupAttemptStatus | null; limit?: number } = {},
+  enabled = true,
 ) {
   return useInfiniteQuery({
     queryKey: warmupKeys.attempts(upstreamId, filters),
-    enabled: Boolean(upstreamId),
+    enabled: enabled && Boolean(upstreamId),
     initialPageParam: undefined as string | undefined,
     queryFn: async ({ pageParam }) => {
       const params = new URLSearchParams();
@@ -1692,20 +1714,22 @@ export function useWarmupAttempts(
 export function useCacheKeepaliveSessions(
   principalId: string,
   filters: CacheKeepaliveSessionsFilters = {},
+  enabled = true,
 ) {
   const visibility = useVisibility();
   const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
 
   return useInfiniteQuery({
     queryKey: qk.cacheKeepaliveSessions(principalId, filters),
-    enabled: Boolean(principalId),
+    enabled: enabled && Boolean(principalId),
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       getCacheKeepaliveSessions(principalId, { ...filters, cursor: pageParam }),
     getNextPageParam: (last) => last.next_cursor ?? undefined,
-    refetchInterval: isHidden
-      ? false
-      : POLLING_INTERVALS.CACHE_KEEPALIVE_SESSIONS_MS,
+    refetchInterval:
+      enabled && !isHidden
+        ? POLLING_INTERVALS.CACHE_KEEPALIVE_SESSIONS_MS
+        : false,
   });
 }
 

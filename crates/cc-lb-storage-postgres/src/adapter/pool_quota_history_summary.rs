@@ -56,7 +56,7 @@ pub(super) async fn list_range(
            FROM pool_subscription_quota_history_v1
           WHERE "quota_window" = ANY($1)
             AND snapshot_at_unix_secs BETWEEN $2 AND $3
-       ORDER BY "quota_window", snapshot_at_unix_secs ASC"#,
+       ORDER BY "quota_window" DESC, snapshot_at_unix_secs ASC"#,
     )
     .bind(&windows)
     .bind(since_unix_secs)

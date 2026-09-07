@@ -72,8 +72,8 @@ import {
   type PoolQuotaChartRow,
   type PoolQuotaLatest,
   type PoolQuotaWindow,
-  poolQuotaChartLatest,
   poolQuotaChartMax,
+  poolQuotaResponseLatest,
 } from './-overviewPoolQuota';
 export const Route = createFileRoute('/')({
   component: OverviewPage,
@@ -87,6 +87,7 @@ const stepFor = (r: Range): 'hour' | 'minute' =>
 
 const POOL_QUOTA_QUERY_WINDOWS = POOL_QUOTA_WINDOWS.join(',');
 const POOL_HISTORY_WINDOW_QUANTUM_SECS = 1800;
+const POOL_HISTORY_MAX_POINTS_PER_SERIES = 1000;
 
 function fmtMs(n: number | undefined | null): string {
   if (n == null) return '—';
@@ -1336,7 +1337,13 @@ function OverviewPage() {
   };
 
   const summary = useSummary(range);
-  const principalUsage = useUsage(range, stepFor(range), 'principal');
+  const principalUsage = useUsage(
+    range,
+    stepFor(range),
+    'principal',
+    undefined,
+    'totals',
+  );
   const events = useRecentEventsInfinite({});
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
@@ -1375,6 +1382,7 @@ function OverviewPage() {
     windows: POOL_QUOTA_QUERY_WINDOWS,
     sinceUnixSecs: poolHistorySinceUnixSecs,
     untilUnixSecs: poolHistoryUntilUnixSecs,
+    maxPointsPerSeries: POOL_HISTORY_MAX_POINTS_PER_SERIES,
   });
   const showFable = POOL_QUOTA_WINDOWS.includes('7d_fable');
   const quotaLoading =
@@ -1526,8 +1534,13 @@ function OverviewPage() {
   );
 
   const chartLatest = useMemo(
-    () => poolQuotaChartLatest(visibleChartData, showFable),
-    [visibleChartData, showFable],
+    () =>
+      poolQuotaResponseLatest(
+        quotaPoolHistory.data?.windows,
+        visibleChartData,
+        showFable,
+      ),
+    [quotaPoolHistory.data, visibleChartData, showFable],
   );
 
   // Principals Data

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook } from '@testing-library/react';
+import { renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
@@ -7,6 +7,7 @@ import {
   useClearUpstreamWarmupDialectPlugin,
   useFireNowUpstreamWarmup,
   useUpdateUpstreamWarmupSettings,
+  useWarmupAttempts,
 } from '../../queries';
 import {
   makeFireNowError,
@@ -74,6 +75,28 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('useWarmupAttempts', () => {
+  test('does not fetch until its drawer is open', async () => {
+    const fetchMock = stubFetchOnce({ attempts: [], next_cursor: null });
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useWarmupAttempts(UPSTREAM_ID, { limit: 50 }, enabled),
+      {
+        initialProps: { enabled: false },
+        wrapper: makeWrapper(makeClient()),
+      },
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.current.fetchStatus).toBe('idle');
+
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requestFrom(fetchMock).url).toBe(
+      `/admin/v1/upstreams/${UPSTREAM_ID}/warmup/attempts?limit=50`,
+    );
+  });
+});
 describe('useFireNowUpstreamWarmup', () => {
   test('sends a no-body POST without If-Match', async () => {
     const fetchMock = stubFetchOnce(makeFireNowSuccess());

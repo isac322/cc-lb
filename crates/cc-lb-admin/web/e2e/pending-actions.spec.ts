@@ -118,6 +118,7 @@ async function installPrincipalFixtures(page: Page) {
   const unexpectedRequests: string[] = [];
   let issuePostCount = 0;
   let keyListGetCount = 0;
+  let keepaliveSessionGetCount = 0;
 
   await page.route('**/admin/**', async (route) => {
     const request = route.request();
@@ -159,6 +160,9 @@ async function installPrincipalFixtures(page: Page) {
       method === 'GET' &&
       /^\/admin\/v1\/principals\/[^/]+\/cache-keepalive$/.test(pathname)
     ) {
+      if (url.searchParams.get('limit') !== '0') {
+        keepaliveSessionGetCount += 1;
+      }
       return json(200, {
         summary: {
           renewing_now: 0,
@@ -206,6 +210,7 @@ async function installPrincipalFixtures(page: Page) {
     issueBodies,
     issuePostCount: () => issuePostCount,
     keyListGetCount: () => keyListGetCount,
+    keepaliveSessionGetCount: () => keepaliveSessionGetCount,
     releaseIssue: () => responseGate.resolve(undefined),
     requestStarted: requestStarted.promise,
     unexpectedRequests,
@@ -288,7 +293,23 @@ async function installCredentialFixtures(page: Page) {
   };
 }
 
+
 test.describe('pending admin actions', () => {
+  test('cache keepalive sessions load only after opening the drawer', async ({
+    page,
+  }) => {
+    const fixtures = await installPrincipalFixtures(page);
+    await page.goto('/principals');
+    await page
+      .locator('aside button', { hasText: 'pending-actions-fixture' })
+      .click();
+
+    expect(fixtures.keepaliveSessionGetCount()).toBe(0);
+    await page.getByRole('button', { name: 'Sessions' }).click();
+    await expect(page.getByTestId('cache-keepalive-sessions-drawer')).toBeVisible();
+    await expect.poll(() => fixtures.keepaliveSessionGetCount()).toBe(1);
+    expect(fixtures.unexpectedRequests).toEqual([]);
+  });
   test('API key issuance submits once, locks dismissal, preserves plaintext, and refreshes the key list', async ({
     page,
   }) => {
