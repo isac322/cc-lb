@@ -59,12 +59,15 @@ fn provider_lots_from_checkpoints(
         };
         checkpoints.sort_by(compare_checkpoints);
         lots.extend(lots_for_group(
-            upstream_id,
-            window,
-            window_secs,
-            query.source_merge,
-            query.until_unix_millis,
-            query.evaluation_unix_secs,
+            GroupContext {
+                upstream_id,
+                window,
+                window_secs,
+                source_merge: query.source_merge,
+                since_unix_millis: query.since_unix_millis,
+                until_unix_millis: query.until_unix_millis,
+                evaluation_unix_secs: query.evaluation_unix_secs,
+            },
             &checkpoints,
         ));
     }
@@ -84,23 +87,50 @@ struct Cycle {
     last: Observation,
 }
 
-fn lots_for_group(
+#[derive(Clone, Copy)]
+struct GroupContext {
     upstream_id: Uuid,
     window: SubscriptionQuotaWindow,
     window_secs: u64,
     source_merge: SubscriptionQuotaSourceMerge,
+    since_unix_millis: u64,
     until_unix_millis: u64,
     evaluation_unix_secs: u64,
+}
+
+fn lots_for_group(
+    context: GroupContext,
     checkpoints: &[SubscriptionQuotaSlimCheckpoint],
 ) -> Vec<SubscriptionQuotaProviderLot> {
-    let Some(first) = checkpoints.first() else {
+    if checkpoints.is_empty() {
         return Vec::new();
-    };
+    }
     let mut latest_by_source: [Option<&SubscriptionQuotaSlimCheckpoint>; 2] = [None, None];
     let mut index = 0usize;
-    let mut bucket_start = quota_bucket_start(first.changed_at_unix_millis);
-    let end_bucket = quota_bucket_start(until_unix_millis);
-    let mut cycle: Option<Cycle> = None;
+    let mut bucket_start = quota_bucket_start(context.since_unix_millis);
+    while let Some(checkpoint) = checkpoints.get(index)
+        && quota_bucket_start(checkpoint.changed_at_unix_millis) < bucket_start
+    {
+        latest_by_source[source_index(checkpoint.source)] = Some(checkpoint);
+        index += 1;
+    }
+    let end_bucket = quota_bucket_start(context.until_unix_millis);
+    let mut cycle = latest_by_source
+        .iter()
+        .flatten()
+        .copied()
+        .max_by(|left, right| compare_checkpoints(left, right))
+        .and_then(|checkpoint| {
+            checkpoint.utilization.map(|utilization| Cycle {
+                first_observed_at_unix_millis: checkpoint.changed_at_unix_millis,
+                last: Observation {
+                    bucket_start_unix_secs: bucket_start.saturating_sub(PROVIDER_LOT_BUCKET_SECS),
+                    observed_at_unix_millis: checkpoint.changed_at_unix_millis,
+                    utilization,
+                    resets_at_unix_secs: checkpoint.resets_at_unix_secs,
+                },
+            })
+        });
     let mut lots = Vec::new();
 
     while bucket_start <= end_bucket {
@@ -127,10 +157,7 @@ fn lots_for_group(
             match cycle.as_mut() {
                 Some(current) if starts_new_cycle(current.last, observation) => {
                     lots.push(lot_from_cycle(
-                        upstream_id,
-                        window,
-                        window_secs,
-                        source_merge,
+                        context,
                         current,
                         current.last.bucket_start_unix_secs,
                     ));
@@ -155,33 +182,27 @@ fn lots_for_group(
     }
     if let Some(cycle) = cycle {
         lots.push(lot_from_cycle(
-            upstream_id,
-            window,
-            window_secs,
-            source_merge,
+            context,
             &cycle,
-            evaluation_unix_secs,
+            context.evaluation_unix_secs,
         ));
     }
     lots
 }
 
 fn lot_from_cycle(
-    upstream_id: Uuid,
-    window: SubscriptionQuotaWindow,
-    window_secs: u64,
-    source: SubscriptionQuotaSourceMerge,
+    context: GroupContext,
     cycle: &Cycle,
     evaluation_unix_secs: u64,
 ) -> SubscriptionQuotaProviderLot {
     SubscriptionQuotaProviderLot {
-        upstream_id,
-        window,
-        source,
+        upstream_id: context.upstream_id,
+        window: context.window,
+        source: context.source_merge,
         provider_start_unix_secs: cycle
             .last
             .resets_at_unix_secs
-            .map(|reset| reset.saturating_sub(window_secs))
+            .map(|reset| reset.saturating_sub(context.window_secs))
             .or(Some(cycle.first_observed_at_unix_millis / 1_000)),
         provider_reset_unix_secs: cycle.last.resets_at_unix_secs,
         observed_at_unix_millis: cycle.last.observed_at_unix_millis,

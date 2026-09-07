@@ -220,6 +220,162 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('/upstreams quota request cadence', () => {
+  test('aligns analysis ranges at the 120-second boundary', () => {
+    const boundaryUnixSecs =
+      new Date('2026-06-18T00:02:00.000Z').getTime() / 1000;
+    const rangeSecs = 3600;
+
+    const justBefore = queries.alignSubscriptionQuotaAnalysisKeyRange(
+      boundaryUnixSecs - 1 - rangeSecs,
+      boundaryUnixSecs - 1,
+    );
+    const atBoundary = queries.alignSubscriptionQuotaAnalysisKeyRange(
+      boundaryUnixSecs - rangeSecs,
+      boundaryUnixSecs,
+    );
+    const justBeforeNextBoundary =
+      queries.alignSubscriptionQuotaAnalysisKeyRange(
+        boundaryUnixSecs + 119 - rangeSecs,
+        boundaryUnixSecs + 119,
+      );
+
+    expect(justBefore).toEqual({
+      sinceUnixSecs: boundaryUnixSecs - 120 - rangeSecs,
+      untilUnixSecs: boundaryUnixSecs - 120,
+    });
+    expect(atBoundary).toEqual({
+      sinceUnixSecs: boundaryUnixSecs - rangeSecs,
+      untilUnixSecs: boundaryUnixSecs,
+    });
+    expect(justBeforeNextBoundary).toEqual(atBoundary);
+  });
+
+  test('keeps the analysis key stable across a 60-second tick while requests follow the visible domain', () => {
+    vi.setSystemTime(new Date('2026-06-18T00:00:01.000Z'));
+    renderRoute();
+
+    const firstSeriesParams = vi
+      .mocked(queries.useSubscriptionQuotaSeries)
+      .mock.calls.at(-1)?.[0];
+    const firstAnalysisParams = vi
+      .mocked(queries.useSubscriptionQuotaAnalysis)
+      .mock.calls.at(-1)?.[0];
+
+    cleanup();
+    vi.clearAllMocks();
+    vi.setSystemTime(new Date('2026-06-18T00:01:01.000Z'));
+    renderRoute();
+
+    const secondSeriesParams = vi
+      .mocked(queries.useSubscriptionQuotaSeries)
+      .mock.calls.at(-1)?.[0];
+    const secondAnalysisParams = vi
+      .mocked(queries.useSubscriptionQuotaAnalysis)
+      .mock.calls.at(-1)?.[0];
+
+    if (
+      !firstSeriesParams ||
+      !firstAnalysisParams ||
+      !secondSeriesParams ||
+      !secondAnalysisParams
+    ) {
+      throw new Error('quota hooks were not called');
+    }
+
+    expect(secondAnalysisParams.untilUnixSecs).toBe(
+      firstAnalysisParams.untilUnixSecs + 60,
+    );
+    expect(secondAnalysisParams.sinceUnixSecs).toBe(
+      firstAnalysisParams.sinceUnixSecs + 60,
+    );
+    expect(secondAnalysisParams).toMatchObject({
+      sinceUnixSecs: secondSeriesParams.sinceUnixSecs,
+      untilUnixSecs: secondSeriesParams.untilUnixSecs,
+    });
+    expect(secondSeriesParams.untilUnixSecs).toBe(
+      firstSeriesParams.untilUnixSecs + 60,
+    );
+    expect(secondSeriesParams.sinceUnixSecs).toBe(
+      firstSeriesParams.sinceUnixSecs + 60,
+    );
+
+    const firstRequest =
+      queries.buildSubscriptionQuotaAnalysisRequest(firstAnalysisParams);
+    const secondRequest =
+      queries.buildSubscriptionQuotaAnalysisRequest(secondAnalysisParams);
+    expect(secondRequest.queryKey).toEqual(firstRequest.queryKey);
+    expect(secondRequest.path).not.toBe(firstRequest.path);
+    expect(secondRequest.path).toContain(
+      `since_unix_secs=${secondAnalysisParams.sinceUnixSecs}`,
+    );
+    expect(secondRequest.path).toContain(
+      `until_unix_secs=${secondAnalysisParams.untilUnixSecs}`,
+    );
+  });
+
+  test('uses the latest exact range when the 120-second analysis quantum advances', () => {
+    const firstUntilUnixSecs =
+      new Date('2026-06-18T00:00:01.000Z').getTime() / 1000;
+    const rangeSecs = 604800;
+    const firstParams = {
+      sinceUnixSecs: firstUntilUnixSecs - rangeSecs,
+      untilUnixSecs: firstUntilUnixSecs,
+    };
+    const secondParams = {
+      sinceUnixSecs: firstParams.sinceUnixSecs + 120,
+      untilUnixSecs: firstParams.untilUnixSecs + 120,
+    };
+
+    const firstRequest =
+      queries.buildSubscriptionQuotaAnalysisRequest(firstParams);
+    const secondRequest =
+      queries.buildSubscriptionQuotaAnalysisRequest(secondParams);
+
+    expect(secondRequest.queryKey).not.toEqual(firstRequest.queryKey);
+    expect(secondRequest.path).toContain(
+      `since_unix_secs=${secondParams.sinceUnixSecs}`,
+    );
+    expect(secondRequest.path).toContain(
+      `until_unix_secs=${secondParams.untilUnixSecs}`,
+    );
+  });
+
+  test('keeps exact request bounds when the visible range changes', () => {
+    renderRoute();
+
+    fireEvent.click(screen.getByRole('button', { name: '1h' }));
+
+    const seriesParams = vi
+      .mocked(queries.useSubscriptionQuotaSeries)
+      .mock.calls.at(-1)?.[0];
+    const analysisParams = vi
+      .mocked(queries.useSubscriptionQuotaAnalysis)
+      .mock.calls.at(-1)?.[0];
+
+    if (!seriesParams || !analysisParams) {
+      throw new Error('quota hooks were not called');
+    }
+    expect(analysisParams).toMatchObject({
+      sinceUnixSecs: seriesParams.sinceUnixSecs,
+      untilUnixSecs: seriesParams.untilUnixSecs,
+    });
+    expect(analysisParams.untilUnixSecs - analysisParams.sinceUnixSecs).toBe(
+      3600,
+    );
+
+    const request =
+      queries.buildSubscriptionQuotaAnalysisRequest(analysisParams);
+    const keyParams = request.queryKey[2];
+    const alignedUntilUnixSecs =
+      Math.floor(analysisParams.untilUnixSecs / 120) * 120;
+    expect(keyParams).toMatchObject({
+      sinceUnixSecs: alignedUntilUnixSecs - 3600,
+      untilUnixSecs: alignedUntilUnixSecs,
+    });
+  });
+});
+
 describe('/upstreams cold-load geometry', () => {
   test('renders a structured detail shell before desktop auto-selection', () => {
     searchState = {};
