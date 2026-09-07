@@ -450,6 +450,97 @@ fn analyze_v3_prompt_cache_optimized_scoped(
     (analysis, stats)
 }
 
+#[cfg(test)]
+struct AnalysisTestGate {
+    release_state: Arc<AnalysisTestGateReleaseState>,
+    started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    runtime_worker: std::thread::ThreadId,
+}
+
+#[cfg(test)]
+struct AnalysisTestGateReleaseState {
+    released: Mutex<bool>,
+    release_changed: Condvar,
+}
+
+#[cfg(test)]
+impl AnalysisTestGate {
+    fn new(
+        runtime_worker: std::thread::ThreadId,
+    ) -> (
+        Arc<Self>,
+        tokio::sync::oneshot::Receiver<()>,
+        AnalysisTestGateRelease,
+    ) {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let release_state = Arc::new(AnalysisTestGateReleaseState {
+            released: Mutex::new(false),
+            release_changed: Condvar::new(),
+        });
+        let gate = Arc::new(Self {
+            release_state: Arc::clone(&release_state),
+            started: Mutex::new(Some(started_tx)),
+            runtime_worker,
+        });
+        let release = AnalysisTestGateRelease {
+            release_state: Some(release_state),
+        };
+        (gate, started_rx, release)
+    }
+
+    fn wait_for_release(&self) {
+        let mut released = self.release_state.released.lock();
+        let started = self
+            .started
+            .lock()
+            .take()
+            .expect("analysis test gate may only be entered once");
+        let _ = started.send(());
+        assert_ne!(
+            std::thread::current().id(),
+            self.runtime_worker,
+            "blocking analysis body ran on the Tokio runtime worker instead of spawn_blocking"
+        );
+        while !*released {
+            self.release_state.release_changed.wait(&mut released);
+        }
+    }
+}
+
+#[cfg(test)]
+struct AnalysisTestGateRelease {
+    release_state: Option<Arc<AnalysisTestGateReleaseState>>,
+}
+
+#[cfg(test)]
+impl AnalysisTestGateRelease {
+    fn release(mut self) {
+        self.release_inner();
+    }
+
+    fn release_inner(&mut self) {
+        let Some(release_state) = self.release_state.take() else {
+            return;
+        };
+        let mut released = release_state.released.lock();
+        *released = true;
+        drop(released);
+        release_state.release_changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl Drop for AnalysisTestGateRelease {
+    fn drop(&mut self) {
+        self.release_inner();
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static PROMPT_CACHE_ANALYSIS_TEST_GATE: Arc<AnalysisTestGate>;
+}
+
 #[derive(Clone)]
 pub(crate) struct PromptCacheAnalysisExecutor {
     semaphore: Arc<Semaphore>,
@@ -496,6 +587,8 @@ impl PromptCacheAnalysisExecutor {
         let fallback_model = canonical_model.clone();
         #[cfg(test)]
         let test_delay = self.test_delay;
+        #[cfg(test)]
+        let test_gate = PROMPT_CACHE_ANALYSIS_TEST_GATE.try_with(Arc::clone).ok();
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let inflight = metrics::gauge!("cc_lb_prompt_cache_tokenizer_inflight");
@@ -507,6 +600,10 @@ impl PromptCacheAnalysisExecutor {
                 }
             }
             let _inflight = InflightGuard(inflight);
+            #[cfg(test)]
+            if let Some(test_gate) = test_gate {
+                test_gate.wait_for_release();
+            }
             #[cfg(test)]
             if !test_delay.is_zero() {
                 std::thread::sleep(test_delay);
@@ -915,35 +1012,50 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // One worker makes its thread ID authoritative and runtime progress causally meaningful.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn executor_keeps_async_runtime_progressing() {
         let executor = PromptCacheAnalysisExecutor {
             semaphore: Arc::new(Semaphore::new(1)),
             cache: Arc::new(PromptTokenCountCache::new(32)),
-            test_delay: Duration::from_millis(100),
+            ..PromptCacheAnalysisExecutor::default()
         };
+        let runtime_worker = tokio::spawn(async { std::thread::current().id() })
+            .await
+            .expect("runtime worker task");
+        let (analysis_gate, analysis_started, release_analysis) =
+            AnalysisTestGate::new(runtime_worker);
         let request = Arc::new(four_breakpoint_request("runtime-progress"));
         let analysis_task = {
             let executor = executor.clone();
-            tokio::spawn(async move { executor.analyze(request, MODEL.to_owned(), [1; 32]).await })
+            tokio::spawn(
+                PROMPT_CACHE_ANALYSIS_TEST_GATE.scope(analysis_gate, async move {
+                    executor.analyze(request, MODEL.to_owned(), [1; 32]).await
+                }),
+            )
         };
-        let heartbeat = tokio::time::timeout(Duration::from_millis(50), async {
-            for _ in 0..5 {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-        })
-        .await;
-        assert!(
-            heartbeat.is_ok(),
-            "Tokio heartbeat must run while analysis is active"
-        );
+
+        analysis_started
+            .await
+            .expect("spawn-blocking analysis closure started");
+        let (runtime_progress_tx, runtime_progress_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = runtime_progress_tx.send(());
+        });
+        runtime_progress_rx
+            .await
+            .expect("Tokio task progressed while blocking analysis was gated");
         assert!(
             !analysis_task.is_finished(),
-            "test delay must keep the blocking analysis active during heartbeat"
+            "blocking analysis completed before the test released its gate"
         );
+
+        release_analysis.release();
         let analysis = analysis_task.await.expect("analysis task");
         assert_eq!(analysis.breakpoints.len(), 4);
     }
+
     #[test]
     fn request_without_breakpoints_performs_no_tokenization() {
         let request = json!({
