@@ -1,6 +1,6 @@
 [package]
 name = "cc-lb-pdk-wasmtime-macros"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
