@@ -33,6 +33,7 @@ export function ApiUsageCard({
   onMetricChange,
 }: Props) {
   const chartId = useId();
+  const showLoading = data === undefined && isLoading;
 
   const chartData = useMemo(() => {
     if (!data?.series || data.series.length === 0) return [];
@@ -137,7 +138,7 @@ export function ApiUsageCard({
       <CardBody>
         <div className="flex flex-col gap-4">
           <div className="h-64 w-full">
-            {isLoading ? (
+            {showLoading ? (
               <Skeleton className="h-full w-full" />
             ) : chartData.length === 0 ? (
               <div className="flex h-full items-center justify-center text-sm text-zinc-500">
@@ -236,7 +237,7 @@ export function ApiUsageCard({
             data-testid="api-usage-legend-slot"
             className="flex flex-wrap items-center gap-4 text-sm min-h-[28px]"
           >
-            {!isLoading && chartData.length > 0
+            {!showLoading && chartData.length > 0
               ? models.map((model) => {
                   const color = getWindowColor(model).fill;
                   const lastBucket = chartData[chartData.length - 1];

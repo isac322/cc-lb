@@ -82,8 +82,22 @@ export const Route = createFileRoute('/')({
 const RANGES = ['1h', '6h', '24h', '7d'] as const;
 type Range = (typeof RANGES)[number];
 
+const RANGE_SECONDS: Record<Range, number> = {
+  '1h': 3600,
+  '6h': 21600,
+  '24h': 86400,
+  '7d': 604800,
+};
+
 const stepFor = (r: Range): 'hour' | 'minute' =>
   r === '7d' || r === '24h' ? 'hour' : 'minute';
+
+function rangeLabelForSecs(rangeSecs: number): string {
+  return (
+    RANGES.find((candidate) => RANGE_SECONDS[candidate] === rangeSecs) ??
+    `${rangeSecs}s`
+  );
+}
 
 const POOL_QUOTA_QUERY_WINDOWS = POOL_QUOTA_WINDOWS.join(',');
 const POOL_HISTORY_WINDOW_QUANTUM_SECS = 1800;
@@ -957,7 +971,7 @@ function PoolQuotaCard({
     maxValue: number;
     rangeStartUnix: number;
     rangeEndUnix: number;
-    range: Range;
+    range: string;
     latest: PoolQuotaLatest;
     showFable: boolean;
   };
@@ -1348,48 +1362,22 @@ function OverviewPage() {
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
 
-  const [nowUnixSecs, setNowUnixSecs] = useState(() =>
-    Math.floor(Date.now() / 1000),
-  );
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setNowUnixSecs(Math.floor(Date.now() / 1000));
-    }, 60_000);
-    return () => clearInterval(interval);
-  }, []);
-
   const quotaAggregate = useSubscriptionQuotaAggregate({
     windows: POOL_QUOTA_QUERY_WINDOWS,
     source: 'merged',
   });
 
-  const seriesRangeSecs =
-    range === '1h'
-      ? 3600
-      : range === '6h'
-        ? 21600
-        : range === '24h'
-          ? 86400
-          : 604800;
-  const poolHistoryUntilUnixSecs =
-    Math.ceil(nowUnixSecs / POOL_HISTORY_WINDOW_QUANTUM_SECS) *
-    POOL_HISTORY_WINDOW_QUANTUM_SECS;
-  const poolHistorySinceUnixSecs =
-    poolHistoryUntilUnixSecs -
-    seriesRangeSecs -
-    POOL_HISTORY_WINDOW_QUANTUM_SECS;
+  const seriesRangeSecs = RANGE_SECONDS[range];
   const quotaPoolHistory = useSubscriptionQuotaPoolHistory({
     windows: POOL_QUOTA_QUERY_WINDOWS,
-    sinceUnixSecs: poolHistorySinceUnixSecs,
-    untilUnixSecs: poolHistoryUntilUnixSecs,
+    rangeSecs: seriesRangeSecs,
+    windowQuantumSecs: POOL_HISTORY_WINDOW_QUANTUM_SECS,
     maxPointsPerSeries: POOL_HISTORY_MAX_POINTS_PER_SERIES,
   });
   const showFable = POOL_QUOTA_WINDOWS.includes('7d_fable');
   const quotaLoading =
-    quotaAggregate.isPending ||
-    quotaAggregate.isPlaceholderData ||
-    quotaPoolHistory.isPending ||
-    quotaPoolHistory.isPlaceholderData;
+    (quotaAggregate.data === undefined && quotaAggregate.isPending) ||
+    (quotaPoolHistory.data === undefined && quotaPoolHistory.isPending);
 
   const live = useLiveEventStream({});
   const streamStatus = live.status;
@@ -1514,7 +1502,16 @@ function OverviewPage() {
     if (kpiBucketCount === 0) setActiveKpiIndex(null);
   }, [kpiBucketCount]);
 
-  // Chart Data
+  // Anchor the visible window and its label to the last successful response.
+  // A range control may move immediately, but placeholder data keeps its own
+  // plot context until the replacement response lands.
+  const poolHistoryNowUnixSecs =
+    quotaPoolHistory.data?.now_unix_secs ?? Math.floor(Date.now() / 1000);
+  const displayedPoolHistoryRangeSecs =
+    quotaPoolHistory.data?.range_secs ?? seriesRangeSecs;
+  const displayedPoolHistoryRange = rangeLabelForSecs(
+    displayedPoolHistoryRangeSecs,
+  );
   const chartData = useMemo(
     () => buildPoolQuotaChartData(quotaPoolHistory.data?.windows, showFable),
     [quotaPoolHistory.data, showFable],
@@ -1523,9 +1520,10 @@ function OverviewPage() {
     () =>
       chartData.filter(
         (row) =>
-          row.unix >= nowUnixSecs - seriesRangeSecs && row.unix <= nowUnixSecs,
+          row.unix >= poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs &&
+          row.unix <= poolHistoryNowUnixSecs,
       ),
-    [chartData, nowUnixSecs, seriesRangeSecs],
+    [chartData, poolHistoryNowUnixSecs, displayedPoolHistoryRangeSecs],
   );
 
   const chartMaxValue = useMemo(
@@ -1719,9 +1717,10 @@ function OverviewPage() {
           chart={{
             data: visibleChartData,
             maxValue: chartMaxValue,
-            rangeStartUnix: nowUnixSecs - seriesRangeSecs,
-            rangeEndUnix: nowUnixSecs,
-            range,
+            rangeStartUnix:
+              poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
+            rangeEndUnix: poolHistoryNowUnixSecs,
+            range: displayedPoolHistoryRange,
             latest: chartLatest,
             showFable,
           }}
@@ -1730,7 +1729,9 @@ function OverviewPage() {
         <TopPrincipalsCard
           range={range}
           principals={topPrincipals}
-          loading={principalUsage.isPending || principalUsage.isPlaceholderData}
+          loading={
+            principalUsage.data === undefined && principalUsage.isPending
+          }
         />
       </div>
 

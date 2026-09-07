@@ -150,9 +150,9 @@ function UpstreamsPage() {
   // /admin/v1/status reports per-upstream runtime state incl. OAuth binding.
   const status = useStatus();
   const quotaLatestPending =
-    quotaLatest.isPending || quotaLatest.isPlaceholderData;
-  const listUsagePending = listUsage.isPending || listUsage.isPlaceholderData;
-  const statusPending = status.isPending || status.isPlaceholderData;
+    quotaLatest.data === undefined && quotaLatest.isPending;
+  const listUsagePending = listUsage.data === undefined && listUsage.isPending;
+  const statusPending = status.data === undefined && status.isPending;
   const statusByUpstreamId = useMemo(() => {
     const m = new Map<
       string,
@@ -430,7 +430,11 @@ function UpstreamsPage() {
         )}
       >
         {selected ? (
-          <DetailView upstream={selected} onBack={() => select(undefined)} />
+          <DetailView
+            key={selected.id}
+            upstream={selected}
+            onBack={() => select(undefined)}
+          />
         ) : upstreams.isLoading ? (
           <UpstreamDetailLoadingShell />
         ) : (
@@ -805,10 +809,9 @@ function DetailView({
   const [isolatedWindow, setIsolatedWindow] = useState<string | null>(null);
   const [showMoreMeta, setShowMoreMeta] = useState(false);
 
-  // Stable across re-renders so quotaSeries/quotaAnalysis queryKeys do not
-  // churn each time another hook here refetches; mirrors routes/index.tsx.
-  // Inlining Math.floor(Date.now()/1000) here fires a fresh
-  // /subscription-quotas/series on every re-render.
+  // Keep a separate wall clock for snapshot freshness/countdowns. Series and
+  // analysis requests use stable range keys and resolve their own absolute
+  // bounds when each request starts.
   const [nowUnixSecs, setNowUnixSecs] = useState(() =>
     Math.floor(Date.now() / 1000),
   );
@@ -818,18 +821,18 @@ function DetailView({
     }, 60_000);
     return () => clearInterval(interval);
   }, []);
-  const sinceUnixSecs = useMemo(() => {
+  const rangeSecs = useMemo(() => {
     switch (range) {
       case '1h':
-        return nowUnixSecs - 3600;
+        return 3600;
       case '6h':
-        return nowUnixSecs - 21600;
+        return 21600;
       case '24h':
-        return nowUnixSecs - 86400;
+        return 86400;
       case '7d':
-        return nowUnixSecs - 604800;
+        return 604800;
     }
-  }, [range, nowUnixSecs]);
+  }, [range]);
   // Backend rejects (until - since) / bucket_secs > max_points_per_series * 2.
   // Default max_points_per_series = 1000, so we target <= 500 points/series
   // for a 2-window query.
@@ -869,17 +872,18 @@ function DetailView({
     upstreamIds: upstream.id,
     windows: '5h,7d,7d_sonnet,7d_opus,7d_fable,overage',
     source: 'merged',
-    sinceUnixSecs,
-    untilUnixSecs: nowUnixSecs,
+    rangeSecs,
     bucketSecs: bucketSecsForRange,
   });
   const quotaAnalysis = useSubscriptionQuotaAnalysis({
     upstreamIds: upstream.id,
     windows: '5h,7d,7d_sonnet,7d_opus,7d_fable,overage',
     source: 'merged',
-    sinceUnixSecs,
-    untilUnixSecs: nowUnixSecs,
+    rangeSecs,
   });
+  const seriesSinceUnixSecs =
+    quotaSeries.data?.since_unix_secs ?? nowUnixSecs - rangeSecs;
+  const seriesUntilUnixSecs = quotaSeries.data?.until_unix_secs ?? nowUnixSecs;
 
   const [apiUsageRange, setApiUsageRange] = useState<'24h' | '7d'>('24h');
   const [apiUsageMetric, setApiUsageMetric] = useState<'tokens' | 'cost'>(
@@ -905,9 +909,9 @@ function DetailView({
       selectVisibleGraphWindows({
         latestWindows: selectedLatest?.windows,
         series: quotaSeries.data?.series,
-        sinceUnixSecs,
+        sinceUnixSecs: seriesSinceUnixSecs,
       }),
-    [selectedLatest, quotaSeries.data, sinceUnixSecs],
+    [selectedLatest, quotaSeries.data, seriesSinceUnixSecs],
   );
 
   const effectiveIsolatedWindow =
@@ -916,13 +920,13 @@ function DetailView({
       : null;
 
   const chartRows = useMemo(
-    () => chartData.rows.filter((row) => row.unix >= sinceUnixSecs),
-    [chartData.rows, sinceUnixSecs],
+    () => chartData.rows.filter((row) => row.unix >= seriesSinceUnixSecs),
+    [chartData.rows, seriesSinceUnixSecs],
   );
 
   const xDomain = useMemo<[number, number]>(
-    () => [sinceUnixSecs, nowUnixSecs],
-    [sinceUnixSecs, nowUnixSecs],
+    () => [seriesSinceUnixSecs, seriesUntilUnixSecs],
+    [seriesSinceUnixSecs, seriesUntilUnixSecs],
   );
 
   const recent = useRecentEvents({
@@ -939,16 +943,15 @@ function DetailView({
   const isOauth = upstream.kind === 'anthropic_oauth';
   const metadataPending =
     isOauth &&
-    (subscriptionMetadataQ.isPending ||
-      subscriptionMetadataQ.isPlaceholderData);
+    subscriptionMetadataQ.data === undefined &&
+    subscriptionMetadataQ.isPending;
   const quotaLatestPending =
-    quotaLatest.isPending || quotaLatest.isPlaceholderData;
+    quotaLatest.data === undefined && quotaLatest.isPending;
   const quotaHistoryPending =
     quotaLatestPending ||
-    quotaSeries.isPending ||
-    quotaSeries.isPlaceholderData;
+    (quotaSeries.data === undefined && quotaSeries.isPending);
   const quotaAnalysisPending =
-    quotaAnalysis.isPending || quotaAnalysis.isPlaceholderData;
+    quotaAnalysis.data === undefined && quotaAnalysis.isPending;
   const analysis = quotaAnalysis.data?.upstreams[0];
   const a5h = analysis?.windows.find((w) => w.window === '5h');
   const caveats = Array.from(
@@ -959,8 +962,8 @@ function DetailView({
       'capacity is inferred from proxy tokens and quota utilization; anthropic quota units are not directly exposed',
   );
   const oauthStatusPending =
-    isOauth && (upstreamOAuthQ.isPending || upstreamOAuthQ.isPlaceholderData);
-  const recentPending = recent.isPending || recent.isPlaceholderData;
+    isOauth && upstreamOAuthQ.data === undefined && upstreamOAuthQ.isPending;
+  const recentPending = recent.data === undefined && recent.isPending;
   const subMeta = subscriptionMetadataQ.data?.subscription_metadata;
   const orgMeta = subscriptionMetadataQ.data?.organization_metadata;
   const principalEntry = upstreamOAuthQ.data?.has_credentials
@@ -1505,7 +1508,8 @@ function DetailView({
                           }}
                         />
                         {(() => {
-                          const visible = 2 * (nowUnixSecs - sinceUnixSecs);
+                          const visible =
+                            2 * (seriesUntilUnixSecs - seriesSinceUnixSecs);
                           const markers: ChartMarker[] = [];
                           const paired = new Map<
                             string,
@@ -1538,9 +1542,10 @@ function DetailView({
                           }
                           return markers.map((marker, i) => {
                             if (
-                              marker.ts < sinceUnixSecs ||
+                              marker.ts < seriesSinceUnixSecs ||
                               marker.ts >
-                                nowUnixSecs + (nowUnixSecs - sinceUnixSecs) ||
+                                seriesUntilUnixSecs +
+                                  (seriesUntilUnixSecs - seriesSinceUnixSecs) ||
                               !visibleGraphWindows.includes(marker.window) ||
                               (effectiveIsolatedWindow !== null &&
                                 effectiveIsolatedWindow !== marker.window)
@@ -1863,8 +1868,8 @@ function DetailView({
         {!isOauth && (
           <Section title="API Usage">
             <ApiUsageCard
-              data={apiUsageQ.isPlaceholderData ? undefined : apiUsageQ.data}
-              isLoading={apiUsageQ.isPending || apiUsageQ.isPlaceholderData}
+              data={apiUsageQ.data}
+              isLoading={apiUsageQ.data === undefined && apiUsageQ.isPending}
               range={apiUsageRange}
               onRangeChange={setApiUsageRange}
               metric={apiUsageMetric}
@@ -2071,7 +2076,7 @@ function DetailView({
             className="min-h-48 overflow-x-auto"
           >
             <RequestEventsTable
-              events={recentPending ? [] : recentForUpstream}
+              events={recentForUpstream}
               principalNameMap={principalNameMap}
               upstreamNameMap={upstreamNameMap}
               loading={recentPending}

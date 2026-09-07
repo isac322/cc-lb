@@ -907,7 +907,7 @@ function LogsPage() {
               bucketMs={histogramBucketMs}
               view={view ?? { a: Date.now() - 3_600_000, b: Date.now() }}
               selection={selection}
-              loading={histogram.isFetching}
+              loading={histogram.data === undefined && histogram.isPending}
               failed={histogram.isError}
               onViewChange={changeView}
               onSelectionCommit={commitSelection}

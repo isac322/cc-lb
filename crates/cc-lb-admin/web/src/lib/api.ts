@@ -53,11 +53,23 @@ export async function fetchWithAuth(
   }
 
   const controller = new AbortController();
+  const externalSignal = options.signal;
+  const abortFromExternal = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) {
+    abortFromExternal();
+  } else {
+    externalSignal?.addEventListener('abort', abortFromExternal, {
+      once: true,
+    });
+  }
   const timeoutId = setTimeout(() => controller.abort(), 30000);
-  const signal = options.signal || controller.signal;
 
   try {
-    const res = await fetch(path, { ...options, headers, signal });
+    const res = await fetch(path, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    });
     if (!res.ok) {
       let body: unknown = null;
       let code: string | null = null;
@@ -90,6 +102,7 @@ export async function fetchWithAuth(
     return res;
   } finally {
     clearTimeout(timeoutId);
+    externalSignal?.removeEventListener('abort', abortFromExternal);
   }
 }
 
