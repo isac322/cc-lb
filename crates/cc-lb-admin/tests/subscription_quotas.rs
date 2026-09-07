@@ -170,6 +170,22 @@ async fn subscription_quota_pool_history_accepts_explicit_fable_window() {
         body["windows"][0]["series"][0]["utilization_percent"].as_f64(),
         28.0,
     );
+    assert_eq!(body["windows"][0]["series"][0]["contributing_upstreams"], 1);
+
+    let (status, _, body) = server
+        .client
+        .get(
+            "/admin/v1/subscription-quotas/pool-history?windows=7d_fable&since_unix_secs=60&until_unix_secs=180&series_projection=chart",
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let compact_point = body["windows"][0]["series"][0]
+        .as_object()
+        .expect("compact chart point");
+    assert_eq!(compact_point.len(), 2);
+    assert_eq!(compact_point["snapshot_at_unix_secs"], 120);
+    assert_close(compact_point["utilization_percent"].as_f64(), 28.0);
 }
 
 #[tokio::test]

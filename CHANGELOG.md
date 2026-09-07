@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- PostgreSQL principal-cost aggregation now reads materialized cost columns from a covering index instead of decoding request payloads, while a compatibility trigger protects rolling deployments. Pool quota history batches all requested windows, and Overview opts into a compact chart projection without changing the endpoint's default response.
+
 ## [0.4.5] - 2026-08-24
 
 ### Fixed

@@ -450,15 +450,23 @@ async fn assert_order_index_is_usable(pool: &PgPool) -> Result<()> {
     let principal_cost_plan = sqlx::query_scalar::<_, String>(
         "EXPLAIN (COSTS OFF) \
          SELECT principal_id, ((list_ts_ms - $1) / $2)::bigint AS bucket_index, \
-                convert_from(payload, 'UTF8')::jsonb \
+                list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+                list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+                list_cost_cache_read_micros \
          FROM ( \
-             SELECT principal_id, list_ts_ms, payload \
+             SELECT principal_id, list_ts_ms, \
+                    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+                    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+                    list_cost_cache_read_micros \
              FROM request_events_v1 \
              WHERE list_ts_ms >= $1 AND list_ts_ms < $3 \
                AND ($4::uuid IS NULL OR upstream_id = $4) \
                AND principal_id = ANY($5::text[]) \
              UNION ALL \
-             SELECT principal_id, list_ts_ms, payload \
+             SELECT principal_id, list_ts_ms, \
+                    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+                    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+                    list_cost_cache_read_micros \
              FROM request_events_v1 \
              WHERE list_ts_ms >= $1 AND list_ts_ms < $3 \
                AND ($4::uuid IS NULL OR upstream_id = $4) \
@@ -469,8 +477,7 @@ async fn assert_order_index_is_usable(pool: &PgPool) -> Result<()> {
                    \\2002\\2003\\2004\\2005\\2006\\2007\\2008\\2009\\200A\\2028\\2029\\202F\
                    \\205F\\3000'), ''), 'unknown'), '[^A-Za-z0-9_.:@-]', '_', 'g'), 64) \
                    = ANY($6::text[]) \
-         ) selected \
-         OFFSET 0",
+         ) selected",
     )
     .bind((FALLBACK_TS_SECS * 1_000) as i64)
     .bind(60_000_i64)
@@ -505,10 +512,10 @@ async fn assert_order_index_is_usable(pool: &PgPool) -> Result<()> {
         "principal request-event list index was not structurally usable: {principal_plan:?}"
     );
     ensure!(
-        principal_cost_plan
-            .iter()
-            .any(|line| line.contains("request_events_v1_principal_list_order_idx")),
-        "exact principal cost source could not use the principal-leading range index: {principal_cost_plan:?}"
+        principal_cost_plan.iter().any(|line| {
+            line.contains("Index Only Scan using request_events_v1_principal_list_order_idx")
+        }),
+        "exact principal cost source could not use the covering principal range index: {principal_cost_plan:?}"
     );
     ensure!(
         principal_cost_plan.iter().any(|line| {

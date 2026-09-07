@@ -868,6 +868,7 @@ export function useSubscriptionQuotaPoolHistory(params: {
   untilUnixSecs?: number;
 }) {
   const searchParams = new URLSearchParams();
+  searchParams.set('series_projection', 'chart');
   if (params.windows) searchParams.set('windows', params.windows);
   if (params.sinceUnixSecs !== undefined)
     searchParams.set('since_unix_secs', String(params.sinceUnixSecs));

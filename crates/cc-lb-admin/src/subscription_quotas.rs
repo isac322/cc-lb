@@ -455,27 +455,35 @@ pub const POOLED_HISTORY_WINDOWS: &[SubscriptionQuotaWindow] = &[
     SubscriptionQuotaWindow::SevenDayFable,
 ];
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct PoolHistoryQuery {
     windows: Option<String>,
     since_unix_secs: Option<i64>,
     until_unix_secs: Option<i64>,
+    series_projection: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct PoolHistoryResponse {
     now_unix_secs: i64,
     windows: Vec<PoolHistoryWindowResponse>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct PoolHistoryWindowResponse {
     window: String,
     latest: Option<PoolHistoryPoint>,
-    series: Vec<PoolHistoryPoint>,
+    series: PoolHistorySeries,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum PoolHistorySeries {
+    Full(Vec<PoolHistoryPoint>),
+    Chart(Vec<PoolHistorySeriesPoint>),
+}
+
+#[derive(Debug, Serialize)]
 struct PoolHistoryPoint {
     snapshot_at_unix_secs: i64,
     utilization: Option<f64>,
@@ -486,12 +494,29 @@ struct PoolHistoryPoint {
     max_observed_at_unix_millis: Option<i64>,
 }
 
+#[derive(Debug, Serialize)]
+struct PoolHistorySeriesPoint {
+    snapshot_at_unix_secs: i64,
+    utilization_percent: Option<f64>,
+}
+
 async fn build_pool_history_response(
     state: &AdminState,
     query: PoolHistoryQuery,
 ) -> Result<PoolHistoryResponse, Response> {
     let storage = storage(state)?;
     let windows = parse_pool_history_windows(query.windows.as_deref())?;
+    let compact_series = match query.series_projection.as_deref() {
+        None | Some("full") => false,
+        Some("chart") => true,
+        Some(value) => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("unknown pool history series projection: {value}"),
+            )
+                .into_response());
+        }
+    };
     let now_unix_secs = (now_unix_millis(&*state.clock) / 1_000) as i64;
     let default_lookback_secs: i64 = 6 * 60 * 60;
     let since_unix_secs = query
@@ -499,33 +524,58 @@ async fn build_pool_history_response(
         .unwrap_or(now_unix_secs.saturating_sub(default_lookback_secs));
     let until_unix_secs = query.until_unix_secs.unwrap_or(now_unix_secs);
 
-    let mut response_windows = Vec::with_capacity(windows.len());
-    for window in windows {
-        let latest_records = PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries(
-            storage,
-            std::slice::from_ref(&window),
-        )
-        .await
-        .map_err(storage_error)?;
-        let series_records = PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range(
-            storage,
-            std::slice::from_ref(&window),
-            since_unix_secs,
-            until_unix_secs,
-        )
-        .await
-        .map_err(storage_error)?;
-        let latest = latest_records.first().map(pool_history_point_from_record);
-        let series = series_records
-            .iter()
-            .map(pool_history_point_from_record)
-            .collect::<Vec<_>>();
-        response_windows.push(PoolHistoryWindowResponse {
-            window: window.as_str().to_owned(),
-            latest,
-            series,
-        });
+    let latest_records =
+        PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries(storage, &windows)
+            .await
+            .map_err(storage_error)?;
+    let series_records = PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range(
+        storage,
+        &windows,
+        since_unix_secs,
+        until_unix_secs,
+    )
+    .await
+    .map_err(storage_error)?;
+
+    let mut latest_by_window = latest_records
+        .into_iter()
+        .map(|record| {
+            let window = record.window;
+            let point = pool_history_point_from_record(&record);
+            (window, point)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut series_by_window =
+        BTreeMap::<SubscriptionQuotaWindow, Vec<PoolQuotaSnapshotSummaryRecord>>::new();
+    for record in series_records {
+        series_by_window
+            .entry(record.window)
+            .or_default()
+            .push(record);
     }
+
+    let response_windows = windows
+        .into_iter()
+        .map(|window| {
+            let series = series_by_window.remove(&window).unwrap_or_default();
+            PoolHistoryWindowResponse {
+                window: window.as_str().to_owned(),
+                latest: latest_by_window.remove(&window),
+                series: if compact_series {
+                    PoolHistorySeries::Chart(
+                        series
+                            .iter()
+                            .map(pool_history_series_point_from_record)
+                            .collect(),
+                    )
+                } else {
+                    PoolHistorySeries::Full(
+                        series.iter().map(pool_history_point_from_record).collect(),
+                    )
+                },
+            }
+        })
+        .collect();
 
     Ok(PoolHistoryResponse {
         now_unix_secs,
@@ -585,6 +635,15 @@ fn pool_history_point_from_record(record: &PoolQuotaSnapshotSummaryRecord) -> Po
         eligible_upstreams: record.eligible_upstreams,
         stale_upstreams: record.stale_upstreams,
         max_observed_at_unix_millis: record.max_observed_at_unix_millis,
+    }
+}
+
+fn pool_history_series_point_from_record(
+    record: &PoolQuotaSnapshotSummaryRecord,
+) -> PoolHistorySeriesPoint {
+    PoolHistorySeriesPoint {
+        snapshot_at_unix_secs: record.snapshot_at_unix_secs,
+        utilization_percent: record.utilization.map(|value| value * 100.0),
     }
 }
 

@@ -959,10 +959,15 @@ export interface PoolHistoryPoint {
   max_observed_at_unix_millis: number | null;
 }
 
+export interface PoolHistorySeriesPoint {
+  snapshot_at_unix_secs: number;
+  utilization_percent: number | null;
+}
+
 export interface PoolHistoryWindowResponse {
   window: string;
   latest: PoolHistoryPoint | null;
-  series: PoolHistoryPoint[];
+  series: PoolHistorySeriesPoint[];
 }
 
 export interface PoolHistoryResponse {

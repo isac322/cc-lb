@@ -12,28 +12,26 @@ pub(super) async fn list_latest(
     if windows.is_empty() {
         return Ok(Vec::new());
     }
-    let mut out = Vec::with_capacity(windows.len());
-    for window in windows {
-        let row = sqlx::query(
-            r#"SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
-                      capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
-                      stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
-                      header_contributing_upstreams, api_contributing_upstreams,
-                      max_observed_at_unix_millis, computed_at_unix_millis, policy_version
-               FROM pool_subscription_quota_history_v1
-              WHERE "quota_window" = $1
-           ORDER BY snapshot_at_unix_secs DESC
-              LIMIT 1"#,
-        )
-        .bind(window.as_str())
-        .fetch_optional(storage.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        if let Some(row) = row {
-            out.push(row_to_summary(row)?);
-        }
-    }
-    Ok(out)
+    let windows = windows
+        .iter()
+        .map(|window| (*window).as_str())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"SELECT DISTINCT ON ("quota_window")
+                  snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
+                  capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
+                  stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
+                  header_contributing_upstreams, api_contributing_upstreams,
+                  max_observed_at_unix_millis, computed_at_unix_millis, policy_version
+           FROM pool_subscription_quota_history_v1
+          WHERE "quota_window" = ANY($1)
+       ORDER BY "quota_window", snapshot_at_unix_secs DESC"#,
+    )
+    .bind(&windows)
+    .fetch_all(storage.pool())
+    .await
+    .map_err(map_sqlx_error)?;
+    rows.into_iter().map(row_to_summary).collect()
 }
 
 pub(super) async fn list_range(
@@ -45,30 +43,28 @@ pub(super) async fn list_range(
     if windows.is_empty() || since_unix_secs > until_unix_secs {
         return Ok(Vec::new());
     }
-    let mut out = Vec::new();
-    for window in windows {
-        let rows = sqlx::query(
-            r#"SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
-                      capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
-                      stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
-                      header_contributing_upstreams, api_contributing_upstreams,
-                      max_observed_at_unix_millis, computed_at_unix_millis, policy_version
-               FROM pool_subscription_quota_history_v1
-              WHERE "quota_window" = $1
-                AND snapshot_at_unix_secs BETWEEN $2 AND $3
-           ORDER BY snapshot_at_unix_secs ASC"#,
-        )
-        .bind(window.as_str())
-        .bind(since_unix_secs)
-        .bind(until_unix_secs)
-        .fetch_all(storage.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        for row in rows {
-            out.push(row_to_summary(row)?);
-        }
-    }
-    Ok(out)
+    let windows = windows
+        .iter()
+        .map(|window| (*window).as_str())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
+                  capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
+                  stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
+                  header_contributing_upstreams, api_contributing_upstreams,
+                  max_observed_at_unix_millis, computed_at_unix_millis, policy_version
+           FROM pool_subscription_quota_history_v1
+          WHERE "quota_window" = ANY($1)
+            AND snapshot_at_unix_secs BETWEEN $2 AND $3
+       ORDER BY "quota_window", snapshot_at_unix_secs ASC"#,
+    )
+    .bind(&windows)
+    .bind(since_unix_secs)
+    .bind(until_unix_secs)
+    .fetch_all(storage.pool())
+    .await
+    .map_err(map_sqlx_error)?;
+    rows.into_iter().map(row_to_summary).collect()
 }
 
 fn row_to_summary(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotSummaryRecord> {

@@ -16,13 +16,7 @@ function historyWindow(
     latest: null,
     series: values.map(([snapshot_at_unix_secs, utilization_percent]) => ({
       snapshot_at_unix_secs,
-      utilization:
-        utilization_percent == null ? null : utilization_percent / 100,
       utilization_percent,
-      contributing_upstreams: utilization_percent == null ? 0 : 1,
-      eligible_upstreams: 1,
-      stale_upstreams: 0,
-      max_observed_at_unix_millis: snapshot_at_unix_secs * 1000,
     })),
   };
 }
