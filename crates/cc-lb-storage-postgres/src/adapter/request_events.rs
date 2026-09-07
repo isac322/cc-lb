@@ -330,24 +330,23 @@ async fn request_event_key_usage(
     }
 
     let rows = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
-        "SELECT LEAST(((event_ts_ms - $1) / $2), $3)::bigint AS bucket_index, \
+        "SELECT LEAST(((list_ts_ms - $1) / $2), $3)::bigint AS bucket_index, \
                 COUNT(*)::bigint AS request_count, \
                 COALESCE(SUM(COALESCE(input_tokens, 0) \
                     + COALESCE(cache_creation_input_tokens, 0) \
                     + COALESCE(cache_read_input_tokens, 0)), 0)::bigint AS input_tokens, \
                 COALESCE(SUM(COALESCE(output_tokens, 0)), 0)::bigint AS output_tokens, \
-                COALESCE(SUM(COALESCE((payload_jsonb ->> 'cost_usd_micros')::bigint, 0)), 0)::bigint AS cost_usd_micros \
-         FROM ( \
-             SELECT COALESCE((convert_from(payload, 'UTF8')::jsonb ->> 'ts_ms')::bigint, EXTRACT(EPOCH FROM ts)::bigint * 1000) AS event_ts_ms, \
-                    convert_from(payload, 'UTF8')::jsonb AS payload_jsonb, \
-                    input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens \
-             FROM request_events_v1 \
-             WHERE principal_id = $4 AND key_id = $5 \
-         ) matched \
-         WHERE event_ts_ms >= $6 AND event_ts_ms <= $7 \
+                COALESCE(SUM(COALESCE(list_cost_usd_micros, 0)), 0)::bigint AS cost_usd_micros \
+         FROM request_events_v1 \
+         WHERE principal_id = $4 \
+           AND key_id = $5 \
+           AND list_ts_ms BETWEEN $6 AND $7 \
          GROUP BY bucket_index",
     )
-    .bind(u64_to_i64(query.range_start_ms, "request event key usage range start")?)
+    .bind(u64_to_i64(
+        query.range_start_ms,
+        "request event key usage range start",
+    )?)
     .bind(u64_to_i64(query.step_ms, "request event key usage step")?)
     .bind(u64_to_i64(
         query.bucket_count.saturating_sub(1),
@@ -355,8 +354,14 @@ async fn request_event_key_usage(
     )?)
     .bind(query.principal_id.as_str())
     .bind(query.key_id.as_str())
-    .bind(u64_to_i64(query.range_start_ms, "request event key usage lower bound")?)
-    .bind(u64_to_i64(query.range_end_ms, "request event key usage upper bound")?)
+    .bind(u64_to_i64(
+        query.range_start_ms,
+        "request event key usage lower bound",
+    )?)
+    .bind(u64_to_i64(
+        query.range_end_ms,
+        "request event key usage upper bound",
+    )?)
     .fetch_all(&storage.pool)
     .await
     .map_err(map_sqlx_error)?;

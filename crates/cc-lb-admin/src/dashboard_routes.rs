@@ -1,6 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Query, State},
+    http::HeaderMap,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
@@ -11,9 +12,12 @@ use uuid::Uuid;
 
 use crate::AdminState;
 use crate::dashboard::{
-    DashboardBuildError, auto_step, build_dashboard_summary,
-    build_dashboard_usage_projected_checked, parse_group_by, parse_range, parse_step,
-    parse_usage_projection,
+    DashboardBuildError, UsageProjection, auto_step, build_dashboard_summary,
+    build_dashboard_usage_projected_checked, build_window_for_step, parse_group_by, parse_range,
+    parse_step, parse_usage_projection, validate_step_for_range,
+};
+use crate::response_cache::{
+    apply_private_revalidation, matches_if_none_match, not_modified_response,
 };
 
 pub fn router() -> Router<AdminState> {
@@ -30,6 +34,7 @@ pub(crate) struct SummaryQuery {
 
 pub(crate) async fn handle_dashboard_summary(
     State(state): State<AdminState>,
+    headers: HeaderMap,
     Query(query): Query<SummaryQuery>,
 ) -> Response {
     let Some(storage) = state.storage.as_ref() else {
@@ -39,14 +44,23 @@ pub(crate) async fn handle_dashboard_summary(
         Ok(range) => range,
         Err(_) => return bad_request("invalid_range"),
     };
-    match build_dashboard_summary(
-        storage.as_ref(),
-        range,
-        cc_lb_clock::unix_secs(state.clock.now()),
-    )
-    .await
+    let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
+    let (_, window_end_unix_secs) = build_window_for_step(range, auto_step(range), now_unix_secs);
+    let etag = dashboard_checkpoint(storage.as_ref())
+        .await
+        .map(|checkpoint| {
+            format!(
+                "W/\"dashboard:summary:{}:{checkpoint}:{window_end_unix_secs}\"",
+                range.as_str()
+            )
+        });
+    if let Some(etag) = &etag
+        && matches_if_none_match(&headers, etag)
     {
-        Ok(response) => Json(response).into_response(),
+        return not_modified_response(etag);
+    }
+    match build_dashboard_summary(storage.as_ref(), range, now_unix_secs).await {
+        Ok(response) => apply_private_revalidation(Json(response).into_response(), etag.as_deref()),
         Err(error) => {
             tracing::error!(%error, "dashboard summary failed");
             internal_error("storage_error")
@@ -69,6 +83,7 @@ pub(crate) struct UsageQuery {
 
 pub(crate) async fn handle_dashboard_usage(
     State(state): State<AdminState>,
+    headers: HeaderMap,
     Query(query): Query<UsageQuery>,
 ) -> Response {
     let Some(storage) = state.storage.as_ref() else {
@@ -85,6 +100,9 @@ pub(crate) async fn handle_dashboard_usage(
         },
         None => auto_step(range),
     };
+    if let Err(error) = validate_step_for_range(range, step) {
+        return bad_request(error.as_str());
+    }
     let group_by = match query.group_by.as_deref() {
         Some(value) => match parse_group_by(value) {
             Ok(group_by) => group_by,
@@ -103,22 +121,60 @@ pub(crate) async fn handle_dashboard_usage(
         Ok(projection) => projection,
         Err(_) => return bad_request("invalid_projection"),
     };
+    let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
+    let etag = if group_by == crate::dashboard::UsageGroupBy::Principal {
+        None
+    } else {
+        let (_, window_end_unix_secs) = build_window_for_step(range, step, now_unix_secs);
+        let projection_name = match projection {
+            UsageProjection::Full => "full",
+            UsageProjection::Totals => "totals",
+        };
+        dashboard_checkpoint(storage.as_ref())
+            .await
+            .map(|checkpoint| {
+                format!(
+                    "W/\"dashboard:usage:{}:{}:{}:{}:{projection_name}:{checkpoint}:{window_end_unix_secs}\"",
+                    range.as_str(),
+                    step.as_str(),
+                    group_by.as_str(),
+                    upstream_id
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "all".to_owned()),
+                )
+            })
+    };
+    if let Some(etag) = &etag
+        && matches_if_none_match(&headers, etag)
+    {
+        return not_modified_response(etag);
+    }
     match build_dashboard_usage_projected_checked(
         storage.as_ref(),
         range,
         step,
         group_by,
         upstream_id,
-        cc_lb_clock::unix_secs(state.clock.now()),
+        now_unix_secs,
         projection,
     )
     .await
     {
-        Ok(response) => Json(response).into_response(),
+        Ok(response) => apply_private_revalidation(Json(response).into_response(), etag.as_deref()),
         Err(DashboardBuildError::Query(error)) => bad_request(error.as_str()),
         Err(DashboardBuildError::Storage(error)) => {
             tracing::error!(%error, "dashboard usage failed");
             internal_error("storage_error")
+        }
+    }
+}
+
+async fn dashboard_checkpoint(storage: &dyn cc_lb_storage_api::Storage) -> Option<u64> {
+    match storage.usage_rollup_checkpoint().await {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => {
+            tracing::warn!(%error, "dashboard ETag checkpoint read failed");
+            None
         }
     }
 }

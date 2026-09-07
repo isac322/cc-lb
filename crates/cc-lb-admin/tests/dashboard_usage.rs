@@ -2,15 +2,15 @@ use crate::config_admin_common;
 
 use std::sync::Arc;
 
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
     RequestEvent, RequestEventStore, UsageRollupStore, normalize_usage_rollup_dimension,
 };
 use config_admin_common::{
-    app, authed_bytes, authed_json, temp_storage, temp_storage_with_clock, test_state,
-    test_state_with_clock,
+    app, authed_bytes, authed_bytes_with_headers, authed_json, temp_storage,
+    temp_storage_with_clock, test_state, test_state_with_clock,
 };
 use uuid::Uuid;
 
@@ -31,6 +31,144 @@ async fn usage_returns_200_grouped_by_model() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["range"], "1h");
     assert_eq!(body["group_by"], "model");
+}
+
+#[tokio::test]
+async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let now = current_unix_secs(clock.as_ref());
+    storage
+        .append_request_event(&usage_event(
+            now.saturating_sub(60),
+            "req-dashboard-etag",
+            Uuid::from_u128(1),
+            "etag-upstream",
+            1,
+        ))
+        .await
+        .unwrap();
+    storage.rollup_usage_once().await.unwrap();
+
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage.clone()),
+        clock,
+    ));
+    let usage_uri = "/admin/usage?range=1h&step=minute&group_by=model";
+    let principal_uri = "/admin/usage?range=1h&step=minute&group_by=principal&projection=totals";
+    let summary_uri = "/admin/dashboard/summary?range=1h";
+    let (usage_status, usage_headers, _) =
+        authed_bytes(admin_app.clone(), "GET", usage_uri, None).await;
+    let (summary_status, summary_headers, _) =
+        authed_bytes(admin_app.clone(), "GET", summary_uri, None).await;
+    let (principal_status, principal_headers, _) =
+        authed_bytes(admin_app.clone(), "GET", principal_uri, None).await;
+    assert_eq!(usage_status, StatusCode::OK);
+    assert_eq!(summary_status, StatusCode::OK);
+    assert_eq!(principal_status, StatusCode::OK);
+    assert!(
+        !principal_headers.contains_key(header::ETAG),
+        "principal cost responses depend on unrolled request events"
+    );
+    let usage_etag = usage_headers
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .expect("usage ETag")
+        .to_owned();
+    let summary_etag = summary_headers
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .expect("summary ETag")
+        .to_owned();
+    assert!(usage_etag.starts_with("W/\"dashboard:usage:"));
+    assert!(summary_etag.starts_with("W/\"dashboard:summary:"));
+    assert_eq!(
+        usage_headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("private, no-cache")
+    );
+
+    storage
+        .append_request_event(&usage_event(
+            now.saturating_sub(30),
+            "req-dashboard-etag-next",
+            Uuid::from_u128(1),
+            "etag-upstream",
+            2,
+        ))
+        .await
+        .unwrap();
+    storage.rollup_usage_once().await.unwrap();
+    let (usage_status, refreshed_usage_headers, _) = authed_bytes_with_headers(
+        admin_app.clone(),
+        "GET",
+        usage_uri,
+        None,
+        &[(header::IF_NONE_MATCH.as_str(), usage_etag.as_str())],
+    )
+    .await;
+    let (summary_status, refreshed_summary_headers, _) = authed_bytes_with_headers(
+        admin_app.clone(),
+        "GET",
+        summary_uri,
+        None,
+        &[(header::IF_NONE_MATCH.as_str(), summary_etag.as_str())],
+    )
+    .await;
+    assert_eq!(usage_status, StatusCode::OK);
+    assert_eq!(summary_status, StatusCode::OK);
+    let refreshed_usage_etag = refreshed_usage_headers
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .expect("refreshed usage ETag")
+        .to_owned();
+    let refreshed_summary_etag = refreshed_summary_headers
+        .get(header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .expect("refreshed summary ETag")
+        .to_owned();
+    assert_ne!(refreshed_usage_etag, usage_etag);
+    assert_ne!(refreshed_summary_etag, summary_etag);
+
+    sqlx::query("DROP TABLE usage_rollups_v2")
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    let (usage_status, usage_headers, usage_body) = authed_bytes_with_headers(
+        admin_app.clone(),
+        "GET",
+        usage_uri,
+        None,
+        &[(
+            header::IF_NONE_MATCH.as_str(),
+            refreshed_usage_etag.as_str(),
+        )],
+    )
+    .await;
+    assert_eq!(usage_status, StatusCode::NOT_MODIFIED);
+    assert!(usage_body.is_empty());
+    assert_eq!(
+        usage_headers
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+        Some(refreshed_usage_etag.as_str())
+    );
+
+    let (summary_status, _, summary_body) = authed_bytes_with_headers(
+        admin_app,
+        "GET",
+        summary_uri,
+        None,
+        &[(
+            header::IF_NONE_MATCH.as_str(),
+            refreshed_summary_etag.as_str(),
+        )],
+    )
+    .await;
+    assert_eq!(summary_status, StatusCode::NOT_MODIFIED);
+    assert!(summary_body.is_empty());
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -16,12 +16,13 @@ use cc_lb_control::DynamicViewHolder;
 use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_quota::plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio};
 use cc_lb_storage_api::{
-    OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
-    PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, Storage, StorageError,
-    SubscriptionQuotaBucket, SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery,
-    SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
-    SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
-    UsageRollup, UsageRollupResolution, UsageTokenInterval, upstream::UpstreamKind,
+    OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaChartPointRecord,
+    PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, Storage,
+    StorageError, SubscriptionQuotaBucket, SubscriptionQuotaProviderLot,
+    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource,
+    SubscriptionQuotaSourceMerge, SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, UsageRollup, UsageRollupResolution, UsageTokenInterval,
+    upstream::UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -373,68 +374,40 @@ struct UtilizationInterval {
 
 async fn handle_latest(
     State(state): State<AdminState>,
-    headers: HeaderMap,
     Query(query): Query<LatestQuery>,
 ) -> Response {
-    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
-    if let Some(ref e) = etag
-        && matches_if_none_match(&headers, e)
-    {
-        return not_modified_response(e);
-    }
     match build_latest_response(&state, query).await {
-        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
+        Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
 }
 
 async fn handle_series(
     State(state): State<AdminState>,
-    headers: HeaderMap,
     Query(query): Query<SeriesQuery>,
 ) -> Response {
-    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
-    if let Some(ref e) = etag
-        && matches_if_none_match(&headers, e)
-    {
-        return not_modified_response(e);
-    }
     match build_series_response(&state, query).await {
-        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
+        Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
 }
 
 async fn handle_analysis(
     State(state): State<AdminState>,
-    headers: HeaderMap,
     Query(query): Query<AnalysisQuery>,
 ) -> Response {
-    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
-    if let Some(ref e) = etag
-        && matches_if_none_match(&headers, e)
-    {
-        return not_modified_response(e);
-    }
     match build_analysis_response(&state, query).await {
-        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
+        Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
 }
 
 async fn handle_aggregate(
     State(state): State<AdminState>,
-    headers: HeaderMap,
     Query(query): Query<AggregateQuery>,
 ) -> Response {
-    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
-    if let Some(ref e) = etag
-        && matches_if_none_match(&headers, e)
-    {
-        return not_modified_response(e);
-    }
     match build_aggregate_response(&state, query).await {
-        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
+        Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
 }
@@ -551,11 +524,6 @@ async fn build_pool_history_response(
         .list_latest_pool_quota_snapshot_summaries(&windows)
         .await
         .map_err(storage_error)?;
-    let series_records = storage
-        .list_pool_quota_snapshot_summaries_in_range(&windows, since_unix_secs, until_unix_secs)
-        .await
-        .map_err(storage_error)?;
-
     let mut latest_by_window = latest_records
         .into_iter()
         .map(|record| {
@@ -564,39 +532,52 @@ async fn build_pool_history_response(
             (window, point)
         })
         .collect::<BTreeMap<_, _>>();
-    let mut series_by_window =
-        BTreeMap::<SubscriptionQuotaWindow, Vec<PoolQuotaSnapshotSummaryRecord>>::new();
-    for record in series_records {
-        series_by_window
-            .entry(record.window)
-            .or_default()
-            .push(record);
+
+    let mut full_series_by_window =
+        BTreeMap::<SubscriptionQuotaWindow, Vec<PoolHistoryPoint>>::new();
+    let mut chart_series_by_window =
+        BTreeMap::<SubscriptionQuotaWindow, Vec<PoolHistorySeriesPoint>>::new();
+    if compact_series {
+        let records = storage
+            .list_pool_quota_chart_points_in_range(
+                &windows,
+                since_unix_secs,
+                until_unix_secs,
+                bucket_secs.filter(|value| *value > 0),
+            )
+            .await
+            .map_err(storage_error)?;
+        for record in records {
+            let window = record.window;
+            chart_series_by_window
+                .entry(window)
+                .or_default()
+                .push(pool_history_series_point_from_record(&record));
+        }
+    } else {
+        let records = storage
+            .list_pool_quota_snapshot_summaries_in_range(&windows, since_unix_secs, until_unix_secs)
+            .await
+            .map_err(storage_error)?;
+        for record in records {
+            let window = record.window;
+            full_series_by_window
+                .entry(window)
+                .or_default()
+                .push(pool_history_point_from_record(&record));
+        }
     }
 
     let response_windows = windows
         .into_iter()
-        .map(|window| {
-            let series = series_by_window.remove(&window).unwrap_or_default();
-            PoolHistoryWindowResponse {
-                window: window.as_str().to_owned(),
-                latest: latest_by_window.remove(&window),
-                series: if compact_series {
-                    let points = series
-                        .iter()
-                        .map(pool_history_series_point_from_record)
-                        .collect();
-                    PoolHistorySeries::Chart(match bucket_secs {
-                        Some(bucket_secs) if bucket_secs > 0 => {
-                            bucket_pool_history_series_points(points, bucket_secs)
-                        }
-                        _ => points,
-                    })
-                } else {
-                    PoolHistorySeries::Full(
-                        series.iter().map(pool_history_point_from_record).collect(),
-                    )
-                },
-            }
+        .map(|window| PoolHistoryWindowResponse {
+            window: window.as_str().to_owned(),
+            latest: latest_by_window.remove(&window),
+            series: if compact_series {
+                PoolHistorySeries::Chart(chart_series_by_window.remove(&window).unwrap_or_default())
+            } else {
+                PoolHistorySeries::Full(full_series_by_window.remove(&window).unwrap_or_default())
+            },
         })
         .collect();
 
@@ -606,31 +587,6 @@ async fn build_pool_history_response(
     })
 }
 
-fn bucket_pool_history_series_points(
-    points: Vec<PoolHistorySeriesPoint>,
-    bucket_secs: i64,
-) -> Vec<PoolHistorySeriesPoint> {
-    let mut max_by_bucket = BTreeMap::<i64, Option<f64>>::new();
-    for point in points {
-        let bucket_start = point
-            .snapshot_at_unix_secs
-            .div_euclid(bucket_secs)
-            .saturating_mul(bucket_secs);
-        let utilization = max_by_bucket.entry(bucket_start).or_default();
-        if let Some(next) = point.utilization_percent {
-            *utilization = Some(utilization.map_or(next, |current| current.max(next)));
-        }
-    }
-    max_by_bucket
-        .into_iter()
-        .map(
-            |(snapshot_at_unix_secs, utilization_percent)| PoolHistorySeriesPoint {
-                snapshot_at_unix_secs,
-                utilization_percent,
-            },
-        )
-        .collect()
-}
 fn parse_pool_history_windows(raw: Option<&str>) -> Result<Vec<SubscriptionQuotaWindow>, Response> {
     let default_windows = vec![
         SubscriptionQuotaWindow::FiveHour,
@@ -685,74 +641,13 @@ fn pool_history_point_from_record(record: &PoolQuotaSnapshotSummaryRecord) -> Po
         max_observed_at_unix_millis: record.max_observed_at_unix_millis,
     }
 }
-
 fn pool_history_series_point_from_record(
-    record: &PoolQuotaSnapshotSummaryRecord,
+    record: &PoolQuotaChartPointRecord,
 ) -> PoolHistorySeriesPoint {
     PoolHistorySeriesPoint {
         snapshot_at_unix_secs: record.snapshot_at_unix_secs,
         utilization_percent: record.utilization.map(|value| value * 100.0),
     }
-}
-
-// Weak ETag from the latest_v1 sidecar's max observed_at_unix_millis for the
-// requested upstreams. None when upstream_ids missing (overview/all path)
-// to skip a "list all OAuth upstreams" SQL on every poll.
-async fn etag_header_for(state: &AdminState, upstream_ids: Option<&str>) -> Option<String> {
-    let trimmed = upstream_ids.map(str::trim).filter(|s| !s.is_empty())?;
-    let uuids: Vec<Uuid> = trimmed
-        .split(',')
-        .filter_map(|id| Uuid::parse_str(id.trim()).ok())
-        .collect();
-    if uuids.is_empty() {
-        return None;
-    }
-    let storage = state.storage.as_ref()?;
-    let latest = storage
-        .list_latest_subscription_quota_for_upstreams(&uuids)
-        .await
-        .ok()?;
-    let max = latest
-        .into_iter()
-        .map(|record| record.observed_at_unix_millis)
-        .max()
-        .unwrap_or(0);
-    Some(format!("W/\"v1:{max}\""))
-}
-
-fn matches_if_none_match(headers: &HeaderMap, expected: &str) -> bool {
-    headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .map(|raw| raw.split(',').any(|tag| tag.trim() == expected))
-        .unwrap_or(false)
-}
-
-fn not_modified_response(etag: &str) -> Response {
-    let mut resp = StatusCode::NOT_MODIFIED.into_response();
-    let headers = resp.headers_mut();
-    if let Ok(value) = HeaderValue::from_str(etag) {
-        headers.insert(header::ETAG, value);
-    }
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache"),
-    );
-    resp
-}
-
-fn apply_etag(mut resp: Response, etag: Option<&str>) -> Response {
-    let headers = resp.headers_mut();
-    if let Some(etag) = etag
-        && let Ok(value) = HeaderValue::from_str(etag)
-    {
-        headers.insert(header::ETAG, value);
-    }
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache"),
-    );
-    resp
 }
 
 pub async fn build_cc_lb_oauth_usage_response(

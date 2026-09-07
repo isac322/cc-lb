@@ -771,6 +771,7 @@ dependencies = [
  "sha2 0.11.0",
  "siphasher",
  "sqlx 0.8.6",
+ "sqlx 0.9.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
