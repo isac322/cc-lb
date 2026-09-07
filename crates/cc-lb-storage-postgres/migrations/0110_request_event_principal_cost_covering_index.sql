@@ -2,8 +2,9 @@
 -- columns and ordering contract stay unchanged; included cost columns let
 -- request_event_principal_costs avoid heap and TOAST reads.
 SET LOCAL lock_timeout = '1s';
+SET LOCAL statement_timeout = '90s';
 
-DROP INDEX request_events_v1_principal_list_order_idx;
+DROP INDEX IF EXISTS request_events_v1_principal_list_order_idx;
 
 CREATE INDEX request_events_v1_principal_list_order_idx
     ON request_events_v1 (principal_id, list_ts_ms DESC, list_event_key DESC)
