@@ -14,7 +14,7 @@ import {
   RefreshCw,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -102,6 +102,7 @@ import {
 
 const upstreamSearchSchema = z.object({
   selectedId: z.string().optional(),
+  action: z.literal('new').optional(),
 });
 
 // INPUT_CLASS carries no disabled styling, but a control locked by an in-flight
@@ -114,7 +115,7 @@ export const Route = createFileRoute('/upstreams')({
 });
 
 function UpstreamsPage() {
-  const { selectedId } = Route.useSearch();
+  const { selectedId, action } = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const upstreams = useUpstreams();
 
@@ -164,6 +165,20 @@ function UpstreamsPage() {
     return m;
   }, [status.data]);
   const [createOpen, setCreateOpen] = useState(false);
+  const handledCreateAction = useRef(false);
+  useEffect(() => {
+    if (action !== 'new') {
+      handledCreateAction.current = false;
+      return;
+    }
+    if (handledCreateAction.current) return;
+    handledCreateAction.current = true;
+    setCreateOpen(true);
+    navigate({
+      replace: true,
+      search: (previous) => ({ ...previous, action: undefined }),
+    });
+  }, [action, navigate]);
   // While an OAuth upstream is created but its /oauth/complete hasn't succeeded
   // yet, the row exists in the DB (we need its id for /oauth/start) but should
   // be hidden from the list. CreateUpstreamModal calls the setter on POST
@@ -216,7 +231,6 @@ function UpstreamsPage() {
             </div>
           </div>
           <Button
-            id="btn-new-upstream"
             size="sm"
             variant="primary"
             iconLeft={<Plus className="w-3 h-3" />}

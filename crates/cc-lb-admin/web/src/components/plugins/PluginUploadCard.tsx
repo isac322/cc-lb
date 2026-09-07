@@ -1,8 +1,9 @@
+import type { UseMutationResult } from '@tanstack/react-query';
 import { UploadCloud } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ApiError } from '../../lib/api';
-import { useUploadWasm } from '../../lib/queries';
+import type { UploadWasmResponse } from '../../lib/queries';
 import { Card, CardHeader, ConfirmDialog, cx } from '../ui/primitives';
 
 interface ReplacementConfirmationBody {
@@ -31,13 +32,31 @@ function isReplacementConfirmationBody(
   );
 }
 
+type PluginUploadVariables = {
+  file: File;
+  confirmReplacement?: boolean;
+  replaceRegistryId?: string;
+  expectedRevision?: number;
+};
+
+type PluginUploadMutation = Pick<
+  UseMutationResult<UploadWasmResponse, Error, PluginUploadVariables>,
+  'isPending' | 'mutate'
+>;
+
 export function PluginUploadCard({
+  autoFocus = false,
+  onAutoFocus,
   onUploaded,
+  upload,
 }: {
+  autoFocus?: boolean;
+  onAutoFocus?: () => void;
   onUploaded?: (id: string) => void;
+  upload: PluginUploadMutation;
 }) {
-  const upload = useUploadWasm();
   const fileRef = useRef<HTMLInputElement>(null);
+  const browseRef = useRef<HTMLDivElement>(null);
   const [pendingReplacement, setPendingReplacement] = useState<{
     file: File;
     name: string;
@@ -85,6 +104,12 @@ export function PluginUploadCard({
 
   const uploading = upload.isPending;
 
+  useEffect(() => {
+    if (!autoFocus || uploading) return;
+    browseRef.current?.focus();
+    if (document.activeElement === browseRef.current) onAutoFocus?.();
+  }, [autoFocus, onAutoFocus, uploading]);
+
   return (
     <>
       <Card>
@@ -104,15 +129,26 @@ export function PluginUploadCard({
           }
         />
         <div
+          ref={browseRef}
+          role="button"
+          tabIndex={uploading ? -1 : 0}
+          aria-disabled={uploading || undefined}
+          aria-label={uploading ? 'Uploading plugin' : 'Choose .wasm file'}
           aria-busy={uploading}
           className={cx(
-            'm-4 p-8 border border-dashed border-subtle rounded-sm flex flex-col items-center justify-center text-center transition-colors',
+            'm-4 p-8 border border-dashed border-subtle rounded-sm flex flex-col items-center justify-center text-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
             uploading
               ? 'cursor-wait opacity-70 border-accent/40'
               : 'cursor-pointer hover:border-accent/40',
           )}
           onClick={() => {
             if (!uploading) fileRef.current?.click();
+          }}
+          onKeyDown={(e) => {
+            if (!uploading && (e.key === 'Enter' || e.key === ' ')) {
+              e.preventDefault();
+              fileRef.current?.click();
+            }
           }}
           onDragOver={(e) => {
             e.preventDefault();
@@ -135,9 +171,9 @@ export function PluginUploadCard({
             Drag and drop or click to browse. Max 32 MiB.
           </div>
           <input
-            id="btn-upload-wasm"
             ref={fileRef}
             type="file"
+            aria-label="Plugin file"
             accept=".wasm"
             className="hidden"
             disabled={uploading}

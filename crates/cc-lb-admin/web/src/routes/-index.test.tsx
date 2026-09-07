@@ -12,9 +12,11 @@ import type {
   DashboardSummaryResponse,
   DashboardUsageResponse,
   PoolHistoryResponse,
+  RequestEvent,
   UsageBucket,
 } from '../lib/api';
 import * as queries from '../lib/queries';
+import type { LiveEventMap } from '../lib/upsertReducer';
 import * as liveEvents from '../lib/useLiveEventStream';
 import {
   PoolQuotaLegend,
@@ -43,6 +45,7 @@ vi.mock('../lib/useLiveEventStream', () => ({
 }));
 
 const rechartsMock = vi.hoisted(() => ({
+  areaChartRenderCount: 0,
   data: [] as readonly Record<string, unknown>[],
 }));
 
@@ -56,6 +59,7 @@ vi.mock('recharts', () => ({
     className?: string;
     data?: readonly Record<string, unknown>[];
   }) => {
+    rechartsMock.areaChartRenderCount += 1;
     rechartsMock.data = data;
     return (
       <svg className={className} data-testid="pool-quota-area-chart">
@@ -312,6 +316,33 @@ function aggregateResponse(
   };
 }
 
+function mockLiveStream(eventsMap: LiveEventMap, version = 0) {
+  vi.mocked(liveEvents.useLiveEventStream).mockReturnValue({
+    error: null,
+    eventsMap,
+    forceReconnect: vi.fn(),
+    lastActivityAt: null,
+    lastCursor: null,
+    malformedFrameCount: 0,
+    permanentFailure: false,
+    permanentFailureSince: null,
+    reconnectAttempts: 0,
+    status: 'idle',
+    version,
+  });
+}
+
+function finalLiveEvent(index: number): RequestEvent {
+  return {
+    duration_ms: 10,
+    event_id: `live-${index}`,
+    model: `model-${index}`,
+    request_id: `request-${index}`,
+    status: 200,
+    ts: index,
+  };
+}
+
 function mockPendingOverviewQueries() {
   vi.mocked(queries.useSummary).mockReturnValue({
     data: undefined,
@@ -341,19 +372,7 @@ function mockPendingOverviewQueries() {
     isPending: true,
     isPlaceholderData: false,
   } as never);
-  vi.mocked(liveEvents.useLiveEventStream).mockReturnValue({
-    error: null,
-    eventsMap: new Map(),
-    forceReconnect: vi.fn(),
-    lastActivityAt: null,
-    lastCursor: null,
-    malformedFrameCount: 0,
-    permanentFailure: false,
-    permanentFailureSince: null,
-    reconnectAttempts: 0,
-    status: 'idle',
-    version: 0,
-  });
+  mockLiveStream(new Map());
 }
 
 function mockResolvedEmptyQuotaQueries() {
@@ -438,6 +457,7 @@ function mockResolvedKpiQueries({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  rechartsMock.areaChartRenderCount = 0;
 });
 
 afterEach(() => {
@@ -1088,6 +1108,71 @@ describe('Overview loading geometry', () => {
       loadingScrollBox?.className,
     );
     expect(screen.getByText('test-model')).toBeDefined();
+  });
+
+  it('keeps the pool chart memoized across live-only request updates', () => {
+    mockResolvedKpiQueries();
+    const eventsMap: LiveEventMap = new Map([
+      ['live-1', { phase: 'final', event: finalLiveEvent(1) }],
+    ]);
+    mockLiveStream(eventsMap, 1);
+    const { rerender } = render(<OverviewPage />);
+    const initialChartRenderCount = rechartsMock.areaChartRenderCount;
+
+    eventsMap.set('live-2', {
+      phase: 'final',
+      event: finalLiveEvent(2),
+    });
+    mockLiveStream(eventsMap, 2);
+    rerender(<OverviewPage />);
+
+    expect(initialChartRenderCount).toBeGreaterThan(0);
+    expect(rechartsMock.areaChartRenderCount).toBe(initialChartRenderCount);
+    expect(screen.getByLabelText('View request live-2')).toBeDefined();
+  });
+
+  it('flashes the newest live row after the twentieth insertion', () => {
+    mockResolvedKpiQueries();
+    const eventsMap: LiveEventMap = new Map();
+    for (let index = 1; index <= 20; index += 1) {
+      eventsMap.set(`live-${index}`, {
+        phase: 'final',
+        event: finalLiveEvent(index),
+      });
+    }
+    mockLiveStream(eventsMap, 20);
+    const { rerender } = render(<OverviewPage />);
+
+    expect(screen.getByLabelText('View request live-1').className).toContain(
+      'flash-in',
+    );
+    eventsMap.set('live-21', {
+      phase: 'final',
+      event: finalLiveEvent(21),
+    });
+    mockLiveStream(eventsMap, 21);
+    rerender(<OverviewPage />);
+
+    expect(screen.getByLabelText('View request live-21').className).toContain(
+      'flash-in',
+    );
+    expect(
+      screen.getByLabelText('View request live-1').className,
+    ).not.toContain('flash-in');
+
+    eventsMap.set('live-1', {
+      phase: 'final',
+      event: { ...finalLiveEvent(1), status: 201 },
+    });
+    mockLiveStream(eventsMap, 22);
+    rerender(<OverviewPage />);
+
+    expect(
+      screen.getByLabelText('View request live-1').className,
+    ).not.toContain('flash-in');
+    expect(screen.getByLabelText('View request live-21').className).toContain(
+      'flash-in',
+    );
   });
 });
 

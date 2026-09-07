@@ -110,7 +110,9 @@ export function upsertLiveEvent(
     const existing = eventsMap.get(eventId);
     if (!existing || existing.phase === 'partial') {
       eventsMap.set(eventId, { phase: 'partial', event: update.payload });
-      evictOldestPartial(eventsMap);
+      if (eventsMap.size - finalizedIds.size > MAX_LIVE_PARTIAL_EVENTS) {
+        evictOldestPartial(eventsMap);
+      }
       return true;
     }
     return false;
@@ -120,6 +122,8 @@ export function upsertLiveEvent(
   tombstones.delete(eventId);
   eventsMap.set(eventId, { phase: 'final', event });
   finalizedIds.add(eventId);
-  evictOldestFinal(eventsMap, finalizedIds, tombstones);
+  if (finalizedIds.size > MAX_LIVE_FINAL_EVENTS) {
+    evictOldestFinal(eventsMap, finalizedIds, tombstones);
+  }
   return true;
 }

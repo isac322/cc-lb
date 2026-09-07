@@ -1,14 +1,23 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, renderHook } from '@testing-library/react';
-import { createEventSource } from 'eventsource-client';
+import {
+  act,
+  cleanup,
+  render,
+  renderHook,
+  screen,
+} from '@testing-library/react';
+import { createEventSource, type EventSourceOptions } from 'eventsource-client';
 import type React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
 import { useLiveEventStream } from './useLiveEventStream';
+
+const closeClient = vi.hoisted(() => vi.fn());
 
 vi.mock('eventsource-client', () => ({
   createEventSource: vi.fn(() => ({
-    close: vi.fn(),
+    close: closeClient,
   })),
 }));
 
@@ -32,6 +41,30 @@ vi.mock('./api', () => ({
   },
 }));
 
+function eventSourceOptionsAt(index: number): EventSourceOptions {
+  const input = vi.mocked(createEventSource).mock.calls[index]?.[0];
+  if (
+    input === undefined ||
+    typeof input === 'string' ||
+    input instanceof URL
+  ) {
+    throw new Error(`Expected EventSource options at call ${index}`);
+  }
+  return input;
+}
+
+function LiveTailConsumer({ enabled }: { readonly enabled: boolean }) {
+  const live = useLiveEventStream({}, { enabled });
+  return (
+    <LiveTailFailureBanner
+      permanentFailure={live.permanentFailure}
+      permanentFailureSince={live.permanentFailureSince}
+      reconnectAttempts={live.reconnectAttempts}
+      onRetry={live.forceReconnect}
+    />
+  );
+}
+
 describe('useLiveEventStream', () => {
   let queryClient: QueryClient;
 
@@ -41,29 +74,38 @@ describe('useLiveEventStream', () => {
   });
 
   afterEach(() => {
+    cleanup();
     vi.useRealTimers();
     vi.clearAllMocks();
   });
 
-  it('should initialize with idle status', () => {
+  it('starts connecting when enabled', () => {
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
     const { result } = renderHook(() => useLiveEventStream({}), { wrapper });
-    expect(result.current.status).toBe('idle');
+
+    expect(createEventSource).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe('connecting');
   });
 
   it('increments malformedFrameCount on corrupted SSE frame', () => {
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
-    const { result } = renderHook(() => useLiveEventStream({}), { wrapper });
+    let renderCount = 0;
+    const { result } = renderHook(
+      () => {
+        renderCount += 1;
+        return useLiveEventStream({});
+      },
+      { wrapper },
+    );
 
-    const createEventSourceMock = vi.mocked(createEventSource);
-    const options = createEventSourceMock.mock.calls[0][0] as unknown as {
-      onMessage: (msg: unknown) => void;
-    };
-    const onMessage = options.onMessage;
+    const onMessage = eventSourceOptionsAt(0).onMessage;
+    if (onMessage === undefined) {
+      throw new Error('Expected an EventSource message handler');
+    }
 
     act(() => {
       onMessage({
@@ -76,6 +118,7 @@ describe('useLiveEventStream', () => {
 
     expect(result.current.malformedFrameCount).toBe(0);
     expect(result.current.eventsMap.size).toBe(1);
+    const renderCountBeforeMalformedFrame = renderCount;
 
     act(() => {
       onMessage({
@@ -85,30 +128,46 @@ describe('useLiveEventStream', () => {
 
     expect(result.current.malformedFrameCount).toBe(1);
     expect(result.current.eventsMap.size).toBe(1);
+    expect(renderCount).toBe(renderCountBeforeMalformedFrame);
   });
 
-  it('closes and recreates EventSource on auth token change', () => {
+  it('clears failure bookkeeping and ignores stale callbacks after auth failure', () => {
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
     const { result } = renderHook(() => useLiveEventStream({}), { wrapper });
 
-    const createEventSourceMock = vi.mocked(createEventSource);
-    expect(createEventSourceMock).toHaveBeenCalledTimes(1);
+    const { onConnect, onDisconnect, onScheduleReconnect } =
+      eventSourceOptionsAt(0);
+    if (
+      onConnect === undefined ||
+      onDisconnect === undefined ||
+      onScheduleReconnect === undefined
+    ) {
+      throw new Error('Expected EventSource lifecycle handlers');
+    }
 
-    const mockClose = (
-      createEventSourceMock.mock.results[0].value as unknown as {
-        close: () => void;
-      }
-    ).close;
+    act(() => {
+      onScheduleReconnect({ delay: 1_000 });
+      vi.advanceTimersByTime(300_000);
+      onScheduleReconnect({ delay: 1_000 });
+    });
+    expect(result.current.permanentFailure).toBe(true);
 
     act(() => {
       window.dispatchEvent(new Event('cclb:auth-required'));
+      onConnect();
+      onDisconnect();
+      onScheduleReconnect({ delay: 1_000 });
     });
 
-    expect(mockClose).toHaveBeenCalledTimes(1);
+    expect(closeClient).toHaveBeenCalledTimes(1);
+    expect(createEventSource).toHaveBeenCalledTimes(1);
     expect(result.current.status).toBe('error');
     expect(result.current.error?.message).toBe('Unauthorized');
+    expect(result.current.permanentFailure).toBe(false);
+    expect(result.current.permanentFailureSince).toBeNull();
+    expect(result.current.reconnectAttempts).toBe(0);
   });
 
   it('tracks permanent failure after 5 minutes of reconnecting', () => {
@@ -118,16 +177,16 @@ describe('useLiveEventStream', () => {
     const { result } = renderHook(() => useLiveEventStream({}), { wrapper });
 
     const createEventSourceMock = vi.mocked(createEventSource);
-    const options = createEventSourceMock.mock.calls[0][0] as unknown as {
-      onScheduleReconnect: (info: { delay: number }) => void;
-      onConnect: () => void;
-    };
+    const { onConnect, onScheduleReconnect } = eventSourceOptionsAt(0);
+    if (onScheduleReconnect === undefined || onConnect === undefined) {
+      throw new Error('Expected EventSource lifecycle handlers');
+    }
 
     expect(result.current.permanentFailure).toBe(false);
     expect(result.current.reconnectAttempts).toBe(0);
 
     act(() => {
-      options.onScheduleReconnect({ delay: 1000 });
+      onScheduleReconnect({ delay: 1000 });
     });
 
     expect(result.current.status).toBe('reconnecting');
@@ -136,20 +195,63 @@ describe('useLiveEventStream', () => {
 
     act(() => {
       vi.advanceTimersByTime(300_000);
-      options.onScheduleReconnect({ delay: 1000 });
+      onScheduleReconnect({ delay: 1000 });
     });
 
     expect(result.current.reconnectAttempts).toBe(2);
     expect(result.current.permanentFailure).toBe(true);
     expect(result.current.permanentFailureSince).not.toBeNull();
+    expect(closeClient).toHaveBeenCalledTimes(1);
 
     act(() => {
-      options.onConnect();
+      onConnect();
+    });
+    expect(result.current.permanentFailure).toBe(true);
+
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(createEventSourceMock).toHaveBeenCalledTimes(2);
+
+    const { onConnect: onReconnect } = eventSourceOptionsAt(1);
+    if (onReconnect === undefined) {
+      throw new Error('Expected a reconnected EventSource handler');
+    }
+    act(() => {
+      onReconnect();
     });
 
     expect(result.current.permanentFailure).toBe(false);
     expect(result.current.permanentFailureSince).toBeNull();
     expect(result.current.reconnectAttempts).toBe(0);
+  });
+
+  it('removes the failure banner when the stream is disabled', () => {
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <LiveTailConsumer enabled />
+      </QueryClientProvider>,
+    );
+    const { onScheduleReconnect } = eventSourceOptionsAt(0);
+    if (onScheduleReconnect === undefined) {
+      throw new Error('Expected an EventSource reconnect handler');
+    }
+
+    act(() => {
+      onScheduleReconnect({ delay: 1_000 });
+      vi.advanceTimersByTime(300_000);
+      onScheduleReconnect({ delay: 1_000 });
+    });
+    expect(screen.getByText('Live tail disconnected')).toBeTruthy();
+
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <LiveTailConsumer enabled={false} />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByText('Live tail disconnected')).toBeNull();
+    expect(screen.queryByText('Retry now')).toBeNull();
   });
 
   it('forceReconnect resets the retry timer and attempts to connect', () => {
@@ -159,14 +261,15 @@ describe('useLiveEventStream', () => {
     const { result } = renderHook(() => useLiveEventStream({}), { wrapper });
 
     const createEventSourceMock = vi.mocked(createEventSource);
-    const options = createEventSourceMock.mock.calls[0][0] as unknown as {
-      onScheduleReconnect: (info: { delay: number }) => void;
-    };
+    const { onScheduleReconnect } = eventSourceOptionsAt(0);
+    if (onScheduleReconnect === undefined) {
+      throw new Error('Expected an EventSource reconnect handler');
+    }
 
     act(() => {
-      options.onScheduleReconnect({ delay: 1000 });
+      onScheduleReconnect({ delay: 1000 });
       vi.advanceTimersByTime(300_000);
-      options.onScheduleReconnect({ delay: 1000 });
+      onScheduleReconnect({ delay: 1000 });
     });
 
     expect(result.current.permanentFailure).toBe(true);

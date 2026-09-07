@@ -292,7 +292,7 @@ function SessionListSkeleton() {
 }
 
 function useFlipReorder(
-  listRef: React.RefObject<HTMLUListElement | null>,
+  listElement: HTMLUListElement | null,
   items: unknown[],
 ) {
   const oldRects = React.useRef<Record<string, DOMRect>>({});
@@ -300,20 +300,34 @@ function useFlipReorder(
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: items is the trigger
   React.useLayoutEffect(() => {
-    if (!listRef.current) return;
+    if (!listElement) return;
     if (window.PAUSE_ANIMATIONS) return;
 
-    const children = Array.from(listRef.current.children) as HTMLElement[];
+    const children = Array.from(listElement.children) as HTMLElement[];
+    const previousRects = oldRects.current;
+    const nextRects: Record<string, DOMRect> = {};
+    const measurements: {
+      child: HTMLElement;
+      key: string;
+      rect: DOMRect;
+    }[] = [];
 
-    children.forEach((child) => {
+    // FLIP's geometry phase must finish before any transform/style write.
+    for (const child of children) {
       const key = child.dataset.key;
-      if (!key) return;
+      if (!key) continue;
 
-      const oldRect = oldRects.current[key];
-      const newRect = child.getBoundingClientRect();
+      const rect = child.getBoundingClientRect();
+      nextRects[key] = rect;
+      measurements.push({ child, key, rect });
+    }
+    oldRects.current = nextRects;
+
+    for (const { child, key, rect } of measurements) {
+      const oldRect = previousRects[key];
 
       if (oldRect) {
-        const deltaY = oldRect.top - newRect.top;
+        const deltaY = oldRect.top - rect.top;
         if (deltaY !== 0) {
           child.style.transform = `translateY(${deltaY}px)`;
           child.style.transition = 'none';
@@ -348,17 +362,12 @@ function useFlipReorder(
             cacheKeepaliveAnimationContract.newSessionTransition;
         });
       }
-    });
+    }
 
-    oldRects.current = {};
-    children.forEach((child) => {
-      const key = child.dataset.key;
-      if (key) {
-        oldRects.current[key] = child.getBoundingClientRect();
-        seenIds.current.add(key);
-      }
-    });
-  }, [items]);
+    for (const { key } of measurements) {
+      seenIds.current.add(key);
+    }
+  }, [items, listElement]);
 }
 
 export function CacheKeepaliveSessionsDrawer({
@@ -369,7 +378,7 @@ export function CacheKeepaliveSessionsDrawer({
   const [filter, setFilter] = useState<CacheKeepaliveStatusFilter>('all');
   const [horizon, setHorizon] = useState<CacheKeepaliveHorizon>('24h');
   const [selected, setSelected] = useState<CacheKeepaliveRow | null>(null);
-  const listRef = React.useRef<HTMLUListElement>(null);
+  const [listElement, setListElement] = useState<HTMLUListElement | null>(null);
 
   const query = useCacheKeepaliveSessions(
     principal.id,
@@ -391,7 +400,7 @@ export function CacheKeepaliveSessionsDrawer({
     return mergeLiveSessions(rawRows, maxRows);
   }, [query.data]);
 
-  useFlipReorder(listRef, allRows);
+  useFlipReorder(listElement, allRows);
 
   const summary = query.data?.pages[0]?.summary;
 
@@ -501,7 +510,7 @@ export function CacheKeepaliveSessionsDrawer({
                     }
                   />
                 ) : (
-                  <ul ref={listRef} className="flex flex-col">
+                  <ul ref={setListElement} className="flex flex-col">
                     {allRows.map((r) => (
                       <SessionListRow
                         key={r.id}
