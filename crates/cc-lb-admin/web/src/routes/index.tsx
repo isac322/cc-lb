@@ -72,8 +72,8 @@ import {
   type PoolQuotaChartRow,
   type PoolQuotaLatest,
   type PoolQuotaWindow,
-  poolQuotaChartLatest,
   poolQuotaChartMax,
+  poolQuotaResponseLatest,
 } from './-overviewPoolQuota';
 export const Route = createFileRoute('/')({
   component: OverviewPage,
@@ -86,6 +86,8 @@ const stepFor = (r: Range): 'hour' | 'minute' =>
   r === '7d' || r === '24h' ? 'hour' : 'minute';
 
 const POOL_QUOTA_QUERY_WINDOWS = POOL_QUOTA_WINDOWS.join(',');
+const POOL_HISTORY_WINDOW_QUANTUM_SECS = 1800;
+const POOL_HISTORY_MAX_POINTS_PER_SERIES = 1000;
 
 function fmtMs(n: number | undefined | null): string {
   if (n == null) return '—';
@@ -1335,7 +1337,13 @@ function OverviewPage() {
   };
 
   const summary = useSummary(range);
-  const principalUsage = useUsage(range, stepFor(range), 'principal');
+  const principalUsage = useUsage(
+    range,
+    stepFor(range),
+    'principal',
+    undefined,
+    'totals',
+  );
   const events = useRecentEventsInfinite({});
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
@@ -1363,10 +1371,18 @@ function OverviewPage() {
         : range === '24h'
           ? 86400
           : 604800;
+  const poolHistoryUntilUnixSecs =
+    Math.ceil(nowUnixSecs / POOL_HISTORY_WINDOW_QUANTUM_SECS) *
+    POOL_HISTORY_WINDOW_QUANTUM_SECS;
+  const poolHistorySinceUnixSecs =
+    poolHistoryUntilUnixSecs -
+    seriesRangeSecs -
+    POOL_HISTORY_WINDOW_QUANTUM_SECS;
   const quotaPoolHistory = useSubscriptionQuotaPoolHistory({
     windows: POOL_QUOTA_QUERY_WINDOWS,
-    sinceUnixSecs: nowUnixSecs - seriesRangeSecs,
-    untilUnixSecs: nowUnixSecs,
+    sinceUnixSecs: poolHistorySinceUnixSecs,
+    untilUnixSecs: poolHistoryUntilUnixSecs,
+    maxPointsPerSeries: POOL_HISTORY_MAX_POINTS_PER_SERIES,
   });
   const showFable = POOL_QUOTA_WINDOWS.includes('7d_fable');
   const quotaLoading =
@@ -1503,15 +1519,28 @@ function OverviewPage() {
     () => buildPoolQuotaChartData(quotaPoolHistory.data?.windows, showFable),
     [quotaPoolHistory.data, showFable],
   );
+  const visibleChartData = useMemo(
+    () =>
+      chartData.filter(
+        (row) =>
+          row.unix >= nowUnixSecs - seriesRangeSecs && row.unix <= nowUnixSecs,
+      ),
+    [chartData, nowUnixSecs, seriesRangeSecs],
+  );
 
   const chartMaxValue = useMemo(
-    () => poolQuotaChartMax(chartData, showFable),
-    [chartData, showFable],
+    () => poolQuotaChartMax(visibleChartData, showFable),
+    [visibleChartData, showFable],
   );
 
   const chartLatest = useMemo(
-    () => poolQuotaChartLatest(chartData, showFable),
-    [chartData, showFable],
+    () =>
+      poolQuotaResponseLatest(
+        quotaPoolHistory.data?.windows,
+        visibleChartData,
+        showFable,
+      ),
+    [quotaPoolHistory.data, visibleChartData, showFable],
   );
 
   // Principals Data
@@ -1688,7 +1717,7 @@ function OverviewPage() {
           aggregate={quotaAggregate}
           loading={quotaLoading}
           chart={{
-            data: chartData,
+            data: visibleChartData,
             maxValue: chartMaxValue,
             rangeStartUnix: nowUnixSecs - seriesRangeSecs,
             rangeEndUnix: nowUnixSecs,

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -16,12 +16,13 @@ use cc_lb_control::DynamicViewHolder;
 use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_quota::plan_capacity::{PRO_CAPACITY_RATIO, plan_capacity_ratio};
 use cc_lb_storage_api::{
-    OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
-    PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, Storage, StorageError,
-    SubscriptionQuotaBucket, SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery,
-    SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
-    SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
-    UsageRollup, UsageRollupResolution, UsageTokenInterval, upstream::UpstreamKind,
+    OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaChartPointRecord,
+    PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, Storage,
+    StorageError, SubscriptionQuotaBucket, SubscriptionQuotaProviderLot,
+    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource,
+    SubscriptionQuotaSourceMerge, SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, UsageRollup, UsageRollupResolution, UsageTokenInterval,
+    upstream::UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -373,68 +374,40 @@ struct UtilizationInterval {
 
 async fn handle_latest(
     State(state): State<AdminState>,
-    headers: HeaderMap,
     Query(query): Query<LatestQuery>,
 ) -> Response {
-    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
-    if let Some(ref e) = etag
-        && matches_if_none_match(&headers, e)
-    {
-        return not_modified_response(e);
-    }
     match build_latest_response(&state, query).await {
-        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
+        Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
 }
 
 async fn handle_series(
     State(state): State<AdminState>,
-    headers: HeaderMap,
     Query(query): Query<SeriesQuery>,
 ) -> Response {
-    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
-    if let Some(ref e) = etag
-        && matches_if_none_match(&headers, e)
-    {
-        return not_modified_response(e);
-    }
     match build_series_response(&state, query).await {
-        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
+        Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
 }
 
 async fn handle_analysis(
     State(state): State<AdminState>,
-    headers: HeaderMap,
     Query(query): Query<AnalysisQuery>,
 ) -> Response {
-    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
-    if let Some(ref e) = etag
-        && matches_if_none_match(&headers, e)
-    {
-        return not_modified_response(e);
-    }
     match build_analysis_response(&state, query).await {
-        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
+        Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
 }
 
 async fn handle_aggregate(
     State(state): State<AdminState>,
-    headers: HeaderMap,
     Query(query): Query<AggregateQuery>,
 ) -> Response {
-    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
-    if let Some(ref e) = etag
-        && matches_if_none_match(&headers, e)
-    {
-        return not_modified_response(e);
-    }
     match build_aggregate_response(&state, query).await {
-        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
+        Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
 }
@@ -455,27 +428,36 @@ pub const POOLED_HISTORY_WINDOWS: &[SubscriptionQuotaWindow] = &[
     SubscriptionQuotaWindow::SevenDayFable,
 ];
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct PoolHistoryQuery {
     windows: Option<String>,
     since_unix_secs: Option<i64>,
     until_unix_secs: Option<i64>,
+    series_projection: Option<String>,
+    max_points_per_series: Option<usize>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct PoolHistoryResponse {
     now_unix_secs: i64,
     windows: Vec<PoolHistoryWindowResponse>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct PoolHistoryWindowResponse {
     window: String,
     latest: Option<PoolHistoryPoint>,
-    series: Vec<PoolHistoryPoint>,
+    series: PoolHistorySeries,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum PoolHistorySeries {
+    Full(Vec<PoolHistoryPoint>),
+    Chart(Vec<PoolHistorySeriesPoint>),
+}
+
+#[derive(Debug, Serialize)]
 struct PoolHistoryPoint {
     snapshot_at_unix_secs: i64,
     utilization: Option<f64>,
@@ -486,46 +468,118 @@ struct PoolHistoryPoint {
     max_observed_at_unix_millis: Option<i64>,
 }
 
+#[derive(Debug, Serialize)]
+struct PoolHistorySeriesPoint {
+    snapshot_at_unix_secs: i64,
+    utilization_percent: Option<f64>,
+}
+
 async fn build_pool_history_response(
     state: &AdminState,
     query: PoolHistoryQuery,
 ) -> Result<PoolHistoryResponse, Response> {
     let storage = storage(state)?;
     let windows = parse_pool_history_windows(query.windows.as_deref())?;
+    let compact_series = match query.series_projection.as_deref() {
+        None | Some("full") => false,
+        Some("chart") => true,
+        Some(value) => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("unknown pool history series projection: {value}"),
+            )
+                .into_response());
+        }
+    };
     let now_unix_secs = (now_unix_millis(&*state.clock) / 1_000) as i64;
     let default_lookback_secs: i64 = 6 * 60 * 60;
     let since_unix_secs = query
         .since_unix_secs
         .unwrap_or(now_unix_secs.saturating_sub(default_lookback_secs));
     let until_unix_secs = query.until_unix_secs.unwrap_or(now_unix_secs);
+    let bucket_secs = match query.max_points_per_series {
+        None => None,
+        Some(_) if !compact_series => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "pool history max_points_per_series requires series_projection=chart".to_owned(),
+            )
+                .into_response());
+        }
+        Some(value) if !(2..=10_000).contains(&value) => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "pool history max_points_per_series must be between 2 and 10000".to_owned(),
+            )
+                .into_response());
+        }
+        Some(value) => {
+            let divisor = i64::try_from(value - 1).expect("validated point limit fits i64");
+            let range_secs = until_unix_secs.saturating_sub(since_unix_secs);
+            Some(range_secs.saturating_add(divisor - 1) / divisor.max(1))
+        }
+    };
 
-    let mut response_windows = Vec::with_capacity(windows.len());
-    for window in windows {
-        let latest_records = PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries(
-            storage,
-            std::slice::from_ref(&window),
-        )
+    let latest_records = storage
+        .list_latest_pool_quota_snapshot_summaries(&windows)
         .await
         .map_err(storage_error)?;
-        let series_records = PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range(
-            storage,
-            std::slice::from_ref(&window),
-            since_unix_secs,
-            until_unix_secs,
-        )
-        .await
-        .map_err(storage_error)?;
-        let latest = latest_records.first().map(pool_history_point_from_record);
-        let series = series_records
-            .iter()
-            .map(pool_history_point_from_record)
-            .collect::<Vec<_>>();
-        response_windows.push(PoolHistoryWindowResponse {
-            window: window.as_str().to_owned(),
-            latest,
-            series,
-        });
+    let mut latest_by_window = latest_records
+        .into_iter()
+        .map(|record| {
+            let window = record.window;
+            let point = pool_history_point_from_record(&record);
+            (window, point)
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut full_series_by_window =
+        BTreeMap::<SubscriptionQuotaWindow, Vec<PoolHistoryPoint>>::new();
+    let mut chart_series_by_window =
+        BTreeMap::<SubscriptionQuotaWindow, Vec<PoolHistorySeriesPoint>>::new();
+    if compact_series {
+        let records = storage
+            .list_pool_quota_chart_points_in_range(
+                &windows,
+                since_unix_secs,
+                until_unix_secs,
+                bucket_secs.filter(|value| *value > 0),
+            )
+            .await
+            .map_err(storage_error)?;
+        for record in records {
+            let window = record.window;
+            chart_series_by_window
+                .entry(window)
+                .or_default()
+                .push(pool_history_series_point_from_record(&record));
+        }
+    } else {
+        let records = storage
+            .list_pool_quota_snapshot_summaries_in_range(&windows, since_unix_secs, until_unix_secs)
+            .await
+            .map_err(storage_error)?;
+        for record in records {
+            let window = record.window;
+            full_series_by_window
+                .entry(window)
+                .or_default()
+                .push(pool_history_point_from_record(&record));
+        }
     }
+
+    let response_windows = windows
+        .into_iter()
+        .map(|window| PoolHistoryWindowResponse {
+            window: window.as_str().to_owned(),
+            latest: latest_by_window.remove(&window),
+            series: if compact_series {
+                PoolHistorySeries::Chart(chart_series_by_window.remove(&window).unwrap_or_default())
+            } else {
+                PoolHistorySeries::Full(full_series_by_window.remove(&window).unwrap_or_default())
+            },
+        })
+        .collect();
 
     Ok(PoolHistoryResponse {
         now_unix_secs,
@@ -587,65 +641,13 @@ fn pool_history_point_from_record(record: &PoolQuotaSnapshotSummaryRecord) -> Po
         max_observed_at_unix_millis: record.max_observed_at_unix_millis,
     }
 }
-
-// Weak ETag from the latest_v1 sidecar's max observed_at_unix_millis for the
-// requested upstreams. None when upstream_ids missing (overview/all path)
-// to skip a "list all OAuth upstreams" SQL on every poll.
-async fn etag_header_for(state: &AdminState, upstream_ids: Option<&str>) -> Option<String> {
-    let trimmed = upstream_ids.map(str::trim).filter(|s| !s.is_empty())?;
-    let uuids: Vec<Uuid> = trimmed
-        .split(',')
-        .filter_map(|id| Uuid::parse_str(id.trim()).ok())
-        .collect();
-    if uuids.is_empty() {
-        return None;
+fn pool_history_series_point_from_record(
+    record: &PoolQuotaChartPointRecord,
+) -> PoolHistorySeriesPoint {
+    PoolHistorySeriesPoint {
+        snapshot_at_unix_secs: record.snapshot_at_unix_secs,
+        utilization_percent: record.utilization.map(|value| value * 100.0),
     }
-    let storage = state.storage.as_ref()?;
-    let latest = storage
-        .list_latest_subscription_quota_for_upstreams(&uuids)
-        .await
-        .ok()?;
-    let max = latest
-        .into_iter()
-        .map(|record| record.observed_at_unix_millis)
-        .max()
-        .unwrap_or(0);
-    Some(format!("W/\"v1:{max}\""))
-}
-
-fn matches_if_none_match(headers: &HeaderMap, expected: &str) -> bool {
-    headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .map(|raw| raw.split(',').any(|tag| tag.trim() == expected))
-        .unwrap_or(false)
-}
-
-fn not_modified_response(etag: &str) -> Response {
-    let mut resp = StatusCode::NOT_MODIFIED.into_response();
-    let headers = resp.headers_mut();
-    if let Ok(value) = HeaderValue::from_str(etag) {
-        headers.insert(header::ETAG, value);
-    }
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache"),
-    );
-    resp
-}
-
-fn apply_etag(mut resp: Response, etag: Option<&str>) -> Response {
-    let headers = resp.headers_mut();
-    if let Some(etag) = etag
-        && let Ok(value) = HeaderValue::from_str(etag)
-    {
-        headers.insert(header::ETAG, value);
-    }
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache"),
-    );
-    resp
 }
 
 pub async fn build_cc_lb_oauth_usage_response(

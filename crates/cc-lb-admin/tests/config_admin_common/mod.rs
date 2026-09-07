@@ -246,10 +246,23 @@ pub async fn authed_bytes(
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, HeaderMap, Bytes) {
+    authed_bytes_with_headers(app, method, uri, body, &[]).await
+}
+
+pub async fn authed_bytes_with_headers(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, HeaderMap, Bytes) {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
         .header("Authorization", format!("Bearer {TOKEN}"));
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
     let request_body = match body {
         Some(value) => {
             builder = builder.header("content-type", "application/json");

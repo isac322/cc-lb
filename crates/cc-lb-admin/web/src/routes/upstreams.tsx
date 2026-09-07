@@ -132,7 +132,7 @@ function UpstreamsPage() {
     refetchInterval: 5_000,
   });
 
-  const listUsage = useUsage('7d', 'hour', 'upstream');
+  const listUsage = useUsage('7d', 'hour', 'upstream', undefined, 'totals');
   const usageByUpstreamId = useMemo(() => {
     const m = new Map<string, { cost_usd: number; tokens: number }>();
     for (const series of listUsage.data?.series ?? []) {

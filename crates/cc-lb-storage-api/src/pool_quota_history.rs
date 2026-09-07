@@ -43,6 +43,13 @@ pub struct PoolQuotaSnapshotSummaryRecord {
     pub policy_version: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PoolQuotaChartPointRecord {
+    pub snapshot_at_unix_secs: i64,
+    pub window: SubscriptionQuotaWindow,
+    pub utilization: Option<f64>,
+}
+
 impl From<&PoolQuotaSnapshotRecord> for PoolQuotaSnapshotSummaryRecord {
     fn from(record: &PoolQuotaSnapshotRecord) -> Self {
         Self {
@@ -109,6 +116,14 @@ pub trait PoolQuotaHistoryStore: Send + Sync {
             .map(PoolQuotaSnapshotSummaryRecord::from)
             .collect())
     }
+
+    async fn list_pool_quota_chart_points_in_range(
+        &self,
+        windows: &[SubscriptionQuotaWindow],
+        since_unix_secs: i64,
+        until_unix_secs: i64,
+        bucket_secs: Option<i64>,
+    ) -> StorageResult<Vec<PoolQuotaChartPointRecord>>;
 
     async fn delete_pool_quota_snapshots_before(
         &self,

@@ -2,6 +2,7 @@ import { expect, type Page, test } from '@playwright/test';
 import type {
   DashboardSummaryResponse,
   DashboardUsageResponse,
+  PoolHistoryResponse,
   UsageBucket,
 } from '../src/lib/api';
 import type { Theme } from '../src/lib/theme';
@@ -418,16 +419,25 @@ function contrastRatio(a: Rgba, b: Rgba): number {
 type OverviewFixtures = {
   summaryRanges: () => readonly string[];
   principalUsageRanges: () => readonly string[];
+  principalUsageProjections: () => readonly string[];
+  poolHistoryPointLimits: () => readonly string[];
   serveSummary: (next: DashboardSummaryResponse) => void;
   servePrincipalUsage: (next: DashboardUsageResponse) => void;
+  servePoolHistory: (next: PoolHistoryResponse) => void;
 };
 
 async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
   let servedSummary: DashboardSummaryResponse = summary;
   let servedPrincipalUsage: DashboardUsageResponse = principalUsage;
+  let servedPoolHistory: PoolHistoryResponse = {
+    now_unix_secs: Math.floor(Date.now() / 1000),
+    windows: [],
+  };
   const summaryRanges: string[] = [];
   // The Overview issues exactly one usage query: the principal grouping.
   const principalUsageRanges: string[] = [];
+  const principalUsageProjections: string[] = [];
+  const poolHistoryPointLimits: string[] = [];
 
   await page.addInitScript(() => {
     window.localStorage.setItem('cc-lb-admin-token', 'mock-token');
@@ -467,6 +477,9 @@ async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
     }
     if (pathname === '/admin/usage') {
       principalUsageRanges.push(url.searchParams.get('range') ?? '');
+      principalUsageProjections.push(
+        url.searchParams.get('projection') ?? 'full',
+      );
       return json(200, servedPrincipalUsage);
     }
     if (pathname === '/admin/events/recent') {
@@ -483,7 +496,10 @@ async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
       });
     }
     if (pathname === '/admin/v1/subscription-quotas/pool-history') {
-      return json(200, { now_unix_secs: TIMESTAMPS[2], windows: [] });
+      poolHistoryPointLimits.push(
+        url.searchParams.get('max_points_per_series') ?? '',
+      );
+      return json(200, servedPoolHistory);
     }
     if (pathname === '/admin/events/stream') {
       return route.fulfill({
@@ -504,11 +520,16 @@ async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
   return {
     summaryRanges: () => [...summaryRanges],
     principalUsageRanges: () => [...principalUsageRanges],
+    principalUsageProjections: () => [...principalUsageProjections],
+    poolHistoryPointLimits: () => [...poolHistoryPointLimits],
     serveSummary: (next) => {
       servedSummary = next;
     },
     servePrincipalUsage: (next) => {
       servedPrincipalUsage = next;
+    },
+    servePoolHistory: (next) => {
+      servedPoolHistory = next;
     },
   };
 }
@@ -767,11 +788,18 @@ test.describe('Overview KPI hover', () => {
   test('synchronizes KPI details in the dark and light themes', async ({
     page,
   }) => {
-    await installOverviewFixtures(page);
+    const fixtures = await installOverviewFixtures(page);
     await page.setViewportSize(DESKTOP_VIEWPORT);
     await page.goto('/');
     // Boot once so `cclb.theme` can be stored before each themed reload.
     await expect(page.getByTestId('overview-kpi-request-rate')).toBeVisible();
+    await expect
+      .poll(() => fixtures.principalUsageProjections())
+      .toContain('totals');
+    expect(
+      fixtures.principalUsageProjections().every((value) => value === 'totals'),
+    ).toBe(true);
+    await expect.poll(() => fixtures.poolHistoryPointLimits()).toContain('1000');
 
     const surfaceLuminance: number[] = [];
     for (const theme of THEMES) {
@@ -1045,6 +1073,86 @@ test.describe('Overview KPI hover', () => {
     await expect(
       page.getByTestId('top-principal-cost-details'),
     ).toHaveCount(0);
+  });
+
+  test('keeps the capped 7d peak visible and the legend exact', async ({
+    page,
+  }) => {
+    const fixtures = await installOverviewFixtures(page);
+    const nowUnixSecs = Math.floor(Date.now() / 1000);
+    const latestPoint = (utilizationPercent: number) => ({
+      snapshot_at_unix_secs: nowUnixSecs - 60,
+      utilization: utilizationPercent / 100,
+      utilization_percent: utilizationPercent,
+      contributing_upstreams: 1,
+      eligible_upstreams: 1,
+      stale_upstreams: 0,
+      max_observed_at_unix_millis: (nowUnixSecs - 60) * 1000,
+    });
+    fixtures.servePoolHistory({
+      now_unix_secs: nowUnixSecs,
+      windows: [
+        {
+          window: '5h',
+          latest: latestPoint(18),
+          series: [
+            {
+              snapshot_at_unix_secs: nowUnixSecs - 60,
+              utilization_percent: 20,
+            },
+          ],
+        },
+        {
+          window: '7d',
+          latest: latestPoint(35),
+          series: [
+            {
+              snapshot_at_unix_secs: nowUnixSecs - 6 * 24 * 60 * 60,
+              utilization_percent: 40,
+            },
+            {
+              snapshot_at_unix_secs: nowUnixSecs - 60,
+              utilization_percent: 38,
+            },
+          ],
+        },
+        {
+          window: '7d_fable',
+          latest: latestPoint(109),
+          series: [
+            {
+              snapshot_at_unix_secs: nowUnixSecs - 6 * 24 * 60 * 60,
+              utilization_percent: 137,
+            },
+            {
+              snapshot_at_unix_secs: nowUnixSecs - 60,
+              utilization_percent: 110,
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.setViewportSize(DESKTOP_VIEWPORT);
+    await page.goto('/');
+    await expect(page.getByTestId('pool-quota-card')).toBeVisible();
+    await selectRange(page, '7d');
+    await expect
+      .poll(() => fixtures.summaryRanges())
+      .toContain('7d');
+
+    const chart = page.getByTestId('pool-quota-chart-slot');
+    await expect(chart.getByText('140%', { exact: true })).toBeVisible();
+    await expect(
+      page.getByTestId('pool-quota-legend-slot').filter({
+        hasText: 'Fable · 109%',
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId('pool-quota-legend-slot').filter({
+        hasText: '7d · 35%',
+      }),
+    ).toBeVisible();
   });
 
   test('keeps the mobile Overview free of horizontal overflow', async ({

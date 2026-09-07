@@ -15,6 +15,26 @@ use uuid::Uuid;
 
 const CHECKPOINT_TEST_NOW_UNIX_SECS: u64 = 1_800_000_000;
 
+fn pool_history_record(snapshot_at_unix_secs: i64, utilization: f64) -> PoolQuotaSnapshotRecord {
+    PoolQuotaSnapshotRecord {
+        snapshot_at_unix_secs,
+        window: SubscriptionQuotaWindow::SevenDayFable,
+        utilization: Some(utilization),
+        weighted_utilization_sum: utilization,
+        capacity_ratio_sum: 1.0,
+        eligible_upstreams: 1,
+        contributing_upstreams: 1,
+        stale_upstreams: 0,
+        missing_observation_upstreams: 0,
+        missing_metadata_upstreams: 0,
+        header_contributing_upstreams: 0,
+        api_contributing_upstreams: 1,
+        max_observed_at_unix_millis: Some(snapshot_at_unix_secs * 1_000),
+        computed_at_unix_millis: snapshot_at_unix_secs * 1_000,
+        policy_version: 1,
+    }
+}
+
 #[tokio::test]
 async fn subscription_quota_latest_is_registered_on_v1_and_legacy_paths() {
     let server = admin_test_common::spawn_admin_server().await;
@@ -170,6 +190,68 @@ async fn subscription_quota_pool_history_accepts_explicit_fable_window() {
         body["windows"][0]["series"][0]["utilization_percent"].as_f64(),
         28.0,
     );
+    assert_eq!(body["windows"][0]["series"][0]["contributing_upstreams"], 1);
+
+    let (status, _, body) = server
+        .client
+        .get(
+            "/admin/v1/subscription-quotas/pool-history?windows=7d_fable&since_unix_secs=60&until_unix_secs=180&series_projection=chart",
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let compact_point = body["windows"][0]["series"][0]
+        .as_object()
+        .expect("compact chart point");
+    assert_eq!(compact_point.len(), 2);
+    assert_eq!(compact_point["snapshot_at_unix_secs"], 120);
+    assert_close(compact_point["utilization_percent"].as_f64(), 28.0);
+}
+
+#[tokio::test]
+async fn subscription_quota_pool_history_caps_chart_points_and_preserves_peak() {
+    let server = admin_test_common::spawn_admin_server().await;
+    server
+        .storage
+        .record_pool_quota_snapshots(&[
+            pool_history_record(60, 0.10),
+            pool_history_record(120, 0.20),
+            pool_history_record(180, 0.40),
+            pool_history_record(239, 0.30),
+            pool_history_record(240, 0.20),
+        ])
+        .await
+        .unwrap();
+
+    let (status, _, body) = server
+        .client
+        .get(
+            "/admin/v1/subscription-quotas/pool-history?windows=7d_fable&since_unix_secs=60&until_unix_secs=240&series_projection=chart&max_points_per_series=3",
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let series = body["windows"][0]["series"]
+        .as_array()
+        .expect("bucketed chart series");
+    assert_eq!(series.len(), 3);
+    assert_eq!(series[0]["snapshot_at_unix_secs"], 0);
+    assert_eq!(series[1]["snapshot_at_unix_secs"], 90);
+    assert_eq!(series[2]["snapshot_at_unix_secs"], 180);
+    assert_close(series[2]["utilization_percent"].as_f64(), 40.0);
+    assert_eq!(body["windows"][0]["latest"]["snapshot_at_unix_secs"], 240);
+    assert_close(
+        body["windows"][0]["latest"]["utilization_percent"].as_f64(),
+        20.0,
+    );
+
+    let (status, _, _) = server
+        .client
+        .get(
+            "/admin/v1/subscription-quotas/pool-history?windows=7d_fable&series_projection=chart&max_points_per_series=1",
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
