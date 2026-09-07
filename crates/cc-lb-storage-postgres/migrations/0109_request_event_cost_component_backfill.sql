@@ -1,6 +1,8 @@
 -- DashboardRange::SevenDays is the largest reachable dashboard window. Backfill
 -- ten days so every reachable bucket is populated without decoding the full
 -- historical payload table during startup.
+SET LOCAL statement_timeout = '90s';
+
 WITH decoded AS MATERIALIZED (
     SELECT
         seq,

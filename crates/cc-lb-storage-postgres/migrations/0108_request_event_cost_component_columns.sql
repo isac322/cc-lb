@@ -2,20 +2,22 @@
 -- Without these columns, Postgres request_event_principal_costs decodes the
 -- payload TOAST value as jsonb for every matching row.
 -- NULL means that cost components were not recorded for the event.
+-- Keep this migration replayable so a rollback may rewind versions 108-111 in
+-- _sqlx_migrations without requiring the additive schema to be removed.
 SET LOCAL lock_timeout = '1s';
 
 ALTER TABLE request_events_v1
-    ADD COLUMN list_cost_usd_micros BIGINT NULL,
-    ADD COLUMN list_cost_input_micros BIGINT NULL,
-    ADD COLUMN list_cost_output_micros BIGINT NULL,
-    ADD COLUMN list_cost_cache_creation_5m_micros BIGINT NULL,
-    ADD COLUMN list_cost_cache_creation_1h_micros BIGINT NULL,
-    ADD COLUMN list_cost_cache_read_micros BIGINT NULL,
-    ADD COLUMN list_cost_components_materialized BOOLEAN NOT NULL DEFAULT FALSE;
+    ADD COLUMN IF NOT EXISTS list_cost_usd_micros BIGINT NULL,
+    ADD COLUMN IF NOT EXISTS list_cost_input_micros BIGINT NULL,
+    ADD COLUMN IF NOT EXISTS list_cost_output_micros BIGINT NULL,
+    ADD COLUMN IF NOT EXISTS list_cost_cache_creation_5m_micros BIGINT NULL,
+    ADD COLUMN IF NOT EXISTS list_cost_cache_creation_1h_micros BIGINT NULL,
+    ADD COLUMN IF NOT EXISTS list_cost_cache_read_micros BIGINT NULL,
+    ADD COLUMN IF NOT EXISTS list_cost_components_materialized BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Old or rolled-back replicas do not send the marker. Materialize their
 -- payloads in the database; current writers set the marker and skip the body.
-CREATE FUNCTION request_events_v1_materialize_cost_components()
+CREATE OR REPLACE FUNCTION request_events_v1_materialize_cost_components()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
@@ -41,6 +43,9 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+DROP TRIGGER IF EXISTS request_events_v1_materialize_cost_components
+    ON request_events_v1;
 
 CREATE TRIGGER request_events_v1_materialize_cost_components
 BEFORE INSERT ON request_events_v1

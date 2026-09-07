@@ -2,6 +2,7 @@
 -- Plain CREATE INDEX is intentional: sqlx's database-wide migration advisory lock
 -- serializes migrations, so CREATE INDEX CONCURRENTLY cannot be used safely here.
 SET LOCAL lock_timeout = '1s';
+SET LOCAL statement_timeout = '90s';
 
 DROP INDEX IF EXISTS pool_subscription_quota_history_v1_window_time_idx;
 CREATE INDEX pool_subscription_quota_history_v1_window_time_idx
