@@ -43,11 +43,11 @@
 ## API · 브라우저 QA
 
 - [x] `/series`, `/analysis`, `/aggregate`의 status와 JSON schema가 유지된다.
-- [x] Upstream Detail의 Quota History 선, latest, deficit, empty state가 정상이다.
-- [x] 1h/6h/24h/7d 범위 변경 시 정확한 X축 범위와 point 수를 표시한다.
-- [x] Backend quota 상태 변경 후 series는 30초 계약 안에, analysis는 120초 계약 안에 갱신된다.
-- [x] 5분 관찰에서 analysis 요청은 60초가 아니라 120초 quantum에 맞춰 발생한다.
-- [x] Loading/error/empty 상태가 이전 데이터 유지와 함께 정상 표시된다.
+- [x] Upstream Detail의 Quota History 선, latest, deficit, loading/error/empty state가 정상이다.
+- [x] Mock API browser에서 1h/6h/24h/7d 버튼별 exact request range와 정상 chart render를 확인한다.
+- [x] SQLite/PostgreSQL storage·API transition과 browser-layer series 30초/analysis 120초 cadence가 각각 통과한다.
+- [x] Virtual clock에서 +60초에는 analysis 요청이 없고 +120초에는 최신 exact bounds로 refetch한다.
+- [x] Loading 중 기존 화면, empty 전환, analysis error 중 previous data, 성공 recovery가 정상 표시된다.
 
 ## 성능 QA
 
@@ -70,11 +70,15 @@
 - Storage conformance: SQLite `79/79`, PostgreSQL `64/64`.
 - Admin: unit `19/19`, focused integration `15/15`, 전체 `52 + 246` tests 통과.
 - Web: typecheck, Biome lint, Vitest `60 files / 558 tests` 통과.
-- Playwright: `upstream-quota-analysis-cadence.spec.ts` 통과. 60초에는 series만 최신
-  bounds로 갱신되고, 120초에는 analysis가 최신 exact bounds로 refetch되어 변경된
-  deficit/caveat가 실제 DOM에 반영됐다.
+- Playwright: `upstream-quota-analysis-cadence.spec.ts` 6개 browser test 통과.
+  1h/6h/24h/7d exact range, delayed loading, empty 전환, analysis error 중 previous data,
+  성공 recovery, +60초 series-only refresh, +120초 최신 exact-bounds analysis refresh와
+  deficit/caveat DOM 변경을 검증했다. Browser는 mock API를 사용하며 실제 SQLite/PostgreSQL
+  storage·API state transition은 별도 Rust conformance/integration tests가 검증한다.
 - 독립 리뷰: range와 analysis 두 리뷰 모두 finding 0건.
-- GitHub Actions: 최종 코드 head `a730188bfada`에서 CI, Web, Publish-check 전부 통과.
+- GitHub Actions: 기능 head `a730188bfada`에서 CI, Web, Publish-check 전부 통과.
+  이후 발견된 remote sccache backend 500과 inherited wall-clock heartbeat test 결함은
+  각각 uncached fallback과 결정론적 rendezvous test로 수정했다.
 
 ## 종료 게이트
 
@@ -82,6 +86,6 @@
 - [x] SQLite QA 통과
 - [x] PostgreSQL QA 통과
 - [x] Web typecheck/test 통과
-- [x] 실제 브라우저 point-in-time 및 state-transition QA 통과
+- [x] Mock API 실제 브라우저 point/state transition과 양 backend storage/API transition을 계층별로 통과
 - [x] 독립 코드 리뷰 finding 0건
 - [x] GitHub CI 전체 통과
