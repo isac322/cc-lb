@@ -56,10 +56,10 @@
 ## API · 브라우저 QA
 
 - [x] `/admin/usage?...group_by=principal&projection=totals` JSON schema와 값이 유지된다.
-- [x] Overview Top principals의 total 및 Input/Output/Cache 5m/Cache 1h/Cache read 값이 정확하다.
-- [x] 새 request event를 기록한 뒤 허용된 TTL과 5초 poll 안에 카드 값이 증가한다.
+- [x] Mock API browser에서 Overview Top principals의 total 및 Input/Output/Cache 5m/Cache 1h/Cache read 값을 확인한다.
+- [x] Rust cache/API transition과 browser 5초 poll 소비자 transition에서 값이 허용된 TTL 뒤 증가한다.
 - [x] Principal 또는 upstream filter 변경이 다른 query cache와 섞이지 않는다.
-- [x] Loading/error/empty 상태가 유지된다.
+- [x] Browser loading, empty, initial error, next-poll recovery 상태가 정상이다.
 
 ## 성능 QA
 
@@ -89,11 +89,21 @@
   leader panic recovery, storage/query-key isolation 통과.
 - Admin: unit `49/49`, integration `253/253`.
 - Storage conformance: SQLite `78/78`, PostgreSQL `63/63`.
+- 공통 principal-cost conformance는 initial append→query, 같은 upstream 후속 append→requery
+  delta, 다른 upstream 누출 방지를 SQLite와 PostgreSQL에서 모두 검증한다.
+- Web: typecheck, Biome lint, Vitest `60 files / 555 tests` 통과.
+- Playwright: `overview-principal-totals-refresh.spec.ts` 3개 browser test 통과.
+  Loading→초기 값→5초 자동 갱신, empty totals, 2회 500 이후 다음 poll recovery,
+  total과 5개 component DOM 및 totals request params를 검증했다. Browser는 mock API를
+  사용하며 server cache/storage transition은 Rust tests가 별도로 검증한다.
+- Inherited prompt-cache heartbeat test의 50ms wall-clock race를 test-only rendezvous로
+  교체했고 exact test 최종 `50/50` stress run을 통과했다.
 - 독립 SQL 및 cache/totals 리뷰: finding 0건.
 - PostgreSQL 영구 plan test는 parallel snapshot에 따라 달라지는 visibility-map 수치를
   고정하지 않고 네 production SQL shape의 Index Only Scan을 검증한다. Heap fetch 0은
   격리된 scratch VACUUM 측정으로 확인했다.
-- GitHub Actions: 최종 코드 head `35d050373a23`에서 CI 전체 통과.
+- GitHub Actions: 기능 head `35d050373a23`에서 CI 전체 통과. 이후 doc-only head에서
+  드러난 inherited heartbeat test race는 결정론적 test synchronization으로 수정했다.
 
 ## 종료 게이트
 
@@ -101,6 +111,6 @@
 - [x] SQLite QA 통과
 - [x] PostgreSQL QA 통과
 - [x] Admin API point-in-time 및 state-transition QA 통과
-- [x] Overview frontend는 변경하지 않았으며 API JSON byte parity와 기존 web suite로 비회귀를 확인했다.
+- [x] Mock API 실제 Overview browser transition과 양 backend storage/API transition을 계층별로 통과
 - [x] 독립 코드 리뷰 finding 0건
 - [x] GitHub CI 전체 통과
