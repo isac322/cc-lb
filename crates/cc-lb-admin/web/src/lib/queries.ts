@@ -83,6 +83,24 @@ export const POLLING_INTERVALS = {
   CACHE_KEEPALIVE_DETAIL_MS: 5_000,
 };
 
+const SUBSCRIPTION_QUOTA_ANALYSIS_QUANTUM_SECS =
+  POLLING_INTERVALS.QUOTA_ANALYSIS_MS / 1000;
+
+export function alignSubscriptionQuotaAnalysisKeyRange(
+  sinceUnixSecs: number,
+  untilUnixSecs: number,
+) {
+  const durationSecs = untilUnixSecs - sinceUnixSecs;
+  const alignedUntilUnixSecs =
+    Math.floor(untilUnixSecs / SUBSCRIPTION_QUOTA_ANALYSIS_QUANTUM_SECS) *
+    SUBSCRIPTION_QUOTA_ANALYSIS_QUANTUM_SECS;
+
+  return {
+    sinceUnixSecs: alignedUntilUnixSecs - durationSecs,
+    untilUnixSecs: alignedUntilUnixSecs,
+  };
+}
+
 export interface UpstreamStatus {
   last_apply_error: string | null;
   last_apply_at_unix_secs: number | null;
@@ -826,13 +844,17 @@ export function useSubscriptionQuotaSeries(params: {
   );
 }
 
-export function useSubscriptionQuotaAnalysis(params: {
+export interface SubscriptionQuotaAnalysisParams {
   upstreamIds?: string;
   windows?: string;
   source?: string;
   sinceUnixSecs: number;
   untilUnixSecs: number;
-}) {
+}
+
+export function buildSubscriptionQuotaAnalysisRequest(
+  params: SubscriptionQuotaAnalysisParams,
+) {
   const searchParams = new URLSearchParams();
   if (params.upstreamIds) searchParams.set('upstream_ids', params.upstreamIds);
   if (params.windows) searchParams.set('windows', params.windows);
@@ -840,13 +862,28 @@ export function useSubscriptionQuotaAnalysis(params: {
   searchParams.set('since_unix_secs', String(params.sinceUnixSecs));
   searchParams.set('until_unix_secs', String(params.untilUnixSecs));
 
+  // Quantize only the cache identity. The request path retains the exact
+  // visible interval so interval refetches use the newest observer options.
+  const keyRange = alignSubscriptionQuotaAnalysisKeyRange(
+    params.sinceUnixSecs,
+    params.untilUnixSecs,
+  );
+
+  return {
+    queryKey: qk.subscriptionQuotaAnalysis({ ...params, ...keyRange }),
+    path: `/admin/v1/subscription-quotas/analysis?${searchParams.toString()}`,
+  };
+}
+
+export function useSubscriptionQuotaAnalysis(
+  params: SubscriptionQuotaAnalysisParams,
+) {
+  const request = buildSubscriptionQuotaAnalysisRequest(params);
+
   return usePolledData(
     {
-      queryKey: qk.subscriptionQuotaAnalysis(params),
-      queryFn: () =>
-        getJson<AnalysisResponse>(
-          `/admin/v1/subscription-quotas/analysis?${searchParams.toString()}`,
-        ),
+      queryKey: request.queryKey,
+      queryFn: () => getJson<AnalysisResponse>(request.path),
     },
     POLLING_INTERVALS.QUOTA_ANALYSIS_MS,
   );

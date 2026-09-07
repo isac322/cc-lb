@@ -817,13 +817,21 @@ async fn build_analysis_response(
     let requested_upstream_ids: Vec<Uuid> = upstreams.iter().map(|u| u.id).collect();
     let upstream_names = upstream_name_map(&upstreams);
     let rollups = storage
-        .query_usage_rollups_in_range(
+        .query_usage_rollups_for_upstreams_in_range(
+            &requested_upstream_ids,
             UsageRollupResolution::Minute,
             query.since_unix_secs,
             query.until_unix_secs,
         )
         .await
         .map_err(storage_error)?;
+    let mut rollups_by_upstream = BTreeMap::<Uuid, Vec<UsageRollup>>::new();
+    for rollup in rollups {
+        rollups_by_upstream
+            .entry(rollup.upstream_id)
+            .or_default()
+            .push(rollup);
+    }
     let quota_series = list_subscription_quota_series(
         storage,
         SubscriptionQuotaSeriesQuery {
@@ -854,16 +862,15 @@ async fn build_analysis_response(
     for series in quota_series {
         let observations = checkpoint_observations(&series.buckets);
         let latest = latest_by_upstream_window.get(&(series.upstream_id, series.window));
-        let rollups_for_upstream = rollups
-            .iter()
-            .filter(|rollup| rollup.upstream_id == series.upstream_id)
-            .cloned()
-            .collect::<Vec<_>>();
+        let rollups_for_upstream = rollups_by_upstream
+            .get(&series.upstream_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let response = build_analysis_window(
             series.window,
             latest,
             &observations,
-            &rollups_for_upstream,
+            rollups_for_upstream,
             query.since_unix_secs,
             query.until_unix_secs,
         );

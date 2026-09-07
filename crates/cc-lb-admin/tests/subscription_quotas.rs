@@ -8,7 +8,7 @@ use cc_lb_storage_api::{
     PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, RequestEvent, RequestEventStore,
     SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
-    UpstreamSubscriptionQuotaStore, UsageRollupStore,
+    UpstreamSubscriptionQuotaStore, UsageRollupResolution, UsageRollupStore,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -267,6 +267,133 @@ async fn subscription_quota_analysis_defaults_missing_upstream_ids_to_all() {
 }
 
 #[tokio::test]
+async fn subscription_quota_analysis_excludes_unrequested_usage_rollups_and_refreshes() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let selected_upstream_id = create_oauth_upstream(&server, "analysis-selected").await;
+    let excluded_upstream_id = create_oauth_upstream(&server, "analysis-excluded").await;
+    server
+        .storage
+        .put_subscription_quota_checkpoints(&[
+            checkpoint_record(quota_observation(
+                selected_upstream_id,
+                60,
+                40,
+                SubscriptionQuotaSource::Header,
+                0.20,
+                Some(SubscriptionQuotaStatus::Allowed),
+            )),
+            checkpoint_record(quota_observation(
+                selected_upstream_id,
+                660,
+                41,
+                SubscriptionQuotaSource::Header,
+                0.50,
+                Some(SubscriptionQuotaStatus::AllowedWarning),
+            )),
+        ])
+        .await
+        .unwrap();
+    server
+        .storage
+        .append_request_event(&usage_event(
+            120,
+            "analysis-selected-initial",
+            selected_upstream_id,
+            "analysis-selected",
+            300,
+        ))
+        .await
+        .unwrap();
+    server
+        .storage
+        .append_request_event(&usage_event(
+            840,
+            "analysis-excluded",
+            excluded_upstream_id,
+            "analysis-excluded",
+            9_000,
+        ))
+        .await
+        .unwrap();
+    server.storage.rollup_usage_once().await.unwrap();
+
+    let all_rollups = server
+        .storage
+        .query_usage_rollups_in_range(UsageRollupResolution::Minute, 0, 900)
+        .await
+        .unwrap();
+    assert!(
+        all_rollups
+            .iter()
+            .any(|rollup| rollup.upstream_id == excluded_upstream_id),
+        "fixture must contain an unrequested upstream rollup"
+    );
+    let selected_rollups = server
+        .storage
+        .query_usage_rollups_for_upstreams_in_range(
+            &[selected_upstream_id],
+            UsageRollupResolution::Minute,
+            0,
+            900,
+        )
+        .await
+        .unwrap();
+    assert!(!selected_rollups.is_empty());
+    assert!(
+        selected_rollups
+            .iter()
+            .all(|rollup| rollup.upstream_id == selected_upstream_id)
+    );
+
+    let path = format!(
+        "/admin/v1/subscription-quotas/analysis?upstream_ids={selected_upstream_id}&windows=5h&source=header&since_unix_secs=0&until_unix_secs=900"
+    );
+    let (status, _, initial_body) = server.client.get(&path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        initial_body["upstreams"]
+            .as_array()
+            .expect("analysis upstreams")
+            .len(),
+        1
+    );
+    let initial = analysis_window_for(&initial_body, selected_upstream_id);
+    assert_close(
+        initial["proxy_projected_burn"]["proxy_tokens_per_hour"].as_f64(),
+        1_200.0,
+    );
+    assert_close(
+        initial["proxy_projected_burn"]["effective_limit_tokens_estimate"].as_f64(),
+        1_000.0,
+    );
+
+    server
+        .storage
+        .append_request_event(&usage_event(
+            780,
+            "analysis-selected-refresh",
+            selected_upstream_id,
+            "analysis-selected",
+            300,
+        ))
+        .await
+        .unwrap();
+    server.storage.rollup_usage_once().await.unwrap();
+
+    let (status, _, refreshed_body) = server.client.get(&path).await;
+    assert_eq!(status, StatusCode::OK);
+    let refreshed = analysis_window_for(&refreshed_body, selected_upstream_id);
+    assert_close(
+        refreshed["proxy_projected_burn"]["proxy_tokens_per_hour"].as_f64(),
+        2_400.0,
+    );
+    assert_close(
+        refreshed["proxy_projected_burn"]["effective_limit_tokens_estimate"].as_f64(),
+        1_000.0,
+    );
+}
+
+#[tokio::test]
 async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_leading_zeroes() {
     let server = admin_test_common::spawn_admin_server().await;
     let upstream_id = create_oauth_upstream(&server, "checkpoint-series").await;
@@ -312,10 +439,10 @@ async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_l
     let buckets = body["series"][0]["buckets"]
         .as_array()
         .expect("series buckets are returned");
-    assert_eq!(bucket_starts(buckets), vec![0, 60, 120, 180, 240]);
-    assert_eq!(buckets[0]["utilization_last"], 0.10);
+    assert_eq!(bucket_starts(buckets), vec![60, 120, 180, 240]);
+    assert_eq!(buckets[0]["utilization_last"], 0.20);
     assert_eq!(buckets[1]["utilization_last"], 0.20);
-    assert_eq!(buckets[2]["utilization_last"], 0.20);
+    assert_eq!(buckets[2]["utilization_last"], 0.60);
     assert_eq!(buckets[3]["utilization_last"], 0.60);
     assert!(
         buckets

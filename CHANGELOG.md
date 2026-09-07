@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - PostgreSQL principal-cost aggregation now reads materialized cost columns from a covering index instead of decoding request payloads, while a compatibility trigger protects rolling deployments.
 - PostgreSQL read-path migrations now allow 90 seconds for backfills and index builds, and can be replayed after a rollback rewinds their migration registry entries.
+- Subscription quota series and provider-lot calculations now bound work to the requested range while preserving left-anchor state, and quota analysis filters usage rollups in storage with a stable 120-second query key.
 - Overview requests principal totals without dense time-series buckets and caps pooled-quota chart points while preserving bucket peaks and exact latest values. Pool-history defaults remain unchanged.
 - Rollup-backed Overview polling now revalidates with weak ETags derived from the persisted rollup checkpoint before response construction; live principal-cost reads remain uncached.
 - Warmup history and cache keepalive session lists now load only when their drawers open, eliminating hidden detail-page reads.
