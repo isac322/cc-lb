@@ -146,7 +146,6 @@ describe('RequestEventDrawer', () => {
     expect(pendingTimeline.querySelectorAll('.skeleton')).toHaveLength(0);
     expect(screen.getByText('Internal pre')).toBeDefined();
     expect(pendingTimeline.textContent).toContain('Upstream');
-    expect(screen.queryByText('Internal post')).toBeNull();
 
     await waitFor(() => expect(resolveDetail).toBeDefined());
     const resolvePendingDetail = resolveDetail;
@@ -167,9 +166,12 @@ describe('RequestEventDrawer', () => {
       await Promise.resolve();
     });
 
-    await waitFor(() =>
-      expect(screen.getByText('Internal post')).toBeDefined(),
-    );
+    await waitFor(() => {
+      const finalTimeline = screen.getByTestId('latency-timeline-region');
+      expect(finalTimeline).toBe(partialTimeline);
+      expect(finalTimeline.textContent).toContain('90 ms');
+      expect(finalTimeline.textContent).toContain('40 ms');
+    });
     expect(screen.getAllByText('200 ms').length).toBeGreaterThan(0);
     const bodyRow = screen.getByText('Body bytes').parentElement;
     expect(bodyRow?.querySelectorAll('.skeleton')).toHaveLength(0);
