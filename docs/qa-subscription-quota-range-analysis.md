@@ -74,6 +74,7 @@
   bounds로 갱신되고, 120초에는 analysis가 최신 exact bounds로 refetch되어 변경된
   deficit/caveat가 실제 DOM에 반영됐다.
 - 독립 리뷰: range와 analysis 두 리뷰 모두 finding 0건.
+- GitHub Actions: 최종 코드 head `a730188bfada`에서 CI, Web, Publish-check 전부 통과.
 
 ## 종료 게이트
 
@@ -83,4 +84,4 @@
 - [x] Web typecheck/test 통과
 - [x] 실제 브라우저 point-in-time 및 state-transition QA 통과
 - [x] 독립 코드 리뷰 finding 0건
-- [ ] GitHub CI 전체 통과
+- [x] GitHub CI 전체 통과
