@@ -6,9 +6,7 @@ import {
 import { useEffect, useRef } from 'react';
 import { useVisibility } from './visibilityManager';
 
-export type PolledDataResult<TData, TError> = UseQueryResult<TData, TError> & {
-  status: 'hidden' | 'live';
-};
+export type PolledDataResult<TData, TError> = UseQueryResult<TData, TError>;
 
 export function usePolledData<
   TQueryFnData = unknown,
@@ -18,7 +16,7 @@ export function usePolledData<
 >(
   options: UseQueryOptions<TQueryFnData, TError, TData, TQueryKey>,
   refetchInterval: number | false,
-) {
+): PolledDataResult<TData, TError> {
   const visibility = useVisibility();
   const isHidden = visibility.gracePeriodElapsed || !visibility.visible;
   const wasHiddenRef = useRef(isHidden);
@@ -29,14 +27,11 @@ export function usePolledData<
   });
 
   useEffect(() => {
-    if (wasHiddenRef.current && !isHidden) {
+    if (wasHiddenRef.current && !isHidden && query.isEnabled) {
       query.refetch();
     }
     wasHiddenRef.current = isHidden;
-  }, [isHidden, query.refetch]);
+  }, [isHidden, query.isEnabled, query.refetch]);
 
-  return {
-    ...query,
-    status: isHidden ? 'hidden' : 'live',
-  } as const;
+  return query;
 }

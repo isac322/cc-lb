@@ -1,11 +1,13 @@
 import { useNavigate } from '@tanstack/react-router';
 import { ArrowLeft } from 'lucide-react';
-import { usePluginRegistry } from '../../lib/queries';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { usePluginRegistry, useUploadWasm } from '../../lib/queries';
 import { Route } from '../../routes/plugins';
 import {
   Button,
   Card,
   CardBody,
+  Modal,
   PageContainer,
   Section,
   Skeleton,
@@ -130,17 +132,47 @@ function PluginDetailSkeleton({ onBack }: { onBack: () => void }) {
 }
 
 export function PluginsPage() {
-  const { plugin: selectedPluginId } = Route.useSearch();
+  const { plugin: selectedPluginId, action } = Route.useSearch();
   const navigate = useNavigate({ from: Route.id });
   const reg = usePluginRegistry();
+  const upload = useUploadWasm();
+  const handledUploadAction = useRef(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   const setSelectedPluginId = (id: string | null) => {
-    navigate({ search: { plugin: id || undefined } });
+    navigate({
+      search: (previous) => ({
+        ...previous,
+        plugin: id || undefined,
+      }),
+    });
   };
+
+  useEffect(() => {
+    if (action !== 'upload') {
+      handledUploadAction.current = false;
+      return;
+    }
+    setUploadOpen(true);
+  }, [action]);
+
+  const consumeUploadAction = useCallback(() => {
+    if (action !== 'upload' || handledUploadAction.current) return;
+    handledUploadAction.current = true;
+    navigate({
+      replace: true,
+      search: (previous) => ({ ...previous, action: undefined }),
+    });
+  }, [action, navigate]);
 
   const selectedPlugin = reg.data?.entries.find(
     (p) => p.id === selectedPluginId,
   );
+
+  const handleUploaded = (id: string) => {
+    setUploadOpen(false);
+    setSelectedPluginId(id);
+  };
 
   return (
     <PageContainer>
@@ -162,10 +194,30 @@ export function PluginsPage() {
         />
       ) : (
         <div className="space-y-6">
-          <PluginUploadCard onUploaded={setSelectedPluginId} />
+          <div hidden={uploadOpen}>
+            <PluginUploadCard
+              upload={upload}
+              onUploaded={setSelectedPluginId}
+            />
+          </div>
           <PluginCatalog onSelectPlugin={setSelectedPluginId} />
         </div>
       )}
+      <Modal
+        open={uploadOpen}
+        onOpenChange={setUploadOpen}
+        preventDismiss={upload.isPending}
+        size="lg"
+        title="Upload plugin"
+        description="Choose a WebAssembly plugin file, then review its capabilities and usage."
+      >
+        <PluginUploadCard
+          upload={upload}
+          autoFocus
+          onAutoFocus={consumeUploadAction}
+          onUploaded={handleUploaded}
+        />
+      </Modal>
     </PageContainer>
   );
 }

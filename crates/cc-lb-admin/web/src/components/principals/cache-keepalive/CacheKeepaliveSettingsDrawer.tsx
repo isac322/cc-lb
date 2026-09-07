@@ -1,6 +1,6 @@
 import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ApiError } from '../../../lib/api';
 import {
@@ -18,6 +18,31 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   principal: Principal;
+}
+
+interface CacheKeepaliveDraftSnapshot {
+  enabled: boolean;
+  lead5m: number;
+  lead1h: number;
+  maxRenewals: number;
+  maxDuration: number;
+  snapshotBytes: number;
+  extraTools: string[];
+  treatAmbiguous: boolean;
+}
+
+function getDraftSnapshot(principal: Principal): CacheKeepaliveDraftSnapshot {
+  const config = principal.cache_keepalive;
+  return {
+    enabled: config?.enabled ?? false,
+    lead5m: config?.refresh_lead_time_5m_secs ?? 30,
+    lead1h: config?.refresh_lead_time_1h_secs ?? 300,
+    maxRenewals: config?.max_refreshes_per_session ?? 12,
+    maxDuration: config?.max_total_duration_secs ?? 14400,
+    snapshotBytes: config?.snapshot_max_bytes ?? 524288,
+    extraTools: [...(config?.classifier?.extra_wait_for_user_tools ?? [])],
+    treatAmbiguous: config?.classifier?.treat_end_turn_as_ambiguous ?? false,
+  };
 }
 
 export function CacheKeepaliveSettingsDrawer({
@@ -51,32 +76,42 @@ export function CacheKeepaliveSettingsDrawer({
   const [extraTools, setExtraTools] = useState<string[]>([]);
   const [treatAmbiguous, setTreatAmbiguous] = useState(false);
   const [newTool, setNewTool] = useState('');
+  const initialDraftRef = useRef<CacheKeepaliveDraftSnapshot | null>(null);
+  const [editingRevision, setEditingRevision] = useState(principal.revision);
 
+  // The open principal identity defines the editing session. Same-principal
+  // refetches must not replace an in-progress draft or its optimistic-lock
+  // revision.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: open/id intentionally define the draft snapshot boundary
   useEffect(() => {
-    if (open) {
-      const cfg = principal.cache_keepalive;
-      setEnabled(cfg?.enabled ?? false);
-      setLead5m(cfg?.refresh_lead_time_5m_secs ?? 30);
-      setLead1h(cfg?.refresh_lead_time_1h_secs ?? 300);
-      setMaxRenewals(cfg?.max_refreshes_per_session ?? 12);
-      setMaxDuration(cfg?.max_total_duration_secs ?? 14400);
-      setSnapshotBytes(cfg?.snapshot_max_bytes ?? 524288);
-      setExtraTools(cfg?.classifier?.extra_wait_for_user_tools ?? []);
-      setTreatAmbiguous(cfg?.classifier?.treat_end_turn_as_ambiguous ?? false);
-      setNewTool('');
-    }
-  }, [open, principal]);
+    if (!open) return;
+
+    const snapshot = getDraftSnapshot(principal);
+    initialDraftRef.current = snapshot;
+    setEditingRevision(principal.revision);
+    setEnabled(snapshot.enabled);
+    setLead5m(snapshot.lead5m);
+    setLead1h(snapshot.lead1h);
+    setMaxRenewals(snapshot.maxRenewals);
+    setMaxDuration(snapshot.maxDuration);
+    setSnapshotBytes(snapshot.snapshotBytes);
+    setExtraTools(snapshot.extraTools);
+    setTreatAmbiguous(snapshot.treatAmbiguous);
+    setNewTool('');
+  }, [open, principal.id]);
 
   const reset = () => {
-    const cfg = principal.cache_keepalive;
-    setEnabled(cfg?.enabled ?? false);
-    setLead5m(cfg?.refresh_lead_time_5m_secs ?? 30);
-    setLead1h(cfg?.refresh_lead_time_1h_secs ?? 300);
-    setMaxRenewals(cfg?.max_refreshes_per_session ?? 12);
-    setMaxDuration(cfg?.max_total_duration_secs ?? 14400);
-    setSnapshotBytes(cfg?.snapshot_max_bytes ?? 524288);
-    setExtraTools(cfg?.classifier?.extra_wait_for_user_tools ?? []);
-    setTreatAmbiguous(cfg?.classifier?.treat_end_turn_as_ambiguous ?? false);
+    const snapshot = initialDraftRef.current;
+    if (!snapshot) return;
+
+    setEnabled(snapshot.enabled);
+    setLead5m(snapshot.lead5m);
+    setLead1h(snapshot.lead1h);
+    setMaxRenewals(snapshot.maxRenewals);
+    setMaxDuration(snapshot.maxDuration);
+    setSnapshotBytes(snapshot.snapshotBytes);
+    setExtraTools(snapshot.extraTools);
+    setTreatAmbiguous(snapshot.treatAmbiguous);
     setNewTool('');
   };
 
@@ -101,7 +136,7 @@ export function CacheKeepaliveSettingsDrawer({
     updateMutation.mutate(
       {
         id: principal.id,
-        expected_revision: principal.revision,
+        expected_revision: editingRevision,
         cache_keepalive: {
           enabled,
           refresh_lead_time_5m_secs: lead5m,
@@ -121,7 +156,13 @@ export function CacheKeepaliveSettingsDrawer({
           onOpenChange(false);
         },
         onError: (error) => {
-          if (error instanceof ApiError && error.status === 412) {
+          if (
+            error instanceof ApiError &&
+            (error.status === 412 ||
+              (error.status === 409 &&
+                (error.code === 'stale_revision' ||
+                  error.code === 'storage_conflict')))
+          ) {
             toast.error(
               'Principal was modified by another user. Please refresh and try again.',
             );

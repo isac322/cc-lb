@@ -1,46 +1,76 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type * as ReactRouterModule from '@tanstack/react-router';
 import {
+  act,
   cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react';
 import type React from 'react';
 import { useState } from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+
+vi.mock('sonner', () => ({
+  toast: {
+    error: vi.fn(),
+    success: vi.fn(),
+  },
+}));
+
+const fetchWithAuthMock = vi.hoisted(() => vi.fn());
+
+vi.mock('../lib/api', async () => {
+  const actual = await vi.importActual<typeof ApiModule>('../lib/api');
+  return {
+    ...actual,
+    fetchWithAuth: (...args: unknown[]) => fetchWithAuthMock(...args),
+  };
+});
+
+import { toast } from 'sonner';
+import type * as ApiModule from '../lib/api';
 import { ApiError } from '../lib/api';
 import * as queries from '../lib/queries';
 import { Route } from './plugins';
 
 type SearchState = {
   readonly plugin?: string;
+  readonly action?: 'upload';
 };
 
 type NavigateArgs = {
-  readonly search?: SearchState;
+  readonly replace?: boolean;
+  readonly search?: SearchState | ((previous: SearchState) => SearchState);
 };
 
+const navigateMock = vi.fn();
+let initialSearch: SearchState = {};
+let currentSearch: SearchState = {};
 let setMockSearch: React.Dispatch<React.SetStateAction<SearchState>> | null =
   null;
 
 vi.mock('@tanstack/react-router', async () => {
-  const actual = await vi.importActual<typeof import('@tanstack/react-router')>(
+  const actual = await vi.importActual<typeof ReactRouterModule>(
     '@tanstack/react-router',
   );
   return {
     ...actual,
-    useNavigate:
-      () =>
-      ({ search }: NavigateArgs) => {
-        if (setMockSearch && search) setMockSearch(search);
-      },
+    useNavigate: () => (args: NavigateArgs) => {
+      navigateMock(args);
+      const search = args.search;
+      if (!setMockSearch || !search) return;
+      setMockSearch((previous) =>
+        typeof search === 'function' ? search(previous) : search,
+      );
+    },
   };
 });
 
 vi.mock('../lib/queries', async () => {
-  const actual =
-    await vi.importActual<typeof import('../lib/queries')>('../lib/queries');
+  const actual = await vi.importActual<typeof queries>('../lib/queries');
   return {
     ...actual,
     usePluginRegistry: vi.fn(),
@@ -55,20 +85,11 @@ vi.mock('../lib/queries', async () => {
 });
 
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: false } },
+  defaultOptions: {
+    queries: { retry: false },
+    mutations: { retry: false },
+  },
 });
-
-type UploadVariables = Parameters<
-  ReturnType<typeof queries.useUploadWasm>['mutate']
->[0];
-type UploadOptions = Parameters<
-  ReturnType<typeof queries.useUploadWasm>['mutate']
->[1];
-type UploadOnError = Extract<
-  NonNullable<UploadOptions>['onError'],
-  (...args: never[]) => unknown
->;
-type UploadErrorContext = Parameters<UploadOnError>[3];
 
 const Component = Route.options.component as React.ComponentType;
 
@@ -90,7 +111,8 @@ const pluginEntry: queries.PluginEntry = {
 };
 
 function TestWrapper() {
-  const [search, setSearch] = useState<SearchState>({});
+  const [search, setSearch] = useState<SearchState>(initialSearch);
+  currentSearch = search;
   setMockSearch = setSearch;
   Object.assign(Route, { useSearch: () => search });
   return <Component />;
@@ -106,130 +128,290 @@ function renderWithProviders() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  initialSearch = {};
+  currentSearch = {};
+  setMockSearch = null;
 });
 
 afterEach(() => {
   cleanup();
+  queryClient.clear();
+  vi.restoreAllMocks();
 });
 
-test('uploads plugin', async () => {
-  const mutateMock = vi.fn();
+function mockPluginPageDependencies() {
   vi.mocked(queries.usePluginRegistry).mockReturnValue({
     data: { entries: [] },
     isLoading: false,
-  } as unknown as ReturnType<typeof queries.usePluginRegistry>);
-  vi.mocked(queries.useUploadWasm).mockReturnValue({
-    mutate: mutateMock,
-    isPending: false,
-  } as unknown as ReturnType<typeof queries.useUploadWasm>);
+  } as never);
   vi.mocked(queries.useDeletePlugin).mockReturnValue({
     mutate: vi.fn(),
-  } as unknown as ReturnType<typeof queries.useDeletePlugin>);
+  } as never);
   vi.mocked(queries.useGcPlugins).mockReturnValue({
     mutate: vi.fn(),
-  } as unknown as ReturnType<typeof queries.useGcPlugins>);
+  } as never);
   vi.mocked(queries.usePluginReferences).mockReturnValue({
     data: null,
     isLoading: false,
-  } as unknown as ReturnType<typeof queries.usePluginReferences>);
+  } as never);
+}
+
+function mockPluginPage(uploadPending = false) {
+  const mutate = vi.fn();
+  mockPluginPageDependencies();
+  vi.mocked(queries.useUploadWasm).mockReturnValue({
+    mutate,
+    isPending: uploadPending,
+  } as never);
+  return mutate;
+}
+
+async function mockPluginPageWithRealUpload() {
+  mockPluginPageDependencies();
+  const actual = await vi.importActual<typeof queries>('../lib/queries');
+  vi.mocked(queries.useUploadWasm).mockImplementation(actual.useUploadWasm);
+}
+
+function openUploadAction() {
+  const setSearch = setMockSearch;
+  if (!setSearch) throw new Error('Plugin route is not mounted');
+  act(() => {
+    setSearch((previous) => ({ ...previous, action: 'upload' }));
+  });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, reject, resolve };
+}
+
+test('consumes the upload action once while preserving plugin selection', async () => {
+  initialSearch = { plugin: 'preserved-plugin', action: 'upload' };
+  const mutate = mockPluginPage();
+  const fileInputClick = vi.spyOn(HTMLInputElement.prototype, 'click');
 
   renderWithProviders();
 
-  const fileInput = document.getElementById(
-    'btn-upload-wasm',
-  ) as HTMLInputElement;
-  const file = new File(['dummy content'], 'test.wasm', {
-    type: 'application/wasm',
-  });
-
-  fireEvent.change(fileInput, { target: { files: [file] } });
-
+  expect(
+    await screen.findByRole('dialog', { name: 'Upload plugin' }),
+  ).toBeDefined();
+  const browse = screen.getByRole('button', { name: 'Choose .wasm file' });
   await waitFor(() => {
-    expect(mutateMock).toHaveBeenCalledWith({ file }, expect.anything());
+    expect(document.activeElement).toBe(browse);
   });
+  expect(mutate).not.toHaveBeenCalled();
+  expect(fileInputClick).not.toHaveBeenCalled();
+  await waitFor(() => {
+    expect(currentSearch.plugin).toBe('preserved-plugin');
+    expect(currentSearch.action).toBeUndefined();
+  });
+  expect(navigateMock).toHaveBeenCalledTimes(1);
+  expect(navigateMock.mock.calls[0]?.[0]).toMatchObject({ replace: true });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }));
+  await waitFor(() => {
+    expect(screen.queryByRole('dialog', { name: 'Upload plugin' })).toBeNull();
+  });
+  expect(navigateMock).toHaveBeenCalledTimes(1);
 });
 
-test('handles replacement confirmation retry', async () => {
-  let onErrorCallback: NonNullable<UploadOptions>['onError'] | undefined;
-  const mutateMock = vi
-    .fn()
-    .mockImplementation((vars: UploadVariables, options: UploadOptions) => {
-      if (!vars.confirmReplacement) {
-        onErrorCallback = options?.onError;
-      }
+test('keeps action-opened upload dialog locked while an upload is pending', async () => {
+  initialSearch = { action: 'upload' };
+  mockPluginPage(true);
+
+  renderWithProviders();
+
+  const dialog = await screen.findByRole('dialog', { name: 'Upload plugin' });
+  const uploadTarget = screen.getByRole('button', {
+    name: 'Uploading plugin',
+  });
+  expect(uploadTarget.getAttribute('aria-disabled')).toBe('true');
+  expect(uploadTarget.getAttribute('tabindex')).toBe('-1');
+
+  const close = screen.getByRole('button', { name: 'Close dialog' });
+  await waitFor(() => {
+    expect(close.hasAttribute('disabled')).toBe(true);
+  });
+  expect(currentSearch.action).toBe('upload');
+  expect(navigateMock).not.toHaveBeenCalled();
+  fireEvent.click(close);
+  expect(dialog.isConnected).toBe(true);
+});
+
+test('keeps an inline upload observed and blocks a duplicate after the upload action opens', async () => {
+  await mockPluginPageWithRealUpload();
+  const request = deferred<{
+    json: () => Promise<queries.UploadWasmResponse>;
+  }>();
+  fetchWithAuthMock.mockReturnValue(request.promise);
+
+  renderWithProviders();
+
+  const file = new File(['first upload'], 'first.wasm', {
+    type: 'application/wasm',
+  });
+  fireEvent.change(screen.getByLabelText('Plugin file'), {
+    target: { files: [file] },
+  });
+  await waitFor(() => {
+    expect(fetchWithAuthMock).toHaveBeenCalledTimes(1);
+  });
+
+  openUploadAction();
+  const dialog = await screen.findByRole('dialog', { name: 'Upload plugin' });
+  const modalFileInput = within(dialog).getByLabelText(
+    'Plugin file',
+  ) as HTMLInputElement;
+  expect(modalFileInput.disabled).toBe(true);
+
+  fireEvent.change(modalFileInput, {
+    target: {
+      files: [
+        new File(['duplicate upload'], 'duplicate.wasm', {
+          type: 'application/wasm',
+        }),
+      ],
+    },
+  });
+  expect(fetchWithAuthMock).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    request.resolve({
+      json: async () => ({
+        id: 'uploaded-plugin',
+        sha256_hex: 'abcd',
+        size_bytes: file.size,
+        original_filename: file.name,
+        revision: 0,
+        idempotent: false,
+        action: 'created',
+      }),
     });
+  });
 
-  vi.mocked(queries.usePluginRegistry).mockReturnValue({
-    data: { entries: [] },
-    isLoading: false,
-  } as unknown as ReturnType<typeof queries.usePluginRegistry>);
-  vi.mocked(queries.useUploadWasm).mockReturnValue({
-    mutate: mutateMock,
-    isPending: false,
-  } as unknown as ReturnType<typeof queries.useUploadWasm>);
-  vi.mocked(queries.useDeletePlugin).mockReturnValue({
-    mutate: vi.fn(),
-  } as unknown as ReturnType<typeof queries.useDeletePlugin>);
-  vi.mocked(queries.useGcPlugins).mockReturnValue({
-    mutate: vi.fn(),
-  } as unknown as ReturnType<typeof queries.useGcPlugins>);
-  vi.mocked(queries.usePluginReferences).mockReturnValue({
-    data: null,
-    isLoading: false,
-  } as unknown as ReturnType<typeof queries.usePluginReferences>);
+  await waitFor(() => {
+    expect(toast.success).toHaveBeenCalledWith('Uploaded first.wasm');
+    expect(currentSearch.plugin).toBe('uploaded-plugin');
+    expect(currentSearch.action).toBeUndefined();
+  });
+});
+
+test('reports a deferred inline upload failure after the upload action opens', async () => {
+  await mockPluginPageWithRealUpload();
+  const request = deferred<{
+    json: () => Promise<queries.UploadWasmResponse>;
+  }>();
+  fetchWithAuthMock.mockReturnValue(request.promise);
 
   renderWithProviders();
 
-  const fileInput = document.getElementById(
-    'btn-upload-wasm',
-  ) as HTMLInputElement;
-  const file = new File(['dummy content'], 'test.wasm', {
-    type: 'application/wasm',
+  fireEvent.change(screen.getByLabelText('Plugin file'), {
+    target: {
+      files: [
+        new File(['failed upload'], 'failed.wasm', {
+          type: 'application/wasm',
+        }),
+      ],
+    },
+  });
+  await waitFor(() => {
+    expect(fetchWithAuthMock).toHaveBeenCalledTimes(1);
   });
 
-  fireEvent.change(fileInput, { target: { files: [file] } });
+  openUploadAction();
+  await screen.findByRole('dialog', { name: 'Upload plugin' });
+  await act(async () => {
+    request.reject(new Error('upload failed'));
+  });
 
   await waitFor(() => {
-    expect(mutateMock).toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith('upload failed');
+    expect(currentSearch.action).toBeUndefined();
+  });
+});
+
+test('keeps deferred inline replacement confirmation actionable after the upload action opens', async () => {
+  await mockPluginPageWithRealUpload();
+  const initialRequest = deferred<{
+    json: () => Promise<queries.UploadWasmResponse>;
+  }>();
+  const replacementRequest = deferred<{
+    json: () => Promise<queries.UploadWasmResponse>;
+  }>();
+  fetchWithAuthMock
+    .mockReturnValueOnce(initialRequest.promise)
+    .mockReturnValueOnce(replacementRequest.promise);
+
+  renderWithProviders();
+
+  const file = new File(['replacement upload'], 'replacement.wasm', {
+    type: 'application/wasm',
+  });
+  fireEvent.change(screen.getByLabelText('Plugin file'), {
+    target: { files: [file] },
+  });
+  await waitFor(() => {
+    expect(fetchWithAuthMock).toHaveBeenCalledTimes(1);
   });
 
-  onErrorCallback?.(
-    new ApiError(
-      409,
-      'replacement_confirmation_required',
-      {
-        name: 'test',
-        error: 'replacement_confirmation_required',
-        replace_registry_id: 'reg-1',
-        expected_revision: 1,
-        current_version: '1.0.0',
-        incoming_version: '1.0.1',
-        current_sha256_hex: 'aaaa',
-        incoming_sha256_hex: 'bbbb',
-      },
-      'replacement_confirmation_required',
-    ),
-    { file },
-    undefined,
-    {} as UploadErrorContext,
-  );
+  openUploadAction();
+  await screen.findByRole('dialog', { name: 'Upload plugin' });
+  await act(async () => {
+    initialRequest.reject(
+      new ApiError(
+        409,
+        'replacement_confirmation_required',
+        {
+          name: 'replacement',
+          error: 'replacement_confirmation_required',
+          replace_registry_id: 'reg-1',
+          expected_revision: 7,
+          current_version: '1.0.0',
+          incoming_version: '1.1.0',
+          current_sha256_hex: 'aaaa',
+          incoming_sha256_hex: 'bbbb',
+        },
+        'replacement_confirmation_required',
+      ),
+    );
+  });
 
   expect(await screen.findByText('Confirm Plugin Replacement')).toBeDefined();
-  expect(screen.getByText(/1\.0\.0/)).toBeDefined();
-  expect(screen.getByText(/1\.0\.1/)).toBeDefined();
-
   fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
 
   await waitFor(() => {
-    expect(mutateMock).toHaveBeenCalledWith(
-      {
-        file,
-        confirmReplacement: true,
-        replaceRegistryId: 'reg-1',
-        expectedRevision: 1,
-      },
-      expect.anything(),
-    );
+    expect(fetchWithAuthMock).toHaveBeenCalledTimes(2);
+  });
+  const replacementInit = fetchWithAuthMock.mock.calls[1]?.[1] as {
+    body: FormData;
+  };
+  expect(replacementInit.body.get('bytes')).toBe(file);
+  expect(replacementInit.body.get('confirm_replacement')).toBe('true');
+  expect(replacementInit.body.get('replace_registry_id')).toBe('reg-1');
+  expect(replacementInit.body.get('expected_revision')).toBe('7');
+
+  await act(async () => {
+    replacementRequest.resolve({
+      json: async () => ({
+        id: 'replaced-plugin',
+        sha256_hex: 'bbbb',
+        size_bytes: file.size,
+        original_filename: file.name,
+        revision: 8,
+        idempotent: false,
+        action: 'replaced',
+      }),
+    });
+  });
+
+  await waitFor(() => {
+    expect(toast.success).toHaveBeenCalledWith('Replaced replacement.wasm');
+    expect(currentSearch.plugin).toBe('replaced-plugin');
   });
 });
 

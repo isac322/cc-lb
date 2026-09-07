@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 
 - Admin charts and request lists retain successful data during background refreshes instead of replacing it with skeletons. Rolling quota queries now keep stable cache keys and update their time bounds when responses arrive; range changes preserve the displayed chart until replacement data is ready.
 - Histogram and detail queries no longer reuse another filter or entity's data. Query cancellation also preserves the existing 30-second request timeout.
+- Admin editing sessions now retain their starting revision, isolate principal drafts, and preserve unsaved changes through external updates. Shared locale, timezone, and theme preferences update all mounted consumers.
+- Live-event reconnection uses the current filters, keeps connections through short tab switches, and excludes intentional pauses from failure tracking. Query subscriptions and memoized request rows avoid unchanged-data rendering work.
+- Command palette actions survive lazy route loading, plugin upload callbacks survive modal transitions, and Audit exposes only supported principal/time filters. Unsupported in-app admin-token rotation is replaced with accurate restart guidance.
+- Request-detail timelines retain live data while final details load, session-detail errors retain mobile back navigation, and previously omitted state-management tests are collected.
 - PostgreSQL principal-cost aggregation now reads materialized cost columns from a covering index instead of decoding request payloads, while a compatibility trigger protects rolling deployments.
 - PostgreSQL read-path migrations now allow 90 seconds for backfills and index builds, and can be replayed after a rollback rewinds their migration registry entries.
 - Overview requests principal totals without dense time-series buckets and caps pooled-quota chart points while preserving bucket peaks and exact latest values. Pool-history defaults remain unchanged.

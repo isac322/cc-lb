@@ -8,9 +8,27 @@ import {
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as FormatModule from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { RequestEventsTable } from './RequestEventsTable';
 import { Sparkline } from './Sparkline';
+
+type GetRequestOutcome = typeof FormatModule.getRequestOutcome;
+
+const { requestOutcomeWork } = vi.hoisted(() => ({
+  requestOutcomeWork: vi.fn(),
+}));
+
+vi.mock('../../lib/format', async (importOriginal) => {
+  const actual = await importOriginal<typeof FormatModule>();
+  return {
+    ...actual,
+    getRequestOutcome: (...args: Parameters<GetRequestOutcome>) => {
+      requestOutcomeWork();
+      return actual.getRequestOutcome(...args);
+    },
+  };
+});
 
 function render(ui: ReactElement, options?: RenderOptions) {
   const queryClient = new QueryClient();
@@ -28,6 +46,7 @@ describe('RequestEventsTable', () => {
       'fetch',
       vi.fn(() => Promise.reject(new Error('network disabled in test'))),
     );
+    requestOutcomeWork.mockClear();
   });
 
   afterEach(() => {
@@ -37,6 +56,70 @@ describe('RequestEventsTable', () => {
 
   const principalNameMap = new Map<string, string>();
   const upstreamNameMap = new Map<string, string>();
+
+  it('skips unchanged row work across identical and single-event updates', () => {
+    const events: RequestEventWithPhase[] = Array.from(
+      { length: 200 },
+      (_, index) => ({
+        event_id: `evt_${index}`,
+        request_id: `req_${index}`,
+        ts: 1718553120 + index,
+        ts_ms: 1718553120000 + index * 1000,
+        status: 200,
+        duration_ms: 100 + index,
+        _phase: 'final' as const,
+      }),
+    );
+    const { container, rerender } = render(
+      <RequestEventsTable
+        events={events}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    expect(requestOutcomeWork).toHaveBeenCalledTimes(200);
+    const unchangedRow = container.querySelector<HTMLTableRowElement>(
+      'tr[aria-label="View request evt_72"]',
+    );
+    const changedRow = container.querySelector<HTMLTableRowElement>(
+      'tr[aria-label="View request evt_73"]',
+    );
+    if (!unchangedRow || !changedRow) throw new Error('Expected request rows');
+
+    requestOutcomeWork.mockClear();
+    rerender(
+      <RequestEventsTable
+        events={events}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+    expect(requestOutcomeWork).not.toHaveBeenCalled();
+
+    const changedEvents = [...events];
+    const changedEvent = changedEvents[73];
+    if (!changedEvent) throw new Error('Expected changed event');
+    changedEvents[73] = { ...changedEvent, status: 500 };
+
+    requestOutcomeWork.mockClear();
+    rerender(
+      <RequestEventsTable
+        events={changedEvents}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    expect(requestOutcomeWork).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('tr[aria-label="View request evt_72"]'),
+    ).toBe(unchangedRow);
+    expect(
+      container.querySelector('tr[aria-label="View request evt_73"]'),
+    ).toBe(changedRow);
+    expect(changedRow.textContent).toContain('500');
+  });
 
   it('matches visible columns in reserved loading rows', () => {
     const { container } = render(

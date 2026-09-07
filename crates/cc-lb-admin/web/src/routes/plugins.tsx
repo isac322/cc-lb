@@ -6,6 +6,7 @@ export const Route = createFileRoute('/plugins')({
   validateSearch: (search: Record<string, unknown>) => {
     return {
       plugin: typeof search.plugin === 'string' ? search.plugin : undefined,
+      action: search.action === 'upload' ? ('upload' as const) : undefined,
     };
   },
 });

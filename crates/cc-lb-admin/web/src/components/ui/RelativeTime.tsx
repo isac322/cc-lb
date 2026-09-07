@@ -90,8 +90,11 @@ export function RelativeTime({
         : makeIntlFormatter({ locale, numeric: 'auto', style: 'long' }),
     [locale, compact],
   );
+  const abs = useMemo(
+    () => (date ? formatAbsolute(date, locale, timezone) : ''),
+    [date, locale, timezone],
+  );
   if (!date) return <span className={cx('text-text-faint', className)}>—</span>;
-  const abs = formatAbsolute(date, locale, timezone);
   return (
     <Hint label={abs}>
       <span className={cx('cursor-help', className)}>
@@ -139,10 +142,12 @@ export function ResetCountdown({
     () => makeResetFormatter(locale, compact),
     [locale, compact],
   );
+  const abs = useMemo(
+    () => (date ? formatAbsolute(date, locale, timezone) : ''),
+    [date, locale, timezone],
+  );
 
   if (!date) return <span className={cx('text-text-faint', className)}>—</span>;
-
-  const abs = formatAbsolute(date, locale, timezone);
 
   return (
     <Hint label={abs} side="top">

@@ -25,17 +25,16 @@ describe('mergeLiveSessions', () => {
     expect(mergeLiveSessions([], 10)).toEqual([]);
   });
 
-  it('Given duplicate ids, When merged, Then keeps the first occurrence (newest-first)', () => {
-    const rows = [
-      makeRow('1', 'renewed'),
-      makeRow('2', 'scheduled'),
-      makeRow('1', 'scheduled'), // duplicate, older state
-    ];
-    const result = mergeLiveSessions(rows, 10);
-    expect(result).toHaveLength(2);
-    expect(result[0].id).toBe('1');
-    expect(result[0].state).toBe('renewed');
-    expect(result[1].id).toBe('2');
+  it('Given overlapping pages, When merged, Then keeps the newest row object without cloning', () => {
+    const newest = makeRow('1', 'renewed');
+    const second = makeRow('2', 'scheduled');
+    const olderDuplicate = makeRow('1', 'scheduled');
+
+    const result = mergeLiveSessions([newest, second, olderDuplicate], 10);
+
+    expect(result).toEqual([newest, second]);
+    expect(result[0]).toBe(newest);
+    expect(result[1]).toBe(second);
   });
 
   it('Given rows exceeding maxRows, When merged, Then trims to maxRows', () => {
@@ -44,16 +43,6 @@ describe('mergeLiveSessions', () => {
     expect(result).toHaveLength(2);
     expect(result[0].id).toBe('1');
     expect(result[1].id).toBe('2');
-  });
-
-  it('Given in-place update, When merged, Then reflects the changed row object at same id', () => {
-    const rows1 = [makeRow('1', 'scheduled')];
-    const result1 = mergeLiveSessions(rows1, 10);
-    expect(result1[0].state).toBe('scheduled');
-
-    const rows2 = [makeRow('1', 'renewed')];
-    const result2 = mergeLiveSessions(rows2, 10);
-    expect(result2[0].state).toBe('renewed');
   });
 
   it('Given order, When merged, Then preserves newest-first order', () => {

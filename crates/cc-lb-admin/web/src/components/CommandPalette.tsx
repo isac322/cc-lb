@@ -5,7 +5,6 @@ import {
   ArrowUpDown,
   Box,
   CornerDownLeft,
-  KeyRound,
   LayoutDashboard,
   Plus,
   Power,
@@ -113,56 +112,17 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 </Command.Item>
               </Command.Group>
               <Command.Group heading="Actions">
-                <Command.Item
-                  onSelect={() => {
-                    go('/upstreams');
-                    setTimeout(
-                      () =>
-                        document.getElementById('btn-new-upstream')?.click(),
-                      100,
-                    );
-                  }}
-                >
+                <Command.Item onSelect={() => go('/upstreams?action=new')}>
                   <Plus className="w-4 h-4 text-text-faint" />
                   Create upstream
                 </Command.Item>
-                <Command.Item
-                  onSelect={() => {
-                    go('/principals');
-                    setTimeout(
-                      () =>
-                        document.getElementById('btn-new-principal')?.click(),
-                      100,
-                    );
-                  }}
-                >
+                <Command.Item onSelect={() => go('/principals?action=new')}>
                   <Plus className="w-4 h-4 text-text-faint" />
                   Create principal
                 </Command.Item>
-                <Command.Item
-                  onSelect={() => {
-                    go('/plugins');
-                    setTimeout(
-                      () => document.getElementById('btn-upload-wasm')?.click(),
-                      100,
-                    );
-                  }}
-                >
+                <Command.Item onSelect={() => go('/plugins?action=upload')}>
                   <Plus className="w-4 h-4 text-text-faint" />
-                  Upload Wasm plugin
-                </Command.Item>
-                <Command.Item
-                  onSelect={() => {
-                    go('/settings');
-                    setTimeout(
-                      () =>
-                        document.getElementById('btn-rotate-token')?.click(),
-                      100,
-                    );
-                  }}
-                >
-                  <KeyRound className="w-4 h-4 text-text-faint" />
-                  Rotate admin token
+                  Open plugin upload
                 </Command.Item>
               </Command.Group>
               <Command.Group heading="Upstreams">

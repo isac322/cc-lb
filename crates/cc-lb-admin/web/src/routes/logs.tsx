@@ -4,7 +4,9 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { AlertTriangle, Download, RefreshCw, X, Zap } from 'lucide-react';
 import {
   type SetStateAction,
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -32,6 +34,8 @@ import {
   filterLogRows,
   LOG_STATUS_CLASSES,
   mergeLogRows,
+  newestLiveEventIds,
+  selectLogRowsForPage,
 } from '../lib/logRows';
 import { LOGS_PAGE_SIZE } from '../lib/logsPagination';
 import {
@@ -166,6 +170,16 @@ function LogsPage() {
   const { session: sessionFilter } = filters;
   const serverFilters = buildLiveFilters(filters);
   const historicalFilters = buildHistoricalFilters(filters);
+  const nextPaginationIdentity = JSON.stringify([
+    filters.principal_id,
+    filters.upstream_id,
+    filters.session,
+    filters.model,
+    filters.status,
+    filters.source_kind,
+    filters.since_unix_secs,
+    filters.until_unix_secs,
+  ]);
 
   const [userRequestedTailing, setUserRequestedTailing] = useState(true);
   const [page, setPage] = useState(0);
@@ -183,10 +197,39 @@ function LogsPage() {
   );
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const paginationRequestGenerationRef = useRef(0);
+  const paginationRequestIdentityRef = useRef(nextPaginationIdentity);
+  const [paginationIdentity, setPaginationIdentity] = useState(
+    nextPaginationIdentity,
+  );
+  // This checkpoint and the pagination reset are render-phase state updates,
+  // so React retries them together when a concurrent render is discarded.
+  const scrollResetPaginationIdentityRef = useRef(nextPaginationIdentity);
+  const paginationIdentityChanged =
+    paginationIdentity !== nextPaginationIdentity;
+  if (paginationIdentityChanged) {
+    setPaginationIdentity(nextPaginationIdentity);
+    setPage(0);
+    setCursorStack([INITIAL_LOGS_PAGE_PARAM]);
+    setLoadedPages([]);
+    setLoadingNext(false);
+    setExhaustedCursorKeys(new Set());
+  }
 
-  const pageCount = Math.max(1, cursorStack.length);
-  const clampedPage = Math.min(page, pageCount - 1);
-  const currentPageParam = cursorStack[clampedPage] ?? INITIAL_LOGS_PAGE_PARAM;
+  // A changed filter identity must never subscribe with the previous page's
+  // cursor while React applies the pagination reset above.
+  const activePage = paginationIdentityChanged ? 0 : page;
+  const activeCursorStack = paginationIdentityChanged
+    ? [INITIAL_LOGS_PAGE_PARAM]
+    : cursorStack;
+  const activeLoadedPages = paginationIdentityChanged ? [] : loadedPages;
+  const activeExhaustedCursorKeys = paginationIdentityChanged
+    ? new Set<string>()
+    : exhaustedCursorKeys;
+  const activeLoadingNext = paginationIdentityChanged ? false : loadingNext;
+  const pageCount = Math.max(1, activeCursorStack.length);
+  const clampedPage = Math.min(activePage, pageCount - 1);
+  const currentPageParam =
+    activeCursorStack[clampedPage] ?? INITIAL_LOGS_PAGE_PARAM;
   const recent = useRecentEventsPage(historicalFilters, currentPageParam);
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
@@ -237,25 +280,21 @@ function LogsPage() {
     return () => clearTimeout(timer);
   }, [modelDraft, routeModel, navigate]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: route filter scalars intentionally reset pagination and table scroll without being read in the effect body.
   useEffect(() => {
-    paginationRequestGenerationRef.current += 1;
-    setPage(0);
-    setCursorStack([INITIAL_LOGS_PAGE_PARAM]);
-    setLoadedPages([]);
-    setLoadingNext(false);
-    setExhaustedCursorKeys(new Set());
+    if (scrollResetPaginationIdentityRef.current === nextPaginationIdentity) {
+      return;
+    }
+    scrollResetPaginationIdentityRef.current = nextPaginationIdentity;
     if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
-  }, [
-    filters.principal_id,
-    filters.upstream_id,
-    filters.session,
-    filters.model,
-    filters.status,
-    filters.source_kind,
-    filters.since_unix_secs,
-    filters.until_unix_secs,
-  ]);
+  }, [nextPaginationIdentity]);
+
+  // Invalidate page requests only after the identity reset commits. A render
+  // mutation would survive a discarded transition while its state updates do not.
+  useLayoutEffect(() => {
+    if (paginationRequestIdentityRef.current === paginationIdentity) return;
+    paginationRequestIdentityRef.current = paginationIdentity;
+    paginationRequestGenerationRef.current += 1;
+  }, [paginationIdentity]);
 
   useEffect(
     () => () => {
@@ -507,25 +546,30 @@ function LogsPage() {
     });
   };
 
-  const focusAround = (tsMs: number, radiusSecs: number) => {
-    const nowMs = Date.now();
-    const nowSecs = Math.floor(nowMs / 1000);
-    const centerSecs = Math.floor(tsMs / 1000);
-    const viewEnd = Math.min(nowMs, (centerSecs + radiusSecs * 3) * 1000);
-    setFollowRight(nowMs - viewEnd <= Math.max(histogramBucketMs, 5_000));
-    setView({ a: (centerSecs - radiusSecs * 3) * 1000, b: viewEnd });
-    // Anchoring a fresh row would otherwise write a future upper bound and
-    // freeze tailing on a window that has not happened yet.
-    const untilRaw = centerSecs + radiusSecs;
-    navigate({
-      search: (prev) => ({
-        ...prev,
-        since_unix_secs: centerSecs - radiusSecs,
-        until_unix_secs:
-          untilRaw >= nowSecs - histogramBucketMs / 1000 ? undefined : untilRaw,
-      }),
-    });
-  };
+  const focusAround = useCallback(
+    (tsMs: number, radiusSecs: number) => {
+      const nowMs = Date.now();
+      const nowSecs = Math.floor(nowMs / 1000);
+      const centerSecs = Math.floor(tsMs / 1000);
+      const viewEnd = Math.min(nowMs, (centerSecs + radiusSecs * 3) * 1000);
+      setFollowRight(nowMs - viewEnd <= Math.max(histogramBucketMs, 5_000));
+      setView({ a: (centerSecs - radiusSecs * 3) * 1000, b: viewEnd });
+      // Anchoring a fresh row would otherwise write a future upper bound and
+      // freeze tailing on a window that has not happened yet.
+      const untilRaw = centerSecs + radiusSecs;
+      navigate({
+        search: (prev) => ({
+          ...prev,
+          since_unix_secs: centerSecs - radiusSecs,
+          until_unix_secs:
+            untilRaw >= nowSecs - histogramBucketMs / 1000
+              ? undefined
+              : untilRaw,
+        }),
+      });
+    },
+    [histogramBucketMs, navigate],
+  );
 
   const sessionOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -545,23 +589,17 @@ function LogsPage() {
     [rows, filters],
   );
   const currentHistoricalEvents = historicalPages[clampedPage]?.events ?? [];
-  // biome-ignore lint/correctness/useExhaustiveDependencies: same stable-Map contract as rows above; the first page must re-merge whenever a live upsert bumps live.version.
   const pageRows = useMemo(
     () =>
       filterLogRows(
-        mergeLogRows(
-          clampedPage === 0 ? rangedLiveEvents : new Map(),
+        selectLogRowsForPage(
+          rows,
+          clampedPage === 0 ? rangedLiveEvents : undefined,
           currentHistoricalEvents,
         ),
         filters,
       ).slice(0, LOGS_PAGE_SIZE),
-    [
-      clampedPage,
-      currentHistoricalEvents,
-      filters,
-      rangedLiveEvents,
-      live.version,
-    ],
+    [clampedPage, currentHistoricalEvents, filters, rangedLiveEvents, rows],
   );
   const currentCursor = pageRows.length
     ? getRecentEventsCursor(pageRows[pageRows.length - 1])
@@ -583,7 +621,7 @@ function LogsPage() {
   const hasMore =
     lastHistoricalEvents.length === LOGS_PAGE_SIZE &&
     lastHistoricalCursorKey !== undefined &&
-    !exhaustedCursorKeys.has(lastHistoricalCursorKey);
+    !activeExhaustedCursorKeys.has(lastHistoricalCursorKey);
 
   const commitPage = (nextPage: SetStateAction<number>) => {
     if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
@@ -598,9 +636,9 @@ function LogsPage() {
       limit: LOGS_PAGE_SIZE,
       ...currentCursor,
     };
-    const cachedPageParam = cursorStack[nextPageIndex];
+    const cachedPageParam = activeCursorStack[nextPageIndex];
     if (
-      loadedPages[nextPageIndex] !== undefined &&
+      activeLoadedPages[nextPageIndex] !== undefined &&
       cachedPageParam?.kind === 'cursor' &&
       cachedPageParam.ts_ms === nextPageParam.ts_ms &&
       cachedPageParam.event_id === nextPageParam.event_id
@@ -710,14 +748,9 @@ function LogsPage() {
     [],
   );
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: same rationale — live.version is the mutation counter for the stable eventsMap ref.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: live.version is the mutation counter for the stable eventsMap ref.
   const recentLiveIds = useMemo(
-    () =>
-      new Set(
-        Array.from(live.eventsMap.values())
-          .slice(0, 20)
-          .map((e) => e.event.event_id ?? e.event.request_id),
-      ),
+    () => newestLiveEventIds(live.eventsMap),
     [live.eventsMap, live.version],
   );
 
@@ -946,7 +979,7 @@ function LogsPage() {
             pageSize={LOGS_PAGE_SIZE}
             hasMore={hasMore}
             loading={initialRowsLoading}
-            loadingNext={loadingNext}
+            loadingNext={activeLoadingNext}
             onPrev={previousPage}
             onNext={() => void nextPage()}
           />

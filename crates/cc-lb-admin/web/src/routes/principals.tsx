@@ -92,7 +92,10 @@ import {
 } from '../lib/queries';
 import { useCopyButton } from '../lib/useCopyButton';
 
-const principalSearchSchema = z.object({ selectedId: z.string().optional() });
+const principalSearchSchema = z.object({
+  selectedId: z.string().optional(),
+  action: z.literal('new').optional(),
+});
 
 const PRINCIPAL_LIST_ROW_CLASS =
   'w-full min-h-[72px] text-left p-3 rounded-sm border';
@@ -292,7 +295,7 @@ function PrincipalDetailLoadingShell() {
 }
 
 function PrincipalsPage() {
-  const { selectedId } = Route.useSearch();
+  const { selectedId, action } = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const principals = usePrincipals();
   const [createOpen, setCreateOpen] = useState(false);
@@ -301,6 +304,15 @@ function PrincipalsPage() {
     principals.data?.principals.find((p) => p.id === selectedId) ?? null;
   const select = (id: string | undefined) =>
     navigate({ search: id ? { selectedId: id } : {} });
+
+  useEffect(() => {
+    if (action !== 'new') return;
+    setCreateOpen(true);
+    navigate({
+      search: (prev) => ({ ...prev, action: undefined }),
+      replace: true,
+    });
+  }, [action, navigate]);
 
   useEffect(() => {
     if (
@@ -433,6 +445,7 @@ function PrincipalsPage() {
       >
         {selected ? (
           <PrincipalDetail
+            key={selected.id}
             principal={selected}
             onBack={() => select(undefined)}
           />
@@ -655,7 +668,21 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;
   const [models, setModels] = useState(principal.allowed_models.join(', '));
   const [editing, setEditing] = useState(false);
+  const [editRevision, setEditRevision] = useState<number | null>(null);
   const saving = setAllowed.isPending;
+
+  const startEditing = () => {
+    setModels(principal.allowed_models.join(', '));
+    setEditRevision(principal.revision);
+    setEditing(true);
+  };
+
+  const cancelEditing = () => {
+    setEditing(false);
+    setEditRevision(null);
+    setModels(principal.allowed_models.join(', '));
+  };
+
   return (
     <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.allowedModels}>
       <CardHeader
@@ -666,10 +693,7 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
               <Button
                 size="sm"
                 disabled={saving || principalWritePending}
-                onClick={() => {
-                  setEditing(false);
-                  setModels(principal.allowed_models.join(', '));
-                }}
+                onClick={cancelEditing}
               >
                 Cancel
               </Button>
@@ -677,8 +701,11 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
                 size="sm"
                 variant="primary"
                 loading={saving}
-                disabled={saving || principalWritePending}
-                onClick={() =>
+                disabled={
+                  saving || principalWritePending || editRevision === null
+                }
+                onClick={() => {
+                  if (editRevision === null) return;
                   setAllowed.mutate(
                     {
                       id: principal.id,
@@ -686,16 +713,17 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
                         .split(',')
                         .map((m) => m.trim())
                         .filter(Boolean),
-                      expected_revision: principal.revision,
+                      expected_revision: editRevision,
                     },
                     {
                       onSuccess: () => {
                         toast.success('Allowed models updated');
                         setEditing(false);
+                        setEditRevision(null);
                       },
                     },
-                  )
-                }
+                  );
+                }}
               >
                 {saving ? 'Saving...' : 'Save'}
               </Button>
@@ -704,7 +732,7 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
             <Button
               size="sm"
               disabled={principalWritePending}
-              onClick={() => setEditing(true)}
+              onClick={startEditing}
             >
               Edit
             </Button>
@@ -908,9 +936,19 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
   const [draft, setDraft] = useState<PrincipalDefaultLimit[]>(
     principal.default_limits,
   );
-  useEffect(() => {
-    if (!editing) setDraft(principal.default_limits);
-  }, [editing, principal.default_limits]);
+  const [editRevision, setEditRevision] = useState<number | null>(null);
+
+  const startEditing = () => {
+    setDraft(principal.default_limits.map((limit) => ({ ...limit })));
+    setEditRevision(principal.revision);
+    setEditing(true);
+  };
+
+  const cancelEditing = () => {
+    setEditing(false);
+    setEditRevision(null);
+    setDraft(principal.default_limits.map((limit) => ({ ...limit })));
+  };
 
   return (
     <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.defaultLimits}>
@@ -923,10 +961,7 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
               <Button
                 size="sm"
                 disabled={saving || principalWritePending}
-                onClick={() => {
-                  setEditing(false);
-                  setDraft(principal.default_limits);
-                }}
+                onClick={cancelEditing}
               >
                 Cancel
               </Button>
@@ -934,22 +969,26 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
                 size="sm"
                 variant="primary"
                 loading={saving}
-                disabled={saving || principalWritePending}
-                onClick={() =>
+                disabled={
+                  saving || principalWritePending || editRevision === null
+                }
+                onClick={() => {
+                  if (editRevision === null) return;
                   update.mutate(
                     {
                       id: principal.id,
                       default_limits: draft,
-                      expected_revision: principal.revision,
+                      expected_revision: editRevision,
                     },
                     {
                       onSuccess: () => {
                         toast.success('Default limits updated');
                         setEditing(false);
+                        setEditRevision(null);
                       },
                     },
-                  )
-                }
+                  );
+                }}
               >
                 {saving ? 'Saving...' : 'Save'}
               </Button>
@@ -958,7 +997,7 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
             <Button
               size="sm"
               disabled={principalWritePending}
-              onClick={() => setEditing(true)}
+              onClick={startEditing}
             >
               Edit
             </Button>
@@ -1020,7 +1059,7 @@ function SlotRadioCard({
   desc,
   isActive,
   isMutating,
-  isMutatingOther,
+  disabled,
   isDefault,
   isNone,
   badge,
@@ -1030,7 +1069,7 @@ function SlotRadioCard({
   desc: string;
   isActive: boolean;
   isMutating: boolean;
-  isMutatingOther: boolean;
+  disabled: boolean;
   isDefault?: boolean;
   isNone?: boolean;
   badge?: string;
@@ -1046,12 +1085,12 @@ function SlotRadioCard({
                 isNone && 'border-dashed',
               )
             : 'border-subtle hover:bg-overlay-3',
-          isMutatingOther ? 'pointer-events-none opacity-50' : '',
+          disabled ? 'pointer-events-none opacity-50 cursor-not-allowed' : '',
         )}
       >
         <BaseRadio.Root
           className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
-          disabled={isMutatingOther}
+          disabled={disabled}
           value={value}
         >
           {isMutating ? (
@@ -1228,45 +1267,50 @@ function useFlipReorder(
   React.useLayoutEffect(() => {
     if (!listRef.current) return;
     const children = Array.from(listRef.current.children) as HTMLElement[];
+    const nextRects: Record<string, DOMRect> = {};
+    const measurements: Array<{
+      child: HTMLElement;
+      oldRect: DOMRect | undefined;
+      deltaY: number;
+    }> = [];
 
-    children.forEach((child) => {
+    for (const child of children) {
       const key = child.dataset.key;
-      if (!key) return;
-
-      const oldRect = oldRects.current[key];
+      if (!key) continue;
       const newRect = child.getBoundingClientRect();
+      const oldRect = oldRects.current[key];
+      nextRects[key] = newRect;
+      measurements.push({
+        child,
+        oldRect,
+        deltaY: oldRect ? oldRect.top - newRect.top : 0,
+      });
+    }
+    oldRects.current = nextRects;
 
+    for (const { child, oldRect, deltaY } of measurements) {
       if (oldRect) {
-        const deltaY = oldRect.top - newRect.top;
-        if (deltaY !== 0) {
-          child.style.transform = `translateY(${deltaY}px)`;
-          child.style.transition = 'none';
-
-          requestAnimationFrame(() => {
-            child.style.transform = '';
-            child.style.transition =
-              'transform 220ms cubic-bezier(0.4, 0, 0.2, 1)';
-          });
-        }
-      } else {
-        // New element
-        child.style.opacity = '0';
-        child.style.transform = 'translateY(10px)';
+        if (deltaY === 0) continue;
+        child.style.transform = `translateY(${deltaY}px)`;
         child.style.transition = 'none';
-        requestAnimationFrame(() => {
-          child.style.opacity = '1';
-          child.style.transform = '';
-          child.style.transition = 'all 220ms cubic-bezier(0.4, 0, 0.2, 1)';
-        });
+        continue;
       }
-    });
+      child.style.opacity = '0';
+      child.style.transform = 'translateY(10px)';
+      child.style.transition = 'none';
+    }
 
-    // Update old rects for next render
-    oldRects.current = {};
-    children.forEach((child) => {
-      const key = child.dataset.key;
-      if (key) {
-        oldRects.current[key] = child.getBoundingClientRect();
+    if (measurements.length === 0) return;
+    requestAnimationFrame(() => {
+      for (const { child, oldRect } of measurements) {
+        child.style.transform = '';
+        if (oldRect) {
+          child.style.transition =
+            'transform 220ms cubic-bezier(0.4, 0, 0.2, 1)';
+          continue;
+        }
+        child.style.opacity = '1';
+        child.style.transition = 'all 220ms cubic-bezier(0.4, 0, 0.2, 1)';
       }
     });
   }, [items]);
@@ -1396,6 +1440,8 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   // Every chain write bumps sibling revisions, so one in-flight chain mutation
   // invalidates the expected_revision any other chain edit would submit.
   const isChainBusy = reorder.isPending || insert.isPending || del.isPending;
+  const routerWriteBlocked =
+    isChainBusy || updateTerminalStrategy.isPending || principalWritePending;
   const insertingPluginId = insert.isPending
     ? (insert.variables?.body.wasm_registry_id ?? null)
     : null;
@@ -1448,7 +1494,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
       deletingEntryId === subscriptionPreferenceEntry?.id);
 
   const toggleSubscriptionPreference = () => {
-    if (isChainBusy) return;
+    if (routerWriteBlocked) return;
     if (subscriptionPreferenceEntry) {
       del.mutate({
         id: subscriptionPreferenceEntry.id,
@@ -1467,12 +1513,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
     });
   };
   const setStrategy = (strategy: string) => {
-    if (
-      !terminalStrategy.data ||
-      updateTerminalStrategy.isPending ||
-      principalWritePending
-    )
-      return;
+    if (!terminalStrategy.data || routerWriteBlocked) return;
     updateTerminalStrategy.mutate(
       {
         id: principalId,
@@ -1501,7 +1542,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   const [pickerOpen, setPickerOpen] = useState(false);
 
   const moveUp = (index: number) => {
-    if (index === 0 || isChainBusy) return;
+    if (index === 0 || routerWriteBlocked) return;
     const reordered = [...entries];
     const temp = reordered[index - 1];
     reordered[index - 1] = reordered[index]!;
@@ -1518,7 +1559,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   };
 
   const moveDown = (index: number) => {
-    if (index === entries.length - 1 || isChainBusy) return;
+    if (index === entries.length - 1 || routerWriteBlocked) return;
     const reordered = [...entries];
     const temp = reordered[index + 1];
     reordered[index + 1] = reordered[index]!;
@@ -1535,7 +1576,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   };
 
   const addFilter = (pluginId: string) => {
-    if (isChainBusy) return;
+    if (routerWriteBlocked) return;
     insert.mutate(
       {
         pid: principalId,
@@ -1550,7 +1591,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   };
 
   const removeFilter = (id: string, revision: number) => {
-    if (isChainBusy) return;
+    if (routerWriteBlocked) return;
     del.mutate({ id, revision });
   };
 
@@ -1650,7 +1691,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   onCheckedChange={() => toggleSubscriptionPreference()}
                   render={<button type="button" />}
                   aria-busy={subscriptionPreferencePending || undefined}
-                  disabled={isChainMetadataLoading || isChainBusy}
+                  disabled={isChainMetadataLoading || routerWriteBlocked}
                 >
                   <div
                     className={cx(
@@ -1680,9 +1721,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
               <TerminalStrategyRadioGroup
                 name="strategy"
                 value={strategy}
-                disabled={
-                  updateTerminalStrategy.isPending || principalWritePending
-                }
+                disabled={routerWriteBlocked}
                 isPending={updateTerminalStrategy.isPending}
                 pendingValue={pendingStrategy}
                 onSelect={setStrategy}
@@ -1768,7 +1807,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                             aria-label="Move filter up"
                             onClick={() => moveUp(idx)}
                             className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
-                            disabled={idx === 0 || isChainBusy}
+                            disabled={idx === 0 || routerWriteBlocked}
                           >
                             <ArrowUp className="w-4 h-4" />
                           </button>
@@ -1776,7 +1815,9 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                             aria-label="Move filter down"
                             onClick={() => moveDown(idx)}
                             className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
-                            disabled={idx === entries.length - 1 || isChainBusy}
+                            disabled={
+                              idx === entries.length - 1 || routerWriteBlocked
+                            }
                           >
                             <ArrowDown className="w-4 h-4" />
                           </button>
@@ -1784,7 +1825,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                             aria-label="Remove filter"
                             onClick={() => removeFilter(e.id, e.revision)}
                             className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-red-400 hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-text-faint"
-                            disabled={isChainBusy}
+                            disabled={routerWriteBlocked}
                           >
                             {deletingEntryId === e.id ? (
                               <Spinner className="w-4 h-4 text-red-400" />
@@ -1809,7 +1850,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                 )}
 
                 <BasePopover.Trigger
-                  disabled={isChainBusy}
+                  disabled={routerWriteBlocked}
                   nativeButton={false}
                   render={
                     <li
@@ -1817,7 +1858,9 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                         'flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm bg-overlay-1/50 transition-colors',
                         isChainBusy
                           ? 'opacity-50 cursor-progress'
-                          : 'hover:bg-overlay-2 cursor-pointer',
+                          : principalWritePending
+                            ? 'opacity-50 cursor-not-allowed'
+                            : 'hover:bg-overlay-2 cursor-pointer',
                       )}
                       data-key="add-filter-placeholder"
                       onClick={(e) => e.stopPropagation()}
@@ -1859,9 +1902,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   <TerminalStrategyRadioGroup
                     name="term-strategy"
                     value={strategy}
-                    disabled={
-                      updateTerminalStrategy.isPending || principalWritePending
-                    }
+                    disabled={routerWriteBlocked}
                     isPending={updateTerminalStrategy.isPending}
                     pendingValue={pendingStrategy}
                     onSelect={setStrategy}
@@ -1885,7 +1926,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                           (e) => e.wasm_registry_id === p.id,
                         );
                         const isInserting = insertingPluginId === p.id;
-                        const disabled = inChain || isChainBusy;
+                        const disabled = inChain || routerWriteBlocked;
 
                         return (
                           <button
@@ -1944,6 +1985,7 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
   const registry = usePluginRegistry();
   const insert = useInsertChainEntry();
   const del = useDeleteChainEntry();
+  const principalWritePending = usePrincipalWritePending(principalId) > 0;
 
   const entries = useMemo(
     () => [...(chain.data?.entries ?? [])].sort((a, b) => a.order - b.order),
@@ -1954,9 +1996,12 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
   const hasMultiple = entries.length > 1;
 
   const [mutatingId, setMutatingId] = useState<string | null>(null);
+  const shapeWritePending =
+    mutatingId !== null || insert.isPending || del.isPending;
+  const shapeWriteBlocked = shapeWritePending || principalWritePending;
 
   const handleSelect = async (pluginId: string | null) => {
-    if (mutatingId) return;
+    if (shapeWriteBlocked) return;
     const currentPluginId = activeEntry?.wasm_registry_id ?? null;
     if (pluginId === currentPluginId) return;
 
@@ -2038,7 +2083,7 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
       <CardBody>
         <BaseRadioGroup
           className="space-y-2"
-          aria-busy={mutatingId !== null}
+          aria-busy={shapeWritePending || undefined}
           name="shape-slot"
           onValueChange={(nextValue) => {
             void handleSelect(nextValue === 'none' ? null : nextValue);
@@ -2052,7 +2097,7 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
             desc="Inherits the dialect returned by the router (typically anthropic-direct)."
             isActive={!activeEntry}
             isMutating={mutatingId === 'none'}
-            isMutatingOther={mutatingId !== null && mutatingId !== 'none'}
+            disabled={shapeWriteBlocked}
             isNone
             badge="Off"
           />
@@ -2066,7 +2111,7 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
                 desc={p.label || 'Custom shape plugin'}
                 isActive={activeEntry?.wasm_registry_id === p.id}
                 isMutating={mutatingId === p.id}
-                isMutatingOther={mutatingId !== null && mutatingId !== p.id}
+                disabled={shapeWriteBlocked}
               />
             ))}
         </BaseRadioGroup>
