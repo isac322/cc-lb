@@ -69,16 +69,16 @@
   선택 upstream `1,000 rows / 0.937ms / 2,006 shared hits`.
 - Storage conformance: SQLite `79/79`, PostgreSQL `64/64`.
 - Admin: unit `19/19`, focused integration `15/15`, 전체 `52 + 246` tests 통과.
-- Web: typecheck, Biome lint, Vitest `60 files / 558 tests` 통과.
+- Web: typecheck, Biome lint, Vitest `63 files / 573 tests` 통과.
 - Playwright: `upstream-quota-analysis-cadence.spec.ts` 6개 browser test 통과.
   1h/6h/24h/7d exact range, delayed loading, empty 전환, analysis error 중 previous data,
   성공 recovery, +60초 series-only refresh, +120초 최신 exact-bounds analysis refresh와
   deficit/caveat DOM 변경을 검증했다. Browser는 mock API를 사용하며 실제 SQLite/PostgreSQL
   storage·API state transition은 별도 Rust conformance/integration tests가 검증한다.
 - 독립 리뷰: range와 analysis 두 리뷰 모두 finding 0건.
-- GitHub Actions: 기능 head `a730188bfada`에서 CI, Web, Publish-check 전부 통과.
-  이후 발견된 remote sccache backend 500과 inherited wall-clock heartbeat test 결함은
-  각각 uncached fallback과 결정론적 rendezvous test로 수정했다.
+- GitHub Actions: rebased 기능 head `66be8150fc6c`에서 CI, Web, Publish-check 전부 통과.
+  Remote sccache backend 500은 uncached fallback으로, inherited wall-clock heartbeat
+  test race는 결정론적 rendezvous로 수정한 상태에서 검증했다.
 
 ## 종료 게이트
 
