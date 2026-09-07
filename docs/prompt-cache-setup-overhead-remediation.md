@@ -1,6 +1,6 @@
 # Prompt-cache setup overhead 근본 개선 설계
 
-- 상태: Implemented and locally verified; CI pending
+- 상태: Implemented, locally verified, and CI passed
 - 작성일: 2026-09-07
 - 대상: `cc-lb-engine` proxy hot path와 admin-web latency timeline
 - 관련 ADR: ADR 0007, ADR 0008

@@ -1,6 +1,6 @@
 # Prompt-cache setup overhead TDD 및 QA 체크리스트
 
-- 상태: Local QA complete; CI pending
+- 상태: Complete
 - 작성일: 2026-09-07
 - 설계 문서: `docs/prompt-cache-setup-overhead-remediation.md`
 
@@ -174,7 +174,7 @@ CI와 같은 명령이 별도 workflow에 있으면 해당 workflow invocation�
 - [x] Browser QA PASS
 - [x] Worktree에 비밀값·운영 dump 없음
 - [x] Internal reviewer와 security reviewer 지적 해결
-- [ ] PR CI 전체 통과
+- [x] PR CI 전체 통과
 
 ## 7. 2026-09-07 격리 QA 실행 기록
 
@@ -233,3 +233,17 @@ CI와 같은 명령이 별도 workflow에 있으면 해당 workflow invocation�
 - CI guard scripts와 Prometheus rule syntax PASS
 - 로컬 toolchain에는 `cargo-clippy`, `cargo-nextest`, `cargo-llvm-cov`, `cargo-deny`가 없어 해당 job은 GitHub CI에서 검증한다.
 - macOS의 workspace `--all-features`는 기존 Wasm test fixture의 Mach-O section 제약으로 중단됐다. 변경 crate와 Linux CI 경로의 결과가 아니며 GitHub CI에서 최종 판정한다.
+
+## 8. PR CI 결과
+
+PR #703의 commit `f2144dbc7f4f6f0b68ad2c47900ca9bfe5a27a28`에서 모든 workflow가 통과했다.
+
+- Web build/lint/typecheck/Vitest: PASS
+- Rust fmt: PASS
+- Clippy SQLite: PASS
+- Clippy PostgreSQL: PASS
+- cargo-deny: PASS
+- promtool/dashboard validation: PASS
+- nextest + coverage gate: PASS
+- real-client E2E: PASS
+- crate version guard: PASS
