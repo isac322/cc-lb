@@ -1,12 +1,15 @@
 import type React from 'react';
-import { fmtMs, fmtMsCompact } from '../../../lib/format';
+import { fmtMs, fmtMsCompact, fmtSetupMs } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Hint } from '../primitives';
 import { Sparkline } from '../Sparkline';
 import {
+  CACHE_SETUP_TIMING_STAGES,
   computeStageGroups,
+  deriveOtherSetup,
   deriveProxyTimelineDuration,
   deriveSetupOverhead,
+  hasSetupTimingBreakdown,
 } from './computeStageGroups';
 
 function pctOf(value: number | null | undefined, denom: number): number {
@@ -26,11 +29,16 @@ function Section({
   color: string;
   total: number;
   duration: number;
-  items: { label: string; value: number | null | undefined }[];
+  items: {
+    label: string;
+    value: number | null | undefined;
+    showZero?: boolean;
+    setupTiming?: boolean;
+  }[];
   pill?: React.ReactNode;
 }) {
   const visibleItems = items.filter(
-    (item) => item.value != null && item.value > 0,
+    (item) => item.value != null && (item.value > 0 || item.showZero === true),
   );
   if (total <= 0 && visibleItems.length === 0) return null;
 
@@ -60,7 +68,7 @@ function Section({
                 {item.label}
               </span>
               <span className="tabular-nums text-text-muted w-16 text-right">
-                {fmtMs(item.value)}
+                {item.setupTiming ? fmtSetupMs(item.value) : fmtMs(item.value)}
               </span>
               <span className="tabular-nums text-text-faint w-9 text-right">
                 {pctOf(item.value, duration)}%
@@ -89,6 +97,44 @@ export function LatencyCell({
   const { value, unit } = fmtMsCompact(e._phase === 'final' ? duration : 0);
 
   const setup_overhead_ms = deriveSetupOverhead(e);
+  const internalPreItems = hasSetupTimingBreakdown(e)
+    ? [
+        ...CACHE_SETUP_TIMING_STAGES.map(([field, label]) => ({
+          label,
+          value: e[field],
+          showZero: true,
+          setupTiming: true,
+        })),
+        { label: 'Auth', value: e.auth_ms },
+        { label: 'Route', value: e.route_ms },
+        { label: 'Limit reserve', value: e.limit_reserve_ms },
+        {
+          label: 'Prepare signer',
+          value: e.prepare_signer_ms,
+          showZero: true,
+          setupTiming: true,
+        },
+        ...(e._phase === 'final' && e.proxy_setup_ms != null
+          ? [
+              {
+                label: 'Other setup',
+                value: deriveOtherSetup(e),
+                showZero: true,
+                setupTiming: true,
+              },
+            ]
+          : []),
+        { label: 'Shape', value: e.shape_ms },
+        { label: 'Sign', value: e.sign_ms },
+      ]
+    : [
+        { label: 'Auth', value: e.auth_ms },
+        { label: 'Route', value: e.route_ms },
+        { label: 'Limit reserve', value: e.limit_reserve_ms },
+        { label: 'Setup overhead', value: setup_overhead_ms },
+        { label: 'Shape', value: e.shape_ms },
+        { label: 'Sign', value: e.sign_ms },
+      ];
 
   const upstream_wait_ms = Math.max(
     0,
@@ -110,14 +156,7 @@ export function LatencyCell({
           color="bg-sky-400"
           total={groups.internalPre}
           duration={duration}
-          items={[
-            { label: 'Auth', value: e.auth_ms },
-            { label: 'Route', value: e.route_ms },
-            { label: 'Limit reserve', value: e.limit_reserve_ms },
-            { label: 'Setup overhead', value: setup_overhead_ms },
-            { label: 'Shape', value: e.shape_ms },
-            { label: 'Sign', value: e.sign_ms },
-          ]}
+          items={internalPreItems}
         />
 
         <Section
@@ -224,7 +263,11 @@ export function LatencyCell({
       onClick={(ev) => ev.stopPropagation()}
     >
       <Hint label={popover}>
-        <div className="px-3 py-2 cursor-help block">
+        <button
+          type="button"
+          aria-label={`Latency ${value} ${unit}, show breakdown`}
+          className="w-full px-3 py-2 cursor-help block bg-transparent border-0 text-inherit"
+        >
           <div className="flex items-baseline justify-end tabular-nums leading-tight">
             <span className="shrink-0 w-[5ch] text-right text-text">
               {value}
@@ -251,7 +294,7 @@ export function LatencyCell({
                 : []),
             ]}
           />
-        </div>
+        </button>
       </Hint>
     </td>
   );

@@ -92,6 +92,62 @@ async fn events_recent_filters_by_upstream_id() {
 }
 
 #[tokio::test]
+async fn events_recent_serializes_request_setup_timings_without_losing_zero_or_fraction() {
+    let (_dir, storage) = temp_storage().await;
+    let event = RequestEvent {
+        ts: TEST_NOW_UNIX_SECS,
+        ts_ms: Some(TEST_NOW_UNIX_SECS * 1_000),
+        request_id: "req-setup-timings".to_owned(),
+        event_id: Some("event-setup-timings".to_owned()),
+        status: 200,
+        duration_ms: 10,
+        json_parse_ms: Some(0.125),
+        cache_structure_ms: Some(0.0),
+        cache_token_key_ms: Some(0.25),
+        cache_count_lookup_ms: Some(0.5),
+        cache_tokenizer_queue_ms: Some(0.75),
+        cache_serialize_ms: Some(1.0),
+        cache_tokenize_ms: Some(0.0),
+        prepare_signer_ms: Some(2.0),
+        ..RequestEvent::default()
+    };
+    storage.append_request_event(&event).await.unwrap();
+    let state = test_state(Config::default(), Some(storage));
+    let admin = app(state);
+
+    let (status, _, body, _) =
+        authed_json(admin.clone(), "GET", "/admin/events/recent?limit=1", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let row = &body["events"][0];
+    assert_eq!(row["json_parse_ms"], 0.125);
+    assert_eq!(row["cache_structure_ms"], 0.0);
+    assert_eq!(row["cache_token_key_ms"], 0.25);
+    assert_eq!(row["cache_count_lookup_ms"], 0.5);
+    assert_eq!(row["cache_tokenizer_queue_ms"], 0.75);
+    assert_eq!(row["cache_serialize_ms"], 1.0);
+    assert_eq!(row["cache_tokenize_ms"], 0.0);
+    assert_eq!(row["prepare_signer_ms"], 2.0);
+
+    let (status, _, detail, _) = authed_json(
+        admin,
+        "GET",
+        "/admin/v1/events/detail/event-setup-timings",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["json_parse_ms"], 0.125);
+    assert_eq!(detail["cache_structure_ms"], 0.0);
+    assert_eq!(detail["cache_token_key_ms"], 0.25);
+    assert_eq!(detail["cache_count_lookup_ms"], 0.5);
+    assert_eq!(detail["cache_tokenizer_queue_ms"], 0.75);
+    assert_eq!(detail["cache_serialize_ms"], 1.0);
+    assert_eq!(detail["cache_tokenize_ms"], 0.0);
+    assert_eq!(detail["prepare_signer_ms"], 2.0);
+}
+
+#[tokio::test]
 async fn events_recent_uses_compound_cursor_for_same_timestamp_pages() {
     let (_dir, storage) = temp_storage().await;
     let ts_ms = 1_800_000_000_000;

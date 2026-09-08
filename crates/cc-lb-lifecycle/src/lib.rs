@@ -9,7 +9,7 @@ mod stage_route_limit;
 mod stage_usage_stream;
 mod termination;
 
-pub use event::{EventId, LifecycleEvent};
+pub use event::{EventId, LifecycleEvent, RequestSetupTimings};
 pub use prompt_cache::{PromptCacheObservationKindWire, PromptCacheObservationWire};
 pub use stage_parse_auth::{AuthFailure, AuthInfo, ParseFailure, ParseInfo};
 pub use stage_route_limit::{

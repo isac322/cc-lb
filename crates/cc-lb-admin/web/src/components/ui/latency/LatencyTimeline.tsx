@@ -6,12 +6,16 @@ import {
   useMemo,
   useState,
 } from 'react';
-import { fmtMs, fmtN } from '../../../lib/format';
+import { fmtMs, fmtN, fmtSetupMs } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Skeleton } from '../primitives';
 import {
+  CACHE_SETUP_TIMING_STAGES,
+  computeStageGroups,
+  deriveOtherSetup,
   deriveProxyTimelineDuration,
   deriveSetupOverhead,
+  hasSetupTimingBreakdown,
 } from './computeStageGroups';
 
 // -----------------------------------------------------------------------------
@@ -69,7 +73,24 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   limit_reserve:
     'Reserve tokens / requests against the principal budget before dispatching upstream.',
   setup_overhead:
-    'proxy_setup_ms minus auth + route + limit_reserve. Body/JSON parse, prompt-cache prefix hashing (scales with body size), and upstream credential prep (OAuth refresh can spike this).',
+    'Legacy fallback: proxy_setup_ms minus auth + route + limit reserve.',
+  json_parse_ms: 'Parse the request body with sonic_rs::from_slice.',
+  cache_tokenizer_queue_ms:
+    'Wait for a prompt-cache analysis executor semaphore permit.',
+  cache_structure_ms:
+    'Flatten blocks, resolve breakpoints, and compute structural prefix hashes.',
+  cache_serialize_ms:
+    'Materialize exact serialized prefix bytes used for token counting.',
+  cache_token_key_ms:
+    'Hash the credential-scoped exact token-prefix cache key with BLAKE3.',
+  cache_count_lookup_ms:
+    'Distributed cache intervals: claim, hit/miss bookkeeping, leader completion, count retrieval, and coalesced follower wait. Tokenization is excluded.',
+  cache_tokenize_ms:
+    'Run exact BPE tokenization for leaders or fallbacks; cache hits record zero.',
+  prepare_signer_ms:
+    'Build upstream credentials, including lookup, decrypt, and lazy OAuth refresh.',
+  other_setup:
+    'Remaining proxy setup time after auth, route, limit reserve, and measured setup stages.',
   shape:
     'Run the shape plugin: dialect adaptation + Anthropic-format shaping of the outbound body.',
   sign: 'Sign the outbound request (OAuth refresh if the credential needs one).',
@@ -111,6 +132,7 @@ interface Stage {
   label: string;
   group: StageGroup;
   ms: number;
+  setupTiming?: boolean;
 }
 
 interface StageDetail extends Stage {
@@ -130,6 +152,10 @@ function stageShadeHsl(
   return `hsl(${hue}deg ${sat}% ${lightness}%)`;
 }
 
+function formatStageMs(stage: Stage): string {
+  return stage.setupTiming ? fmtSetupMs(stage.ms) : fmtMs(stage.ms);
+}
+
 export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
   const raw: Stage[] = [];
   const push = (
@@ -140,16 +166,48 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
   ) => {
     if (ms && ms > 0) raw.push({ key, label, group, ms });
   };
+  const pushMeasured = (
+    key: string,
+    label: string,
+    group: StageGroup,
+    ms: number | null | undefined,
+  ) => {
+    if (ms != null && ms >= 0)
+      raw.push({ key, label, group, ms, setupTiming: true });
+  };
 
-  push('auth', 'Auth', 'internal_pre', e.auth_ms);
-  push('route', 'Route', 'internal_pre', e.route_ms);
-  push('limit_reserve', 'Limit reserve', 'internal_pre', e.limit_reserve_ms);
-  push(
-    'setup_overhead',
-    'Setup overhead',
-    'internal_pre',
-    deriveSetupOverhead(e),
-  );
+  if (hasSetupTimingBreakdown(e)) {
+    for (const [field, label] of CACHE_SETUP_TIMING_STAGES) {
+      pushMeasured(field, label, 'internal_pre', e[field]);
+    }
+    push('auth', 'Auth', 'internal_pre', e.auth_ms);
+    push('route', 'Route', 'internal_pre', e.route_ms);
+    push('limit_reserve', 'Limit reserve', 'internal_pre', e.limit_reserve_ms);
+    pushMeasured(
+      'prepare_signer_ms',
+      'Prepare signer',
+      'internal_pre',
+      e.prepare_signer_ms,
+    );
+    if (e._phase === 'final' && e.proxy_setup_ms != null) {
+      pushMeasured(
+        'other_setup',
+        'Other setup',
+        'internal_pre',
+        deriveOtherSetup(e),
+      );
+    }
+  } else {
+    push('auth', 'Auth', 'internal_pre', e.auth_ms);
+    push('route', 'Route', 'internal_pre', e.route_ms);
+    push('limit_reserve', 'Limit reserve', 'internal_pre', e.limit_reserve_ms);
+    push(
+      'setup_overhead',
+      'Setup overhead',
+      'internal_pre',
+      deriveSetupOverhead(e),
+    );
+  }
   push('shape', 'Shape', 'internal_pre', e.shape_ms);
   push('sign', 'Sign', 'internal_pre', e.sign_ms);
   push('bulkhead_wait', 'Bulkhead wait', 'wait', e.bulkhead_wait_ms);
@@ -435,7 +493,7 @@ function StageInfo({
                     backgroundColor: s.fill,
                     minWidth: '3px',
                   }}
-                  title={`${s.label} · ${fmtMs(s.ms)}`}
+                  title={`${s.label} · ${formatStageMs(s)}`}
                 />
               );
             })}
@@ -460,7 +518,7 @@ function StageInfo({
                   />
                   <span className="flex-1 truncate">{s.label}</span>
                   <span className="tabular-nums shrink-0 w-12 text-right">
-                    {fmtMs(s.ms)}
+                    {formatStageMs(s)}
                   </span>
                   <span
                     className={cx(
@@ -486,7 +544,7 @@ function StageInfo({
             <span className="text-text font-medium">{stage.label}</span>
           </div>
           <div className="flex items-center gap-2 tabular-nums text-text-muted">
-            <span>{fmtMs(stage.ms)}</span>
+            <span>{formatStageMs(stage)}</span>
             <span className="text-text-faint">·</span>
             <span>{pct(stage.ms, total)}% of request</span>
           </div>
@@ -585,7 +643,8 @@ function SegmentButton({
       <button
         type="button"
         {...active.bind(stage.key)}
-        aria-label={`${stage.label} ${fmtMs(stage.ms)}`}
+        data-testid={`latency-segment-${stage.key}`}
+        aria-label={`${stage.label} ${formatStageMs(stage)}`}
         className={cx(
           'absolute top-0 h-full rounded-sm outline-none transition-all cursor-pointer',
           isActive
@@ -992,6 +1051,7 @@ function StageDetailsList({
             }
             label={s.label}
             ms={s.ms}
+            setupTiming={s.setupTiming}
             total={total}
             hint={GROUP_META[s.group].label}
             description={STAGE_DESCRIPTIONS[s.key]}
@@ -1104,6 +1164,7 @@ function DetailRow({
   total,
   hint,
   description,
+  setupTiming,
 }: {
   stateKey: string;
   active: ActiveKeyApi;
@@ -1113,6 +1174,7 @@ function DetailRow({
   total: number;
   hint?: string;
   description?: string;
+  setupTiming?: boolean;
 }) {
   const isActive = active.isActive(stateKey);
   const isSticky = active.isSticky(stateKey);
@@ -1135,7 +1197,9 @@ function DetailRow({
       {leading}
       <span className="flex-1 truncate">{label}</span>
       {hint ? <span className="text-text-faint shrink-0">· {hint}</span> : null}
-      <span className="tabular-nums shrink-0 w-16 text-right">{fmtMs(ms)}</span>
+      <span className="tabular-nums shrink-0 w-16 text-right">
+        {setupTiming ? fmtSetupMs(ms) : fmtMs(ms)}
+      </span>
       <span className="tabular-nums shrink-0 w-8 text-right text-text-faint">
         {pct(ms, total)}%
       </span>
@@ -1154,7 +1218,7 @@ function DetailRow({
             ) : null}
           </div>
           <div className="flex items-center gap-2 tabular-nums text-text-muted">
-            <span>{fmtMs(ms)}</span>
+            <span>{setupTiming ? fmtSetupMs(ms) : fmtMs(ms)}</span>
             <span className="text-text-faint">·</span>
             <span>{pct(ms, total)}% of request</span>
           </div>
@@ -1198,6 +1262,7 @@ export function LatencyTimeline({
 }) {
   const total = deriveProxyTimelineDuration(event);
   const stages = useMemo(() => buildStageDetails(event), [event]);
+  const groups = computeStageGroups(event);
   const markers = useMemo(() => buildSseMarkers(event), [event]);
   const positioned = useMemo(() => {
     let cursor = 0;
@@ -1274,6 +1339,11 @@ export function LatencyTimeline({
           const items = positioned.positioned.filter((p) => p.group === g);
           if (items.length === 0) return null;
           const groupSum = items.reduce((a, s) => a + s.ms, 0);
+          const groupTotal =
+            g === 'internal_pre' ? groups.internalPre : groupSum;
+          const interactiveItems = items.filter(
+            (item) => !item.setupTiming || item.ms / total >= 0.001,
+          );
           const anyActive = items.some((it) => active.isActive(it.key));
           const groupItems = stages.filter((s) => s.group === g);
           return (
@@ -1288,11 +1358,11 @@ export function LatencyTimeline({
                   {GROUP_META[g].label}
                 </span>
                 <span className="text-text-muted tabular-nums">
-                  {fmtMs(groupSum)} · {pct(groupSum, total)}%
+                  {fmtMs(groupTotal)} · {pct(groupTotal, total)}%
                 </span>
               </div>
               <div className="relative h-4 w-full rounded-sm bg-overlay-5">
-                {items.map((it) => (
+                {interactiveItems.map((it) => (
                   <SegmentButton
                     key={it.key}
                     stage={it}

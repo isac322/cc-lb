@@ -4,6 +4,7 @@ import {
   cacheMissRatio,
   fmtChartTooltipTs,
   fmtMsCompact,
+  fmtSetupMs,
   formatBigInteger,
   formatCostMicros,
   formatCount,
@@ -214,6 +215,14 @@ describe('formatCostMicros', () => {
   it('formats positive values as USD', () => {
     expect(formatCostMicros(1234567)).toBe('$1.2346');
     expect(formatCostMicros(1_234_567_800)).toBe('$1,234.5678');
+  });
+});
+
+describe('fmtSetupMs', () => {
+  it('distinguishes exact zero from fractional setup timings', () => {
+    expect(fmtSetupMs(0)).toBe('0 ms');
+    expect(fmtSetupMs(0.125)).toBe('0.125 ms');
+    expect(fmtSetupMs(0.0001)).toBe('<0.001 ms');
   });
 });
 

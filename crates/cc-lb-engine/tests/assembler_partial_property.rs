@@ -302,6 +302,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             limit_reconcile_ms: Some(profile.token_base() + 7),
             observability_post_ms: Some(profile.token_base() + 8),
             proxy_setup_ms: Some(profile.token_base() + 9),
+            setup_timings: Default::default(),
             upstream_body_ms: Some(profile.token_base() + 10),
         },
     }
