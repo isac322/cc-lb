@@ -148,6 +148,13 @@ struct GroupAccumulator {
     buckets: Vec<UsageBucket>,
 }
 
+#[derive(Debug)]
+struct TotalGroupAccumulator {
+    total_request_count: u64,
+    upstream_name: Option<String>,
+    buckets: BTreeMap<u64, UsageBucket>,
+}
+
 pub fn parse_range(value: &str) -> Result<DashboardRange, ParseRangeError> {
     match value {
         "15m" => Ok(DashboardRange::FifteenMinutes),
@@ -303,13 +310,21 @@ async fn build_dashboard_usage_with_projection(
         .filter(|rollup| upstream_id.is_none_or(|id| rollup.upstream_id == id))
         .collect::<Vec<_>>();
     let observed = !rollups.is_empty();
-    let (mut series, truncated_series_count) = build_usage_series(
-        group_by,
-        &rollups,
-        window_start_unix_secs,
-        window_end_unix_secs,
-        step,
-    );
+    let (mut series, truncated_series_count) = match projection {
+        UsageProjection::Full => build_usage_series(
+            group_by,
+            &rollups,
+            window_start_unix_secs,
+            window_end_unix_secs,
+            step,
+        ),
+        UsageProjection::Totals => {
+            // Start from sparse rollup buckets instead of a dense window. Cost-only
+            // buckets for selected principals are seeded before enrichment below;
+            // this preserves both live-tail guardrails and recorded zero components.
+            build_usage_totals_series(group_by, &rollups, window_start_unix_secs)
+        }
+    };
     if group_by == UsageGroupBy::Principal && !series.is_empty() {
         let principal_keys = selected_principal_cost_keys(&series);
         let bucket_width_secs = step_width_secs(step);
@@ -322,6 +337,9 @@ async fn build_dashboard_usage_with_projection(
                 principal_keys,
             })
             .await?;
+        if projection == UsageProjection::Totals {
+            seed_principal_cost_buckets(&mut series, &costs);
+        }
         enrich_principal_costs(&mut series, costs);
     }
     if projection == UsageProjection::Totals {
@@ -709,6 +727,68 @@ pub(crate) fn build_usage_series(
     (series, truncated_series_count)
 }
 
+fn build_usage_totals_series(
+    group_by: UsageGroupBy,
+    rollups: &[UsageRollup],
+    window_start_unix_secs: u64,
+) -> (Vec<UsageSeries>, Option<u64>) {
+    if group_by == UsageGroupBy::None {
+        let mut bucket = empty_bucket(window_start_unix_secs);
+        for rollup in rollups {
+            add_rollup_to_bucket(&mut bucket, rollup);
+        }
+        return (
+            vec![UsageSeries {
+                key: "all".to_owned(),
+                upstream_name: None,
+                buckets: vec![bucket],
+            }],
+            None,
+        );
+    }
+
+    let mut groups = BTreeMap::<String, TotalGroupAccumulator>::new();
+    for rollup in rollups {
+        let (key, upstream_name) = group_key(group_by, rollup);
+        let entry = groups.entry(key).or_insert_with(|| TotalGroupAccumulator {
+            total_request_count: 0,
+            upstream_name,
+            buckets: BTreeMap::new(),
+        });
+        entry.total_request_count += rollup.request_count;
+        let bucket = entry
+            .buckets
+            .entry(rollup.bucket_start)
+            .or_insert_with(|| empty_bucket(rollup.bucket_start));
+        add_rollup_to_bucket(bucket, rollup);
+    }
+
+    let mut ranked = groups.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|(left_key, left), (right_key, right)| {
+        right
+            .total_request_count
+            .cmp(&left.total_request_count)
+            .then_with(|| left_key.cmp(right_key))
+    });
+
+    let truncated_count = ranked.len().saturating_sub(MAX_GROUPED_SERIES);
+    let series = ranked
+        .into_iter()
+        .take(MAX_GROUPED_SERIES)
+        .map(|(key, group)| UsageSeries {
+            key,
+            upstream_name: group.upstream_name,
+            buckets: group.buckets.into_values().collect(),
+        })
+        .collect();
+    let truncated_series_count = if truncated_count == 0 {
+        None
+    } else {
+        Some(truncated_count as u64)
+    };
+    (series, truncated_series_count)
+}
+
 fn collapse_usage_series(series: &mut [UsageSeries], window_start_unix_secs: u64) {
     for item in series {
         let mut total = empty_bucket(window_start_unix_secs);
@@ -787,6 +867,30 @@ fn selected_principal_cost_keys(series: &[UsageSeries]) -> Vec<String> {
         .take(MAX_PRINCIPAL_COST_SERIES)
         .map(|(key, _)| key.to_owned())
         .collect()
+}
+
+fn seed_principal_cost_buckets(
+    series: &mut [UsageSeries],
+    costs: &[RequestEventPrincipalCostBucket],
+) {
+    for cost in costs {
+        let Some(principal_series) = series
+            .iter_mut()
+            .find(|principal_series| principal_series.key == cost.principal)
+        else {
+            continue;
+        };
+        match principal_series
+            .buckets
+            .binary_search_by_key(&cost.bucket_start_unix_secs, |bucket| {
+                bucket.bucket_start_unix_secs
+            }) {
+            Ok(_) => {}
+            Err(index) => principal_series
+                .buckets
+                .insert(index, empty_bucket(cost.bucket_start_unix_secs)),
+        }
+    }
 }
 
 fn enrich_principal_costs(series: &mut [UsageSeries], costs: Vec<RequestEventPrincipalCostBucket>) {
@@ -955,6 +1059,57 @@ mod tests {
                 expected_bucket_count
             );
         }
+    }
+
+    #[test]
+    fn totals_series_materializes_only_observed_rollup_buckets() {
+        let rollup = |bucket_start, request_count| UsageRollup {
+            resolution: UsageRollupResolution::Minute,
+            bucket_start,
+            principal: "principal-a".to_owned(),
+            upstream_id: Uuid::from_u128(1),
+            upstream_name: "upstream-a".to_owned(),
+            model: "model-a".to_owned(),
+            request_count,
+            input_tokens: request_count,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            error_count: 0,
+            latency_count: request_count,
+            latency_ms_sum: request_count * 10,
+            latency_ms_min: Some(10),
+            latency_ms_max: Some(10),
+            proxy_setup_ms_count: 0,
+            proxy_setup_ms_sum: 0,
+            shape_ms_count: 0,
+            shape_ms_sum: 0,
+            sign_ms_count: 0,
+            sign_ms_sum: 0,
+            upstream_ttfb_ms_count: 0,
+            upstream_ttfb_ms_sum: 0,
+            upstream_body_ms_count: 0,
+            upstream_body_ms_sum: 0,
+            virtual_cost_micros: request_count,
+        };
+        let rollups = [rollup(MINUTE_SECS, 1), rollup(59 * MINUTE_SECS, 2)];
+
+        let (mut series, truncated_series_count) =
+            build_usage_totals_series(UsageGroupBy::Principal, &rollups, 0);
+
+        assert_eq!(truncated_series_count, None);
+        assert_eq!(series.len(), 1);
+        assert_eq!(
+            series[0]
+                .buckets
+                .iter()
+                .map(|bucket| bucket.bucket_start_unix_secs)
+                .collect::<Vec<_>>(),
+            vec![MINUTE_SECS, 59 * MINUTE_SECS]
+        );
+        collapse_usage_series(&mut series, 0);
+        assert_eq!(series[0].buckets.len(), 1);
+        assert_eq!(series[0].buckets[0].request_count, 3);
     }
 
     #[test]

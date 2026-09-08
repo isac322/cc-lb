@@ -1,3 +1,5 @@
+use std::sync::{Arc, LazyLock};
+
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -12,12 +14,13 @@ use uuid::Uuid;
 
 use crate::AdminState;
 use crate::dashboard::{
-    DashboardBuildError, UsageProjection, auto_step, build_dashboard_summary,
-    build_dashboard_usage_projected_checked, build_window_for_step, parse_group_by, parse_range,
-    parse_step, parse_usage_projection, validate_step_for_range,
+    DashboardBuildError, DashboardUsageResponse, UsageProjection, auto_step,
+    build_dashboard_summary, build_dashboard_usage_projected_checked, build_window_for_step,
+    parse_group_by, parse_range, parse_step, parse_usage_projection, validate_step_for_range,
 };
 use crate::response_cache::{
-    apply_private_revalidation, matches_if_none_match, not_modified_response,
+    PRINCIPAL_TOTALS_CACHE_TTL, ShortTtlSingleFlightCache, apply_private_revalidation,
+    matches_if_none_match, not_modified_response,
 };
 
 pub fn router() -> Router<AdminState> {
@@ -81,6 +84,27 @@ pub(crate) struct UsageQuery {
     projection: Option<String>,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PrincipalTotalsCacheKey {
+    range: &'static str,
+    step: &'static str,
+    group_by: &'static str,
+    upstream_id: Option<Uuid>,
+    projection: &'static str,
+    window_start_unix_secs: u64,
+    window_end_unix_secs: u64,
+}
+
+type PrincipalTotalsCache = ShortTtlSingleFlightCache<
+    PrincipalTotalsCacheKey,
+    DashboardUsageResponse,
+    DashboardBuildError,
+    dyn cc_lb_storage_api::Storage,
+>;
+
+static PRINCIPAL_TOTALS_CACHE: LazyLock<PrincipalTotalsCache> =
+    LazyLock::new(|| ShortTtlSingleFlightCache::new(PRINCIPAL_TOTALS_CACHE_TTL));
+
 pub(crate) async fn handle_dashboard_usage(
     State(state): State<AdminState>,
     headers: HeaderMap,
@@ -122,14 +146,49 @@ pub(crate) async fn handle_dashboard_usage(
         Err(_) => return bad_request("invalid_projection"),
     };
     let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
+    let (window_start_unix_secs, window_end_unix_secs) =
+        build_window_for_step(range, step, now_unix_secs);
+    let projection_name = match projection {
+        UsageProjection::Full => "full",
+        UsageProjection::Totals => "totals",
+    };
+    if group_by == crate::dashboard::UsageGroupBy::Principal
+        && projection == UsageProjection::Totals
+    {
+        let cache_key = PrincipalTotalsCacheKey {
+            range: range.as_str(),
+            step: step.as_str(),
+            group_by: group_by.as_str(),
+            upstream_id,
+            projection: projection_name,
+            window_start_unix_secs,
+            window_end_unix_secs,
+        };
+        let storage_for_build = Arc::clone(storage);
+        let result = PRINCIPAL_TOTALS_CACHE
+            .get_or_build(storage, cache_key, async move {
+                build_dashboard_usage_projected_checked(
+                    storage_for_build.as_ref(),
+                    range,
+                    step,
+                    group_by,
+                    upstream_id,
+                    now_unix_secs,
+                    projection,
+                )
+                .await
+            })
+            .await;
+        return match result {
+            Ok(response) => {
+                apply_private_revalidation(Json(response.as_ref()).into_response(), None)
+            }
+            Err(error) => dashboard_usage_error(error.as_ref()),
+        };
+    }
     let etag = if group_by == crate::dashboard::UsageGroupBy::Principal {
         None
     } else {
-        let (_, window_end_unix_secs) = build_window_for_step(range, step, now_unix_secs);
-        let projection_name = match projection {
-            UsageProjection::Full => "full",
-            UsageProjection::Totals => "totals",
-        };
         dashboard_checkpoint(storage.as_ref())
             .await
             .map(|checkpoint| {
@@ -161,8 +220,14 @@ pub(crate) async fn handle_dashboard_usage(
     .await
     {
         Ok(response) => apply_private_revalidation(Json(response).into_response(), etag.as_deref()),
-        Err(DashboardBuildError::Query(error)) => bad_request(error.as_str()),
-        Err(DashboardBuildError::Storage(error)) => {
+        Err(error) => dashboard_usage_error(&error),
+    }
+}
+
+fn dashboard_usage_error(error: &DashboardBuildError) -> Response {
+    match error {
+        DashboardBuildError::Query(error) => bad_request((*error).as_str()),
+        DashboardBuildError::Storage(error) => {
             tracing::error!(%error, "dashboard usage failed");
             internal_error("storage_error")
         }

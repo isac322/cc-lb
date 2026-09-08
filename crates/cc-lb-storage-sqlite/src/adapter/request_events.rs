@@ -8,7 +8,7 @@ use cc_lb_storage_api::{
     RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_pattern,
     model_filter_matches, normalize_usage_rollup_dimension,
 };
-use sqlx::{AssertSqlSafe, QueryBuilder, Sqlite};
+use sqlx::AssertSqlSafe;
 use std::{collections::BTreeMap, time::Instant};
 use uuid::Uuid;
 
@@ -333,136 +333,182 @@ async fn request_event_key_usage(
     Ok(buckets)
 }
 
-const PRINCIPAL_COST_SOURCE_COLUMNS: &str = "principal_id, list_ts_ms, \
-    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
-    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
-    list_cost_cache_read_micros";
+type PrincipalCostRow = (Option<String>, i64, i64, i64, i64, i64, i64, i64, i64);
 
-const NON_UUID_PRINCIPAL_PREDICATE: &str = "(principal_id IS NULL \
-    OR length(principal_id) <> 36 \
-    OR length(replace(principal_id, '-', '')) <> 32 \
-    OR substr(principal_id, 9, 1) <> '-' \
-    OR substr(principal_id, 14, 1) <> '-' \
-    OR substr(principal_id, 19, 1) <> '-' \
-    OR substr(principal_id, 24, 1) <> '-' \
-    OR lower(replace(principal_id, '-', '')) GLOB '*[^0-9a-f]*')";
+const PRINCIPAL_COST_AGGREGATE_PREFIX: &str = "SELECT principal_id, bucket_index, \
+        COALESCE(SUM(CASE WHEN list_cost_usd_micros > 0 \
+            THEN list_cost_usd_micros ELSE 0 END), 0) AS total_cost_micros, \
+        MAX(CASE WHEN list_cost_input_micros IS NOT NULL \
+            OR list_cost_output_micros IS NOT NULL \
+            OR list_cost_cache_creation_5m_micros IS NOT NULL \
+            OR list_cost_cache_creation_1h_micros IS NOT NULL \
+            OR list_cost_cache_read_micros IS NOT NULL \
+            THEN 1 ELSE 0 END) AS component_costs_recorded, \
+        COALESCE(SUM(CASE WHEN list_cost_input_micros > 0 \
+            THEN list_cost_input_micros ELSE 0 END), 0) AS cost_input_micros, \
+        COALESCE(SUM(CASE WHEN list_cost_output_micros > 0 \
+            THEN list_cost_output_micros ELSE 0 END), 0) AS cost_output_micros, \
+        COALESCE(SUM(CASE WHEN list_cost_cache_creation_5m_micros > 0 \
+            THEN list_cost_cache_creation_5m_micros ELSE 0 END), 0) \
+            AS cost_cache_creation_5m_micros, \
+        COALESCE(SUM(CASE WHEN list_cost_cache_creation_1h_micros > 0 \
+            THEN list_cost_cache_creation_1h_micros ELSE 0 END), 0) \
+            AS cost_cache_creation_1h_micros, \
+        COALESCE(SUM(CASE WHEN list_cost_cache_read_micros > 0 \
+            THEN list_cost_cache_read_micros ELSE 0 END), 0) \
+            AS cost_cache_read_micros \
+    FROM (";
+
+const PRINCIPAL_COST_AGGREGATE_SUFFIX: &str = ") matched \
+    GROUP BY principal_id, bucket_index \
+    ORDER BY bucket_index ASC, principal_id ASC";
+
+const UUID_PRINCIPAL_COST_SOURCE_SQL: &str = "SELECT principal_id, \
+        ((list_ts_ms - ?1) / ?2) AS bucket_index, \
+        list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+        list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+        list_cost_cache_read_micros \
+    FROM request_events_v1 \
+    WHERE list_ts_ms >= ?1 \
+      AND list_ts_ms < ?3 \
+      AND principal_id IN (SELECT CAST(value AS TEXT) FROM json_each(?4))";
+
+const FILTERED_UUID_PRINCIPAL_COST_SOURCE_SQL: &str = "SELECT principal_id, \
+        ((list_ts_ms - ?1) / ?2) AS bucket_index, \
+        list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+        list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+        list_cost_cache_read_micros \
+    FROM request_events_v1 \
+    WHERE list_ts_ms >= ?1 \
+      AND list_ts_ms < ?3 \
+      AND upstream_id = ?4 \
+      AND principal_id IN (SELECT CAST(value AS TEXT) FROM json_each(?5))";
+
+const NON_UUID_PRINCIPAL_COST_SOURCE_SQL: &str = "SELECT principal_id, \
+        ((list_ts_ms - ?1) / ?2) AS bucket_index, \
+        list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+        list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+        list_cost_cache_read_micros \
+    FROM request_events_v1 \
+    WHERE list_ts_ms >= ?1 \
+      AND list_ts_ms < ?3 \
+      AND (principal_id IS NULL \
+        OR length(principal_id) <> 36 \
+        OR length(replace(principal_id, '-', '')) <> 32 \
+        OR substr(principal_id, 9, 1) <> '-' \
+        OR substr(principal_id, 14, 1) <> '-' \
+        OR substr(principal_id, 19, 1) <> '-' \
+        OR substr(principal_id, 24, 1) <> '-' \
+        OR lower(replace(principal_id, '-', '')) GLOB '*[^0-9a-f]*')";
+
+const FILTERED_NON_UUID_PRINCIPAL_COST_SOURCE_SQL: &str = "SELECT principal_id, \
+        ((list_ts_ms - ?1) / ?2) AS bucket_index, \
+        list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
+        list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
+        list_cost_cache_read_micros \
+    FROM request_events_v1 \
+    WHERE list_ts_ms >= ?1 \
+      AND list_ts_ms < ?3 \
+      AND upstream_id = ?4 \
+      AND (principal_id IS NULL \
+        OR length(principal_id) <> 36 \
+        OR length(replace(principal_id, '-', '')) <> 32 \
+        OR substr(principal_id, 9, 1) <> '-' \
+        OR substr(principal_id, 14, 1) <> '-' \
+        OR substr(principal_id, 19, 1) <> '-' \
+        OR substr(principal_id, 24, 1) <> '-' \
+        OR lower(replace(principal_id, '-', '')) GLOB '*[^0-9a-f]*')";
 
 fn is_canonical_uuid_principal(value: &str) -> bool {
     value.len() == 36 && Uuid::parse_str(value).is_ok()
 }
 
-async fn request_event_principal_costs(
+async fn fetch_principal_cost_rows(
     storage: &SqliteStorage,
+    source_sql: &'static str,
+    range_start_ms: i64,
+    bucket_width_ms: i64,
+    range_end_ms: i64,
+) -> StorageResult<Vec<PrincipalCostRow>> {
+    sqlx::query_as::<_, PrincipalCostRow>(AssertSqlSafe(format!(
+        "{PRINCIPAL_COST_AGGREGATE_PREFIX}{source_sql}{PRINCIPAL_COST_AGGREGATE_SUFFIX}"
+    )))
+    .bind(range_start_ms)
+    .bind(bucket_width_ms)
+    .bind(range_end_ms)
+    .fetch_all(storage.pool())
+    .await
+    .map_err(map_sqlx_error)
+}
+
+async fn fetch_filtered_principal_cost_rows(
+    storage: &SqliteStorage,
+    source_sql: &'static str,
+    range_start_ms: i64,
+    bucket_width_ms: i64,
+    range_end_ms: i64,
+    upstream_id: String,
+) -> StorageResult<Vec<PrincipalCostRow>> {
+    sqlx::query_as::<_, PrincipalCostRow>(AssertSqlSafe(format!(
+        "{PRINCIPAL_COST_AGGREGATE_PREFIX}{source_sql}{PRINCIPAL_COST_AGGREGATE_SUFFIX}"
+    )))
+    .bind(range_start_ms)
+    .bind(bucket_width_ms)
+    .bind(range_end_ms)
+    .bind(upstream_id)
+    .fetch_all(storage.pool())
+    .await
+    .map_err(map_sqlx_error)
+}
+
+async fn fetch_uuid_principal_cost_rows(
+    storage: &SqliteStorage,
+    source_sql: &'static str,
+    range_start_ms: i64,
+    bucket_width_ms: i64,
+    range_end_ms: i64,
+    principal_keys_json: &str,
+) -> StorageResult<Vec<PrincipalCostRow>> {
+    sqlx::query_as::<_, PrincipalCostRow>(AssertSqlSafe(format!(
+        "{PRINCIPAL_COST_AGGREGATE_PREFIX}{source_sql}{PRINCIPAL_COST_AGGREGATE_SUFFIX}"
+    )))
+    .bind(range_start_ms)
+    .bind(bucket_width_ms)
+    .bind(range_end_ms)
+    .bind(principal_keys_json)
+    .fetch_all(storage.pool())
+    .await
+    .map_err(map_sqlx_error)
+}
+
+async fn fetch_filtered_uuid_principal_cost_rows(
+    storage: &SqliteStorage,
+    source_sql: &'static str,
+    range_start_ms: i64,
+    bucket_width_ms: i64,
+    range_end_ms: i64,
+    upstream_id: String,
+    principal_keys_json: &str,
+) -> StorageResult<Vec<PrincipalCostRow>> {
+    sqlx::query_as::<_, PrincipalCostRow>(AssertSqlSafe(format!(
+        "{PRINCIPAL_COST_AGGREGATE_PREFIX}{source_sql}{PRINCIPAL_COST_AGGREGATE_SUFFIX}"
+    )))
+    .bind(range_start_ms)
+    .bind(bucket_width_ms)
+    .bind(range_end_ms)
+    .bind(upstream_id)
+    .bind(principal_keys_json)
+    .fetch_all(storage.pool())
+    .await
+    .map_err(map_sqlx_error)
+}
+
+fn merge_principal_cost_rows(
+    buckets: &mut BTreeMap<(String, u64), RequestEventPrincipalCostBucket>,
+    rows: Vec<PrincipalCostRow>,
+    selected_principals: &[String],
     query: &RequestEventPrincipalCostQuery,
-) -> StorageResult<Vec<RequestEventPrincipalCostBucket>> {
-    if query.bucket_width_secs == 0
-        || query.until_unix_secs <= query.since_unix_secs
-        || query.principal_keys.is_empty()
-    {
-        return Ok(Vec::new());
-    }
-
-    let range_start_ms = seconds_to_millis(
-        query.since_unix_secs,
-        "request event principal cost range start",
-    )?;
-    let range_end_ms = seconds_to_millis(
-        query.until_unix_secs,
-        "request event principal cost range end",
-    )?;
-    let bucket_width_ms = seconds_to_millis(
-        query.bucket_width_secs,
-        "request event principal cost bucket width",
-    )?;
-    let upstream_id = query.upstream_id.map(|id| id.to_string());
-    let uuid_keys = query
-        .principal_keys
-        .iter()
-        .filter(|key| is_canonical_uuid_principal(key))
-        .collect::<Vec<_>>();
-    let include_unknown = query.principal_keys.iter().any(|key| key == "unknown");
-    let mut builder = QueryBuilder::<Sqlite>::new(
-        "SELECT principal_id, \
-                ((list_ts_ms - ",
-    );
-    builder.push_bind(range_start_ms);
-    builder.push(") / ");
-    builder.push_bind(bucket_width_ms);
-    builder.push(
-        ") AS bucket_index, \
-                COALESCE(SUM(CASE WHEN list_cost_usd_micros > 0 \
-                    THEN list_cost_usd_micros ELSE 0 END), 0) AS total_cost_micros, \
-                MAX(CASE WHEN list_cost_input_micros IS NOT NULL \
-                    OR list_cost_output_micros IS NOT NULL \
-                    OR list_cost_cache_creation_5m_micros IS NOT NULL \
-                    OR list_cost_cache_creation_1h_micros IS NOT NULL \
-                    OR list_cost_cache_read_micros IS NOT NULL \
-                    THEN 1 ELSE 0 END) AS component_costs_recorded, \
-                COALESCE(SUM(CASE WHEN list_cost_input_micros > 0 \
-                    THEN list_cost_input_micros ELSE 0 END), 0) AS cost_input_micros, \
-                COALESCE(SUM(CASE WHEN list_cost_output_micros > 0 \
-                    THEN list_cost_output_micros ELSE 0 END), 0) AS cost_output_micros, \
-                COALESCE(SUM(CASE WHEN list_cost_cache_creation_5m_micros > 0 \
-                    THEN list_cost_cache_creation_5m_micros ELSE 0 END), 0) \
-                    AS cost_cache_creation_5m_micros, \
-                COALESCE(SUM(CASE WHEN list_cost_cache_creation_1h_micros > 0 \
-                    THEN list_cost_cache_creation_1h_micros ELSE 0 END), 0) \
-                    AS cost_cache_creation_1h_micros, \
-                COALESCE(SUM(CASE WHEN list_cost_cache_read_micros > 0 \
-                    THEN list_cost_cache_read_micros ELSE 0 END), 0) \
-                    AS cost_cache_read_micros \
-         FROM (",
-    );
-    if !uuid_keys.is_empty() {
-        builder.push("SELECT ");
-        builder.push(PRINCIPAL_COST_SOURCE_COLUMNS);
-        builder.push(
-            " FROM request_events_v1 \
-             WHERE list_ts_ms >= ",
-        );
-        builder.push_bind(range_start_ms);
-        builder.push(" AND list_ts_ms < ");
-        builder.push_bind(range_end_ms);
-        builder.push(" AND (");
-        builder.push_bind(upstream_id.as_deref());
-        builder.push(" IS NULL OR upstream_id = ");
-        builder.push_bind(upstream_id.as_deref());
-        builder.push(") AND principal_id IN (");
-        let mut separated = builder.separated(", ");
-        for key in &uuid_keys {
-            separated.push_bind(*key);
-        }
-        separated.push_unseparated(") UNION ALL ");
-    }
-    builder.push("SELECT ");
-    builder.push(PRINCIPAL_COST_SOURCE_COLUMNS);
-    builder.push(
-        " FROM request_events_v1 \
-         WHERE list_ts_ms >= ",
-    );
-    builder.push_bind(range_start_ms);
-    builder.push(" AND list_ts_ms < ");
-    builder.push_bind(range_end_ms);
-    builder.push(" AND (");
-    builder.push_bind(upstream_id.as_deref());
-    builder.push(" IS NULL OR upstream_id = ");
-    builder.push_bind(upstream_id.as_deref());
-    builder.push(") AND ");
-    builder.push(NON_UUID_PRINCIPAL_PREDICATE);
-    builder.push(" AND (principal_id IS NOT NULL OR ");
-    builder.push_bind(include_unknown);
-    builder.push(
-        ")) matched \
-         GROUP BY principal_id, bucket_index \
-         ORDER BY bucket_index ASC, principal_id ASC",
-    );
-    let rows = builder
-        .build_query_as::<(Option<String>, i64, i64, i64, i64, i64, i64, i64, i64)>()
-        .fetch_all(storage.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-
-    let mut buckets = BTreeMap::<(String, u64), RequestEventPrincipalCostBucket>::new();
+) -> StorageResult<()> {
     for (
         principal_id,
         bucket_index,
@@ -476,8 +522,7 @@ async fn request_event_principal_costs(
     ) in rows
     {
         let principal = normalize_usage_rollup_dimension(principal_id.as_deref());
-        if !query
-            .principal_keys
+        if !selected_principals
             .iter()
             .any(|selected| selected == &principal)
         {
@@ -536,6 +581,93 @@ async fn request_event_principal_costs(
             "request event principal cache read cost",
         )?;
     }
+    Ok(())
+}
+
+async fn request_event_principal_costs(
+    storage: &SqliteStorage,
+    query: &RequestEventPrincipalCostQuery,
+) -> StorageResult<Vec<RequestEventPrincipalCostBucket>> {
+    if query.bucket_width_secs == 0
+        || query.until_unix_secs <= query.since_unix_secs
+        || query.principal_keys.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+
+    let range_start_ms = seconds_to_millis(
+        query.since_unix_secs,
+        "request event principal cost range start",
+    )?;
+    let range_end_ms = seconds_to_millis(
+        query.until_unix_secs,
+        "request event principal cost range end",
+    )?;
+    let bucket_width_ms = seconds_to_millis(
+        query.bucket_width_secs,
+        "request event principal cost bucket width",
+    )?;
+    let uuid_keys = query
+        .principal_keys
+        .iter()
+        .filter(|key| is_canonical_uuid_principal(key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut buckets = BTreeMap::<(String, u64), RequestEventPrincipalCostBucket>::new();
+
+    if !uuid_keys.is_empty() {
+        let principal_keys_json = serde_json::to_string(&uuid_keys)?;
+        let rows = match query.upstream_id {
+            Some(upstream_id) => {
+                fetch_filtered_uuid_principal_cost_rows(
+                    storage,
+                    FILTERED_UUID_PRINCIPAL_COST_SOURCE_SQL,
+                    range_start_ms,
+                    bucket_width_ms,
+                    range_end_ms,
+                    upstream_id.to_string(),
+                    &principal_keys_json,
+                )
+                .await?
+            }
+            None => {
+                fetch_uuid_principal_cost_rows(
+                    storage,
+                    UUID_PRINCIPAL_COST_SOURCE_SQL,
+                    range_start_ms,
+                    bucket_width_ms,
+                    range_end_ms,
+                    &principal_keys_json,
+                )
+                .await?
+            }
+        };
+        merge_principal_cost_rows(&mut buckets, rows, &uuid_keys, query)?;
+    }
+    let rows = match query.upstream_id {
+        Some(upstream_id) => {
+            fetch_filtered_principal_cost_rows(
+                storage,
+                FILTERED_NON_UUID_PRINCIPAL_COST_SOURCE_SQL,
+                range_start_ms,
+                bucket_width_ms,
+                range_end_ms,
+                upstream_id.to_string(),
+            )
+            .await?
+        }
+        None => {
+            fetch_principal_cost_rows(
+                storage,
+                NON_UUID_PRINCIPAL_COST_SOURCE_SQL,
+                range_start_ms,
+                bucket_width_ms,
+                range_end_ms,
+            )
+            .await?
+        }
+    };
+    merge_principal_cost_rows(&mut buckets, rows, &query.principal_keys, query)?;
 
     Ok(buckets.into_values().collect())
 }

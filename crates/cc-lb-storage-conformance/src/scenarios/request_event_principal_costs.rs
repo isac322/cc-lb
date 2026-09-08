@@ -28,6 +28,7 @@ where
         let padded_uuid_raw = format!(" {padded_uuid_principal} ");
         let compact_uuid_principal = Uuid::from_u128(0x55).simple().to_string();
         let extra_hyphen_principal = "1234-678-0123-5678-9abc-def012345678".to_owned();
+        let partial_principal = normalize_usage_rollup_dimension(Some("negative/partial"));
 
         storage
             .append_request_event(&cost_event(
@@ -139,6 +140,21 @@ where
                 None,
             ))
             .await?;
+        let mut partial_event = cost_event(
+            range_start + 80,
+            "principal-cost-negative-partial",
+            Some("negative/partial"),
+            upstream_id,
+            Some(-11),
+            None,
+            None,
+        );
+        partial_event.cost_input_micros = Some(-1);
+        partial_event.cost_output_micros = None;
+        partial_event.cost_cache_creation_5m_micros = Some(4);
+        partial_event.cost_cache_creation_1h_micros = None;
+        partial_event.cost_cache_read_micros = Some(0);
+        storage.append_request_event(&partial_event).await?;
         storage
             .append_request_event(&cost_event(
                 range_start + 120,
@@ -157,6 +173,7 @@ where
             normalized_principal.clone(),
             normalized_long_principal.clone(),
             "unknown".to_owned(),
+            partial_principal.clone(),
         ];
 
         let buckets = storage
@@ -235,6 +252,29 @@ where
                 && truncated.cost_output_micros == 1
                 && truncated.cost_cache_creation_5m_micros == 1,
             "truncated principal components mismatch"
+        );
+        let partial = buckets
+            .iter()
+            .find(|bucket| {
+                bucket.principal == partial_principal
+                    && bucket.bucket_start_unix_secs == range_start + 60
+            })
+            .expect("negative and partially recorded component bucket");
+        ensure!(
+            partial.total_cost_micros == 0,
+            "negative total cost must clamp to zero"
+        );
+        ensure!(
+            partial.component_costs_recorded,
+            "partially recorded components must retain coverage"
+        );
+        ensure!(
+            partial.cost_input_micros == 0
+                && partial.cost_output_micros == 0
+                && partial.cost_cache_creation_5m_micros == 4
+                && partial.cost_cache_creation_1h_micros == 0
+                && partial.cost_cache_read_micros == 0,
+            "negative and NULL components must clamp or coalesce without fabrication"
         );
 
         ensure!(
@@ -342,6 +382,31 @@ where
                 && extra_hyphen_buckets[0].cost_cache_read_micros == 5,
             "extra-hyphen principal component costs mismatch"
         );
+        let mixed_shape_buckets = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: range_start,
+                until_unix_secs: range_start + 120,
+                bucket_width_secs: 60,
+                upstream_id: Some(upstream_id),
+                principal_keys: vec![uuid_principal.clone(), normalized_principal.clone()],
+            })
+            .await?;
+        ensure!(
+            mixed_shape_buckets.len() == 2,
+            "mixed UUID and non-UUID selection must return both static-query branches"
+        );
+        ensure!(
+            mixed_shape_buckets.iter().any(|bucket| {
+                bucket.principal == uuid_principal && bucket.total_cost_micros == 13
+            }),
+            "mixed selection must retain UUID costs"
+        );
+        ensure!(
+            mixed_shape_buckets.iter().any(|bucket| {
+                bucket.principal == normalized_principal && bucket.total_cost_micros == 25
+            }),
+            "mixed selection must retain normalized non-UUID costs"
+        );
 
         let filtered_buckets = storage
             .request_event_principal_costs(&RequestEventPrincipalCostQuery {
@@ -386,6 +451,125 @@ where
         ensure!(
             filtered_mixed.total_cost_micros < mixed.total_cost_micros,
             "filtered and unfiltered totals must differ"
+        );
+
+        storage
+            .append_request_event(&cost_event(
+                range_start + 40,
+                "principal-cost-transition-same-upstream",
+                Some("team A"),
+                upstream_id,
+                Some(29),
+                Some([5, 6, 7, 5, 6]),
+                Some("transition"),
+            ))
+            .await?;
+        let refreshed_filtered_buckets = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: range_start,
+                until_unix_secs: range_start + 120,
+                bucket_width_secs: 60,
+                upstream_id: Some(upstream_id),
+                principal_keys: vec![normalized_principal.clone()],
+            })
+            .await?;
+        let refreshed_filtered_mixed = refreshed_filtered_buckets
+            .iter()
+            .find(|bucket| {
+                bucket.principal == normalized_principal
+                    && bucket.bucket_start_unix_secs == range_start
+            })
+            .expect("refreshed upstream-filtered normalized principal bucket");
+        ensure!(
+            refreshed_filtered_mixed.total_cost_micros == filtered_mixed.total_cost_micros + 29,
+            "same-upstream append must increase filtered total by the appended delta"
+        );
+        ensure!(
+            refreshed_filtered_mixed.cost_input_micros == filtered_mixed.cost_input_micros + 5
+                && refreshed_filtered_mixed.cost_output_micros
+                    == filtered_mixed.cost_output_micros + 6
+                && refreshed_filtered_mixed.cost_cache_creation_5m_micros
+                    == filtered_mixed.cost_cache_creation_5m_micros + 7
+                && refreshed_filtered_mixed.cost_cache_creation_1h_micros
+                    == filtered_mixed.cost_cache_creation_1h_micros + 5
+                && refreshed_filtered_mixed.cost_cache_read_micros
+                    == filtered_mixed.cost_cache_read_micros + 6,
+            "same-upstream append must increase filtered components by the appended deltas"
+        );
+
+        storage
+            .append_request_event(&cost_event(
+                range_start + 45,
+                "principal-cost-transition-other-upstream",
+                Some("team A"),
+                other_upstream_id,
+                Some(31),
+                Some([6, 7, 8, 4, 6]),
+                Some("transition"),
+            ))
+            .await?;
+        let refreshed_unfiltered_buckets = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: range_start,
+                until_unix_secs: range_start + 120,
+                bucket_width_secs: 60,
+                upstream_id: None,
+                principal_keys: vec![normalized_principal.clone()],
+            })
+            .await?;
+        let refreshed_unfiltered_mixed = refreshed_unfiltered_buckets
+            .iter()
+            .find(|bucket| {
+                bucket.principal == normalized_principal
+                    && bucket.bucket_start_unix_secs == range_start
+            })
+            .expect("refreshed unfiltered normalized principal bucket");
+        ensure!(
+            refreshed_unfiltered_mixed.total_cost_micros == mixed.total_cost_micros + 29 + 31,
+            "unfiltered requery must observe both appended total deltas"
+        );
+        ensure!(
+            refreshed_unfiltered_mixed.cost_input_micros == mixed.cost_input_micros + 5 + 6
+                && refreshed_unfiltered_mixed.cost_output_micros
+                    == mixed.cost_output_micros + 6 + 7
+                && refreshed_unfiltered_mixed.cost_cache_creation_5m_micros
+                    == mixed.cost_cache_creation_5m_micros + 7 + 8
+                && refreshed_unfiltered_mixed.cost_cache_creation_1h_micros
+                    == mixed.cost_cache_creation_1h_micros + 5 + 4
+                && refreshed_unfiltered_mixed.cost_cache_read_micros
+                    == mixed.cost_cache_read_micros + 6 + 6,
+            "unfiltered requery must observe both appended component deltas"
+        );
+
+        let isolated_filtered_buckets = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: range_start,
+                until_unix_secs: range_start + 120,
+                bucket_width_secs: 60,
+                upstream_id: Some(upstream_id),
+                principal_keys: vec![normalized_principal.clone()],
+            })
+            .await?;
+        let isolated_filtered_mixed = isolated_filtered_buckets
+            .iter()
+            .find(|bucket| {
+                bucket.principal == normalized_principal
+                    && bucket.bucket_start_unix_secs == range_start
+            })
+            .expect("isolated upstream-filtered normalized principal bucket");
+        ensure!(
+            isolated_filtered_mixed.total_cost_micros == refreshed_filtered_mixed.total_cost_micros
+                && isolated_filtered_mixed.cost_input_micros
+                    == refreshed_filtered_mixed.cost_input_micros
+                && isolated_filtered_mixed.cost_output_micros
+                    == refreshed_filtered_mixed.cost_output_micros
+                && isolated_filtered_mixed.cost_cache_creation_5m_micros
+                    == refreshed_filtered_mixed.cost_cache_creation_5m_micros
+                && isolated_filtered_mixed.cost_cache_creation_1h_micros
+                    == refreshed_filtered_mixed.cost_cache_creation_1h_micros
+                && isolated_filtered_mixed.cost_cache_read_micros
+                    == refreshed_filtered_mixed.cost_cache_read_micros,
+            "other-upstream append must not leak into the upstream-filtered requery"
         );
 
         let empty_selection = storage

@@ -275,9 +275,9 @@ jobs:
         if: always()
         run: |
           if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats
+            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
           elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats
+            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
           fi
 
   cargo-deny:
@@ -445,9 +445,9 @@ jobs:
         if: always()
         run: |
           if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats
+            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
           elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats
+            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
           fi
 
       - name: Upload coverage report
@@ -492,9 +492,9 @@ jobs:
         if: always()
         run: |
           if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats
+            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
           elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats
+            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
           fi
       - name: Upload real-client evidence
         if: always()
