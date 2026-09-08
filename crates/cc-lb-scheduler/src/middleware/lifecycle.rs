@@ -68,6 +68,7 @@ impl SchedulerMetricPayload for CronJob {
             Self::UsagePrune(_) => "cron:usage_prune",
             Self::QuotaGc(_) => "cron:quota_gc",
             Self::PromptCachePurge(_) => "cron:prompt_cache_purge",
+            Self::UpstreamAffinityPurge(_) => "cron:upstream_affinity_purge",
             Self::PriceCatalogRefresh(_) => "cron:price_catalog_refresh",
             Self::ApalisHousekeeping(_) => "cron:apalis_housekeeping",
             Self::WarmupWatchdog(_) => "cron:warmup_watchdog",

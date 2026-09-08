@@ -16,6 +16,7 @@ fn double_underscore_env_names_map_to_nested_config_fields() {
         .arg("load_env_override::double_underscore_env_names_map_to_nested_config_fields")
         .env(ENV_OVERRIDE_CHILD, "1")
         .env("CC_LB_LISTENER__PROXY_ADDR", "[::]:9999")
+        .env("CC_LB_UPSTREAM_AFFINITY__TTL_DAYS", "21")
         .output()
         .unwrap();
 
@@ -37,4 +38,6 @@ proxy_addr = "[::]:7777"
     let config = Config::load(&path).unwrap();
 
     assert_eq!(config.listener.proxy_addr, "[::]:9999".parse().unwrap());
+    assert_eq!(config.upstream_affinity.ttl_days, 21);
+    assert_eq!(config.upstream_affinity.ttl_secs(), 21 * 86_400);
 }

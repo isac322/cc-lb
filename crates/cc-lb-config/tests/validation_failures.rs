@@ -71,6 +71,41 @@ oauth_aead_key_env = "CC_LB_TEST_MASTER_KEY_INVALID"
 }
 
 #[test]
+fn zero_upstream_affinity_ttl_fails_with_field_path() {
+    let (_dir, path) = crate::common::temp_config(
+        r#"
+[listener]
+
+[upstream_affinity]
+ttl_days = 0
+"#,
+    );
+
+    let error = Config::load(&path).unwrap_err().to_string();
+
+    assert!(
+        error.contains(
+            "upstream_affinity.ttl_days: upstream affinity TTL must be greater than zero"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn upstream_affinity_ttl_days_rejects_values_above_u32() {
+    let error = toml::from_str::<Config>(
+        r#"
+[upstream_affinity]
+ttl_days = 4294967296
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("ttl_days"), "{error}");
+}
+
+#[test]
 fn validation_failures_none_mode_legacy_field() {
     let (_dir, path) = crate::common::temp_config(
         r#"[none_mode]

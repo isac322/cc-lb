@@ -35,7 +35,18 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_storage(config)?;
     validate_event_bus(config)?;
     validate_oauth(config)?;
+    validate_upstream_affinity(config)?;
     wasmtime::validate_wasmtime_runtime(config)?;
+    Ok(())
+}
+
+fn validate_upstream_affinity(config: &Config) -> Result<(), ValidationError> {
+    if config.upstream_affinity.ttl_days == 0 {
+        return Err(ValidationError::new(
+            "upstream_affinity.ttl_days",
+            "upstream affinity TTL must be greater than zero",
+        ));
+    }
     Ok(())
 }
 

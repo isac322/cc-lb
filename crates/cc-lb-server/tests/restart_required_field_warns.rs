@@ -3,6 +3,7 @@ use crate::reload_common;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use cc_lb_admin::CurrentConfig;
 use cc_lb_server::reload::ConfigWatcher;
 
 #[test]
@@ -27,6 +28,38 @@ fn restart_required_field_warns() {
 
     assert_eq!(watcher.current_config().listener.proxy_addr, proxy_b);
     assert!(logs.contains("listener.proxy_addr"));
+    assert!(logs.contains("restart required to apply"));
+}
+
+#[test]
+fn upstream_affinity_ttl_reload_warns_with_exact_field_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("cc-lb.toml");
+    std::fs::write(&config_path, "[listener]\n").unwrap();
+    let watcher = ConfigWatcher::new(
+        &config_path,
+        reload_common::load_config(&config_path),
+        Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
+        Arc::new(cc_lb_engine::SystemClock),
+    );
+    std::fs::write(
+        &config_path,
+        "[listener]\n\n[upstream_affinity]\nttl_days = 14\n",
+    )
+    .unwrap();
+
+    let logs = reload_common::capture_warn_logs(|| {
+        watcher.reload_now().unwrap();
+    });
+
+    assert_eq!(watcher.current_config().upstream_affinity.ttl_days, 14);
+    assert!(
+        watcher
+            .restart_required_changes()
+            .iter()
+            .any(|change| change.field == "upstream_affinity.ttl_days")
+    );
+    assert!(logs.contains("upstream_affinity.ttl_days"));
     assert!(logs.contains("restart required to apply"));
 }
 

@@ -1420,6 +1420,7 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-conformance",
  "chrono",
+ "metrics",
  "serde",
  "serde_json",
  "sha2 0.11.0",

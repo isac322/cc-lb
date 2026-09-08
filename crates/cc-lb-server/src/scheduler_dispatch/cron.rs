@@ -13,6 +13,7 @@ use cc_lb_scheduler::jobs::oauth_usage_poll::{
 use cc_lb_scheduler::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJobHandler;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJobHandler;
+use cc_lb_scheduler::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJobHandler;
 use cc_lb_scheduler::jobs::usage_prune::handle_usage_prune_job;
 use cc_lb_scheduler::jobs::usage_rollup::handle_usage_rollup_job;
 use cc_lb_scheduler::jobs::watchdog::{
@@ -28,7 +29,7 @@ use uuid::Uuid;
 use super::SchedulerDispatch;
 use crate::scheduler_dispatch::outcomes::{
     apalis_housekeeping_outcome, price_catalog_outcome, prompt_cache_purge_outcome,
-    usage_prune_outcome, usage_rollup_outcome,
+    upstream_affinity_purge_outcome, usage_prune_outcome, usage_rollup_outcome,
 };
 use crate::scheduler_dispatch::storage::{StorageHandle, storage_scheduler_error};
 
@@ -64,6 +65,16 @@ impl SchedulerDispatch {
                 ))
                 .handle(job, unix_secs(self.clock.now()))
                 .await,
+            ),
+            CronJob::UpstreamAffinityPurge(job) => upstream_affinity_purge_outcome(
+                UpstreamAffinityPurgeJobHandler::new(StorageHandle::new(self.storage.clone()))
+                    .handle(
+                        job,
+                        unix_secs(self.clock.now()),
+                        self.config.upstream_affinity.ttl_secs(),
+                        &self.cancel,
+                    )
+                    .await,
             ),
             CronJob::PriceCatalogRefresh(job) => self.dispatch_price_catalog(job).await,
             CronJob::ApalisHousekeeping(job) => match &self.backend {

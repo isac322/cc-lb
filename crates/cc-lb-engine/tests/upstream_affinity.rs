@@ -5,12 +5,13 @@ use crate::common::{
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::{
-    DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
+    DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock,
     UpstreamDispatch,
 };
 use cc_lb_storage_api::{
@@ -24,6 +25,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
+
+const TEST_NOW_UNIX_SECS: u64 = 4_100_000_000;
 
 #[derive(Clone)]
 enum ResponseSpec {
@@ -124,15 +127,19 @@ struct MemoryAffinityStore {
 
 impl MemoryAffinityStore {
     fn insert(&self, key: UpstreamAffinityKey, upstream_id: Uuid) {
-        self.bindings.lock().expect("affinity binding lock").insert(
-            key.clone(),
-            UpstreamAffinityBinding {
-                key,
-                upstream_id,
-                observed_at_unix_secs: 1,
-                expires_at_unix_secs: None,
-            },
-        );
+        self.insert_binding(UpstreamAffinityBinding {
+            key,
+            upstream_id,
+            observed_at_unix_secs: TEST_NOW_UNIX_SECS,
+            expires_at_unix_secs: None,
+        });
+    }
+
+    fn insert_binding(&self, binding: UpstreamAffinityBinding) {
+        self.bindings
+            .lock()
+            .expect("affinity binding lock")
+            .insert(binding.key.clone(), binding);
     }
 
     fn upstream_for(&self, key: &UpstreamAffinityKey) -> Option<Uuid> {
@@ -142,6 +149,20 @@ impl MemoryAffinityStore {
             .get(key)
             .map(|binding| binding.upstream_id)
     }
+
+    fn len(&self) -> usize {
+        self.bindings.lock().expect("affinity binding lock").len()
+    }
+}
+
+fn binding_is_active(binding: &UpstreamAffinityBinding, now_unix_secs: u64, ttl_secs: u64) -> bool {
+    let retained = now_unix_secs
+        .checked_sub(ttl_secs)
+        .is_none_or(|cutoff| binding.observed_at_unix_secs > cutoff);
+    retained
+        && binding
+            .expires_at_unix_secs
+            .is_none_or(|expires_at| expires_at > now_unix_secs)
 }
 
 #[async_trait]
@@ -150,6 +171,7 @@ impl UpstreamAffinityStore for MemoryAffinityStore {
         &self,
         keys: &[UpstreamAffinityKey],
         now_unix_secs: u64,
+        ttl_secs: u64,
     ) -> StorageResult<Vec<UpstreamAffinityBinding>> {
         if let Some(message) = self
             .resolve_failure
@@ -163,11 +185,7 @@ impl UpstreamAffinityStore for MemoryAffinityStore {
         Ok(keys
             .iter()
             .filter_map(|key| bindings.get(key))
-            .filter(|binding| {
-                binding
-                    .expires_at_unix_secs
-                    .is_none_or(|expires_at| expires_at > now_unix_secs)
-            })
+            .filter(|binding| binding_is_active(binding, now_unix_secs, ttl_secs))
             .cloned()
             .collect())
     }
@@ -175,13 +193,42 @@ impl UpstreamAffinityStore for MemoryAffinityStore {
     async fn bind_upstream_affinities(
         &self,
         incoming: &[UpstreamAffinityBinding],
+        now_unix_secs: u64,
+        ttl_secs: u64,
     ) -> StorageResult<()> {
         if let Some(message) = self.bind_failure.lock().expect("bind failure lock").clone() {
             return Err(StorageError::Unavailable { message });
         }
-        let mut bindings = self.bindings.lock().expect("affinity binding lock");
+
+        let mut prepared = HashMap::<UpstreamAffinityKey, UpstreamAffinityBinding>::new();
         for binding in incoming {
+            match prepared.entry(binding.key.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(binding.clone());
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let existing = entry.get_mut();
+                    if existing.upstream_id != binding.upstream_id {
+                        return Err(StorageError::Conflict {
+                            message: "affinity target differs".to_owned(),
+                        });
+                    }
+                    existing.observed_at_unix_secs = existing
+                        .observed_at_unix_secs
+                        .max(binding.observed_at_unix_secs);
+                    existing.expires_at_unix_secs =
+                        match (existing.expires_at_unix_secs, binding.expires_at_unix_secs) {
+                            (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                            _ => None,
+                        };
+                }
+            }
+        }
+
+        let mut bindings = self.bindings.lock().expect("affinity binding lock");
+        for binding in prepared.values() {
             if let Some(existing) = bindings.get(&binding.key)
+                && binding_is_active(existing, now_unix_secs, ttl_secs)
                 && existing.upstream_id != binding.upstream_id
             {
                 return Err(StorageError::Conflict {
@@ -189,10 +236,28 @@ impl UpstreamAffinityStore for MemoryAffinityStore {
                 });
             }
         }
-        for binding in incoming {
-            bindings.insert(binding.key.clone(), binding.clone());
-        }
+        bindings.extend(prepared);
         Ok(())
+    }
+
+    async fn purge_expired_upstream_affinities(
+        &self,
+        now_unix_secs: u64,
+        ttl_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        let mut bindings = self.bindings.lock().expect("affinity binding lock");
+        let expired = bindings
+            .iter()
+            .filter(|(_, binding)| !binding_is_active(binding, now_unix_secs, ttl_secs))
+            .map(|(key, _)| key.clone())
+            .take(batch_size)
+            .collect::<Vec<_>>();
+        let purged = expired.len() as u64;
+        for key in expired {
+            bindings.remove(&key);
+        }
+        Ok(purged)
     }
 }
 
@@ -241,6 +306,22 @@ fn lifecycle_with_config(
     store: Option<Arc<MemoryAffinityStore>>,
     config: LifecycleConfig,
 ) -> Lifecycle {
+    lifecycle_with_config_and_clock(
+        records,
+        dispatcher,
+        store,
+        config,
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+    )
+}
+
+fn lifecycle_with_config_and_clock(
+    records: Vec<cc_lb_storage_api::UpstreamRecord>,
+    dispatcher: Arc<RecordingDispatch>,
+    store: Option<Arc<MemoryAffinityStore>>,
+    config: LifecycleConfig,
+    clock: Arc<TestClock>,
+) -> Lifecycle {
     let authn = TestAuthn::new(TestState::default());
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
@@ -256,7 +337,7 @@ fn lifecycle_with_config(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         config,
-        Arc::new(cc_lb_engine::SystemClock),
+        clock,
     );
     match store {
         Some(store) => lifecycle.with_upstream_affinity_store(store),
@@ -293,6 +374,155 @@ fn web_search_response(ciphertext: &str) -> Value {
         }],
         "usage": {"input_tokens": 1, "output_tokens": 1}
     })
+}
+
+#[test]
+fn lifecycle_default_affinity_ttl_matches_config_default() {
+    assert_eq!(
+        LifecycleConfig::default().upstream_affinity_ttl,
+        Duration::from_secs(cc_lb_config::UpstreamAffinityConfig::default().ttl_secs())
+    );
+}
+
+#[tokio::test]
+async fn legacy_null_binding_expires_at_retention_boundary_without_read_extension() {
+    let first = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let origin = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert_binding(UpstreamAffinityBinding {
+        key: affinity_key("retention-boundary"),
+        upstream_id: origin,
+        observed_at_unix_secs: TEST_NOW_UNIX_SECS - 9,
+        expires_at_unix_secs: None,
+    });
+    let clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "type": "message",
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    })));
+    let lifecycle = lifecycle_with_config_and_clock(
+        vec![
+            upstream_record(first, "first", true),
+            upstream_record(origin, "origin", true),
+        ],
+        dispatch.clone(),
+        Some(store),
+        LifecycleConfig {
+            upstream_affinity_ttl: Duration::from_secs(10),
+            ..LifecycleConfig::default()
+        },
+        clock.clone(),
+    );
+
+    let unexpired = lifecycle
+        .handle(messages_request(opaque_request(
+            &["retention-boundary"],
+            false,
+        )))
+        .await
+        .expect("unexpired request handled");
+    assert_eq!(unexpired.status(), StatusCode::OK);
+    assert_eq!(
+        dispatch.urls.lock().expect("dispatch URL lock").as_slice(),
+        &["http://origin.local/v1/messages".to_owned()]
+    );
+
+    clock.advance_secs(1);
+    let expired = lifecycle
+        .handle(messages_request(opaque_request(
+            &["retention-boundary"],
+            false,
+        )))
+        .await
+        .expect("expired request handled");
+    assert_eq!(expired.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(dispatch.call_count(), 1);
+}
+
+#[tokio::test]
+async fn memory_affinity_purge_removes_explicit_and_retention_expiry_in_bounded_batches() {
+    let origin = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let store = MemoryAffinityStore::default();
+    store.insert_binding(UpstreamAffinityBinding {
+        key: affinity_key("active"),
+        upstream_id: origin,
+        observed_at_unix_secs: TEST_NOW_UNIX_SECS,
+        expires_at_unix_secs: None,
+    });
+    store.insert_binding(UpstreamAffinityBinding {
+        key: affinity_key("retention-expired"),
+        upstream_id: origin,
+        observed_at_unix_secs: TEST_NOW_UNIX_SECS - 10,
+        expires_at_unix_secs: None,
+    });
+    store.insert_binding(UpstreamAffinityBinding {
+        key: affinity_key("explicit-expired"),
+        upstream_id: origin,
+        observed_at_unix_secs: TEST_NOW_UNIX_SECS,
+        expires_at_unix_secs: Some(TEST_NOW_UNIX_SECS),
+    });
+
+    assert_eq!(
+        store
+            .purge_expired_upstream_affinities(TEST_NOW_UNIX_SECS, 10, 1)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(store.len(), 2);
+    assert_eq!(
+        store
+            .purge_expired_upstream_affinities(TEST_NOW_UNIX_SECS, 10, 1)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(store.len(), 1);
+    assert_eq!(
+        store
+            .resolve_upstream_affinities(&[affinity_key("active")], TEST_NOW_UNIX_SECS, 10,)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .purge_expired_upstream_affinities(TEST_NOW_UNIX_SECS, 10, 1)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn memory_affinity_bind_replaces_expired_target_without_waiting_for_purge() {
+    let old = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let new = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let key = affinity_key("expired-rebind");
+    let store = MemoryAffinityStore::default();
+    store.insert_binding(UpstreamAffinityBinding {
+        key: key.clone(),
+        upstream_id: old,
+        observed_at_unix_secs: TEST_NOW_UNIX_SECS - 10,
+        expires_at_unix_secs: None,
+    });
+
+    store
+        .bind_upstream_affinities(
+            &[UpstreamAffinityBinding {
+                key: key.clone(),
+                upstream_id: new,
+                observed_at_unix_secs: TEST_NOW_UNIX_SECS,
+                expires_at_unix_secs: None,
+            }],
+            TEST_NOW_UNIX_SECS,
+            10,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(store.upstream_for(&key), Some(new));
 }
 
 #[tokio::test]
@@ -351,6 +581,45 @@ async fn response_learning_pins_a_later_request_and_learns_pending_keys() {
     );
     assert_eq!(
         store.upstream_for(&affinity_key("opaque-pending")),
+        Some(origin)
+    );
+}
+
+#[tokio::test]
+async fn maximum_key_request_resolves_from_one_known_key_and_learns_the_rest() {
+    let first = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let origin = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(affinity_key("opaque-0"), origin);
+    let ciphertexts = (0..1024)
+        .map(|index| format!("opaque-{index}"))
+        .collect::<Vec<_>>();
+    let ciphertext_refs = ciphertexts.iter().map(String::as_str).collect::<Vec<_>>();
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({
+        "type": "message",
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    })));
+    let lifecycle = lifecycle(
+        vec![
+            upstream_record(first, "first", true),
+            upstream_record(origin, "origin", true),
+        ],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let response = lifecycle
+        .handle(messages_request(opaque_request(&ciphertext_refs, false)))
+        .await
+        .expect("maximum-size affinity request handled");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        dispatch.urls.lock().expect("dispatch URL lock").as_slice(),
+        &["http://origin.local/v1/messages".to_owned()]
+    );
+    assert_eq!(
+        store.upstream_for(&affinity_key("opaque-1023")),
         Some(origin)
     );
 }

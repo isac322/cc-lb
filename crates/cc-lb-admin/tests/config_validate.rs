@@ -74,6 +74,41 @@ async fn valid_draft_validate_marks_current_revision_valid() {
 }
 
 #[tokio::test]
+async fn zero_upstream_affinity_ttl_reports_exact_validation_path() {
+    let (_dir, storage) = temp_storage().await;
+    let app = app(test_state(
+        config_admin_common::minimal_config(),
+        Some(storage),
+    ));
+    let mut draft = config_value(123);
+    draft["upstream_affinity"]["ttl_days"] = json!(0);
+
+    let _ = authed_json(
+        app.clone(),
+        "PUT",
+        "/admin/config/draft",
+        Some(put_body(draft, 0)),
+    )
+    .await;
+    let (status, _, json, _) = authed_json(
+        app,
+        "POST",
+        "/admin/config/draft/validate",
+        Some(expected_revision_body(1)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["valid"], false);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("upstream_affinity.ttl_days")
+    );
+}
+
+#[tokio::test]
 async fn stale_validate_revision_returns_conflict() {
     let (_dir, storage) = temp_storage().await;
     let app = app(test_state(

@@ -39,10 +39,20 @@ pub trait UpstreamAffinityStore: Send + Sync + 'static {
         &self,
         keys: &[UpstreamAffinityKey],
         now_unix_secs: u64,
+        ttl_secs: u64,
     ) -> StorageResult<Vec<UpstreamAffinityBinding>>;
 
     async fn bind_upstream_affinities(
         &self,
         bindings: &[UpstreamAffinityBinding],
+        now_unix_secs: u64,
+        ttl_secs: u64,
     ) -> StorageResult<()>;
+
+    async fn purge_expired_upstream_affinities(
+        &self,
+        now_unix_secs: u64,
+        ttl_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64>;
 }

@@ -11,6 +11,7 @@ use crate::cron::WorkerBuilder as CronWorkerBuilder;
 use crate::jobs::compat::AnthropicCompatRefreshJob;
 use crate::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
 use crate::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
+use crate::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJob;
 use crate::jobs::watchdog::{OAuthRefreshWatchdogJob, WarmupWatchdogJob};
 
 /// Delay between cron producer restarts after a transient failure.
@@ -197,6 +198,13 @@ fn singleton_cron_specs(config: &Config, clock: ClockHandle) -> Vec<SingletonCro
     push_singleton_spec(&mut specs, config, &clock, "prompt_cache_purge", |_| {
         CronJob::PromptCachePurge(Default::default())
     });
+    push_singleton_spec(
+        &mut specs,
+        config,
+        &clock,
+        "upstream_affinity_purge",
+        |_| CronJob::UpstreamAffinityPurge(UpstreamAffinityPurgeJob::default()),
+    );
     push_singleton_spec(&mut specs, config, &clock, "price_catalog_refresh", |_| {
         CronJob::PriceCatalogRefresh(Default::default())
     });
@@ -308,4 +316,44 @@ fn stable_hash(value: &str) -> u64 {
     value.as_bytes().iter().fold(0_u64, |hash, byte| {
         hash.wrapping_mul(31).wrapping_add(u64::from(*byte))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use cc_lb_clock::TestClock;
+
+    use super::*;
+
+    #[test]
+    fn default_registry_contains_the_actual_upstream_affinity_purge_job() {
+        let config = Config::default();
+        let clock: ClockHandle = std::sync::Arc::new(TestClock::new_at_secs(1_800_000_000));
+        let specs = singleton_cron_specs(&config, clock);
+        let spec = specs
+            .iter()
+            .find(|spec| spec.name == "upstream_affinity_purge")
+            .expect("default upstream affinity purge cron registration");
+
+        let job = (spec.factory)(1_800_000_600);
+        assert!(matches!(job, CronJob::UpstreamAffinityPurge(_)));
+        assert_eq!(job.kind(), "upstream_affinity_purge");
+    }
+
+    #[test]
+    fn disabled_upstream_affinity_purge_is_not_registered() {
+        let mut config = Config::default();
+        config
+            .scheduler
+            .recurring_jobs
+            .get_mut("upstream_affinity_purge")
+            .expect("default upstream affinity purge config")
+            .enabled = false;
+        let clock: ClockHandle = std::sync::Arc::new(TestClock::new_at_secs(1_800_000_000));
+
+        assert!(
+            singleton_cron_specs(&config, clock)
+                .iter()
+                .all(|spec| spec.name != "upstream_affinity_purge")
+        );
+    }
 }

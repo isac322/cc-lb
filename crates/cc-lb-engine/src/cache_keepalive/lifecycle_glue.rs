@@ -15,6 +15,7 @@ use uuid::Uuid;
 use cc_lb_storage_api::{CacheKeepaliveConfigSnapshot, CacheTtl};
 
 use crate::lifecycle::RequestCacheMetadata;
+use crate::usage_parser::ParsedSseEvent;
 
 use super::display_reason::CacheKeepaliveDisplayReason;
 use super::{CancelReason, HeuristicClassifier, RequestSnapshot, SessionKey};
@@ -392,28 +393,26 @@ pub(crate) struct StreamingKeepaliveResponse {
 }
 
 impl StreamingKeepaliveResponse {
-    pub(crate) fn observe(&mut self, event_name: Option<&[u8]>, raw: &[u8]) {
-        match event_name {
+    pub(crate) fn observe(&mut self, event: &ParsedSseEvent<'_>) {
+        let Some(value) = event.first_observed_value() else {
+            return;
+        };
+        match event.event_name() {
             Some(b"message_start") => {
-                if let Some(value) = sse_json_value(raw)
-                    && let Some(message) = value.get("message")
-                {
+                if let Some(message) = value.get("message") {
                     self.message = Some(message.clone());
                 }
             }
             Some(b"content_block_start") => {
-                if let Some(value) = sse_json_value(raw)
-                    && let Some(block) = value.get("content_block")
-                {
+                if let Some(block) = value.get("content_block") {
                     self.content_blocks.push(block.clone());
                 }
             }
             Some(b"message_delta") => {
-                if let Some(value) = sse_json_value(raw)
-                    && let Some(stop_reason) = value
-                        .get("delta")
-                        .and_then(|delta| delta.get("stop_reason"))
-                        .and_then(Value::as_str)
+                if let Some(stop_reason) = value
+                    .get("delta")
+                    .and_then(|delta| delta.get("stop_reason"))
+                    .and_then(Value::as_str)
                 {
                     self.stop_reason = Some(stop_reason.to_owned());
                 }
@@ -434,19 +433,6 @@ impl StreamingKeepaliveResponse {
         }
         Some(value)
     }
-}
-
-fn sse_json_value(raw: &[u8]) -> Option<Value> {
-    let text = std::str::from_utf8(raw).ok()?;
-    for line in text.lines() {
-        let Some(payload) = line.strip_prefix("data:").map(str::trim_start) else {
-            continue;
-        };
-        if let Ok(value) = sonic_rs::from_str::<Value>(payload) {
-            return Some(value);
-        }
-    }
-    None
 }
 
 const KEEPALIVE_FORWARD_HEADERS: &[&str] = &["anthropic-version", "anthropic-beta"];
@@ -517,14 +503,12 @@ mod tests {
     #[test]
     fn streaming_message_start_becomes_response_body_for_classifier() {
         let mut response = StreamingKeepaliveResponse::default();
-        response.observe(
-            Some(b"message_start"),
+        response.observe(&crate::usage_parser::parse_sse_event(
             b"event: message_start\ndata: {\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"cache_read_input_tokens\":2}}}\n\n",
-        );
-        response.observe(
-            Some(b"message_delta"),
+        ));
+        response.observe(&crate::usage_parser::parse_sse_event(
             b"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
-        );
+        ));
 
         let value = response.into_value().expect("message_start captured");
 
@@ -539,5 +523,18 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(2)
         );
+    }
+
+    #[test]
+    fn invalid_joined_multiline_preserves_first_parseable_keepalive_value() {
+        let event = crate::usage_parser::parse_sse_event(
+            b"event: message_start\ndata: {\"message\":{\"id\":\"first\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\ndata: {\"message\":{\"id\":\"second\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+        );
+        let mut response = StreamingKeepaliveResponse::default();
+
+        response.observe(&event);
+        let value = response.into_value().expect("legacy first value captured");
+
+        assert_eq!(value.get("id").and_then(Value::as_str), Some("first"));
     }
 }

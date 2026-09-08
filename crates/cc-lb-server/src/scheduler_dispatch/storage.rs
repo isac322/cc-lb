@@ -4,10 +4,11 @@ use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshUpstreams;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeStore;
+use cc_lb_scheduler::jobs::upstream_affinity_purge::UpstreamAffinityPurgeStore;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneRunner;
 use cc_lb_storage_api::{
     ApiKeyUsageBucketStore, ApiKeyUsageCompactionRun, PromptCacheObservationStore, Storage,
-    StorageError, StorageResult, UpstreamRecord, UpstreamStore,
+    StorageError, StorageResult, UpstreamAffinityStore, UpstreamRecord, UpstreamStore,
     usage_pruner::{PruneResult, UsagePruner},
 };
 use uuid::Uuid;
@@ -51,6 +52,23 @@ impl OAuthRefreshUpstreams for StorageHandle {
 impl PromptCacheObservationPurgeStore for StorageHandle {
     async fn purge_expired_before(&self, ts_unix_secs: u64) -> StorageResult<u64> {
         PromptCacheObservationStore::purge_expired_before(self.storage.as_ref(), ts_unix_secs).await
+    }
+}
+
+impl UpstreamAffinityPurgeStore for StorageHandle {
+    async fn purge_expired_upstream_affinities(
+        &self,
+        now_unix_secs: u64,
+        ttl_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        UpstreamAffinityStore::purge_expired_upstream_affinities(
+            self.storage.as_ref(),
+            now_unix_secs,
+            ttl_secs,
+            batch_size,
+        )
+        .await
     }
 }
 

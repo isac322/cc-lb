@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::{Bytes, BytesMut};
-use cc_lb_config::PromptCacheShadowConfig;
+use cc_lb_config::{PromptCacheShadowConfig, UpstreamAffinityConfig};
 use cc_lb_domain::{
     BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix,
     CachePricingSummary, CacheScore, InternalError, InternalErrorKind, InternalErrorStage,
@@ -79,7 +79,7 @@ use crate::upstream_affinity::{
     request_enables_anthropic_web_search,
 };
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
-use crate::usage_parser::{self, UsageCounts, accumulate_sse_usage, sse_event_name};
+use crate::usage_parser::{self, UsageCounts, accumulate_sse_usage, parse_sse_event};
 use cc_lb_control::RequestEventBus;
 use cc_lb_control::dynamic_view::{
     DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
@@ -1632,6 +1632,7 @@ pub struct LifecycleConfig {
     pub files_body_cap_bytes: usize,
     pub replica_identity: Option<ReplicaIdentity>,
     pub prompt_cache_shadow: PromptCacheShadowConfig,
+    pub upstream_affinity_ttl: Duration,
 }
 
 impl Default for LifecycleConfig {
@@ -1641,6 +1642,9 @@ impl Default for LifecycleConfig {
             files_body_cap_bytes: DEFAULT_FILES_CAP_BYTES,
             replica_identity: None,
             prompt_cache_shadow: PromptCacheShadowConfig::default(),
+            upstream_affinity_ttl: Duration::from_secs(
+                UpstreamAffinityConfig::default().ttl_secs(),
+            ),
         }
     }
 }
@@ -1733,6 +1737,7 @@ struct ResponseAffinityContext {
     upstream_id: Uuid,
     pending_request_keys: Vec<UpstreamAffinityKey>,
     observe_response_keys: bool,
+    ttl_secs: u64,
 }
 
 async fn bind_upstream_affinity_keys(
@@ -1749,7 +1754,7 @@ async fn bind_upstream_affinity_keys(
     let mut seen = HashSet::with_capacity(keys.len());
     let mut bindings = Vec::with_capacity(keys.len());
     for key in keys {
-        if seen.insert(key.clone()) {
+        if seen.insert(key) {
             bindings.push(UpstreamAffinityBinding {
                 key: key.clone(),
                 upstream_id: context.upstream_id,
@@ -1759,7 +1764,7 @@ async fn bind_upstream_affinity_keys(
         }
     }
     store
-        .bind_upstream_affinities(&bindings)
+        .bind_upstream_affinities(&bindings, now_unix_secs, context.ttl_secs)
         .await
         .map_err(|_| ())
 }
@@ -2146,30 +2151,40 @@ impl Lifecycle {
                 message: UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
             });
         };
+        let now_unix_secs = unix_secs(self.clock.now());
         let bindings = store
-            .resolve_upstream_affinities(keys, unix_secs(self.clock.now()))
+            .resolve_upstream_affinities(
+                keys,
+                now_unix_secs,
+                self.config.upstream_affinity_ttl.as_secs(),
+            )
             .await
             .map_err(|_| RequestAffinityFailure {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 error_type: "api_error",
                 message: UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
             })?;
-        let matched = bindings
-            .iter()
-            .filter(|binding| keys.contains(&binding.key))
-            .collect::<Vec<_>>();
-        let targets = matched
-            .iter()
-            .map(|binding| binding.upstream_id)
-            .collect::<HashSet<_>>();
-        if targets.len() > 1 {
-            return Err(RequestAffinityFailure {
-                status: StatusCode::BAD_REQUEST,
-                error_type: "invalid_request_error",
-                message: "opaque request content resolves to multiple upstreams",
-            });
+        let requested_keys = keys.iter().collect::<HashSet<_>>();
+        let mut matched_keys = HashSet::with_capacity(bindings.len().min(keys.len()));
+        let mut target_upstream_id = None;
+        for binding in &bindings {
+            if !requested_keys.contains(&binding.key) {
+                continue;
+            }
+            matched_keys.insert(&binding.key);
+            match target_upstream_id {
+                Some(target) if target != binding.upstream_id => {
+                    return Err(RequestAffinityFailure {
+                        status: StatusCode::BAD_REQUEST,
+                        error_type: "invalid_request_error",
+                        message: "opaque request content resolves to multiple upstreams",
+                    });
+                }
+                Some(_) => {}
+                None => target_upstream_id = Some(binding.upstream_id),
+            }
         }
-        let Some(target_upstream_id) = targets.into_iter().next() else {
+        let Some(target_upstream_id) = target_upstream_id else {
             return Err(RequestAffinityFailure {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 error_type: "api_error",
@@ -2178,7 +2193,7 @@ impl Lifecycle {
         };
         let pending_keys = keys
             .iter()
-            .filter(|key| !matched.iter().any(|binding| &binding.key == *key))
+            .filter(|key| !matched_keys.contains(key))
             .cloned()
             .collect();
         Ok(Some(RequestAffinityResolution {
@@ -3010,6 +3025,7 @@ impl Lifecycle {
             observe_response_keys: body_view
                 .value()
                 .is_some_and(request_enables_anthropic_web_search),
+            ttl_secs: self.config.upstream_affinity_ttl.as_secs(),
         };
         response = self
             .finish_success_response(
@@ -3338,6 +3354,8 @@ impl Lifecycle {
         let mut affinity_bind_failed = false;
         if status.is_success() && !body_collect_failed {
             let mut affinity_keys = response_affinity_context.pending_request_keys.clone();
+            // Do not gate this scan on request tools: a successful buffered response can
+            // introduce an unsolicited web-search result that later requests must pin.
             let extraction_failed = if let Some(response_json) = response_body_json.as_ref() {
                 match extract_anthropic_web_search_affinity_keys(
                     response_json,
@@ -4052,8 +4070,12 @@ impl Lifecycle {
                                         break;
                                     };
                                 let raw = split_sse_event(&mut buffer, end);
-                                let usage_update = accumulate_sse_usage(&raw, &mut usage);
-                                if let Some(err) = usage_parser::detect_mid_stream_error(&raw) {
+                                let parsed_event = parse_sse_event(&raw);
+                                let usage_update =
+                                    accumulate_sse_usage(&parsed_event, &mut usage);
+                                if let Some(err) =
+                                    usage_parser::detect_mid_stream_error(&parsed_event)
+                                {
                                     stream_provider_error_seen = true;
                                     if let Some(o) = observer.as_ref() {
                                         let error = cc_lb_lifecycle::StreamError {
@@ -4082,11 +4104,11 @@ impl Lifecycle {
                                     }
                                 }
                                 sse_event_count = sse_event_count.saturating_add(1);
-                                let event_name = sse_event_name(&raw);
+                                let event_name = parsed_event.event_name();
                                 if success_sse_affinity_gate {
                                     let response_keys = match
                                         extract_anthropic_web_search_affinity_keys_from_sse_event(
-                                            &raw,
+                                            &parsed_event,
                                             &response_affinity_context.principal_id,
                                         )
                                     {
@@ -4194,7 +4216,7 @@ impl Lifecycle {
                                         pending_request_affinity_keys.clear();
                                     }
                                 }
-                                keepalive_response.observe(event_name, &raw);
+                                keepalive_response.observe(&parsed_event);
                                 match event_name {
                                     Some(b"message_start") if message_start_at.is_none() => {
                                         message_start_at = Some(now);
@@ -4642,12 +4664,13 @@ impl Lifecycle {
                         buffer.extend_from_slice(&tail);
                         while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
                             let raw = split_sse_event(&mut buffer, end);
-                            let usage_update = accumulate_sse_usage(&raw, &mut usage);
-                            let event_name = sse_event_name(&raw);
+                            let parsed_event = parse_sse_event(&raw);
+                            let usage_update = accumulate_sse_usage(&parsed_event, &mut usage);
+                            let event_name = parsed_event.event_name();
                             if success_sse_affinity_gate {
                                 let response_keys = match
                                     extract_anthropic_web_search_affinity_keys_from_sse_event(
-                                        &raw,
+                                        &parsed_event,
                                         &response_affinity_context.principal_id,
                                     )
                                 {
@@ -4732,8 +4755,10 @@ impl Lifecycle {
                                     pending_request_affinity_keys.clear();
                                 }
                             }
-                            keepalive_response.observe(event_name, &raw);
-                            if let Some(err) = usage_parser::detect_mid_stream_error(&raw) {
+                            keepalive_response.observe(&parsed_event);
+                            if let Some(err) =
+                                usage_parser::detect_mid_stream_error(&parsed_event)
+                            {
                                 stream_provider_error_seen = true;
                                 if let Some(o) = observer.as_ref() {
                                     let error = cc_lb_lifecycle::StreamError {
@@ -8825,7 +8850,8 @@ mod tests {
             buffer.extend_from_slice(&plaintext);
             while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
                 let raw = buffer.drain(..end).collect::<Vec<u8>>();
-                let _ = accumulate_sse_usage(&raw, &mut usage);
+                let event = parse_sse_event(&raw);
+                let _ = accumulate_sse_usage(&event, &mut usage);
                 events_seen += 1;
             }
         }
@@ -8833,7 +8859,8 @@ mod tests {
         buffer.extend_from_slice(&tail);
         while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
             let raw = buffer.drain(..end).collect::<Vec<u8>>();
-            let _ = accumulate_sse_usage(&raw, &mut usage);
+            let event = parse_sse_event(&raw);
+            let _ = accumulate_sse_usage(&event, &mut usage);
             events_seen += 1;
         }
 

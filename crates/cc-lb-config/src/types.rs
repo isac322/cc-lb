@@ -40,6 +40,7 @@ pub const DEFAULT_STORAGE_TAIL_POLL_INTERVAL_MS: u64 = 250;
 pub const DEFAULT_PG_NOTIFY_CHANNEL: &str = "cc_lb_events_partial";
 pub const DEFAULT_PARTIAL_RETENTION_TTL_SECS: u64 = 300;
 pub const DEFAULT_PARTIAL_RETENTION_MAX_ENTRIES: usize = 10_000;
+pub const DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS: u32 = 90;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -54,6 +55,8 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
+    #[serde(default)]
+    pub upstream_affinity: UpstreamAffinityConfig,
     pub aead: AeadConfig,
     pub observability: ObservabilityConfig,
     pub admin: AdminConfig,
@@ -93,6 +96,28 @@ pub struct Config {
     pub limit_reservation_ttl: LimitReservationTtlConfig,
     #[serde(default)]
     pub lifecycle_limit_reconcile_subscriber: LifecycleLimitReconcileSubscriberConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpstreamAffinityConfig {
+    #[serde(default = "default_upstream_affinity_ttl_days")]
+    #[schemars(range(min = 1))]
+    pub ttl_days: u32,
+}
+
+impl UpstreamAffinityConfig {
+    pub fn ttl_secs(&self) -> u64 {
+        u64::from(self.ttl_days) * 86_400
+    }
+}
+
+impl Default for UpstreamAffinityConfig {
+    fn default() -> Self {
+        Self {
+            ttl_days: DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1238,6 +1263,10 @@ fn default_scheduler_recurring_jobs() -> HashMap<String, RecurringJobConfig> {
             recurring_job_config(600, scheduler_jitter_secs(600)),
         ),
         (
+            "upstream_affinity_purge".to_owned(),
+            recurring_job_config(600, scheduler_jitter_secs(600)),
+        ),
+        (
             "price_catalog_refresh".to_owned(),
             recurring_job_config(3600, scheduler_jitter_secs(3600)),
         ),
@@ -1325,6 +1354,10 @@ fn default_scheduler_retry_base_secs() -> u64 {
 
 fn default_scheduler_retry_max_secs() -> u64 {
     SchedulerRetryConfig::default().max_secs
+}
+
+fn default_upstream_affinity_ttl_days() -> u32 {
+    UpstreamAffinityConfig::default().ttl_days
 }
 
 fn default_recurring_job_interval_secs() -> u64 {

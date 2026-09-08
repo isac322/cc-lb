@@ -366,6 +366,13 @@ pub fn summarize_restart_required(
     summarize_storage_restart_required(&mut changes, &current.storage, &new_config.storage);
     push_changed(
         &mut changes,
+        "upstream_affinity.ttl_days",
+        current.upstream_affinity.ttl_days.to_string(),
+        new_config.upstream_affinity.ttl_days.to_string(),
+        "upstream affinity retention is captured by the engine and scheduler at process startup",
+    );
+    push_changed(
+        &mut changes,
         "aead.key_env",
         current.aead.key_env.clone(),
         new_config.aead.key_env.clone(),
