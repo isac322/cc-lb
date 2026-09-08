@@ -160,6 +160,8 @@ mod task_23_no_hop_by_hop;
 mod tower_layer_round_trip;
 #[path = "unknown_event_preserved.rs"]
 mod unknown_event_preserved;
+#[path = "upstream_affinity.rs"]
+mod upstream_affinity;
 #[path = "upstream_mid_stream_error_emits_error_frame.rs"]
 mod upstream_mid_stream_error_emits_error_frame;
 #[path = "upstream_rate_limit_cache.rs"]

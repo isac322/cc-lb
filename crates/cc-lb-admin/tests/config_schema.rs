@@ -14,6 +14,30 @@ async fn authorized_schema_returns_schema_and_checklist() {
 }
 
 #[tokio::test]
+async fn schema_and_coverage_include_upstream_affinity() {
+    let app = app(test_state_without_storage());
+    let (_, _, json, _) = authed_json(app, "GET", "/admin/config/schema", None).await;
+
+    assert!(
+        json["schema"]["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("upstream_affinity")
+    );
+    assert!(
+        json["coverage_checklist"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "upstream_affinity")
+    );
+    assert_eq!(
+        json["schema"]["$defs"]["UpstreamAffinityConfig"]["properties"]["ttl_days"]["minimum"],
+        1
+    );
+}
+
+#[tokio::test]
 async fn schema_contains_property_for_each_coverage_item() {
     let app = app(test_state_without_storage());
     let (_, _, json, _) = authed_json(app, "GET", "/admin/config/schema", None).await;

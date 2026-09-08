@@ -7,7 +7,12 @@ use std::time::Duration;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_control::{BusReceiver, RequestEventBus};
-use cc_lb_engine::LifecycleContext;
+use cc_lb_engine::{
+    DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, LifecycleContext,
+    NoopSubscriptionQuotaCache,
+};
+use cc_lb_lifecycle::{LifecycleEvent, TerminationReason, UsageSource};
+use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
 use http::StatusCode;
 use http_body_util::BodyExt;
@@ -18,7 +23,8 @@ use client_disconnect_support::{
     normal_sse_frame, pending_sse, sqlite_storage, sse_dispatch, transform_body,
     transform_lifecycle, upstream_frame_error, upstream_frame_error_after,
 };
-use common::{TestLifecycleBus, messages_request};
+use common::{RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState, messages_request};
+use url::Url;
 
 #[tokio::test]
 async fn unpolled_stream_body_drop_persists_one_client_closed_final()
@@ -113,6 +119,112 @@ async fn normal_stream_eof_remains_success() {
     let _ = response.into_body().collect().await.expect("body collects");
 
     assert_success_terminal(&mut lifecycle_rx, StatusCode::OK.as_u16()).await;
+}
+
+#[tokio::test]
+async fn aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observation_event() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+    let lifecycle = prompt_cache_lifecycle(
+        sse_dispatch(
+            StatusCode::OK,
+            Body::from(Bytes::from_static(
+                b"event: message_start\n\
+                  data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12,\"cache_creation_input_tokens\":12,\"output_tokens\":0}}}\n\n",
+            )),
+        ),
+        &test_bus,
+    );
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-sonnet-4-5-20250929","stream":true,"system":[{"type":"text","text":"brief system","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}"#,
+        )))
+        .await
+        .expect("lifecycle handles aborted prompt-cache stream");
+    assert_eq!(response.status(), StatusCode::OK);
+    response
+        .into_body()
+        .collect()
+        .await
+        .expect("aborted prompt-cache stream body collects");
+
+    let (client_status, reason, prefix_token_counts, cache_usage_observed) =
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let mut prefix_token_counts = None;
+            let mut cache_usage_observed = false;
+            loop {
+                match lifecycle_rx
+                    .recv()
+                    .await
+                    .expect("lifecycle event delivered")
+                {
+                    LifecycleEvent::ParseCompleted {
+                        result: Ok(info), ..
+                    } => {
+                        prefix_token_counts = Some(
+                            info.cache_breakpoints
+                                .into_iter()
+                                .map(|breakpoint| breakpoint.prefix_token_count)
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                    LifecycleEvent::UsageObserved {
+                        usage,
+                        source: UsageSource::MessageStart,
+                        ..
+                    } => {
+                        cache_usage_observed = usage.cache_creation_input_tokens == 12;
+                    }
+                    LifecycleEvent::PromptCacheObservationsProduced {
+                        observations,
+                        dropped_below_threshold,
+                        dropped_aborted,
+                        ..
+                    } => panic!(
+                        "aborted below-threshold stream published an observation event: \
+                         observations={}, dropped_below_threshold={dropped_below_threshold}, \
+                         dropped_aborted={dropped_aborted}",
+                        observations.len(),
+                    ),
+                    LifecycleEvent::RequestTerminated {
+                        client_status,
+                        reason,
+                        ..
+                    } => {
+                        break (
+                            client_status,
+                            reason,
+                            prefix_token_counts,
+                            cache_usage_observed,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("request terminates");
+
+    assert_eq!(client_status, StatusCode::OK.as_u16());
+    assert!(matches!(reason, TerminationReason::Success));
+    let prefix_token_counts = prefix_token_counts.expect("request exposes cache breakpoints");
+    assert_eq!(prefix_token_counts.len(), 2);
+    assert!(
+        prefix_token_counts.iter().all(|count| *count < 1_024),
+        "every cache candidate must remain below the model threshold: {prefix_token_counts:?}",
+    );
+    assert!(
+        cache_usage_observed,
+        "message_start cache creation usage was not observed",
+    );
+    assert!(
+        std::iter::from_fn(|| lifecycle_rx.try_recv().ok()).all(|event| !matches!(
+            event,
+            LifecycleEvent::PromptCacheObservationsProduced { .. }
+        )),
+        "prompt-cache observation event was published after request termination",
+    );
 }
 
 #[tokio::test]
@@ -431,6 +543,40 @@ async fn timeout_ordering(timeout_first: bool) {
     drop(observer);
 
     assert_error_terminal(&mut lifecycle_rx, 504, "tower_timeout").await;
+}
+
+fn prompt_cache_lifecycle(
+    dispatcher: Arc<dyn cc_lb_engine::UpstreamDispatch>,
+    test_bus: &TestLifecycleBus,
+) -> Lifecycle {
+    let authn = TestAuthn::new(TestState::default());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .global_router(Arc::new(TestRouter {
+            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
+        }))
+        .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![UpstreamRecord {
+            id: uuid::Uuid::from_u128(1),
+            name: "test-upstream".to_owned(),
+            kind: StorageUpstreamKind::AnthropicApiKey,
+            base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
+            enabled: true,
+            api_key_ciphertext: Some(Vec::new()),
+            revision: 1,
+            ..UpstreamRecord::default()
+        }])
+        .prompt_cache_observation_cache(Arc::new(NoopSubscriptionQuotaCache))
+        .build();
+    Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_engine::SystemClock),
+    )
+    .with_event_bus(test_bus.bus_arc())
 }
 
 fn stream_request() -> http::Request<Bytes> {

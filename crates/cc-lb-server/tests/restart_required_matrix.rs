@@ -93,6 +93,23 @@ fn wasmtime_allocation_strategy_change_returns_entry() {
     assert_field(&changes, "runtime.wasmtime.allocation_strategy");
 }
 
+#[test]
+fn upstream_affinity_ttl_change_returns_exact_restart_entry() {
+    let current = Config::default();
+    let mut new_config = current.clone();
+    new_config.upstream_affinity.ttl_days = 14;
+
+    let changes = summarize_restart_required(&current, &new_config);
+    let change = changes
+        .iter()
+        .find(|change| change.field == "upstream_affinity.ttl_days")
+        .expect("upstream affinity TTL restart entry");
+
+    assert_eq!(change.current, "90");
+    assert_eq!(change.new, "14");
+    assert!(change.reason.contains("engine and scheduler"));
+}
+
 fn socket(value: &str) -> SocketAddr {
     value.parse().expect("valid socket address")
 }

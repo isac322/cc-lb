@@ -226,6 +226,30 @@ impl Fixture {
         )
     }
 
+    pub(super) fn dispatch_with_config(
+        &self,
+        pusher: Arc<dyn CacheKeepaliveTaskPusher>,
+        config: Config,
+    ) -> SchedulerDispatch {
+        let keepalive_dispatcher = Arc::new(
+            AnthropicKeepaliveDispatcher::new(
+                self.dynamic_view.clone(),
+                self.storage_dyn.clone(),
+                self.http.clone(),
+            )
+            .with_timeout(Duration::from_secs(1)),
+        );
+        self.dispatch_with_config_limit_engine_and_keepalive_dispatcher(
+            pusher,
+            cc_lb_control::api_keys::limit_engine::LimitEngine::new(
+                Arc::new(cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+                Arc::new(SystemClock),
+            ),
+            keepalive_dispatcher,
+            config,
+        )
+    }
+
     pub(super) fn dispatch_with_limit_engine(
         &self,
         pusher: Arc<dyn CacheKeepaliveTaskPusher>,
@@ -252,6 +276,21 @@ impl Fixture {
         limit_engine: Arc<LimitEngine>,
         keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
     ) -> SchedulerDispatch {
+        self.dispatch_with_config_limit_engine_and_keepalive_dispatcher(
+            pusher,
+            limit_engine,
+            keepalive_dispatcher,
+            Config::default(),
+        )
+    }
+
+    fn dispatch_with_config_limit_engine_and_keepalive_dispatcher(
+        &self,
+        pusher: Arc<dyn CacheKeepaliveTaskPusher>,
+        limit_engine: Arc<LimitEngine>,
+        keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
+        config: Config,
+    ) -> SchedulerDispatch {
         let stores = Arc::new(Stores {
             upstreams: self.storage_dyn.clone(),
             principals: self.storage_dyn.clone(),
@@ -268,7 +307,7 @@ impl Fixture {
         SchedulerDispatch::new(SchedulerDispatchDeps {
             backend: self.backend.backend.clone(),
             cache_keepalive_pusher: pusher,
-            config: Config::default(),
+            config,
             storage: self.storage_dyn.clone(),
             stores,
             aead: self.aead.clone(),

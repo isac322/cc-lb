@@ -7,6 +7,18 @@ fn missing_scheduler_section_applies_default_config() {
     let config = Config::load(&path).unwrap();
 
     assert_eq!(config.scheduler, SchedulerConfig::default());
+    assert_eq!(
+        config
+            .scheduler
+            .recurring_jobs
+            .get("upstream_affinity_purge")
+            .expect("upstream affinity purge default"),
+        &cc_lb_config::RecurringJobConfig {
+            enabled: true,
+            interval_secs: 600,
+            jitter_secs: 30,
+        }
+    );
 }
 
 #[test]

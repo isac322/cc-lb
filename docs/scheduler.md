@@ -63,11 +63,21 @@ The table below lists every job type registered in the scheduler. This list is d
 | **UsageRollupJob** | Singleton | `singleton:usage_rollup` | Maintenance | Every 30s (with jitter) | `usage_rollups` | 5s |
 | **UsagePruneJob** | Singleton | `singleton:usage_prune` | Maintenance | Every 24h (86,400s) | `request_events`, `audit_log` | 60s |
 | **PromptCacheObservationPurgeJob** | Singleton | `singleton:prompt_cache_purge` | Maintenance | Every 10m (600s) | `prompt_cache_observations` | 10s |
+| **UpstreamAffinityPurgeJob** | Singleton | `cron:upstream_affinity_purge:<tick_unix_secs>` | Maintenance (60s retry) | Every 10m (600s) plus up to 30s jitter | `upstream_affinity_v1` | Bounded to 1,000 rows/batch and 1,024 batches/run |
 | **PriceCatalogRefreshJob** | Singleton | `singleton:price_catalog_refresh` | Maintenance | Every 1h (3600s) | `price_catalog` | 10s |
 | **ApalisHousekeepingJob** | Singleton | `singleton:apalis_housekeeping` | Maintenance | Every 1h (3600s) | `apalis.jobs` | 10s |
 | **OAuthUsagePollCronJob** | Singleton | `cron:oauth_usage_poll:<tick_unix_secs>` | Maintenance | Every 60s (no jitter) | `oauth_usage_poll_cursors` | 60s |
 | **WarmupWatchdogJob** | Singleton | `maintenance:warmup_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
 | **OAuthRefreshWatchdogJob** | Singleton | `maintenance:oauth_refresh_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
+
+### Upstream-affinity retention
+
+`[upstream_affinity] ttl_days = 90` sets the retention policy, independently of request-log retention. Values must be positive; `CC_LB_UPSTREAM_AFFINITY__TTL_DAYS` is the environment override. Restart the server after changing the TTL so the proxy and cleanup worker use the same startup policy.
+
+Rows expire when their last successful binding observation is at least the configured number of days old, or their explicit expiry has passed. Existing NULL-expiry rows also age out. Ordinary replay reads do not refresh the timestamp. The proxy rejects expired unknown affinity with a local 503 even before the purge runs.
+
+The recurring job removes expired rows through indexed, bounded batches. PostgreSQL skips locked candidates and rechecks expiry before deletion, so an in-flight renewal is not removed as stale. A shorter TTL applies to existing rows after restart; increasing it cannot restore rows already deleted. Disabling `scheduler.recurring_jobs.upstream_affinity_purge` stops physical cleanup, not the proxy's logical expiry check. SQLite can reuse freed pages without immediately shrinking its database file.
+
 
 ## 3. DB Pool Isolation
 
@@ -168,8 +178,8 @@ Cache keepalive-specific operator notes:
 - `cclb_scheduler_lazy_refresh_timeout_total` (Counter): Tracks timed-out lazy OAuth refresh waits.
   - Cardinality: 1
 - `cclb_scheduler_prune_rows_removed_total` (Counter): Tracks pruned rows.
-  - Labels: `table` (request_events, audit_log)
-  - Cardinality: 2
+  - Labels: `table` (request_events, audit_log, upstream_affinity)
+  - Cardinality: 3
 - `cclb_scheduler_price_catalog_status_total` (Counter): Tracks price catalog refresh outcomes.
   - Labels: `status` (applied, noop)
   - Cardinality: 2

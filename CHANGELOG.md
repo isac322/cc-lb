@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Upstream-affinity retention is configurable with `[upstream_affinity] ttl_days = 90` or `CC_LB_UPSTREAM_AFFINITY__TTL_DAYS`. Positive values take effect after restart and also apply to existing mappings with no explicit expiry. Bindings expire after the configured time since their last successful bind, without writes on replay; expired or unknown history fails closed with 503. A recurring `upstream_affinity_purge` job removes expired mappings in bounded indexed batches outside the proxy path, every 10 minutes with up to 30 seconds of jitter by default.
+
+### Fixed
+
+- Anthropic native web-search history now keeps exact upstream affinity across cache misses and quota-driven routing changes. cc-lb persists only SHA-256 digests of opaque `encrypted_content`, fails closed when affinity is unknown, conflicting, unavailable, or cannot be persisted, and gates streaming search-result events until the mapping is durable.
+- Upstream-affinity persistence now uses atomic bounded batches, with fixed-shape PostgreSQL array inserts and bounded SQLite statement caching. SSE observers share parsed events, affinity matching avoids quadratic key scans, and JSON traversal skips redundant work while preserving routing, replay, and fail-closed delivery semantics. Storage latency and batch-size metrics expose the remaining persistence cost.
+
 ## [0.4.6] - 2026-09-08
 
 ### Added

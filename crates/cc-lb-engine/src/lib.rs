@@ -98,6 +98,8 @@ mod terminal_observer;
 #[cfg(not(loom))]
 pub mod tokenizer;
 #[cfg(not(loom))]
+pub(crate) mod upstream_affinity;
+#[cfg(not(loom))]
 pub mod upstream_rate_limit_events;
 #[cfg(not(loom))]
 pub mod usage_decoder;

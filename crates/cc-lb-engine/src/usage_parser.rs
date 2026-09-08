@@ -141,58 +141,236 @@ pub(crate) fn find_sse_event_end(buffer: &[u8]) -> Option<usize> {
     None
 }
 
-/// Extract the raw bytes of the `event: <name>` line from one SSE event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SseEventParseError {
+    InvalidData,
+}
+
+/// One SSE frame split into its borrowed event metadata and parsed JSON payload.
+///
+/// The conformant joined payload is parsed once so usage, provider-error,
+/// affinity, and keepalive observers can share the same JSON tree. Only when a
+/// multiline payload is not valid joined JSON do we retain individually
+/// parseable data lines for compatibility with the legacy observers.
+#[derive(Debug)]
+pub(crate) struct ParsedSseEvent<'a> {
+    event_name: Option<&'a [u8]>,
+    named_error: bool,
+    value: Result<Option<Value>, SseEventParseError>,
+    legacy_values: Vec<Value>,
+}
+
+impl ParsedSseEvent<'_> {
+    pub(crate) fn event_name(&self) -> Option<&[u8]> {
+        self.event_name
+    }
+
+    pub(crate) fn event_type(&self) -> Option<&str> {
+        self.value
+            .as_ref()
+            .ok()
+            .and_then(|value| value.as_ref())
+            .and_then(|value| value.get("type"))
+            .and_then(Value::as_str)
+            .or_else(|| {
+                self.event_name
+                    .and_then(|name| std::str::from_utf8(name).ok())
+            })
+    }
+
+    pub(crate) fn value(&self) -> Result<Option<&Value>, SseEventParseError> {
+        self.value
+            .as_ref()
+            .map(Option::as_ref)
+            .map_err(|error| *error)
+    }
+
+    pub(crate) fn first_observed_value(&self) -> Option<&Value> {
+        match self.value() {
+            Ok(value) => value,
+            Err(_) => self.legacy_values.first(),
+        }
+    }
+
+    fn last_observed_value(&self) -> Option<&Value> {
+        match self.value() {
+            Ok(value) => value,
+            Err(_) => self.legacy_values.last(),
+        }
+    }
+}
+
+/// Parse one complete SSE frame.
+///
+/// A single `data:` line is parsed directly from the input buffer. Multiline
+/// data allocates only for the required SSE newline joining. The legacy
+/// per-line compatibility values are parsed only if that joined payload fails.
+pub(crate) fn parse_sse_event(raw_event: &[u8]) -> ParsedSseEvent<'_> {
+    let Ok(text) = std::str::from_utf8(raw_event) else {
+        return ParsedSseEvent {
+            event_name: sse_event_name(raw_event),
+            named_error: false,
+            value: Err(SseEventParseError::InvalidData),
+            legacy_values: Vec::new(),
+        };
+    };
+    let (event_name, named_error) = scan_sse_event_metadata(text);
+    let mut data_lines = text.split(['\r', '\n']).filter_map(sse_data_line);
+    let Some(first) = data_lines.next() else {
+        return ParsedSseEvent {
+            event_name,
+            named_error,
+            value: Ok(None),
+            legacy_values: Vec::new(),
+        };
+    };
+    let Some(second) = data_lines.next() else {
+        let value = if first.trim() == "[DONE]" {
+            Ok(None)
+        } else {
+            sonic_rs::from_str::<Value>(first)
+                .map(Some)
+                .map_err(|_| SseEventParseError::InvalidData)
+        };
+        let legacy_values = if value.is_err() {
+            let legacy = first.trim_start();
+            if legacy.len() != first.len() {
+                sonic_rs::from_str::<Value>(legacy)
+                    .ok()
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        return ParsedSseEvent {
+            event_name,
+            named_error,
+            value,
+            legacy_values,
+        };
+    };
+
+    let mut payload = String::with_capacity(raw_event.len());
+    payload.push_str(first);
+    payload.push('\n');
+    payload.push_str(second);
+    for line in data_lines {
+        payload.push('\n');
+        payload.push_str(line);
+    }
+    let value = if payload.trim() == "[DONE]" {
+        Ok(None)
+    } else {
+        sonic_rs::from_str::<Value>(&payload)
+            .map(Some)
+            .map_err(|_| SseEventParseError::InvalidData)
+    };
+    let legacy_values = if value.is_err() {
+        text.split(['\r', '\n'])
+            .filter_map(legacy_sse_data_line)
+            .filter_map(|line| sonic_rs::from_str::<Value>(line).ok())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    ParsedSseEvent {
+        event_name,
+        named_error,
+        value,
+        legacy_values,
+    }
+}
+
+fn sse_data_line(line: &str) -> Option<&str> {
+    line.strip_prefix("data:")
+        .map(|data| data.strip_prefix(' ').unwrap_or(data))
+}
+
+fn legacy_sse_data_line(line: &str) -> Option<&str> {
+    line.strip_prefix("data:").map(str::trim_start)
+}
+
+fn scan_sse_event_metadata(text: &str) -> (Option<&[u8]>, bool) {
+    let mut event_name = None;
+    let mut named_error = false;
+    for line in text.split(['\r', '\n']) {
+        let Some(name) = line.strip_prefix("event:") else {
+            continue;
+        };
+        event_name.get_or_insert(name.trim_ascii().as_bytes());
+        named_error |= name.trim() == "error";
+    }
+    (event_name, named_error)
+}
+
+/// Extract the first raw `event: <name>` line from one SSE event.
 pub(crate) fn sse_event_name(raw_event: &[u8]) -> Option<&[u8]> {
     raw_event
-        .split(|b| *b == b'\n')
+        .split(|byte| matches!(*byte, b'\r' | b'\n'))
         .filter_map(|line| line.strip_prefix(b"event:"))
         .map(|name| name.trim_ascii())
         .next()
 }
 
-/// Merge usage carried by one raw SSE event frame into `usage`. Returns flags
+/// Merge usage carried by one parsed SSE event into `usage`. Returns flags
 /// for which boundary events were observed (so callers can record timing).
-pub(crate) fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) -> SseUsageUpdate {
+pub(crate) fn accumulate_sse_usage(
+    event: &ParsedSseEvent<'_>,
+    usage: &mut UsageCounts,
+) -> SseUsageUpdate {
     let mut update = SseUsageUpdate::default();
-    let Ok(text) = std::str::from_utf8(raw) else {
-        return update;
-    };
-    for line in text.lines() {
-        let Some(payload) = line.strip_prefix("data:").map(str::trim_start) else {
-            continue;
-        };
-        let Ok(value) = sonic_rs::from_str::<Value>(payload) else {
-            continue;
-        };
-        let event_type = value
-            .get("type")
-            .and_then(Value::as_str)
-            .or_else(|| sse_event_name(raw).and_then(|name| std::str::from_utf8(name).ok()));
-        if event_type == Some("message_stop") {
-            update.message_stop = true;
+    match event.value() {
+        Ok(Some(value)) => {
+            accumulate_sse_usage_value(value, event.event_name, usage, &mut update);
         }
-        if event_type == Some("content_block_delta")
-            && let Some(delta) = value.get("delta")
-            && delta.get("type").and_then(Value::as_str) == Some("thinking_delta")
-            && let Some(estimated) = delta.get("estimated_tokens").and_then(Value::as_u64)
-        {
-            usage.estimated_thinking_progress =
-                usage.estimated_thinking_progress.saturating_add(estimated);
-            usage.present = true;
+        Ok(None) => {}
+        Err(_) => {
+            for value in &event.legacy_values {
+                accumulate_sse_usage_value(value, event.event_name, usage, &mut update);
+            }
         }
-        let reported = value
-            .get("usage")
-            .or_else(|| value.get("message").and_then(|m| m.get("usage")));
-        let Some(reported) = reported else {
-            continue;
-        };
-        if event_type == Some("message_start") {
-            update.message_start_usage = true;
-        }
-        usage.present = true;
-        merge_usage_value(usage, reported);
     }
     update
+}
+
+fn accumulate_sse_usage_value(
+    value: &Value,
+    event_name: Option<&[u8]>,
+    usage: &mut UsageCounts,
+    update: &mut SseUsageUpdate,
+) {
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| event_name.and_then(|name| std::str::from_utf8(name).ok()));
+    if event_type == Some("message_stop") {
+        update.message_stop = true;
+    }
+    if event_type == Some("content_block_delta")
+        && let Some(delta) = value.get("delta")
+        && delta.get("type").and_then(Value::as_str) == Some("thinking_delta")
+        && let Some(estimated) = delta.get("estimated_tokens").and_then(Value::as_u64)
+    {
+        usage.estimated_thinking_progress =
+            usage.estimated_thinking_progress.saturating_add(estimated);
+        usage.present = true;
+    }
+    let reported = value.get("usage").or_else(|| {
+        value
+            .get("message")
+            .and_then(|message| message.get("usage"))
+    });
+    let Some(reported) = reported else {
+        return;
+    };
+    if event_type == Some("message_start") {
+        update.message_start_usage = true;
+    }
+    usage.present = true;
+    merge_usage_value(usage, reported);
 }
 
 #[cfg(test)]
@@ -235,30 +413,13 @@ fn canonical_upstream_error_from_value(value: &Value) -> Option<CanonicalUpstrea
 
 /// Detect a mid-stream `event: error` (or `data: {"type":"error",...}`)
 /// emission. Returns the upstream error's `type` and `message` if found.
-pub(crate) fn detect_mid_stream_error(raw: &[u8]) -> Option<UpstreamStreamError> {
-    let text = std::str::from_utf8(raw).ok()?;
-    let mut named_error = false;
-    let mut payload_value: Option<Value> = None;
-    for line in text.lines() {
-        if let Some(name) = line.strip_prefix("event:").map(str::trim) {
-            if name == "error" {
-                named_error = true;
-            }
-            continue;
-        }
-        if let Some(payload) = line.strip_prefix("data:").map(str::trim_start)
-            && let Ok(value) = sonic_rs::from_str::<Value>(payload)
-        {
-            payload_value = Some(value);
-        }
-    }
-    let value = payload_value?;
+pub(crate) fn detect_mid_stream_error(event: &ParsedSseEvent<'_>) -> Option<UpstreamStreamError> {
+    let value = event.last_observed_value()?;
     let type_str = value.get("type").and_then(Value::as_str);
-    let is_error = named_error || type_str == Some("error");
-    if !is_error {
+    if !event.named_error && type_str != Some("error") {
         return None;
     }
-    let (error_type, error_message) = bounded_upstream_error(&value);
+    let (error_type, error_message) = bounded_upstream_error(value);
     Some(UpstreamStreamError {
         error_type: error_type.map(BoundedErrorType::into_string),
         error_message: error_message.map(BoundedErrorMessage::into_string),
@@ -383,13 +544,106 @@ mod tests {
         out
     }
 
+    fn accumulate_raw_sse_usage(raw: &[u8], usage: &mut UsageCounts) -> SseUsageUpdate {
+        let event = parse_sse_event(raw);
+        accumulate_sse_usage(&event, usage)
+    }
+
+    fn detect_raw_mid_stream_error(raw: &[u8]) -> Option<UpstreamStreamError> {
+        let event = parse_sse_event(raw);
+        detect_mid_stream_error(&event)
+    }
+
+    #[test]
+    fn parsed_event_joins_multiline_data_for_all_observers() {
+        let raw = b"event: message_delta\r\ndata: {\"type\":\"message_delta\",\r\ndata: \"usage\":{\"output_tokens\":17}}\r\n\r\n";
+        let event = parse_sse_event(raw);
+        let mut usage = UsageCounts::default();
+
+        let update = accumulate_sse_usage(&event, &mut usage);
+
+        assert_eq!(event.event_name(), Some(b"message_delta".as_slice()));
+        assert!(!update.message_stop);
+        assert_eq!(usage.output_tokens, 17);
+    }
+
+    #[test]
+    fn json_type_takes_precedence_over_sse_event_name() {
+        let raw = b"event: message_stop\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":19}}\n\n";
+        let event = parse_sse_event(raw);
+        let mut usage = UsageCounts::default();
+
+        let update = accumulate_sse_usage(&event, &mut usage);
+
+        assert_eq!(event.event_type(), Some("message_delta"));
+        assert!(!update.message_stop);
+        assert_eq!(usage.output_tokens, 19);
+    }
+
+    #[test]
+    fn malformed_payload_is_available_to_fail_closed_observers() {
+        let event = parse_sse_event(b"event: content_block_start\ndata: {not-json}\n\n");
+
+        assert_eq!(event.value(), Err(SseEventParseError::InvalidData));
+    }
+
+    #[test]
+    fn unicode_trim_legacy_observers_survive_while_affinity_stays_strict() {
+        let raw = "event: error\ndata:\u{a0}{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"unicode trim\"},\"usage\":{\"output_tokens\":23}}\n\n";
+        let event = parse_sse_event(raw.as_bytes());
+        let mut usage = UsageCounts::default();
+
+        let _ = accumulate_sse_usage(&event, &mut usage);
+        let error = detect_mid_stream_error(&event).expect("legacy trimmed error detected");
+
+        assert_eq!(event.value(), Err(SseEventParseError::InvalidData));
+        assert_eq!(usage.output_tokens, 23);
+        assert_eq!(error.error_type.as_deref(), Some("api_error"));
+        assert_eq!(error.error_message.as_deref(), Some("unicode trim"));
+        assert_eq!(
+            crate::upstream_affinity::extract_anthropic_web_search_affinity_keys_from_sse_event(
+                &event,
+                "principal-unicode",
+            ),
+            Err(crate::upstream_affinity::UpstreamAffinityExtractionError::InvalidSseData)
+        );
+    }
+
+    #[test]
+    fn later_error_event_name_preserves_legacy_error_classification() {
+        let raw = "event: message_delta\nevent:\u{a0}error\u{a0}\ndata: {\"type\":\"message_delta\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"later named error\"}}\n\n";
+        let event = parse_sse_event(raw.as_bytes());
+
+        let error = detect_mid_stream_error(&event).expect("later event:error detected");
+
+        assert_eq!(event.event_name(), Some(b"message_delta".as_slice()));
+        assert_eq!(error.error_type.as_deref(), Some("overloaded_error"));
+        assert_eq!(error.error_message.as_deref(), Some("later named error"));
+    }
+
+    #[test]
+    fn invalid_joined_multiline_preserves_legacy_usage_and_last_error_value() {
+        let raw = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"legacy last\"},\"usage\":{\"output_tokens\":11}}\n\n";
+        let event = parse_sse_event(raw);
+        let mut usage = UsageCounts::default();
+
+        let update = accumulate_sse_usage(&event, &mut usage);
+        let error = detect_mid_stream_error(&event).expect("last parseable error detected");
+
+        assert_eq!(event.value(), Err(SseEventParseError::InvalidData));
+        assert!(!update.message_stop);
+        assert_eq!(usage.output_tokens, 11);
+        assert_eq!(error.error_type.as_deref(), Some("api_error"));
+        assert_eq!(error.error_message.as_deref(), Some("legacy last"));
+    }
+
     #[test]
     fn merges_full_anthropic_usage_object() {
         let mut usage = UsageCounts::default();
         let raw = raw_event(
             r#"{"type":"message_delta","usage":{"input_tokens":120,"output_tokens":48,"cache_creation_input_tokens":40,"cache_creation":{"ephemeral_5m_input_tokens":25,"ephemeral_1h_input_tokens":15},"cache_read_input_tokens":10,"output_tokens_details":{"thinking_tokens":12},"server_tool_use":{"web_search_requests":3,"web_fetch_requests":1},"service_tier":"priority","inference_geo":"us-east"}}"#,
         );
-        accumulate_sse_usage(&raw, &mut usage);
+        accumulate_raw_sse_usage(&raw, &mut usage);
         assert!(usage.present);
         assert_eq!(usage.input_tokens, 120);
         assert_eq!(usage.output_tokens, 48);
@@ -433,12 +687,12 @@ mod tests {
         let start = raw_event(
             r#"{"type":"message_start","message":{"usage":{"input_tokens":99,"output_tokens":1}}}"#,
         );
-        accumulate_sse_usage(&start, &mut usage);
+        accumulate_raw_sse_usage(&start, &mut usage);
         assert_eq!(usage.input_tokens, 99);
 
         // message_delta without input_tokens (null/absent). Must NOT zero out the 99.
         let delta = raw_event(r#"{"type":"message_delta","usage":{"output_tokens":50}}"#);
-        accumulate_sse_usage(&delta, &mut usage);
+        accumulate_raw_sse_usage(&delta, &mut usage);
         assert_eq!(usage.input_tokens, 99);
         assert_eq!(usage.output_tokens, 50);
     }
@@ -449,7 +703,7 @@ mod tests {
         let raw = raw_event(
             r#"{"type":"message_delta","usage":{"output_tokens":10,"iterations":[{"type":"message","model":"claude-x","input_tokens":5,"output_tokens":10}]}}"#,
         );
-        accumulate_sse_usage(&raw, &mut usage);
+        accumulate_raw_sse_usage(&raw, &mut usage);
         let preserved = usage.iterations.expect("iterations preserved");
         let arr = preserved.as_array().expect("iterations is array");
         assert_eq!(arr.len(), 1);
@@ -462,7 +716,7 @@ mod tests {
     #[test]
     fn detect_mid_stream_error_from_named_event() {
         let raw = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"upstream overloaded\"}}\n\n";
-        let err = detect_mid_stream_error(raw).expect("detected");
+        let err = detect_raw_mid_stream_error(raw).expect("detected");
         assert_eq!(err.error_type.as_deref(), Some("overloaded_error"));
         assert_eq!(err.error_message.as_deref(), Some("upstream overloaded"));
     }
@@ -470,14 +724,14 @@ mod tests {
     #[test]
     fn detect_mid_stream_error_from_data_type_only() {
         let raw = b"data: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"too many\"}}\n\n";
-        let err = detect_mid_stream_error(raw).expect("detected");
+        let err = detect_raw_mid_stream_error(raw).expect("detected");
         assert_eq!(err.error_type.as_deref(), Some("rate_limit_error"));
     }
 
     #[test]
     fn detect_mid_stream_error_ignores_normal_events() {
         let raw = raw_event(r#"{"type":"message_delta","usage":{"output_tokens":1}}"#);
-        assert!(detect_mid_stream_error(&raw).is_none());
+        assert!(detect_raw_mid_stream_error(&raw).is_none());
     }
 
     #[test]
@@ -501,7 +755,7 @@ mod tests {
         let raw = format!(
             "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"e\",\"message\":\"{long_msg}\"}}}}\n\n"
         );
-        let err = detect_mid_stream_error(raw.as_bytes()).expect("detected");
+        let err = detect_raw_mid_stream_error(raw.as_bytes()).expect("detected");
         let msg = err.error_message.expect("message present");
         assert!(msg.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES);
         assert!(msg.ends_with("..."));
@@ -667,8 +921,8 @@ mod tests {
         let mut usage = UsageCounts::default();
         let frame1 = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"estimated_tokens\":12}}\n\n".to_vec();
         let frame2 = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"estimated_tokens\":34}}\n\n".to_vec();
-        let update1 = accumulate_sse_usage(&frame1, &mut usage);
-        let update2 = accumulate_sse_usage(&frame2, &mut usage);
+        let update1 = accumulate_raw_sse_usage(&frame1, &mut usage);
+        let update2 = accumulate_raw_sse_usage(&frame2, &mut usage);
         assert!(!update1.message_start_usage && !update1.message_stop);
         assert!(!update2.message_start_usage && !update2.message_stop);
         assert!(usage.present);
@@ -685,7 +939,7 @@ mod tests {
     fn content_block_delta_text_delta_does_not_touch_thinking_progress() {
         let mut usage = UsageCounts::default();
         let frame = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n".to_vec();
-        accumulate_sse_usage(&frame, &mut usage);
+        accumulate_raw_sse_usage(&frame, &mut usage);
         assert!(!usage.present);
         assert_eq!(usage.estimated_thinking_progress, 0);
     }
@@ -694,7 +948,7 @@ mod tests {
     fn content_block_delta_null_estimated_tokens_is_noop() {
         let mut usage = UsageCounts::default();
         let frame = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"estimated_tokens\":null}}\n\n".to_vec();
-        accumulate_sse_usage(&frame, &mut usage);
+        accumulate_raw_sse_usage(&frame, &mut usage);
         assert!(!usage.present);
         assert_eq!(usage.estimated_thinking_progress, 0);
     }
@@ -703,11 +957,11 @@ mod tests {
     fn thinking_delta_progress_does_not_overwrite_authoritative_thinking_tokens() {
         let mut usage = UsageCounts::default();
         let prog = b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"estimated_tokens\":7}}\n\n".to_vec();
-        accumulate_sse_usage(&prog, &mut usage);
+        accumulate_raw_sse_usage(&prog, &mut usage);
         let delta = raw_event(
             r#"{"type":"message_delta","usage":{"output_tokens":50,"output_tokens_details":{"thinking_tokens":42}}}"#,
         );
-        accumulate_sse_usage(&delta, &mut usage);
+        accumulate_raw_sse_usage(&delta, &mut usage);
         assert_eq!(usage.estimated_thinking_progress, 7);
         assert_eq!(usage.thinking_tokens, 42);
         assert_eq!(usage.output_tokens, 50);

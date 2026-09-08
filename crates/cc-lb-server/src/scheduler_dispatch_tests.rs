@@ -17,7 +17,9 @@ use cc_lb_engine::cache_keepalive::{
 use cc_lb_engine::clock::SystemClock;
 use cc_lb_lifecycle::LifecycleEvent;
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
+use cc_lb_scheduler::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJob;
 use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_scheduler::worker::CronJob;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, Limit,
@@ -25,7 +27,7 @@ use cc_lb_storage_api::{
 };
 use serde_json::Value;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
 
@@ -52,6 +54,86 @@ impl KeepaliveDispatcher for StaticRenewalDispatcher {
                 .expect("one renewal finalization"),
         }
     }
+}
+
+#[tokio::test]
+async fn default_upstream_affinity_purge_physically_removes_stale_null_expiry_rows() {
+    let fixture = Fixture::new().await;
+    sqlx::query(
+        "INSERT INTO upstream_affinity_v1
+         (principal_id, provider, kind, value_sha256, upstream_id, observed_at_unix_secs, expires_at_unix_secs)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+    )
+    .bind("principal")
+    .bind("anthropic")
+    .bind("anthropic_web_search_encrypted_content")
+    .bind(vec![7_u8; 32])
+    .bind(fixture.upstream_id.to_string())
+    .bind(0_i64)
+    .execute(fixture.storage.pool())
+    .await
+    .expect("seed stale upstream affinity");
+
+    let outcome = fixture
+        .dispatch(Arc::new(FailingPusher))
+        .dispatch_singleton(CronJob::UpstreamAffinityPurge(
+            UpstreamAffinityPurgeJob::default(),
+        ))
+        .await
+        .expect("dispatch upstream affinity purge");
+
+    assert_eq!(outcome, JobOutcome::Done);
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_affinity_v1")
+        .fetch_one(fixture.storage.pool())
+        .await
+        .expect("count upstream affinity rows");
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn upstream_affinity_purge_uses_the_captured_configured_retention() {
+    let fixture = Fixture::new().await;
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_secs();
+    for (value_sha256, observed_at_unix_secs) in [
+        (vec![8_u8; 32], now_unix_secs - 2 * 86_400),
+        (vec![9_u8; 32], now_unix_secs - 12 * 3_600),
+    ] {
+        sqlx::query(
+            "INSERT INTO upstream_affinity_v1
+             (principal_id, provider, kind, value_sha256, upstream_id, observed_at_unix_secs, expires_at_unix_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+        )
+        .bind("principal")
+        .bind("anthropic")
+        .bind("anthropic_web_search_encrypted_content")
+        .bind(value_sha256)
+        .bind(fixture.upstream_id.to_string())
+        .bind(i64::try_from(observed_at_unix_secs).expect("test timestamp fits i64"))
+        .execute(fixture.storage.pool())
+        .await
+        .expect("seed upstream affinity");
+    }
+    let mut config = Config::default();
+    config.upstream_affinity.ttl_days = 1;
+
+    let outcome = fixture
+        .dispatch_with_config(Arc::new(FailingPusher), config)
+        .dispatch_singleton(CronJob::UpstreamAffinityPurge(
+            UpstreamAffinityPurgeJob::default(),
+        ))
+        .await
+        .expect("dispatch upstream affinity purge");
+
+    assert_eq!(outcome, JobOutcome::Done);
+    let remaining: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT value_sha256 FROM upstream_affinity_v1")
+            .fetch_all(fixture.storage.pool())
+            .await
+            .expect("read remaining upstream affinity rows");
+    assert_eq!(remaining, vec![vec![9_u8; 32]]);
 }
 
 #[tokio::test]

@@ -83,6 +83,19 @@ async fn config_diff_route_returns_history_difference() {
 }
 
 #[tokio::test]
+async fn current_config_exposes_upstream_affinity_ttl_path() {
+    let mut config = Config::default();
+    config.upstream_affinity.ttl_days = 14;
+    let app = config_admin_common::app(config_admin_common::test_state(config, None));
+
+    let (status, _, json, _) =
+        config_admin_common::authed_json(app, "GET", "/admin/config/current", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["upstream_affinity"]["ttl_days"], 14);
+}
+
+#[tokio::test]
 async fn config_diff_current_admin_config_smoke() {
     let response = router(test_state())
         .oneshot(
