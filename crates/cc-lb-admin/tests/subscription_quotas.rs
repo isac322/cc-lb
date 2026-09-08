@@ -267,6 +267,43 @@ async fn subscription_quota_analysis_defaults_missing_upstream_ids_to_all() {
 }
 
 #[tokio::test]
+async fn subscription_quota_analysis_enforces_bucket_range_guardrail() {
+    const MAX_ANALYSIS_RANGE_SECS: u64 = 60 * 10_000 * 2;
+
+    let server = admin_test_common::spawn_admin_server().await;
+
+    for range_secs in [3_600, 21_600, 86_400, 604_800, MAX_ANALYSIS_RANGE_SECS] {
+        let (status, _, _) = server
+            .client
+            .get(&format!(
+                "/admin/v1/subscription-quotas/analysis?since_unix_secs=1&until_unix_secs={}",
+                1 + range_secs
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "range_secs={range_secs}");
+    }
+
+    for path in [
+        "/admin/v1/subscription-quotas/analysis",
+        "/admin/subscription-quotas/analysis",
+    ] {
+        let (status, _, body) = server
+            .client
+            .get(&format!(
+                "{path}?since_unix_secs=1&until_unix_secs={}",
+                2 + MAX_ANALYSIS_RANGE_SECS
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+        assert_eq!(body["error"], "bucket_range_too_large");
+        assert_eq!(
+            body["detail"],
+            "narrow the requested time range; analysis supports at most 20000 one-minute buckets"
+        );
+    }
+}
+
+#[tokio::test]
 async fn subscription_quota_analysis_excludes_unrequested_usage_rollups_and_refreshes() {
     let server = admin_test_common::spawn_admin_server().await;
     let selected_upstream_id = create_oauth_upstream(&server, "analysis-selected").await;
