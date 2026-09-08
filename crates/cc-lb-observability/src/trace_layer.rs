@@ -221,7 +221,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use http::StatusCode;
-    use tower_http::trace::{OnBodyChunk as _, OnRequest as _, OnResponse as _};
 
     use super::*;
     use crate::{ObservabilityError, ObserveEvent};

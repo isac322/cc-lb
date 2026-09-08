@@ -2,13 +2,12 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
 use opentelemetry::global;
-use opentelemetry::trace::{SpanId, SpanKind, TraceContextExt as _, TracerProvider as _};
+use opentelemetry::trace::{SpanId, SpanKind, TracerProvider as _};
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
 use tower::{Layer, ServiceExt, service_fn};
 use tracing::Span;
-use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::prelude::*;
 
 use super::*;

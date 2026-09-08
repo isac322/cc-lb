@@ -27,7 +27,7 @@ resolver = "2"
 version = "0.4.6"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.97.1"
+rust-version = "1.98.1"
 
 [workspace.dependencies]
 cc-lb-domain = { path = "crates/cc-lb-domain", version = "0.4.6" }
@@ -49,11 +49,11 @@ cc-lb-plugin-conformance = { version = "0.2", path = "crates/cc-lb-plugin-confor
 # External wasmtime/rkyv ecosystem — wired up by cc-lb-runtime-wasmtime in Phase 1+.
 # Phase 0 declares them here so member crates can opt in via `<name>.workspace = true`
 # without churning the manifest.
-wasmtime  = "47"
+wasmtime  = "48"
 rkyv      = { version = "0.8", default-features = false }
 bytecheck = { version = "0.8", default-features = false }
 blake3    = { version = "1", default-features = false }
-wasmparser = "0.256"
+wasmparser = "0.258"
 
 anyhow = "1"
 arc-swap = "1"
@@ -72,12 +72,12 @@ dashmap = "6"
 eventsource-stream = "0.2"
 figment = "0.10"
 flate2 = "1"
-brotli = "8"
-zstd = "0.13"
+brotli = "9"
+zstd = "0.14"
 globset = "0.4"
 hickory-resolver = "0.26"
 hex = "0.4"
-hyper = "1.10.1"
+hyper = "1.11.1"
 http = "1"
 http-body-util = "0.1"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "webpki-roots"] }
@@ -112,7 +112,7 @@ tempfile = "3"
 thiserror = "2"
 tokio = "1"
 tokio-util = "0.7"
-toml = "1.1.2"
+toml = "1.1.5"
 tower = "0.5"
 tower-service = "0.3"
 tower-http = "0.7"
