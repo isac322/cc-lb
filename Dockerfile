@@ -142,7 +142,9 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
 # cc-lb-runtime-wasmtime/build.rs would otherwise force a wasm32 fixture build.
 export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
 export GIT_SHA="${GIT_SHA}"
-if [ -n "${CARGO_PROFILE_RELEASE_LTO:-}" ]; then
+if [ -z "${CARGO_PROFILE_RELEASE_LTO:-}" ]; then
+  unset CARGO_PROFILE_RELEASE_LTO
+else
   export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO}"
 fi
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
