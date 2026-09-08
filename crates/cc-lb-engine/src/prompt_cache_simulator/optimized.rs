@@ -249,6 +249,23 @@ fn reference_fallback(
     (analysis, PromptCacheAnalysisStats::default(), durations)
 }
 
+#[cfg(test)]
+impl ExactPrefixBatch {
+    fn owned_serialized_storage(&self) -> (usize, usize) {
+        let ExactPrefixBatch {
+            open_prefix_bytes,
+            breakpoint_offsets: _,
+            suffix_bytes,
+            token_prefix_keys: _,
+        } = self;
+        (
+            open_prefix_bytes.len().saturating_add(suffix_bytes.len()),
+            open_prefix_bytes
+                .capacity()
+                .saturating_add(suffix_bytes.capacity()),
+        )
+    }
+}
 #[derive(Clone, Copy, Debug, Default)]
 struct PromptCacheAnalysisStats {
     cache_hits: u64,
@@ -833,6 +850,15 @@ mod tests {
     use super::*;
 
     const MODEL: &str = "claude-sonnet-4-5-20250929";
+    const PRODUCTION_FIXTURE_MESSAGE_COUNT: usize = 182;
+    const PRODUCTION_FIXTURE_BREAKPOINT_MESSAGE_INDICES: [usize; 4] = [44, 90, 136, 180];
+    const PRODUCTION_FIXTURE_PAYLOAD_REPEATS: usize = 170;
+    const PRODUCTION_FIXTURE_SERIALIZED_BYTES: usize = 4_065_868;
+    const PRODUCTION_FIXTURE_UNIT: &str = " boundary=\"quoted\" slash=\\ end=}], comma=,, newline=\n tab=\t carriage=\r 한글=캐시 emoji=👩‍💻🙂 whitespace=   \u{00a0}\n";
+    const _: () = assert!(
+        PRODUCTION_FIXTURE_SERIALIZED_BYTES >= 4_000_000
+            && PRODUCTION_FIXTURE_SERIALIZED_BYTES <= 4_800_000
+    );
     #[derive(Clone, Default)]
     struct RecordingMetrics {
         counters: Arc<StdMutex<HashMap<String, u64>>>,
@@ -933,6 +959,34 @@ mod tests {
                 {"type":"text","text":parts[3],"cache_control":{"type":"ephemeral"}}
             ],
             "messages": [{"role":"user","content":"hello"}]
+        })
+    }
+
+    fn production_size_prompt_cache_request() -> Value {
+        let mut messages = Vec::with_capacity(PRODUCTION_FIXTURE_MESSAGE_COUNT);
+        for message_index in 0..PRODUCTION_FIXTURE_MESSAGE_COUNT {
+            let text = format!(
+                "message-{message_index:03}:{}",
+                PRODUCTION_FIXTURE_UNIT.repeat(PRODUCTION_FIXTURE_PAYLOAD_REPEATS)
+            );
+            let mut content_block = json!({"type": "text", "text": text});
+            let ttl = match message_index {
+                44 | 90 => Some("1h"),
+                136 | 180 => Some("5m"),
+                _ => None,
+            };
+            if let Some(ttl) = ttl {
+                content_block["cache_control"] = json!({"type": "ephemeral", "ttl": ttl});
+            }
+            messages.push(json!({
+                "role": if message_index % 2 == 0 { "user" } else { "assistant" },
+                "content": [content_block]
+            }));
+        }
+        json!({
+            "model": MODEL,
+            "max_tokens": 1024,
+            "messages": messages
         })
     }
 
@@ -1145,6 +1199,181 @@ mod tests {
             durations
                 .tokenize
                 .is_some_and(|duration| !duration.is_zero())
+        );
+    }
+    #[test]
+    #[ignore = "release-profile gate; run via the dedicated CI job"]
+    fn production_size_prompt_cache_release_regression_gate() {
+        let request = production_size_prompt_cache_request();
+        let serialized_request = serde_json::to_vec(&request).expect("serialize fixture");
+        assert_eq!(
+            serialized_request.len(),
+            PRODUCTION_FIXTURE_SERIALIZED_BYTES,
+            "production fixture shape changed"
+        );
+
+        let messages = request["messages"].as_array().expect("fixture messages");
+        assert_eq!(messages.len(), PRODUCTION_FIXTURE_MESSAGE_COUNT);
+        let breakpoint_message_indices = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(message_index, message)| {
+                message["content"][0]
+                    .get("cache_control")
+                    .map(|_| message_index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            breakpoint_message_indices,
+            PRODUCTION_FIXTURE_BREAKPOINT_MESSAGE_INDICES
+        );
+        let first_text = messages[0]["content"][0]["text"]
+            .as_str()
+            .expect("fixture text");
+        for boundary in [
+            "\"quoted\"",
+            "slash=\\",
+            "}],",
+            "\n",
+            "\t",
+            "\r",
+            "한글=캐시",
+            "👩‍💻🙂",
+            "\u{00a0}",
+        ] {
+            assert!(
+                first_text.contains(boundary),
+                "fixture lost serializer/tokenizer boundary {boundary:?}"
+            );
+        }
+
+        let reference = analyze_v3_prompt_cache(&request, MODEL);
+        assert_eq!(reference.blocks.len(), PRODUCTION_FIXTURE_MESSAGE_COUNT);
+        assert_eq!(reference.breakpoints.len(), 4);
+
+        let mut structural_scratch = SerializationScratch::default();
+        let structural =
+            analyze_v3_prompt_cache_structure(&request, MODEL, &mut structural_scratch)
+                .expect("fixture remains analyzable");
+        assert_eq!(structural.blocks.len(), PRODUCTION_FIXTURE_MESSAGE_COUNT);
+        assert_eq!(structural.breakpoints.len(), 4);
+        let batch = prepare_exact_prefix_batch(MODEL, &structural.blocks, &structural.breakpoints)
+            .expect("prepare exact prefix batch");
+
+        let mut reference_scratch = SerializationScratch::default();
+        for (position, breakpoint) in structural.breakpoints.iter().enumerate() {
+            let expected = super::super::serialized_prefix(
+                MODEL,
+                &structural.blocks[..=breakpoint.block_index as usize],
+                &mut reference_scratch,
+            );
+            let offset = batch.breakpoint_offsets[position];
+            assert_eq!(expected.len(), offset + batch.suffix_bytes.len());
+            assert_eq!(&expected[..offset], &batch.open_prefix_bytes[..offset]);
+            assert_eq!(&expected[offset..], batch.suffix_bytes.as_slice());
+        }
+
+        let expected_ttls = ["1h", "1h", "5m", "5m"];
+        for (position, breakpoint) in reference.breakpoints.iter().enumerate() {
+            assert_eq!(
+                breakpoint.message_index,
+                Some(PRODUCTION_FIXTURE_BREAKPOINT_MESSAGE_INDICES[position] as u64)
+            );
+            assert_eq!(breakpoint.ttl.as_deref(), Some(expected_ttls[position]));
+            assert_eq!(breakpoint.lookback_prefixes.len(), 20);
+            assert_eq!(
+                breakpoint
+                    .lookback_prefixes
+                    .iter()
+                    .map(|prefix| prefix.lookback_distance)
+                    .collect::<Vec<_>>(),
+                (0..20).collect::<Vec<_>>()
+            );
+        }
+
+        let deepest_prefix_bytes = batch
+            .breakpoint_offsets
+            .last()
+            .copied()
+            .expect("deepest breakpoint")
+            .saturating_add(batch.suffix_bytes.len()) as u64;
+        let deepest_prefix_tokens = reference
+            .breakpoints
+            .last()
+            .expect("deepest reference breakpoint")
+            .prefix_token_count;
+        let (owned_serialized_bytes, owned_serialized_capacity) = batch.owned_serialized_storage();
+        assert_eq!(owned_serialized_bytes as u64, deepest_prefix_bytes);
+        assert!(
+            (owned_serialized_capacity as u64).saturating_mul(4)
+                <= deepest_prefix_bytes.saturating_mul(9),
+            "exact-prefix batch retained too much serialized capacity: owned={owned_serialized_capacity}, deepest={deepest_prefix_bytes}"
+        );
+
+        let cache = PromptTokenCountCache::new(32);
+        let cache_scope = [0x5a; 32];
+        let (cold, cold_stats, _cold_durations) =
+            analyze_v3_prompt_cache_optimized_scoped(&request, MODEL, &cache_scope, &cache);
+        for (position, (actual, expected)) in cold
+            .breakpoints
+            .iter()
+            .zip(&reference.breakpoints)
+            .enumerate()
+        {
+            assert_eq!(
+                actual.prefix_token_count, expected.prefix_token_count,
+                "breakpoint {position} prefix token count drift"
+            );
+            assert_eq!(
+                actual.prefix_key, expected.prefix_key,
+                "breakpoint {position} prefix hash drift"
+            );
+            assert_eq!(actual.ttl, expected.ttl, "breakpoint {position} TTL drift");
+            assert_eq!(
+                actual.lookback_prefixes, expected.lookback_prefixes,
+                "breakpoint {position} lookback metadata drift"
+            );
+        }
+        assert_eq!(cold, reference);
+        assert_eq!(cold_stats.cache_hits, 0);
+        assert_eq!(cold_stats.cache_misses, 4);
+        assert_eq!(cold_stats.cache_coalesced, 0);
+        assert_eq!(cold_stats.tokenizer.fallback_prefixes, 0);
+        assert!(
+            cold_stats.tokenizer.input_bytes.saturating_mul(4)
+                <= deepest_prefix_bytes.saturating_mul(5),
+            "cold tokenizer byte work exceeded 1.25x deepest prefix: actual={}, deepest={deepest_prefix_bytes}",
+            cold_stats.tokenizer.input_bytes
+        );
+        assert!(
+            cold_stats.tokenizer.produced_tokens.saturating_mul(4)
+                <= deepest_prefix_tokens.saturating_mul(5),
+            "cold tokenizer token work exceeded 1.25x deepest prefix: actual={}, deepest={deepest_prefix_tokens}",
+            cold_stats.tokenizer.produced_tokens
+        );
+
+        let (warm, warm_stats, _warm_durations) =
+            analyze_v3_prompt_cache_optimized_scoped(&request, MODEL, &cache_scope, &cache);
+        assert_eq!(warm, reference);
+        assert_eq!(warm_stats.cache_hits, 4);
+        assert_eq!(warm_stats.cache_misses, 0);
+        assert_eq!(warm_stats.cache_coalesced, 0);
+        assert_eq!(warm_stats.tokenizer.input_bytes, 0);
+        assert_eq!(warm_stats.tokenizer.produced_tokens, 0);
+        assert_eq!(warm_stats.tokenizer.fallback_prefixes, 0);
+
+        println!(
+            "prompt-cache-production-regression fixture_bytes={} messages={} breakpoints={} deepest_prefix_bytes={} deepest_prefix_tokens={} actual_tokenized_bytes={} actual_tokenized_tokens={} warm_hits={} owned_serialized_bytes={} owned_serialized_capacity={}",
+            serialized_request.len(),
+            messages.len(),
+            reference.breakpoints.len(),
+            deepest_prefix_bytes,
+            deepest_prefix_tokens,
+            cold_stats.tokenizer.input_bytes,
+            cold_stats.tokenizer.produced_tokens,
+            warm_stats.cache_hits,
+            owned_serialized_bytes,
+            owned_serialized_capacity
         );
     }
     #[test]
