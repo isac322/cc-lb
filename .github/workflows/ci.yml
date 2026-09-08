@@ -280,6 +280,45 @@ jobs:
             sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
           fi
 
+  prompt-cache-production-regression:
+    name: prompt-cache 4MB release regression
+    runs-on: cc-lb-4
+    timeout-minutes: 45
+    env:
+      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
+      - name: Run production-size prompt-cache regression gate
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/prompt-cache-production-regression.log"
+          cargo test --locked --release -p cc-lb-engine --lib \
+            prompt_cache_simulator::optimized::tests::production_size_prompt_cache_release_regression_gate \
+            -- --exact --ignored --nocapture 2>&1 | tee "$log"
+          summary_count="$(
+            grep -Fc 'test result: ok. 1 passed; 0 failed;' "$log" || true
+          )"
+          if [ "$summary_count" -ne 1 ]; then
+            echo "::error::expected exactly one passing prompt-cache regression test; found $summary_count matching summaries"
+            exit 1
+          fi
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
+          fi
+
   cargo-deny:
     runs-on: cc-lb-1
     steps:
