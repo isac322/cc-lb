@@ -23,6 +23,7 @@ use cc_lb_request_log::{
 };
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouteDecision, RouterPlugin};
 use cc_lb_storage_api::{
+    UpstreamAffinityBinding, UpstreamAffinityKey, UpstreamAffinityStore,
     UpstreamRateLimitObservationRecord, UpstreamRecord, types::StoredApiKeyRecord,
     upstream::UpstreamKind as StorageUpstreamKind,
 };
@@ -51,9 +52,11 @@ use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as Li
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
 use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Scoped};
-use crate::clock::{Clock, ClockHandle, unix_millis};
+use crate::clock::{Clock, ClockHandle, unix_millis, unix_secs};
 use crate::downstream_stream_drop_guard::DownstreamStreamDropGuard;
-use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
+use crate::error_format::{
+    anthropic_error_body, anthropic_error_response, anthropic_error_response_with_retry_after,
+};
 use crate::error_normalizer::ErrorNormalizer;
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
@@ -70,6 +73,11 @@ use crate::sse_error_frame::make_error_frame;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{LifecycleContext, error_codes};
+use crate::upstream_affinity::{
+    extract_anthropic_web_search_affinity_keys,
+    extract_anthropic_web_search_affinity_keys_from_sse_event,
+    request_enables_anthropic_web_search,
+};
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
 use crate::usage_parser::{self, UsageCounts, accumulate_sse_usage, sse_event_name};
 use cc_lb_control::RequestEventBus;
@@ -111,6 +119,13 @@ const UPSTREAM_RESPONSE_BODY_ERROR_TYPE: &str = "upstream_response_body_error";
 const UPSTREAM_RESPONSE_DECODE_ERROR_TYPE: &str = "upstream_response_decode_error";
 const UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE: &str = "upstream_response_framing_error";
 const UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE: &str = "api_error";
+const UPSTREAM_AFFINITY_ERROR_TYPE: &str = "upstream_affinity_error";
+const UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE: &str =
+    "upstream affinity is unavailable for opaque request content";
+const UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE: &str = "too many upstream affinity keys in request";
+const UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE: &str =
+    "upstream SSE response could not be safely processed";
+const UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE: &str = "upstream response body could not be read";
 
 fn is_upstream_response_decode_error(error: &std::io::Error) -> bool {
     matches!(
@@ -1694,6 +1709,68 @@ struct LimitRejectionErr {
     info: LimitRejectionInfo,
 }
 
+struct RequestAffinityResolution {
+    target_upstream_id: Uuid,
+    pending_keys: Vec<UpstreamAffinityKey>,
+}
+
+struct RequestAffinityFailure {
+    status: StatusCode,
+    error_type: &'static str,
+    message: &'static str,
+}
+
+impl RequestAffinityFailure {
+    fn response(&self) -> Response<Body> {
+        anthropic_error_response(self.status, self.error_type, self.message)
+    }
+}
+
+#[derive(Clone)]
+struct ResponseAffinityContext {
+    store: Option<Arc<dyn UpstreamAffinityStore>>,
+    principal_id: String,
+    upstream_id: Uuid,
+    pending_request_keys: Vec<UpstreamAffinityKey>,
+    observe_response_keys: bool,
+}
+
+async fn bind_upstream_affinity_keys(
+    context: &ResponseAffinityContext,
+    keys: &[UpstreamAffinityKey],
+    now_unix_secs: u64,
+) -> Result<(), ()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let Some(store) = context.store.as_ref() else {
+        return Err(());
+    };
+    let mut seen = HashSet::with_capacity(keys.len());
+    let mut bindings = Vec::with_capacity(keys.len());
+    for key in keys {
+        if seen.insert(key.clone()) {
+            bindings.push(UpstreamAffinityBinding {
+                key: key.clone(),
+                upstream_id: context.upstream_id,
+                observed_at_unix_secs: now_unix_secs,
+                expires_at_unix_secs: None,
+            });
+        }
+    }
+    store
+        .bind_upstream_affinities(&bindings)
+        .await
+        .map_err(|_| ())
+}
+
+fn affinity_stream_error() -> cc_lb_lifecycle::StreamError {
+    cc_lb_lifecycle::StreamError {
+        error_type: UPSTREAM_AFFINITY_ERROR_TYPE.to_owned(),
+        error_message: UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned(),
+    }
+}
+
 struct StaticLimitSubjectProvider {
     subject: AuthLimitSubject,
 }
@@ -1759,6 +1836,7 @@ pub struct Lifecycle {
     authn: Arc<BuiltinAuthn>,
     dynamic_view: Arc<DynamicViewHolder>,
     dispatcher: Arc<dyn UpstreamDispatch>,
+    upstream_affinity_store: Option<Arc<dyn UpstreamAffinityStore>>,
     config: LifecycleConfig,
     limit_engine: Option<Arc<LimitEngine>>,
     limit_subject_provider: Option<Arc<dyn LimitSubjectProvider>>,
@@ -1800,6 +1878,7 @@ impl Lifecycle {
             authn,
             dynamic_view: Arc::new(DynamicViewHolder::new(dynamic_view)),
             dispatcher,
+            upstream_affinity_store: None,
             config,
             limit_engine: None,
             limit_subject_provider: None,
@@ -1826,6 +1905,7 @@ impl Lifecycle {
             authn,
             dynamic_view,
             dispatcher,
+            upstream_affinity_store: None,
             config,
             limit_engine: None,
             limit_subject_provider: None,
@@ -1846,6 +1926,11 @@ impl Lifecycle {
         enqueuer: Arc<dyn crate::cache_keepalive::CacheKeepaliveEnqueuer>,
     ) -> Self {
         self.cache_keepalive_enqueuer = Some(enqueuer);
+        self
+    }
+
+    pub fn with_upstream_affinity_store(mut self, store: Arc<dyn UpstreamAffinityStore>) -> Self {
+        self.upstream_affinity_store = Some(store);
         self
     }
 
@@ -2045,6 +2130,61 @@ impl Lifecycle {
             winner_upstream_id,
             winner_upstream_name,
         })
+    }
+
+    async fn resolve_request_affinities(
+        &self,
+        keys: &[UpstreamAffinityKey],
+    ) -> Result<Option<RequestAffinityResolution>, RequestAffinityFailure> {
+        if keys.is_empty() {
+            return Ok(None);
+        }
+        let Some(store) = self.upstream_affinity_store.as_ref() else {
+            return Err(RequestAffinityFailure {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                error_type: "api_error",
+                message: UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+            });
+        };
+        let bindings = store
+            .resolve_upstream_affinities(keys, unix_secs(self.clock.now()))
+            .await
+            .map_err(|_| RequestAffinityFailure {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                error_type: "api_error",
+                message: UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+            })?;
+        let matched = bindings
+            .iter()
+            .filter(|binding| keys.contains(&binding.key))
+            .collect::<Vec<_>>();
+        let targets = matched
+            .iter()
+            .map(|binding| binding.upstream_id)
+            .collect::<HashSet<_>>();
+        if targets.len() > 1 {
+            return Err(RequestAffinityFailure {
+                status: StatusCode::BAD_REQUEST,
+                error_type: "invalid_request_error",
+                message: "opaque request content resolves to multiple upstreams",
+            });
+        }
+        let Some(target_upstream_id) = targets.into_iter().next() else {
+            return Err(RequestAffinityFailure {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                error_type: "api_error",
+                message: "upstream affinity is not established for opaque request content",
+            });
+        };
+        let pending_keys = keys
+            .iter()
+            .filter(|key| !matched.iter().any(|binding| &binding.key == *key))
+            .cloned()
+            .collect();
+        Ok(Some(RequestAffinityResolution {
+            target_upstream_id,
+            pending_keys,
+        }))
     }
 
     pub fn with_static_limit_subject(
@@ -2312,6 +2452,38 @@ impl Lifecycle {
             kind: PrincipalKind::ApiKey,
             claims: serde_json::Map::new(),
         };
+        let request_affinity_keys = match body_view
+            .value()
+            .map(|value| extract_anthropic_web_search_affinity_keys(value, &principal.id))
+            .transpose()
+        {
+            Ok(keys) => keys.unwrap_or_default(),
+            Err(_) => {
+                if let Some(o) = observer.as_ref() {
+                    o.set_terminal(StatusCode::BAD_REQUEST, error_codes::INVALID_JSON);
+                    o.finish();
+                }
+                return Ok(anthropic_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE,
+                ));
+            }
+        };
+        let request_affinity = match self
+            .resolve_request_affinities(&request_affinity_keys)
+            .await
+        {
+            Ok(resolution) => resolution,
+            Err(failure) => {
+                if let Some(o) = observer.as_ref() {
+                    o.emit_provider_error(UPSTREAM_AFFINITY_ERROR_TYPE, failure.message, "storage");
+                    o.set_terminal(failure.status, error_codes::UPSTREAM_AFFINITY_UNAVAILABLE);
+                    o.finish();
+                }
+                return Ok(failure.response());
+            }
+        };
         let track_keepalive_response = self.cache_keepalive_enqueuer.is_some()
             && cached.cache_keepalive().is_some()
             && !cache_metadata.cache_breakpoints.is_empty();
@@ -2351,7 +2523,7 @@ impl Lifecycle {
         // Synchronous routing region: no .await is permitted while `route_guard` is held.
         let route_span = tracing::info_span!("proxy.route");
         let route_guard = route_span.enter();
-        let (candidates, selected_cache_matches) = build_candidates_with_matches(
+        let (mut candidates, mut selected_cache_matches) = build_candidates_with_matches(
             &view,
             &principal.id,
             RequestKind::AnthropicMessages,
@@ -2360,6 +2532,11 @@ impl Lifecycle {
             ctx.thread_id.as_deref(),
             &*self.clock,
         );
+        if let Some(affinity) = request_affinity.as_ref() {
+            candidates.retain(|candidate| candidate.upstream_id == affinity.target_upstream_id);
+            selected_cache_matches
+                .retain(|upstream_id, _| *upstream_id == affinity.target_upstream_id);
+        }
         let pipeline_result = execute_filter_pipeline(
             &router_pipeline.user_filters,
             &ctx,
@@ -2823,6 +3000,17 @@ impl Lifecycle {
                 downstream_headers: ctx.downstream_headers.clone(),
             }
         });
+        let response_affinity_context = ResponseAffinityContext {
+            store: self.upstream_affinity_store.clone(),
+            principal_id: principal.id.clone(),
+            upstream_id: resolved_upstream_id,
+            pending_request_keys: request_affinity
+                .map(|affinity| affinity.pending_keys)
+                .unwrap_or_default(),
+            observe_response_keys: body_view
+                .value()
+                .is_some_and(request_enables_anthropic_web_search),
+        };
         response = self
             .finish_success_response(
                 response,
@@ -2847,6 +3035,7 @@ impl Lifecycle {
                     dialect: route.dialect.clone(),
                 },
                 prompt_cache_observation_context,
+                response_affinity_context,
                 observer.clone(),
                 keepalive_completion,
                 dispatch_started,
@@ -2960,6 +3149,7 @@ impl Lifecycle {
         event_ctx: RequestEventContext,
         transform_ctx: ResponseTransformContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
+        response_affinity_context: ResponseAffinityContext,
         observer: Option<LifecycleContext>,
         keepalive_completion: Option<crate::cache_keepalive::LifecycleKeepaliveContext>,
         dispatch_started: Instant,
@@ -2980,6 +3170,7 @@ impl Lifecycle {
                 event_ctx.clone(),
                 transform_ctx,
                 prompt_cache_observation_context,
+                response_affinity_context,
                 observer,
                 keepalive_completion,
                 dispatch_started,
@@ -2995,6 +3186,7 @@ impl Lifecycle {
         let mut first_body_chunk_at: Option<Instant> = None;
         let mut body_buf: Vec<u8> = Vec::new();
         let mut body_chunk_count: u64 = 0;
+        let mut body_collect_failed = false;
         while let Some(frame) = body.frame().await {
             match frame {
                 Ok(frame) => {
@@ -3006,10 +3198,17 @@ impl Lifecycle {
                         body_buf.extend_from_slice(&data);
                     }
                 }
-                Err(_source) => break,
+                Err(_source) => {
+                    body_collect_failed = true;
+                    break;
+                }
             }
         }
-        let body = Bytes::from(body_buf);
+        let body = if body_collect_failed {
+            Bytes::new()
+        } else {
+            Bytes::from(body_buf)
+        };
         let body_collect_ms = duration_to_ms(body_collect_started.elapsed());
         let first_body_chunk_ms = first_body_chunk_at
             .map(|t| duration_to_ms(t.saturating_duration_since(body_collect_started)));
@@ -3027,35 +3226,39 @@ impl Lifecycle {
             total_ms = duration_to_ms(duration),
             "request latency breakdown"
         );
-        let semantic_body = match decode_full_body(
-            &parts.headers,
-            &body,
-            decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
-        ) {
-            Ok(Some(plaintext)) => Some(semantic_body_bytes(&body, plaintext)),
-            Ok(None) => {
-                if let Some(encoding) = parts
-                    .headers
-                    .get(http::header::CONTENT_ENCODING)
-                    .and_then(|v| v.to_str().ok())
-                {
+        let semantic_body = if body_collect_failed {
+            None
+        } else {
+            match decode_full_body(
+                &parts.headers,
+                &body,
+                decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
+            ) {
+                Ok(Some(plaintext)) => Some(semantic_body_bytes(&body, plaintext)),
+                Ok(None) => {
+                    if let Some(encoding) = parts
+                        .headers
+                        .get(http::header::CONTENT_ENCODING)
+                        .and_then(|v| v.to_str().ok())
+                    {
+                        tracing::warn!(
+                            request_id = %event_ctx.request_id,
+                            content_encoding = encoding,
+                            "skipping usage extraction: unsupported content-encoding"
+                        );
+                        None
+                    } else {
+                        Some(body.clone())
+                    }
+                }
+                Err(error) => {
                     tracing::warn!(
                         request_id = %event_ctx.request_id,
-                        content_encoding = encoding,
-                        "skipping usage extraction: unsupported content-encoding"
+                        %error,
+                        "skipping usage extraction: failed to decode response body"
                     );
                     None
-                } else {
-                    Some(body.clone())
                 }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    request_id = %event_ctx.request_id,
-                    %error,
-                    "skipping usage extraction: failed to decode response body"
-                );
-                None
             }
         };
         let response_body_json = semantic_body
@@ -3082,12 +3285,24 @@ impl Lifecycle {
         } else {
             None
         };
-        let mut downstream_body = body;
+        let mut downstream_body = if body_collect_failed {
+            parts.status = StatusCode::BAD_GATEWAY;
+            parts.headers.clear();
+            parts.headers.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            );
+            anthropic_error_body("api_error", UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE)
+        } else {
+            body
+        };
         let mut buffered_transform_error: Option<ResponseTransformError> = None;
-        if let (Some(hook), Some(semantic_body)) = (
-            transform_ctx.dialect.response_transform_hook(),
-            semantic_body,
-        ) {
+        if !body_collect_failed
+            && let (Some(hook), Some(semantic_body)) = (
+                transform_ctx.dialect.response_transform_hook(),
+                semantic_body,
+            )
+        {
             match hook.transform_response(TransformResponseRequest {
                 request_id: event_ctx.request_id.clone(),
                 principal: transform_ctx.principal.clone(),
@@ -3120,8 +3335,48 @@ impl Lifecycle {
                 }
             }
         }
-        if let (Some(context), Some(response_json)) =
-            (keepalive_completion, response_body_json.as_ref())
+        let mut affinity_bind_failed = false;
+        if status.is_success() && !body_collect_failed {
+            let mut affinity_keys = response_affinity_context.pending_request_keys.clone();
+            let extraction_failed = if let Some(response_json) = response_body_json.as_ref() {
+                match extract_anthropic_web_search_affinity_keys(
+                    response_json,
+                    &response_affinity_context.principal_id,
+                ) {
+                    Ok(response_keys) => {
+                        affinity_keys.extend(response_keys);
+                        false
+                    }
+                    Err(_) => true,
+                }
+            } else {
+                false
+            };
+            if extraction_failed
+                || bind_upstream_affinity_keys(
+                    &response_affinity_context,
+                    &affinity_keys,
+                    unix_secs(self.clock.now()),
+                )
+                .await
+                .is_err()
+            {
+                tracing::warn!("failed to safely bind upstream affinity before buffered response");
+                affinity_bind_failed = true;
+                parts.status = StatusCode::SERVICE_UNAVAILABLE;
+                parts.headers.clear();
+                parts.headers.insert(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("application/json; charset=utf-8"),
+                );
+                downstream_body =
+                    anthropic_error_body("api_error", UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE);
+            }
+        }
+        let client_status = parts.status;
+        if !affinity_bind_failed
+            && let (Some(context), Some(response_json)) =
+                (keepalive_completion, response_body_json.as_ref())
         {
             crate::cache_keepalive::LifecycleKeepalive::new(
                 self.cache_keepalive_enqueuer.clone(),
@@ -3172,7 +3427,14 @@ impl Lifecycle {
                 usage: to_usage_snapshot(&usage),
                 source: cc_lb_lifecycle::UsageSource::NonStreamBody,
             });
-            let stream_result = if let Some(error) = buffered_transform_error.as_ref() {
+            let stream_result = if body_collect_failed {
+                Err(cc_lb_lifecycle::StreamError {
+                    error_type: UPSTREAM_RESPONSE_BODY_ERROR_TYPE.to_owned(),
+                    error_message: UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE.to_owned(),
+                })
+            } else if affinity_bind_failed {
+                Err(affinity_stream_error())
+            } else if let Some(error) = buffered_transform_error.as_ref() {
                 Err(cc_lb_lifecycle::StreamError {
                     error_type: "response_transform_error".to_owned(),
                     error_message: error.to_string(),
@@ -3225,17 +3487,29 @@ impl Lifecycle {
                 };
                 o.emit_provider_error(code, status.as_str(), "upstream");
                 o.set_terminal(status, code);
+            } else if body_collect_failed {
+                o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::UPSTREAM_STREAM_ERROR);
+            } else if affinity_bind_failed {
+                o.emit_provider_error(
+                    UPSTREAM_AFFINITY_ERROR_TYPE,
+                    UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                    "storage",
+                );
+                o.set_terminal(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                );
             } else if buffered_transform_error.is_some() {
                 o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
             } else {
-                o.set_success_status(status);
+                o.set_success_status(client_status);
             }
             o.finish();
         }
         observe_many(
             stream_hooks.as_slice(),
             ObserveEvent::RequestFinished {
-                status,
+                status: client_status,
                 input_tokens: usage.present.then_some(usage.input_tokens),
                 output_tokens: usage.present.then_some(usage.output_tokens),
                 cache_creation_input_tokens: usage
@@ -3498,6 +3772,7 @@ impl Lifecycle {
         event_ctx: RequestEventContext,
         transform_ctx: ResponseTransformContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
+        response_affinity_context: ResponseAffinityContext,
         observer: Option<LifecycleContext>,
         keepalive_completion: Option<crate::cache_keepalive::LifecycleKeepaliveContext>,
         dispatch_started: Instant,
@@ -3513,12 +3788,20 @@ impl Lifecycle {
             UsageDecoder::from_headers(&parts.headers, decompression_output_budget_bytes);
         let downstream_stream_is_identity = matches!(&usage_decoder, UsageDecoder::Identity);
         let upstream_is_sse = is_sse_response(&parts.headers);
+        let success_sse_affinity_gate = upstream_is_sse
+            && status.is_success()
+            && (response_affinity_context.observe_response_keys
+                || !response_affinity_context.pending_request_keys.is_empty());
         let transform_requested =
             upstream_is_sse && transform_ctx.dialect.sse_event_transform_hook().is_some();
         let transform_decode_supported = usage_decoder.unsupported_encoding().is_none();
         let response_headers = (transform_requested && transform_decode_supported)
             .then(|| sanitized_response_headers_for_plugin(&parts.headers));
-        if transform_requested && transform_decode_supported {
+        if (transform_requested && transform_decode_supported)
+            || (success_sse_affinity_gate
+                && transform_decode_supported
+                && !downstream_stream_is_identity)
+        {
             sanitize_downstream_stream_headers(&mut parts.headers);
         }
         if let Some(encoding) = usage_decoder.unsupported_encoding() {
@@ -3533,6 +3816,7 @@ impl Lifecycle {
             self.cache_keepalive_enqueuer.clone(),
             Arc::clone(&self.dynamic_view),
         );
+        let affinity_clock = self.clock.clone();
         let downstream_drop_guard = if status.is_client_error() || status.is_server_error() {
             if let Some(o) = observer.as_ref() {
                 let code = if status.is_client_error() {
@@ -3574,6 +3858,10 @@ impl Lifecycle {
             let mut transformed_output_started = false;
             let mut stream_transform_error: Option<ResponseTransformError> = None;
             let mut stream_upstream_error: Option<cc_lb_lifecycle::StreamError> = None;
+            let mut stream_affinity_error: Option<cc_lb_lifecycle::StreamError> = None;
+            let mut bound_response_affinity_keys = HashSet::new();
+            let mut pending_request_affinity_keys =
+                response_affinity_context.pending_request_keys.clone();
             let mut stream_upstream_error_frame_emitted = false;
             let mut downstream_sse_boundary = SseDownstreamBoundaryTracker::default();
             let mut stream_provider_error_seen = false;
@@ -3595,6 +3883,30 @@ impl Lifecycle {
                             }
                             last_chunk_at = Some(now);
                             total_bytes = total_bytes.saturating_add(data.len() as u64);
+                            if success_sse_affinity_gate && !transform_decode_supported {
+                                stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
+                                    error_type: UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
+                                    error_message: UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                                });
+                                let frame = make_error_frame(
+                                    UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                );
+                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                    batch_index,
+                                    event_count: 1,
+                                    total_bytes: frame.len(),
+                                });
+                                if let Some(o) = observer.as_ref() {
+                                    o.set_terminal(
+                                        StatusCode::OK,
+                                        error_codes::UPSTREAM_STREAM_ERROR,
+                                    );
+                                }
+                                downstream_drop_guard.disarm();
+                                yield Ok::<Bytes, Infallible>(frame);
+                                break 'upstream;
+                            }
                             match usage_decoder.push(&data) {
                                 Ok(plaintext) => {
                                     if upstream_error_status {
@@ -3620,6 +3932,34 @@ impl Lifecycle {
                                     upstream_error_body_decode_failed = true;
                                     parse_sse_events_active = false;
                                     buffer.clear();
+                                    if success_sse_affinity_gate {
+                                        stream_upstream_error =
+                                            Some(cc_lb_lifecycle::StreamError {
+                                                error_type:
+                                                    UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
+                                                error_message:
+                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                        .to_owned(),
+                                            });
+                                        let frame = make_error_frame(
+                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                        );
+                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                            batch_index,
+                                            event_count: 1,
+                                            total_bytes: frame.len(),
+                                        });
+                                        if let Some(o) = observer.as_ref() {
+                                            o.set_terminal(
+                                                StatusCode::OK,
+                                                error_codes::UPSTREAM_STREAM_ERROR,
+                                            );
+                                        }
+                                        downstream_drop_guard.disarm();
+                                        yield Ok::<Bytes, Infallible>(frame);
+                                        break 'upstream;
+                                    }
                                     if upstream_decode_failed && sse_transform_active {
                                         if stream_provider_error_seen {
                                             downstream_drop_guard.disarm();
@@ -3743,6 +4083,117 @@ impl Lifecycle {
                                 }
                                 sse_event_count = sse_event_count.saturating_add(1);
                                 let event_name = sse_event_name(&raw);
+                                if success_sse_affinity_gate {
+                                    let response_keys = match
+                                        extract_anthropic_web_search_affinity_keys_from_sse_event(
+                                            &raw,
+                                            &response_affinity_context.principal_id,
+                                        )
+                                    {
+                                        Ok(keys) => keys,
+                                        Err(_) => {
+                                            tracing::warn!(
+                                                "failed to inspect upstream affinity in SSE event"
+                                            );
+                                            stream_upstream_error =
+                                                Some(cc_lb_lifecycle::StreamError {
+                                                    error_type:
+                                                        UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE
+                                                            .to_owned(),
+                                                    error_message:
+                                                        UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                            .to_owned(),
+                                                });
+                                            parse_sse_events_active = false;
+                                            buffer.clear();
+                                            raw_before_transform_output.clear();
+                                            let frame = make_error_frame(
+                                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            );
+                                            observe_many(
+                                                hooks.as_slice(),
+                                                ObserveEvent::Chunk {
+                                                    batch_index,
+                                                    event_count: 1,
+                                                    total_bytes: frame.len(),
+                                                },
+                                            );
+                                            batch_index = batch_index.saturating_add(1);
+                                            if let Some(o) = observer.as_ref() {
+                                                o.set_terminal(
+                                                    StatusCode::OK,
+                                                    error_codes::UPSTREAM_STREAM_ERROR,
+                                                );
+                                            }
+                                            downstream_drop_guard.disarm();
+                                            yield Ok::<Bytes, Infallible>(frame);
+                                            break 'upstream;
+                                        }
+                                    };
+                                    let mut affinity_keys = response_keys
+                                        .iter()
+                                        .filter(|key| {
+                                            !bound_response_affinity_keys.contains(*key)
+                                        })
+                                        .cloned()
+                                        .collect::<Vec<_>>();
+                                    let bind_pending_request =
+                                        usage_update.message_stop
+                                            || event_name == Some(b"message_stop");
+                                    if bind_pending_request {
+                                        affinity_keys.extend(
+                                            pending_request_affinity_keys.iter().cloned(),
+                                        );
+                                    }
+                                    if bind_upstream_affinity_keys(
+                                        &response_affinity_context,
+                                        &affinity_keys,
+                                        unix_secs(affinity_clock.now()),
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        tracing::warn!(
+                                            "failed to persist upstream affinity before SSE event"
+                                        );
+                                        stream_affinity_error = Some(affinity_stream_error());
+                                        parse_sse_events_active = false;
+                                        buffer.clear();
+                                        raw_before_transform_output.clear();
+                                        if success_sse_affinity_gate
+                                            || sse_transform_active
+                                            || downstream_stream_is_identity
+                                        {
+                                            let frame = make_error_frame(
+                                                "api_error",
+                                                UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                                            );
+                                            observe_many(
+                                                hooks.as_slice(),
+                                                ObserveEvent::Chunk {
+                                                    batch_index,
+                                                    event_count: 1,
+                                                    total_bytes: frame.len(),
+                                                },
+                                            );
+                                            batch_index = batch_index.saturating_add(1);
+                                            yield Ok::<Bytes, Infallible>(frame);
+                                        }
+                                        if let Some(o) = observer.as_ref() {
+                                            o.set_terminal(
+                                                StatusCode::OK,
+                                                error_codes::UPSTREAM_STREAM_ERROR,
+                                            );
+                                        }
+                                        downstream_drop_guard.disarm();
+                                        break 'upstream;
+                                    }
+                                    bound_response_affinity_keys.extend(response_keys);
+                                    if bind_pending_request {
+                                        pending_request_affinity_keys.clear();
+                                    }
+                                }
                                 keepalive_response.observe(event_name, &raw);
                                 match event_name {
                                     Some(b"message_start") if message_start_at.is_none() => {
@@ -3869,7 +4320,8 @@ impl Lifecycle {
                                                 continue;
                                             }
                                             SseTransformOutcome::FailOpen => {
-                                                if transformed_output_started
+                                                if success_sse_affinity_gate
+                                                    || transformed_output_started
                                                     || !downstream_stream_is_identity
                                                 {
                                                     let error = ResponseTransformError::Runtime {
@@ -3924,11 +4376,18 @@ impl Lifecycle {
                                                     %error,
                                                     "sse response transform failed"
                                                 );
-                                                if transformed_output_started
+                                                if success_sse_affinity_gate
+                                                    || transformed_output_started
                                                     || !downstream_stream_is_identity
                                                 {
-                                                    let frame =
-                                                        make_response_transform_error_frame(&error);
+                                                    let frame = if success_sse_affinity_gate {
+                                                        make_error_frame(
+                                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                                        )
+                                                    } else {
+                                                        make_response_transform_error_frame(&error)
+                                                    };
                                                     observe_many(
                                                         hooks.as_slice(),
                                                         ObserveEvent::Chunk {
@@ -3967,6 +4426,26 @@ impl Lifecycle {
                                                 Bytes::new()
                                             }
                                         }
+                                    } else if success_sse_affinity_gate {
+                                        stream_upstream_error =
+                                            Some(cc_lb_lifecycle::StreamError {
+                                                error_type:
+                                                    UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
+                                                error_message:
+                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                        .to_owned(),
+                                            });
+                                        let frame = make_error_frame(
+                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                        );
+                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                            batch_index,
+                                            event_count: 1,
+                                            total_bytes: frame.len(),
+                                        });
+                                        yield Ok::<Bytes, Infallible>(frame);
+                                        break 'upstream;
                                     } else {
                                         sse_transform_active = false;
                                         raw_passthrough_current_chunk = true;
@@ -3982,6 +4461,15 @@ impl Lifecycle {
                                     });
                                     batch_index = batch_index.saturating_add(1);
                                     yield Ok::<Bytes, Infallible>(outgoing);
+                                } else if success_sse_affinity_gate {
+                                    downstream_sse_boundary.observe(&raw);
+                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                        batch_index,
+                                        event_count: 1,
+                                        total_bytes: raw.len(),
+                                    });
+                                    batch_index = batch_index.saturating_add(1);
+                                    yield Ok::<Bytes, Infallible>(raw);
                                 }
                             }
                             if parse_sse_events_active
@@ -3995,6 +4483,33 @@ impl Lifecycle {
                                 );
                                 parse_sse_events_active = false;
                                 buffer.clear();
+                                if success_sse_affinity_gate {
+                                    stream_upstream_error =
+                                        Some(cc_lb_lifecycle::StreamError {
+                                            error_type:
+                                                UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
+                                            error_message:
+                                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                                        });
+                                    let frame = make_error_frame(
+                                        UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                        UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                    );
+                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                        batch_index,
+                                        event_count: 1,
+                                        total_bytes: frame.len(),
+                                    });
+                                    if let Some(o) = observer.as_ref() {
+                                        o.set_terminal(
+                                            StatusCode::OK,
+                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                        );
+                                    }
+                                    downstream_drop_guard.disarm();
+                                    yield Ok::<Bytes, Infallible>(frame);
+                                    break 'upstream;
+                                }
                                 if sse_transform_active {
                                     if transformed_output_started
                                         || !downstream_stream_is_identity
@@ -4043,17 +4558,19 @@ impl Lifecycle {
                                 }
                             }
                             if !sse_transform_active {
-                                // Chunk fanout stays inline — high-volume, not bus-worthy.
-                                if upstream_is_sse && downstream_stream_is_identity {
-                                    downstream_sse_boundary.observe(&data);
+                                if !success_sse_affinity_gate {
+                                    // Chunk fanout stays inline — high-volume, not bus-worthy.
+                                    if upstream_is_sse && downstream_stream_is_identity {
+                                        downstream_sse_boundary.observe(&data);
+                                    }
+                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                        batch_index,
+                                        event_count: 1,
+                                        total_bytes: data.len(),
+                                    });
+                                    batch_index = batch_index.saturating_add(1);
+                                    yield Ok::<Bytes, Infallible>(data);
                                 }
-                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                    batch_index,
-                                    event_count: 1,
-                                    total_bytes: data.len(),
-                                });
-                                batch_index = batch_index.saturating_add(1);
-                                yield Ok::<Bytes, Infallible>(data);
                             } else if !transformed_output_started {
                                 raw_before_transform_output.push(data);
                             }
@@ -4076,12 +4593,20 @@ impl Lifecycle {
                         }
                         if body_error_is_primary
                             && upstream_is_sse
-                            && (sse_transform_active || downstream_stream_is_identity)
+                            && (success_sse_affinity_gate
+                                || sse_transform_active
+                                || downstream_stream_is_identity)
                         {
+                            let client_error_message = if success_sse_affinity_gate {
+                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                            } else {
+                                &error_message
+                            };
                             let frame = make_stream_error_frame(
                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
-                                &error_message,
-                                downstream_stream_is_identity
+                                client_error_message,
+                                !success_sse_affinity_gate
+                                    && downstream_stream_is_identity
                                     && !sse_transform_active
                                     && downstream_sse_boundary.partial_event_pending(),
                             );
@@ -4117,8 +4642,97 @@ impl Lifecycle {
                         buffer.extend_from_slice(&tail);
                         while let Some(end) = usage_parser::find_sse_event_end(&buffer) {
                             let raw = split_sse_event(&mut buffer, end);
-                            let _ = accumulate_sse_usage(&raw, &mut usage);
-                            keepalive_response.observe(sse_event_name(&raw), &raw);
+                            let usage_update = accumulate_sse_usage(&raw, &mut usage);
+                            let event_name = sse_event_name(&raw);
+                            if success_sse_affinity_gate {
+                                let response_keys = match
+                                    extract_anthropic_web_search_affinity_keys_from_sse_event(
+                                        &raw,
+                                        &response_affinity_context.principal_id,
+                                    )
+                                {
+                                    Ok(keys) => keys,
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            "failed to inspect upstream affinity in final SSE event"
+                                        );
+                                        stream_upstream_error =
+                                            Some(cc_lb_lifecycle::StreamError {
+                                                error_type:
+                                                    UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
+                                                error_message:
+                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                        .to_owned(),
+                                            });
+                                        parse_sse_events_active = false;
+                                        buffer.clear();
+                                        raw_before_transform_output.clear();
+                                        let frame = make_error_frame(
+                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                        );
+                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                            batch_index,
+                                            event_count: 1,
+                                            total_bytes: frame.len(),
+                                        });
+                                        batch_index = batch_index.saturating_add(1);
+                                        yield Ok::<Bytes, Infallible>(frame);
+                                        break;
+                                    }
+                                };
+                                let mut affinity_keys = response_keys
+                                    .iter()
+                                    .filter(|key| {
+                                        !bound_response_affinity_keys.contains(*key)
+                                    })
+                                    .cloned()
+                                    .collect::<Vec<_>>();
+                                let bind_pending_request =
+                                    usage_update.message_stop
+                                        || event_name == Some(b"message_stop");
+                                if bind_pending_request {
+                                    affinity_keys.extend(
+                                        pending_request_affinity_keys.iter().cloned(),
+                                    );
+                                }
+                                if bind_upstream_affinity_keys(
+                                    &response_affinity_context,
+                                    &affinity_keys,
+                                    unix_secs(affinity_clock.now()),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    tracing::warn!(
+                                        "failed to persist upstream affinity before final SSE event"
+                                    );
+                                    stream_affinity_error = Some(affinity_stream_error());
+                                    parse_sse_events_active = false;
+                                    buffer.clear();
+                                    raw_before_transform_output.clear();
+                                    let frame = make_error_frame(
+                                        "api_error",
+                                        UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                                    );
+                                    observe_many(
+                                        hooks.as_slice(),
+                                        ObserveEvent::Chunk {
+                                            batch_index,
+                                            event_count: 1,
+                                            total_bytes: frame.len(),
+                                        },
+                                    );
+                                    batch_index = batch_index.saturating_add(1);
+                                    yield Ok::<Bytes, Infallible>(frame);
+                                    break;
+                                }
+                                bound_response_affinity_keys.extend(response_keys);
+                                if bind_pending_request {
+                                    pending_request_affinity_keys.clear();
+                                }
+                            }
+                            keepalive_response.observe(event_name, &raw);
                             if let Some(err) = usage_parser::detect_mid_stream_error(&raw) {
                                 stream_provider_error_seen = true;
                                 if let Some(o) = observer.as_ref() {
@@ -4142,6 +4756,77 @@ impl Lifecycle {
                                 }
                             }
                             sse_event_count = sse_event_count.saturating_add(1);
+                            if success_sse_affinity_gate {
+                                let outgoing = if sse_transform_active {
+                                    let Some(response_headers) = response_headers.as_ref() else {
+                                        stream_upstream_error =
+                                            Some(cc_lb_lifecycle::StreamError {
+                                                error_type:
+                                                    UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
+                                                error_message:
+                                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE
+                                                        .to_owned(),
+                                            });
+                                        let frame = make_error_frame(
+                                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                        );
+                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                            batch_index,
+                                            event_count: 1,
+                                            total_bytes: frame.len(),
+                                        });
+                                        batch_index = batch_index.saturating_add(1);
+                                        yield Ok::<Bytes, Infallible>(frame);
+                                        break;
+                                    };
+                                    match transform_sse_event_bytes(
+                                        transform_ctx.dialect.sse_event_transform_hook(),
+                                        &transform_ctx,
+                                        &event_ctx,
+                                        status,
+                                        response_headers,
+                                        raw.clone(),
+                                    ) {
+                                        SseTransformOutcome::Emit(bytes) => bytes,
+                                        SseTransformOutcome::Drop => continue,
+                                        SseTransformOutcome::FailOpen
+                                        | SseTransformOutcome::Error(_) => {
+                                            stream_transform_error =
+                                                Some(ResponseTransformError::Runtime {
+                                                    reason:
+                                                        "failed to safely transform SSE event"
+                                                            .to_owned(),
+                                                });
+                                            let frame = make_error_frame(
+                                                UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                                UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                            );
+                                            observe_many(
+                                                hooks.as_slice(),
+                                                ObserveEvent::Chunk {
+                                                    batch_index,
+                                                    event_count: 1,
+                                                    total_bytes: frame.len(),
+                                                },
+                                            );
+                                            batch_index = batch_index.saturating_add(1);
+                                            yield Ok::<Bytes, Infallible>(frame);
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    raw
+                                };
+                                downstream_sse_boundary.observe(&outgoing);
+                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                    batch_index,
+                                    event_count: 1,
+                                    total_bytes: outgoing.len(),
+                                });
+                                batch_index = batch_index.saturating_add(1);
+                                yield Ok::<Bytes, Infallible>(outgoing);
+                            }
                         }
                         if buffer.len() > incomplete_sse_event_budget_bytes {
                             tracing::warn!(
@@ -4151,6 +4836,25 @@ impl Lifecycle {
                                 "stopping SSE parsing: final incomplete event exceeds configured body-derived budget"
                             );
                             buffer.clear();
+                            if success_sse_affinity_gate {
+                                stream_upstream_error =
+                                    Some(cc_lb_lifecycle::StreamError {
+                                        error_type:
+                                            UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
+                                        error_message:
+                                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                                    });
+                                let frame = make_error_frame(
+                                    UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                                    UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                                );
+                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                                    batch_index,
+                                    event_count: 1,
+                                    total_bytes: frame.len(),
+                                });
+                                yield Ok::<Bytes, Infallible>(frame);
+                            } else
                             if sse_transform_active && stream_transform_error.is_none() {
                                 if transformed_output_started
                                     || !downstream_stream_is_identity
@@ -4208,9 +4912,30 @@ impl Lifecycle {
                         upstream_decode_failed,
                         "streaming usage extractor decoder finish failed"
                     );
+                    if success_sse_affinity_gate
+                        && stream_transform_error.is_none()
+                        && stream_affinity_error.is_none()
+                        && stream_upstream_error.is_none()
+                    {
+                        stream_upstream_error = Some(cc_lb_lifecycle::StreamError {
+                            error_type: UPSTREAM_RESPONSE_DECODE_ERROR_TYPE.to_owned(),
+                            error_message: UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE.to_owned(),
+                        });
+                        let frame = make_error_frame(
+                            UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
+                            UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
+                        );
+                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
+                            batch_index,
+                            event_count: 1,
+                            total_bytes: frame.len(),
+                        });
+                        yield Ok::<Bytes, Infallible>(frame);
+                    } else
                     if upstream_is_sse
                         && upstream_decode_failed
                         && stream_transform_error.is_none()
+                        && stream_affinity_error.is_none()
                     {
                         let decode_error_is_primary =
                             !stream_provider_error_seen && stream_upstream_error.is_none();
@@ -4248,7 +4973,10 @@ impl Lifecycle {
                             yield Ok::<Bytes, Infallible>(frame);
                         }
                     }
-                    else if sse_transform_active && stream_transform_error.is_none() {
+                    else if sse_transform_active
+                        && stream_transform_error.is_none()
+                        && stream_affinity_error.is_none()
+                    {
                         if transformed_output_started || !downstream_stream_is_identity {
                             let transform_error = ResponseTransformError::Runtime {
                                 reason: if transformed_output_started {
@@ -4284,6 +5012,7 @@ impl Lifecycle {
                 && stream_upstream_error.is_none()
                 && !stream_provider_error_seen
                 && stream_transform_error.is_none()
+                && stream_affinity_error.is_none()
             {
                 let error_message = if transformed_output_started {
                     "upstream SSE response ended with an incomplete event after transform output"
@@ -4296,7 +5025,10 @@ impl Lifecycle {
                     error_type: UPSTREAM_RESPONSE_FRAMING_ERROR_TYPE.to_owned(),
                     error_message: error_message.clone(),
                 });
-                if sse_transform_active || downstream_stream_is_identity {
+                if success_sse_affinity_gate
+                    || sse_transform_active
+                    || downstream_stream_is_identity
+                {
                     let frame = make_stream_error_frame(
                         UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                         &error_message,
@@ -4318,10 +5050,46 @@ impl Lifecycle {
                 }
                 buffer.clear();
             }
-            if status == StatusCode::OK
+            if stream_affinity_error.is_none()
+                && stream_upstream_error.is_none()
+                && stream_transform_error.is_none()
+                && !stream_provider_error_seen
+                && status.is_success()
+                && !pending_request_affinity_keys.is_empty()
+                && bind_upstream_affinity_keys(
+                    &response_affinity_context,
+                    &pending_request_affinity_keys,
+                    unix_secs(affinity_clock.now()),
+                )
+                .await
+                .is_err()
+            {
+                tracing::warn!("failed to persist upstream affinity at SSE completion");
+                stream_affinity_error = Some(affinity_stream_error());
+                if success_sse_affinity_gate
+                    || sse_transform_active
+                    || downstream_stream_is_identity
+                {
+                    let frame = make_error_frame(
+                        "api_error",
+                        UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                    );
+                    observe_many(
+                        hooks.as_slice(),
+                        ObserveEvent::Chunk {
+                            batch_index,
+                            event_count: 1,
+                            total_bytes: frame.len(),
+                        },
+                    );
+                    batch_index = batch_index.saturating_add(1);
+                    yield Ok::<Bytes, Infallible>(frame);
+                }
+            }
+            if stream_affinity_error.is_none()
+                && status == StatusCode::OK
                 && prompt_cache_observations_buffered
                 && !prompt_cache_observations_emitted
-                && !prompt_cache_decode.observations.is_empty()
                 && let Some(o) = observer.as_ref()
                 && let Some(context) = prompt_cache_observation_context.as_ref()
             {
@@ -4334,7 +5102,8 @@ impl Lifecycle {
                     dropped_aborted,
                 );
             }
-            if let Some(context) = keepalive_completion
+            if stream_affinity_error.is_none()
+                && let Some(context) = keepalive_completion
                 && let Some(response_json) = keepalive_response.into_value()
             {
                 keepalive.on_response_completed(
@@ -4380,13 +5149,19 @@ impl Lifecycle {
                 response_accounting_guard.forget();
             }
             if let Some(o) = observer.as_ref() {
-                if status == StatusCode::OK
+                if stream_affinity_error.is_none()
+                    && status == StatusCode::OK
                     && let Some(context) = prompt_cache_observation_context.as_ref()
                 {
                     let now_unix_secs = context.cache.clock_now_unix_secs();
                     record_thread_usage_from_response(&event_ctx, context, &usage, now_unix_secs);
                 }
-                if let Some(error) = stream_upstream_error.as_ref() {
+                if let Some(error) = stream_affinity_error.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
+                        event_id: o.event_id().to_owned(),
+                        result: Err(error.clone()),
+                    });
+                } else if let Some(error) = stream_upstream_error.as_ref() {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                         event_id: o.event_id().to_owned(),
                         result: Err(error.clone()),
@@ -4444,7 +5219,14 @@ impl Lifecycle {
                         },
                     );
                 }
-                if stream_upstream_error.is_some() && !upstream_error_status {
+                if stream_affinity_error.is_some() && !upstream_error_status {
+                    o.emit_provider_error(
+                        UPSTREAM_AFFINITY_ERROR_TYPE,
+                        UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                        "storage",
+                    );
+                    o.set_terminal(StatusCode::OK, error_codes::UPSTREAM_STREAM_ERROR);
+                } else if stream_upstream_error.is_some() && !upstream_error_status {
                     o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
                 } else if stream_transform_error.is_some() && !upstream_error_status {
                     o.set_terminal(StatusCode::OK, error_codes::UPSTREAM_STREAM_ERROR);

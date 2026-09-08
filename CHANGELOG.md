@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file.
 - Rollup-backed Overview polling now revalidates with weak ETags derived from the persisted rollup checkpoint before response construction; live principal-cost reads remain uncached.
 - Warmup history and cache keepalive session lists now load only when their drawers open, eliminating hidden detail-page reads.
 - Prompt-cache request analysis now reuses exact token-prefix counts, incrementally tokenizes nested breakpoints on a bounded blocking executor, and exposes low-cardinality Prometheus work metrics. Cache-control hashes, token estimates, routing, observations, and upstream request bytes remain unchanged; Request Log timelines exclude post-response observability work.
+- Anthropic native web-search history now keeps exact upstream affinity across cache misses and quota-driven routing changes. cc-lb persists only SHA-256 digests of opaque `encrypted_content`, fails closed when affinity is unknown, conflicting, unavailable, or cannot be persisted, and gates streaming search-result events until the mapping is durable.
 
 ## [0.4.5] - 2026-08-24
 

@@ -1374,6 +1374,9 @@ async fn build_app_with_storage_inner(
         lifecycle_config,
         clock.clone(),
     );
+    lifecycle = lifecycle.with_upstream_affinity_store(
+        storage.clone() as Arc<dyn cc_lb_storage_api::UpstreamAffinityStore>
+    );
     lifecycle = lifecycle.with_cache_keepalive_enqueuer(cache_keepalive_enqueuer);
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
     lifecycle = lifecycle.with_limit_cost_estimator(Arc::new(PricingLimitCostEstimator {
