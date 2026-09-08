@@ -168,7 +168,7 @@ fn streamed_series_matches_reference_for_multi_window_boundaries_and_downsamplin
     // When: the production builder streams selected buckets.
     let actual = build_series(checkpoints, &query);
 
-    // Then: every element and serialized byte match the pre-streaming reference.
+    // Then: every element and serialized byte match the range-bounded reference.
     assert_eq!(actual, expected);
     assert_eq!(
         serde_json::to_vec(&actual).expect("series serializes"),
@@ -184,10 +184,300 @@ fn streamed_series_matches_reference_for_multi_window_boundaries_and_downsamplin
             .iter()
             .map(|bucket| bucket.bucket_start_unix_secs)
             .collect::<Vec<_>>(),
-        vec![0, 120, 300],
+        vec![60, 180, 300],
     );
     assert_eq!(five_hour.buckets[1].utilization_last, Some(0.4));
     assert_eq!(five_hour.buckets[2].utilization_last, Some(0.8));
+}
+
+#[test]
+fn old_left_anchor_seeds_only_the_requested_dense_range() {
+    const DAY_MILLIS: u64 = 86_400_000;
+
+    let upstream_id = Uuid::from_u128(2);
+    let since_unix_millis = 200 * DAY_MILLIS + 37_000;
+    let until_unix_millis = since_unix_millis + 3_600_000;
+    let expected_start = reference_bucket_start(since_unix_millis, 60);
+    let query = SubscriptionQuotaSeriesQuery {
+        upstream_ids: vec![upstream_id],
+        windows: vec![SubscriptionQuotaWindow::FiveHour],
+        sources: vec![SubscriptionQuotaSource::Header],
+        since_unix_millis,
+        until_unix_millis,
+        bucket_secs: 60,
+        max_points_per_series: 10_000,
+        source_merge: SubscriptionQuotaSourceMerge::Header,
+    };
+
+    for anchor_age_days in [1, 30, 180] {
+        let anchor_unix_millis = since_unix_millis - anchor_age_days * DAY_MILLIS - 17_000;
+        let actual = build_series(
+            vec![
+                checkpoint(
+                    upstream_id,
+                    SubscriptionQuotaWindow::FiveHour,
+                    CheckpointFixture {
+                        source: SubscriptionQuotaSource::Header,
+                        changed_at_unix_millis: anchor_unix_millis - DAY_MILLIS,
+                        utilization: Some(0.11),
+                        status: Some(SubscriptionQuotaStatus::Rejected),
+                        resets_at_unix_secs: Some(88_888),
+                    },
+                ),
+                checkpoint(
+                    upstream_id,
+                    SubscriptionQuotaWindow::FiveHour,
+                    CheckpointFixture {
+                        source: SubscriptionQuotaSource::Header,
+                        changed_at_unix_millis: anchor_unix_millis,
+                        utilization: Some(0.42),
+                        status: Some(SubscriptionQuotaStatus::AllowedWarning),
+                        resets_at_unix_secs: Some(99_999),
+                    },
+                ),
+            ],
+            &query,
+        );
+        let [series] = actual.as_slice() else {
+            panic!("one series should be returned for a {anchor_age_days}-day-old anchor");
+        };
+
+        assert_eq!(
+            series.buckets.len(),
+            61,
+            "bucket work must depend on the one-hour query, not a {anchor_age_days}-day-old anchor"
+        );
+        for (index, bucket) in series.buckets.iter().enumerate() {
+            assert_eq!(
+                bucket.bucket_start_unix_secs,
+                expected_start + u64::try_from(index).expect("bucket index fits u64") * 60,
+            );
+            assert!(bucket.observed);
+            assert_eq!(bucket.sample_count, 0);
+            assert_eq!(bucket.utilization_min, Some(0.42));
+            assert_eq!(bucket.utilization_avg, Some(0.42));
+            assert_eq!(bucket.utilization_max, Some(0.42));
+            assert_eq!(bucket.utilization_last, Some(0.42));
+            assert_eq!(
+                bucket.status_last,
+                Some(SubscriptionQuotaStatus::AllowedWarning)
+            );
+            assert_eq!(bucket.resets_at_unix_secs_last, Some(99_999));
+            assert_eq!(
+                bucket.observed_at_unix_millis_last,
+                Some(anchor_unix_millis)
+            );
+            assert_eq!(bucket.sources_seen, vec![SubscriptionQuotaSource::Header]);
+        }
+    }
+}
+
+#[test]
+fn exact_since_changes_are_not_duplicated_with_the_left_anchor() {
+    let upstream_id = Uuid::from_u128(3);
+    let since_unix_millis = 90_000;
+    let query = SubscriptionQuotaSeriesQuery {
+        upstream_ids: vec![upstream_id],
+        windows: vec![SubscriptionQuotaWindow::FiveHour],
+        sources: SubscriptionQuotaSource::all().to_vec(),
+        since_unix_millis,
+        until_unix_millis: 210_000,
+        bucket_secs: 60,
+        max_points_per_series: 10,
+        source_merge: SubscriptionQuotaSourceMerge::Merged,
+    };
+    let actual = build_series(
+        vec![
+            checkpoint(
+                upstream_id,
+                SubscriptionQuotaWindow::FiveHour,
+                CheckpointFixture {
+                    source: SubscriptionQuotaSource::Header,
+                    changed_at_unix_millis: since_unix_millis - 1,
+                    utilization: Some(0.1),
+                    status: Some(SubscriptionQuotaStatus::Rejected),
+                    resets_at_unix_secs: Some(100),
+                },
+            ),
+            checkpoint(
+                upstream_id,
+                SubscriptionQuotaWindow::FiveHour,
+                CheckpointFixture {
+                    source: SubscriptionQuotaSource::Header,
+                    changed_at_unix_millis: since_unix_millis,
+                    utilization: Some(0.2),
+                    status: Some(SubscriptionQuotaStatus::AllowedWarning),
+                    resets_at_unix_secs: Some(300),
+                },
+            ),
+            checkpoint(
+                upstream_id,
+                SubscriptionQuotaWindow::FiveHour,
+                CheckpointFixture {
+                    source: SubscriptionQuotaSource::Api,
+                    changed_at_unix_millis: since_unix_millis,
+                    utilization: Some(0.3),
+                    status: Some(SubscriptionQuotaStatus::Allowed),
+                    resets_at_unix_secs: Some(200),
+                },
+            ),
+        ],
+        &query,
+    );
+    let [series] = actual.as_slice() else {
+        panic!("one merged series should be returned");
+    };
+
+    assert_eq!(
+        series
+            .buckets
+            .iter()
+            .map(|bucket| bucket.bucket_start_unix_secs)
+            .collect::<Vec<_>>(),
+        vec![60, 120, 180],
+    );
+    assert_eq!(series.buckets[0].sample_count, 2);
+    assert_eq!(series.buckets[0].utilization_min, Some(0.2));
+    assert_eq!(series.buckets[0].utilization_avg, Some(0.25));
+    assert_eq!(series.buckets[0].utilization_max, Some(0.3));
+    for bucket in &series.buckets {
+        assert!(bucket.observed);
+        assert_eq!(bucket.utilization_last, Some(0.2));
+        assert_eq!(
+            bucket.status_last,
+            Some(SubscriptionQuotaStatus::AllowedWarning)
+        );
+        assert_eq!(bucket.resets_at_unix_secs_last, Some(300));
+        assert_eq!(bucket.observed_at_unix_millis_last, Some(since_unix_millis));
+        assert_eq!(bucket.sources_seen, SubscriptionQuotaSource::all().to_vec());
+    }
+    assert!(
+        series.buckets[1..]
+            .iter()
+            .all(|bucket| bucket.sample_count == 0),
+        "only the two exact-since checkpoints are changes inside the range"
+    );
+}
+
+#[test]
+fn missing_anchor_keeps_buckets_empty_until_the_first_observation() {
+    let upstream_id = Uuid::from_u128(5);
+    let first_observation_unix_millis = 180_000;
+    let query = SubscriptionQuotaSeriesQuery {
+        upstream_ids: vec![upstream_id],
+        windows: vec![SubscriptionQuotaWindow::SevenDay],
+        sources: vec![SubscriptionQuotaSource::Api],
+        since_unix_millis: 60_000,
+        until_unix_millis: 300_000,
+        bucket_secs: 60,
+        max_points_per_series: 10,
+        source_merge: SubscriptionQuotaSourceMerge::Api,
+    };
+    let actual = build_series(
+        vec![checkpoint(
+            upstream_id,
+            SubscriptionQuotaWindow::SevenDay,
+            CheckpointFixture {
+                source: SubscriptionQuotaSource::Api,
+                changed_at_unix_millis: first_observation_unix_millis,
+                utilization: Some(0.55),
+                status: Some(SubscriptionQuotaStatus::Allowed),
+                resets_at_unix_secs: Some(600),
+            },
+        )],
+        &query,
+    );
+    let [series] = actual.as_slice() else {
+        panic!("one API series should be returned");
+    };
+
+    assert_eq!(
+        series
+            .buckets
+            .iter()
+            .map(|bucket| bucket.bucket_start_unix_secs)
+            .collect::<Vec<_>>(),
+        vec![180, 240, 300],
+    );
+    assert_eq!(series.buckets[0].sample_count, 1);
+    assert!(
+        series.buckets[1..]
+            .iter()
+            .all(|bucket| bucket.sample_count == 0)
+    );
+    assert!(series.buckets.iter().all(|bucket| {
+        bucket.observed
+            && bucket.utilization_last == Some(0.55)
+            && bucket.observed_at_unix_millis_last == Some(first_observation_unix_millis)
+    }));
+}
+
+#[test]
+fn reset_checkpoint_replaces_the_anchor_through_a_long_gap() {
+    let upstream_id = Uuid::from_u128(4);
+    let since_unix_millis = 3_600_000;
+    let reset_unix_millis = since_unix_millis + 60_000;
+    let query = SubscriptionQuotaSeriesQuery {
+        upstream_ids: vec![upstream_id],
+        windows: vec![SubscriptionQuotaWindow::FiveHour],
+        sources: vec![SubscriptionQuotaSource::Header],
+        since_unix_millis,
+        until_unix_millis: since_unix_millis + 600_000,
+        bucket_secs: 60,
+        max_points_per_series: 20,
+        source_merge: SubscriptionQuotaSourceMerge::Header,
+    };
+    let actual = build_series(
+        vec![
+            checkpoint(
+                upstream_id,
+                SubscriptionQuotaWindow::FiveHour,
+                CheckpointFixture {
+                    source: SubscriptionQuotaSource::Header,
+                    changed_at_unix_millis: since_unix_millis - 1,
+                    utilization: Some(0.9),
+                    status: Some(SubscriptionQuotaStatus::Rejected),
+                    resets_at_unix_secs: Some(7_200),
+                },
+            ),
+            checkpoint(
+                upstream_id,
+                SubscriptionQuotaWindow::FiveHour,
+                CheckpointFixture {
+                    source: SubscriptionQuotaSource::Header,
+                    changed_at_unix_millis: reset_unix_millis,
+                    utilization: Some(0.1),
+                    status: Some(SubscriptionQuotaStatus::Allowed),
+                    resets_at_unix_secs: Some(10_800),
+                },
+            ),
+        ],
+        &query,
+    );
+    let [series] = actual.as_slice() else {
+        panic!("one header series should be returned");
+    };
+
+    assert_eq!(series.buckets.len(), 11);
+    let first = &series.buckets[0];
+    assert_eq!(first.sample_count, 0);
+    assert_eq!(first.utilization_last, Some(0.9));
+    assert_eq!(
+        first.observed_at_unix_millis_last,
+        Some(since_unix_millis - 1)
+    );
+
+    for (index, bucket) in series.buckets[1..].iter().enumerate() {
+        assert!(bucket.observed);
+        assert_eq!(bucket.sample_count, if index == 0 { 1 } else { 0 });
+        assert_eq!(bucket.utilization_min, Some(0.1));
+        assert_eq!(bucket.utilization_avg, Some(0.1));
+        assert_eq!(bucket.utilization_max, Some(0.1));
+        assert_eq!(bucket.utilization_last, Some(0.1));
+        assert_eq!(bucket.status_last, Some(SubscriptionQuotaStatus::Allowed));
+        assert_eq!(bucket.resets_at_unix_secs_last, Some(10_800));
+        assert_eq!(bucket.observed_at_unix_millis_last, Some(reset_unix_millis));
+    }
 }
 
 fn checkpoint(
@@ -234,6 +524,7 @@ fn reference_build_series(
             let mut buckets = reference_buckets_from_checkpoints(
                 source_checkpoints.into_values(),
                 query.bucket_secs.max(1),
+                query.since_unix_millis,
                 query.until_unix_millis,
             );
             reference_downsample(
@@ -253,14 +544,23 @@ fn reference_build_series(
 fn reference_buckets_from_checkpoints(
     source_checkpoints: impl Iterator<Item = Vec<SubscriptionQuotaSlimCheckpoint>>,
     bucket_secs: u64,
+    since_unix_millis: u64,
     until_unix_millis: u64,
 ) -> Vec<SubscriptionQuotaBucket> {
     let mut streams = source_checkpoints
         .filter(|checkpoints| !checkpoints.is_empty())
-        .map(|checkpoints| ReferenceCheckpointStream {
-            checkpoints,
-            next_index: 0,
-            current_index: None,
+        .map(|checkpoints| {
+            let mut next_index = 0;
+            while next_index < checkpoints.len()
+                && checkpoints[next_index].changed_at_unix_millis < since_unix_millis
+            {
+                next_index += 1;
+            }
+            ReferenceCheckpointStream {
+                checkpoints,
+                next_index,
+                current_index: next_index.checked_sub(1),
+            }
         })
         .collect::<Vec<_>>();
     streams.sort_by(|left, right| {
@@ -269,14 +569,10 @@ fn reference_buckets_from_checkpoints(
             .as_str()
             .cmp(right.checkpoints[0].source.as_str())
     });
-    let Some(mut bucket_start) = streams
-        .iter()
-        .filter_map(|stream| stream.checkpoints.first())
-        .map(|checkpoint| reference_bucket_start(checkpoint.changed_at_unix_millis, bucket_secs))
-        .min()
-    else {
+    if streams.is_empty() {
         return Vec::new();
-    };
+    }
+    let mut bucket_start = reference_bucket_start(since_unix_millis, bucket_secs);
     let end_bucket = reference_bucket_start(until_unix_millis, bucket_secs);
     let mut buckets = Vec::new();
     while bucket_start <= end_bucket {

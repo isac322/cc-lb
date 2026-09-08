@@ -85,6 +85,7 @@ fn build_series(
             let buckets = sampled_buckets_from_checkpoints(
                 source_checkpoints,
                 query.bucket_secs.max(1),
+                query.since_unix_millis,
                 query.until_unix_millis,
                 max_points,
             );
@@ -102,6 +103,23 @@ struct CheckpointStream {
     checkpoints: Vec<SubscriptionQuotaSlimCheckpoint>,
     next_index: usize,
     current_index: Option<usize>,
+}
+
+impl CheckpointStream {
+    /// Retains the latest pre-range checkpoint as current state and leaves
+    /// exact-`since` checkpoints to be counted as in-range changes.
+    fn seeded_before(
+        checkpoints: Vec<SubscriptionQuotaSlimCheckpoint>,
+        since_unix_millis: u64,
+    ) -> Self {
+        let next_index = checkpoints
+            .partition_point(|checkpoint| checkpoint.changed_at_unix_millis < since_unix_millis);
+        Self {
+            checkpoints,
+            next_index,
+            current_index: next_index.checked_sub(1),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -211,13 +229,14 @@ fn sources_seen_from_bitmask(bitmask: u8) -> Vec<SubscriptionQuotaSource> {
 
 /// Builds one series' buckets, streamed and downsampled without ever
 /// materializing more than `max_points` final `SubscriptionQuotaBucket`
-/// values. A single pass over the checkpoint streams produces a `Vec` of
-/// stack-only `BucketAccumulator`s (pre-sized from the query's time range);
-/// only the buckets selected by the existing uniform-downsample formula are
-/// converted into the heap-owning `SubscriptionQuotaBucket` output type.
+/// values. Each source keeps its latest checkpoint before `since` as a
+/// current-state seed, but bucket accumulation starts at the query's first
+/// bucket. Only buckets selected by the existing uniform-downsample formula
+/// are converted into the heap-owning `SubscriptionQuotaBucket` output type.
 fn sampled_buckets_from_checkpoints(
     source_checkpoints: SourceCheckpoints,
     bucket_secs: u64,
+    since_unix_millis: u64,
     until_unix_millis: u64,
     max_points: usize,
 ) -> Vec<SubscriptionQuotaBucket> {
@@ -228,11 +247,7 @@ fn sampled_buckets_from_checkpoints(
         .into_checkpoint_lists()
         .into_iter()
         .filter(|checkpoints| !checkpoints.is_empty())
-        .map(|checkpoints| CheckpointStream {
-            checkpoints,
-            next_index: 0,
-            current_index: None,
-        })
+        .map(|checkpoints| CheckpointStream::seeded_before(checkpoints, since_unix_millis))
         .collect::<Vec<_>>();
     streams.sort_by(|left, right| {
         left.checkpoints[0]
@@ -240,14 +255,10 @@ fn sampled_buckets_from_checkpoints(
             .as_str()
             .cmp(right.checkpoints[0].source.as_str())
     });
-    let Some(start_bucket) = streams
-        .iter()
-        .filter_map(|stream| stream.checkpoints.first())
-        .map(|checkpoint| bucket_start_unix_secs(checkpoint.changed_at_unix_millis, bucket_secs))
-        .min()
-    else {
+    if streams.is_empty() {
         return Vec::new();
-    };
+    }
+    let start_bucket = bucket_start_unix_secs(since_unix_millis, bucket_secs);
     let end_bucket = bucket_start_unix_secs(until_unix_millis, bucket_secs);
     let accumulators = accumulate_buckets(&mut streams, start_bucket, end_bucket, bucket_secs);
     select_and_finalize(accumulators, max_points)

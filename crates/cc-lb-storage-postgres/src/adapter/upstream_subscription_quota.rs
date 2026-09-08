@@ -578,6 +578,7 @@ fn build_series_from_checkpoint_ranges(
 
 #[derive(Debug, Clone)]
 struct CheckpointStream {
+    source: SubscriptionQuotaSource,
     checkpoints: Vec<SubscriptionQuotaCheckpointRecord>,
     index: usize,
     current: Option<SubscriptionQuotaCheckpointRecord>,
@@ -597,21 +598,13 @@ fn buckets_from_checkpoint_ranges(
     let mut streams = ranges
         .into_iter()
         .map(stream_from_range)
-        .filter(|stream| !stream.checkpoints.is_empty())
+        .filter(|stream| stream.current.is_some() || !stream.checkpoints.is_empty())
         .collect::<Vec<_>>();
-    streams.sort_by(|left, right| {
-        let left_source = left.checkpoints[0].source.as_str();
-        let right_source = right.checkpoints[0].source.as_str();
-        left_source.cmp(right_source)
-    });
-    let Some(mut bucket_start) = streams
-        .iter()
-        .filter_map(|stream| stream.checkpoints.first())
-        .map(|checkpoint| bucket_start_unix_secs(checkpoint.changed_at_unix_millis, bucket_secs))
-        .min()
-    else {
+    streams.sort_by(|left, right| left.source.as_str().cmp(right.source.as_str()));
+    if streams.is_empty() {
         return Vec::new();
-    };
+    }
+    let mut bucket_start = bucket_start_unix_secs(query.since_unix_millis, bucket_secs);
     let end_bucket = bucket_start_unix_secs(query.until_unix_millis, bucket_secs);
     let mut buckets = Vec::new();
     while bucket_start <= end_bucket {
@@ -631,17 +624,13 @@ fn buckets_from_checkpoint_ranges(
 }
 
 fn stream_from_range(range: SubscriptionQuotaCheckpointRange) -> CheckpointStream {
-    let mut checkpoints =
-        Vec::with_capacity(range.checkpoints.len() + usize::from(range.left_anchor.is_some()));
-    if let Some(anchor) = range.left_anchor {
-        checkpoints.push(anchor);
-    }
-    checkpoints.extend(range.checkpoints);
+    let mut checkpoints = range.checkpoints;
     checkpoints.sort_by_key(|checkpoint| (checkpoint.changed_at_unix_millis, checkpoint.sample_id));
     CheckpointStream {
+        source: range.source,
         checkpoints,
         index: 0,
-        current: None,
+        current: range.left_anchor,
     }
 }
 

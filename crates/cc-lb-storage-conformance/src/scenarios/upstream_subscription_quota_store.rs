@@ -444,34 +444,137 @@ scenario!(empty_upstream_ids_returns_empty, |storage| async move {
 });
 
 scenario!(series_filters_observed_at_window, |storage| async move {
+    const HOUR_MILLIS: u64 = 60 * 60 * 1_000;
+
     let upstream = upstream_id(13);
+    let since_unix_millis = HOUR_MILLIS;
+    let until_unix_millis = since_unix_millis + HOUR_MILLIS;
     storage
         .record_subscription_quota_samples(&[
-            observation(upstream, 50, 1, SubscriptionQuotaSource::Header, 0.1),
-            observation(upstream, 100, 2, SubscriptionQuotaSource::Header, 0.2),
-            observation(upstream, 200, 3, SubscriptionQuotaSource::Header, 0.3),
-            observation(upstream, 300, 4, SubscriptionQuotaSource::Header, 0.4),
+            observation(
+                upstream,
+                since_unix_millis - 30_000,
+                1,
+                SubscriptionQuotaSource::Header,
+                0.1,
+            ),
+            observation(
+                upstream,
+                since_unix_millis,
+                2,
+                SubscriptionQuotaSource::Header,
+                0.2,
+            ),
+            observation(
+                upstream,
+                since_unix_millis + 90_000,
+                3,
+                SubscriptionQuotaSource::Api,
+                0.8,
+            ),
+            observation(
+                upstream,
+                since_unix_millis + 120_000,
+                4,
+                SubscriptionQuotaSource::Header,
+                0.4,
+            ),
+            observation(
+                upstream,
+                until_unix_millis,
+                5,
+                SubscriptionQuotaSource::Api,
+                0.6,
+            ),
+            observation(
+                upstream,
+                until_unix_millis + 1_000,
+                6,
+                SubscriptionQuotaSource::Header,
+                0.9,
+            ),
         ])
         .await?;
     let series = storage
         .list_subscription_quota_series(series_query(
             upstream,
+            since_unix_millis,
+            until_unix_millis,
+            60,
             100,
-            200,
-            1,
-            10,
-            SubscriptionQuotaSourceMerge::Header,
+            SubscriptionQuotaSourceMerge::Merged,
         ))
         .await?;
-    ensure!(series.len() == 1, "expected one bounded series");
-    let count = series[0]
-        .buckets
-        .iter()
-        .map(|bucket| bucket.sample_count)
-        .sum::<u32>();
+    ensure!(series.len() == 1, "expected one bounded merged series");
+    let buckets = &series[0].buckets;
     ensure!(
-        count == 3,
-        "series should include the left-anchor checkpoint plus inclusive in-range checkpoints"
+        buckets.len() == 61
+            && buckets.iter().all(|bucket| bucket.observed)
+            && buckets[0].bucket_start_unix_secs == since_unix_millis / 1_000
+            && buckets[60].bucket_start_unix_secs == until_unix_millis / 1_000,
+        "the inclusive one-hour window must contain exactly 61 observed requested-range buckets"
+    );
+    ensure!(
+        buckets
+            .iter()
+            .map(|bucket| bucket.sample_count)
+            .sum::<u32>()
+            == 4,
+        "only the four inclusive in-range checkpoints should count as samples"
+    );
+    ensure!(
+        buckets[0].sample_count == 1
+            && buckets[0].utilization_min == Some(0.2)
+            && buckets[0].utilization_max == Some(0.2)
+            && buckets[0].utilization_last == Some(0.2)
+            && buckets[0].observed_at_unix_millis_last == Some(since_unix_millis)
+            && buckets[0].sources_seen == [SubscriptionQuotaSource::Header],
+        "the exact-since header checkpoint must replace the pre-range anchor in the first bucket"
+    );
+    ensure!(
+        buckets[1].sample_count == 1
+            && buckets[1].utilization_min == Some(0.2)
+            && buckets[1].utilization_max == Some(0.8)
+            && buckets[1].utilization_last == Some(0.8)
+            && buckets[1].observed_at_unix_millis_last == Some(since_unix_millis + 90_000)
+            && buckets[1].sources_seen
+                == [
+                    SubscriptionQuotaSource::Header,
+                    SubscriptionQuotaSource::Api
+                ],
+        "the first api checkpoint must merge with carried header state in its bucket"
+    );
+    ensure!(
+        buckets[2].sample_count == 1
+            && buckets[2].utilization_min == Some(0.4)
+            && buckets[2].utilization_max == Some(0.8)
+            && buckets[2].utilization_last == Some(0.4)
+            && buckets[2].observed_at_unix_millis_last == Some(since_unix_millis + 120_000)
+            && buckets[2].sources_seen
+                == [
+                    SubscriptionQuotaSource::Header,
+                    SubscriptionQuotaSource::Api
+                ],
+        "the later header checkpoint must become the exact last observation while api state carries"
+    );
+    ensure!(
+        buckets[59].sample_count == 0
+            && buckets[59].utilization_last == Some(0.4)
+            && buckets[59].observed_at_unix_millis_last == Some(since_unix_millis + 120_000),
+        "dense gap buckets must carry the latest per-source state without synthetic samples"
+    );
+    ensure!(
+        buckets[60].sample_count == 1
+            && buckets[60].utilization_min == Some(0.4)
+            && buckets[60].utilization_max == Some(0.6)
+            && buckets[60].utilization_last == Some(0.6)
+            && buckets[60].observed_at_unix_millis_last == Some(until_unix_millis)
+            && buckets[60].sources_seen
+                == [
+                    SubscriptionQuotaSource::Header,
+                    SubscriptionQuotaSource::Api
+                ],
+        "the exact-until api checkpoint must be included and the post-range header checkpoint excluded"
     );
     Ok(())
 });
@@ -603,25 +706,25 @@ scenario!(checkpoint_series_anchor_merge, |storage| async move {
         .await?;
     ensure!(header_series.len() == 1, "expected one header series");
     let header_buckets = &header_series[0].buckets;
-    assert_bucket_starts(header_buckets, &[0, 60, 120, 180, 240])?;
+    assert_bucket_starts(header_buckets, &[60, 120, 180, 240])?;
     ensure!(
-        header_buckets[0].utilization_last == Some(0.10),
-        "left-anchor bucket should carry the pre-since header checkpoint"
+        header_buckets[0].utilization_last == Some(0.40),
+        "first requested bucket should apply its in-range header checkpoints over the anchor"
     );
     ensure!(
-        header_buckets[1].sample_count == 2,
-        "same-minute header changes should remain distinct inside the bucket"
+        header_buckets[0].sample_count == 2,
+        "same-minute in-range header changes should remain distinct inside the bucket"
     );
     ensure!(
-        header_buckets[1].observed_at_unix_millis_last == Some(90_000),
+        header_buckets[0].observed_at_unix_millis_last == Some(90_000),
         "same-minute bucket should preserve the exact timestamp of the last checkpoint"
     );
     ensure!(
-        header_buckets[2].sample_count == 0 && header_buckets[2].utilization_last == Some(0.40),
+        header_buckets[1].sample_count == 0 && header_buckets[1].utilization_last == Some(0.40),
         "gap bucket should carry forward the latest header checkpoint without adding a change count"
     );
     ensure!(
-        header_buckets[2].observed_at_unix_millis_last == Some(90_000),
+        header_buckets[1].observed_at_unix_millis_last == Some(90_000),
         "carry-forward bucket should keep the exact source checkpoint timestamp"
     );
     ensure!(
@@ -643,12 +746,13 @@ scenario!(checkpoint_series_anchor_merge, |storage| async move {
         .await?;
     ensure!(api_series.len() == 1, "expected one api series");
     let api_buckets = &api_series[0].buckets;
-    assert_bucket_starts(api_buckets, &[0, 60, 120, 180])?;
+    assert_bucket_starts(api_buckets, &[60, 120, 180])?;
     ensure!(
-        api_buckets[0].utilization_last == Some(0.80)
-            && api_buckets[1].utilization_last == Some(0.80)
+        api_buckets[0].sample_count == 0
+            && api_buckets[0].utilization_last == Some(0.80)
+            && api_buckets[1].utilization_last == Some(0.70)
             && api_buckets[2].utilization_last == Some(0.70),
-        "api stream should carry forward independently of header checkpoints"
+        "api anchor should seed the requested range and carry forward independently of header checkpoints"
     );
     ensure!(
         api_buckets
@@ -733,11 +837,67 @@ scenario!(checkpoint_series_anchor_merge, |storage| async move {
     Ok(())
 });
 
+scenario!(
+    checkpoint_series_old_anchor_is_bounded_and_dense,
+    |storage| async move {
+        const DAY_MILLIS: u64 = 24 * 60 * 60 * 1_000;
+        const HOUR_MILLIS: u64 = 60 * 60 * 1_000;
+
+        let upstream = upstream_id(32);
+        let since_unix_millis = 180 * DAY_MILLIS;
+        let until_unix_millis = since_unix_millis + HOUR_MILLIS;
+        let anchor = checkpoint(&observation(
+            upstream,
+            1_000,
+            1,
+            SubscriptionQuotaSource::Header,
+            0.42,
+        ));
+        storage.put_subscription_quota_checkpoint(&anchor).await?;
+
+        let series = storage
+            .list_subscription_quota_series(series_query(
+                upstream,
+                since_unix_millis,
+                until_unix_millis,
+                60,
+                100,
+                SubscriptionQuotaSourceMerge::Header,
+            ))
+            .await?;
+        ensure!(series.len() == 1, "expected one anchor-only series");
+        let buckets = &series[0].buckets;
+        ensure!(
+            buckets.len() == 61,
+            "an inclusive one-hour range at 60-second resolution must contain exactly 61 buckets"
+        );
+        ensure!(
+            buckets.first().map(|bucket| bucket.bucket_start_unix_secs)
+                == Some(since_unix_millis / 1_000)
+                && buckets.last().map(|bucket| bucket.bucket_start_unix_secs)
+                    == Some(until_unix_millis / 1_000),
+            "an old anchor must not materialize buckets outside the requested range"
+        );
+        ensure!(
+            buckets.iter().all(|bucket| {
+                bucket.observed
+                    && bucket.sample_count == 0
+                    && bucket.utilization_last == Some(0.42)
+                    && bucket.observed_at_unix_millis_last == Some(1_000)
+                    && bucket.sources_seen == [SubscriptionQuotaSource::Header]
+            }),
+            "anchor-only buckets must preserve the exact carried state without counting synthetic samples"
+        );
+        Ok(())
+    }
+);
+
 pub async fn checkpoint_history<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
     B::Storage: UpstreamSubscriptionQuotaStore,
 {
+    checkpoint_series_old_anchor_is_bounded_and_dense(Arc::clone(&backend)).await?;
     sample_writer_persists_seven_day_fable_window(Arc::clone(&backend)).await?;
     checkpoint_history_suppresses_duplicate_semantic_state(Arc::clone(&backend)).await?;
     checkpoint_history_returns_left_anchor_and_in_range_rows(Arc::clone(&backend)).await?;
@@ -758,6 +918,7 @@ where
     slim_checkpoints_preserve_left_anchor_sources_and_same_millis_ties(Arc::clone(&backend))
         .await?;
     provider_lots_keep_header_and_api_streams_separate(Arc::clone(&backend)).await?;
+    provider_lots_old_anchor_preserves_boundary_reset(Arc::clone(&backend)).await?;
     interval_sums_match_legacy_inclusive_boundary_bytes(backend).await?;
     Ok(())
 }
@@ -926,6 +1087,66 @@ aggregate_scenario!(
                 "provider lots must retain the selected source's reset cycle and utilization"
             );
         }
+        Ok(())
+    }
+);
+
+aggregate_scenario!(
+    provider_lots_old_anchor_preserves_boundary_reset,
+    |storage| async move {
+        const DAY_SECS: u64 = 24 * 60 * 60;
+        const FIVE_HOURS_SECS: u64 = 5 * 60 * 60;
+
+        let upstream = upstream_id(33);
+        let since_unix_secs = 180 * DAY_SECS;
+        let since_unix_millis = since_unix_secs * 1_000;
+        let old_reset_unix_secs = since_unix_secs + FIVE_HOURS_SECS;
+        let new_reset_unix_secs = old_reset_unix_secs + FIVE_HOURS_SECS;
+        let mut anchor = observation(upstream, 1_000, 1, SubscriptionQuotaSource::Header, 0.9);
+        anchor.resets_at_unix_secs = Some(old_reset_unix_secs);
+        let mut reset = observation(
+            upstream,
+            since_unix_millis,
+            2,
+            SubscriptionQuotaSource::Header,
+            0.1,
+        );
+        reset.resets_at_unix_secs = Some(new_reset_unix_secs);
+        storage
+            .put_subscription_quota_checkpoints(&[checkpoint(&anchor), checkpoint(&reset)])
+            .await?;
+
+        let lots = storage
+            .list_subscription_quota_provider_lots(SubscriptionQuotaProviderLotQuery {
+                upstream_ids: vec![upstream],
+                windows: vec![SubscriptionQuotaWindow::FiveHour],
+                sources: vec![SubscriptionQuotaSource::Header],
+                since_unix_millis,
+                until_unix_millis: since_unix_millis + 60_000,
+                source_merge: SubscriptionQuotaSourceMerge::Header,
+                evaluation_unix_secs: since_unix_secs + 60,
+            })
+            .await?;
+        ensure!(
+            lots.len() == 2,
+            "an exact-boundary reset must close the anchored provider lot and open the new lot"
+        );
+        ensure!(
+            lots[0].provider_start_unix_secs == Some(since_unix_secs)
+                && lots[0].provider_reset_unix_secs == Some(old_reset_unix_secs)
+                && lots[0].observed_at_unix_millis == 1_000
+                && lots[0].evaluation_unix_secs == since_unix_secs - 60
+                && lots[0].utilization == 0.9,
+            "the old anchor must seed the pre-range provider cycle without shifting its values"
+        );
+        ensure!(
+            lots[1].provider_start_unix_secs == Some(old_reset_unix_secs)
+                && lots[1].provider_reset_unix_secs == Some(new_reset_unix_secs)
+                && lots[1].observed_at_unix_millis == since_unix_millis
+                && lots[1].evaluation_unix_secs == since_unix_secs + 60
+                && lots[1].utilization == 0.1,
+            "the boundary checkpoint must remain the first observation of the new provider cycle"
+        );
         Ok(())
     }
 );
