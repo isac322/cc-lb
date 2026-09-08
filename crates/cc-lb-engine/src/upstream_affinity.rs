@@ -47,7 +47,7 @@ pub(crate) fn extract_anthropic_web_search_affinity_keys_from_sse_event(
         .map_err(|_| UpstreamAffinityExtractionError::InvalidSseData)?;
     let mut payload = String::new();
     let mut has_data = false;
-    for line in text.split(|character| character == '\r' || character == '\n') {
+    for line in text.split(['\r', '\n']) {
         let Some(data) = line.strip_prefix("data:") else {
             continue;
         };

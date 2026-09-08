@@ -4854,8 +4854,7 @@ impl Lifecycle {
                                     total_bytes: frame.len(),
                                 });
                                 yield Ok::<Bytes, Infallible>(frame);
-                            } else
-                            if sse_transform_active && stream_transform_error.is_none() {
+                            } else if sse_transform_active && stream_transform_error.is_none() {
                                 if transformed_output_started
                                     || !downstream_stream_is_identity
                                 {
@@ -4931,8 +4930,7 @@ impl Lifecycle {
                             total_bytes: frame.len(),
                         });
                         yield Ok::<Bytes, Infallible>(frame);
-                    } else
-                    if upstream_is_sse
+                    } else if upstream_is_sse
                         && upstream_decode_failed
                         && stream_transform_error.is_none()
                         && stream_affinity_error.is_none()
