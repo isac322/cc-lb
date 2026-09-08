@@ -109,7 +109,7 @@ GROUP BY name;
 - 같은 key의 중복 입력은 borrowed-key map으로 정규화한다. 다른 target 충돌을 거부하고, timestamp max/NULL-wins expiry를 유지한다.
 - SQLite는 128행/898 bind 이하의 multi-row UPSERT를 실행한다(행당 7개와 TTL 정책 인자 2개). 가변 tail SQL은 statement cache에 보관하지 않고 1행/128행 형태만 재사용하여 다른 저장소 쿼리의 cache를 밀어내지 않는다.
 - PostgreSQL은 고정 SQL의 `UNNEST`에 7개 typed array와 정책 인자 2개를 전달한다. 가변 `VALUES` SQL에서 발생하는 tail별 prepare/cache churn을 없앤다. 문자열/해시 데이터는 borrow하고, bounded array buffer는 chunk 간 재사용한다.
-- 모든 chunk를 하나의 transaction으로 묶고 affected-row count가 기대와 다르면 전체 rollback한다. TTL 기능은 조회·쓰기·purge API에 현재 시각과 정책을 전달하며, SQLite 0078/PostgreSQL 0113 migration은 observed_at 인덱스만 추가한다. 기존 행의 만료 backfill UPDATE는 하지 않는다.
+- 모든 chunk를 하나의 transaction으로 묶고 affected-row count가 기대와 다르면 전체 rollback한다. TTL 기능은 조회·쓰기·purge API에 현재 시각과 정책을 전달하며, SQLite 0079/PostgreSQL 0113 migration은 observed_at 인덱스만 추가한다. SQLite affinity 테이블은 0078이다. 최신 master의 0077 요청 타이밍 migration과 충돌하지 않도록 미병합 affinity migration 번호를 조정했다. 기존 행의 만료 backfill UPDATE는 하지 않는다.
 - source에서 계산한 19-key bind SQL 실행 수는 19+BEGIN/COMMIT에서 1+BEGIN/COMMIT으로 줄었다. 1,024-key는 1,024+2에서 8+2다. 이는 DB wire trace로 센 RTT가 아니며, 서로 다른 SSE 이벤트의 transaction을 합치지는 않는다.
 
 ### 공유 SSE 파싱과 입력 의미 보존
@@ -236,3 +236,9 @@ Config schema를 재생성하고 freshness 검사를 통과했다. 관련 8개 c
 조회 계획은 SQLite의 composite PK와 PostgreSQL의 pkey index/bitmap 접근을 유지했다. purge는 explicit-expiry/observed-at 인덱스로 후보를 제한한다. PostgreSQL 대상 순차 스캔을 제거한 뒤 1,000행 purge 평균은 explicit-expiry 9.356ms, retention 7.717ms였다(각 3회, production 보장값 아님). SQLite의 같은 batch 측정은 약 4.7–4.9ms였다.
 
 TTL 단계 증거는 `/tmp/affinity-ttl-verification/`에 보존한다. 여기에는 full-suite 요약, 최종 PG 로그, Clippy 로그, 민감 정보 없는 HTTP/cron QA JSON과 before/current·query-plan CSV가 포함된다. 임시 실행 스크립트와 DB는 정리했고, 테스트용 PostgreSQL schema와 프로세스가 남지 않은 것을 확인했다.
+
+## PR 최종 base 통합
+
+최신 master `9e58c7b7`의 요청 setup timing 변경과 v0.4.6 release를 통합했다. master가 사용한 SQLite 0077과의 중복을 피하기 위해 미병합 affinity table/index migration을 0078/0079로 이동했고, fresh SQLite 초기화와 config/engine/storage/scheduler/server/admin affinity 검증을 통과했다.
+
+최종 엔진 리뷰에서는 aborted SSE의 빈 prompt-cache 관찰을 방출하지 않던 base guard가 사라진 것을 발견해 복원했다. 실제 Lifecycle SSE 회귀 테스트는 guard 제거 시 `observations=0, dropped_below_threshold=2, dropped_aborted=0` 이벤트 때문에 실패했고, 복원 후 통과했다. affinity와 무관한 abort 메트릭 동작 변경을 막는 수정이다.

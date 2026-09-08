@@ -754,6 +754,7 @@ async fn build_series_response(
         query.until_unix_secs,
         bucket_secs,
         max_points_per_series,
+        "increase bucket_secs or max_points_per_series; requested range exceeds max_points_per_series * 2 buckets",
     )?;
 
     let upstreams = upstreams_for_optional_query(storage, query.upstream_ids.as_deref()).await?;
@@ -812,6 +813,13 @@ async fn build_analysis_response(
     let source = parse_source_merge(query.source.as_deref())?;
     let windows = parse_windows_or_default(query.windows.as_deref())?;
     validate_time_range(query.since_unix_secs, query.until_unix_secs)?;
+    validate_series_guardrails(
+        query.since_unix_secs,
+        query.until_unix_secs,
+        ANALYSIS_BUCKET_SECS,
+        ANALYSIS_MAX_POINTS,
+        "narrow the requested time range; analysis supports at most 20000 one-minute buckets",
+    )?;
     let upstreams = upstreams_for_optional_query(storage, query.upstream_ids.as_deref()).await?;
     validate_upstream_count(upstreams.len())?;
     let requested_upstream_ids: Vec<Uuid> = upstreams.iter().map(|u| u.id).collect();
@@ -2299,6 +2307,7 @@ fn validate_series_guardrails(
     until_unix_secs: u64,
     bucket_secs: u64,
     max_points_per_series: u32,
+    bucket_range_detail: &'static str,
 ) -> Result<(), Response> {
     if max_points_per_series > MAX_SERIES_MAX_POINTS {
         return Err(bad_request(
@@ -2310,10 +2319,7 @@ fn validate_series_guardrails(
         .saturating_sub(since_unix_secs)
         .div_ceil(bucket_secs);
     if bucket_count > u64::from(max_points_per_series).saturating_mul(2) {
-        return Err(bad_request(
-            "bucket_range_too_large",
-            "increase bucket_secs or max_points_per_series; requested range exceeds max_points_per_series * 2 buckets",
-        ));
+        return Err(bad_request("bucket_range_too_large", bucket_range_detail));
     }
     Ok(())
 }

@@ -70,6 +70,14 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .limit_reserve_ms
             .map(|value| i64_to_u64(value, "request event list limit_reserve_ms"))
             .transpose()?,
+        json_parse_ms: row.json_parse_ms,
+        cache_structure_ms: row.cache_structure_ms,
+        cache_token_key_ms: row.cache_token_key_ms,
+        cache_count_lookup_ms: row.cache_count_lookup_ms,
+        cache_tokenizer_queue_ms: row.cache_tokenizer_queue_ms,
+        cache_serialize_ms: row.cache_serialize_ms,
+        cache_tokenize_ms: row.cache_tokenize_ms,
+        prepare_signer_ms: row.prepare_signer_ms,
         bulkhead_wait_ms: row
             .bulkhead_wait_ms
             .map(|value| i64_to_u64(value, "request event list bulkhead_wait_ms"))

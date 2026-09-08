@@ -302,6 +302,23 @@ export interface DashboardUsageResponse {
   observed: boolean;
 }
 
+const requestSetupTimingSchema = z
+  .number()
+  .finite()
+  .nonnegative()
+  .nullable()
+  .optional();
+const requestSetupTimingFields = {
+  json_parse_ms: requestSetupTimingSchema,
+  cache_structure_ms: requestSetupTimingSchema,
+  cache_token_key_ms: requestSetupTimingSchema,
+  cache_count_lookup_ms: requestSetupTimingSchema,
+  cache_tokenizer_queue_ms: requestSetupTimingSchema,
+  cache_serialize_ms: requestSetupTimingSchema,
+  cache_tokenize_ms: requestSetupTimingSchema,
+  prepare_signer_ms: requestSetupTimingSchema,
+};
+
 export const RequestEventPartialSchema = z.looseObject({
   event_id: z.string().min(1),
   request_id: z.string().min(1),
@@ -354,6 +371,7 @@ export const RequestEventPartialSchema = z.looseObject({
   auth_ms: z.number().nullable().optional(),
   route_ms: z.number().nullable().optional(),
   limit_reserve_ms: z.number().nullable().optional(),
+  ...requestSetupTimingFields,
   bulkhead_wait_ms: z.number().nullable().optional(),
   dns_ms: z.number().nullable().optional(),
   connect_ms: z.number().nullable().optional(),
@@ -378,7 +396,9 @@ export const RequestEventPartialSchema = z.looseObject({
 });
 
 export const FinalRequestEventUpdateSchema = z.object({
-  event: z.custom<RequestEvent>(),
+  event: z
+    .looseObject(requestSetupTimingFields)
+    .transform((event) => event as unknown as RequestEvent),
   cursor: z.number(),
 });
 
@@ -512,6 +532,14 @@ export interface RequestEvent {
   auth_ms?: number;
   route_ms?: number;
   limit_reserve_ms?: number;
+  json_parse_ms?: number | null;
+  cache_structure_ms?: number | null;
+  cache_token_key_ms?: number | null;
+  cache_count_lookup_ms?: number | null;
+  cache_tokenizer_queue_ms?: number | null;
+  cache_serialize_ms?: number | null;
+  cache_tokenize_ms?: number | null;
+  prepare_signer_ms?: number | null;
   bulkhead_wait_ms?: number;
   dns_ms?: number;
   connect_ms?: number;

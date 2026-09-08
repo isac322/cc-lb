@@ -9,6 +9,8 @@
 //! enters at `system` (or the first message when no system block exists), while thinking, effort,
 //! and tool choice enter at `messages`. Earlier prefix tiers remain stable.
 
+use std::time::{Duration, Instant};
+
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
@@ -16,7 +18,7 @@ use serde_json::Value;
 use crate::tokenizer::PrefixTokenizer;
 mod optimized;
 
-pub(crate) use optimized::PromptCacheAnalysisExecutor;
+pub(crate) use optimized::{PromptCacheAnalysisExecutor, PromptCacheAnalysisTimings};
 
 pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "local_tiktoken_v1";
 
@@ -486,26 +488,39 @@ fn non_default_string_invalidator<'a>(
 /// upstream still serves. `lifecycle::build_cache_score_from_match` applies the ordering rule
 /// where it actually matters, when pricing a matched prefix.
 pub fn analyze_v3_prompt_cache(value: &Value, canonical_model: &str) -> V3PromptCacheAnalysis {
+    analyze_v3_prompt_cache_with_tokenize_duration(value, canonical_model).0
+}
+
+pub(super) fn analyze_v3_prompt_cache_with_tokenize_duration(
+    value: &Value,
+    canonical_model: &str,
+) -> (V3PromptCacheAnalysis, Duration) {
     let mut serialization_scratch = SerializationScratch::default();
     let Some(structural) =
         analyze_v3_prompt_cache_structure(value, canonical_model, &mut serialization_scratch)
     else {
-        return unanalyzable_prompt_cache();
+        return (unanalyzable_prompt_cache(), Duration::ZERO);
     };
+    let mut tokenization_duration = Duration::ZERO;
     let prefix_token_counts = structural
         .breakpoints
         .iter()
         .map(|breakpoint| {
-            breakpoint_prefix_token_count(
+            let (count, duration) = breakpoint_prefix_token_count(
                 canonical_model,
                 &structural.blocks,
                 breakpoint.block_index as usize,
                 &mut serialization_scratch,
-            )
+            );
+            tokenization_duration = tokenization_duration.saturating_add(duration);
+            count
         })
         .collect();
-    finish_structural_analysis(structural, prefix_token_counts)
-        .unwrap_or_else(unanalyzable_prompt_cache)
+    (
+        finish_structural_analysis(structural, prefix_token_counts)
+            .unwrap_or_else(unanalyzable_prompt_cache),
+        tokenization_duration,
+    )
 }
 
 fn analyze_v3_prompt_cache_structure<'a>(
@@ -772,13 +787,15 @@ fn breakpoint_prefix_token_count(
     blocks: &[CacheBlockRef<'_>],
     breakpoint_index: usize,
     scratch: &mut SerializationScratch,
-) -> u64 {
+) -> (u64, Duration) {
     let bytes = serialized_prefix(canonical_model, &blocks[..=breakpoint_index], scratch);
+    let tokenization_started = Instant::now();
     let token_count = std::str::from_utf8(bytes)
         .map(|text| PrefixTokenizer::global().count_tokens(text) as u64)
         .unwrap_or(0);
+    let tokenization_duration = tokenization_started.elapsed();
     scratch.clear_for_reuse();
-    token_count
+    (token_count, tokenization_duration)
 }
 
 fn serialized_prefix<'a>(

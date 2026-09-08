@@ -42,6 +42,14 @@ SELECT \
     list_auth_ms AS auth_ms, \
     list_route_ms AS route_ms, \
     list_limit_reserve_ms AS limit_reserve_ms, \
+    list_json_parse_ms AS json_parse_ms, \
+    list_cache_structure_ms AS cache_structure_ms, \
+    list_cache_token_key_ms AS cache_token_key_ms, \
+    list_cache_count_lookup_ms AS cache_count_lookup_ms, \
+    list_cache_tokenizer_queue_ms AS cache_tokenizer_queue_ms, \
+    list_cache_serialize_ms AS cache_serialize_ms, \
+    list_cache_tokenize_ms AS cache_tokenize_ms, \
+    list_prepare_signer_ms AS prepare_signer_ms, \
     list_bulkhead_wait_ms AS bulkhead_wait_ms, \
     list_dns_ms AS dns_ms, \
     list_connect_ms AS connect_ms, \
@@ -124,6 +132,14 @@ pub(super) struct ListRow {
     pub(super) auth_ms: Option<i64>,
     pub(super) route_ms: Option<i64>,
     pub(super) limit_reserve_ms: Option<i64>,
+    pub(super) json_parse_ms: Option<f64>,
+    pub(super) cache_structure_ms: Option<f64>,
+    pub(super) cache_token_key_ms: Option<f64>,
+    pub(super) cache_count_lookup_ms: Option<f64>,
+    pub(super) cache_tokenizer_queue_ms: Option<f64>,
+    pub(super) cache_serialize_ms: Option<f64>,
+    pub(super) cache_tokenize_ms: Option<f64>,
+    pub(super) prepare_signer_ms: Option<f64>,
     pub(super) bulkhead_wait_ms: Option<i64>,
     pub(super) dns_ms: Option<i64>,
     pub(super) connect_ms: Option<i64>,

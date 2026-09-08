@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchWithAuth, RequestEventPartialSchema } from './api';
+import {
+  FinalRequestEventUpdateSchema,
+  fetchWithAuth,
+  RequestEventPartialSchema,
+} from './api';
 
 vi.mock('./auth', () => ({
   clearAdminToken: vi.fn(),
@@ -147,6 +151,62 @@ describe('RequestEventPartialSchema', () => {
     const result = RequestEventPartialSchema.safeParse({
       ...baseFixture,
       thinking_budget_tokens: '18000',
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('preserves fractional, zero, missing, and nullable setup timings', () => {
+    const result = RequestEventPartialSchema.safeParse({
+      ...baseFixture,
+      json_parse_ms: 0.125,
+      cache_structure_ms: 0,
+      cache_token_key_ms: null,
+      cache_count_lookup_ms: 1.5,
+      cache_tokenizer_queue_ms: 0.25,
+      cache_serialize_ms: 2.75,
+      prepare_signer_ms: 4.5,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.cache_structure_ms).toBe(0);
+      expect(result.data.cache_tokenize_ms).toBeUndefined();
+      expect(result.data.cache_token_key_ms).toBeNull();
+    }
+  });
+
+  it('rejects negative setup timings', () => {
+    const result = RequestEventPartialSchema.safeParse({
+      ...baseFixture,
+      cache_tokenize_ms: -0.1,
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('FinalRequestEventUpdateSchema', () => {
+  it('validates setup timings on final SSE rows', () => {
+    const result = FinalRequestEventUpdateSchema.safeParse({
+      event: {
+        request_id: 'r',
+        status: 200,
+        duration_ms: 10,
+        json_parse_ms: 0.125,
+        cache_tokenize_ms: 0,
+      },
+      cursor: 1,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects non-finite final setup timings', () => {
+    const result = FinalRequestEventUpdateSchema.safeParse({
+      event: {
+        request_id: 'r',
+        status: 200,
+        duration_ms: 10,
+        json_parse_ms: Number.POSITIVE_INFINITY,
+      },
+      cursor: 1,
     });
     expect(result.success).toBe(false);
   });

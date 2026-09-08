@@ -13,6 +13,14 @@ struct ListPayload {
     auth_ms: Option<i64>,
     route_ms: Option<i64>,
     limit_reserve_ms: Option<i64>,
+    json_parse_ms: Option<f64>,
+    cache_structure_ms: Option<f64>,
+    cache_token_key_ms: Option<f64>,
+    cache_count_lookup_ms: Option<f64>,
+    cache_tokenizer_queue_ms: Option<f64>,
+    cache_serialize_ms: Option<f64>,
+    cache_tokenize_ms: Option<f64>,
+    prepare_signer_ms: Option<f64>,
     bulkhead_wait_ms: Option<i64>,
     dns_ms: Option<i64>,
     connect_ms: Option<i64>,
@@ -105,6 +113,14 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .limit_reserve_ms
             .map(|value| i64_to_u64(value, "request event list limit_reserve_ms"))
             .transpose()?,
+        json_parse_ms: payload.json_parse_ms,
+        cache_structure_ms: payload.cache_structure_ms,
+        cache_token_key_ms: payload.cache_token_key_ms,
+        cache_count_lookup_ms: payload.cache_count_lookup_ms,
+        cache_tokenizer_queue_ms: payload.cache_tokenizer_queue_ms,
+        cache_serialize_ms: payload.cache_serialize_ms,
+        cache_tokenize_ms: payload.cache_tokenize_ms,
+        prepare_signer_ms: payload.prepare_signer_ms,
         bulkhead_wait_ms: payload
             .bulkhead_wait_ms
             .map(|value| i64_to_u64(value, "request event list bulkhead_wait_ms"))

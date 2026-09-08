@@ -122,6 +122,69 @@ describe('buildStageDetails', () => {
     const stages = buildStageDetails(ev({ duration_ms: 500, auth_ms: 10 }));
     expect(stages.map((s) => s.key)).not.toContain('setup_overhead');
   });
+
+  it('replaces legacy setup overhead with eight measured stages and Other setup', () => {
+    const stages = buildStageDetails(
+      ev({
+        proxy_setup_ms: 20,
+        auth_ms: 2,
+        route_ms: 1,
+        limit_reserve_ms: 1,
+        json_parse_ms: 0.125,
+        cache_tokenizer_queue_ms: 0.25,
+        cache_structure_ms: 0.5,
+        cache_serialize_ms: 1,
+        cache_token_key_ms: 1.5,
+        cache_count_lookup_ms: 2,
+        cache_tokenize_ms: 0,
+        prepare_signer_ms: 3,
+      }),
+    );
+    const internalPre = stages.filter(
+      (stage) => stage.group === 'internal_pre',
+    );
+
+    expect(internalPre.map((stage) => stage.key)).toEqual([
+      'json_parse_ms',
+      'cache_tokenizer_queue_ms',
+      'cache_structure_ms',
+      'cache_serialize_ms',
+      'cache_token_key_ms',
+      'cache_count_lookup_ms',
+      'cache_tokenize_ms',
+      'auth',
+      'route',
+      'limit_reserve',
+      'prepare_signer_ms',
+      'other_setup',
+    ]);
+    expect(stages.find((stage) => stage.key === 'cache_tokenize_ms')?.ms).toBe(
+      0,
+    );
+    expect(stages.find((stage) => stage.key === 'other_setup')?.ms).toBe(7.625);
+    expect(stages.map((stage) => stage.key)).not.toContain('setup_overhead');
+  });
+
+  it('keeps completed setup timings on partial rows without inventing missing stages', () => {
+    const stages = buildStageDetails({
+      event_id: 'evt-partial',
+      request_id: 'req-partial',
+      ts: 1,
+      ts_ms: 1000,
+      last_update_ms: 1001,
+      elapsed_ms: 1,
+      stream: false,
+      json_parse_ms: 0,
+      cache_structure_ms: 0.25,
+      _phase: 'partial',
+    });
+
+    expect(stages.map((stage) => stage.key)).toEqual([
+      'json_parse_ms',
+      'cache_structure_ms',
+    ]);
+    expect(stages[0]?.ms).toBe(0);
+  });
 });
 
 describe('buildSseMarkers', () => {
@@ -159,6 +222,23 @@ describe('buildSseMarkers', () => {
     );
     const first = markers.find((m) => m.key === 'first_delta')!;
     expect(first.absMs).toBe(2 + (235 - 2) + 500 + 20);
+  });
+
+  it('keeps SSE marker offsets anchored to proxy_setup_ms for new rows', () => {
+    const markers = buildSseMarkers(
+      ev({
+        proxy_setup_ms: 20,
+        auth_ms: 2,
+        route_ms: 1,
+        limit_reserve_ms: 1,
+        json_parse_ms: 4,
+        cache_structure_ms: 20,
+        upstream_ttfb_ms: 500,
+        stream_first_content_delta_ms: 20,
+      }),
+    );
+    const first = markers.find((marker) => marker.key === 'first_delta');
+    expect(first?.absMs).toBe(20 + 500 + 20);
   });
 });
 
@@ -252,6 +332,31 @@ describe('LatencyTimeline', () => {
     expect(screen.getByText('Internal post')).toBeTruthy();
     expect(screen.getByText('SSE markers')).toBeTruthy();
     expect(screen.queryByText('Observability post')).toBeNull();
+  });
+
+  it('keeps zero and fractional setup details without overlapping tiny segments', () => {
+    const event = ev({
+      duration_ms: 1000,
+      proxy_setup_ms: 20,
+      auth_ms: 2,
+      route_ms: 1,
+      limit_reserve_ms: 1,
+      json_parse_ms: 0,
+      cache_structure_ms: 0.125,
+      prepare_signer_ms: 3,
+    });
+    render(<LatencyTimeline event={event} />);
+
+    expect(screen.getByText('0.125 ms')).toBeTruthy();
+    expect(screen.getByText('0 ms')).toBeTruthy();
+    expect(screen.queryByTestId('latency-segment-json_parse_ms')).toBeNull();
+    expect(
+      screen.queryByTestId('latency-segment-cache_structure_ms'),
+    ).toBeNull();
+    expect(
+      screen.getByTestId('latency-segment-prepare_signer_ms'),
+    ).toBeTruthy();
+    expect(screen.getByText('20 ms · 2%')).toBeTruthy();
   });
 
   it('keeps the latency region height reserved while detail hydrates', () => {

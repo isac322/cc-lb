@@ -15,6 +15,7 @@
 - PostgreSQL과 SQLite가 동일 결과를 반환한다.
 - `/analysis`는 요청한 upstream만 storage query에서 읽는다.
 - Frontend series freshness 30초와 analysis 120초 poll을 유지하고, 두 query key는 absolute clock 대신 stable range identity를 사용한다.
+- `/analysis`는 고정 60초 bucket 기준 20,000개를 초과하는 요청 범위를 storage 조회 전에 `bucket_range_too_large`로 거부한다.
 
 ## 저장소·도메인 QA
 
@@ -39,6 +40,8 @@
 - [x] Window별 계산이 원본 row를 deep clone하지 않는다.
 - [x] Analysis 응답의 utilization, deficit, observation 수와 source가 기존 의미를 유지한다.
 - [x] Backend 상태를 변경한 뒤 다음 analysis refresh에서 값이 갱신된다.
+- [x] `/analysis`는 정확히 20,000개 bucket 범위를 허용하고 20,001개부터 HTTP 400을 반환한다.
+- [x] UI 지원 범위 1h/6h/24h/7d는 guardrail에 걸리지 않는다.
 
 ## API · 브라우저 QA
 

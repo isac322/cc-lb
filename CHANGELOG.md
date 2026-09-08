@@ -10,22 +10,33 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Anthropic native web-search history now keeps exact upstream affinity across cache misses and quota-driven routing changes. cc-lb persists only SHA-256 digests of opaque `encrypted_content`, fails closed when affinity is unknown, conflicting, unavailable, or cannot be persisted, and gates streaming search-result events until the mapping is durable.
+- Upstream-affinity persistence now uses atomic bounded batches, with fixed-shape PostgreSQL array inserts and bounded SQLite statement caching. SSE observers share parsed events, affinity matching avoids quadratic key scans, and JSON traversal skips redundant work while preserving routing, replay, and fail-closed delivery semantics. Storage latency and batch-size metrics expose the remaining persistence cost.
+
+## [0.4.6] - 2026-09-08
+
+### Added
+
+- Anthropic OAuth credentials now persist refresh-token expiry reported by the token endpoint, expose it through the admin status API, and show the remaining lifetime on upstream detail cards while keeping existing credentials compatible.
+
+### Fixed
+
 - Admin charts and request lists retain successful data during background refreshes instead of replacing it with skeletons. Rolling quota queries now keep stable cache keys and update their time bounds when responses arrive; range changes preserve the displayed chart until replacement data is ready.
 - Histogram and detail queries no longer reuse another filter or entity's data. Query cancellation also preserves the existing 30-second request timeout.
 - Admin editing sessions now retain their starting revision, isolate principal drafts, and preserve unsaved changes through external updates. Shared locale, timezone, and theme preferences update all mounted consumers.
 - Live-event reconnection uses the current filters, keeps connections through short tab switches, and excludes intentional pauses from failure tracking. Query subscriptions and memoized request rows avoid unchanged-data rendering work.
 - Command palette actions survive lazy route loading, plugin upload callbacks survive modal transitions, and Audit exposes only supported principal/time filters. Unsupported in-app admin-token rotation is replaced with accurate restart guidance.
 - Request-detail timelines retain live data while final details load, session-detail errors retain mobile back navigation, and previously omitted state-management tests are collected.
+- Soft-deleted upstream and principal names can be reused with new resource IDs while active-name uniqueness and historical records remain intact.
 - PostgreSQL principal-cost aggregation now reads materialized cost columns from a covering index instead of decoding request payloads, while a compatibility trigger protects rolling deployments.
 - PostgreSQL read-path migrations now allow 90 seconds for backfills and index builds, and can be replayed after a rollback rewinds their migration registry entries.
 - Principal usage totals now use static filtered and unfiltered cost queries backed by covering indexes, skip dense empty buckets, and coalesce identical reads behind a two-second cache.
 - Subscription quota series and provider-lot calculations now bound work to the requested range while preserving left-anchor state, and quota analysis filters usage rollups in storage with a stable 120-second query key.
+- Subscription quota analysis now rejects caller-supplied ranges above 20,000 one-minute buckets before storage reads, while all supported 1h/6h/24h/7d ranges remain unchanged.
 - Overview requests principal totals without dense time-series buckets and caps pooled-quota chart points while preserving bucket peaks and exact latest values. Pool-history defaults remain unchanged.
 - Rollup-backed Overview polling now revalidates with weak ETags derived from the persisted rollup checkpoint before response construction; live principal-cost reads remain uncached.
 - Warmup history and cache keepalive session lists now load only when their drawers open, eliminating hidden detail-page reads.
 - Prompt-cache request analysis now reuses exact token-prefix counts, incrementally tokenizes nested breakpoints on a bounded blocking executor, and exposes low-cardinality Prometheus work metrics. Cache-control hashes, token estimates, routing, observations, and upstream request bytes remain unchanged; Request Log timelines exclude post-response observability work.
-- Anthropic native web-search history now keeps exact upstream affinity across cache misses and quota-driven routing changes. cc-lb persists only SHA-256 digests of opaque `encrypted_content`, fails closed when affinity is unknown, conflicting, unavailable, or cannot be persisted, and gates streaming search-result events until the mapping is durable.
-- Upstream-affinity persistence now uses atomic bounded batches, with fixed-shape PostgreSQL array inserts and bounded SQLite statement caching. SSE observers share parsed events, affinity matching avoids quadratic key scans, and JSON traversal skips redundant work while preserving routing, replay, and fail-closed delivery semantics. Storage latency and batch-size metrics expose the remaining persistence cost.
 
 ## [0.4.5] - 2026-08-24
 

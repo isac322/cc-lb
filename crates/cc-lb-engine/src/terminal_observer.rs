@@ -30,7 +30,7 @@ use std::time::Instant;
 
 use cc_lb_control::RequestEventBus;
 use cc_lb_domain::InternalError;
-use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
+use cc_lb_lifecycle::{LifecycleEvent, RequestSetupTimings, TerminationReason};
 use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
 use uuid::Uuid;
@@ -80,6 +80,7 @@ struct TerminalState {
     limit_reconcile_ms: Option<u64>,
     observability_post_ms: Option<u64>,
     proxy_setup_ms: Option<u64>,
+    setup_timings: RequestSetupTimings,
     upstream_body_ms: Option<u64>,
     first_body_chunk_ms: Option<u64>,
 }
@@ -132,6 +133,10 @@ impl LifecycleContext {
         state.proxy_setup_ms = proxy_setup_ms;
         state.upstream_body_ms = upstream_body_ms;
         state.first_body_chunk_ms = first_body_chunk_ms;
+    }
+
+    pub(crate) fn set_setup_timings(&self, timings: RequestSetupTimings) {
+        self.lock_state().setup_timings = timings;
     }
 
     pub(crate) fn set_internal_errors(&self, errors: Vec<InternalError>) {
@@ -251,6 +256,7 @@ impl Inner {
                 limit_reconcile_ms: state.limit_reconcile_ms,
                 observability_post_ms: state.observability_post_ms,
                 proxy_setup_ms: state.proxy_setup_ms,
+                setup_timings: state.setup_timings,
                 upstream_body_ms: state.upstream_body_ms,
                 first_body_chunk_ms: state.first_body_chunk_ms,
                 internal_errors: state.internal_errors.clone(),
@@ -363,6 +369,48 @@ mod tests {
         let (_id, reason, _status) =
             expect_terminated(rx.recv().await.expect("drop fallback delivered"));
         assert!(matches!(reason, TerminationReason::Dropped));
+    }
+
+    #[tokio::test]
+    async fn finish_and_drop_preserve_completed_setup_timings() {
+        for finish_explicitly in [true, false] {
+            let bus = Arc::new(InMemoryBus::new());
+            let mut rx = subscribe(&bus);
+            let clock: ClockHandle = Arc::new(SystemClock);
+            {
+                let observer = LifecycleContext::new(
+                    "req-setup-timings".to_owned(),
+                    bus.clone() as Arc<dyn RequestEventBus>,
+                    &clock,
+                );
+                observer.set_setup_timings(RequestSetupTimings {
+                    json_parse_ms: Some(0.125),
+                    cache_structure_ms: Some(0.25),
+                    cache_token_key_ms: Some(0.375),
+                    cache_count_lookup_ms: Some(0.5),
+                    cache_tokenizer_queue_ms: Some(0.625),
+                    cache_serialize_ms: Some(0.75),
+                    cache_tokenize_ms: Some(0.0),
+                    prepare_signer_ms: Some(1.25),
+                });
+                if finish_explicitly {
+                    observer.finish();
+                }
+            }
+
+            let event = rx.recv().await.expect("terminal event delivered");
+            let LifecycleEvent::RequestTerminated { setup_timings, .. } = event else {
+                panic!("expected request termination");
+            };
+            assert_eq!(setup_timings.json_parse_ms, Some(0.125));
+            assert_eq!(setup_timings.cache_structure_ms, Some(0.25));
+            assert_eq!(setup_timings.cache_token_key_ms, Some(0.375));
+            assert_eq!(setup_timings.cache_count_lookup_ms, Some(0.5));
+            assert_eq!(setup_timings.cache_tokenizer_queue_ms, Some(0.625));
+            assert_eq!(setup_timings.cache_serialize_ms, Some(0.75));
+            assert_eq!(setup_timings.cache_tokenize_ms, Some(0.0));
+            assert_eq!(setup_timings.prepare_signer_ms, Some(1.25));
+        }
     }
 
     #[tokio::test]

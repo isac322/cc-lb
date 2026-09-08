@@ -61,8 +61,8 @@ use crate::error_normalizer::ErrorNormalizer;
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
-    PromptCacheAnalysisExecutor, V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis,
-    V3PromptCacheBlockSource, analyze_v3_prompt_cache,
+    PromptCacheAnalysisExecutor, PromptCacheAnalysisTimings, V3_TOKEN_ESTIMATE_SOURCE,
+    V3PromptCacheAnalysis, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
 };
 use crate::request_classification::classify_client_request_kind;
 use crate::request_context::RequestContext;
@@ -2243,6 +2243,10 @@ impl Lifecycle {
         let observer_from_ext = req.extensions().get::<LifecycleContext>().cloned();
         let (mut ctx, body_too_large) = self.parse(req);
         let body_view = RequestBodyView::new(&ctx.body_bytes);
+        let mut setup_timings = cc_lb_lifecycle::RequestSetupTimings {
+            json_parse_ms: Some(body_view.json_parse_ms()),
+            ..cc_lb_lifecycle::RequestSetupTimings::default()
+        };
         let handle_span = tracing::Span::current();
         handle_span.record("cc_lb.request.id", ctx.request_id.as_str());
         handle_span.record("http.request.method", ctx.method.as_str());
@@ -2261,6 +2265,7 @@ impl Lifecycle {
         if let Some(o) = observer.as_ref() {
             o.emit_request_started(body_view.stream());
         }
+        store_setup_timings(observer.as_ref(), setup_timings);
         if let Some(response) = body_too_large {
             if let Some(o) = observer.as_ref() {
                 let cap = body_cap_for_path(&self.config, &ctx.path);
@@ -2299,11 +2304,13 @@ impl Lifecycle {
                     .map(canonical_model_id)
                     .unwrap_or_default()
                     .to_owned();
-                Some(
-                    self.prompt_cache_analysis_executor
-                        .analyze(value, canonical_model, prompt_cache_token_scope)
-                        .await,
-                )
+                let output = self
+                    .prompt_cache_analysis_executor
+                    .analyze(value, canonical_model, prompt_cache_token_scope)
+                    .await;
+                apply_prompt_cache_timings(&mut setup_timings, output.timings);
+                store_setup_timings(observer.as_ref(), setup_timings);
+                Some(output.analysis)
             }
             None => None,
         };
@@ -2819,11 +2826,15 @@ impl Lifecycle {
             success.api_key.clone().unwrap_or_default(),
             router_chosen_upstream_name.clone(),
         );
-        let signer = match signer_factory
+        let prepare_signer_started = Instant::now();
+        let signer_result = signer_factory
             .build(&route.upstream)
             .instrument(tracing::info_span!("proxy.prepare_signer"))
-            .await
-        {
+            .await;
+        setup_timings.prepare_signer_ms =
+            Some(prepare_signer_started.elapsed().as_secs_f64() * 1_000.0);
+        store_setup_timings(observer.as_ref(), setup_timings);
+        let signer = match signer_result {
             Ok(signer) => signer,
             Err(source) => {
                 if let Some(o) = observer.as_ref() {
@@ -5113,6 +5124,7 @@ impl Lifecycle {
                 && status == StatusCode::OK
                 && prompt_cache_observations_buffered
                 && !prompt_cache_observations_emitted
+                && !prompt_cache_decode.observations.is_empty()
                 && let Some(o) = observer.as_ref()
                 && let Some(context) = prompt_cache_observation_context.as_ref()
             {
@@ -5712,6 +5724,27 @@ fn system_time_to_unix_millis(value: SystemTime) -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
+fn apply_prompt_cache_timings(
+    setup: &mut cc_lb_lifecycle::RequestSetupTimings,
+    prompt_cache: PromptCacheAnalysisTimings,
+) {
+    setup.cache_structure_ms = prompt_cache.cache_structure_ms;
+    setup.cache_token_key_ms = prompt_cache.cache_token_key_ms;
+    setup.cache_count_lookup_ms = prompt_cache.cache_count_lookup_ms;
+    setup.cache_tokenizer_queue_ms = prompt_cache.cache_tokenizer_queue_ms;
+    setup.cache_serialize_ms = prompt_cache.cache_serialize_ms;
+    setup.cache_tokenize_ms = prompt_cache.cache_tokenize_ms;
+}
+
+fn store_setup_timings(
+    observer: Option<&LifecycleContext>,
+    timings: cc_lb_lifecycle::RequestSetupTimings,
+) {
+    if let Some(observer) = observer {
+        observer.set_setup_timings(timings);
+    }
+}
+
 // Shared parse of the request body inside `handle`. Every downstream consumer
 // (stream / model / max_tokens / cache metadata) reads through this view so
 // the body JSON is parsed exactly once per request instead of up to 7 times.
@@ -5721,12 +5754,17 @@ fn system_time_to_unix_millis(value: SystemTime) -> u64 {
 // touching the serialization side (see `docs/adr/0002-json-library-strategy.md`).
 struct RequestBodyView {
     parsed: Result<Arc<Value>, sonic_rs::Error>,
+    json_parse_ms: f64,
 }
 
 impl RequestBodyView {
     fn new(body: &Bytes) -> Self {
+        let started = Instant::now();
+        let parsed = sonic_rs::from_slice::<Value>(body);
+        let json_parse_ms = started.elapsed().as_secs_f64() * 1_000.0;
         Self {
-            parsed: sonic_rs::from_slice::<Value>(body).map(Arc::new),
+            parsed: parsed.map(Arc::new),
+            json_parse_ms,
         }
     }
 
@@ -5740,6 +5778,10 @@ impl RequestBodyView {
 
     fn is_valid_json(&self) -> bool {
         self.parsed.is_ok()
+    }
+
+    fn json_parse_ms(&self) -> f64 {
+        self.json_parse_ms
     }
 
     fn stream(&self) -> bool {

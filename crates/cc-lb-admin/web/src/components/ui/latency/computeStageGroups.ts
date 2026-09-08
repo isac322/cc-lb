@@ -10,12 +10,50 @@ export interface StageGroups {
   unaccounted: number;
 }
 
-// `proxy_setup_ms` wraps handle-entry → attempt-entry and includes
-// auth + route + limit_reserve + ctx build. `setup_overhead` is the
-// residual inside that wrapper not attributed to a named sub-stage.
+export const CACHE_SETUP_TIMING_STAGES = [
+  ['json_parse_ms', 'JSON parse'],
+  ['cache_tokenizer_queue_ms', 'Tokenizer queue'],
+  ['cache_structure_ms', 'Cache structure'],
+  ['cache_serialize_ms', 'Cache serialize'],
+  ['cache_token_key_ms', 'Cache token key'],
+  ['cache_count_lookup_ms', 'Cache count lookup'],
+  ['cache_tokenize_ms', 'Cache tokenize'],
+] as const;
+
+export const SETUP_TIMING_STAGES = [
+  ...CACHE_SETUP_TIMING_STAGES,
+  ['prepare_signer_ms', 'Prepare signer'],
+] as const;
+
+export function hasSetupTimingBreakdown(e: RequestEventWithPhase): boolean {
+  return SETUP_TIMING_STAGES.some(([field]) => e[field] != null);
+}
+
+export function setupTimingTotal(e: RequestEventWithPhase): number {
+  return SETUP_TIMING_STAGES.reduce(
+    (total, [field]) => total + (e[field] ?? 0),
+    0,
+  );
+}
+
+export function deriveOtherSetup(e: RequestEventWithPhase): number {
+  if (e._phase === 'partial' || e.proxy_setup_ms == null) return 0;
+  return Math.max(
+    0,
+    e.proxy_setup_ms -
+      (e.auth_ms ?? 0) -
+      (e.route_ms ?? 0) -
+      (e.limit_reserve_ms ?? 0) -
+      setupTimingTotal(e),
+  );
+}
+
+// `proxy_setup_ms` wraps handle-entry → attempt-entry and includes auth,
+// route, limit reservation, the measured setup stages, and an unmeasured
+// residual. This helper returns the whole residual so group totals and SSE
+// marker offsets retain their existing meaning.
 export function deriveSetupOverhead(e: RequestEventWithPhase): number {
-  if (e._phase === 'partial') return 0;
-  if (e.proxy_setup_ms == null) return 0;
+  if (e._phase === 'partial' || e.proxy_setup_ms == null) return 0;
   return Math.max(
     0,
     e.proxy_setup_ms -

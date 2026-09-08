@@ -120,12 +120,17 @@ Programmatic seed alt: `UpstreamSubscriptionQuotaStore::put_subscription_quota[_
 |---|---|---|---|
 | `GET /admin/v1/subscription-quotas/latest` | — | windows=all, source=merged, upstream_ids=all-active-oauth, max_staleness=routing cfg | `invalid_source` / `invalid_window` / `invalid_upstream_id` |
 | `…/series` | `since_unix_secs`,`until_unix_secs` | windows=5h,7d; bucket_secs=300(min1); max_points=1000 | `invalid_time_range` (until≤since); `max_points_per_series_too_large` (>10000); `bucket_range_too_large` ((until−since)/bucket > max*2); `too_many_upstreams` (>50) |
-| `…/analysis` | `since_unix_secs`,`until_unix_secs` | windows=5h,7d; source=merged | `invalid_time_range`; `too_many_upstreams` |
+| `…/analysis` | `since_unix_secs`,`until_unix_secs` | windows=5h,7d; source=merged; bucket_secs=60(fixed); max_points=10000(fixed) | `invalid_time_range`; `bucket_range_too_large` (>20,000 buckets / 1,200,000s); `too_many_upstreams` |
 | `…/aggregate` | — | windows=5h,7d; source=merged | source/window/upstream parse only |
 | `…/pool-history` | — | windows=5h,7d(only these two); since=now−6h; until=now | `unknown pool history window`; `pool history only supports 5h and 7d` (plain-text 400) |
 - source-merge: `merged`(default)|`header`|`api`. ETag `W/"v1:<max_observed_at_millis>"` + `If-None-Match`→304 on latest/series/analysis/aggregate (NOT pool-history); omitting `upstream_ids` skips the ETag SQL.
 - Response skeletons + full field lists: see per-endpoint curl examples appended in §3.2a of the source findings (latest.windows[].{state,utilization,status,resets_at,age_secs}; series.series[].{buckets[].{bucket_start_unix_secs,utilization_last}, markers[].{kind:reset|gap}}; analysis.upstreams[].windows[].{current_utilization,actual_account_burn,proxy_projected_burn,deficit,caveats}; aggregate.windows[].{utilization,confidence,provider_lots[],caveats}; pool-history.windows[].{latest,series[]}).
 - Reproduce each: `curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:52252/admin/v1/subscription-quotas/<ep>?upstream_ids=<UID>&windows=5h&source=merged[&since_unix_secs=..&until_unix_secs=..&bucket_secs=..]" | jq`.
+
+### 3.2b Analysis range guardrail
+- **Point-in-time:** 1h/6h/24h/7d and the exact 1,200,000-second boundary return HTTP 200; 1,200,001 seconds returns HTTP 400 with `error:"bucket_range_too_large"`.
+- **Reproduce:** request `/admin/v1/subscription-quotas/analysis?since_unix_secs=1&until_unix_secs=1200002` on both v1 and legacy paths and assert the typed 400 response.
+- **Invariant:** validation runs before rollup or checkpoint storage reads, so an extreme caller-supplied range cannot start a minute-bucket walk.
 
 ### 3.3 Frontend surfaces — execute the 8 browser cases in `subscription-quota-frontend.md` (TC-1 detail range windowing [gating, FIXED], TC-2 snapshot cards, TC-3 deficit/analysis, TC-4 empty/loading, TC-5 Overview pool, TC-6 sidebar, TC-7 ApiUsageCard, TC-8 QuotaObservedAt).
 
@@ -236,8 +241,12 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
     ```
   - **Expected observable result:** Both endpoints return `200`. The `5h` series contains a `markers[]` entry with `kind:"reset"`, its last utilization is exactly `0.05`, and `/latest` shows `status:"allowed"` with the new reset-cycle utilization. No leading `0%` bucket is fabricated before the left anchor.
 
+
+- **T14 analysis range rejection/recovery** — INITIAL: request a supported 7d range and observe HTTP 200. MUTATION: widen the same request to 1,200,001 seconds and observe HTTP 400 `bucket_range_too_large`. EXPECTED: restore the range to the exact 1,200,000-second boundary and observe HTTP 200 again; no storage mutation or service restart is required.
+
 ## 5. Automated-test coverage map (leverage; focus manual QA on gaps)
 - Endpoint contracts + series windowing/anchor/no-zeroes: `crates/cc-lb-admin/tests/subscription_quotas.rs` (snapshot + some multi-observation transition, including Fable tests).
+- Analysis range boundary and v1/legacy rejection: `crates/cc-lb-admin/tests/subscription_quotas.rs` (`subscription_quota_analysis_enforces_bucket_range_guardrail`).
 - Checkpoint dedup/fingerprint + range/anchor: `crates/cc-lb-storage-api/tests/subscription_quota_checkpoint.rs`, `crates/cc-lb-storage-conformance/tests/scenarios/upstream_subscription_quota_store.rs` (transition-heavy, including Fable storage conformance).
 - Cleanup/backfill idempotency + writer-continues-after-drop: `crates/cc-lb-server/tests/subscription_quota_checkpoint_{cleanup,backfill,writer}.rs`.
 - Storage roundtrips: `crates/cc-lb-storage-sqlite/tests/storage_roundtrips_sqlite.rs` (+ postgres).
@@ -252,6 +261,7 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
 | Case | Layer(s) | Result | Evidence |
 |------|----------|--------|----------|
 | §3.2 endpoint contracts | API | PASS | /series + /latest HTTP 200 with correct payloads during T1/T4 |
+| **T14 analysis range rejection/recovery** | API | **PASS** | Isolated server: 7d `200` → 1,200,001s `400 bucket_range_too_large` → 1,200,000s `200` |
 | §3.1 storage invariants | storage | PASS | +1 checkpoint only on semantic change; latest guarded by observed_at>= |
 | §3.3 TC-1..8 (frontend) | UI | PASS (prior run) | subscription-quota-frontend.md verdict PASS |
 | **T1 utilization ↑** | storage→API | **PASS** | /series last bucket `utilization_last` 0.82→0.917; checkpoints 5402→5403 (+1) |
