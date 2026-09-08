@@ -188,6 +188,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          target: distroless
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le
           push: true
           provenance: false

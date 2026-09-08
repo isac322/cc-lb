@@ -48,17 +48,20 @@ jobs:
           endpoint: tcp://buildkit.example-build.svc.cluster.local:1234
 
       # Build every release target on Dockerfile changes so cross-compilation
-      # failures are caught before publication.
-      - name: Build all release targets
+      # failures are caught before publication. Build each 64-bit target and
+      # secondary targets separately so concurrent LTO memory stays safely
+      # within the 10Gi daemon limit.
+      - name: Build linux/arm64 release target
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le
+          platforms: linux/arm64
           target: builder
           outputs: type=cacheonly
           build-args: |
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            CARGO_PROFILE_RELEASE_LTO=thin
             SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
             SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
             SCCACHE_REGION=${{ env.SCCACHE_REGION }}
@@ -68,20 +71,78 @@ jobs:
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
 
-      - name: Build image and smoke-test binary
+      - name: Build linux/amd64 release target
         uses: docker/build-push-action@v7
         with:
           context: .
-          target: smoke
+          platforms: linux/amd64
+          target: builder
           outputs: type=cacheonly
           build-args: |
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            CARGO_PROFILE_RELEASE_LTO=thin
             SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
             SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
             SCCACHE_REGION=${{ env.SCCACHE_REGION }}
             SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
             SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
           secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      - name: Build linux/arm/v7 release target
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm/v7
+          target: builder
+          outputs: type=cacheonly
+          build-args: |
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            CARGO_PROFILE_RELEASE_LTO=thin
+            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
+            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
+            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
+            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
+            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      - name: Build linux/ppc64le release target
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/ppc64le
+          target: builder
+          outputs: type=cacheonly
+          build-args: |
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            CARGO_PROFILE_RELEASE_LTO=thin
+            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
+            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
+            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
+            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
+            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+      - name: Build image and smoke-test binary
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          target: smoke
+          outputs: type=cacheonly
+          build-args: |
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            CARGO_PROFILE_RELEASE_LTO=thin
+            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
+            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
+            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
+            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
+            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY

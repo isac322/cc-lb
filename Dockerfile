@@ -102,6 +102,7 @@ ARG SCCACHE_REGION=""
 ARG SCCACHE_S3_USE_SSL=""
 ARG REQUIRE_SCCACHE="0"
 ARG SCCACHE_S3_KEY_PREFIX=""
+ARG CARGO_PROFILE_RELEASE_LTO=""
 
 COPY . .
 
@@ -140,6 +141,9 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
 # cc-lb-runtime-wasmtime/build.rs would otherwise force a wasm32 fixture build.
 export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
 export GIT_SHA="${GIT_SHA}"
+if [ -n "${CARGO_PROFILE_RELEASE_LTO:-}" ]; then
+  export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO}"
+fi
 if [ "${SKIP_SPA}" = "1" ]; then
   rm -rf /src/crates/cc-lb-admin/web/dist
   export CC_LB_ADMIN_SKIP_SPA=1
@@ -222,6 +226,16 @@ echo 'nonroot:x:65532:65532:nonroot:/home/nonroot:/sbin/nologin' > /out/etc/pass
 echo 'nonroot:x:65532:' > /out/etc/group
 EOF
 
+# ---- CI smoke: run the static binary on BuildKit without a local Docker daemon ----
+FROM alpine:3.22 AS smoke
+ARG EXPECTED_VERSION=
+COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
+RUN /usr/local/bin/cc-lb --version && \
+    if [ -n "$EXPECTED_VERSION" ]; then \
+      /usr/local/bin/cc-lb --version | grep -Fq "$EXPECTED_VERSION"; \
+    fi
+
 # ---- Final: scratch (opt-in via `--target runtime-scratch`; smallest image) ----
 FROM scratch AS runtime-scratch
 COPY --link --from=builder /out/etc/passwd /etc/passwd
@@ -243,13 +257,3 @@ USER 65532:65532
 EXPOSE 8080 9090 9091
 ENTRYPOINT ["/usr/local/bin/cc-lb"]
 CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
-
-# ---- CI smoke: run the static binary on BuildKit without a local Docker daemon ----
-FROM alpine:3.22 AS smoke
-ARG EXPECTED_VERSION=
-COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
-SHELL ["/bin/ash", "-o", "pipefail", "-c"]
-RUN /usr/local/bin/cc-lb --version && \
-    if [ -n "$EXPECTED_VERSION" ]; then \
-      /usr/local/bin/cc-lb --version | grep -Fq "$EXPECTED_VERSION"; \
-    fi
