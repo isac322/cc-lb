@@ -39,15 +39,49 @@ runs:
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
         fi
 
+    - name: Validate sccache compiler wrapper
+      id: sccache-health
+      if: ${{ steps.sccache-probe.outputs.available == 'true' || steps.sccache-setup.outcome == 'success' }}
+      shell: bash
+      run: |
+        sccache_path="$(command -v sccache || true)"
+        rustc_path="$(command -v rustc || true)"
+
+        if [ -n "$sccache_path" ] && [ -n "$rustc_path" ]; then
+          "$sccache_path" --stop-server >/dev/null 2>&1 || true
+          if probe_output="$("$sccache_path" "$rustc_path" -vV 2>&1)"; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "path=$sccache_path" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        else
+          probe_output="sccache or rustc was not found on PATH"
+        fi
+
+        echo "available=false" >> "$GITHUB_OUTPUT"
+        cleanup="no sccache server was running"
+        if [ -n "$sccache_path" ]; then
+          if "$sccache_path" --stop-server >/dev/null 2>&1; then
+            cleanup="stopped the sccache server"
+          else
+            cleanup="could not stop the sccache server"
+          fi
+        fi
+
+        probe_output="${probe_output//'%'/'%25'}"
+        probe_output="${probe_output//$'\r'/'%0D'}"
+        probe_output="${probe_output//$'\n'/'%0A'}"
+        echo "::warning::sccache compiler-wrapper probe failed and $cleanup; continuing with uncached rustc. Error: $probe_output"
+
     # No actions/cache round-trip: sccache stores into the versitygw COSI
     # bucket (SCCACHE_BUCKET/ENDPOINT + AWS creds set on the runner) so every
     # runner across nodes shares one content-addressed compiler cache. Cargo registry
     # and git downloads persist separately in the runner's node-local CARGO_HOME.
     - name: Export Rust compiler cache env
-      if: ${{ steps.sccache-probe.outputs.available == 'true' || steps.sccache-setup.outcome == 'success' }}
+      if: ${{ steps.sccache-health.outputs.available == 'true' }}
       shell: bash
       run: |
-        echo "SCCACHE_PATH=$(command -v sccache)" >> "$GITHUB_ENV"
+        echo "SCCACHE_PATH=${{ steps.sccache-health.outputs.path }}" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 

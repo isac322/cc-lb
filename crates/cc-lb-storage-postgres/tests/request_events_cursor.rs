@@ -51,6 +51,198 @@ fn request_event_history_uses_materialized_cursor_columns_and_index() {
         .expect("postgres request-event materialized cursor regression");
 }
 
+#[test]
+fn request_event_principal_cost_shapes_use_covering_indexes() {
+    let Some(url) = postgres_url() else {
+        eprintln!(
+            "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
+        );
+        return;
+    };
+
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async move {
+            let fixture = Fixture::create(&url).await?;
+            let result = assert_principal_cost_shapes_use_covering_indexes(&fixture.pool).await;
+            fixture
+                .drop_schema()
+                .await
+                .context("drop isolated principal-cost plan schema")?;
+            result
+        })
+        .expect("postgres principal-cost covering-index regression");
+}
+
+const UUID_PRINCIPAL_COST_PLAN_SQL: &str =
+    include_str!("../src/adapter/request_event_principal_cost_uuid.sql");
+const FILTERED_UUID_PRINCIPAL_COST_PLAN_SQL: &str =
+    include_str!("../src/adapter/request_event_principal_cost_uuid_filtered.sql");
+const NORMALIZED_PRINCIPAL_COST_PLAN_SQL: &str =
+    include_str!("../src/adapter/request_event_principal_cost_normalized.sql");
+const FILTERED_NORMALIZED_PRINCIPAL_COST_PLAN_SQL: &str =
+    include_str!("../src/adapter/request_event_principal_cost_normalized_filtered.sql");
+
+async fn explain_principal_cost_shape(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    sql: &'static str,
+    range_start_ms: i64,
+    range_end_ms: i64,
+    principal_keys: &Vec<String>,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF, SUMMARY OFF) {sql}"
+    )))
+    .bind(range_start_ms)
+    .bind(60_000_i64)
+    .bind(range_end_ms)
+    .bind(principal_keys)
+    .fetch_all(&mut **tx)
+    .await?)
+}
+
+async fn explain_filtered_principal_cost_shape(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    sql: &'static str,
+    range_start_ms: i64,
+    range_end_ms: i64,
+    upstream_id: Uuid,
+    principal_keys: &Vec<String>,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF, SUMMARY OFF) {sql}"
+    )))
+    .bind(range_start_ms)
+    .bind(60_000_i64)
+    .bind(range_end_ms)
+    .bind(upstream_id)
+    .bind(principal_keys)
+    .fetch_all(&mut **tx)
+    .await?)
+}
+
+async fn assert_principal_cost_shapes_use_covering_indexes(pool: &PgPool) -> Result<()> {
+    let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize(BackendKind::Postgres).await?;
+    let upstream_id = Uuid::from_u128(0x51);
+    let uuid_principal = upstream_id.to_string();
+    for index in 0..128_u64 {
+        for (suffix, principal_id) in [("uuid", uuid_principal.as_str()), ("normalized", "team A")]
+        {
+            storage
+                .append_request_event(&RequestEvent {
+                    ts: FALLBACK_TS_SECS + index % 120,
+                    request_id: format!("principal-plan-{suffix}-request-{index}"),
+                    event_id: Some(format!("principal-plan-{suffix}-event-{index}")),
+                    principal_id: Some(principal_id.to_owned()),
+                    upstream: Some(RequestEventUpstream::AnthropicDirect),
+                    upstream_id: Some(upstream_id),
+                    status: 200,
+                    cost_usd_micros: Some(11),
+                    cost_input_micros: Some(2),
+                    cost_output_micros: Some(3),
+                    ..Default::default()
+                })
+                .await?;
+        }
+    }
+    sqlx::query("VACUUM (ANALYZE) request_events_v1")
+        .execute(pool)
+        .await?;
+
+    let range_start_ms = (FALLBACK_TS_SECS * 1_000) as i64;
+    let range_end_ms = ((FALLBACK_TS_SECS + 120) * 1_000) as i64;
+    let uuid_keys = vec![uuid_principal];
+    let normalized_keys = vec!["team_A".to_owned()];
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SET LOCAL enable_bitmapscan = off")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SET LOCAL plan_cache_mode = force_generic_plan")
+        .execute(&mut *tx)
+        .await?;
+
+    let plans = [
+        (
+            "unfiltered UUID",
+            explain_principal_cost_shape(
+                &mut tx,
+                UUID_PRINCIPAL_COST_PLAN_SQL,
+                range_start_ms,
+                range_end_ms,
+                &uuid_keys,
+            )
+            .await?,
+            &[
+                "request_events_v1_principal_list_order_idx",
+                "request_events_v1_upstream_id_idx",
+            ][..],
+        ),
+        (
+            "filtered UUID",
+            explain_filtered_principal_cost_shape(
+                &mut tx,
+                FILTERED_UUID_PRINCIPAL_COST_PLAN_SQL,
+                range_start_ms,
+                range_end_ms,
+                upstream_id,
+                &uuid_keys,
+            )
+            .await?,
+            &["request_events_v1_upstream_id_idx"][..],
+        ),
+        (
+            "unfiltered normalized",
+            explain_principal_cost_shape(
+                &mut tx,
+                NORMALIZED_PRINCIPAL_COST_PLAN_SQL,
+                range_start_ms,
+                range_end_ms,
+                &normalized_keys,
+            )
+            .await?,
+            &[
+                "request_events_v1_normalized_non_uuid_principal_cost_idx",
+                "request_events_v1_upstream_id_idx",
+            ][..],
+        ),
+        (
+            "filtered normalized",
+            explain_filtered_principal_cost_shape(
+                &mut tx,
+                FILTERED_NORMALIZED_PRINCIPAL_COST_PLAN_SQL,
+                range_start_ms,
+                range_end_ms,
+                upstream_id,
+                &normalized_keys,
+            )
+            .await?,
+            &[
+                "request_events_v1_normalized_non_uuid_principal_cost_idx",
+                "request_events_v1_upstream_id_idx",
+            ][..],
+        ),
+    ];
+    tx.rollback().await?;
+    // Measure heap fetches only with a scratch EXPLAIN after an isolated VACUUM.
+    // Parallel tests can hold snapshots that keep new pages out of the all-visible map.
+
+    for (shape, plan, covering_indexes) in plans {
+        ensure!(
+            covering_indexes.iter().any(|index| {
+                plan.iter()
+                    .any(|line| line.contains(&format!("Index Only Scan using {index}")))
+            }),
+            "{shape} principal-cost shape did not use a covering index \
+             from {covering_indexes:?}: {plan:?}"
+        );
+    }
+    Ok(())
+}
+
 async fn run_regression(pool: &PgPool) -> Result<()> {
     let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
     storage.initialize(BackendKind::Postgres).await?;
@@ -447,49 +639,6 @@ async fn assert_order_index_is_usable(pool: &PgPool) -> Result<()> {
     .bind(PAGE_LIMIT as i64)
     .fetch_all(&mut *tx)
     .await?;
-    let principal_cost_plan = sqlx::query_scalar::<_, String>(
-        "EXPLAIN (COSTS OFF) \
-         SELECT principal_id, ((list_ts_ms - $1) / $2)::bigint AS bucket_index, \
-                list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
-                list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
-                list_cost_cache_read_micros \
-         FROM ( \
-             SELECT principal_id, list_ts_ms, \
-                    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
-                    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
-                    list_cost_cache_read_micros \
-             FROM request_events_v1 \
-             WHERE list_ts_ms >= $1 AND list_ts_ms < $3 \
-               AND ($4::uuid IS NULL OR upstream_id = $4) \
-               AND principal_id = ANY($5::text[]) \
-             UNION ALL \
-             SELECT principal_id, list_ts_ms, \
-                    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
-                    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
-                    list_cost_cache_read_micros \
-             FROM request_events_v1 \
-             WHERE list_ts_ms >= $1 AND list_ts_ms < $3 \
-               AND ($4::uuid IS NULL OR upstream_id = $4) \
-               AND (principal_id IS NULL OR principal_id !~* \
-                   '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') \
-               AND LEFT(REGEXP_REPLACE(COALESCE(NULLIF(BTRIM(principal_id COLLATE \"C\", \
-                   U&'\\0009\\000A\\000B\\000C\\000D\\0020\\0085\\00A0\\1680\\2000\\2001\
-                   \\2002\\2003\\2004\\2005\\2006\\2007\\2008\\2009\\200A\\2028\\2029\\202F\
-                   \\205F\\3000'), ''), 'unknown'), '[^A-Za-z0-9_.:@-]', '_', 'g'), 64) \
-                   = ANY($6::text[]) \
-         ) selected",
-    )
-    .bind((FALLBACK_TS_SECS * 1_000) as i64)
-    .bind(60_000_i64)
-    .bind(((FALLBACK_TS_SECS + 120) * 1_000) as i64)
-    .bind(Option::<Uuid>::None)
-    .bind(vec![
-        Uuid::from_u128(0x51).to_string(),
-        Uuid::from_u128(0x52).to_string(),
-    ])
-    .bind(vec!["team_A".to_owned()])
-    .fetch_all(&mut *tx)
-    .await?;
     sqlx::query("SET LOCAL enable_seqscan = on")
         .execute(&mut *tx)
         .await?;
@@ -510,18 +659,6 @@ async fn assert_order_index_is_usable(pool: &PgPool) -> Result<()> {
             .iter()
             .any(|line| line.contains("request_events_v1_principal_list_order_idx")),
         "principal request-event list index was not structurally usable: {principal_plan:?}"
-    );
-    ensure!(
-        principal_cost_plan.iter().any(|line| {
-            line.contains("Index Only Scan using request_events_v1_principal_list_order_idx")
-        }),
-        "exact principal cost source could not use the covering principal range index: {principal_cost_plan:?}"
-    );
-    ensure!(
-        principal_cost_plan.iter().any(|line| {
-            line.contains("request_events_v1_normalized_non_uuid_principal_cost_idx")
-        }),
-        "normalized fallback could not use the non-UUID partial index: {principal_cost_plan:?}"
     );
     ensure!(
         cursor_plan
