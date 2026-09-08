@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-09-08
+
+### Added
+
+- Anthropic OAuth credentials now persist refresh-token expiry reported by the token endpoint, expose it through the admin status API, and show the remaining lifetime on upstream detail cards while keeping existing credentials compatible.
+
 ### Fixed
 
 - Admin charts and request lists retain successful data during background refreshes instead of replacing it with skeletons. Rolling quota queries now keep stable cache keys and update their time bounds when responses arrive; range changes preserve the displayed chart until replacement data is ready.
@@ -12,6 +18,7 @@ All notable changes to this project will be documented in this file.
 - Live-event reconnection uses the current filters, keeps connections through short tab switches, and excludes intentional pauses from failure tracking. Query subscriptions and memoized request rows avoid unchanged-data rendering work.
 - Command palette actions survive lazy route loading, plugin upload callbacks survive modal transitions, and Audit exposes only supported principal/time filters. Unsupported in-app admin-token rotation is replaced with accurate restart guidance.
 - Request-detail timelines retain live data while final details load, session-detail errors retain mobile back navigation, and previously omitted state-management tests are collected.
+- Soft-deleted upstream and principal names can be reused with new resource IDs while active-name uniqueness and historical records remain intact.
 - PostgreSQL principal-cost aggregation now reads materialized cost columns from a covering index instead of decoding request payloads, while a compatibility trigger protects rolling deployments.
 - PostgreSQL read-path migrations now allow 90 seconds for backfills and index builds, and can be replayed after a rollback rewinds their migration registry entries.
 - Principal usage totals now use static filtered and unfiltered cost queries backed by covering indexes, skip dense empty buckets, and coalesce identical reads behind a two-second cache.
