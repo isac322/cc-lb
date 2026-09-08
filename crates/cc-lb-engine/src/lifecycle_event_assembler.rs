@@ -142,6 +142,14 @@ struct Partial {
     routing_trace: Option<RoutingTrace>,
 
     limit_reserve_ms: Option<u64>,
+    json_parse_ms: Option<f64>,
+    cache_structure_ms: Option<f64>,
+    cache_token_key_ms: Option<f64>,
+    cache_count_lookup_ms: Option<f64>,
+    cache_tokenizer_queue_ms: Option<f64>,
+    cache_serialize_ms: Option<f64>,
+    cache_tokenize_ms: Option<f64>,
+    prepare_signer_ms: Option<f64>,
 
     bulkhead_wait_ms: Option<u64>,
     dns_ms: Option<u64>,
@@ -343,6 +351,14 @@ impl Partial {
             auth_ms: self.auth.as_ref().and_then(|auth| auth.auth_ms),
             route_ms,
             limit_reserve_ms: self.limit_reserve_ms,
+            json_parse_ms: self.json_parse_ms,
+            cache_structure_ms: self.cache_structure_ms,
+            cache_token_key_ms: self.cache_token_key_ms,
+            cache_count_lookup_ms: self.cache_count_lookup_ms,
+            cache_tokenizer_queue_ms: self.cache_tokenizer_queue_ms,
+            cache_serialize_ms: self.cache_serialize_ms,
+            cache_tokenize_ms: self.cache_tokenize_ms,
+            prepare_signer_ms: self.prepare_signer_ms,
             bulkhead_wait_ms: self.bulkhead_wait_ms,
             dns_ms: self.dns_ms,
             connect_ms: self.connect_ms,
@@ -684,6 +700,17 @@ async fn force_flush_terminations(
     }
 }
 
+fn apply_setup_timings(partial: &mut Partial, timings: &cc_lb_lifecycle::RequestSetupTimings) {
+    partial.json_parse_ms = timings.json_parse_ms;
+    partial.cache_structure_ms = timings.cache_structure_ms;
+    partial.cache_token_key_ms = timings.cache_token_key_ms;
+    partial.cache_count_lookup_ms = timings.cache_count_lookup_ms;
+    partial.cache_tokenizer_queue_ms = timings.cache_tokenizer_queue_ms;
+    partial.cache_serialize_ms = timings.cache_serialize_ms;
+    partial.cache_tokenize_ms = timings.cache_tokenize_ms;
+    partial.prepare_signer_ms = timings.prepare_signer_ms;
+}
+
 async fn handle_event(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
@@ -703,6 +730,7 @@ async fn handle_event(
         limit_reconcile_ms,
         observability_post_ms,
         proxy_setup_ms,
+        setup_timings,
         upstream_body_ms,
         first_body_chunk_ms,
         internal_errors,
@@ -721,6 +749,7 @@ async fn handle_event(
             partial.limit_reconcile_ms = *limit_reconcile_ms;
             partial.observability_post_ms = *observability_post_ms;
             partial.proxy_setup_ms = *proxy_setup_ms;
+            apply_setup_timings(&mut partial, setup_timings);
             partial.upstream_body_ms = *upstream_body_ms;
             partial.first_body_chunk_ms = *first_body_chunk_ms;
             partial.internal_errors = internal_errors.clone();
@@ -743,6 +772,7 @@ async fn handle_event(
         partial.limit_reconcile_ms = *limit_reconcile_ms;
         partial.observability_post_ms = *observability_post_ms;
         partial.proxy_setup_ms = *proxy_setup_ms;
+        apply_setup_timings(&mut partial, setup_timings);
         partial.upstream_body_ms = *upstream_body_ms;
         if partial.first_body_chunk_ms.is_none() {
             partial.first_body_chunk_ms = *first_body_chunk_ms;
@@ -1178,6 +1208,14 @@ fn finalize_base(
         auth_ms,
         route_ms,
         limit_reserve_ms: partial.limit_reserve_ms,
+        json_parse_ms: partial.json_parse_ms,
+        cache_structure_ms: partial.cache_structure_ms,
+        cache_token_key_ms: partial.cache_token_key_ms,
+        cache_count_lookup_ms: partial.cache_count_lookup_ms,
+        cache_tokenizer_queue_ms: partial.cache_tokenizer_queue_ms,
+        cache_serialize_ms: partial.cache_serialize_ms,
+        cache_tokenize_ms: partial.cache_tokenize_ms,
+        prepare_signer_ms: partial.prepare_signer_ms,
         bulkhead_wait_ms: partial.bulkhead_wait_ms,
         dns_ms: partial.dns_ms,
         connect_ms: partial.connect_ms,
@@ -1468,6 +1506,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -1482,6 +1521,72 @@ mod tests {
         assert_eq!(rows[0].duration_ms, 42);
         assert_eq!(rows[0].error_code, None);
         assert_eq!(rows[0].principal_id.as_deref(), Some("p1"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn setup_timings_survive_success_and_early_failure_termination() {
+        let (tx, rx) = mpsc::channel(16);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+
+        for (event_id, status, reason) in [
+            ("setup-success", 200, TerminationReason::Success),
+            (
+                "setup-signer-failure",
+                502,
+                TerminationReason::ErrorCode("signer_failed".to_owned()),
+            ),
+        ] {
+            tx.send(LifecycleEvent::RequestStarted {
+                event_id: eid(event_id),
+                request_id: format!("req-{event_id}"),
+                ts_ms: 1_730_000_000_000,
+                stream: false,
+                source_kind: Some("proxy".to_owned()),
+                source_ref_id: None,
+            })
+            .await
+            .expect("send request started");
+            tx.send(LifecycleEvent::RequestTerminated {
+                event_id: eid(event_id),
+                reason,
+                client_status: status,
+                duration_ms: 10,
+                limit_reconcile_ms: None,
+                observability_post_ms: None,
+                proxy_setup_ms: Some(4),
+                setup_timings: cc_lb_lifecycle::RequestSetupTimings {
+                    json_parse_ms: Some(0.125),
+                    cache_structure_ms: Some(0.25),
+                    cache_token_key_ms: Some(0.375),
+                    cache_count_lookup_ms: Some(0.5),
+                    cache_tokenizer_queue_ms: Some(0.625),
+                    cache_serialize_ms: Some(0.75),
+                    cache_tokenize_ms: Some(0.0),
+                    prepare_signer_ms: Some(1.25),
+                },
+                upstream_body_ms: None,
+                first_body_chunk_ms: None,
+                internal_errors: Vec::new(),
+            })
+            .await
+            .expect("send termination");
+        }
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 2);
+        for row in rows.iter() {
+            assert_eq!(row.json_parse_ms, Some(0.125));
+            assert_eq!(row.cache_structure_ms, Some(0.25));
+            assert_eq!(row.cache_token_key_ms, Some(0.375));
+            assert_eq!(row.cache_count_lookup_ms, Some(0.5));
+            assert_eq!(row.cache_tokenizer_queue_ms, Some(0.625));
+            assert_eq!(row.cache_serialize_ms, Some(0.75));
+            assert_eq!(row.cache_tokenize_ms, Some(0.0));
+            assert_eq!(row.prepare_signer_ms, Some(1.25));
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1509,6 +1614,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
@@ -1559,6 +1665,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -1607,6 +1714,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
@@ -1658,6 +1766,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -1687,6 +1796,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -1730,6 +1840,7 @@ mod tests {
             limit_reconcile_ms: Some(1),
             observability_post_ms: Some(2),
             proxy_setup_ms: Some(3),
+            setup_timings: Default::default(),
             upstream_body_ms: Some(4),
         })
         .await
@@ -1888,6 +1999,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -2083,6 +2195,7 @@ mod tests {
                 limit_reconcile_ms: None,
                 observability_post_ms: None,
                 proxy_setup_ms: None,
+                setup_timings: Default::default(),
                 upstream_body_ms: None,
             })
             .await
@@ -2181,6 +2294,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -2406,6 +2520,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: Some(12),
         })
         .await
@@ -2527,6 +2642,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
@@ -2642,6 +2758,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
         });
 

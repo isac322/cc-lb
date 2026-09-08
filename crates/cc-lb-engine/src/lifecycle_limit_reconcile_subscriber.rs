@@ -411,6 +411,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -445,6 +446,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -469,6 +471,7 @@ mod tests {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await

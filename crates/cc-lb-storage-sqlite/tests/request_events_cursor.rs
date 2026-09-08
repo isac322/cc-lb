@@ -734,3 +734,102 @@ async fn request_event_histogram_matches_list_and_uses_index() {
         "histogram must not fall back to a full table scan: {plan:?}"
     );
 }
+
+#[tokio::test]
+async fn request_setup_timings_roundtrip_through_sqlite_payload() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir
+            .path()
+            .join("request-setup-timings.sqlite")
+            .display()
+    );
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open sqlite");
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .expect("initialize sqlite");
+    let columns = sqlx::query("PRAGMA table_info(request_events_v1)")
+        .fetch_all(storage.pool())
+        .await
+        .expect("request events schema")
+        .into_iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect::<HashSet<_>>();
+    for column in [
+        "list_json_parse_ms",
+        "list_cache_structure_ms",
+        "list_cache_token_key_ms",
+        "list_cache_count_lookup_ms",
+        "list_cache_tokenizer_queue_ms",
+        "list_cache_serialize_ms",
+        "list_cache_tokenize_ms",
+        "list_prepare_signer_ms",
+    ] {
+        assert!(
+            columns.contains(column),
+            "missing materialized column {column}"
+        );
+    }
+    let event = RequestEvent {
+        ts: 1_800_000_000,
+        request_id: "req-setup-timings".to_owned(),
+        event_id: Some("event-setup-timings".to_owned()),
+        status: 502,
+        duration_ms: 10,
+        json_parse_ms: Some(0.125),
+        cache_structure_ms: Some(0.0),
+        cache_token_key_ms: Some(0.25),
+        cache_count_lookup_ms: Some(0.5),
+        cache_tokenizer_queue_ms: Some(0.75),
+        cache_serialize_ms: Some(1.0),
+        cache_tokenize_ms: None,
+        prepare_signer_ms: Some(2.0),
+        ..RequestEvent::default()
+    };
+
+    storage
+        .append_request_event(&event)
+        .await
+        .expect("append request setup timings");
+    let payload: String =
+        sqlx::query_scalar("SELECT payload FROM request_events_v1 WHERE event_id = ?")
+            .bind(event.event_id.as_deref())
+            .fetch_one(storage.pool())
+            .await
+            .expect("read stored payload");
+    let restored: RequestEvent =
+        serde_json::from_str(&payload).expect("deserialize stored request event");
+
+    assert_eq!(restored.json_parse_ms, Some(0.125));
+    assert_eq!(restored.cache_structure_ms, Some(0.0));
+    assert_eq!(restored.cache_token_key_ms, Some(0.25));
+    assert_eq!(restored.cache_count_lookup_ms, Some(0.5));
+    assert_eq!(restored.cache_tokenizer_queue_ms, Some(0.75));
+    assert_eq!(restored.cache_serialize_ms, Some(1.0));
+    assert_eq!(restored.cache_tokenize_ms, None);
+    assert_eq!(restored.prepare_signer_ms, Some(2.0));
+
+    let page = storage
+        .list_request_events(&RequestEventListQuery {
+            since_unix_secs: 0,
+            until_unix_secs: u64::MAX,
+            limit: 1,
+            ..RequestEventListQuery::default()
+        })
+        .await
+        .expect("list request setup timings");
+    let listed = page.first().expect("listed timing row");
+    assert_eq!(listed.json_parse_ms, Some(0.125));
+    assert_eq!(listed.cache_structure_ms, Some(0.0));
+    assert_eq!(listed.cache_token_key_ms, Some(0.25));
+    assert_eq!(listed.cache_count_lookup_ms, Some(0.5));
+    assert_eq!(listed.cache_tokenizer_queue_ms, Some(0.75));
+    assert_eq!(listed.cache_serialize_ms, Some(1.0));
+    assert_eq!(listed.cache_tokenize_ms, None);
+    assert_eq!(listed.prepare_signer_ms, Some(2.0));
+}

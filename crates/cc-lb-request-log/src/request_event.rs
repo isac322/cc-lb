@@ -126,6 +126,22 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_reserve_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_parse_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_structure_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_token_key_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_count_lookup_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_tokenizer_queue_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_serialize_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_tokenize_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare_signer_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bulkhead_wait_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns_ms: Option<u64>,
@@ -218,6 +234,45 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize request event");
 
         assert_eq!(event, restored);
+    }
+
+    #[test]
+    fn request_setup_timings_roundtrip_fractional_zero_and_partial_values() {
+        let event = RequestEvent {
+            json_parse_ms: Some(0.125),
+            cache_structure_ms: Some(0.0),
+            cache_token_key_ms: Some(0.03125),
+            cache_count_lookup_ms: Some(1.75),
+            cache_tokenizer_queue_ms: Some(0.0625),
+            cache_serialize_ms: Some(2.5),
+            cache_tokenize_ms: None,
+            prepare_signer_ms: Some(8.25),
+            ..RequestEvent::default()
+        };
+
+        let json = serde_json::to_value(&event).expect("serialize request setup timings");
+        assert_eq!(json["json_parse_ms"], 0.125);
+        assert_eq!(json["cache_structure_ms"], 0.0);
+        assert!(json.get("cache_tokenize_ms").is_none());
+
+        let restored: RequestEvent =
+            serde_json::from_value(json).expect("deserialize request setup timings");
+        assert_eq!(restored, event);
+    }
+
+    #[test]
+    fn legacy_request_event_defaults_request_setup_timings_to_missing() {
+        let event: RequestEvent = serde_json::from_str(r#"{"status":200,"duration_ms":1}"#)
+            .expect("deserialize legacy request event");
+
+        assert_eq!(event.json_parse_ms, None);
+        assert_eq!(event.cache_structure_ms, None);
+        assert_eq!(event.cache_token_key_ms, None);
+        assert_eq!(event.cache_count_lookup_ms, None);
+        assert_eq!(event.cache_tokenizer_queue_ms, None);
+        assert_eq!(event.cache_serialize_ms, None);
+        assert_eq!(event.cache_tokenize_ms, None);
+        assert_eq!(event.prepare_signer_ms, None);
     }
 
     #[test]

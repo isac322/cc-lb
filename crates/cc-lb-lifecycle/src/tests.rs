@@ -53,6 +53,62 @@ fn request_started_source_metadata_defaults_without_legacy_json_fields() {
 }
 
 #[test]
+fn request_terminated_flattens_fractional_setup_timings_and_defaults_legacy_payloads() {
+    let event = LifecycleEvent::RequestTerminated {
+        event_id: sample_event_id(),
+        reason: TerminationReason::Success,
+        client_status: 200,
+        duration_ms: 1,
+        limit_reconcile_ms: None,
+        observability_post_ms: None,
+        proxy_setup_ms: Some(1),
+        setup_timings: RequestSetupTimings {
+            json_parse_ms: Some(0.125),
+            cache_structure_ms: Some(0.0),
+            cache_tokenize_ms: Some(0.25),
+            ..RequestSetupTimings::default()
+        },
+        upstream_body_ms: None,
+        first_body_chunk_ms: None,
+        internal_errors: Vec::new(),
+    };
+
+    let json = serde_json::to_value(&event).expect("serialize terminal setup timings");
+    assert_eq!(json["json_parse_ms"], 0.125);
+    assert_eq!(json["cache_structure_ms"], 0.0);
+    assert!(json.get("setup_timings").is_none());
+    let restored: LifecycleEvent =
+        serde_json::from_value(json).expect("deserialize terminal setup timings");
+    assert_eq!(restored, event);
+
+    let legacy = r#"{
+        "kind":"request_terminated",
+        "event_id":"01978c00-0000-7000-8000-000000000000",
+        "reason":"success",
+        "client_status":200,
+        "duration_ms":1
+    }"#;
+    let restored: LifecycleEvent =
+        serde_json::from_str(legacy).expect("deserialize legacy terminal event");
+    assert!(matches!(
+        restored,
+        LifecycleEvent::RequestTerminated {
+            setup_timings: RequestSetupTimings {
+                json_parse_ms: None,
+                cache_structure_ms: None,
+                cache_token_key_ms: None,
+                cache_count_lookup_ms: None,
+                cache_tokenizer_queue_ms: None,
+                cache_serialize_ms: None,
+                cache_tokenize_ms: None,
+                prepare_signer_ms: None,
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
 fn kind_labels_cover_every_variant() {
     // Anti-regression: if a new variant is added without updating kind()
     // the compile-checked match in kind() will fail. This runtime test
@@ -154,6 +210,7 @@ fn kind_labels_cover_every_variant() {
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
+            setup_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),

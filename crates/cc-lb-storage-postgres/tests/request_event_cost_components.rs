@@ -200,6 +200,49 @@ async fn cost_component_migrations_reapply_after_registry_rewind() -> TestResult
     teardown
 }
 
+#[tokio::test]
+async fn request_setup_timings_roundtrip_through_postgres_payload() -> TestResult {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let event = RequestEvent {
+        status: 502,
+        json_parse_ms: Some(0.125),
+        cache_structure_ms: Some(0.0),
+        cache_token_key_ms: Some(0.25),
+        cache_count_lookup_ms: Some(0.5),
+        cache_tokenizer_queue_ms: Some(0.75),
+        cache_serialize_ms: Some(1.0),
+        cache_tokenize_ms: None,
+        prepare_signer_ms: Some(2.0),
+        ..request_event("setup-timings")
+    };
+
+    let result: TestResult = async {
+        fixture.storage.append_request_event(&event).await?;
+        let payload: Vec<u8> =
+            sqlx::query_scalar("SELECT payload FROM request_events_v1 WHERE event_id = $1")
+                .bind(event.event_id.as_deref())
+                .fetch_one(fixture.storage.pool())
+                .await?;
+        let restored: RequestEvent = serde_json::from_slice(&payload)?;
+
+        assert_eq!(restored.json_parse_ms, Some(0.125));
+        assert_eq!(restored.cache_structure_ms, Some(0.0));
+        assert_eq!(restored.cache_token_key_ms, Some(0.25));
+        assert_eq!(restored.cache_count_lookup_ms, Some(0.5));
+        assert_eq!(restored.cache_tokenizer_queue_ms, Some(0.75));
+        assert_eq!(restored.cache_serialize_ms, Some(1.0));
+        assert_eq!(restored.cache_tokenize_ms, None);
+        assert_eq!(restored.prepare_signer_ms, Some(2.0));
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
 async fn insert_legacy_event(fixture: &Fixture, event: &RequestEvent) -> TestResult {
     let payload = serde_json::to_vec(event)?;
     sqlx::query(

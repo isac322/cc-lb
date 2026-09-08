@@ -33,6 +33,14 @@ async fn events_delta_returns_rows_next_cursor_and_exhaustion() {
     assert_eq!(first_page["events"].as_array().unwrap().len(), 1);
     assert_eq!(first_page["events"][0]["request_id"], "req-2");
     assert_eq!(first_page["next_cursor"], second_cursor);
+    assert_eq!(first_page["events"][0]["json_parse_ms"], 0.125);
+    assert_eq!(first_page["events"][0]["cache_structure_ms"], 0.25);
+    assert_eq!(first_page["events"][0]["cache_token_key_ms"], 0.375);
+    assert_eq!(first_page["events"][0]["cache_count_lookup_ms"], 0.5);
+    assert_eq!(first_page["events"][0]["cache_tokenizer_queue_ms"], 0.625);
+    assert_eq!(first_page["events"][0]["cache_serialize_ms"], 0.75);
+    assert_eq!(first_page["events"][0]["cache_tokenize_ms"], 0.0);
+    assert_eq!(first_page["events"][0]["prepare_signer_ms"], 1.25);
     assert_eq!(first_page["exhausted"], false);
 
     let (status, _, second_page, _) = authed_json(
@@ -59,6 +67,14 @@ fn request_event(index: u64) -> RequestEvent {
         model: Some("claude-sonnet-4-5".to_owned()),
         status: 200,
         duration_ms: 10,
+        json_parse_ms: Some(0.125),
+        cache_structure_ms: Some(0.25),
+        cache_token_key_ms: Some(0.375),
+        cache_count_lookup_ms: Some(0.5),
+        cache_tokenizer_queue_ms: Some(0.625),
+        cache_serialize_ms: Some(0.75),
+        cache_tokenize_ms: Some(0.0),
+        prepare_signer_ms: Some(1.25),
         ..Default::default()
     }
 }
