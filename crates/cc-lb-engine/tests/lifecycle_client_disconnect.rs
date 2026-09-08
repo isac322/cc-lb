@@ -169,9 +169,11 @@ async fn aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observa
                                 .collect::<Vec<_>>(),
                         );
                     }
-                    LifecycleEvent::UsageObserved { usage, source, .. }
-                        if source == UsageSource::MessageStart =>
-                    {
+                    LifecycleEvent::UsageObserved {
+                        usage,
+                        source: UsageSource::MessageStart,
+                        ..
+                    } => {
                         cache_usage_observed = usage.cache_creation_input_tokens == 12;
                     }
                     LifecycleEvent::PromptCacheObservationsProduced {
