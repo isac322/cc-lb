@@ -45,6 +45,7 @@ pub(crate) mod error_codes {
     pub(crate) const ROUTER_PIPELINE_UNAVAILABLE: &str = "router_pipeline_unavailable";
     pub(crate) const ROUTE_NO_UPSTREAM_AFTER_FILTER: &str = "route_no_upstream_after_filter";
     pub(crate) const ROUTE_NOT_CONFIGURED: &str = "route_not_configured";
+    pub(crate) const UPSTREAM_AFFINITY_UNAVAILABLE: &str = "upstream_affinity_unavailable";
     pub(crate) const LIMIT_REJECTED: &str = "limit_rejected";
     pub(crate) const SIGNER_FAILED: &str = "signer_failed";
     pub(crate) const UPSTREAM_DISPATCH_FAILED: &str = "upstream_dispatch_failed";

@@ -241,6 +241,11 @@
             "interval_secs": 600,
             "jitter_secs": 30
           },
+          "upstream_affinity_purge": {
+            "enabled": true,
+            "interval_secs": 600,
+            "jitter_secs": 30
+          },
           "usage_prune": {
             "enabled": true,
             "interval_secs": 86400,
@@ -323,6 +328,12 @@
           "type": "null"
         }
       ]
+    },
+    "upstream_affinity": {
+      "$ref": "#/$defs/UpstreamAffinityConfig",
+      "default": {
+        "ttl_days": 90
+      }
     }
   },
   "$defs": {
@@ -1048,6 +1059,11 @@
               "interval_secs": 600,
               "jitter_secs": 30
             },
+            "upstream_affinity_purge": {
+              "enabled": true,
+              "interval_secs": 600,
+              "jitter_secs": 30
+            },
             "usage_prune": {
               "enabled": true,
               "interval_secs": 86400,
@@ -1370,6 +1386,18 @@
           "default": true
         }
       }
+    },
+    "UpstreamAffinityConfig": {
+      "type": "object",
+      "properties": {
+        "ttl_days": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 90,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
     },
     "WasmtimeAllocationStrategy": {
       "type": "string",

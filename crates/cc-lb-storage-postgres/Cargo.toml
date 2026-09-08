@@ -24,6 +24,7 @@ cc-lb-aead = { path = "../cc-lb-aead" }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+metrics = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

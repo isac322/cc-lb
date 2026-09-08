@@ -25,6 +25,7 @@ const JOB_TYPES: &[&str] = &[
     "cron:usage_prune",
     "cron:quota_gc",
     "cron:prompt_cache_purge",
+    "cron:upstream_affinity_purge",
     "cron:price_catalog_refresh",
     "cron:apalis_housekeeping",
     "cron:warmup_watchdog",
@@ -71,7 +72,7 @@ pub fn describe_scheduler_metrics() {
         ::metrics::describe_counter!(
             PRUNE_ROWS_REMOVED_TOTAL,
             Unit::Count,
-            "Scheduler usage prune rows removed by table."
+            "Scheduler maintenance rows removed by table."
         );
         ::metrics::describe_counter!(
             API_KEY_USAGE_BUCKETS_FOLDED_TOTAL,
@@ -111,6 +112,7 @@ pub fn touch_scheduler_metric_handles() {
     ::metrics::counter!(PRUNE_ROWS_REMOVED_TOTAL, "table" => "request_events").increment(0);
     ::metrics::counter!(PRUNE_ROWS_REMOVED_TOTAL, "table" => "audit_log").increment(0);
     ::metrics::counter!(PRUNE_ROWS_REMOVED_TOTAL, "table" => "api_key_usage_buckets").increment(0);
+    ::metrics::counter!(PRUNE_ROWS_REMOVED_TOTAL, "table" => "upstream_affinity").increment(0);
     ::metrics::counter!(API_KEY_USAGE_BUCKETS_FOLDED_TOTAL).increment(0);
     ::metrics::counter!(PRICE_CATALOG_STATUS_TOTAL, "status" => "applied").increment(0);
     ::metrics::counter!(PRICE_CATALOG_STATUS_TOTAL, "status" => "noop").increment(0);

@@ -16,6 +16,7 @@ use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJob;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJob;
 use cc_lb_scheduler::jobs::quota_gc::SubscriptionQuotaGcJob;
+use cc_lb_scheduler::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJob;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::usage_rollup::UsageRollupTask;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
@@ -66,6 +67,15 @@ fn scheduler_metrics_cover_worker_lifecycle() -> Result<(), Box<dyn Error>> {
                 &rendered,
                 scheduler_metrics::JOBS_TOTAL,
                 &[("job_type", "adaptive:cache_keepalive"), ("status", "done")],
+                1.0,
+            );
+            assert_counter_eq(
+                &rendered,
+                scheduler_metrics::JOBS_TOTAL,
+                &[
+                    ("job_type", "cron:upstream_affinity_purge"),
+                    ("status", "done"),
+                ],
                 1.0,
             );
             Ok::<(), Box<dyn Error>>(())
@@ -188,12 +198,13 @@ fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 4] {
     ]
 }
 
-fn singleton_jobs() -> [CronJob; 7] {
+fn singleton_jobs() -> [CronJob; 8] {
     [
         CronJob::UsageRollup(UsageRollupTask::default()),
         CronJob::UsagePrune(UsagePruneJob::default()),
         CronJob::QuotaGc(SubscriptionQuotaGcJob::default()),
         CronJob::PromptCachePurge(PromptCacheObservationPurgeJob::default()),
+        CronJob::UpstreamAffinityPurge(UpstreamAffinityPurgeJob::default()),
         CronJob::PriceCatalogRefresh(PriceCatalogRefreshJob::default()),
         CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()),
         CronJob::OAuthUsagePoll(OAuthUsagePollCronJob::new(1_800_000_000)),

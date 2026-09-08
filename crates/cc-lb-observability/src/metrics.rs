@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 30] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 31] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -132,6 +132,11 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 30] = [
         name: "cc_lb_storage_operation_duration_seconds",
         kind: MetricKind::Histogram,
         description: "Storage operation latency by store, operation, and status.",
+    },
+    MetricDefinition {
+        name: "cc_lb_upstream_affinity_batch_keys",
+        kind: MetricKind::Histogram,
+        description: "Input key count per non-empty affinity storage operation by store and operation.",
     },
     MetricDefinition {
         name: "cc_lb_storage_operation_errors_total",
@@ -285,6 +290,11 @@ pub(crate) fn register_prometheus14_metrics() {
         "cc_lb_storage_operation_duration_seconds",
         Unit::Seconds,
         "Storage operation latency by store, operation, and status."
+    );
+    metrics::describe_histogram!(
+        "cc_lb_upstream_affinity_batch_keys",
+        Unit::Count,
+        "Input key count per non-empty affinity storage operation by store and operation."
     );
     metrics::describe_counter!(
         "cc_lb_storage_operation_errors_total",
@@ -490,6 +500,12 @@ pub(crate) fn touch_prometheus14_metric_handles() {
         "store" => "unknown",
         "operation" => "unknown",
         "status" => "unknown"
+    )
+    .record(0.0);
+    metrics::histogram!(
+        "cc_lb_upstream_affinity_batch_keys",
+        "store" => "unknown",
+        "operation" => "unknown"
     )
     .record(0.0);
     metrics::counter!(

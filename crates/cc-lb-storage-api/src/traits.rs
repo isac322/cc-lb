@@ -11,6 +11,7 @@ use crate::{
     organization_metadata::OrganizationMetadataStore,
     prompt_cache_observation::PromptCacheObservationStore,
     types::*,
+    upstream_affinity::UpstreamAffinityStore,
     upstream_rate_limit::UpstreamRateLimitStateStore,
     upstream_subscription_metadata::UpstreamSubscriptionMetadataStore,
     upstream_subscription_quota::{
@@ -466,6 +467,7 @@ pub trait Storage:
     + crate::pool_quota_history::PoolQuotaHistoryStore
     + crate::principal::PrincipalStore
     + crate::upstream::UpstreamStore
+    + UpstreamAffinityStore
     + RequestEventStore
     + CacheKeepaliveProjectionStore
     + UpstreamRateLimitStateStore
@@ -501,6 +503,7 @@ impl<T> Storage for T where
         + crate::pool_quota_history::PoolQuotaHistoryStore
         + crate::principal::PrincipalStore
         + crate::upstream::UpstreamStore
+        + UpstreamAffinityStore
         + RequestEventStore
         + CacheKeepaliveProjectionStore
         + UpstreamRateLimitStateStore

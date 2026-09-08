@@ -28,6 +28,10 @@ acquire_timeout_secs = 10
 statement_timeout_secs = 25
 sslmode = "disable"
 
+# Learned upstream affinity retention; changes require restarting cc-lb.
+[upstream_affinity]
+ttl_days = 90
+
 # The postgres backend always runs the pg_notify event fanout, which needs a
 # peer-reachable identity plus a shared token from CC_LB_CLUSTER_TOKEN.
 [cluster]

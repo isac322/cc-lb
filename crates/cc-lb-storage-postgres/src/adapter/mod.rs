@@ -29,6 +29,7 @@ mod request_event_list_row;
 mod request_event_list_sql;
 pub mod request_events;
 pub mod retry;
+pub mod upstream_affinity;
 pub mod upstream_rate_limit;
 pub mod upstream_subscription_metadata;
 pub mod upstream_subscription_quota;

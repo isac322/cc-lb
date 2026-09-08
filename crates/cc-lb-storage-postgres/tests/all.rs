@@ -32,3 +32,5 @@ mod request_events_reasoning_effort;
 mod request_events_thinking_budget_tokens;
 #[path = "router_singleton_dropped.rs"]
 mod router_singleton_dropped;
+#[path = "upstream_affinity.rs"]
+mod upstream_affinity;

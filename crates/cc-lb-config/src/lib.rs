@@ -20,14 +20,14 @@ pub use types::{
     AdminConfig, AnthropicOAuthConfig, ApiKeysConfig, BodyConfig, BulkheadConfig,
     CircuitBreakerConfig, ClusterConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
     DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
-    DEFAULT_SQLITE_PATH, DnsConfig, DownstreamAuthConfig, DownstreamAuthMode, EgressConfig,
-    EventBusConfig, ListenerConfig, ListenerOverrides, NoneModeConfig, NoneModeUpstreamKind,
-    ObservabilityConfig, PluginFailurePolicy, PluginWireBounds, PostgresPoolConfig,
-    PriceCatalogConfig, PromptCacheShadowConfig, RecurringJobConfig, RestartRequiredField,
-    RuntimeConfig, SchedulerConfig, SchedulerIdempotencyConfig, SchedulerPoolConfig,
-    SchedulerRetryClasses, SchedulerRetryConfig, SchedulerStalenessConfig, ShapeOriginPolicy,
-    StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, WasmtimeAllocationStrategy,
-    WasmtimeConfig,
+    DEFAULT_SQLITE_PATH, DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS, DnsConfig, DownstreamAuthConfig,
+    DownstreamAuthMode, EgressConfig, EventBusConfig, ListenerConfig, ListenerOverrides,
+    NoneModeConfig, NoneModeUpstreamKind, ObservabilityConfig, PluginFailurePolicy,
+    PluginWireBounds, PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig,
+    RecurringJobConfig, RestartRequiredField, RuntimeConfig, SchedulerConfig,
+    SchedulerIdempotencyConfig, SchedulerPoolConfig, SchedulerRetryClasses, SchedulerRetryConfig,
+    SchedulerStalenessConfig, ShapeOriginPolicy, StorageConfig, SubscriptionQuotaConfig,
+    TimeoutsConfig, TlsConfig, UpstreamAffinityConfig, WasmtimeAllocationStrategy, WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 

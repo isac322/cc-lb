@@ -922,12 +922,8 @@ async fn build_app_with_storage_inner(
         messages: cap_to_usize(config.body.messages_cap_bytes),
         files: cap_to_usize(config.body.files_cap_bytes),
     };
-    let lifecycle_config = LifecycleConfig {
-        messages_body_cap_bytes: body_caps.messages,
-        files_body_cap_bytes: body_caps.files,
-        replica_identity: replica_identity.clone(),
-        prompt_cache_shadow: config.prompt_cache_shadow.clone(),
-    };
+    let lifecycle_config =
+        lifecycle_config_from_config(&config, body_caps, replica_identity.clone());
     let scheduler_replica_id = lifecycle_config
         .replica_identity
         .as_ref()
@@ -1373,6 +1369,9 @@ async fn build_app_with_storage_inner(
         dispatcher,
         lifecycle_config,
         clock.clone(),
+    );
+    lifecycle = lifecycle.with_upstream_affinity_store(
+        storage.clone() as Arc<dyn cc_lb_storage_api::UpstreamAffinityStore>
     );
     lifecycle = lifecycle.with_cache_keepalive_enqueuer(cache_keepalive_enqueuer);
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
@@ -1996,6 +1995,19 @@ fn spawn_reconcile_shutdown(shutdown: watch::Receiver<bool>, cancel: Cancellatio
         signal::wait_for_shutdown(shutdown).await;
         cancel.cancel();
     });
+}
+fn lifecycle_config_from_config(
+    config: &Config,
+    body_caps: RequestBodyCaps,
+    replica_identity: Option<cc_lb_domain::ReplicaIdentity>,
+) -> LifecycleConfig {
+    LifecycleConfig {
+        messages_body_cap_bytes: body_caps.messages,
+        files_body_cap_bytes: body_caps.files,
+        replica_identity,
+        prompt_cache_shadow: config.prompt_cache_shadow.clone(),
+        upstream_affinity_ttl: std::time::Duration::from_secs(config.upstream_affinity.ttl_secs()),
+    }
 }
 
 fn cap_to_usize(value: u64) -> usize {
@@ -3313,6 +3325,26 @@ mod tests {
 
         assert!(catalog.lookup("operator-model-a", None, None).is_some());
         assert!(catalog.lookup("claude-opus-4-5", None, None).is_none());
+    }
+
+    #[test]
+    fn lifecycle_config_uses_startup_upstream_affinity_ttl() {
+        let mut config = Config::default();
+        config.upstream_affinity.ttl_days = 14;
+
+        let lifecycle_config = super::lifecycle_config_from_config(
+            &config,
+            super::RequestBodyCaps {
+                messages: 1024,
+                files: 2048,
+            },
+            None,
+        );
+
+        assert_eq!(
+            lifecycle_config.upstream_affinity_ttl,
+            std::time::Duration::from_secs(14 * 86_400)
+        );
     }
 
     #[test]
