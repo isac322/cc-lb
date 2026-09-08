@@ -832,6 +832,7 @@ fn build_series_from_checkpoint_ranges(
 
 #[derive(Debug, Clone)]
 struct CheckpointStream {
+    source: SubscriptionQuotaSource,
     checkpoints: Vec<SubscriptionQuotaCheckpointRecord>,
     index: usize,
     current: Option<SubscriptionQuotaCheckpointRecord>,
@@ -851,21 +852,13 @@ fn buckets_from_checkpoint_ranges(
     let mut streams = ranges
         .into_iter()
         .map(stream_from_range)
-        .filter(|stream| !stream.checkpoints.is_empty())
+        .filter(|stream| stream.current.is_some() || !stream.checkpoints.is_empty())
         .collect::<Vec<_>>();
-    streams.sort_by(|left, right| {
-        let left_source = left.checkpoints[0].source.as_str();
-        let right_source = right.checkpoints[0].source.as_str();
-        left_source.cmp(right_source)
-    });
-    let Some(mut bucket_start) = streams
-        .iter()
-        .filter_map(|stream| stream.checkpoints.first())
-        .map(|checkpoint| bucket_start_unix_secs(checkpoint.changed_at_unix_millis, bucket_secs))
-        .min()
-    else {
+    streams.sort_by(|left, right| left.source.as_str().cmp(right.source.as_str()));
+    if streams.is_empty() {
         return Vec::new();
-    };
+    }
+    let mut bucket_start = bucket_start_unix_secs(query.since_unix_millis, bucket_secs);
     let end_bucket = bucket_start_unix_secs(query.until_unix_millis, bucket_secs);
     let mut buckets = Vec::new();
     while bucket_start <= end_bucket {
@@ -885,17 +878,13 @@ fn buckets_from_checkpoint_ranges(
 }
 
 fn stream_from_range(range: SubscriptionQuotaCheckpointRange) -> CheckpointStream {
-    let mut checkpoints =
-        Vec::with_capacity(range.checkpoints.len() + usize::from(range.left_anchor.is_some()));
-    if let Some(anchor) = range.left_anchor {
-        checkpoints.push(anchor);
-    }
-    checkpoints.extend(range.checkpoints);
+    let mut checkpoints = range.checkpoints;
     checkpoints.sort_by_key(|checkpoint| (checkpoint.changed_at_unix_millis, checkpoint.sample_id));
     CheckpointStream {
+        source: range.source,
         checkpoints,
         index: 0,
-        current: None,
+        current: range.left_anchor,
     }
 }
 
@@ -909,6 +898,25 @@ struct SlimCheckpointStream {
 }
 
 impl SlimCheckpointStream {
+    fn new(mut checkpoints: Vec<SubscriptionQuotaSlimCheckpoint>, start_bucket: u64) -> Self {
+        checkpoints
+            .sort_by_key(|checkpoint| (checkpoint.changed_at_unix_millis, checkpoint.sample_id));
+        let mut next_index = 0;
+        while next_index < checkpoints.len()
+            && bucket_start_unix_secs(
+                checkpoints[next_index].changed_at_unix_millis,
+                PROVIDER_LOT_BUCKET_SECS,
+            ) < start_bucket
+        {
+            next_index += 1;
+        }
+        Self {
+            checkpoints,
+            current_index: next_index.checked_sub(1),
+            next_index,
+        }
+    }
+
     fn advance_to_bucket(&mut self, bucket_start: u64) {
         while self.next_index < self.checkpoints.len()
             && bucket_start_unix_secs(
@@ -961,27 +969,47 @@ fn provider_lots_from_slim_checkpoints(
         let Some(window_secs) = provider_lot_window_secs(window) else {
             continue;
         };
+        let mut bucket_start =
+            bucket_start_unix_secs(query.since_unix_millis, PROVIDER_LOT_BUCKET_SECS);
         let mut streams = source_checkpoints
             .into_values()
-            .map(|checkpoints| SlimCheckpointStream {
-                checkpoints,
-                next_index: 0,
-                current_index: None,
-            })
+            .map(|checkpoints| SlimCheckpointStream::new(checkpoints, bucket_start))
             .collect::<Vec<_>>();
-        let Some(mut bucket_start) = streams
-            .iter()
-            .filter_map(|stream| stream.checkpoints.first())
-            .map(|checkpoint| {
-                bucket_start_unix_secs(checkpoint.changed_at_unix_millis, PROVIDER_LOT_BUCKET_SECS)
-            })
-            .min()
-        else {
+        if streams.is_empty() {
             continue;
-        };
+        }
         let end_bucket = bucket_start_unix_secs(query.until_unix_millis, PROVIDER_LOT_BUCKET_SECS);
-        let mut cycle: Option<ProviderLotCycle> = None;
-        let mut previous: Option<ProviderLotObservation> = None;
+        let seeded = streams
+            .iter()
+            .filter_map(SlimCheckpointStream::current)
+            .max_by(|left, right| {
+                (
+                    left.changed_at_unix_millis,
+                    left.source.as_str(),
+                    left.sample_id,
+                )
+                    .cmp(&(
+                        right.changed_at_unix_millis,
+                        right.source.as_str(),
+                        right.sample_id,
+                    ))
+            })
+            .and_then(|checkpoint| {
+                checkpoint
+                    .utilization
+                    .map(|utilization| ProviderLotObservation {
+                        bucket_start_unix_secs: bucket_start
+                            .saturating_sub(PROVIDER_LOT_BUCKET_SECS),
+                        observed_at_unix_millis: checkpoint.changed_at_unix_millis,
+                        utilization,
+                        resets_at_unix_secs: checkpoint.resets_at_unix_secs,
+                    })
+            });
+        let mut cycle = seeded.map(|observation| ProviderLotCycle {
+            first_observed_at_unix_millis: observation.observed_at_unix_millis,
+            last: observation,
+        });
+        let mut previous = seeded;
         while bucket_start <= end_bucket {
             for stream in &mut streams {
                 stream.advance_to_bucket(bucket_start);

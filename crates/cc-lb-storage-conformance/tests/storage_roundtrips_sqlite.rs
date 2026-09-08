@@ -21,7 +21,7 @@ use cc_lb_storage_conformance::{
         prompt_cache_observation_store, request_event_key_usage, request_event_list,
         request_event_principal_costs, storage_roundtrips, storage_roundtrips_cache_split,
         storage_roundtrips_latency_stages, upstream_rate_limit_store,
-        upstream_subscription_metadata_store, upstream_subscription_quota_store,
+        upstream_subscription_metadata_store, upstream_subscription_quota_store, usage_rollups,
         warmup_attempts_store,
     },
 };
@@ -167,6 +167,14 @@ fn usage_rollup_v2_preserves_upstream_id_across_renames_sqlite() {
             result?;
             teardown
         },
+    );
+}
+
+#[test]
+fn usage_rollup_filtered_analysis_query_sqlite() {
+    run_sqlite_scenario(
+        "usage_rollup_filtered_analysis_query",
+        usage_rollups::run_all,
     );
 }
 
