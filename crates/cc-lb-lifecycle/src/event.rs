@@ -14,6 +14,29 @@ use crate::{
 /// for cross-subscriber correlation.
 pub type EventId = String;
 
+/// Optional request-scoped setup timings. `serde(flatten)` keeps the eight
+/// fields at the top level of the terminal lifecycle event while allowing
+/// producers and fixtures to pass them as one value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RequestSetupTimings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_parse_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_structure_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_token_key_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_count_lookup_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_tokenizer_queue_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_serialize_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_tokenize_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare_signer_ms: Option<f64>,
+}
+
 /// Fixed vocabulary of events emitted during a single request's lifecycle.
 ///
 /// See the crate-level documentation for the expected sequences.
@@ -124,6 +147,8 @@ pub enum LifecycleEvent {
         observability_post_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proxy_setup_ms: Option<u64>,
+        #[serde(default, flatten)]
+        setup_timings: RequestSetupTimings,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         upstream_body_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

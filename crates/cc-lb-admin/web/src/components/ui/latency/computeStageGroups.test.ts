@@ -3,8 +3,11 @@ import type { RequestEvent } from '../../../lib/api';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import {
   computeStageGroups,
+  deriveOtherSetup,
   deriveProxyTimelineDuration,
   deriveSetupOverhead,
+  hasSetupTimingBreakdown,
+  setupTimingTotal,
 } from './computeStageGroups';
 
 function ev(overrides: Partial<RequestEvent>): RequestEventWithPhase {
@@ -171,5 +174,72 @@ describe('computeStageGroups', () => {
     expect(r.setupOverhead).toBe(235 - 2);
     expect(r.internalPre).toBe(235);
     expect(r.unaccounted).toBe(1780 - 235 - 1000 - 500);
+  });
+
+  it('preserves the proxy setup total while exposing measured setup stages', () => {
+    const event = ev({
+      proxy_setup_ms: 20,
+      auth_ms: 2,
+      route_ms: 1,
+      limit_reserve_ms: 1,
+      json_parse_ms: 0.125,
+      cache_structure_ms: 1,
+      cache_token_key_ms: 0.25,
+      cache_count_lookup_ms: 2,
+      cache_tokenizer_queue_ms: 0.5,
+      cache_serialize_ms: 3,
+      cache_tokenize_ms: 4,
+      prepare_signer_ms: 1.125,
+      duration_ms: 100,
+    });
+
+    expect(hasSetupTimingBreakdown(event)).toBe(true);
+    expect(setupTimingTotal(event)).toBe(12);
+    expect(deriveOtherSetup(event)).toBe(4);
+    expect(deriveSetupOverhead(event)).toBe(16);
+    expect(computeStageGroups(event).internalPre).toBe(20);
+  });
+
+  it('distinguishes a measured zero from a missing setup timing', () => {
+    const measuredZero = ev({
+      proxy_setup_ms: 5,
+      cache_tokenize_ms: 0,
+    });
+    const legacy = ev({ proxy_setup_ms: 5 });
+
+    expect(hasSetupTimingBreakdown(measuredZero)).toBe(true);
+    expect(hasSetupTimingBreakdown(legacy)).toBe(false);
+    expect(setupTimingTotal(measuredZero)).toBe(0);
+    expect(deriveOtherSetup(measuredZero)).toBe(5);
+    expect(deriveSetupOverhead(legacy)).toBe(5);
+  });
+
+  it('clamps Other setup when measured stages exceed proxy setup', () => {
+    const event = ev({
+      proxy_setup_ms: 2,
+      auth_ms: 1,
+      json_parse_ms: 4,
+    });
+    expect(deriveOtherSetup(event)).toBe(0);
+    expect(deriveSetupOverhead(event)).toBe(1);
+  });
+
+  it('does not derive Other setup for an in-flight partial row', () => {
+    const partial = {
+      event_id: 'evt-partial',
+      request_id: 'req-partial',
+      ts: 1,
+      ts_ms: 1000,
+      last_update_ms: 1001,
+      elapsed_ms: 1,
+      stream: false,
+      cache_structure_ms: 0.25,
+      _phase: 'partial',
+    } satisfies RequestEventWithPhase;
+
+    expect(hasSetupTimingBreakdown(partial)).toBe(true);
+    expect(setupTimingTotal(partial)).toBe(0.25);
+    expect(deriveOtherSetup(partial)).toBe(0);
+    expect(computeStageGroups(partial).internalPre).toBe(0);
   });
 });

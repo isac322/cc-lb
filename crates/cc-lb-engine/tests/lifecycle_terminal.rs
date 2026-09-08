@@ -111,7 +111,45 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
             .map(|decision| (decision.upstream_id, decision.strategy.clone(),)),
         Some((Some(second), TerminalStrategy::FirstPick))
     );
+    assert_request_setup_timings(events.first().expect("successful event"));
     Ok(())
+}
+
+#[tokio::test]
+async fn signer_build_failure_preserves_request_setup_timings()
+-> Result<(), Box<dyn std::error::Error>> {
+    let choices = Arc::new(Mutex::new(Vec::new()));
+    let _dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-signer-failure.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let lifecycle = lifecycle_with_terminal_and_signer_failure(
+        TerminalStrategy::FirstPick,
+        Vec::new(),
+        vec![upstream_record(upstream_id(1), "first")],
+        Arc::clone(&choices),
+        true,
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"max_tokens":16}"#,
+        )))
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let event = events.first().expect("signer failure event");
+    assert_eq!(event.error_code.as_deref(), Some("signer_failed"));
+    assert_request_setup_timings(event);
+    Ok(())
+}
+
+fn assert_request_setup_timings(event: &cc_lb_storage_api::types::RequestEvent) {
+    for timing in [event.json_parse_ms, event.prepare_signer_ms] {
+        assert!(timing.is_some_and(|value| value.is_finite() && value >= 0.0));
+    }
 }
 
 async fn sqlite_storage(
@@ -211,6 +249,16 @@ fn lifecycle_with_terminal(
     records: Vec<UpstreamRecord>,
     choices: Arc<Mutex<Vec<String>>>,
 ) -> Lifecycle {
+    lifecycle_with_terminal_and_signer_failure(terminal, filters, records, choices, false)
+}
+
+fn lifecycle_with_terminal_and_signer_failure(
+    terminal: TerminalStrategy,
+    filters: Vec<Arc<dyn FilterPlugin>>,
+    records: Vec<UpstreamRecord>,
+    choices: Arc<Mutex<Vec<String>>>,
+    signer_fails: bool,
+) -> Lifecycle {
     let principal_view = principal_view(terminal, filters);
     let state = TestState::default();
     let authn = TestAuthn::with_principal_view(state.clone(), Arc::clone(&principal_view));
@@ -219,7 +267,10 @@ fn lifecycle_with_terminal(
         mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
     });
     let view = DynamicViewBuilder::new(0)
-        .signer_factory(Arc::new(RecordingSignerFactory { choices }))
+        .signer_factory(Arc::new(RecordingSignerFactory {
+            choices,
+            signer_fails,
+        }))
         .global_router(Arc::new(NullRouter))
         .global_observability_hooks(Vec::new())
         .principal_view(principal_view)
@@ -352,6 +403,7 @@ impl UpstreamDialect for NullDialect {
 
 struct RecordingSignerFactory {
     choices: Arc<Mutex<Vec<String>>>,
+    signer_fails: bool,
 }
 
 impl ApiKeyAwareSignerFactory for RecordingSignerFactory {
@@ -364,15 +416,24 @@ impl ApiKeyAwareSignerFactory for RecordingSignerFactory {
             .lock()
             .expect("choices lock")
             .push(router_chosen_upstream_name);
-        Arc::new(RecordingSignerFactoryInner)
+        Arc::new(RecordingSignerFactoryInner {
+            signer_fails: self.signer_fails,
+        })
     }
 }
 
-struct RecordingSignerFactoryInner;
+struct RecordingSignerFactoryInner {
+    signer_fails: bool,
+}
 
 #[async_trait]
 impl SignerFactory for RecordingSignerFactoryInner {
     async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+        if self.signer_fails {
+            return Err(SignerError::MissingCredentials {
+                reason: "forced signer build failure".to_owned(),
+            });
+        }
         Ok(Arc::new(RecordingSigner))
     }
 }
