@@ -24,7 +24,7 @@
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0 AS xx
 
 # ---- Architecture-independent cc-lb-admin dashboard SPA build ----
-FROM --platform=$BUILDPLATFORM oven/bun:1.3.14-alpine AS admin-spa
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.2-alpine AS admin-spa
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
 ARG BUILDOS
