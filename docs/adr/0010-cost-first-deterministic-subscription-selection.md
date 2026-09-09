@@ -15,7 +15,8 @@ cheaper than re-priming the cache, so this tail leakage is an avoidable cost.
 
 Use `cost-first-v1` within the chosen tier only. Existing tier eligibility,
 hard negatives, base-signal classification, quota pressure, urgency, and
-fallback reasons are unchanged.
+fallback reasons are unchanged. Provider `allowed_warning` status and finite
+`utilization >= surpassed_threshold` remain warning-positive quota observations.
 
 For every candidate with all cache-score and pricing inputs, calculate
 `cost_i = uncached * input + create_5m * price_5m + create_1h * price_1h + read * price_read`
@@ -26,18 +27,31 @@ u128(cost_i) * 100 <= u128(min_cost) * 105
 ```
 
 Candidates without a cost are excluded while any cost exists. If every cost is
-unknown, all candidates remain. Select the maximum lexicographic key:
+unknown, all candidates remain.
+
+The ranking warning multiplier depends on the selected tier:
 
 ```text
-(tier_urgency * warning_multiplier, warning_multiplier,
+KnownBase or PartialBase: 1.0
+Overage with any warning-positive base window: 0.20
+otherwise: 1.0
+```
+
+Base warning observations therefore remain available for classification and
+tracing without changing base-tier ranking. The Overage tier retains its
+existing warning penalty. Select the maximum lexicographic key:
+
+```text
+(tier_urgency * ranking_warning_multiplier, ranking_warning_multiplier,
  -cost when known, -upstream_id, -original_index)
 ```
 
 This makes a cheap warm owner deterministic, while cold requests tie on cost
 and fall through to the use-it-or-lose-it urgency key at zero cost penalty.
-Quota-exhausted upstreams remain excluded by existing tier and hard
-negative rules. The trace records `formula_version = cost-first-v1` as the
-selection identity.
+Quota-exhausted upstreams remain excluded by existing tier and hard-negative
+rules. The trace records `formula_version = cost-first-v1` as the selection
+identity and reports the tier-specific ranking multiplier in
+`warning_multiplier`.
 
 ## Interface cleanup
 

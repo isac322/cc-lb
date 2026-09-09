@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-07-09
 - Ships with: pending
-- Supersedes: ADR 0003's base-window quota urgency formula and capacity multiplier inside base quota urgency; ADR 0004/0005 cache and warning multipliers remain in force.
+- Supersedes: ADR 0003's base-window quota urgency formula and capacity multiplier inside base quota urgency. ADR 0010 keeps this pressure formula but makes base-tier warning signals ranking-neutral; the existing `0.20` warning multiplier remains active only in `Overage`.
 
 ## Context
 
@@ -19,11 +19,11 @@ That formula is a seconds burn-pressure score. It grows as reset approaches, but
 
 1. eligibility/safety decides whether a candidate can participate;
 2. quota urgency should mean the marginal pressure to use quota before it resets;
-3. cache, warning, and WRH scalarization remain outside the quota pressure itself.
+3. cache and selection scalarization remain outside the quota pressure itself.
 
 Operationally this ADR targets the cache-hit-0 or no-useful-cache path, but the implementation must not break cache-positive behavior. The existing WRH code multiplies quota, cache, and warning factors, so a formula that returns exact zero for on-pace candidates would also nullify cache affinity. The chosen implementation therefore separates the traceable pressure `U` from the WRH quota factor `1 + U`.
 
-Recent local SQLite inspection of the user-service database confirmed that provider warning fields are external Anthropic signals and are persisted in subscription quota latest/checkpoint tables. They are not derived from the quota formula and remain policy-relevant. `surpassed_threshold` is rare, but `allowed_warning` appears often enough that warning demotion should stay.
+Recent local SQLite inspection of the user-service database confirmed that provider warning fields are external Anthropic signals and are persisted in subscription quota latest/checkpoint tables. They are not derived from the quota formula. `allowed_warning` and finite `utilization >= surpassed_threshold` remain warning-positive for classification and observability, but do not change `KnownBase` or `PartialBase` ranking.
 
 ## Decision
 
@@ -86,12 +86,12 @@ quota_weight_factor = if bucket_total_pressure < EPSILON {
     1.0 + quota_pressure
 }
 
-effective_weight = quota_weight_factor * cache_weight_multiplier(cache_ratio) * warning_multiplier
+effective_weight = quota_weight_factor * cache_weight_multiplier(cache_ratio)
 score            = -ln(hash_to_open_unit(hash)) / effective_weight
 winner           = argmin(score)
 ```
 
-The `1 + quota_pressure` baseline is load-bearing. It keeps on-pace candidates selectable, lets cache-positive candidates still benefit from cache multiplier, and preserves the existing warning multiplier behavior during uniform fallback. Positive quota pressure still biases WRH toward upstreams whose quota is most likely to be wasted at reset.
+The `1 + quota_pressure` baseline is load-bearing. It keeps on-pace candidates selectable and lets cache-positive candidates still benefit from the cache multiplier. Base-tier provider warnings do not alter this factor or the later cost-first ranking. Positive quota pressure still biases selection toward upstreams whose quota is most likely to be wasted at reset.
 
 `Overage` and `UnknownProbe` are not base-pressure tiers and do not use `1 + quota_pressure`:
 
@@ -106,7 +106,7 @@ overage_quota_weight_factor_i = if overage_bucket_total < EPSILON {
 unknown_probe_quota_weight_factor = 1.0
 ```
 
-The overage formula, its eligibility, and its uniform fallback therefore remain byte-for-byte behaviorally unchanged. `UnknownProbe` continues to have zero raw urgency and always reaches the existing uniform fallback. Every tier still multiplies its tier-specific quota factor by the unchanged cache and warning multipliers.
+The overage formula, its eligibility, and its uniform fallback therefore remain byte-for-byte behaviorally unchanged. `UnknownProbe` continues to have zero raw urgency and always reaches the existing uniform fallback. The `0.20` warning multiplier remains a ranking input in `Overage`; `KnownBase` and `PartialBase` use a neutral warning multiplier of `1.0`.
 
 Remove the old base `capacity_multiplier` from quota urgency. Do not delete or reinterpret `plan_capacity_ratio`; it remains useful for admin analytics and future policy experiments. Overage tier urgency remains out of scope for this ADR and should keep its existing formula and fallback behavior unless a later ADR revisits overage routing.
 
@@ -114,7 +114,7 @@ Keep existing eligibility and safety behavior:
 
 - Fresh `rejected`, fresh `disabled_reason`, and fresh finite `utilization >= 1.0` remain hard negatives.
 - Fresh `allowed_warning`, or fresh `allowed` with finite `utilization >= surpassed_threshold`, remains warning-positive.
-- Warning-positive candidates remain routable and continue to receive `WARNING_MULTIPLIER = 0.20`.
+- Warning-positive candidates remain routable. Their ranking multiplier is `1.0` in `KnownBase` and `PartialBase`; a warning-positive candidate forced into `Overage` retains `OVERAGE_WARNING_MULTIPLIER = 0.20`.
 - Tier order remains `KnownBase > PartialBase > Overage > UnknownProbe`.
 - Cache multiplier and cache-affinity key selection remain unchanged.
 
@@ -175,7 +175,7 @@ Add SQLite migration `0048_request_events_quota_urgency.sql` with nullable `REAL
 - 7d can dominate when weekly waste risk is the binding constraint; 5h is not hard-prioritized over 7d.
 - Capacity no longer overrides quota urgency or creates a feedback loop where larger plans receive traffic merely because they are larger.
 - Cache-positive and on-pace candidates remain selectable because WRH uses `1 + pressure`, not raw pressure.
-- Warning signals stay independent from the formula and continue to protect provider-declared near-surpassed candidates.
+- Warning signals stay independent from the pressure formula and remain observable without penalizing base-tier candidates; the Overage penalty remains unchanged.
 - Chosen-upstream columns support cheap aggregate queries, while payload JSON keeps full candidate-level debugging.
 
 ### Negative
@@ -216,8 +216,8 @@ Implementation must include local regression tests for:
 - Capacity ratio changes not changing base quota pressure.
 - Cache multiplier outputs unchanged for fixed cache inputs.
 - Cache-hot on-pace candidates keeping finite effective weight through `1 + pressure`.
-- All-on-pace buckets using uniform quota factor `1.0` while still applying warning multiplier.
-- Warning-positive candidates retaining `WARNING_MULTIPLIER = 0.20` in mixed and uniform fallback cases.
+- All-on-pace base buckets using a neutral warning multiplier of `1.0`.
+- Allowed-to-warning and surpassed-threshold transitions preserving `KnownBase` and `PartialBase` winners, including zero-pressure ties, while warning-positive `Overage` selection retains the `0.20` multiplier.
 - Two otherwise-equal Fable candidates receiving different pressure, effective weights, and routing distribution from scoped weekly pressure.
 - All-candidate payload trace carrying U5/U7/combined/factor fields.
 - Historical v10 payload JSON deserializing with the documented compatibility defaults.

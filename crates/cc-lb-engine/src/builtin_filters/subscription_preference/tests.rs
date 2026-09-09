@@ -1392,15 +1392,16 @@ fn base_non_uniform_quota_urgency_tracks_positive_pressure() {
 }
 
 #[test]
-fn warning_multiplier_is_point_two_in_mixed_pressure_bucket() {
-    // Given: one warning-positive candidate in a non-uniform base bucket.
-    let warning = oauth_at_t0(
-        "warning",
+fn base_warning_signals_do_not_change_positive_pressure_selection() {
+    // Given: a pressured base candidate and the same candidate after each
+    // provider warning transition.
+    let allowed = oauth_at_t0(
+        "transitioned",
         1,
         vec![
             fresh(WINDOW_FIVE_HOUR)
                 .util(0.10)
-                .status("allowed_warning")
+                .status("allowed")
                 .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS / 2)
                 .build(),
             fresh(WINDOW_SEVEN_DAY)
@@ -1410,48 +1411,141 @@ fn warning_multiplier_is_point_two_in_mixed_pressure_bucket() {
                 .build(),
         ],
     );
-    let peer = healthy_known_base_at_util("peer", 2, 0.90);
-
-    // When: the filter scores their bucket.
-    let output = filter_for_model(&[warning.clone(), peer], MODEL_AGNOSTIC);
-    let trace = output.subscription_preference.expect("trace present");
-    let warning_weight = candidate_urgency_for(&trace, warning.upstream_id);
-
-    // Then: warning remains a final 0.20 multiplier on the base urgency signal.
-    assert_eq!(warning_weight.warning_multiplier, WARNING_MULTIPLIER);
-}
-
-#[test]
-fn warning_multiplier_is_point_two_in_uniform_pressure_bucket() {
-    // Given: a warning-positive candidate in an all-on-pace base bucket.
-    let warning = oauth_at_t0(
-        "warning",
-        1,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.0)
-                .status("allowed_warning")
-                .build(),
-            fresh(WINDOW_SEVEN_DAY).util(0.0).status("allowed").build(),
-        ],
-    );
+    let mut explicit_warning = allowed.clone();
+    explicit_warning.subscription_quotas[0].status = Some("allowed_warning".to_owned());
+    let mut threshold_warning = allowed.clone();
+    threshold_warning.subscription_quotas[0].surpassed_threshold = Some(0.05);
     let peer = oauth_at_t0(
         "peer",
         2,
         vec![
-            fresh(WINDOW_FIVE_HOUR).util(0.0).status("allowed").build(),
-            fresh(WINDOW_SEVEN_DAY).util(0.0).status("allowed").build(),
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.50)
+                .status("allowed")
+                .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS / 2)
+                .build(),
+            fresh(WINDOW_SEVEN_DAY)
+                .util(0.50)
+                .status("allowed")
+                .reset_at(T0_SECS + SEVEN_DAY_RESET_SECS / 2)
+                .build(),
         ],
     );
 
-    // When: the filter scores their uniform bucket.
-    let output = filter_for_model(&[warning.clone(), peer], MODEL_AGNOSTIC);
-    let trace = output.subscription_preference.expect("trace present");
-    let warning_weight = candidate_urgency_for(&trace, warning.upstream_id);
+    // When: the allowed and warning-positive forms compete with the same peer.
+    let allowed_output = filter_for_model(&[allowed.clone(), peer.clone()], MODEL_AGNOSTIC);
+    for warning_candidate in [explicit_warning, threshold_warning] {
+        let warning_output =
+            filter_for_model(&[warning_candidate.clone(), peer.clone()], MODEL_AGNOSTIC);
+        let trace = warning_output
+            .subscription_preference
+            .expect("subscription trace");
+        let warning_weight = candidate_urgency_for(&trace, warning_candidate.upstream_id);
 
-    // Then: neutral quota urgency still receives the unchanged 0.20 warning multiplier.
-    assert_eq!(warning_weight.quota_urgency, 0.0);
-    assert_eq!(warning_weight.warning_multiplier, WARNING_MULTIPLIER);
+        // Then: warning remains classified and observable in quota state, but
+        // base ranking uses a neutral multiplier and keeps the allowed winner.
+        assert_eq!(
+            warning_output.kept_upstream_ids,
+            allowed_output.kept_upstream_ids
+        );
+        assert_eq!(
+            warning_weight.tier,
+            cc_lb_domain::SubscriptionTier::KnownBase
+        );
+        assert!(warning_weight.quota_urgency > 0.0);
+        assert_eq!(warning_weight.warning_multiplier, 1.0);
+    }
+
+    let partial_allowed = oauth_at_t0(
+        "partial-transitioned",
+        3,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.10)
+                .status("allowed")
+                .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS / 2)
+                .build(),
+        ],
+    );
+    let mut partial_explicit_warning = partial_allowed.clone();
+    partial_explicit_warning.subscription_quotas[0].status = Some("allowed_warning".to_owned());
+    let mut partial_threshold_warning = partial_allowed.clone();
+    partial_threshold_warning.subscription_quotas[0].surpassed_threshold = Some(0.05);
+    let partial_peer = oauth_at_t0(
+        "partial-peer",
+        4,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.30)
+                .status("allowed")
+                .reset_at(T0_SECS + FIVE_HOUR_RESET_SECS / 2)
+                .build(),
+        ],
+    );
+    let partial_allowed_output =
+        filter_for_model(&[partial_allowed, partial_peer.clone()], MODEL_AGNOSTIC);
+
+    for warning_candidate in [partial_explicit_warning, partial_threshold_warning] {
+        let warning_output = filter_for_model(
+            &[warning_candidate.clone(), partial_peer.clone()],
+            MODEL_AGNOSTIC,
+        );
+        let trace = warning_output
+            .subscription_preference
+            .expect("subscription trace");
+        let warning_weight = candidate_urgency_for(&trace, warning_candidate.upstream_id);
+
+        assert_eq!(
+            warning_output.kept_upstream_ids,
+            partial_allowed_output.kept_upstream_ids
+        );
+        assert_eq!(
+            warning_weight.tier,
+            cc_lb_domain::SubscriptionTier::PartialBase
+        );
+        assert!(warning_weight.quota_urgency > 0.0);
+        assert_eq!(warning_weight.warning_multiplier, 1.0);
+    }
+}
+
+#[test]
+fn overage_warning_multiplier_and_selection_remain_unchanged() {
+    // Given: otherwise-equal overage candidates whose blocked base windows
+    // differ only by a provider warning on the still-positive 5h window.
+    let warned = oauth_at_t0(
+        "warned-overage",
+        1,
+        vec![
+            fresh(WINDOW_FIVE_HOUR)
+                .util(0.10)
+                .status("allowed_warning")
+                .build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.25).status("allowed").build(),
+        ],
+    );
+    let clean = oauth_at_t0(
+        "clean-overage",
+        2,
+        vec![
+            fresh(WINDOW_FIVE_HOUR).util(0.10).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.25).status("allowed").build(),
+        ],
+    );
+
+    // When: cost-first compares the two candidates in the Overage tier.
+    let output = filter_for_model(&[warned.clone(), clean.clone()], MODEL_AGNOSTIC);
+    let trace = output.subscription_preference.expect("subscription trace");
+    let warned_weight = candidate_urgency_for(&trace, warned.upstream_id);
+    let clean_weight = candidate_urgency_for(&trace, clean.upstream_id);
+
+    // Then: the existing overage-only warning penalty remains active.
+    assert_eq!(warned_weight.tier, cc_lb_domain::SubscriptionTier::Overage);
+    assert_eq!(clean_weight.tier, cc_lb_domain::SubscriptionTier::Overage);
+    assert_eq!(warned_weight.warning_multiplier, OVERAGE_WARNING_MULTIPLIER);
+    assert_eq!(clean_weight.warning_multiplier, 1.0);
+    assert_eq!(output.kept_upstream_ids, vec![clean.upstream_id]);
 }
 
 #[test]
