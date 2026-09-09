@@ -41,6 +41,7 @@ fn describes_all_required_metrics() {
             "cc_lb_plugin_pool_saturation_total",
             "cc_lb_tokens_total",
             "cc_lb_virtual_cost_usd_total",
+            "cc_lb_stream_terminations_total",
             "cclb_api_key_requests_total",
             "cclb_api_key_tokens_total",
             "cclb_api_key_cost_usd_micro_total",
@@ -70,7 +71,7 @@ fn describes_all_required_metrics() {
         ]
     );
 
-    assert_eq!(definitions.len(), 54);
+    assert_eq!(definitions.len(), 55);
     assert_eq!(definitions[0].kind, MetricKind::Counter);
     assert_eq!(definitions[1].kind, MetricKind::Histogram);
     assert_eq!(definitions[3].kind, MetricKind::Gauge);
