@@ -14,14 +14,16 @@ use cc_lb_engine::{
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason, UsageSource};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
-use http::StatusCode;
+use http::header::CONTENT_ENCODING;
+use http::{HeaderMap, StatusCode};
 use http_body_util::BodyExt;
 
 use client_disconnect_support::{
     assert_dropped_terminal, assert_error_terminal, assert_one_final, assert_stream_error,
-    assert_success_terminal, canonical_error_frame, json_dispatch, lifecycle, lifecycle_receiver,
-    normal_sse_frame, pending_sse, sqlite_storage, sse_dispatch, transform_body,
-    transform_lifecycle, upstream_frame_error, upstream_frame_error_after,
+    assert_success_terminal, canonical_error_frame, encoded_sse_dispatch, json_dispatch, lifecycle,
+    lifecycle_receiver, normal_sse_frame, pending_sse, persistent_upstream_frame_error,
+    sqlite_storage, sse_dispatch, transform_body, transform_lifecycle, upstream_frame_error,
+    upstream_frame_error_after,
 };
 use common::{RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState, messages_request};
 use url::Url;
@@ -332,6 +334,100 @@ async fn upstream_frame_error_is_recorded_as_upstream_stream_error() {
     )
     .await;
     assert_error_terminal(&mut lifecycle_rx, 200, "upstream_stream_error").await;
+}
+
+#[tokio::test]
+async fn uncompressed_sse_terminal_body_error_reaches_eos_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (headers, body) = terminal_body_error_case(None).await?;
+
+    assert!(headers.get(CONTENT_ENCODING).is_none());
+    let text = std::str::from_utf8(&body).expect("identity SSE output is utf8");
+    assert_eq!(
+        text.matches("event: error\n").count(),
+        1,
+        "identity SSE emits one client-visible error frame before EOS"
+    );
+    assert!(text.contains("\"api_error\""));
+    Ok(())
+}
+
+#[tokio::test]
+async fn compressed_sse_terminal_body_error_reaches_eos_without_plaintext_frame()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (headers, body) = terminal_body_error_case(Some("gzip")).await?;
+
+    assert_eq!(
+        headers
+            .get(CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+        Some("gzip")
+    );
+    assert!(
+        body.is_empty(),
+        "compressed passthrough must not inject a plaintext SSE error frame"
+    );
+    Ok(())
+}
+
+async fn terminal_body_error_case(
+    content_encoding: Option<&'static str>,
+) -> Result<(HeaderMap, Bytes), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
+        panic!("expected in-memory update receiver");
+    };
+    let dispatcher = match content_encoding {
+        Some(content_encoding) => encoded_sse_dispatch(
+            StatusCode::OK,
+            persistent_upstream_frame_error(),
+            content_encoding,
+        ),
+        None => sse_dispatch(StatusCode::OK, persistent_upstream_frame_error()),
+    };
+    let lifecycle = lifecycle(dispatcher, &test_bus);
+
+    let response = lifecycle
+        .handle(stream_request())
+        .await
+        .expect("lifecycle handles persistent upstream body error");
+    let (parts, body) = response.into_parts();
+    let body = body
+        .collect()
+        .await
+        .expect("downstream response reaches EOS after the first upstream body error")
+        .to_bytes();
+
+    assert_stream_error(
+        &mut lifecycle_rx,
+        "upstream_response_body_error",
+        "forced persistent upstream frame error",
+    )
+    .await;
+    assert_error_terminal(&mut lifecycle_rx, 200, "upstream_stream_error").await;
+    assert_one_final(&mut update_rx).await;
+
+    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].error_code.as_deref(),
+        Some("upstream_stream_error"),
+        "terminal upstream errors must not be reclassified as client_closed_request"
+    );
+    assert_eq!(
+        rows[0].upstream_error_type.as_deref(),
+        Some("upstream_response_body_error")
+    );
+    assert_eq!(
+        rows[0].upstream_error_message.as_deref(),
+        Some("forced persistent upstream frame error")
+    );
+
+    Ok((parts.headers, body))
 }
 
 #[tokio::test]

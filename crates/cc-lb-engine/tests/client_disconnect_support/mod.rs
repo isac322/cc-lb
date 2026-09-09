@@ -7,8 +7,10 @@ pub use events::{
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -29,8 +31,9 @@ use cc_lb_upstream::{
     SignedRequest, SseEventTransformHook, TransformSseEventRequest, TransformSseEventResult,
     UpstreamDialect,
 };
-use http::header::CONTENT_TYPE;
+use http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use http::{HeaderValue, Response, StatusCode};
+use http_body::{Body as HttpBody, Frame};
 use tokio::sync::Notify;
 use url::Url;
 
@@ -118,11 +121,32 @@ pub fn transform_lifecycle(
 }
 
 pub fn sse_dispatch(status: StatusCode, body: Body) -> Arc<dyn UpstreamDispatch> {
+    sse_dispatch_with_encoding(status, body, None)
+}
+
+pub fn encoded_sse_dispatch(
+    status: StatusCode,
+    body: Body,
+    content_encoding: &'static str,
+) -> Arc<dyn UpstreamDispatch> {
+    sse_dispatch_with_encoding(status, body, Some(content_encoding))
+}
+
+fn sse_dispatch_with_encoding(
+    status: StatusCode,
+    body: Body,
+    content_encoding: Option<&'static str>,
+) -> Arc<dyn UpstreamDispatch> {
     let mut response = Response::new(body);
     *response.status_mut() = status;
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    if let Some(content_encoding) = content_encoding {
+        response
+            .headers_mut()
+            .insert(CONTENT_ENCODING, HeaderValue::from_static(content_encoding));
+    }
     Arc::new(OneResponseDispatch::new(response))
 }
 
@@ -151,6 +175,36 @@ pub fn upstream_frame_error() -> Body {
         ));
     };
     Body::from_stream(stream)
+}
+
+// Models an h2 body that remains error-ready after a reset. The relay must treat the first
+// error as terminal; a second poll panics so the regression fails promptly instead of hanging.
+pub fn persistent_upstream_frame_error() -> Body {
+    Body::new(PersistentReadyErrorBody::default())
+}
+
+#[derive(Default)]
+struct PersistentReadyErrorBody {
+    error_returned: bool,
+}
+
+impl HttpBody for PersistentReadyErrorBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        assert!(
+            !self.error_returned,
+            "upstream body was polled after its first terminal error"
+        );
+        self.error_returned = true;
+        Poll::Ready(Some(Err(std::io::Error::other(
+            "forced persistent upstream frame error",
+        ))))
+    }
 }
 
 pub fn upstream_frame_error_after(frame: Bytes) -> Body {
