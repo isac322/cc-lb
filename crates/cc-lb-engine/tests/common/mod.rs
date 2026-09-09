@@ -213,6 +213,9 @@ pub struct RecordingHook {
 impl RecordingHook {
     pub async fn wait_for_event(&self, matches: impl Fn(&ObserveEvent) -> bool) -> ObserveEvent {
         loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(event) = self
                 .events
                 .lock()
@@ -223,7 +226,7 @@ impl RecordingHook {
             {
                 return event;
             }
-            self.notify.notified().await;
+            notified.await;
         }
     }
 }
