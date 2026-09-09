@@ -426,7 +426,7 @@ fi
 set +e
 case "$client" in
   claude-code)
-    timeout 30s env \
+    run_isolated_client 30 env \
       HOME="$TMP_DIR/home" \
       XDG_CONFIG_HOME="$TMP_DIR/xdg-config" \
       XDG_DATA_HOME="$TMP_DIR/xdg-data" \
