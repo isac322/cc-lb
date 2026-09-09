@@ -56,6 +56,7 @@ hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", 
 chrono.workspace = true
 metrics.workspace = true
 parking_lot = "0.12"
+opentelemetry.workspace = true
 rand = "0.10"
 reqwest.workspace = true
 secrecy.workspace = true
@@ -70,6 +71,7 @@ tiktoken-rs = "0.12"
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 ulid = "3"
 url.workspace = true
 uuid.workspace = true

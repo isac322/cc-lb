@@ -130,6 +130,8 @@ mod request_context;
 mod request_context_proxy_parity;
 #[path = "resolves_anthropic_host.rs"]
 mod resolves_anthropic_host;
+#[path = "response_observation_regressions.rs"]
+mod response_observation_regressions;
 #[path = "response_transform_paths.rs"]
 mod response_transform_paths;
 #[path = "rfc_0002_fix_live_qa.rs"]

@@ -160,6 +160,7 @@ pub struct App {
     pub admin_router: Router,
     pub proxy_addr: SocketAddr,
     pub admin_addr: SocketAddr,
+    lifecycle: Arc<Lifecycle>,
     pub reload_task: Option<JoinHandle<()>>,
     notify_cancel: Option<CancellationToken>,
     notifier_task: Option<JoinHandle<()>>,
@@ -254,6 +255,7 @@ impl App {
             admin_router,
             proxy_addr,
             admin_addr,
+            lifecycle,
             reload_task,
             notify_cancel,
             notifier_task,
@@ -362,6 +364,20 @@ impl App {
         }
         for task in event_fanout_tasks {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        }
+        // Optional observations must not consume the durable writers' flush budget.
+        // The worker has drained concurrently during the mandatory cleanup above.
+        if tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, lifecycle.shutdown())
+            .await
+            .is_err()
+        {
+            cc_lb_observability::increment_dropped_events_by(
+                "stream_completion_observer_shutdown_timeout",
+                1,
+            );
+            tracing::warn!(
+                "completion observer drain exceeded the cleanup budget; worker remains detached"
+            );
         }
         proxy_result?;
         Ok(())
@@ -1741,6 +1757,7 @@ async fn build_app_with_storage_inner(
         admin_router: admin_router(admin_state, server_state.clone(), internal_partials_state),
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
+        lifecycle,
         reload_task,
         notify_cancel: Some(notify_cancel),
         notifier_task,

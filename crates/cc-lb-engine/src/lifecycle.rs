@@ -54,6 +54,9 @@ use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
 use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Scoped};
 use crate::clock::{Clock, ClockHandle, unix_millis, unix_secs};
+use crate::completion_observer::{
+    CompletionObserver, StreamCompletionLog, StreamCompletionObservation, StreamLatency,
+};
 use crate::downstream_stream_drop_guard::DownstreamStreamDropGuard;
 use crate::error_format::{
     anthropic_error_body, anthropic_error_response, anthropic_error_response_with_retry_after,
@@ -71,7 +74,6 @@ use crate::request_timing::{
     REQUEST_STAGE_TIMINGS, RequestStageTimings, finalize_connection_reused_if_unset,
 };
 use crate::sse_error_frame::make_error_frame;
-use crate::stream_span_body::StreamSpanBody;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{
@@ -1856,6 +1858,7 @@ pub struct Lifecycle {
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     cache_keepalive_enqueuer: Option<Arc<dyn crate::cache_keepalive::CacheKeepaliveEnqueuer>>,
     prompt_cache_analysis_executor: PromptCacheAnalysisExecutor,
+    completion_observer: Arc<CompletionObserver>,
     clock: ClockHandle,
     rng: Mutex<StdRng>,
 }
@@ -1898,6 +1901,7 @@ impl Lifecycle {
             subscription_quota_cache: None,
             cache_keepalive_enqueuer: None,
             prompt_cache_analysis_executor: PromptCacheAnalysisExecutor::default(),
+            completion_observer: Arc::new(CompletionObserver::new()),
             clock,
             rng: Mutex::new(rand::make_rng()),
         }
@@ -1925,6 +1929,7 @@ impl Lifecycle {
             subscription_quota_cache: None,
             cache_keepalive_enqueuer: None,
             prompt_cache_analysis_executor: PromptCacheAnalysisExecutor::default(),
+            completion_observer: Arc::new(CompletionObserver::new()),
             clock,
             rng: Mutex::new(rand::make_rng()),
         }
@@ -1962,6 +1967,11 @@ impl Lifecycle {
 
     pub fn event_bus(&self) -> Option<Arc<dyn RequestEventBus>> {
         self.event_bus.clone()
+    }
+
+    /// Drains accepted streaming completion observations and stops the dedicated worker.
+    pub async fn shutdown(&self) {
+        self.completion_observer.shutdown().await;
     }
 
     pub fn with_event_bus(mut self, bus: Arc<dyn RequestEventBus>) -> Self {
@@ -3872,12 +3882,31 @@ impl Lifecycle {
             error.io.kind = tracing::field::Empty,
             error.io.os_error = tracing::field::Empty,
             error.h2.reason = tracing::field::Empty,
+            stream_first_chunk_ms = tracing::field::Empty,
+            stream_message_start_ms = tracing::field::Empty,
+            stream_content_block_start_ms = tracing::field::Empty,
+            stream_first_content_delta_ms = tracing::field::Empty,
+            stream_last_content_delta_ms = tracing::field::Empty,
+            stream_message_stop_ms = tracing::field::Empty,
+            stream_last_chunk_ms = tracing::field::Empty,
+            stream_total_ms = tracing::field::Empty,
+            sse_event_count = tracing::field::Empty,
+            content_delta_count = tracing::field::Empty,
+            ping_count = tracing::field::Empty,
+            inter_token_avg_ms = tracing::field::Empty,
+            total_bytes = tracing::field::Empty,
         );
+        let stream_latency_log_dispatch = tracing::enabled!(
+            target: "cc_lb_engine::lifecycle",
+            tracing::Level::INFO
+        )
+        .then(|| tracing::dispatcher::get_default(|dispatch| dispatch.clone()));
         let downstream_drop_guard = DownstreamStreamDropGuard::armed(
             observer.clone(),
             stream_span.clone(),
             upstream_error_status.then_some(StreamTerminationCause::ProviderError),
         );
+        let completion_observer = Arc::clone(&self.completion_observer);
         let parse_sse_events = !upstream_error_status || upstream_is_sse;
         let stream = async_stream::stream! {
             let mut downstream_drop_guard = downstream_drop_guard;
@@ -3976,6 +4005,7 @@ impl Lifecycle {
                                     let upstream_decode_failed =
                                         is_upstream_response_decode_error(&error);
                                     tracing::warn!(
+                                        parent: &stream_span,
                                         request_id = %event_ctx.request_id,
                                         %error,
                                         upstream_decode_failed,
@@ -4163,6 +4193,7 @@ impl Lifecycle {
                                         Ok(keys) => keys,
                                         Err(_) => {
                                             tracing::warn!(
+                                                parent: &stream_span,
                                                 "failed to inspect upstream affinity in SSE event"
                                             );
                                             stream_upstream_error =
@@ -4228,6 +4259,7 @@ impl Lifecycle {
                                     .is_err()
                                     {
                                         tracing::warn!(
+                                            parent: &stream_span,
                                             "failed to persist upstream affinity before SSE event"
                                         );
                                         stream_affinity_error = Some(affinity_stream_error());
@@ -4449,6 +4481,7 @@ impl Lifecycle {
                                             }
                                             SseTransformOutcome::Error(error) => {
                                                 tracing::warn!(
+                                                    parent: &stream_span,
                                                     request_id = %event_ctx.request_id,
                                                     %error,
                                                     "sse response transform failed"
@@ -4555,6 +4588,7 @@ impl Lifecycle {
                                 && buffer.len() > incomplete_sse_event_budget_bytes
                             {
                                 tracing::warn!(
+                                    parent: &stream_span,
                                     request_id = %event_ctx.request_id,
                                     buffered_bytes = buffer.len(),
                                     budget_bytes = incomplete_sse_event_budget_bytes,
@@ -4669,6 +4703,7 @@ impl Lifecycle {
                         let classification = classify_stream_error(&source);
                         let client_error_message = classification.redacted_message.clone();
                         tracing::warn!(
+                            parent: &stream_span,
                             request_id = %event_ctx.request_id,
                             cause = classification.cause.as_str(),
                             error_chain = %classification.redacted_chain,
@@ -4752,6 +4787,7 @@ impl Lifecycle {
                                     Ok(keys) => keys,
                                     Err(_) => {
                                         tracing::warn!(
+                                            parent: &stream_span,
                                             "failed to inspect upstream affinity in final SSE event"
                                         );
                                         stream_upstream_error =
@@ -4807,6 +4843,7 @@ impl Lifecycle {
                                 .is_err()
                                 {
                                     tracing::warn!(
+                                        parent: &stream_span,
                                         "failed to persist upstream affinity before final SSE event"
                                     );
                                     stream_affinity_error = Some(affinity_stream_error());
@@ -4947,6 +4984,7 @@ impl Lifecycle {
                         }
                         if buffer.len() > incomplete_sse_event_budget_bytes {
                             tracing::warn!(
+                                parent: &stream_span,
                                 request_id = %event_ctx.request_id,
                                 buffered_bytes = buffer.len(),
                                 budget_bytes = incomplete_sse_event_budget_bytes,
@@ -5030,6 +5068,7 @@ impl Lifecycle {
                     upstream_error_body_decode_failed = true;
                     let upstream_decode_failed = is_upstream_response_decode_error(&error);
                     tracing::warn!(
+                        parent: &stream_span,
                         request_id = %event_ctx.request_id,
                         %error,
                         upstream_decode_failed,
@@ -5206,7 +5245,10 @@ impl Lifecycle {
                 .await
                 .is_err()
             {
-                tracing::warn!("failed to persist upstream affinity at SSE completion");
+                tracing::warn!(
+                    parent: &stream_span,
+                    "failed to persist upstream affinity at SSE completion"
+                );
                 stream_affinity_error = Some(affinity_stream_error());
                 downstream_drop_guard.mark_proxy_error(
                     StreamTerminationCause::AffinityError,
@@ -5275,23 +5317,6 @@ impl Lifecycle {
                 }
                 _ => None,
             };
-            tracing::info!(
-                status = status.as_u16(),
-                stream_first_chunk_ms = ?elapsed_ms(first_chunk_at),
-                stream_message_start_ms = ?elapsed_ms(message_start_at),
-                stream_content_block_start_ms = ?elapsed_ms(content_block_start_at),
-                stream_first_content_delta_ms = ?elapsed_ms(first_content_delta_at),
-                stream_last_content_delta_ms = ?elapsed_ms(last_content_delta_at),
-                stream_message_stop_ms = ?elapsed_ms(message_stop_at),
-                stream_last_chunk_ms = ?elapsed_ms(last_chunk_at),
-                stream_total_ms = stream_total_ms,
-                sse_event_count = sse_event_count,
-                content_delta_count = content_delta_count,
-                ping_count = ping_count,
-                inter_token_avg_ms = ?inter_token_avg_ms,
-                total_bytes = total_bytes,
-                "stream latency breakdown"
-            );
             if let Some(response_accounting_guard) = response_accounting_guard {
                 response_accounting_guard.forget();
             }
@@ -5400,21 +5425,57 @@ impl Lifecycle {
                 }
                 o.finish();
             }
+            // Mandatory lifecycle, accounting, affinity, and termination work is complete.
+            // Only best-effort hook dispatch and latency logging cross this bounded boundary.
+            let stream_latency = StreamLatency {
+                status: status.as_u16(),
+                stream_first_chunk_ms: elapsed_ms(first_chunk_at),
+                stream_message_start_ms: elapsed_ms(message_start_at),
+                stream_content_block_start_ms: elapsed_ms(content_block_start_at),
+                stream_first_content_delta_ms: elapsed_ms(first_content_delta_at),
+                stream_last_content_delta_ms: elapsed_ms(last_content_delta_at),
+                stream_message_stop_ms: elapsed_ms(message_stop_at),
+                stream_last_chunk_ms: elapsed_ms(last_chunk_at),
+                stream_total_ms,
+                sse_event_count,
+                content_delta_count,
+                ping_count,
+                inter_token_avg_ms,
+                total_bytes,
+            };
+            stream_latency.record_on_span(&stream_span);
             downstream_drop_guard.finish();
-            observe_many(hooks.as_slice(), ObserveEvent::RequestFinished {
-                status,
-                input_tokens: usage.present.then_some(usage.input_tokens),
-                output_tokens: usage.present.then_some(usage.output_tokens),
-                cache_creation_input_tokens: usage.present.then_some(usage.cache_creation_input_tokens),
-                cache_read_input_tokens: usage.present.then_some(usage.cache_read_input_tokens),
-                duration_ms: stream_total_ms,
-            });
+            if stream_latency_log_dispatch.is_some() || !hooks.is_empty() {
+                let completion_log = stream_latency_log_dispatch.map(|dispatch| {
+                    StreamCompletionLog::new(
+                        event_ctx.request_id,
+                        &stream_span,
+                        stream_latency,
+                        dispatch,
+                    )
+                });
+                let _ = completion_observer.enqueue(StreamCompletionObservation::new(
+                    hooks.into_arc(),
+                    ObserveEvent::RequestFinished {
+                        status,
+                        input_tokens: usage.present.then_some(usage.input_tokens),
+                        output_tokens: usage.present.then_some(usage.output_tokens),
+                        cache_creation_input_tokens: usage
+                            .present
+                            .then_some(usage.cache_creation_input_tokens),
+                        cache_read_input_tokens: usage
+                            .present
+                            .then_some(usage.cache_read_input_tokens),
+                        duration_ms: stream_total_ms,
+                    },
+                    completion_log,
+                ));
+            }
             if let Some(chunk) = deferred_terminal_chunk {
                 yield Ok::<Bytes, Infallible>(chunk);
             }
         };
-        let body = Body::from_stream(stream);
-        Response::from_parts(parts, Body::new(StreamSpanBody::new(body, stream_span)))
+        Response::from_parts(parts, Body::from_stream(stream))
     }
 }
 
@@ -5691,6 +5752,14 @@ impl StreamHooks {
 
     fn as_slice(&self) -> &[Arc<dyn ObservabilityHook>] {
         &self.hooks
+    }
+
+    fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+    }
+
+    fn into_arc(self) -> Arc<[Arc<dyn ObservabilityHook>]> {
+        self.hooks
     }
 }
 
