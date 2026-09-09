@@ -88,6 +88,8 @@ mod sse_relay;
 #[cfg(not(loom))]
 pub mod storage_tail_poller;
 #[cfg(not(loom))]
+mod stream_span_body;
+#[cfg(not(loom))]
 pub mod subscription_metadata_hook {
     pub use cc_lb_control::subscription_metadata_hook::*;
 }

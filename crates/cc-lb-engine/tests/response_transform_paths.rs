@@ -15,7 +15,7 @@ use cc_lb_engine::{
     DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
     UpstreamDispatch,
 };
-use cc_lb_lifecycle::LifecycleEvent;
+use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_observability::ObserveEvent;
 use cc_lb_storage_api::principal::PrincipalRecord;
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
@@ -30,6 +30,7 @@ use cc_lb_upstream::{
 };
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue, Response, StatusCode};
+use http_body_util::BodyExt as _;
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -503,7 +504,7 @@ async fn sse_transform_decodes_gzip_and_emits_identity_sse() {
 }
 
 #[tokio::test]
-async fn gzip_passthrough_preserves_upstream_bytes() {
+async fn gzip_content_length_passthrough_preserves_upstream_bytes_and_headers() {
     let plaintext = sse_upstream_body(false);
     let compressed = gzip_bytes(&plaintext);
     let split_points = [
@@ -524,6 +525,10 @@ async fn gzip_passthrough_preserves_upstream_bytes() {
         .collect::<Vec<_>>();
     let mut headers = sse_headers();
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&compressed.len().to_string()).expect("content length header"),
+    );
     let lifecycle = lifecycle_with_transforms(
         None,
         None,
@@ -546,7 +551,153 @@ async fn gzip_passthrough_preserves_upstream_bytes() {
         headers.get(CONTENT_ENCODING),
         Some(&HeaderValue::from_static("gzip"))
     );
+    assert_eq!(
+        headers
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()),
+        Some(compressed.len().to_string().as_str())
+    );
     assert_eq!(output, compressed);
+}
+#[tokio::test]
+async fn content_length_client_stops_after_declared_gzip_bytes_without_terminal_drop() {
+    let plaintext = sse_upstream_body(false);
+    let compressed = gzip_bytes(&plaintext);
+    let mut headers = sse_headers();
+    headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&compressed.len().to_string()).expect("content length header"),
+    );
+    let test_bus = TestLifecycleBus::new();
+    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
+    else {
+        panic!("expected in-memory lifecycle receiver");
+    };
+    let lifecycle = lifecycle_with_transforms(
+        None,
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers,
+            body: compressed.clone(),
+        }),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )))
+        .await
+        .expect("lifecycle handles content-length gzip passthrough");
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()),
+        Some(compressed.len().to_string().as_str())
+    );
+    let mut body = response.into_body();
+    let frame = body
+        .frame()
+        .await
+        .expect("declared gzip bytes frame")
+        .expect("gzip frame succeeds")
+        .into_data()
+        .expect("gzip data frame");
+    assert_eq!(frame, compressed);
+    drop(body);
+
+    loop {
+        let event = lifecycle_rx
+            .recv()
+            .await
+            .expect("lifecycle event delivered");
+        if let LifecycleEvent::RequestTerminated {
+            reason,
+            client_status,
+            ..
+        } = event
+        {
+            assert_eq!(reason, TerminationReason::Success);
+            assert_eq!(client_status, StatusCode::OK.as_u16());
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn content_length_malformed_sse_delivers_raw_bytes_before_error_telemetry() {
+    let malformed =
+        Bytes::from_static(b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"");
+    let mut headers = sse_headers();
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&malformed.len().to_string()).expect("content length header"),
+    );
+    let test_bus = TestLifecycleBus::new();
+    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
+    else {
+        panic!("expected in-memory lifecycle receiver");
+    };
+    let lifecycle = lifecycle_with_transforms(
+        None,
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers,
+            body: malformed.clone(),
+        }),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )))
+        .await
+        .expect("lifecycle handles malformed content-length SSE");
+    let mut body = response.into_body();
+    let first = body
+        .frame()
+        .await
+        .expect("declared SSE bytes frame")
+        .expect("declared SSE frame succeeds")
+        .into_data()
+        .expect("declared SSE data frame");
+    assert_eq!(first, malformed);
+    drop(body);
+
+    let mut stream_error_seen = false;
+    let mut terminal_seen = false;
+    while !stream_error_seen || !terminal_seen {
+        match lifecycle_rx
+            .recv()
+            .await
+            .expect("lifecycle event delivered")
+        {
+            LifecycleEvent::StreamCompleted {
+                result: Err(error), ..
+            } => {
+                assert_eq!(error.error_type, "upstream_response_framing_error");
+                stream_error_seen = true;
+            }
+            LifecycleEvent::RequestTerminated {
+                reason,
+                client_status,
+                ..
+            } => {
+                assert_eq!(
+                    reason,
+                    TerminationReason::ErrorCode("upstream_stream_error".to_owned())
+                );
+                assert_eq!(client_status, StatusCode::OK.as_u16());
+                terminal_seen = true;
+            }
+            _ => {}
+        }
+    }
 }
 
 #[tokio::test]

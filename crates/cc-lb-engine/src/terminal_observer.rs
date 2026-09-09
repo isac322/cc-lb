@@ -24,6 +24,8 @@
 //! `request_events_v1` is the DB-side safety net for any residual race or
 //! restart-after-fallback corner case.
 
+use std::error::Error as StdError;
+use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -31,11 +33,181 @@ use std::time::Instant;
 use cc_lb_control::RequestEventBus;
 use cc_lb_domain::InternalError;
 use cc_lb_lifecycle::{LifecycleEvent, RequestSetupTimings, TerminationReason};
+use cc_lb_observability::{RedactionPolicy, truncate_reason};
 use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
 use uuid::Uuid;
 
 use crate::clock::{ClockHandle, unix_millis};
+
+const STREAM_ERROR_CHAIN_MAX_DEPTH: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StreamTerminationOutcome {
+    Completed,
+    UpstreamError,
+    ProxyError,
+    ClientCancelled,
+}
+
+impl StreamTerminationOutcome {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::UpstreamError => "upstream_error",
+            Self::ProxyError => "proxy_error",
+            Self::ClientCancelled => "client_cancelled",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StreamTerminationCause {
+    None,
+    ProviderError,
+    TransportError,
+    H2Cancel,
+    H2Reset,
+    IoReset,
+    IoTimeout,
+    UnexpectedEof,
+    DecodeError,
+    FramingError,
+    TransformError,
+    AffinityError,
+    Unknown,
+}
+
+impl StreamTerminationCause {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ProviderError => "provider_error",
+            Self::TransportError => "transport_error",
+            Self::H2Cancel => "h2_cancel",
+            Self::H2Reset => "h2_reset",
+            Self::IoReset => "io_reset",
+            Self::IoTimeout => "io_timeout",
+            Self::UnexpectedEof => "unexpected_eof",
+            Self::DecodeError => "decode_error",
+            Self::FramingError => "framing_error",
+            Self::TransformError => "transform_error",
+            Self::AffinityError => "affinity_error",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StreamErrorClassification {
+    pub(crate) cause: StreamTerminationCause,
+    pub(crate) redacted_message: String,
+    pub(crate) redacted_chain: String,
+    pub(crate) io_kind: Option<String>,
+    pub(crate) io_os_error: Option<i32>,
+    pub(crate) h2_reason: Option<String>,
+}
+
+pub(crate) fn classify_stream_error(error: &(dyn StdError + 'static)) -> StreamErrorClassification {
+    let policy = RedactionPolicy::default();
+    let redacted_message = truncate_reason(&policy.redact_text(&error.to_string()));
+    let redacted_chain = redacted_error_chain(error, &policy, &redacted_message);
+    let mut current = Some(error);
+    let mut hyper_error = None;
+    let mut h2_error = None;
+    let mut io_error = None;
+
+    for _ in 0..STREAM_ERROR_CHAIN_MAX_DEPTH {
+        let Some(source) = current else {
+            break;
+        };
+        hyper_error = hyper_error.or_else(|| source.downcast_ref::<hyper::Error>());
+        h2_error = h2_error.or_else(|| source.downcast_ref::<h2::Error>());
+        io_error = io_error.or_else(|| source.downcast_ref::<io::Error>());
+        current = source.source();
+    }
+
+    let h2_reason = h2_error
+        .and_then(h2::Error::reason)
+        .map(|reason| reason.to_string());
+    let io_error = h2_error.and_then(h2::Error::get_io).or(io_error);
+    let io_kind = io_error.map(|error| format!("{:?}", error.kind()));
+    let io_os_error = io_error.and_then(io::Error::raw_os_error);
+
+    let cause = if let Some(error) = h2_error {
+        if error.reason() == Some(h2::Reason::CANCEL) {
+            StreamTerminationCause::H2Cancel
+        } else if error.is_reset() || error.reason().is_some() {
+            StreamTerminationCause::H2Reset
+        } else if let Some(error) = error.get_io() {
+            classify_io_error(error)
+        } else {
+            StreamTerminationCause::TransportError
+        }
+    } else if let Some(error) = io_error {
+        classify_io_error(error)
+    } else if let Some(error) = hyper_error {
+        if error.is_incomplete_message() {
+            StreamTerminationCause::UnexpectedEof
+        } else if error.is_timeout() {
+            StreamTerminationCause::IoTimeout
+        } else {
+            StreamTerminationCause::TransportError
+        }
+    } else {
+        StreamTerminationCause::Unknown
+    };
+
+    StreamErrorClassification {
+        cause,
+        redacted_message,
+        redacted_chain,
+        io_kind,
+        io_os_error,
+        h2_reason,
+    }
+}
+
+fn classify_io_error(error: &io::Error) -> StreamTerminationCause {
+    match error.kind() {
+        io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::BrokenPipe
+        | io::ErrorKind::NotConnected => StreamTerminationCause::IoReset,
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => StreamTerminationCause::IoTimeout,
+        io::ErrorKind::UnexpectedEof => StreamTerminationCause::UnexpectedEof,
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => {
+            StreamTerminationCause::DecodeError
+        }
+        _ => StreamTerminationCause::TransportError,
+    }
+}
+
+fn redacted_error_chain(
+    error: &(dyn StdError + 'static),
+    policy: &RedactionPolicy,
+    redacted_message: &str,
+) -> String {
+    let mut messages = Vec::with_capacity(STREAM_ERROR_CHAIN_MAX_DEPTH);
+    messages.push(redacted_message.to_owned());
+    let mut current = error.source();
+
+    for _ in 1..STREAM_ERROR_CHAIN_MAX_DEPTH {
+        let Some(source) = current else {
+            break;
+        };
+        let message = truncate_reason(&policy.redact_text(&source.to_string()));
+        if messages.last() != Some(&message) {
+            messages.push(message);
+        }
+        current = source.source();
+    }
+    if current.is_some() {
+        messages.push("[error chain truncated]".to_owned());
+    }
+
+    truncate_reason(&messages.join(": "))
+}
 
 pub(crate) mod error_codes {
     pub(crate) const BODY_TOO_LARGE: &str = "body_too_large";
@@ -459,5 +631,199 @@ mod tests {
         drop(clone2);
         let (_id, reason, _status) = expect_terminated(rx.recv().await.expect("emit on last drop"));
         assert!(matches!(reason, TerminationReason::Dropped));
+    }
+    #[test]
+    fn stream_error_classifier_extracts_io_reset_and_redacts_bounded_chain() {
+        let secret = "Bearer abcdef.ghijkl";
+        let error = io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            format!("{secret} {}", "x".repeat(4_096)),
+        );
+
+        let classification = classify_stream_error(&error);
+
+        assert_eq!(classification.cause, StreamTerminationCause::IoReset);
+        assert_eq!(classification.io_kind.as_deref(), Some("ConnectionReset"));
+        assert!(!classification.redacted_message.contains(secret));
+        assert!(
+            classification
+                .redacted_message
+                .contains(cc_lb_observability::REDACTED)
+        );
+        assert!(classification.redacted_message.len() <= cc_lb_domain::MAX_ERROR_MESSAGE_LEN);
+        assert!(!classification.redacted_chain.contains(secret));
+        assert!(
+            classification
+                .redacted_chain
+                .contains(cc_lb_observability::REDACTED)
+        );
+        assert_eq!(classification.io_os_error, None);
+        assert!(classification.redacted_chain.len() <= cc_lb_domain::MAX_ERROR_MESSAGE_LEN);
+    }
+
+    #[test]
+    fn stream_error_classifier_extracts_h2_cancel_reason() {
+        let error = h2::Error::from(h2::Reason::CANCEL);
+
+        let classification = classify_stream_error(&error);
+
+        assert_eq!(
+            classification.h2_reason,
+            Some(h2::Reason::CANCEL.to_string())
+        );
+    }
+
+    #[test]
+    fn stream_error_classifier_distinguishes_unexpected_eof() {
+        let error = io::Error::new(io::ErrorKind::UnexpectedEof, "truncated response");
+
+        let classification = classify_stream_error(&error);
+
+        assert_eq!(classification.cause, StreamTerminationCause::UnexpectedEof);
+        assert_eq!(classification.io_kind.as_deref(), Some("UnexpectedEof"));
+        assert_eq!(classification.redacted_message, "truncated response");
+    }
+
+    #[test]
+    fn stream_error_chain_deduplicates_wrappers_and_retains_inner_cause() {
+        #[derive(Debug)]
+        struct Wrapper {
+            message: &'static str,
+            source: Box<dyn StdError + Send + Sync>,
+        }
+
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(self.message)
+            }
+        }
+
+        impl StdError for Wrapper {
+            fn source(&self) -> Option<&(dyn StdError + 'static)> {
+                Some(self.source.as_ref())
+            }
+        }
+
+        let error = Wrapper {
+            message: "delegating wrapper",
+            source: Box::new(Wrapper {
+                message: "delegating wrapper",
+                source: Box::new(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "distinct inner cause",
+                )),
+            }),
+        };
+
+        let classification = classify_stream_error(&error);
+
+        assert_eq!(classification.redacted_message, "delegating wrapper");
+        assert_eq!(
+            classification.redacted_chain,
+            "delegating wrapper: distinct inner cause"
+        );
+        assert_eq!(classification.cause, StreamTerminationCause::IoReset);
+    }
+    #[tokio::test]
+    async fn classifies_real_hyper_http2_cancelled_body() {
+        use http::Request;
+        use http_body_util::{BodyExt as _, Full};
+        use hyper::client::conn::http2;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("HTTP/2 test listener binds");
+        let address = listener.local_addr().expect("HTTP/2 listener address");
+        let (headers_received_tx, headers_received_rx) = oneshot::channel();
+        let (reset_observed_tx, reset_observed_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("HTTP/2 client connects");
+            let mut connection = h2::server::handshake(socket)
+                .await
+                .expect("HTTP/2 server handshake");
+            let (_request, mut respond) = connection
+                .accept()
+                .await
+                .expect("HTTP/2 request present")
+                .expect("HTTP/2 request accepted");
+            let response = http::Response::builder()
+                .status(StatusCode::OK)
+                .body(())
+                .expect("HTTP/2 response builds");
+            let mut body = respond
+                .send_response(response, false)
+                .expect("HTTP/2 response headers sent");
+            tokio::select! {
+                received = headers_received_rx => {
+                    received.expect("client confirms response headers");
+                }
+                _ = connection.accept() => {
+                    panic!("HTTP/2 connection ended before response-header acknowledgement");
+                }
+            }
+            body.send_reset(h2::Reason::CANCEL);
+            tokio::pin!(reset_observed_rx);
+            loop {
+                tokio::select! {
+                    observed = &mut reset_observed_rx => {
+                        observed.expect("client observes RST_STREAM");
+                        break;
+                    }
+                    accepted = connection.accept() => {
+                        assert!(
+                            accepted.is_some(),
+                            "HTTP/2 connection closed before reset was observed"
+                        );
+                    }
+                }
+            }
+        });
+
+        let socket = TcpStream::connect(address)
+            .await
+            .expect("HTTP/2 client connects");
+        let (mut sender, connection) = http2::handshake(TokioExecutor::new(), TokioIo::new(socket))
+            .await
+            .expect("Hyper HTTP/2 client handshake");
+        let client_connection = tokio::spawn(connection);
+        let request = Request::builder()
+            .uri(format!("http://{address}/cancel"))
+            .body(Full::new(bytes::Bytes::new()))
+            .expect("HTTP/2 request builds");
+        let mut response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sender.send_request(request),
+        )
+        .await
+        .expect("HTTP/2 response headers are flushed")
+        .expect("response headers received");
+        assert_eq!(response.status(), StatusCode::OK);
+        headers_received_tx
+            .send(())
+            .expect("server waits for response-header acknowledgement");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            response.body_mut().frame(),
+        )
+        .await
+        .expect("HTTP/2 reset is flushed")
+        .expect("reset produces a body frame result")
+        .expect_err("RST_STREAM CANCEL produces a Hyper body error");
+
+        let classification = classify_stream_error(&error);
+
+        assert_eq!(classification.cause, StreamTerminationCause::H2Cancel);
+        assert_eq!(
+            classification.h2_reason,
+            Some(h2::Reason::CANCEL.to_string())
+        );
+        reset_observed_tx
+            .send(())
+            .expect("server waits until Hyper exposes the reset");
+        server.await.expect("HTTP/2 server task completes");
+        client_connection.abort();
     }
 }

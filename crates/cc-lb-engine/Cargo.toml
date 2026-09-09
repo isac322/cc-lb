@@ -45,8 +45,10 @@ dashmap.workspace = true
 eventsource-stream.workspace = true
 flate2.workspace = true
 futures-core = "0.3"
+h2.workspace = true
 hickory-resolver = { workspace = true, features = ["tokio", "system-config"] }
 http.workspace = true
+http-body.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-rustls.workspace = true
@@ -80,9 +82,11 @@ cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 insta.workspace = true
 metrics-exporter-prometheus.workspace = true
+metrics-util.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber.workspace = true
 tower = { workspace = true, features = ["util"] }
 trybuild = "1"
 
