@@ -25,6 +25,8 @@ mod circuit_breaker;
 #[cfg(not(loom))]
 pub mod clock;
 #[cfg(not(loom))]
+mod completion_observer;
+#[cfg(not(loom))]
 mod dns_cache;
 #[cfg(not(loom))]
 mod downstream_stream_drop_guard;
@@ -87,8 +89,6 @@ mod sse_error_frame;
 mod sse_relay;
 #[cfg(not(loom))]
 pub mod storage_tail_poller;
-#[cfg(not(loom))]
-mod stream_span_body;
 #[cfg(not(loom))]
 pub mod subscription_metadata_hook {
     pub use cc_lb_control::subscription_metadata_hook::*;

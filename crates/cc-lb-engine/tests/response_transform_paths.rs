@@ -1670,16 +1670,21 @@ async fn sse_accounting_uses_pre_transform_usage() {
 
     let text = std::str::from_utf8(&body).expect("sse body is utf8");
     assert!(text.contains(r#""input_tokens":999"#));
-    let events = recording.events.lock().expect("events lock").clone();
-    let usage = events.iter().find_map(|event| match event {
-        ObserveEvent::RequestFinished {
-            input_tokens,
-            output_tokens,
-            ..
-        } => Some((*input_tokens, *output_tokens)),
-        _ => None,
-    });
-    assert_eq!(usage, Some((Some(7), Some(11))));
+    let event = tokio::time::timeout(
+        Duration::from_secs(1),
+        recording.wait_for_event(|event| matches!(event, ObserveEvent::RequestFinished { .. })),
+    )
+    .await
+    .expect("request-finished observation arrives");
+    let ObserveEvent::RequestFinished {
+        input_tokens,
+        output_tokens,
+        ..
+    } = event
+    else {
+        panic!("expected request-finished observation");
+    };
+    assert_eq!((input_tokens, output_tokens), (Some(7), Some(11)));
 }
 
 fn lifecycle_with_transforms(

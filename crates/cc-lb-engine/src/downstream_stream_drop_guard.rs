@@ -107,12 +107,6 @@ impl DownstreamStreamDropGuard {
             "cause" => cause.as_str()
         )
         .increment(1);
-        tracing::info!(
-            parent: &self.span,
-            outcome = outcome.as_str(),
-            cause = cause.as_str(),
-            "response_stream_terminated"
-        );
     }
 }
 

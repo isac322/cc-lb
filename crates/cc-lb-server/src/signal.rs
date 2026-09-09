@@ -34,6 +34,10 @@ impl SignalHandle {
         self.drain_complete.subscribe()
     }
 
+    pub(crate) const fn drain_timeout(&self) -> Duration {
+        self.drain_timeout
+    }
+
     pub fn start_shutdown(&self) {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             return;
