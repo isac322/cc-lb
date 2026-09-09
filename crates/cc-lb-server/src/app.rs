@@ -314,20 +314,6 @@ impl App {
                 server_join_result(proxy.await)
             }
         };
-        let completion_observer_shutdown_timeout = signals.drain_timeout();
-        if tokio::time::timeout(completion_observer_shutdown_timeout, lifecycle.shutdown())
-            .await
-            .is_err()
-        {
-            cc_lb_observability::increment_dropped_events_by(
-                "stream_completion_observer_shutdown_timeout",
-                1,
-            );
-            tracing::warn!(
-                timeout_secs = completion_observer_shutdown_timeout.as_secs(),
-                "completion observer drain exceeded the configured drain allowance; worker remains detached"
-            );
-        }
 
         if let Some(task) = reload_task {
             task.abort();
@@ -378,6 +364,20 @@ impl App {
         }
         for task in event_fanout_tasks {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        }
+        // Optional observations must not consume the durable writers' flush budget.
+        // The worker has drained concurrently during the mandatory cleanup above.
+        if tokio::time::timeout(SHUTDOWN_TASK_TIMEOUT, lifecycle.shutdown())
+            .await
+            .is_err()
+        {
+            cc_lb_observability::increment_dropped_events_by(
+                "stream_completion_observer_shutdown_timeout",
+                1,
+            );
+            tracing::warn!(
+                "completion observer drain exceeded the cleanup budget; worker remains detached"
+            );
         }
         proxy_result?;
         Ok(())
