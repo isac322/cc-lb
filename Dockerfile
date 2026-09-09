@@ -18,7 +18,6 @@
 # Build (multi-arch, push — requires a docker-container builder):
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     --build-arg GIT_SHA=$(git rev-parse HEAD) -t <registry>/cc-lb:<tag> --push .
-# Smaller `scratch` variant:  add `--target runtime-scratch`
 
 # ---- xx cross-compilation helper scripts (shared across all target platforms) ----
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0 AS xx
@@ -91,7 +90,8 @@ ARG SOURCE_DATE_EPOCH=""
 # The default ships BOTH storage backends in one binary; the backend is chosen at
 # runtime via `[storage] kind` ("sqlite" or "postgres"). Override to slim, e.g.
 # `--build-arg FEATURES=sqlite`.
-ARG CARGO_BUILD_JOBS="1"
+# Optional Cargo parallelism override; unset lets Cargo size itself to the builder.
+ARG CARGO_BUILD_JOBS
 ARG FEATURES="sqlite,postgres"
 # Set to 1 to embed the existing placeholder page instead of the built dashboard.
 ARG SKIP_SPA="0"
@@ -147,7 +147,11 @@ if [ -z "${CARGO_PROFILE_RELEASE_LTO:-}" ]; then
 else
   export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO}"
 fi
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
+if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+  unset CARGO_BUILD_JOBS
+else
+  export CARGO_BUILD_JOBS
+fi
 if [ "${SKIP_SPA}" = "1" ]; then
   rm -rf /src/crates/cc-lb-admin/web/dist
   export CC_LB_ADMIN_SKIP_SPA=1
@@ -192,7 +196,7 @@ else
   fi
 fi
 build_status=0
-xx-cargo build --release --locked --jobs "${CARGO_BUILD_JOBS}" \
+xx-cargo build --release --locked \
   -p cc-lb-server \
   --no-default-features --features "${FEATURES}" \
   --config 'target."cfg(all())".rustflags = ["-C", "link-arg=-Wl,--threads=2"]' \
@@ -225,10 +229,6 @@ if [ "$cache_status" -ne 0 ]; then exit "$cache_status"; fi
 triple="$target"
 install -Dm0755 "/src/target/${triple}/release/cc-lb" /out/cc-lb
 xx-verify --static /out/cc-lb
-# Minimal passwd/group so the scratch image can run as a real nonroot user.
-install -d /out/etc
-echo 'nonroot:x:65532:65532:nonroot:/home/nonroot:/sbin/nologin' > /out/etc/passwd
-echo 'nonroot:x:65532:' > /out/etc/group
 EOF
 
 # ---- CI smoke: run the static binary on BuildKit without a local Docker daemon ----
@@ -241,20 +241,10 @@ RUN /usr/local/bin/cc-lb --version && \
       /usr/local/bin/cc-lb --version | grep -Fq "$EXPECTED_VERSION"; \
     fi
 
-# ---- Final: scratch (opt-in via `--target runtime-scratch`; smallest image) ----
-FROM scratch AS runtime-scratch
-COPY --link --from=builder /out/etc/passwd /etc/passwd
-COPY --link --from=builder /out/etc/group /etc/group
-COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
-USER 65532:65532
-EXPOSE 8080 9090 9091
-ENTRYPOINT ["/usr/local/bin/cc-lb"]
-CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
-
 # ---- Final: distroless static (DEFAULT target) ----
-# Ships /etc/passwd, a nonroot user (65532), /tmp, and CA certs — a safe,
-# debuggable base ~2 MB over the static binary. Digest-pinned for reproducible
-# builds (:nonroot is a rolling tag); bump alongside the other base images
+# Ships passwd/group metadata, /tmp, and CA certificates in a small operational
+# base around the static binary. Digest-pinned for reproducible builds
+# (:nonroot is a rolling tag); bump alongside the other base images
 # (freshen-deps).
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7 AS distroless
 COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
