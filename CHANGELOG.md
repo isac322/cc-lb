@@ -4,14 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-09-09
+
 ### Added
 
 - Upstream-affinity retention is configurable with `[upstream_affinity] ttl_days = 90` or `CC_LB_UPSTREAM_AFFINITY__TTL_DAYS`. Positive values take effect after restart and also apply to existing mappings with no explicit expiry. Bindings expire after the configured time since their last successful bind, without writes on replay; expired or unknown history fails closed with 503. A recurring `upstream_affinity_purge` job removes expired mappings in bounded indexed batches outside the proxy path, every 10 minutes with up to 30 seconds of jitter by default.
+- Response-body diagnostics now retain bounded, redacted transport error chains and HTTP/2 reset reasons in `proxy.response_stream` spans. `cc_lb_stream_terminations_total{outcome,cause}` distinguishes completion, upstream-response failures, proxy-local failures, and client cancellation without changing HTTP status counters.
+- Request logs expose request setup timing breakdowns.
 
 ### Fixed
 
 - Anthropic native web-search history now keeps exact upstream affinity across cache misses and quota-driven routing changes. cc-lb persists only SHA-256 digests of opaque `encrypted_content`, fails closed when affinity is unknown, conflicting, unavailable, or cannot be persisted, and gates streaming search-result events until the mapping is durable.
 - Upstream-affinity persistence now uses atomic bounded batches, with fixed-shape PostgreSQL array inserts and bounded SQLite statement caching. SSE observers share parsed events, affinity matching avoids quadratic key scans, and JSON traversal skips redundant work while preserving routing, replay, and fail-closed delivery semantics. Storage latency and batch-size metrics expose the remaining persistence cost.
+- Content-Length passthrough responses finalize usage, accounting, and request records before their final bytes are returned, so a fully delivered response is no longer reported as cancelled or terminal-dropped when the HTTP server stops polling.
+- Quota warnings no longer demote otherwise available base quota during routing.
+- Production Docker builds explicitly select the final distroless runtime stage, fixing the startup failure that required rolling back 0.4.6.
 
 ## [0.4.6] - 2026-09-08
 
