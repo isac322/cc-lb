@@ -4,7 +4,7 @@ This gate protects the exact incremental prompt-cache analyzer from returning to
 
 ## Fixture
 
-The test `production_size_prompt_cache_release_regression_gate` builds its request in memory. No binary fixture is stored in the repository.
+The test `production_size_prompt_cache_regression_gate` builds its request in memory. No binary fixture is stored in the repository.
 
 The fixture has these fixed properties:
 
@@ -32,16 +32,31 @@ The second analysis uses the same credential scope and cache. It must return the
 
 The test prints the fixture byte count, deepest prefix bytes and tokens, actual cold tokenizer bytes and tokens, warm hit count, and owned serialized storage. These values are structural evidence; the gate does not use wall-clock thresholds, sleeps, retries, or timing-based pass criteria.
 
-## CI command
+## CI integration
 
-The dedicated `prompt-cache 4MB release regression` CI job uses the repository's `cc-lb-4` self-hosted runner, pinned stable Rust toolchain, release profile, Rust cache convention, build-skip environment variables, and a 45-minute timeout for the cold fat-LTO build. The step enables pipeline failure propagation, tees the output to a log, and requires exactly one `1 passed; 0 failed` test summary. Renaming or deleting the exact test therefore fails the job instead of passing with zero tests. The test command is:
+The gate runs as a normal, non-ignored unit test in the existing `nextest-cov` job. That job already checks out the repository, installs the pinned toolchain, restores the Rust cache, and runs the workspace test suite:
+
+```sh
+cargo llvm-cov nextest \
+  --workspace \
+  --exclude cc-lb-loadgen \
+  --exclude cc-lb-stress-suite \
+  --all-features \
+  --no-report
+```
+
+The gate uses deterministic serialized-byte, token-count, cache-hit, and owned-capacity assertions. None of its pass criteria depend on optimization level or wall-clock timing, so a separate release-profile build does not strengthen the contract. Keeping it in the ordinary suite also makes local `cc-lb-engine` test runs exercise the production-size case.
+
+Passing test output is captured by nextest. To print the structural counters while investigating a failure or intentionally changing the frozen fixture, run the same gate locally without a separate CI job:
 
 ```sh
 CC_LB_ADMIN_SKIP_SPA=1 CC_LB_SKIP_WASM_FIXTURE_BUILD=1 \
-  cargo test --locked --release -p cc-lb-engine --lib \
-  prompt_cache_simulator::optimized::tests::production_size_prompt_cache_release_regression_gate \
+  cargo test --locked -p cc-lb-engine --lib \
+  prompt_cache_simulator::optimized::tests::production_size_prompt_cache_regression_gate \
   -- --exact --nocapture
 ```
+
+CI measurements before this integration showed that `nextest-cov` took 5 minutes 36 seconds with the gate enabled and 5 minutes 33 seconds with it ignored. The separate release job took 1 minute 55 seconds. Running the gate in the existing suite therefore removes a checkout, toolchain setup, cache setup, runner allocation, and release build for an observed coverage-job increase of about 3 seconds.
 
 ## Failure interpretation
 
@@ -77,16 +92,17 @@ Do not loosen a deterministic budget to hide a failure. Compare the printed deep
 - [x] Test-only owned serialized byte and capacity bounds
 - [x] No public production API or timing threshold
 
-### Release CI
+### Existing coverage suite
 
-- [x] Dedicated stable release-profile job
-- [x] Exact named-test command with existing runner and environment conventions
-- [x] `--nocapture` evidence output and exactly-one-pass summary guard configured
+- [x] Normal non-ignored test in the existing `nextest-cov` workspace run
+- [x] No dedicated job, runner allocation, or release-profile rebuild
+- [x] Structural assertions independent of optimization level
 
-### Parent verification — 2026-09-08 local evidence
+### Parent verification — 2026-09-09 integration evidence
 
-- [x] The exact release test passed twice on the current head with identical counters: fixture 4,065,868 bytes; deepest prefix 4,043,246 bytes and 1,234,134 tokens; actual tokenizer work 4,043,384 bytes and 1,234,189 tokens; four warm hits; owned storage 4,043,246 bytes with 4,980,776-byte capacity.
-- [x] The ordinary optimized prompt-cache module run passed 20 tests with the dedicated release gate ignored; the gate passed separately in release mode.
+- [x] The unchanged gate previously passed twice in release mode with identical counters: fixture 4,065,868 bytes; deepest prefix 4,043,246 bytes and 1,234,134 tokens; actual tokenizer work 4,043,384 bytes and 1,234,189 tokens; four warm hits; owned storage 4,043,246 bytes with 4,980,776-byte capacity.
+- [x] The ordinary optimized prompt-cache module run includes the production-size gate and passes all 21 tests.
+- [x] CI timing comparison showed about 3 seconds of `nextest-cov` impact versus 1 minute 55 seconds for the removed standalone job.
 - [x] `cargo fmt --all -- --check` passed.
 - [x] `actionlint .github/workflows/ci.yml` passed.
 - [x] Independent spec re-review passed G1–G16, and the security review reported zero findings.
