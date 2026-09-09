@@ -24,7 +24,7 @@ jobs:
       - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"

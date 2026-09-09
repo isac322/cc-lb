@@ -29,7 +29,9 @@ impl ReplicaPorts {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
         ports
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|ports| Ok(Self::new(ports[0], ports[1], ports[2])))
             .collect()
     }

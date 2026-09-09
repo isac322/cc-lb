@@ -21,7 +21,7 @@ on:
       - '.github/workflows/docker-build.yml'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: docker-build-daemon
   cancel-in-progress: true
 
 jobs:
@@ -47,10 +47,13 @@ jobs:
           driver: remote
           endpoint: tcp://buildkit.arc-systems.svc.cluster.local:1234
 
+      # Prevent BuildKit ResourceExhausted errors from accumulated multi-platform layers.
+      - name: Prune stale BuildKit build cache
+        run: docker buildx prune --force --all --max-used-space 20GB || true
+
       # Build every release target on Dockerfile changes so cross-compilation
-      # failures are caught before publication. Build each 64-bit target and
-      # secondary targets separately so concurrent LTO memory stays safely
-      # within the 10Gi daemon limit.
+      # failures are caught before publication. Build each platform in its own
+      # step to strictly bound peak memory under the 10Gi BuildKit daemon limit.
       - name: Build linux/arm64 release target
         uses: docker/build-push-action@v7
         with:
@@ -59,9 +62,9 @@ jobs:
           target: builder
           outputs: type=cacheonly
           build-args: |
+            CARGO_BUILD_JOBS=1
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
-            CARGO_PROFILE_RELEASE_LTO=thin
             SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
             SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
             SCCACHE_REGION=${{ env.SCCACHE_REGION }}
@@ -70,6 +73,9 @@ jobs:
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+      - name: Prune intermediate build cache
+        run: docker buildx prune --force --all --max-used-space 20GB || true
+
 
       - name: Build linux/amd64 release target
         uses: docker/build-push-action@v7
@@ -79,6 +85,53 @@ jobs:
           target: builder
           outputs: type=cacheonly
           build-args: |
+            CARGO_BUILD_JOBS=1
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
+            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
+            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
+            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
+            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      - name: Prune intermediate build cache
+        run: docker buildx prune --force --all --max-used-space 20GB || true
+
+      - name: Build linux/arm/v7 release target
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm/v7
+          target: builder
+          outputs: type=cacheonly
+          build-args: |
+            CARGO_BUILD_JOBS=1
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
+            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
+            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
+            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
+            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      - name: Prune intermediate build cache
+        run: docker buildx prune --force --all --max-used-space 20GB || true
+
+      - name: Build linux/ppc64le release target
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/ppc64le
+          target: builder
+          outputs: type=cacheonly
+          build-args: |
+            CARGO_BUILD_JOBS=1
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
             CARGO_PROFILE_RELEASE_LTO=thin
@@ -90,44 +143,9 @@ jobs:
           secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+      - name: Prune intermediate build cache
+        run: docker buildx prune --force --all --max-used-space 20GB || true
 
-      - name: Build linux/arm/v7 release target
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/arm/v7
-          target: builder
-          outputs: type=cacheonly
-          build-args: |
-            GIT_SHA=${{ steps.source.outputs.sha }}
-            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
-            CARGO_PROFILE_RELEASE_LTO=thin
-            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
-            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
-            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
-            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
-            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
-            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
-            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
-
-      - name: Build linux/ppc64le release target
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/ppc64le
-          target: builder
-          outputs: type=cacheonly
-          build-args: |
-            GIT_SHA=${{ steps.source.outputs.sha }}
-            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
-            CARGO_PROFILE_RELEASE_LTO=thin
-            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
-            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
-            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
-            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
-            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
-            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
-            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
       - name: Build image and smoke-test binary
         uses: docker/build-push-action@v7
         with:

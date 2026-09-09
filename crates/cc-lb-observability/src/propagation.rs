@@ -47,9 +47,7 @@ pub fn inject_current_trace_context(headers: &mut HeaderMap) {
 #[cfg(test)]
 mod tests {
     use http::HeaderValue;
-    use opentelemetry::trace::{
-        SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
-    };
+    use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
 
     use super::*;
 

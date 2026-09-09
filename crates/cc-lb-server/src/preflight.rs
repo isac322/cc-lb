@@ -343,10 +343,10 @@ fn decode_master_key(env_name: &str, value: &str) -> Result<[u8; 32], PreflightE
         });
     }
     let mut key = [0_u8; 32];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        let high = hex_nibble(chunk[0])
+    for (index, &[high_byte, low_byte]) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        let high = hex_nibble(high_byte)
             .ok_or_else(|| PreflightError::MasterKeyBadHex(env_name.to_owned()))?;
-        let low = hex_nibble(chunk[1])
+        let low = hex_nibble(low_byte)
             .ok_or_else(|| PreflightError::MasterKeyBadHex(env_name.to_owned()))?;
         key[index] = (high << 4) | low;
     }

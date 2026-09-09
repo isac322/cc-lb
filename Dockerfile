@@ -54,7 +54,7 @@ RUN if [ "${SKIP_SPA}" != "1" ]; then \
     fi
 
 # ---- Builder: cross toolchain, source, and the compile ----
-FROM --platform=$BUILDPLATFORM rust:1.97.1-alpine AS builder
+FROM --platform=$BUILDPLATFORM rust:1.98.0-alpine AS builder
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
 # clang/lld: xx uses clang as the cross linker driver for every target
@@ -91,6 +91,7 @@ ARG SOURCE_DATE_EPOCH=""
 # The default ships BOTH storage backends in one binary; the backend is chosen at
 # runtime via `[storage] kind` ("sqlite" or "postgres"). Override to slim, e.g.
 # `--build-arg FEATURES=sqlite`.
+ARG CARGO_BUILD_JOBS="1"
 ARG FEATURES="sqlite,postgres"
 # Set to 1 to embed the existing placeholder page instead of the built dashboard.
 ARG SKIP_SPA="0"
@@ -141,9 +142,12 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then unset SOURCE_DATE_EPOCH; fi
 # cc-lb-runtime-wasmtime/build.rs would otherwise force a wasm32 fixture build.
 export CC_LB_SKIP_WASM_FIXTURE_BUILD=1
 export GIT_SHA="${GIT_SHA}"
-if [ -n "${CARGO_PROFILE_RELEASE_LTO:-}" ]; then
+if [ -z "${CARGO_PROFILE_RELEASE_LTO:-}" ]; then
+  unset CARGO_PROFILE_RELEASE_LTO
+else
   export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO}"
 fi
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 if [ "${SKIP_SPA}" = "1" ]; then
   rm -rf /src/crates/cc-lb-admin/web/dist
   export CC_LB_ADMIN_SKIP_SPA=1
@@ -188,9 +192,10 @@ else
   fi
 fi
 build_status=0
-xx-cargo build --release --locked \
+xx-cargo build --release --locked --jobs "${CARGO_BUILD_JOBS}" \
   -p cc-lb-server \
   --no-default-features --features "${FEATURES}" \
+  --config 'target."cfg(all())".rustflags = ["-C", "link-arg=-Wl,--threads=2"]' \
   --target-dir /src/target || build_status=$?
  # Finish all asynchronous S3 writes before the container exits. Bound the flush
  # so a cold-cache backlog fails this build instead of consuming the CI cap.
@@ -227,7 +232,7 @@ echo 'nonroot:x:65532:' > /out/etc/group
 EOF
 
 # ---- CI smoke: run the static binary on BuildKit without a local Docker daemon ----
-FROM alpine:3.22 AS smoke
+FROM alpine:3.23 AS smoke
 ARG EXPECTED_VERSION=
 COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
 SHELL ["/bin/ash", "-o", "pipefail", "-c"]
@@ -251,7 +256,7 @@ CMD ["serve", "--config", "/etc/cc-lb/cc-lb.toml"]
 # debuggable base ~2 MB over the static binary. Digest-pinned for reproducible
 # builds (:nonroot is a rolling tag); bump alongside the other base images
 # (freshen-deps).
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240 AS distroless
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7 AS distroless
 COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
 USER 65532:65532
 EXPOSE 8080 9090 9091

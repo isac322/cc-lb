@@ -168,6 +168,7 @@ async fn get_cache_keepalive_detail(
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn active_principal(
     storage: &dyn Storage,
     principal_id: &str,
