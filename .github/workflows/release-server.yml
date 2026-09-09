@@ -46,7 +46,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
       - uses: ./.github/actions/setup-rustup-home
-      - uses: ./.github/actions/setup-gh
 
       - name: Validate release target
         id: target
@@ -233,7 +232,6 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.tag }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-gh
 
       - name: Extract changelog section for this version
         id: changelog

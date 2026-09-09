@@ -90,7 +90,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-rustup-home
-      - uses: ./.github/actions/setup-gh
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -120,7 +119,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-rustup-home
-      - uses: ./.github/actions/setup-gh
 
       - uses: dtolnay/rust-toolchain@master
         with:
