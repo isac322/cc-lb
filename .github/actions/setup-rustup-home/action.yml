@@ -7,26 +7,3 @@ runs:
     - name: Export isolated Rustup home
       shell: bash
       run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
-
-    # New runner images provide a GNU-compatible Wolfi ldd wrapper. Keep this
-    # fallback for older images, whose native ldd version string does not match
-    # taiki-e/install-action's grep -E 'GLIBC|GNU libc' and causes a silent exit.
-    - name: Make ldd --version GNU-compatible
-      shell: bash
-      run: |
-        set -euo pipefail
-        if ldd --version 2>&1 | grep -Eq 'GLIBC|GNU libc'; then
-          exit 0
-        fi
-        real_ldd="$(command -v ldd)"
-        ver="$(ldd --version 2>&1 | awk 'NR==1 { print $NF; exit }')"
-        printf '%s\n' \
-          '#!/usr/bin/env bash' \
-          'if [[ "${1:-}" == "--version" || "${1:-}" == "-v" ]]; then' \
-          "  echo \"ldd (GNU libc) ${ver}\"" \
-          '  exit 0' \
-          'fi' \
-          "exec ${real_ldd} \"\$@\"" \
-          | sudo tee /usr/local/bin/ldd >/dev/null
-        sudo chmod 0755 /usr/local/bin/ldd
-        ldd --version | grep -Eq 'GLIBC|GNU libc'
