@@ -23,40 +23,50 @@ const WINDOW_OVERAGE: &str = "overage";
 static PRICE_CATALOG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
-fn recorded_example_peer_warning_snapshot_loses_to_clean_known_base_peer() {
-    // Given: aggregate-only production evidence shape from thread
-    // thread-prod-warning-redacted: 411 events, 310 requests, 4 upstreams,
-    // with example-peer reporting 7d allowed_warning at util 0.90/0.92 over
-    // surpassed_threshold 0.75 while overage was rejected.
-    let example_peer = recorded_example_peer_warning_snapshot();
-    let clean_peer = clean_known_base("clean-known-base", 2);
+fn example_warning_transition_preserves_base_selection() {
+    // Given: a deterministic warning-positive quota fixture and the same
+    // candidate before the provider changes its weekly status.
+    let warning = example_warning_snapshot();
+    let mut allowed = warning.clone();
+    allowed.subscription_quotas[1].status = Some("allowed".to_owned());
+    allowed.subscription_quotas[1].surpassed_threshold = None;
+    let mut clean_peer = clean_known_base("clean-known-base", 2);
+    clean_peer
+        .subscription_quotas
+        .iter_mut()
+        .find(|snapshot| snapshot.window == WINDOW_FIVE_HOUR)
+        .expect("fixture has 5h quota")
+        .resets_at_unix_secs = Some(T0_SECS + 9_000);
 
-    // When: subscription-preference assesses both candidates.
-    let output = filter(&[example_peer.clone(), clean_peer.clone()]);
+    // When: both states compete with the same KnownBase peer.
+    let allowed_output = filter(&[allowed, clean_peer.clone()]);
+    let warning_output = filter(&[warning.clone(), clean_peer]);
+    let trace = warning_output
+        .subscription_preference
+        .expect("trace present");
 
-    // Then: warning-positive base remains KnownBase but carries a soft same-tier
-    // warning multiplier rather than a hard tier demotion.
-    let trace = output.subscription_preference.expect("trace present");
+    // Then: the provider warning remains base-usable and observable without
+    // changing the selected upstream.
+    assert_eq!(
+        warning_output.kept_upstream_ids,
+        allowed_output.kept_upstream_ids
+    );
     assert_eq!(trace.chosen_tier, SubscriptionTier::KnownBase);
     assert_eq!(
-        candidate_tier(&trace, example_peer.upstream_id),
+        candidate_tier(&trace, warning.upstream_id),
         SubscriptionTier::KnownBase
     );
     assert_eq!(
-        candidate_tier(&trace, clean_peer.upstream_id),
-        SubscriptionTier::KnownBase
-    );
-    assert!(
-        candidate_urgency(&trace, example_peer.upstream_id).warning_multiplier < 1.0,
-        "warning-positive candidate must be softly penalized in KnownBase"
+        candidate_urgency(&trace, warning.upstream_id).warning_multiplier,
+        1.0
     );
 }
 
 #[test]
-fn allowed_utilization_at_surpassed_threshold_stays_known_base_with_warning_multiplier() {
-    // Given: a base window still says allowed but its utilization has crossed
-    // the provider-supplied surpassed_threshold.
-    let threshold_crossed = oauth_at_t0(
+fn surpassed_threshold_transition_preserves_base_selection() {
+    // Given: a base window before and after crossing the provider-supplied
+    // surpassed_threshold without changing utilization or reset state.
+    let allowed = oauth_at_t0(
         "threshold-crossed",
         1,
         vec![
@@ -68,26 +78,39 @@ fn allowed_utilization_at_surpassed_threshold_stays_known_base_with_warning_mult
             fresh(WINDOW_SEVEN_DAY)
                 .status("allowed")
                 .util(0.91)
-                .surpassed_threshold(0.75)
                 .reset_at(T0_SECS + 604_800)
                 .build(),
         ],
     );
-    let clean_peer = clean_known_base("clean-known-base", 2);
+    let mut threshold_crossed = allowed.clone();
+    threshold_crossed.subscription_quotas[1].surpassed_threshold = Some(0.75);
+    let mut clean_peer = clean_known_base("clean-known-base", 2);
+    clean_peer
+        .subscription_quotas
+        .iter_mut()
+        .find(|snapshot| snapshot.window == WINDOW_FIVE_HOUR)
+        .expect("fixture has 5h quota")
+        .resets_at_unix_secs = Some(T0_SECS + 9_000);
 
-    // When: subscription-preference assesses both candidates.
-    let output = filter(&[threshold_crossed.clone(), clean_peer.clone()]);
+    // When: both states compete with the same KnownBase peer.
+    let allowed_output = filter(&[allowed, clean_peer.clone()]);
+    let warning_output = filter(&[threshold_crossed.clone(), clean_peer]);
+    let trace = warning_output
+        .subscription_preference
+        .expect("trace present");
 
-    // Then: the threshold-crossed candidate remains base-usable in KnownBase,
-    // and warning is expressed as a same-tier multiplier.
-    let trace = output.subscription_preference.expect("trace present");
+    // Then: threshold metadata cannot alter base-tier ranking or eligibility.
+    assert_eq!(
+        warning_output.kept_upstream_ids,
+        allowed_output.kept_upstream_ids
+    );
     assert_eq!(
         candidate_tier(&trace, threshold_crossed.upstream_id),
         SubscriptionTier::KnownBase
     );
-    assert!(
-        candidate_urgency(&trace, threshold_crossed.upstream_id).warning_multiplier < 1.0,
-        "threshold-crossed allowed status must be a soft warning signal"
+    assert_eq!(
+        candidate_urgency(&trace, threshold_crossed.upstream_id).warning_multiplier,
+        1.0
     );
 }
 

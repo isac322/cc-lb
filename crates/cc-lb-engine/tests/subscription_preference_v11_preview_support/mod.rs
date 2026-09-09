@@ -100,6 +100,14 @@ impl PreviewFixture {
         self.dispatch.calls.lock().clone()
     }
 
+    pub fn set_quota(&self, upstream_id: Uuid, quotas: Vec<SubscriptionQuotaCandidateSnapshot>) {
+        self.cache
+            .snapshots
+            .lock()
+            .expect("quota cache lock")
+            .insert(upstream_id, quotas);
+    }
+
     pub fn swap_quota_states(&self) {
         let mut snapshots = self.cache.snapshots.lock().expect("quota cache lock");
         *snapshots = HashMap::from([

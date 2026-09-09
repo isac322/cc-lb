@@ -107,27 +107,40 @@ fn fable_pressure_changes_quota_urgency_and_selection() {
 }
 
 #[test]
-fn fable_warning_pressure_keeps_warning_multiplier() {
-    let candidate = oauth_at_t0(
-        "warning",
+fn fable_warning_preserves_scoped_pressure_without_base_penalty() {
+    let allowed = oauth_at_t0(
+        "allowed",
         1,
         vec![
             fresh(WINDOW_FIVE_HOUR).util(0.2).status("allowed").build(),
             fresh(WINDOW_SEVEN_DAY).util(0.2).status("allowed").build(),
             fresh(WINDOW_SEVEN_DAY_FABLE)
                 .util(0.1)
-                .status("allowed_warning")
+                .status("allowed")
                 .reset_at(T0_SECS + 60_480)
                 .build(),
         ],
     );
+    let mut warning = allowed.clone();
+    warning.subscription_quotas[2].status = Some("allowed_warning".to_owned());
 
-    let output = filter_for_model(std::slice::from_ref(&candidate), FABLE_MODEL);
-    let trace = output.subscription_preference.expect("trace present");
-    let candidate_trace = candidate_urgency_for(&trace, candidate.upstream_id);
+    let allowed_output = filter_for_model(std::slice::from_ref(&allowed), FABLE_MODEL);
+    let warning_output = filter_for_model(std::slice::from_ref(&warning), FABLE_MODEL);
+    let allowed_trace = allowed_output
+        .subscription_preference
+        .expect("trace present");
+    let warning_trace = warning_output
+        .subscription_preference
+        .expect("trace present");
+    let allowed_candidate = candidate_urgency_for(&allowed_trace, allowed.upstream_id);
+    let warning_candidate = candidate_urgency_for(&warning_trace, warning.upstream_id);
 
-    assert!(candidate_trace.quota_urgency_7d.expect("weekly pressure") > 0.0);
-    assert_eq!(candidate_trace.warning_multiplier, WARNING_MULTIPLIER);
+    assert!(warning_candidate.quota_urgency_7d.expect("weekly pressure") > 0.0);
+    assert_eq!(
+        warning_candidate.quota_urgency_7d,
+        allowed_candidate.quota_urgency_7d
+    );
+    assert_eq!(warning_candidate.warning_multiplier, 1.0);
 }
 
 #[test]

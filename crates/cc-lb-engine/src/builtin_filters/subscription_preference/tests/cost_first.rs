@@ -55,20 +55,6 @@ fn on_pace_candidate(name: &str, seed: u8) -> UpstreamCandidate {
     healthy_known_base_at_util(name, seed, 0.95)
 }
 
-fn warning_on_pace_candidate(name: &str, seed: u8) -> UpstreamCandidate {
-    oauth_at_t0(
-        name,
-        seed,
-        vec![
-            fresh(WINDOW_FIVE_HOUR)
-                .util(0.0)
-                .status("allowed_warning")
-                .build(),
-            fresh(WINDOW_SEVEN_DAY).util(0.0).status("allowed").build(),
-        ],
-    )
-}
-
 fn winner(candidates: &[UpstreamCandidate], request_id: &str) -> Uuid {
     SubscriptionPreferenceFilter::new()
         .filter(
@@ -233,21 +219,26 @@ fn all_unknown_costs_choose_highest_effective_urgency() {
 }
 
 #[test]
-fn warning_multiplier_breaks_zero_urgency_tie() {
-    // Given: both candidates are on pace, but one carries the provider warning signal.
-    let warned = warning_on_pace_candidate("warned", 1);
-    let unwarned = on_pace_candidate("unwarned", 2);
+fn base_warning_does_not_change_zero_urgency_tie() {
+    // Given: two on-pace base candidates, with one candidate transitioning from
+    // allowed to either provider warning form.
+    let allowed = on_pace_candidate("transitioned", 1);
+    let mut explicit_warning = allowed.clone();
+    explicit_warning.subscription_quotas[0].status = Some("allowed_warning".to_owned());
+    let mut threshold_warning = allowed.clone();
+    threshold_warning.subscription_quotas[0].surpassed_threshold = Some(0.90);
+    let peer = on_pace_candidate("peer", 2);
 
-    // When: request identities vary while urgency remains zero for both candidates.
+    // When: request identities vary across the otherwise identical base buckets.
     for request_number in 0..64 {
-        // Then: the full warning multiplier ranks the unwarned candidate first.
-        assert_eq!(
-            winner(
-                &[warned.clone(), unwarned.clone()],
-                &format!("warning-{request_number}"),
-            ),
-            unwarned.upstream_id
-        );
+        let request_id = format!("warning-{request_number}");
+        let allowed_winner = winner(&[allowed.clone(), peer.clone()], &request_id);
+        for warned in [&explicit_warning, &threshold_warning] {
+            let warned_winner = winner(&[(*warned).clone(), peer.clone()], &request_id);
+
+            // Then: neither warning form can change the deterministic zero-U tie.
+            assert_eq!(warned_winner, allowed_winner);
+        }
     }
 }
 
