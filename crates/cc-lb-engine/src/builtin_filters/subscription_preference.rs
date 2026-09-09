@@ -6,16 +6,18 @@
 //!    that keeps the Anthropic base plan strictly higher priority than the
 //!    overage bucket.
 //! 2. Within the winning tier, deterministic cost-first-v1 selection. Candidates
-//!    within five percent of the lowest known input cost use urgency, warning,
-//!    upstream ID, and original position as stable tiebreaks.
+//!    within five percent of the lowest known input cost use urgency, the
+//!    overage-only warning multiplier, upstream ID, and original position as
+//!    stable tiebreaks. Base-tier warning signals remain observable but do not
+//!    affect ranking.
 //!
 //! ## Design rationale
 //!
 //! ADR 0008 base pressure compares utilization with the target burn pace for
-//! the time remaining before reset. Positive pressure raises the base quota
-//! factor above its neutral `1.0`; on-pace buckets use `1.0` uniformly. The
-//! candidate `plan_capacity_ratio` remains available as metadata for analytics
-//! but does not affect pressure, tiering, or winner selection.
+//! the time remaining before reset. Within the near-cost candidate set,
+//! positive pressure ranks ahead of zero-pressure, on-pace candidates.
+//! The candidate `plan_capacity_ratio` remains available as metadata for
+//! analytics but does not affect pressure, tiering, or winner selection.
 //!
 //! ## Windows
 //!
@@ -91,7 +93,7 @@ pub(crate) const OVERAGE_REMAINING_NOMINAL_SECS: u64 = 30 * 86_400;
 pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 
 pub(crate) const CACHE_COST_BASIS_VERSION: &str = "v1";
-const WARNING_MULTIPLIER: f64 = 0.20;
+const OVERAGE_WARNING_MULTIPLIER: f64 = 0.20;
 
 const COST_FIRST_FORMULA_VERSION: &str = "cost-first-v1";
 
@@ -493,8 +495,8 @@ fn assess_candidate<'a>(
         quota_urgency_7d,
         quota_urgency_combined,
         overage_urgency,
-        warning_multiplier: if warning_positive_count > 0 {
-            WARNING_MULTIPLIER
+        warning_multiplier: if tier == Tier::Overage && warning_positive_count > 0 {
+            OVERAGE_WARNING_MULTIPLIER
         } else {
             1.0
         },

@@ -110,6 +110,64 @@ fn preview_all_on_pace_uses_deterministic_uniform_factor() {
 }
 
 #[tokio::test]
+async fn handle_base_warning_preserves_selection_until_rejected() {
+    let mut urgent = on_pace_quota();
+    let weekly = urgent
+        .iter_mut()
+        .find(|snapshot| snapshot.window == "7d")
+        .expect("fixture has shared weekly quota");
+    let now = weekly.observed_at_unix_millis.expect("observed quota") / 1_000;
+    weekly.utilization = Some(0.98);
+    weekly.resets_at_unix_secs = Some(now + 3_600);
+
+    let mut steady = on_pace_quota();
+    let weekly = steady
+        .iter_mut()
+        .find(|snapshot| snapshot.window == "7d")
+        .expect("fixture has shared weekly quota");
+    weekly.utilization = Some(0.5);
+    weekly.resets_at_unix_secs = Some(now + 60 * 3_600);
+    let fixture = PreviewFixture::new(urgent.clone(), steady);
+
+    assert_eq!(fixture.handle_model("claude-test").await, StatusCode::OK);
+    assert_eq!(fixture.dispatch_hosts(), vec!["urgent.invalid"]);
+
+    // The provider changes only its warning signal, not capacity or reset.
+    urgent
+        .iter_mut()
+        .find(|snapshot| snapshot.window == "7d")
+        .expect("fixture has shared weekly quota")
+        .status = Some("allowed_warning".to_owned());
+    fixture.set_quota(fixture.urgent_id, urgent.clone());
+    assert_eq!(
+        fixture.preview("base-warning").winner_upstream_id,
+        Some(fixture.urgent_id)
+    );
+    assert_eq!(fixture.handle_model("claude-test").await, StatusCode::OK);
+    assert_eq!(
+        fixture.dispatch_hosts(),
+        vec!["urgent.invalid", "urgent.invalid"]
+    );
+
+    // A rejection still changes the selected upstream immediately.
+    urgent
+        .iter_mut()
+        .find(|snapshot| snapshot.window == "7d")
+        .expect("fixture has shared weekly quota")
+        .status = Some("rejected".to_owned());
+    fixture.set_quota(fixture.urgent_id, urgent);
+    assert_eq!(
+        fixture.preview("base-rejected").winner_upstream_id,
+        Some(fixture.steady_id)
+    );
+    assert_eq!(fixture.handle_model("claude-test").await, StatusCode::OK);
+    assert_eq!(
+        fixture.dispatch_hosts(),
+        vec!["urgent.invalid", "urgent.invalid", "steady.invalid"]
+    );
+}
+
+#[tokio::test]
 async fn handle_shared_7d_exhaustion_without_api_key_returns_503_without_dispatch() {
     // Given: both OAuth upstreams have healthy 5h quota but exhausted shared
     // weekly quota, and there is no API-key fallback.
