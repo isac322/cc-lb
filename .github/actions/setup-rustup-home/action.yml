@@ -8,9 +8,9 @@ runs:
       shell: bash
       run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
 
-    # Wolfi's ldd --version is "ldd (glibc-2.44-r4) 2.44", which does not
-    # match taiki-e/install-action's grep -E 'GLIBC|GNU libc'. That grep
-    # runs under set -e, so the action exits 1 with no message.
+    # New runner images provide a GNU-compatible Wolfi ldd wrapper. Keep this
+    # fallback for older images, whose native ldd version string does not match
+    # taiki-e/install-action's grep -E 'GLIBC|GNU libc' and causes a silent exit.
     - name: Make ldd --version GNU-compatible
       shell: bash
       run: |

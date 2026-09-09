@@ -82,7 +82,7 @@ jobs:
             type=raw,value=${{ steps.meta.outputs.immutable_tag }}
             type=raw,value=${{ steps.meta.outputs.version }}-cclb,enable=${{ steps.meta.outputs.push == 'true' }}
           labels: |
-            org.opencontainers.image.description=Wolfi ARC runner image for cc-lb with clang 22, mold, and sccache
+            org.opencontainers.image.description=Wolfi ARC runner image for cc-lb with GitHub CLI, clang 22, mold, and sccache
             org.opencontainers.image.source=https://github.com/isac322/cc-lb
             org.opencontainers.image.revision=${{ github.sha }}
 
