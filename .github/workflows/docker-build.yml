@@ -62,7 +62,7 @@ jobs:
           target: builder
           outputs: type=cacheonly
           build-args: |
-            CARGO_BUILD_JOBS=1
+            CARGO_BUILD_JOBS=6
             CARGO_PROFILE_RELEASE_LTO=thin
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
@@ -83,7 +83,7 @@ jobs:
           target: smoke
           outputs: type=cacheonly
           build-args: |
-            CARGO_BUILD_JOBS=1
+            CARGO_BUILD_JOBS=6
             CARGO_PROFILE_RELEASE_LTO=thin
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
@@ -107,7 +107,7 @@ jobs:
           target: builder
           outputs: type=cacheonly
           build-args: |
-            CARGO_BUILD_JOBS=1
+            CARGO_BUILD_JOBS=6
             CARGO_PROFILE_RELEASE_LTO=thin
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
