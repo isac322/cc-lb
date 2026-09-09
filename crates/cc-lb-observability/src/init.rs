@@ -119,7 +119,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 54] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 55] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -259,6 +259,11 @@ const METRIC_DEFINITIONS: [MetricDefinition; 54] = [
         name: "cc_lb_virtual_cost_usd_total",
         kind: MetricKind::Counter,
         description: "Virtual cost in micro-USD attributed to proxied responses by principal, upstream, and model.",
+    },
+    MetricDefinition {
+        name: "cc_lb_stream_terminations_total",
+        kind: MetricKind::Counter,
+        description: "Response stream terminations by bounded outcome and cause.",
     },
     PROMETHEUS14_METRIC_DEFINITIONS[0],
     PROMETHEUS14_METRIC_DEFINITIONS[1],
@@ -532,6 +537,11 @@ pub fn register_metrics() {
         Unit::Count,
         "Virtual cost in micro-USD attributed to proxied responses by principal, upstream, and model."
     );
+    metrics::describe_counter!(
+        "cc_lb_stream_terminations_total",
+        Unit::Count,
+        "Response stream terminations by bounded outcome and cause."
+    );
     metrics::describe_histogram!(
         "cc_lb_prompt_cache_analysis_duration_seconds",
         Unit::Seconds,
@@ -730,6 +740,12 @@ fn touch_metrics() {
         "principal" => "unknown",
         "upstream" => "unknown",
         "model" => "unknown"
+    )
+    .increment(0);
+    metrics::counter!(
+        "cc_lb_stream_terminations_total",
+        "outcome" => "completed",
+        "cause" => "none"
     )
     .increment(0);
     for stage in ["queue", "tokenize", "total"] {
