@@ -189,12 +189,9 @@ pub trait UpstreamWarmupAttemptStore: Send + Sync {
 
 fn encode_base64(bytes: &[u8]) -> String {
     let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    let mut chunks = bytes.chunks_exact(3);
+    let (chunks, remainder) = bytes.as_chunks::<3>();
 
-    for chunk in chunks.by_ref() {
-        let first = chunk[0];
-        let second = chunk[1];
-        let third = chunk[2];
+    for &[first, second, third] in chunks {
         encoded.push(char::from(BASE64_ALPHABET[usize::from(first >> 2)]));
         encoded.push(char::from(
             BASE64_ALPHABET[usize::from(((first & 0b0000_0011) << 4) | (second >> 4))],
@@ -206,8 +203,6 @@ fn encode_base64(bytes: &[u8]) -> String {
             BASE64_ALPHABET[usize::from(third & 0b0011_1111)],
         ));
     }
-
-    let remainder = chunks.remainder();
     if let Some((first, tail)) = remainder.split_first() {
         let first = *first;
         if let Some(second) = tail.first() {
@@ -244,7 +239,7 @@ fn decode_base64(encoded: &str) -> Result<Vec<u8>, String> {
 
     let chunk_count = bytes.len() / 4;
     let mut decoded = Vec::with_capacity(chunk_count * 3);
-    for (chunk_index, chunk) in bytes.chunks_exact(4).enumerate() {
+    for (chunk_index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
         if chunk_index + 1 != chunk_count && chunk.contains(&b'=') {
             return Err("warmup cursor base64 padding must be in the final chunk".to_owned());
         }

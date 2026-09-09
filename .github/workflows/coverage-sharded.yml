@@ -81,7 +81,7 @@ jobs:
       - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           components: llvm-tools-preview
       - name: Install wasm targets for pinned toolchain
         run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
@@ -158,7 +158,7 @@ jobs:
       - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           components: llvm-tools-preview
       - uses: ./.github/actions/setup-rust-cache
         with:
@@ -196,7 +196,7 @@ jobs:
       - uses: ./.github/actions/setup-rustup-home
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           components: llvm-tools-preview
       - uses: taiki-e/install-action@v2
         with:

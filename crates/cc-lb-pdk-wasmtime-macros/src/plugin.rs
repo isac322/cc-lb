@@ -78,7 +78,9 @@ pub(crate) fn expand(args: PluginArgs, mut module: ItemMod) -> TokenStream2 {
         #(#schema_section_items)*
 
         #[used]
-        #[unsafe(link_section = "cc_lb.plugin.v1")]
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "cc_lb.plugin.v1"))]
+        #[cfg_attr(all(not(target_arch = "wasm32"), target_vendor = "apple"), unsafe(link_section = "__DATA,__cc_lb_meta"))]
+        #[cfg_attr(all(not(target_arch = "wasm32"), not(target_vendor = "apple")), unsafe(link_section = "cc_lb.plugin.v1"))]
         static __CC_LB_PLUGIN_METADATA: [u8; #metadata_len] = #metadata_array;
     }
 }
@@ -121,7 +123,9 @@ fn schema_sections(handlers: &[DiscoveredHandler]) -> syn::Result<Vec<TokenStrea
             );
             Ok(quote! {
                 #[used]
-                #[unsafe(link_section = #section)]
+                #[cfg_attr(target_arch = "wasm32", unsafe(link_section = #section))]
+                #[cfg_attr(all(not(target_arch = "wasm32"), target_vendor = "apple"), unsafe(link_section = "__DATA,__cc_lb_schema"))]
+                #[cfg_attr(all(not(target_arch = "wasm32"), not(target_vendor = "apple")), unsafe(link_section = #section))]
                 static #static_ident: [u8; 32] = <#fingerprint_type as ::cc_lb_pdk_wasmtime::types::schema::WireSchema>::FINGERPRINT;
             })
         })
