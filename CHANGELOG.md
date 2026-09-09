@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-09-09
+
+### Fixed
+
+- Proxy relays now terminate after upstream body errors instead of continuing to stream a broken response.
+- Completion observers no longer run on the response hot path, so they cannot stall or cancel a fully delivered stream.
+
 ## [0.4.7] - 2026-09-09
 
 ### Added
