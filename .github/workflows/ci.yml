@@ -203,7 +203,7 @@ jobs:
           target: smoke
           outputs: type=cacheonly
           build-args: |
-            CARGO_BUILD_JOBS=1
+            CARGO_BUILD_JOBS=6
             GIT_SHA=${{ steps.release.outputs.target_sha }}
             SOURCE_DATE_EPOCH=${{ steps.release.outputs.source_date_epoch }}
             SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
