@@ -18,11 +18,13 @@ ARG RUNNER_CONTAINER_HOOKS_VERSION=0.7.0
 ARG DOCKER_VERSION=29.7.2
 ARG BUILDX_VERSION=0.36.1
 ARG SCCACHE_VERSION=0.17.0
+ARG GH_VERSION=2.100.0
 ARG PROMETHEUS_VERSION=3.13.2
 ARG HADOLINT_VERSION=2.15.1
 
 # linux-arm64 runner tarball SHA-256 from the v2.337.0 release notes.
 ARG RUNNER_SHA256_ARM64=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
+ARG GH_SHA256_ARM64=ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961
 ARG PROMETHEUS_SHA256_ARM64=7cecb17a6f41d59814e1a0581a1f81f79051ad5973d1ecf39e23a9f747d6572a
 ARG HADOLINT_SHA256_ARM64=f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d
 
@@ -79,6 +81,30 @@ RUN printf '%s\n' \
       > /usr/local/bin/clang-mold; \
     chmod 0755 /usr/local/bin/clang-mold
 
+# The generated wrapper intentionally preserves shell expressions, and the
+# build-time probes are checked immediately in this same shell.
+# hadolint ignore=DL4006,SC2016
+RUN set -eux; \
+    real_ldd="$(command -v ldd)"; \
+    ldd_version="$("${real_ldd}" --version 2>&1 | awk 'NR == 1 { print $NF; exit }')"; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'case "${1:-}" in' \
+      '  --version|-v)' \
+      "    printf '%s\n' 'ldd (GNU libc) ${ldd_version}'" \
+      '    ;;' \
+      '  *)' \
+      "    exec ${real_ldd} \"\$@\"" \
+      '    ;;' \
+      'esac' \
+      > /usr/local/bin/ldd; \
+    chmod 0755 /usr/local/bin/ldd; \
+    ldd --version | grep -Eq '^ldd \(GNU libc\) [0-9]+(\.[0-9]+)+$'; \
+    printf '%s\n' 'int main(void) { return 0; }' > /tmp/ldd-smoke.c; \
+    cc -o /tmp/ldd-smoke /tmp/ldd-smoke.c; \
+    ldd /tmp/ldd-smoke | grep -q 'libc\.so\.6'; \
+    rm -f /tmp/ldd-smoke /tmp/ldd-smoke.c
+
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold
 
@@ -87,6 +113,7 @@ RUN set -eux; \
       arm64) \
         runner_arch=arm64; \
         runner_sha256="${RUNNER_SHA256_ARM64}"; \
+        gh_sha256="${GH_SHA256_ARM64}"; \
         docker_arch=aarch64; \
         sccache_target="aarch64-unknown-linux-musl"; \
         sccache_sha256="821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77"; \
@@ -124,6 +151,13 @@ RUN set -eux; \
     install -m 0755 /tmp/docker/docker /usr/bin/docker; \
     rm -rf /tmp/docker /tmp/docker.tgz; \
     curl --fail --silent --show-error --location \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${runner_arch}.tar.gz" \
+      --output /tmp/gh.tar.gz; \
+    printf '%s  %s\n' "${gh_sha256}" /tmp/gh.tar.gz | sha256sum --check; \
+    tar -xzf /tmp/gh.tar.gz -C /tmp; \
+    install -m 0755 /tmp/gh_${GH_VERSION}_linux_${runner_arch}/bin/gh /usr/local/bin/gh; \
+    rm -rf /tmp/gh.tar.gz /tmp/gh_${GH_VERSION}_linux_${runner_arch}; \
+    curl --fail --silent --show-error --location \
       "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-${TARGETARCH}" \
       --output /usr/local/lib/docker/cli-plugins/docker-buildx; \
     chmod 0755 /usr/local/lib/docker/cli-plugins/docker-buildx; \
@@ -149,10 +183,14 @@ RUN set -eux; \
     rm -f /tmp/hadolint; \
     chown -R runner:runner /home/runner; \
     chmod 0777 /home/runner; \
+    command -v gh; \
+    command -v ldd; \
     docker --version; \
     sccache --version; \
     promtool --version; \
     hadolint --version; \
+    gh --version; \
+    ldd --version | grep -Eq '^ldd \(GNU libc\) [0-9]+(\.[0-9]+)+$'; \
     test -x /home/runner/run.sh
 
 WORKDIR /home/runner
@@ -169,6 +207,8 @@ RUN set -eux; \
     command -v promtool; \
     command -v hadolint; \
     command -v docker; \
+    command -v gh; \
+    command -v ldd; \
     command -v git; \
     command -v sudo; \
     command -v python3; \
@@ -184,6 +224,8 @@ RUN set -eux; \
     promtool --version; \
     hadolint --version; \
     docker --version; \
+    gh --version; \
+    ldd --version | grep -Eq '^ldd \(GNU libc\) [0-9]+(\.[0-9]+)+$'; \
     python3 --version; \
     printf '%s\n' 'int main(void) { return 0; }' > /tmp/t.c; \
     clang -fuse-ld=mold -o /tmp/t /tmp/t.c; \
