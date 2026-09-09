@@ -15,6 +15,11 @@ runs:
         for k in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY SCCACHE_BUCKET SCCACHE_ENDPOINT SCCACHE_REGION SCCACHE_S3_USE_SSL SCCACHE_S3_KEY_PREFIX; do
           eval "v=\${$k-}"
           if [ -n "$v" ]; then
+            case "$k" in
+              AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)
+                printf '::add-mask::%s\n' "$v"
+                ;;
+            esac
             printf '%s=%s\n' "$k" "$v" >> "$GITHUB_ENV"
           fi
         done

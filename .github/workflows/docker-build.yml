@@ -47,20 +47,18 @@ jobs:
           driver: remote
           endpoint: tcp://buildkit.arc-systems.svc.cluster.local:1234
 
-      # Reclaim only old records because branch-scoped runs share this daemon.
+      # Trim unused records to leave disk headroom for target directories.
+      # BuildKit keeps records leased by builds that are still running.
       - name: Prune stale BuildKit build cache
-        run: >-
-          docker buildx prune --force --all
-          --filter 'until=2h' --max-used-space 20GB || true
+        run: docker buildx prune --force --all --max-used-space 20GB || true
 
-      # Build every release target on Dockerfile changes so cross-compilation
-      # failures are caught before publication. BuildKit schedules the target
-      # graphs concurrently; single-job Cargo and thin LTO bound peak memory.
-      - name: Build multi-platform release targets
+      # Limit each solve to two concurrent target directories; four exhausted
+      # the BuildKit worker before arm/v7 and ppc64le could finish.
+      - name: Build primary release targets
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le
+          platforms: linux/amd64,linux/arm64
           target: builder
           outputs: type=cacheonly
           build-args: |
@@ -86,13 +84,38 @@ jobs:
           outputs: type=cacheonly
           build-args: |
             CARGO_BUILD_JOBS=1
+            CARGO_PROFILE_RELEASE_LTO=thin
             GIT_SHA=${{ steps.source.outputs.sha }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
-            CARGO_PROFILE_RELEASE_LTO=thin
             SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
             SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
             SCCACHE_REGION=${{ env.SCCACHE_REGION }}
             SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
             SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
+          secret-envs: |
+            AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
+
+      - name: Prune intermediate BuildKit build cache
+        run: docker buildx prune --force --all --max-used-space 20GB || true
+
+      - name: Build remaining release targets
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm/v7,linux/ppc64le
+          target: builder
+          outputs: type=cacheonly
+          build-args: |
+            CARGO_BUILD_JOBS=1
+            CARGO_PROFILE_RELEASE_LTO=thin
+            GIT_SHA=${{ steps.source.outputs.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.source_date_epoch }}
+            SCCACHE_BUCKET=${{ env.SCCACHE_BUCKET }}
+            SCCACHE_ENDPOINT=${{ env.SCCACHE_ENDPOINT }}
+            SCCACHE_REGION=${{ env.SCCACHE_REGION }}
+            SCCACHE_S3_USE_SSL=${{ env.SCCACHE_S3_USE_SSL }}
+            SCCACHE_S3_KEY_PREFIX=${{ env.SCCACHE_S3_KEY_PREFIX }}
+          secret-envs: |
             AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID
             AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY
