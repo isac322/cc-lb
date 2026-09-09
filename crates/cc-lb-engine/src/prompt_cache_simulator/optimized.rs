@@ -1202,8 +1202,7 @@ mod tests {
         );
     }
     #[test]
-    #[ignore = "release-profile gate; run via the dedicated CI job"]
-    fn production_size_prompt_cache_release_regression_gate() {
+    fn production_size_prompt_cache_regression_gate() {
         let request = production_size_prompt_cache_request();
         let serialized_request = serde_json::to_vec(&request).expect("serialize fixture");
         assert_eq!(
