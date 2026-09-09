@@ -52,29 +52,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: ./.github/actions/setup-rustup-home
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
-
       # Cache only preflight compilation. The release jobs below intentionally
       # remain uncached and retain real commit metadata for published artifacts.
-      - uses: ./.github/actions/setup-rust-cache
-
-      - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-semver-checks@0.50
-
-      - name: cargo semver-checks (published baselines)
-        run: |
-          set -euo pipefail
-          cargo semver-checks --package cc-lb-plugin-wire
-          cargo semver-checks --package cc-lb-plugin-conformance
-
-      - name: cargo publish --dry-run cc-lb-plugin-wire
-        run: cargo publish --dry-run -p cc-lb-plugin-wire
+      - uses: ./.github/actions/check-published-crates
 
   release:
     name: release-plz release
