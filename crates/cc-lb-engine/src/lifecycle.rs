@@ -4721,6 +4721,7 @@ impl Lifecycle {
                             }
                             yield Ok::<Bytes, Infallible>(frame);
                         }
+                        break;
                     }
                 }
             }
