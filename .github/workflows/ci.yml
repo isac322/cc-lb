@@ -355,9 +355,6 @@ jobs:
       # CARGO_BUILD_JOBS=4 matches the cc-lb-4 request. Dial back toward 2 if
       # postgres visibility tests start timing out under llvm-cov.
       CARGO_BUILD_JOBS: "4"
-      # The ARC pod shares a 32-core node but requests 4 cores and is limited to 14 GiB.
-      # Pin nextest concurrency to the requested CPU count so coverage-instrumented test
-      # processes cannot multiply to node-level parallelism and terminate the runner.
       # Coverage maps counters via embedded __llvm_covmap sections, not DWARF,
       # so debuginfo only bloats object size and slows linking here. Drop it
       # (test + dev profiles, overriding the runner's line-tables-only default)
@@ -428,6 +425,9 @@ jobs:
 
       - name: Run tests with coverage instrumentation
         run: |
+          # The ARC pod shares a 32-core node but requests 4 cores and is limited to 14 GiB.
+          # Pin test concurrency to the pod request so coverage-instrumented processes cannot
+          # multiply to node-level parallelism and terminate the runner.
           cargo llvm-cov nextest \
             --workspace \
             --exclude cc-lb-loadgen \

@@ -103,7 +103,7 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   cache_count_lookup_ms:
     'Distributed cache intervals: claim, hit/miss bookkeeping, leader completion, count retrieval, and coalesced follower wait. Tokenization is excluded.',
   cache_tokenize_ms:
-    'Run exact BPE tokenization for leaders or fallbacks; cache hits record zero.',
+    'Run exact BPE only when serialized prefix bytes fall between the hybrid threshold fast paths. Byte fast paths and worker fallbacks record zero.',
   prepare_signer_ms:
     'Build upstream credentials, including lookup, decrypt, and lazy OAuth refresh.',
   other_setup:
