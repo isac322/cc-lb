@@ -141,6 +141,8 @@ struct Partial {
     /// (redundant with `route.routing_trace`) and Err (only source) paths.
     routing_trace: Option<RoutingTrace>,
 
+    request_body_read_ms: Option<u64>,
+    request_body_bytes: Option<u64>,
     limit_reserve_ms: Option<u64>,
     json_parse_ms: Option<f64>,
     cache_structure_ms: Option<f64>,
@@ -160,6 +162,7 @@ struct Partial {
     upstream_ttfb_ms: Option<u64>,
 
     upstream_body_ms: Option<u64>,
+    finalize_ms: Option<u64>,
     first_body_chunk_ms: Option<u64>,
     limit_reconcile_ms: Option<u64>,
     observability_post_ms: Option<u64>,
@@ -348,6 +351,8 @@ impl Partial {
                 .route
                 .as_ref()
                 .and_then(|route| route.quota_warning_multiplier),
+            request_body_read_ms: self.request_body_read_ms,
+            request_body_bytes: self.request_body_bytes,
             auth_ms: self.auth.as_ref().and_then(|auth| auth.auth_ms),
             route_ms,
             limit_reserve_ms: self.limit_reserve_ms,
@@ -366,6 +371,8 @@ impl Partial {
             shape_ms: self.shape_ms,
             sign_ms: self.sign_ms,
             upstream_ttfb_ms: self.upstream_ttfb_ms,
+            upstream_body_ms: self.upstream_body_ms,
+            finalize_ms: self.finalize_ms,
             first_body_chunk_ms: self.first_body_chunk_ms,
         }
     }
@@ -701,14 +708,18 @@ async fn force_flush_terminations(
 }
 
 fn apply_setup_timings(partial: &mut Partial, timings: &cc_lb_lifecycle::RequestSetupTimings) {
-    partial.json_parse_ms = timings.json_parse_ms;
-    partial.cache_structure_ms = timings.cache_structure_ms;
-    partial.cache_token_key_ms = timings.cache_token_key_ms;
-    partial.cache_count_lookup_ms = timings.cache_count_lookup_ms;
-    partial.cache_tokenizer_queue_ms = timings.cache_tokenizer_queue_ms;
-    partial.cache_serialize_ms = timings.cache_serialize_ms;
-    partial.cache_tokenize_ms = timings.cache_tokenize_ms;
-    partial.prepare_signer_ms = timings.prepare_signer_ms;
+    partial.json_parse_ms = partial.json_parse_ms.or(timings.json_parse_ms);
+    partial.cache_structure_ms = partial.cache_structure_ms.or(timings.cache_structure_ms);
+    partial.cache_token_key_ms = partial.cache_token_key_ms.or(timings.cache_token_key_ms);
+    partial.cache_count_lookup_ms = partial
+        .cache_count_lookup_ms
+        .or(timings.cache_count_lookup_ms);
+    partial.cache_tokenizer_queue_ms = partial
+        .cache_tokenizer_queue_ms
+        .or(timings.cache_tokenizer_queue_ms);
+    partial.cache_serialize_ms = partial.cache_serialize_ms.or(timings.cache_serialize_ms);
+    partial.cache_tokenize_ms = partial.cache_tokenize_ms.or(timings.cache_tokenize_ms);
+    partial.prepare_signer_ms = partial.prepare_signer_ms.or(timings.prepare_signer_ms);
 }
 
 async fn handle_event(
@@ -727,6 +738,9 @@ async fn handle_event(
         reason,
         client_status,
         duration_ms,
+        request_body_read_ms,
+        request_body_bytes,
+        finalize_ms,
         limit_reconcile_ms,
         observability_post_ms,
         proxy_setup_ms,
@@ -746,6 +760,9 @@ async fn handle_event(
             )
             .increment(1);
             let mut partial = Partial::orphan(event_id.clone());
+            partial.request_body_read_ms = *request_body_read_ms;
+            partial.request_body_bytes = *request_body_bytes;
+            partial.finalize_ms = *finalize_ms;
             partial.limit_reconcile_ms = *limit_reconcile_ms;
             partial.observability_post_ms = *observability_post_ms;
             partial.proxy_setup_ms = *proxy_setup_ms;
@@ -769,11 +786,14 @@ async fn handle_event(
             return;
         }
         let mut partial = existing.expect("checked !is_orphan");
-        partial.limit_reconcile_ms = *limit_reconcile_ms;
-        partial.observability_post_ms = *observability_post_ms;
-        partial.proxy_setup_ms = *proxy_setup_ms;
+        partial.request_body_read_ms = partial.request_body_read_ms.or(*request_body_read_ms);
+        partial.request_body_bytes = partial.request_body_bytes.or(*request_body_bytes);
+        partial.finalize_ms = partial.finalize_ms.or(*finalize_ms);
+        partial.limit_reconcile_ms = partial.limit_reconcile_ms.or(*limit_reconcile_ms);
+        partial.observability_post_ms = partial.observability_post_ms.or(*observability_post_ms);
+        partial.proxy_setup_ms = partial.proxy_setup_ms.or(*proxy_setup_ms);
         apply_setup_timings(&mut partial, setup_timings);
-        partial.upstream_body_ms = *upstream_body_ms;
+        partial.upstream_body_ms = partial.upstream_body_ms.or(*upstream_body_ms);
         if partial.first_body_chunk_ms.is_none() {
             partial.first_body_chunk_ms = *first_body_chunk_ms;
         }
@@ -882,6 +902,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::ParseCompleted {
             result: Ok(info), ..
         } => {
+            if partial.request_body_bytes.is_none() {
+                partial.request_body_bytes = Some(info.body_bytes);
+            }
             partial.cache_control_block_count = info.cache_control_block_count;
             partial.thinking_budget_tokens = info.thinking_budget_tokens;
             partial.reasoning_effort = info.reasoning_effort.clone();
@@ -1207,6 +1230,8 @@ fn finalize_base(
         cache_control_message_indices: identity.cache_control_message_indices,
         auth_ms,
         route_ms,
+        request_body_read_ms: partial.request_body_read_ms,
+        request_body_bytes: partial.request_body_bytes,
         limit_reserve_ms: partial.limit_reserve_ms,
         json_parse_ms: partial.json_parse_ms,
         cache_structure_ms: partial.cache_structure_ms,
@@ -1227,6 +1252,7 @@ fn finalize_base(
         sign_ms: partial.sign_ms,
         upstream_ttfb_ms: partial.upstream_ttfb_ms,
         upstream_body_ms: partial.upstream_body_ms,
+        finalize_ms: partial.finalize_ms,
         first_body_chunk_ms: partial.first_body_chunk_ms,
         body_chunk_count: partial.stream_body_chunk_count,
         body_bytes: partial.stream_body_bytes,
@@ -1447,6 +1473,7 @@ mod tests {
         let estimated = partial
             .estimated_cost_options_with(|model, usage, upstream_kind| {
                 assert_eq!(model, "claude-sonnet-4-5-20250929");
+
                 assert_eq!(usage.input_tokens, 1000);
                 assert_eq!(usage.output_tokens, 500);
                 assert_eq!(upstream_kind, None);
@@ -1467,6 +1494,180 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(partial.cost_options().total, Some(4242));
+    }
+
+    #[test]
+    fn client_cancelled_partial_body_timing_survives_late_stream_error() {
+        let event_id = eid("cancelled-partial-body");
+        let mut partial = Partial::new(Instant::now(), event_id.clone());
+        partial.request_id = Some("req-cancelled-partial-body".to_owned());
+        partial.request_body_read_ms = Some(9);
+        partial.request_body_bytes = Some(917_567);
+        partial.upstream_body_ms = Some(41);
+        partial.finalize_ms = Some(4);
+
+        merge(
+            &mut partial,
+            LifecycleEvent::StreamCompleted {
+                event_id,
+                result: Err(StreamError {
+                    error_type: "client_closed_request".to_owned(),
+                    error_message: "downstream disconnected".to_owned(),
+                }),
+            },
+        );
+
+        let snapshot = partial.snapshot_partial(0);
+        assert_eq!(snapshot.request_body_read_ms, Some(9));
+        assert_eq!(snapshot.request_body_bytes, Some(917_567));
+        assert_eq!(snapshot.upstream_body_ms, Some(41));
+        assert_eq!(snapshot.finalize_ms, Some(4));
+
+        let event = finalize_base(&partial, &TerminationReason::Dropped, 499, 54, false);
+        assert_eq!(event.request_body_read_ms, Some(9));
+        assert_eq!(event.request_body_bytes, Some(917_567));
+        assert_eq!(event.upstream_body_ms, Some(41));
+        assert_eq!(event.finalize_ms, Some(4));
+        assert_eq!(event.stream_total_ms, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_terminal_timings_do_not_erase_observed_values() {
+        let store = CapturingStore::default();
+        let metrics = noop_metrics();
+        let event_id = eid("preserve-observed-terminal-timings");
+        let mut partial = Partial::new(Instant::now(), event_id.clone());
+        partial.request_id = Some("req-preserve-observed-terminal-timings".to_owned());
+        partial.request_body_read_ms = Some(9);
+        partial.request_body_bytes = Some(917_567);
+        partial.upstream_body_ms = Some(41);
+        partial.finalize_ms = Some(4);
+        let mut partials = HashMap::from([(event_id.clone(), partial)]);
+
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut partials,
+            DEFAULT_ASSEMBLER_MAP_CAP,
+            LifecycleEvent::RequestTerminated {
+                event_id,
+                reason: TerminationReason::Dropped,
+                client_status: 499,
+                duration_ms: 54,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                finalize_ms: None,
+                first_body_chunk_ms: None,
+                internal_errors: Vec::new(),
+                limit_reconcile_ms: None,
+                observability_post_ms: None,
+                proxy_setup_ms: None,
+                setup_timings: Default::default(),
+                upstream_body_ms: None,
+            },
+        )
+        .await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].request_body_read_ms, Some(9));
+        assert_eq!(rows[0].request_body_bytes, Some(917_567));
+        assert_eq!(rows[0].upstream_body_ms, Some(41));
+        assert_eq!(rows[0].finalize_ms, Some(4));
+        assert_eq!(rows[0].stream_total_ms, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn duplicate_terminal_missing_timings_preserves_first_terminal_timings() {
+        let store = CapturingStore::default();
+        let metrics = noop_metrics();
+        let event_id = eid("preserve-first-terminal-timings");
+        let mut partial = Partial::new(Instant::now(), event_id.clone());
+        partial.request_id = Some("req-preserve-first-terminal-timings".to_owned());
+        partial.upstream_response_status = Some(200);
+        let mut partials = HashMap::from([(event_id.clone(), partial)]);
+
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut partials,
+            DEFAULT_ASSEMBLER_MAP_CAP,
+            LifecycleEvent::RequestTerminated {
+                event_id: event_id.clone(),
+                reason: TerminationReason::Dropped,
+                client_status: 499,
+                duration_ms: 54,
+                request_body_read_ms: Some(0),
+                request_body_bytes: Some(917_567),
+                finalize_ms: Some(4),
+                limit_reconcile_ms: Some(5),
+                observability_post_ms: Some(6),
+                proxy_setup_ms: Some(0),
+                setup_timings: cc_lb_lifecycle::RequestSetupTimings {
+                    json_parse_ms: Some(0.0),
+                    cache_structure_ms: Some(1.0),
+                    cache_token_key_ms: Some(2.0),
+                    cache_count_lookup_ms: Some(3.0),
+                    cache_tokenizer_queue_ms: Some(4.0),
+                    cache_serialize_ms: Some(5.0),
+                    cache_tokenize_ms: Some(6.0),
+                    prepare_signer_ms: Some(7.0),
+                },
+                upstream_body_ms: Some(41),
+                first_body_chunk_ms: Some(0),
+                internal_errors: Vec::new(),
+            },
+        )
+        .await;
+
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut partials,
+            DEFAULT_ASSEMBLER_MAP_CAP,
+            LifecycleEvent::RequestTerminated {
+                event_id,
+                reason: TerminationReason::Dropped,
+                client_status: 499,
+                duration_ms: 54,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                finalize_ms: None,
+                limit_reconcile_ms: None,
+                observability_post_ms: None,
+                proxy_setup_ms: None,
+                setup_timings: Default::default(),
+                upstream_body_ms: None,
+                first_body_chunk_ms: None,
+                internal_errors: Vec::new(),
+            },
+        )
+        .await;
+
+        force_flush_terminations(&store, None, metrics.as_ref(), &mut partials).await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.request_body_read_ms, Some(0));
+        assert_eq!(row.request_body_bytes, Some(917_567));
+        assert_eq!(row.finalize_ms, Some(4));
+        assert_eq!(row.limit_reconcile_ms, Some(5));
+        assert_eq!(row.observability_post_ms, Some(6));
+        assert_eq!(row.proxy_setup_ms, Some(0));
+        assert_eq!(row.json_parse_ms, Some(0.0));
+        assert_eq!(row.cache_structure_ms, Some(1.0));
+        assert_eq!(row.cache_token_key_ms, Some(2.0));
+        assert_eq!(row.cache_count_lookup_ms, Some(3.0));
+        assert_eq!(row.cache_tokenizer_queue_ms, Some(4.0));
+        assert_eq!(row.cache_serialize_ms, Some(5.0));
+        assert_eq!(row.cache_tokenize_ms, Some(6.0));
+        assert_eq!(row.prepare_signer_ms, Some(7.0));
+        assert_eq!(row.upstream_body_ms, Some(41));
+        assert_eq!(row.first_body_chunk_ms, Some(0));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1501,6 +1702,9 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 42,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
@@ -1552,6 +1756,9 @@ mod tests {
                 reason,
                 client_status: status,
                 duration_ms: 10,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                finalize_ms: None,
                 limit_reconcile_ms: None,
                 observability_post_ms: None,
                 proxy_setup_ms: Some(4),
@@ -1611,6 +1818,9 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 42,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
@@ -1660,6 +1870,9 @@ mod tests {
             reason: TerminationReason::ErrorCode("upstream_stream_error".into()),
             client_status: 200,
             duration_ms: 1_234,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
@@ -1711,6 +1924,9 @@ mod tests {
             reason: TerminationReason::ErrorCode("upstream_4xx".into()),
             client_status: 429,
             duration_ms: 12,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
@@ -1761,6 +1977,9 @@ mod tests {
             reason: TerminationReason::ErrorCode("body_too_large".into()),
             client_status: 413,
             duration_ms: 5,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
@@ -1791,6 +2010,9 @@ mod tests {
             reason: TerminationReason::Dropped,
             client_status: 499,
             duration_ms: 7,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
@@ -1835,6 +2057,9 @@ mod tests {
             reason: TerminationReason::Dropped,
             client_status: 499,
             duration_ms: 7,
+            request_body_read_ms: Some(2),
+            request_body_bytes: Some(0),
+            finalize_ms: Some(1),
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: Some(1),
@@ -1866,6 +2091,11 @@ mod tests {
             rows[0].error_code.as_deref(),
             Some("terminal_without_partial")
         );
+        assert_eq!(rows[0].request_body_read_ms, Some(2));
+        assert_eq!(rows[0].request_body_bytes, Some(0));
+        assert_eq!(rows[0].finalize_ms, Some(1));
+        assert_eq!(rows[0].upstream_body_ms, Some(4));
+        assert_eq!(rows[0].stream_total_ms, None);
         assert!(
             recorder.count_matching(
                 "cc_lb_lifecycle_assembler_rows_total",
@@ -1994,6 +2224,9 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 10,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
@@ -2190,6 +2423,9 @@ mod tests {
                 reason: TerminationReason::Success,
                 client_status: 200,
                 duration_ms: 10,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                finalize_ms: None,
                 first_body_chunk_ms: None,
                 internal_errors: Vec::new(),
                 limit_reconcile_ms: None,
@@ -2289,6 +2525,9 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 10,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
@@ -2505,6 +2744,7 @@ mod tests {
                 },
                 sse_event_count: 3,
                 first_body_chunk_ms: Some(11),
+                body_bytes: Some(456),
                 ..StreamSuccess::default()
             }),
         })
@@ -2515,6 +2755,9 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 123,
+            request_body_read_ms: Some(17),
+            request_body_bytes: None,
+            finalize_ms: Some(3),
             first_body_chunk_ms: Some(11),
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
@@ -2560,6 +2803,7 @@ mod tests {
         assert_eq!(parsed.model.as_deref(), Some("claude-3-5-sonnet-20241022"));
         assert_eq!(parsed.principal_id, None);
         assert_eq!(parsed.upstream_name, None);
+        assert_eq!(parsed.request_body_bytes, Some(128));
 
         let authenticated = partials[2];
         assert_eq!(
@@ -2574,6 +2818,11 @@ mod tests {
         assert_eq!(routed.upstream_name.as_deref(), Some("primary"));
         assert_eq!(routed.upstream_id, Some(Uuid::nil()));
         assert_eq!(routed.route_ms, Some(7));
+        let terminated = partials[7];
+        assert_eq!(terminated.request_body_read_ms, Some(17));
+        assert_eq!(terminated.request_body_bytes, Some(128));
+        assert_eq!(terminated.finalize_ms, Some(3));
+        assert_eq!(terminated.upstream_body_ms, Some(12));
 
         let finals: Vec<_> = updates
             .iter()
@@ -2585,6 +2834,11 @@ mod tests {
         assert_eq!(finals.len(), 1);
         assert_eq!(finals[0].cursor, 1);
         assert_eq!(finals[0].event.event_id.as_deref(), Some(event_id.as_str()));
+        assert_eq!(finals[0].event.request_body_read_ms, Some(17));
+        assert_eq!(finals[0].event.request_body_bytes, Some(128));
+        assert_eq!(finals[0].event.finalize_ms, Some(3));
+        assert_eq!(finals[0].event.upstream_body_ms, Some(12));
+        assert_eq!(finals[0].event.body_bytes, Some(456));
         assert!(matches!(updates.last(), Some(RequestEventUpdate::Final(_))));
     }
 
@@ -2639,6 +2893,9 @@ mod tests {
             reason: TerminationReason::ErrorCode("invalid_request".to_owned()),
             client_status: 400,
             duration_ms: 9,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
@@ -2753,6 +3010,9 @@ mod tests {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 42,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,

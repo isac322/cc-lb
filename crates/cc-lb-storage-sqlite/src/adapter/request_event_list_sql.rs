@@ -42,6 +42,8 @@ SELECT \
     list_auth_ms AS auth_ms, \
     list_route_ms AS route_ms, \
     list_limit_reserve_ms AS limit_reserve_ms, \
+    list_request_body_read_ms AS request_body_read_ms, \
+    list_request_body_bytes AS request_body_bytes, \
     list_json_parse_ms AS json_parse_ms, \
     list_cache_structure_ms AS cache_structure_ms, \
     list_cache_token_key_ms AS cache_token_key_ms, \
@@ -56,6 +58,7 @@ SELECT \
     list_connection_reused AS connection_reused, \
     list_limit_reconcile_ms AS limit_reconcile_ms, \
     list_observability_post_ms AS observability_post_ms, \
+    list_finalize_ms AS finalize_ms, \
     list_proxy_setup_ms AS proxy_setup_ms, \
     list_shape_ms AS shape_ms, \
     list_sign_ms AS sign_ms, \
@@ -132,6 +135,8 @@ pub(super) struct ListRow {
     pub(super) auth_ms: Option<i64>,
     pub(super) route_ms: Option<i64>,
     pub(super) limit_reserve_ms: Option<i64>,
+    pub(super) request_body_read_ms: Option<i64>,
+    pub(super) request_body_bytes: Option<i64>,
     pub(super) json_parse_ms: Option<f64>,
     pub(super) cache_structure_ms: Option<f64>,
     pub(super) cache_token_key_ms: Option<f64>,
@@ -146,6 +151,7 @@ pub(super) struct ListRow {
     pub(super) connection_reused: Option<i64>,
     pub(super) limit_reconcile_ms: Option<i64>,
     pub(super) observability_post_ms: Option<i64>,
+    pub(super) finalize_ms: Option<i64>,
     pub(super) proxy_setup_ms: Option<i64>,
     pub(super) shape_ms: Option<i64>,
     pub(super) sign_ms: Option<i64>,

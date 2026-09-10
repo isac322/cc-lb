@@ -262,6 +262,9 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             upstream_body_ms: None,
         })
         .await
@@ -308,6 +311,9 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             upstream_body_ms: None,
         })
         .await
@@ -344,6 +350,9 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
             upstream_body_ms: None,
         })
         .await

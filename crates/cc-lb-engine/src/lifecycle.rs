@@ -2248,6 +2248,8 @@ impl Lifecycle {
             cc_lb.principal.id = tracing::field::Empty,
             cc_lb.upstream.name = tracing::field::Empty,
             cc_lb.upstream.id = tracing::field::Empty,
+            cc_lb.request.finalize_ms = tracing::field::Empty,
+            cc_lb.request.unaccounted_ms = tracing::field::Empty,
         )
     )]
     pub async fn handle(&self, req: Request<Bytes>) -> Result<Response<Body>, ProxyError> {
@@ -2277,6 +2279,7 @@ impl Lifecycle {
                 .map(|bus| LifecycleContext::new(ctx.request_id.clone(), bus.clone(), &self.clock))
         });
         if let Some(o) = observer.as_ref() {
+            o.set_request_span(handle_span.clone());
             o.emit_request_started(body_view.stream());
         }
         store_setup_timings(observer.as_ref(), setup_timings);
@@ -2909,6 +2912,13 @@ impl Lifecycle {
             Ok(response) => {
                 let status = response.status();
                 if let Some(o) = observer.as_ref() {
+                    o.set_attempt_timings(
+                        attempt_timings.shape_ms,
+                        attempt_timings.sign_ms,
+                        attempt_timings.upstream_ttfb_ms,
+                    );
+                }
+                if let Some(o) = observer.as_ref() {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
                         event_id: o.event_id().to_owned(),
                         status: status.as_u16(),
@@ -2929,6 +2939,11 @@ impl Lifecycle {
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
                 let status = response.status();
                 if let Some(o) = observer.as_ref() {
+                    o.set_attempt_timings(
+                        attempt_timings.shape_ms,
+                        attempt_timings.sign_ms,
+                        attempt_timings.upstream_ttfb_ms,
+                    );
                     o.set_terminal(status, error_codes::UPSTREAM_DISPATCH_FAILED);
                     o.finish();
                 }
@@ -2983,6 +2998,13 @@ impl Lifecycle {
                 {
                     Ok(response) => {
                         if let Some(o) = observer.as_ref() {
+                            o.set_attempt_timings(
+                                attempt_timings.shape_ms,
+                                attempt_timings.sign_ms,
+                                attempt_timings.upstream_ttfb_ms,
+                            );
+                        }
+                        if let Some(o) = observer.as_ref() {
                             o.emit_lifecycle(
                                 cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
                                     event_id: o.event_id().to_owned(),
@@ -3005,6 +3027,11 @@ impl Lifecycle {
                         self.attach_limit_headers(&mut response, active_limit.as_ref());
                         let status = response.status();
                         if let Some(o) = observer.as_ref() {
+                            o.set_attempt_timings(
+                                attempt_timings.shape_ms,
+                                attempt_timings.sign_ms,
+                                attempt_timings.upstream_ttfb_ms,
+                            );
                             o.set_terminal(status, error_codes::UPSTREAM_DISPATCH_FAILED);
                             o.finish();
                         }
@@ -3016,6 +3043,11 @@ impl Lifecycle {
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
                 let status = response.status();
                 if let Some(o) = observer.as_ref() {
+                    o.set_attempt_timings(
+                        attempt_timings.shape_ms,
+                        attempt_timings.sign_ms,
+                        attempt_timings.upstream_ttfb_ms,
+                    );
                     let code = if status.is_client_error() {
                         error_codes::UPSTREAM_4XX
                     } else {
@@ -3177,7 +3209,11 @@ impl Lifecycle {
     #[tracing::instrument(
         name = "proxy.finish_response",
         skip_all,
-        fields(http.response.status_code = u64::from(status.as_u16()))
+        fields(
+            http.response.status_code = u64::from(status.as_u16()),
+            cc_lb.response_body_ms = tracing::field::Empty,
+            cc_lb.request.finalize_ms = tracing::field::Empty,
+        )
     )]
     async fn finish_success_response(
         &self,
@@ -3245,6 +3281,7 @@ impl Lifecycle {
                 }
             }
         }
+        let finalize_started = Instant::now();
         let body = if body_collect_failed {
             Bytes::new()
         } else {
@@ -3464,7 +3501,7 @@ impl Lifecycle {
             );
         }
 
-        if let Some(o) = observer.as_ref() {
+        let finalize_ms = if let Some(o) = observer.as_ref() {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                 event_id: o.event_id().to_owned(),
                 usage: to_usage_snapshot(&usage),
@@ -3547,8 +3584,16 @@ impl Lifecycle {
             } else {
                 o.set_success_status(client_status);
             }
+            let finalize_ms = duration_to_ms(finalize_started.elapsed());
+            o.set_finalize_ms(finalize_ms);
             o.finish();
-        }
+            finalize_ms
+        } else {
+            duration_to_ms(finalize_started.elapsed())
+        };
+        let response_span = tracing::Span::current();
+        response_span.record("cc_lb.response_body_ms", body_collect_ms);
+        response_span.record("cc_lb.request.finalize_ms", finalize_ms);
         observe_many(
             stream_hooks.as_slice(),
             ObserveEvent::RequestFinished {
@@ -3875,7 +3920,9 @@ impl Lifecycle {
             "proxy.response_stream",
             otel.kind = "internal",
             otel.status_code = tracing::field::Empty,
-            http.response.status_code = i64::from(status.as_u16()),
+            http.response.status_code = tracing::field::Empty,
+            cc_lb.response_body_ms = tracing::field::Empty,
+            cc_lb.request.finalize_ms = tracing::field::Empty,
             stream.outcome = tracing::field::Empty,
             error.cause = tracing::field::Empty,
             error.chain = tracing::field::Empty,
@@ -3904,7 +3951,9 @@ impl Lifecycle {
         let downstream_drop_guard = DownstreamStreamDropGuard::armed(
             observer.clone(),
             stream_span.clone(),
+            status,
             upstream_error_status.then_some(StreamTerminationCause::ProviderError),
+            relay_start,
         );
         let completion_observer = Arc::clone(&self.completion_observer);
         let parse_sse_events = !upstream_error_status || upstream_is_sse;
@@ -5274,6 +5323,7 @@ impl Lifecycle {
                     yield Ok::<Bytes, Infallible>(frame);
                 }
             }
+            let response_body_completed_at = Instant::now();
             if stream_affinity_error.is_none()
                 && status == StatusCode::OK
                 && prompt_cache_observations_buffered
@@ -5309,7 +5359,9 @@ impl Lifecycle {
             let elapsed_ms = |to: Option<Instant>| {
                 to.map(|t| duration_to_ms(t.saturating_duration_since(relay_start)))
             };
-            let stream_total_ms = duration_to_ms(relay_start.elapsed());
+            let stream_total_ms = duration_to_ms(
+                response_body_completed_at.saturating_duration_since(relay_start),
+            );
             let inter_token_avg_ms = match (first_content_delta_at, last_content_delta_at) {
                 (Some(first), Some(last)) if content_delta_count > 1 => {
                     let span = last.saturating_duration_since(first);
@@ -5338,7 +5390,7 @@ impl Lifecycle {
             } else if stream_transform_error.is_some() {
                 downstream_drop_guard.mark_proxy_error(StreamTerminationCause::TransformError);
             }
-            if let Some(o) = observer.as_ref() {
+            let finalize_ms = if let Some(o) = observer.as_ref() {
                 if stream_affinity_error.is_none()
                     && status == StatusCode::OK
                     && let Some(context) = prompt_cache_observation_context.as_ref()
@@ -5423,8 +5475,13 @@ impl Lifecycle {
                 } else if !upstream_error_status {
                     o.set_success_status(status);
                 }
+                let finalize_ms = duration_to_ms(response_body_completed_at.elapsed());
+                o.set_finalize_ms(finalize_ms);
                 o.finish();
-            }
+                finalize_ms
+            } else {
+                duration_to_ms(response_body_completed_at.elapsed())
+            };
             // Mandatory lifecycle, accounting, affinity, and termination work is complete.
             // Only best-effort hook dispatch and latency logging cross this bounded boundary.
             let stream_latency = StreamLatency {
@@ -5444,7 +5501,7 @@ impl Lifecycle {
                 total_bytes,
             };
             stream_latency.record_on_span(&stream_span);
-            downstream_drop_guard.finish();
+            downstream_drop_guard.finish(stream_total_ms, finalize_ms);
             if stream_latency_log_dispatch.is_some() || !hooks.is_empty() {
                 let completion_log = stream_latency_log_dispatch.map(|dispatch| {
                     StreamCompletionLog::new(

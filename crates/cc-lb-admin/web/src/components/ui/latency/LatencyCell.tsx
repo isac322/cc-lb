@@ -1,5 +1,5 @@
 import type React from 'react';
-import { fmtMs, fmtMsCompact, fmtSetupMs } from '../../../lib/format';
+import { fmtBytes, fmtMs, fmtMsCompact, fmtSetupMs } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Hint } from '../primitives';
 import { Sparkline } from '../Sparkline';
@@ -10,6 +10,7 @@ import {
   deriveProxyTimelineDuration,
   deriveSetupOverhead,
   hasSetupTimingBreakdown,
+  responseBodyDuration,
 } from './computeStageGroups';
 
 function pctOf(value: number | null | undefined, denom: number): number {
@@ -24,6 +25,7 @@ function Section({
   duration,
   items,
   pill,
+  showZero,
 }: {
   title: string;
   color: string;
@@ -36,11 +38,12 @@ function Section({
     setupTiming?: boolean;
   }[];
   pill?: React.ReactNode;
+  showZero?: boolean;
 }) {
   const visibleItems = items.filter(
     (item) => item.value != null && (item.value > 0 || item.showZero === true),
   );
-  if (total <= 0 && visibleItems.length === 0) return null;
+  if (total <= 0 && visibleItems.length === 0 && showZero !== true) return null;
 
   return (
     <div className="mb-2 last:mb-0">
@@ -89,6 +92,15 @@ export function LatencyCell({
   isPartial?: boolean;
 }) {
   const groups = computeStageGroups(e);
+  const isRenewal = e.source_kind === 'renewal';
+  const hasFinalize = e.finalize_ms != null;
+  const requestBodyRead = e.request_body_read_ms ?? 0;
+  const proxyInternalPre = Math.max(0, groups.internalPre - requestBodyRead);
+  const bodyDuration = responseBodyDuration(e);
+  const isCancelledPartial = e.status === 499 && e.upstream_body_ms != null;
+  const limitReconcileMs =
+    typeof e.limit_reconcile_ms === 'number' ? e.limit_reconcile_ms : 0;
+  const otherFinalize = Math.max(0, (e.finalize_ms ?? 0) - limitReconcileMs);
   const duration = isPartial
     ? deriveProxyTimelineDuration(e)
     : e._phase === 'final'
@@ -143,79 +155,181 @@ export function LatencyCell({
       (e.dns_ms ?? 0) -
       (e.connect_ms ?? 0),
   );
+  const sparklineStages = isRenewal
+    ? [`Renewal cycle ${fmtMs(duration)}`]
+    : [
+        ...(e.request_body_read_ms != null
+          ? [`Request body read ${fmtMs(requestBodyRead)}`]
+          : []),
+        ...(e.request_body_bytes != null
+          ? [`Ingress body ${fmtBytes(e.request_body_bytes)}`]
+          : []),
+        ...(proxyInternalPre > 0
+          ? [`Internal pre ${fmtMs(proxyInternalPre)}`]
+          : []),
+        ...(groups.wait > 0 ? [`Wait ${fmtMs(groups.wait)}`] : []),
+        ...(groups.upstream > 0 ? [`Upstream ${fmtMs(groups.upstream)}`] : []),
+        ...(groups.body > 0 ||
+        isCancelledPartial ||
+        e.stream_total_ms != null ||
+        e.upstream_body_ms != null
+          ? [
+              `${
+                isCancelledPartial
+                  ? 'Partial stream (client cancelled)'
+                  : e.stream_total_ms != null
+                    ? 'Stream relay'
+                    : 'Body collect'
+              } ${fmtMs(bodyDuration)}`,
+            ]
+          : []),
+        ...(hasFinalize
+          ? [`Finalize ${fmtMs(groups.internalPost)}`]
+          : groups.internalPost > 0 || e.limit_reconcile_ms != null
+            ? [`Internal post ${fmtMs(groups.internalPost)}`]
+            : []),
+        ...(groups.unaccounted > 10
+          ? [`Unaccounted ${fmtMs(groups.unaccounted)}`]
+          : []),
+      ];
+  const sparklineLabel = `Latency stages: ${sparklineStages.join(', ')}`;
+  const triggerStages = isRenewal
+    ? [`Renewal cycle ${fmtMs(duration)}`]
+    : [
+        ...(e.request_body_read_ms != null
+          ? [`Proxy request body read ${fmtMs(requestBodyRead)}`]
+          : []),
+        ...(e.request_body_bytes != null
+          ? [`Ingress body ${fmtBytes(e.request_body_bytes)}`]
+          : []),
+        ...(isCancelledPartial
+          ? [`Partial stream (client cancelled) ${fmtMs(bodyDuration)}`]
+          : []),
+        ...(hasFinalize
+          ? [`Finalize ${fmtMs(groups.internalPost)}`]
+          : e.limit_reconcile_ms != null
+            ? [`Internal post ${fmtMs(groups.internalPost)}`]
+            : []),
+      ];
+  const triggerLabel = `Latency ${value} ${unit}${
+    triggerStages.length > 0 ? `, ${triggerStages.join(', ')}` : ''
+  }, show breakdown`;
 
-  const popover = (
-    <div className="min-w-[240px] font-mono">
-      <div className="text-[10px] uppercase tracking-wider text-text-faint mb-2">
-        Latency
-      </div>
+  const proxySections = (
+    <div className="flex flex-col">
+      <Section
+        title="Request body read"
+        color="bg-cyan-400"
+        total={requestBodyRead}
+        duration={duration}
+        items={[]}
+        pill={
+          e.request_body_bytes != null ? (
+            <span className="text-[9px] leading-none text-text-faint">
+              Ingress body: {fmtBytes(e.request_body_bytes)}
+            </span>
+          ) : null
+        }
+        showZero={e.request_body_read_ms != null}
+      />
 
-      <div className="flex flex-col">
+      <Section
+        title="Internal pre"
+        color="bg-sky-400"
+        total={proxyInternalPre}
+        duration={duration}
+        items={internalPreItems}
+      />
+
+      <Section
+        title="Wait"
+        color="bg-amber-400"
+        total={groups.wait}
+        duration={duration}
+        items={[
+          { label: 'Bulkhead', value: e.bulkhead_wait_ms },
+          { label: 'DNS', value: e.dns_ms },
+        ]}
+      />
+
+      <Section
+        title="Upstream"
+        color="bg-violet-400"
+        total={groups.upstream}
+        duration={duration}
+        pill={
+          e.connection_reused ? (
+            <span className="px-1 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[9px] leading-none">
+              Warm pool
+            </span>
+          ) : null
+        }
+        items={[
+          { label: 'Connect', value: e.connect_ms },
+          { label: 'Wait (TTFB)', value: upstream_wait_ms },
+        ]}
+      />
+
+      <Section
+        title="Body"
+        color="bg-emerald-400"
+        total={groups.body}
+        duration={duration}
+        items={[
+          {
+            label: isCancelledPartial
+              ? 'Partial stream (client cancelled)'
+              : e.stream_total_ms != null
+                ? 'Stream relay'
+                : 'Body collect',
+            value: bodyDuration,
+            showZero: isCancelledPartial,
+          },
+          {
+            label: 'First content delta',
+            value:
+              e._phase === 'final'
+                ? e.stream_first_content_delta_ms
+                : undefined,
+          },
+          {
+            label: 'Last content delta',
+            value:
+              e._phase === 'final' ? e.stream_last_content_delta_ms : undefined,
+          },
+          {
+            label: 'Inter-token avg',
+            value: e._phase === 'final' ? e.inter_token_avg_ms : undefined,
+          },
+        ]}
+      />
+
+      {hasFinalize ? (
         <Section
-          title="Internal pre"
-          color="bg-sky-400"
-          total={groups.internalPre}
-          duration={duration}
-          items={internalPreItems}
-        />
-
-        <Section
-          title="Wait"
-          color="bg-amber-400"
-          total={groups.wait}
+          title="Finalize"
+          color="bg-slate-400"
+          total={groups.internalPost}
           duration={duration}
           items={[
-            { label: 'Bulkhead', value: e.bulkhead_wait_ms },
-            { label: 'DNS', value: e.dns_ms },
-          ]}
-        />
-
-        <Section
-          title="Upstream"
-          color="bg-violet-400"
-          total={groups.upstream}
-          duration={duration}
-          pill={
-            e.connection_reused ? (
-              <span className="px-1 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[9px] leading-none">
-                Warm pool
-              </span>
-            ) : null
-          }
-          items={[
-            { label: 'Connect', value: e.connect_ms },
-            { label: 'Wait (TTFB)', value: upstream_wait_ms },
-          ]}
-        />
-
-        <Section
-          title="Body"
-          color="bg-emerald-400"
-          total={groups.body}
-          duration={duration}
-          items={[
-            { label: 'Body', value: e.upstream_body_ms },
             {
-              label: 'First content delta',
+              label: 'Limit reconcile',
               value:
-                e._phase === 'final'
-                  ? e.stream_first_content_delta_ms
+                e._phase === 'final' && e.finalize_ms != null
+                  ? e.limit_reconcile_ms
                   : undefined,
             },
             {
-              label: 'Last content delta',
+              label: 'Other finalize',
               value:
-                e._phase === 'final'
-                  ? e.stream_last_content_delta_ms
+                e._phase === 'final' && e.finalize_ms != null
+                  ? otherFinalize
                   : undefined,
-            },
-            {
-              label: 'Inter-token avg',
-              value: e._phase === 'final' ? e.inter_token_avg_ms : undefined,
+              showZero: true,
             },
           ]}
+          showZero
         />
-
+      ) : (
         <Section
           title="Internal post"
           color="bg-slate-400"
@@ -225,10 +339,33 @@ export function LatencyCell({
             {
               label: 'Limit reconcile',
               value: e._phase === 'final' ? e.limit_reconcile_ms : undefined,
+              showZero: e.limit_reconcile_ms != null,
             },
           ]}
+          showZero={e.limit_reconcile_ms != null}
         />
+      )}
+    </div>
+  );
+
+  const popover = (
+    <div className="min-w-[240px] font-mono">
+      <div className="text-[10px] uppercase tracking-wider text-text-faint mb-2">
+        Latency
       </div>
+
+      {isRenewal ? (
+        <Section
+          title="Renewal cycle"
+          color="bg-blue-400"
+          total={duration}
+          duration={duration}
+          items={[]}
+          showZero
+        />
+      ) : (
+        proxySections
+      )}
 
       <div className="border-t border-subtle mt-2 pt-1.5 flex flex-col gap-1">
         <div className="flex items-center gap-2 text-[11px]">
@@ -241,7 +378,7 @@ export function LatencyCell({
             {duration > 0 ? '100%' : '—'}
           </span>
         </div>
-        {groups.unaccounted > 10 && (
+        {!isRenewal && groups.unaccounted > 10 && (
           <div className="flex items-center gap-2 text-[11px]">
             <span className="h-2 w-2 shrink-0 bg-slate-700/30 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)] rounded-full" />
             <span className="text-text-faint flex-1">Unaccounted</span>
@@ -265,7 +402,7 @@ export function LatencyCell({
       <Hint label={popover}>
         <button
           type="button"
-          aria-label={`Latency ${value} ${unit}, show breakdown`}
+          aria-label={triggerLabel}
           className="w-full px-3 py-2 cursor-help block bg-transparent border-0 text-inherit"
         >
           <div className="flex items-baseline justify-end tabular-nums leading-tight">
@@ -276,24 +413,31 @@ export function LatencyCell({
               {unit}
             </span>
           </div>
-          <Sparkline
-            segments={[
-              { value: groups.internalPre, color: 'bg-sky-400' },
-              { value: groups.wait, color: 'bg-amber-400' },
-              { value: groups.upstream, color: 'bg-violet-400' },
-              { value: groups.body, color: 'bg-emerald-400' },
-              { value: groups.internalPost, color: 'bg-slate-400' },
-              ...(groups.unaccounted > 10
-                ? [
-                    {
-                      value: groups.unaccounted,
-                      color:
-                        'bg-slate-700/30 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)]',
-                    },
-                  ]
-                : []),
-            ]}
-          />
+          <div role="img" aria-label={sparklineLabel}>
+            <Sparkline
+              segments={
+                isRenewal
+                  ? [{ value: duration, color: 'bg-blue-400' }]
+                  : [
+                      { value: requestBodyRead, color: 'bg-cyan-400' },
+                      { value: proxyInternalPre, color: 'bg-sky-400' },
+                      { value: groups.wait, color: 'bg-amber-400' },
+                      { value: groups.upstream, color: 'bg-violet-400' },
+                      { value: groups.body, color: 'bg-emerald-400' },
+                      { value: groups.internalPost, color: 'bg-slate-400' },
+                      ...(groups.unaccounted > 10
+                        ? [
+                            {
+                              value: groups.unaccounted,
+                              color:
+                                'bg-slate-700/30 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)]',
+                            },
+                          ]
+                        : []),
+                    ]
+              }
+            />
+          </div>
         </button>
       </Hint>
     </td>

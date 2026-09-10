@@ -832,8 +832,8 @@ async fn insert_request_event_in_tx(
     let cache_breakpoints = serde_json::to_string(&event.cache_breakpoints)?;
     sqlx::query_scalar::<_, i64>(
             "INSERT INTO request_events_v1 \
-             (request_id, ts, event_type, source_kind, source_ref_id, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, web_search_requests, web_fetch_requests, service_tier, inference_geo, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_warning_multiplier, lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, thinking_budget_tokens, reasoning_effort, payload, list_ts_ms, list_event_key, list_upstream, list_status, list_duration_ms, list_auth_ms, list_route_ms, list_limit_reserve_ms, list_json_parse_ms, list_cache_structure_ms, list_cache_token_key_ms, list_cache_count_lookup_ms, list_cache_tokenizer_queue_ms, list_cache_serialize_ms, list_cache_tokenize_ms, list_prepare_signer_ms, list_bulkhead_wait_ms, list_dns_ms, list_connect_ms, list_connection_reused, list_limit_reconcile_ms, list_observability_post_ms, list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, list_upstream_body_ms, list_stream_first_content_delta_ms, list_stream_last_content_delta_ms, list_inter_token_avg_ms, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, observed_session_id, request_kind, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             (request_id, ts, event_type, source_kind, source_ref_id, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message, thinking_tokens, web_search_requests, web_fetch_requests, service_tier, inference_geo, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_warning_multiplier, lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, thinking_budget_tokens, reasoning_effort, payload, list_ts_ms, list_event_key, list_upstream, list_status, list_duration_ms, list_auth_ms, list_route_ms, list_limit_reserve_ms, list_json_parse_ms, list_cache_structure_ms, list_cache_token_key_ms, list_cache_count_lookup_ms, list_cache_tokenizer_queue_ms, list_cache_serialize_ms, list_cache_tokenize_ms, list_prepare_signer_ms, list_bulkhead_wait_ms, list_dns_ms, list_connect_ms, list_connection_reused, list_limit_reconcile_ms, list_observability_post_ms, list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, list_upstream_body_ms, list_stream_first_content_delta_ms, list_stream_last_content_delta_ms, list_inter_token_avg_ms, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, observed_session_id, request_kind, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, list_request_body_read_ms, list_request_body_bytes, list_finalize_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
              RETURNING id",
         )
@@ -1008,6 +1008,18 @@ async fn insert_request_event_in_tx(
         .bind(event.parent_session_id.as_deref())
         .bind(event.client_app.as_deref())
         .bind(event.session_id_source.as_deref())
+        .bind(option_u64_to_i64(
+            event.request_body_read_ms,
+            "request event list_request_body_read_ms",
+        )?)
+        .bind(option_u64_to_i64(
+            event.request_body_bytes,
+            "request event list_request_body_bytes",
+        )?)
+        .bind(option_u64_to_i64(
+            event.finalize_ms,
+            "request event list_finalize_ms",
+        )?)
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)

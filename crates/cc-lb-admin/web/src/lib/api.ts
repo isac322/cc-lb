@@ -318,6 +318,11 @@ const requestSetupTimingFields = {
   cache_tokenize_ms: requestSetupTimingSchema,
   prepare_signer_ms: requestSetupTimingSchema,
 };
+const requestLifecycleTimingFields = {
+  request_body_read_ms: requestSetupTimingSchema,
+  request_body_bytes: requestSetupTimingSchema,
+  finalize_ms: requestSetupTimingSchema,
+};
 
 export const RequestEventPartialSchema = z.looseObject({
   event_id: z.string().min(1),
@@ -327,6 +332,7 @@ export const RequestEventPartialSchema = z.looseObject({
   last_update_ms: z.number().nullable().optional(),
   elapsed_ms: z.number().nullable().optional(),
   stream: z.boolean().nullable().optional(),
+  source_kind: z.string().nullable().optional(),
   principal_id: z.string().nullable().optional(),
   principal_kind: z.string().nullable().optional(),
   key_id: z.string().nullable().optional(),
@@ -372,6 +378,7 @@ export const RequestEventPartialSchema = z.looseObject({
   route_ms: z.number().nullable().optional(),
   limit_reserve_ms: z.number().nullable().optional(),
   ...requestSetupTimingFields,
+  ...requestLifecycleTimingFields,
   bulkhead_wait_ms: z.number().nullable().optional(),
   dns_ms: z.number().nullable().optional(),
   connect_ms: z.number().nullable().optional(),
@@ -397,7 +404,10 @@ export const RequestEventPartialSchema = z.looseObject({
 
 export const FinalRequestEventUpdateSchema = z.object({
   event: z
-    .looseObject(requestSetupTimingFields)
+    .looseObject({
+      ...requestSetupTimingFields,
+      ...requestLifecycleTimingFields,
+    })
     .transform((event) => event as unknown as RequestEvent),
   cursor: z.number(),
 });
@@ -524,6 +534,9 @@ export interface RequestEvent {
   cost_cache_read_micros?: number;
   duration_ms: number;
   elapsed_ms?: number | null;
+  request_body_read_ms?: number | null;
+  request_body_bytes?: number | null;
+  finalize_ms?: number | null;
   proxy_setup_ms?: number;
   shape_ms?: number;
   sign_ms?: number;
