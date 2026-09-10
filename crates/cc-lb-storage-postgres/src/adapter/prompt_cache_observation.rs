@@ -21,7 +21,7 @@ const PURGE_MAX_BATCHES: usize = 1_024;
 impl PromptCacheObservationStore for PostgresStorage {
     async fn upsert_observation(&self, record: &PromptCacheObservationRecord) -> StorageResult<()> {
         sqlx::query(
-            "INSERT INTO prompt_cache_observations (upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source, last_provider_cache_read_tokens, last_provider_cache_creation_tokens) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (upstream_id, canonical_model_id, v3_prefix_key, ttl_class) DO UPDATE SET expires_at = EXCLUDED.expires_at, last_observed_at = EXCLUDED.last_observed_at, hash_schema_version = EXCLUDED.hash_schema_version, prefix_content_block_index = EXCLUDED.prefix_content_block_index, estimated_prefix_tokens = EXCLUDED.estimated_prefix_tokens, token_estimate_source = EXCLUDED.token_estimate_source, last_provider_cache_read_tokens = EXCLUDED.last_provider_cache_read_tokens, last_provider_cache_creation_tokens = EXCLUDED.last_provider_cache_creation_tokens",
+            "INSERT INTO prompt_cache_observations (upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (upstream_id, canonical_model_id, v3_prefix_key, ttl_class) DO UPDATE SET expires_at = EXCLUDED.expires_at, last_observed_at = EXCLUDED.last_observed_at, hash_schema_version = EXCLUDED.hash_schema_version, prefix_content_block_index = EXCLUDED.prefix_content_block_index, estimated_prefix_tokens = EXCLUDED.estimated_prefix_tokens, token_estimate_source = EXCLUDED.token_estimate_source",
         )
         .bind(record.upstream_id)
         .bind(&record.canonical_model_id)
@@ -42,18 +42,6 @@ impl PromptCacheObservationStore for PostgresStorage {
             "prompt cache estimated_prefix_tokens",
         )?)
         .bind(&record.token_estimate_source)
-        .bind(
-            record
-                .last_provider_cache_read_tokens
-                .map(|value| u64_to_i64(value, "prompt cache last_provider_cache_read_tokens"))
-                .transpose()?,
-        )
-        .bind(
-            record
-                .last_provider_cache_creation_tokens
-                .map(|value| u64_to_i64(value, "prompt cache last_provider_cache_creation_tokens"))
-                .transpose()?,
-        )
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -66,7 +54,7 @@ impl PromptCacheObservationStore for PostgresStorage {
         not_expired_at_unix_secs: u64,
     ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
         let rows = sqlx::query(
-            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source, last_provider_cache_read_tokens, last_provider_cache_creation_tokens FROM prompt_cache_observations WHERE upstream_id = $1 AND expires_at > $2 ORDER BY v3_prefix_key, ttl_class",
+            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source FROM prompt_cache_observations WHERE upstream_id = $1 AND expires_at > $2 ORDER BY v3_prefix_key, ttl_class",
         )
         .bind(upstream_id)
         .bind(u64_to_i64(
@@ -90,7 +78,7 @@ impl PromptCacheObservationStore for PostgresStorage {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source, last_provider_cache_read_tokens, last_provider_cache_creation_tokens FROM prompt_cache_observations WHERE upstream_id = $1 AND expires_at > $2 AND v3_prefix_key = ANY($3) ORDER BY v3_prefix_key, ttl_class",
+            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source FROM prompt_cache_observations WHERE upstream_id = $1 AND expires_at > $2 AND v3_prefix_key = ANY($3) ORDER BY v3_prefix_key, ttl_class",
         )
         .bind(upstream_id)
         .bind(u64_to_i64(
@@ -185,16 +173,6 @@ fn row_to_record(row: PgRow) -> StorageResult<PromptCacheObservationRecord> {
         token_estimate_source: row
             .try_get("token_estimate_source")
             .map_err(map_sqlx_error)?,
-        last_provider_cache_read_tokens: row
-            .try_get::<Option<i64>, _>("last_provider_cache_read_tokens")
-            .map_err(map_sqlx_error)?
-            .map(|value| i64_to_u64(value, "prompt cache last_provider_cache_read_tokens"))
-            .transpose()?,
-        last_provider_cache_creation_tokens: row
-            .try_get::<Option<i64>, _>("last_provider_cache_creation_tokens")
-            .map_err(map_sqlx_error)?
-            .map(|value| i64_to_u64(value, "prompt cache last_provider_cache_creation_tokens"))
-            .transpose()?,
     })
 }
 

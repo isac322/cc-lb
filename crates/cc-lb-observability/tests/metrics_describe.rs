@@ -58,7 +58,6 @@ fn describes_all_required_metrics() {
             "cclb_streaming_usage_missing_total",
             "cc_lb_cache_hit_total",
             "cc_lb_cache_miss_total",
-            "cc_lb_cache_token_drift",
             "cc_lb_cache_observation_dropped_total",
             "cc_lb_cache_observation_write_failed_total",
             "cc_lb_prompt_cache_analysis_duration_seconds",
@@ -71,7 +70,7 @@ fn describes_all_required_metrics() {
         ]
     );
 
-    assert_eq!(definitions.len(), 55);
+    assert_eq!(definitions.len(), 54);
     assert_eq!(definitions[0].kind, MetricKind::Counter);
     assert_eq!(definitions[1].kind, MetricKind::Histogram);
     assert_eq!(definitions[3].kind, MetricKind::Gauge);

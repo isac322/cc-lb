@@ -131,8 +131,6 @@ mod tests {
             prefix_content_block_index: 0,
             estimated_prefix_tokens: 0,
             token_estimate_source: "local_tiktoken_v1".to_owned(),
-            last_provider_cache_read_tokens: Some(0),
-            last_provider_cache_creation_tokens: Some(0),
         }
     }
 

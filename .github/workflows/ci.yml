@@ -425,11 +425,15 @@ jobs:
 
       - name: Run tests with coverage instrumentation
         run: |
+          # The ARC pod shares a 32-core node but requests 4 cores and is limited to 14 GiB.
+          # Pin test concurrency to the pod request so coverage-instrumented processes cannot
+          # multiply to node-level parallelism and terminate the runner.
           cargo llvm-cov nextest \
             --workspace \
             --exclude cc-lb-loadgen \
             --exclude cc-lb-stress-suite \
             --all-features \
+            --test-threads=4 \
             --no-report
 
       - name: Generate workspace lcov report

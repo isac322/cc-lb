@@ -1125,9 +1125,6 @@ async fn build_app_with_storage_inner(
     } else {
         None
     };
-    let lifecycle_prompt_cache_drift_rx = Some(in_memory_bus.attach_lifecycle_prompt_cache_drift(
-        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_DRIFT_CAPACITY,
-    ));
     let lifecycle_prompt_cache_observation_rx =
         Some(in_memory_bus.attach_lifecycle_prompt_cache_observation(
             cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
@@ -1283,13 +1280,6 @@ async fn build_app_with_storage_inner(
     let lifecycle_routing_tier_subscriber_handle = lifecycle_routing_tier_rx.map(|rx| {
         cc_lb_engine::spawn_lifecycle_routing_tier_subscriber(rx, Arc::clone(&metrics_hook))
     });
-    let lifecycle_prompt_cache_drift_subscriber_handle =
-        lifecycle_prompt_cache_drift_rx.map(|rx| {
-            cc_lb_engine::spawn_lifecycle_prompt_cache_drift_subscriber(
-                rx,
-                Arc::clone(&metrics_hook),
-            )
-        });
     let lifecycle_prompt_cache_observation_subscriber_handle =
         lifecycle_prompt_cache_observation_rx.and_then(|rx| {
             prompt_cache_observation_cache.clone().map(|cache| {
@@ -1353,11 +1343,6 @@ async fn build_app_with_storage_inner(
         tokio::sync::Mutex<Option<cc_lb_engine::RoutingTierSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(
         lifecycle_routing_tier_subscriber_handle,
-    ));
-    let lifecycle_prompt_cache_drift_subscriber_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::PromptCacheDriftSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(
-        lifecycle_prompt_cache_drift_subscriber_handle,
     ));
     let lifecycle_prompt_cache_observation_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::PromptCacheObservationSubscriberHandle>>,
@@ -1591,18 +1576,6 @@ async fn build_app_with_storage_inner(
             let routing_tier_slot = routing_tier_slot.clone();
             async move {
                 let mut guard = routing_tier_slot.lock().await;
-                if let Some(handle) = guard.take() {
-                    handle.shutdown().await;
-                }
-            }
-        });
-    }
-    {
-        let prompt_cache_drift_slot = lifecycle_prompt_cache_drift_subscriber_slot.clone();
-        signals.add_shutdown_hook(move || {
-            let prompt_cache_drift_slot = prompt_cache_drift_slot.clone();
-            async move {
-                let mut guard = prompt_cache_drift_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }

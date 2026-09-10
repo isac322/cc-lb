@@ -1,17 +1,39 @@
 //! Single tokenizer wrapper. o200k_base used for ALL Anthropic models.
-//! Drift expected (Anthropic uses its own tokenizer); monitored via cc_lb_cache_token_drift metric.
 
+#[cfg(test)]
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use serde_json::Value as JsonValue;
-use tiktoken_rs::{Rank, o200k_base};
+#[cfg(test)]
+use tiktoken_rs::Rank;
+use tiktoken_rs::o200k_base;
+
+pub(crate) const CACHE_THRESHOLD_FAST_ACCEPT_BYTES_PER_TOKEN: usize = 8;
+// Anthropic does not expose its tokenizer. Prefixes at least 8 bytes per required
+// token are treated as clearly large; only the middle band pays for local o200k.
+
+pub(crate) fn cache_threshold_from_byte_len(
+    byte_len: usize,
+    token_threshold: usize,
+) -> Option<bool> {
+    if token_threshold == 0 {
+        return Some(true);
+    }
+    if byte_len < token_threshold {
+        return Some(false);
+    }
+    if byte_len >= token_threshold.saturating_mul(CACHE_THRESHOLD_FAST_ACCEPT_BYTES_PER_TOKEN) {
+        return Some(true);
+    }
+    None
+}
 
 #[cfg(test)]
 thread_local! {
     static TOKENIZER_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
-
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TokenizerBatchStats {
     pub(crate) input_bytes: u64,
@@ -44,6 +66,44 @@ impl PrefixTokenizer {
         self.encoder.encode_ordinary(text).len()
     }
 
+    pub(crate) fn meets_cache_threshold(
+        &self,
+        serialized_prefix: &[u8],
+        token_threshold: usize,
+    ) -> bool {
+        if let Some(decision) =
+            cache_threshold_from_byte_len(serialized_prefix.len(), token_threshold)
+        {
+            return decision;
+        }
+        let Ok(text) = std::str::from_utf8(serialized_prefix) else {
+            return false;
+        };
+        let inflight = metrics::gauge!("cc_lb_prompt_cache_tokenizer_inflight");
+        inflight.increment(1.0);
+        struct InflightGuard(metrics::Gauge);
+        impl Drop for InflightGuard {
+            fn drop(&mut self) {
+                self.0.decrement(1.0);
+            }
+        }
+        let _inflight = InflightGuard(inflight);
+        let started = std::time::Instant::now();
+        let token_count = self.count_tokens(text);
+        metrics::histogram!(
+            "cc_lb_prompt_cache_analysis_duration_seconds",
+            "stage" => "tokenize"
+        )
+        .record(started.elapsed().as_secs_f64());
+        metrics::counter!("cc_lb_prompt_cache_tokenized_bytes_total")
+            .increment(serialized_prefix.len() as u64);
+        metrics::counter!("cc_lb_prompt_cache_tokenized_tokens_total")
+            .increment(token_count as u64);
+        metrics::counter!("cc_lb_prompt_cache_tokenizer_fallback_prefixes_total").increment(1);
+        token_count >= token_threshold
+    }
+
+    #[cfg(test)]
     /// Counts nested JSON prefixes without re-tokenizing stable leading pieces.
     ///
     /// Each prefix is `open_prefix_bytes[..offset] + suffix_bytes`. The encoder's
@@ -148,6 +208,7 @@ impl PrefixTokenizer {
         (counts, stats)
     }
 
+    #[cfg(test)]
     fn extended_unstable_token_len(&self, tokens: &[Rank], last_piece_token_len: usize) -> usize {
         let mut unstable_token_len = last_piece_token_len.min(tokens.len());
         if unstable_token_len == 0
@@ -163,12 +224,14 @@ impl PrefixTokenizer {
         unstable_token_len
     }
 
+    #[cfg(test)]
     fn token_is_all_space(&self, token: Rank) -> bool {
         self.encoder
             .decode_bytes(&[token])
             .is_ok_and(|bytes| bytes.iter().rev().all(|byte| b" \n\t".contains(byte)))
     }
 
+    #[cfg(test)]
     fn count_nested_prefixes_fallback(
         &self,
         open_prefix_bytes: &[u8],
@@ -262,6 +325,35 @@ mod tests {
             count
         );
     }
+    #[test]
+    fn cache_threshold_byte_fast_paths_skip_tokenizer() {
+        reset_tokenizer_call_count();
+        assert_eq!(cache_threshold_from_byte_len(511, 512), Some(false));
+        assert!(!PrefixTokenizer::global().meets_cache_threshold(&[b'a'; 511], 512));
+        assert_eq!(tokenizer_call_count(), 0);
+
+        reset_tokenizer_call_count();
+        let clearly_large = vec![b'a'; 512 * CACHE_THRESHOLD_FAST_ACCEPT_BYTES_PER_TOKEN];
+        assert!(PrefixTokenizer::global().meets_cache_threshold(&clearly_large, 512));
+        assert_eq!(tokenizer_call_count(), 0);
+    }
+
+    #[test]
+    fn cache_threshold_ambiguous_prefix_uses_tokenizer() {
+        let prefix = br#"{"content_blocks":[{"source":"message","value":"hello world"}]}"#;
+        let threshold = 8;
+        assert_eq!(cache_threshold_from_byte_len(prefix.len(), threshold), None);
+        let expected = PrefixTokenizer::global().count_tokens(std::str::from_utf8(prefix).unwrap())
+            >= threshold;
+
+        reset_tokenizer_call_count();
+        assert_eq!(
+            PrefixTokenizer::global().meets_cache_threshold(prefix, threshold),
+            expected
+        );
+        assert_eq!(tokenizer_call_count(), 1);
+    }
+
     #[test]
     fn invalid_incremental_offsets_fall_back_to_exact_counts() {
         let tokenizer = PrefixTokenizer::global();

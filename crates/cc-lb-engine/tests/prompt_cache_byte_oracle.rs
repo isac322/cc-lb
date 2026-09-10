@@ -75,8 +75,9 @@ fn prompt_cache_byte_oracle_matches_current_behavior_over_wide_corpus() {
             let serializer_tokens = token_count(&serializer_prefix);
             assert_eq!(serializer_tokens, legacy_tokens, "tokens: {}", case.name);
             assert_eq!(
-                breakpoint.prefix_token_count, legacy_tokens,
-                "live token count: {}",
+                breakpoint.prefix_token_count,
+                legacy_prefix.len() as u64,
+                "live prefix size: {}",
                 case.name
             );
         }
@@ -139,13 +140,13 @@ fn prompt_cache_byte_oracle_prefix_preserves_cache_control() {
     assert_ne!(preserved_prefix, stripped_prefix);
     assert_eq!(
         breakpoint.prefix_token_count,
-        token_count(&preserved_prefix),
-        "live prefix tokenization must use cache_control-preserving bytes"
+        preserved_prefix.len() as u64,
+        "live prefix size must use cache_control-preserving bytes"
     );
     assert_ne!(
         breakpoint.prefix_token_count,
-        token_count(&stripped_prefix),
-        "sentinel must distinguish preserved from stripped prefix tokenization"
+        stripped_prefix.len() as u64,
+        "sentinel must distinguish preserved from stripped prefix size"
     );
 }
 
