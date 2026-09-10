@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-09-11
+
+### Changed
+
+- Prompt-cache setup now sizes prefix boundaries by serialized JSON byte length instead of running full o200k BPE tokenization on the request path, restricting local BPE to ambiguous threshold bands inside a bounded blocking executor.
+- Unused prompt-cache token drift subscriber and observation columns have been removed.
+
+### Fixed
+
+- Request latency tracking now accounts for complete end-to-end request durations and preserves lifecycle timing metrics across errored and aborted response streams.
+
 ## [0.4.8] - 2026-09-09
 
 ### Fixed
