@@ -593,14 +593,31 @@ Acceptance:
 | Command scope | Result |
 | --- | --- |
 | Rust workspace check and clippy, SQLite and PostgreSQL feature configurations | PASS |
-| Engine tests | PASS — 505 |
+| Engine tests | PASS — 507 |
 | Server tests | PASS — 176 |
 | Lifecycle tests | PASS — 6 |
 | Pricing tests | PASS — 35 + 9 |
 | Storage SQLite tests | PASS — 12 + 37 |
 | Storage PostgreSQL tests | PASS — 11 + 27 |
 | Admin event tests | PASS — 24 |
-| Admin-web tests | PASS — 71 files, 682 tests |
+| Admin-web tests | PASS — 71 files, 684 tests |
+
+### 15.4 Proxy path 성능 회귀 검증
+
+현재 head와 `origin/master`를 같은 release build, loopback fake upstream, raw TCP load generator 조건에서 교대로 세 번 비교했다. 각 run은 non-streaming 1,000건(concurrency 4)과 streaming 300건(concurrency 8)을 사용했다.
+
+| 지표 | 현재 head 3-run median | `origin/master` 3-run median | 차이 |
+| --- | ---: | ---: | ---: |
+| Non-streaming p50 proxy overhead | 0.343ms | 0.347ms | -0.004ms |
+| Non-streaming p99 proxy overhead | 0.434ms | 0.627ms | -0.193ms |
+| Streaming p50 proxy overhead | 0.867ms | 0.702ms | +0.165ms |
+| Streaming p50 per-event overhead | 0.016ms | 0.013ms | +0.003ms |
+
+모든 run은 저장소 budget인 non-streaming p50 5ms 미만, non-streaming p99 20ms 미만, streaming p50 event overhead 5ms 미만을 통과했다. Streaming p99는 loopback host scheduling outlier로 두 revision 모두 run 간 변동이 컸으며 budget 판정 지표가 아니다.
+
+정적 hot-path 검토 결과 request executor에 추가된 작업은 요청당 monotonic clock read 3~4회, uncontended lifecycle-state lock 3~4회, span field record뿐이다. SSE chunk loop에는 추가 작업이 없고 happy path lifecycle event 수도 늘지 않았다. Timing aggregation의 String allocation, map lookup, histogram 기록은 dedicated logger task에서 수행하며 event fanout은 기존 `try_send` drop-and-count 방식이라 request executor를 block하지 않는다. 추가 in-flight 상태는 요청당 약 152B로, 10,000개 long-lived stream 기준 약 1.5MB다. Logger map은 16,384 entries로 제한되며 가장 오래된 active entry를 deterministic하게 제거하고 eviction counter를 기록한다.
+
+따라서 측정 가능한 non-streaming 회귀는 없었고, streaming median 차이는 요청당 0.165ms 및 event당 0.003ms로 budget 대비 충분히 작았다. Proxy path에 유의미한 latency, throughput, memory, backpressure 회귀는 관측되지 않았다.
 
 ## 16. UI QA — PASS
 

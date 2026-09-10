@@ -1382,13 +1382,11 @@ export function LatencyTimeline({
   const groups = computeStageGroups(event);
   const markers = useMemo(() => buildSseMarkers(event), [event]);
   const hasFinalizeTiming = event.finalize_ms != null;
-  const groupOrder =
-    event.source_kind === 'renewal' ? RENEWAL_GROUP_ORDER : PROXY_GROUP_ORDER;
+  const isFinalRenewal =
+    event._phase === 'final' && event.source_kind === 'renewal';
+  const groupOrder = isFinalRenewal ? RENEWAL_GROUP_ORDER : PROXY_GROUP_ORDER;
   const hasMeasuredRenewalCycle =
-    event._phase === 'final' &&
-    event.source_kind === 'renewal' &&
-    event.duration_ms != null &&
-    event.duration_ms >= 0;
+    isFinalRenewal && event.duration_ms != null && event.duration_ms >= 0;
   const positioned = useMemo(() => {
     let cursor = 0;
     const out = stages.map((s) => {

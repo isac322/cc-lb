@@ -245,6 +245,27 @@ describe('computeStageGroups', () => {
     expect(computeStageGroups(partial).internalPre).toBe(0);
   });
 
+  it('suppresses partial residuals so elapsed time is not mislabeled as unaccounted', () => {
+    const partial = {
+      event_id: 'evt-partial-residual',
+      request_id: 'req-partial-residual',
+      ts: 1,
+      ts_ms: 1000,
+      last_update_ms: 1500,
+      elapsed_ms: 500,
+      stream: false,
+      auth_ms: 25,
+      _phase: 'partial',
+    } satisfies RequestEventWithPhase;
+
+    expect(deriveProxyTimelineDuration(partial)).toBe(500);
+    expect(computeStageGroups(partial)).toMatchObject({
+      accounted: 0,
+      rawResidual: 0,
+      unaccounted: 0,
+    });
+  });
+
   it('accounts for a complete proxy request with a sub-10ms residual', () => {
     const event = ev({
       source_kind: 'proxy',
@@ -310,7 +331,7 @@ describe('computeStageGroups', () => {
     expect(groups.unaccounted).toBe(10);
   });
 
-  it('uses one source-specific cycle for renewal events', () => {
+  it('uses one source-specific cycle for final renewal events', () => {
     const groups = computeStageGroups(
       ev({
         source_kind: 'renewal',

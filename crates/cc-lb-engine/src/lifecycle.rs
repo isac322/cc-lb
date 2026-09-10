@@ -3920,7 +3920,7 @@ impl Lifecycle {
             "proxy.response_stream",
             otel.kind = "internal",
             otel.status_code = tracing::field::Empty,
-            http.response.status_code = i64::from(status.as_u16()),
+            http.response.status_code = tracing::field::Empty,
             cc_lb.response_body_ms = tracing::field::Empty,
             cc_lb.request.finalize_ms = tracing::field::Empty,
             stream.outcome = tracing::field::Empty,
@@ -3951,6 +3951,7 @@ impl Lifecycle {
         let downstream_drop_guard = DownstreamStreamDropGuard::armed(
             observer.clone(),
             stream_span.clone(),
+            status,
             upstream_error_status.then_some(StreamTerminationCause::ProviderError),
             relay_start,
         );

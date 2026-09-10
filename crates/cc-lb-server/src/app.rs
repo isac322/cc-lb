@@ -2636,6 +2636,7 @@ async fn lifecycle_handler(
             let body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
             body_read_span.record("http.request.body.size", body_bytes);
             body_read_span.record("outcome", "success");
+            drop(body_read_span);
             if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
                 observer.set_request_body_timing(body_read_ms, Some(body_bytes));
             }
@@ -2643,6 +2644,7 @@ async fn lifecycle_handler(
         }
         Err(RequestBodyReadError::TooLarge) => {
             body_read_span.record("outcome", "too_large");
+            drop(body_read_span);
             if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
                 observer.set_request_body_timing(body_read_ms, None);
                 observer.record_body_too_large_rejection(cap as u64);
@@ -2651,6 +2653,7 @@ async fn lifecycle_handler(
         }
         Err(RequestBodyReadError::Read(source)) => {
             body_read_span.record("outcome", "read_error");
+            drop(body_read_span);
             if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
                 observer.set_request_body_timing(body_read_ms, None);
                 observer.record_body_read_failure();

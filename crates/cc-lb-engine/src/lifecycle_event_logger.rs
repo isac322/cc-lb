@@ -9,7 +9,10 @@
 //! Signal, drain, await. Late lifecycle events after shutdown are lost;
 //! this is acceptable because the assembler already persisted the row.
 
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use tokio::sync::{mpsc, oneshot};
@@ -124,9 +127,16 @@ impl RequestTiming {
     }
 }
 
+struct ActiveRequestTiming {
+    sequence: u64,
+    timing: RequestTiming,
+}
+
 #[derive(Default)]
 struct RequestTimingAggregator {
-    active: HashMap<String, RequestTiming>,
+    active: HashMap<Arc<str>, ActiveRequestTiming>,
+    active_order: BTreeMap<u64, Arc<str>>,
+    next_sequence: u64,
 }
 
 impl RequestTimingAggregator {
@@ -137,14 +147,32 @@ impl RequestTimingAggregator {
                 source_kind,
                 ..
             } => {
-                if !self.active.contains_key(event_id)
-                    && self.active.len() >= MAX_ACTIVE_REQUEST_TIMINGS
-                    && let Some(evicted) = self.active.keys().next().cloned()
-                {
-                    self.active.remove(&evicted);
+                let source_kind = SourceKind::from_event(source_kind.as_deref());
+                if let Some(active) = self.active.get_mut(event_id.as_str()) {
+                    active.timing.source_kind = source_kind;
+                    return;
                 }
-                self.active.entry(event_id.clone()).or_default().source_kind =
-                    SourceKind::from_event(source_kind.as_deref());
+                if self.active.len() >= MAX_ACTIVE_REQUEST_TIMINGS {
+                    self.evict_oldest();
+                }
+
+                let sequence = self.next_sequence;
+                self.next_sequence = self
+                    .next_sequence
+                    .checked_add(1)
+                    .expect("request timing sequence exhausted");
+                let event_id = Arc::<str>::from(event_id.as_str());
+                self.active_order.insert(sequence, Arc::clone(&event_id));
+                self.active.insert(
+                    event_id,
+                    ActiveRequestTiming {
+                        sequence,
+                        timing: RequestTiming {
+                            source_kind,
+                            ..RequestTiming::default()
+                        },
+                    },
+                );
             }
             LifecycleEvent::UpstreamResponseStarted {
                 event_id,
@@ -153,19 +181,19 @@ impl RequestTimingAggregator {
                 upstream_ttfb_ms,
                 ..
             } => {
-                let Some(timing) = self.active.get_mut(event_id) else {
+                let Some(active) = self.active.get_mut(event_id.as_str()) else {
                     return;
                 };
-                timing.shape_ms = *shape_ms;
-                timing.sign_ms = *sign_ms;
-                timing.upstream_ttfb_ms = *upstream_ttfb_ms;
+                active.timing.shape_ms = *shape_ms;
+                active.timing.sign_ms = *sign_ms;
+                active.timing.upstream_ttfb_ms = *upstream_ttfb_ms;
             }
             LifecycleEvent::StreamCompleted { event_id, result } => {
-                let Some(timing) = self.active.get_mut(event_id) else {
+                let Some(active) = self.active.get_mut(event_id.as_str()) else {
                     return;
                 };
                 if let Ok(success) = result {
-                    timing.stream_total_ms = success.stream_total_ms;
+                    active.timing.stream_total_ms = success.stream_total_ms;
                 }
             }
             LifecycleEvent::RequestTerminated {
@@ -180,9 +208,12 @@ impl RequestTimingAggregator {
                 finalize_ms,
                 ..
             } => {
-                let Some(mut timing) = self.active.remove(event_id) else {
+                let Some(active) = self.active.remove(event_id.as_str()) else {
                     return;
                 };
+                self.active_order.remove(&active.sequence);
+
+                let mut timing = active.timing;
                 timing.request_body_read_ms = *request_body_read_ms;
                 timing.request_body_bytes = *request_body_bytes;
                 timing.proxy_setup_ms = *proxy_setup_ms;
@@ -198,8 +229,18 @@ impl RequestTimingAggregator {
         }
     }
 
+    fn evict_oldest(&mut self) {
+        let Some((_, event_id)) = self.active_order.pop_first() else {
+            return;
+        };
+        if self.active.remove(event_id.as_ref()).is_some() {
+            metrics::counter!("cc_lb_request_timing_aggregator_evictions_total").increment(1);
+        }
+    }
+
     fn clear(&mut self) {
         self.active.clear();
+        self.active_order.clear();
     }
 }
 
@@ -587,6 +628,72 @@ mod tests {
         tx.send(sample_event("metric-test")).await.expect("send");
         drop(tx);
         handle.shutdown().await;
+    }
+
+    #[test]
+    fn capacity_evicts_oldest_active_and_preserves_newer_terminal_metrics() {
+        let mut events = (0..MAX_ACTIVE_REQUEST_TIMINGS)
+            .map(|index| started(&format!("active-{index}"), Some("proxy")))
+            .collect::<Vec<_>>();
+        events.push(started("overflow", Some("proxy")));
+        events.extend(
+            complete_proxy_events("active-1", TerminationReason::Success, 200, 50)
+                .into_iter()
+                .skip(1),
+        );
+
+        let (timings, samples) = capture_metrics(events);
+
+        assert!(
+            !timings.active.contains_key("active-0"),
+            "the oldest active timing must be evicted"
+        );
+        assert!(
+            timings.active.contains_key("overflow"),
+            "the newly started timing must remain active"
+        );
+        assert!(
+            !timings.active.contains_key("active-1"),
+            "a newer terminal timing must be cleaned normally"
+        );
+        assert_eq!(timings.active.len(), MAX_ACTIVE_REQUEST_TIMINGS - 1);
+        assert_eq!(timings.active_order.len(), timings.active.len());
+
+        let evictions = named(&samples, "cc_lb_request_timing_aggregator_evictions_total");
+        assert_eq!(evictions.len(), 1);
+        assert_labels(evictions[0], &[]);
+        assert_eq!(evictions[0].value, MetricValue::Counter(1));
+
+        let unaccounted = named(&samples, "cc_lb_request_unaccounted_duration_seconds");
+        assert_eq!(unaccounted.len(), 1);
+        assert_labels(
+            unaccounted[0],
+            &[("source_kind", "proxy"), ("outcome", "success")],
+        );
+        assert_histogram(unaccounted[0], &[8]);
+    }
+
+    #[test]
+    fn terminal_cleanup_keeps_active_order_bounded() {
+        let mut timings = RequestTimingAggregator::default();
+        let mut max_ordering_entries = 0;
+
+        for index in 0..=MAX_ACTIVE_REQUEST_TIMINGS {
+            let event_id = format!("completed-{index}");
+            timings.observe(&started(&event_id, None));
+            max_ordering_entries = max_ordering_entries.max(timings.active_order.len());
+            timings.observe(&terminated(
+                &event_id,
+                TerminationReason::Success,
+                200,
+                TerminalTiming::default(),
+            ));
+            assert_eq!(timings.active_order.len(), timings.active.len());
+        }
+
+        assert_eq!(max_ordering_entries, 1);
+        assert!(timings.active.is_empty());
+        assert!(timings.active_order.is_empty());
     }
 
     #[test]

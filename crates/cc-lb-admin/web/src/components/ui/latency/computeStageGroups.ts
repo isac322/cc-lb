@@ -69,9 +69,6 @@ export function deriveProxyTimelineDuration(e: RequestEventWithPhase): number {
   if (e._phase !== 'final') return 0;
   return Math.max(0, e.duration_ms ?? 0);
 }
-export function hasNewProxyTiming(e: RequestEventWithPhase): boolean {
-  return e.request_body_read_ms != null || e.finalize_ms != null;
-}
 
 export function responseBodyDuration(e: RequestEventWithPhase): number {
   if (e._phase !== 'final') return 0;

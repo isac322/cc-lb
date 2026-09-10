@@ -260,7 +260,7 @@ describe('buildStageDetails', () => {
     ]);
   });
 
-  it('builds only one Renewal cycle for renewal events', () => {
+  it('builds only one Renewal cycle for final renewal events', () => {
     const stages = buildStageDetails(
       ev({
         source_kind: 'renewal',
@@ -705,7 +705,8 @@ describe('LatencyTimeline', () => {
         .some((label) => label.closest('details') === null),
     ).toBe(true);
   });
-  it('renders only Renewal cycle for renewal source rows', () => {
+
+  it('renders only Renewal cycle for final renewal source rows', () => {
     render(
       <LatencyTimeline
         event={ev({
@@ -721,6 +722,34 @@ describe('LatencyTimeline', () => {
     expect(screen.queryByText('Finalize')).toBeNull();
     expect(screen.queryByText('Unaccounted')).toBeNull();
   });
+
+  it('renders partial renewal rows with proxy groups instead of an empty Renewal group', () => {
+    const partialRenewal = {
+      event_id: 'evt-partial-renewal',
+      request_id: 'req-partial-renewal',
+      ts: 1,
+      ts_ms: 1000,
+      last_update_ms: 1100,
+      elapsed_ms: 100,
+      stream: false,
+      source_kind: 'renewal',
+      cache_structure_ms: 25,
+      _phase: 'partial',
+    } satisfies RequestEventWithPhase;
+
+    render(<LatencyTimeline event={partialRenewal} isPartial />);
+
+    expect(screen.getByText('Internal pre')).toBeTruthy();
+    expect(screen.getByText('Cache structure')).toBeTruthy();
+    expect(
+      screen.getByTestId('latency-segment-cache_structure_ms'),
+    ).toBeTruthy();
+    expect(screen.queryByText('Renewal')).toBeNull();
+    expect(screen.queryByText('Renewal cycle')).toBeNull();
+    expect(screen.queryByText('No latency data recorded.')).toBeNull();
+    expect(screen.queryByText('Unaccounted')).toBeNull();
+  });
+
   it('renders a measured zero Renewal cycle instead of the missing-data hint', () => {
     render(
       <LatencyTimeline

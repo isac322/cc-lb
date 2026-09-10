@@ -13,6 +13,7 @@ const CLIENT_CLOSED_STATUS: u16 = 499;
 pub(crate) struct DownstreamStreamDropGuard {
     observer: Option<LifecycleContext>,
     span: Span,
+    initial_upstream_status: StatusCode,
     pending_terminal: Option<(StreamTerminationOutcome, StreamTerminationCause)>,
     finalized: bool,
     relay_start: Instant,
@@ -22,11 +23,13 @@ impl DownstreamStreamDropGuard {
     pub(crate) fn armed(
         observer: Option<LifecycleContext>,
         span: Span,
+        initial_upstream_status: StatusCode,
         initial_upstream_error: Option<StreamTerminationCause>,
         relay_start: Instant,
     ) -> Self {
         Self {
             observer,
+            initial_upstream_status,
             span,
             pending_terminal: initial_upstream_error
                 .map(|cause| (StreamTerminationOutcome::UpstreamError, cause)),
@@ -107,6 +110,14 @@ impl DownstreamStreamDropGuard {
             return;
         }
         self.finalized = true;
+        let response_status = match outcome {
+            StreamTerminationOutcome::ClientCancelled => CLIENT_CLOSED_STATUS,
+            StreamTerminationOutcome::Completed
+            | StreamTerminationOutcome::UpstreamError
+            | StreamTerminationOutcome::ProxyError => self.initial_upstream_status.as_u16(),
+        };
+        self.span
+            .record("http.response.status_code", u64::from(response_status));
         self.span.record("stream.outcome", outcome.as_str());
         self.span.record("error.cause", cause.as_str());
         if matches!(
@@ -141,8 +152,6 @@ impl Drop for DownstreamStreamDropGuard {
         {
             observer.set_upstream_body_ms_if_absent(response_body_ms);
             observer.set_terminal(status, error_codes::CLIENT_CLOSED_REQUEST);
-            self.span
-                .record("http.response.status_code", u64::from(CLIENT_CLOSED_STATUS));
             self.record_terminal(
                 StreamTerminationOutcome::ClientCancelled,
                 StreamTerminationCause::None,
@@ -187,7 +196,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct ResponseTimingLayer {
         span_ids: Arc<Mutex<Vec<Id>>>,
-        values: Arc<Mutex<HashMap<String, u64>>>,
+        values: Arc<Mutex<HashMap<String, Vec<u64>>>>,
     }
 
     impl<S> Layer<S> for ResponseTimingLayer
@@ -200,6 +209,9 @@ mod tests {
                     .lock()
                     .expect("response timing span ids lock")
                     .push(id.clone());
+                attrs.record(&mut ResponseTimingVisitor {
+                    values: &self.values,
+                });
             }
         }
 
@@ -217,8 +229,10 @@ mod tests {
         }
     }
 
+    type RecordedResponseTimingValues = Arc<Mutex<HashMap<String, Vec<u64>>>>;
+
     struct ResponseTimingVisitor<'a> {
-        values: &'a Arc<Mutex<HashMap<String, u64>>>,
+        values: &'a Arc<Mutex<HashMap<String, Vec<u64>>>>,
     }
 
     impl Visit for ResponseTimingVisitor<'_> {
@@ -234,12 +248,14 @@ mod tests {
                 self.values
                     .lock()
                     .expect("response timing values lock")
-                    .insert(field.name().to_owned(), value);
+                    .entry(field.name().to_owned())
+                    .or_default()
+                    .push(value);
             }
         }
     }
 
-    fn response_stream_span() -> (Span, Arc<Mutex<HashMap<String, u64>>>) {
+    fn response_stream_span() -> (Span, RecordedResponseTimingValues) {
         let layer = ResponseTimingLayer::default();
         let values = Arc::clone(&layer.values);
         let subscriber = Registry::default().with(layer);
@@ -264,10 +280,24 @@ mod tests {
         span: Span,
         exercise: impl FnOnce(&mut DownstreamStreamDropGuard),
     ) -> (HashMap<String, String>, u64) {
+        counter_sample_with_status_and_span(StatusCode::OK, span, exercise)
+    }
+
+    fn counter_sample_with_status_and_span(
+        initial_upstream_status: StatusCode,
+        span: Span,
+        exercise: impl FnOnce(&mut DownstreamStreamDropGuard),
+    ) -> (HashMap<String, String>, u64) {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         metrics::with_local_recorder(&recorder, || {
-            let mut guard = DownstreamStreamDropGuard::armed(None, span, None, Instant::now());
+            let mut guard = DownstreamStreamDropGuard::armed(
+                None,
+                span,
+                initial_upstream_status,
+                None,
+                Instant::now(),
+            );
             exercise(&mut guard);
             drop(guard);
         });
@@ -287,6 +317,12 @@ mod tests {
         (labels, value)
     }
 
+    fn recorded_once(values: &HashMap<String, Vec<u64>>, field: &str) -> Option<u64> {
+        let recorded = values.get(field)?;
+        assert_eq!(recorded.len(), 1, "{field} must be recorded exactly once");
+        recorded.first().copied()
+    }
+
     #[test]
     fn finish_and_drop_increment_completed_once() {
         let (span, timings) = response_stream_span();
@@ -299,15 +335,24 @@ mod tests {
         assert_eq!(labels.get("cause").map(String::as_str), Some("none"));
         assert_eq!(value, 1);
         let timings = timings.lock().expect("response timing values lock");
-        assert_eq!(timings.get("cc_lb.response_body_ms"), Some(&31));
-        assert_eq!(timings.get("cc_lb.request.finalize_ms"), Some(&7));
+        assert_eq!(
+            recorded_once(&timings, "http.response.status_code"),
+            Some(u64::from(StatusCode::OK.as_u16()))
+        );
+        assert_eq!(recorded_once(&timings, "cc_lb.response_body_ms"), Some(31));
+        assert_eq!(
+            recorded_once(&timings, "cc_lb.request.finalize_ms"),
+            Some(7)
+        );
     }
 
     #[test]
     fn marked_error_dropped_before_eos_is_not_client_cancelled() {
-        let (labels, value) = counter_sample(|guard| {
-            guard.mark_upstream_error(StreamTerminationCause::H2Reset, None);
-        });
+        let (span, values) = response_stream_span();
+        let (labels, value) =
+            counter_sample_with_status_and_span(StatusCode::BAD_GATEWAY, span, |guard| {
+                guard.mark_upstream_error(StreamTerminationCause::H2Reset, None);
+            });
 
         assert_eq!(
             labels.get("outcome").map(String::as_str),
@@ -315,11 +360,17 @@ mod tests {
         );
         assert_eq!(labels.get("cause").map(String::as_str), Some("h2_reset"));
         assert_eq!(value, 1);
+        let values = values.lock().expect("response timing values lock");
+        assert_eq!(
+            recorded_once(&values, "http.response.status_code"),
+            Some(u64::from(StatusCode::BAD_GATEWAY.as_u16()))
+        );
     }
 
     #[test]
     fn proxy_error_uses_distinct_outcome_and_cause() {
-        let (labels, value) = counter_sample(|guard| {
+        let (span, values) = response_stream_span();
+        let (labels, value) = counter_sample_with_span(span, |guard| {
             guard.mark_proxy_error(StreamTerminationCause::AffinityError);
         });
 
@@ -332,11 +383,19 @@ mod tests {
             Some("affinity_error")
         );
         assert_eq!(value, 1);
+        let values = values.lock().expect("response timing values lock");
+        assert_eq!(
+            recorded_once(&values, "http.response.status_code"),
+            Some(u64::from(StatusCode::OK.as_u16()))
+        );
     }
 
     #[test]
     fn detached_observer_drop_remains_client_cancelled_metric() {
-        let (labels, value) = counter_sample(DownstreamStreamDropGuard::detach_lifecycle_observer);
+        let (span, values) = response_stream_span();
+        let (labels, value) = counter_sample_with_span(span, |guard| {
+            guard.detach_lifecycle_observer();
+        });
 
         assert_eq!(
             labels.get("outcome").map(String::as_str),
@@ -344,6 +403,11 @@ mod tests {
         );
         assert_eq!(labels.get("cause").map(String::as_str), Some("none"));
         assert_eq!(value, 1);
+        let values = values.lock().expect("response timing values lock");
+        assert_eq!(
+            recorded_once(&values, "http.response.status_code"),
+            Some(u64::from(CLIENT_CLOSED_STATUS))
+        );
     }
 
     #[test]
@@ -376,7 +440,13 @@ mod tests {
             .checked_sub(Duration::from_millis(25))
             .expect("relay start before cancellation");
         let (span, span_timings) = response_stream_span();
-        let guard = DownstreamStreamDropGuard::armed(Some(observer), span, None, relay_start);
+        let guard = DownstreamStreamDropGuard::armed(
+            Some(observer),
+            span,
+            StatusCode::OK,
+            None,
+            relay_start,
+        );
 
         drop(guard);
 
@@ -405,15 +475,15 @@ mod tests {
         assert!(finalize_ms.is_some());
         let span_timings = span_timings.lock().expect("response timing values lock");
         assert_eq!(
-            span_timings.get("http.response.status_code"),
-            Some(&u64::from(CLIENT_CLOSED_STATUS))
+            recorded_once(&span_timings, "http.response.status_code"),
+            Some(u64::from(CLIENT_CLOSED_STATUS))
         );
         assert_eq!(
-            span_timings.get("cc_lb.response_body_ms").copied(),
+            recorded_once(&span_timings, "cc_lb.response_body_ms"),
             upstream_body_ms
         );
         assert_eq!(
-            span_timings.get("cc_lb.request.finalize_ms").copied(),
+            recorded_once(&span_timings, "cc_lb.request.finalize_ms"),
             finalize_ms
         );
         assert!(
@@ -440,8 +510,13 @@ mod tests {
             .checked_sub(Duration::from_millis(25))
             .expect("relay start before cancellation");
         let (span, span_timings) = response_stream_span();
-        let guard =
-            DownstreamStreamDropGuard::armed(Some(observer.clone()), span, None, relay_start);
+        let guard = DownstreamStreamDropGuard::armed(
+            Some(observer.clone()),
+            span,
+            StatusCode::OK,
+            None,
+            relay_start,
+        );
 
         drop(guard);
 
@@ -476,15 +551,15 @@ mod tests {
         assert!(finalize_ms.is_some());
         let span_timings = span_timings.lock().expect("response timing values lock");
         assert_eq!(
-            span_timings.get("http.response.status_code"),
-            Some(&u64::from(CLIENT_CLOSED_STATUS))
+            recorded_once(&span_timings, "http.response.status_code"),
+            Some(u64::from(CLIENT_CLOSED_STATUS))
         );
         assert_eq!(
-            span_timings.get("cc_lb.response_body_ms").copied(),
+            recorded_once(&span_timings, "cc_lb.response_body_ms"),
             upstream_body_ms
         );
         assert_eq!(
-            span_timings.get("cc_lb.request.finalize_ms").copied(),
+            recorded_once(&span_timings, "cc_lb.request.finalize_ms"),
             finalize_ms
         );
     }
@@ -504,6 +579,7 @@ mod tests {
         let mut guard = DownstreamStreamDropGuard::armed(
             Some(observer.clone()),
             Span::none(),
+            StatusCode::OK,
             None,
             Instant::now(),
         );
