@@ -167,8 +167,6 @@ fn enqueue_observation(
             .token_estimate_source
             .clone()
             .unwrap_or_else(|| "unknown".to_owned()),
-        last_provider_cache_read_tokens: None,
-        last_provider_cache_creation_tokens: None,
     };
     if let Err(error) = sink.enqueue(record) {
         match error {

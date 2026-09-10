@@ -197,7 +197,5 @@ fn observation(
         prefix_content_block_index: 7,
         estimated_prefix_tokens: 12_345,
         token_estimate_source: "local_tiktoken_v1".to_owned(),
-        last_provider_cache_read_tokens: Some(12_000),
-        last_provider_cache_creation_tokens: Some(345),
     }
 }

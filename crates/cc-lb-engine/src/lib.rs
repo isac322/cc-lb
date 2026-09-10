@@ -56,7 +56,6 @@ pub mod lifecycle_event_logger;
 pub mod lifecycle_hook_adapter;
 pub mod lifecycle_limit_reconcile_subscriber;
 pub mod lifecycle_limit_rejection_audit_subscriber;
-pub mod lifecycle_prompt_cache_drift_subscriber;
 pub mod lifecycle_prompt_cache_observation_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_rate_limit_header_subscriber;
@@ -199,9 +198,6 @@ pub use lifecycle_limit_reconcile_subscriber::{
 };
 pub use lifecycle_limit_rejection_audit_subscriber::{
     LimitRejectionAuditSubscriberHandle, spawn_lifecycle_limit_rejection_audit_subscriber,
-};
-pub use lifecycle_prompt_cache_drift_subscriber::{
-    PromptCacheDriftSubscriberHandle, spawn_lifecycle_prompt_cache_drift_subscriber,
 };
 pub use lifecycle_prompt_cache_observation_subscriber::{
     PromptCacheObservationSubscriberHandle, spawn_lifecycle_prompt_cache_observation_subscriber,

@@ -84,11 +84,6 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 31] = [
         description: "Total cache miss responses by upstream and model.",
     },
     MetricDefinition {
-        name: "cc_lb_cache_token_drift",
-        kind: MetricKind::Histogram,
-        description: "Actual cache read tokens minus predicted cache read tokens by upstream and model.",
-    },
-    MetricDefinition {
         name: "cc_lb_cache_observation_dropped_total",
         kind: MetricKind::Counter,
         description: "Total prompt-cache observations dropped by fixed reason.",
@@ -241,11 +236,6 @@ pub(crate) fn register_prometheus14_metrics() {
         Unit::Count,
         "Total cache miss responses by upstream and model."
     );
-    metrics::describe_histogram!(
-        "cc_lb_cache_token_drift",
-        Unit::Count,
-        "Actual cache read tokens minus predicted cache read tokens by upstream and model."
-    );
     metrics::describe_counter!(
         "cc_lb_cache_observation_dropped_total",
         Unit::Count,
@@ -376,12 +366,6 @@ pub fn touch_prometheus14_metrics() {
         "model" => "smoke-model"
     )
     .increment(1);
-    metrics::histogram!(
-        "cc_lb_cache_token_drift",
-        "upstream" => "smoke-upstream",
-        "model" => "smoke-model"
-    )
-    .record(0.0);
     metrics::counter!(
         "cc_lb_cache_observation_dropped_total",
         "reason" => "queue_full"
@@ -469,12 +453,6 @@ pub(crate) fn touch_prometheus14_metric_handles() {
         "model" => "unknown"
     )
     .increment(0);
-    metrics::histogram!(
-        "cc_lb_cache_token_drift",
-        "upstream" => "unknown",
-        "model" => "unknown"
-    )
-    .record(0.0);
     metrics::counter!(
         "cc_lb_cache_observation_dropped_total",
         "reason" => "unknown"

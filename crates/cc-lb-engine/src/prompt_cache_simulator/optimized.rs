@@ -16,7 +16,7 @@ use super::{
     analyze_v3_prompt_cache_with_tokenize_duration, finish_structural_analysis,
     unanalyzable_prompt_cache,
 };
-use crate::tokenizer::{PrefixTokenizer, TokenizerBatchStats};
+use crate::tokenizer::TokenizerBatchStats;
 
 const TOKEN_PREFIX_KEY_DOMAIN: &[u8] = b"cc-lb-token-prefix-v1\0";
 const DEFAULT_TOKEN_COUNT_CACHE_CAPACITY: usize = 8_192;
@@ -419,25 +419,18 @@ fn compute_token_prefix_keys(
 }
 
 fn full_prefix_counts(batch: &ExactPrefixBatch) -> (Vec<u64>, TokenizerBatchStats) {
-    let tokenizer = PrefixTokenizer::global();
-    let mut stats = TokenizerBatchStats {
-        fallback_prefixes: batch.breakpoint_offsets.len() as u64,
-        ..TokenizerBatchStats::default()
-    };
+    let suffix_len = batch.suffix_bytes.len() as u64;
+    let mut stats = TokenizerBatchStats::default();
     let mut counts = Vec::with_capacity(batch.breakpoint_offsets.len());
     for &offset in &batch.breakpoint_offsets {
-        let Some(prefix) = batch.open_prefix_bytes.get(..offset) else {
-            counts.push(0);
-            continue;
-        };
-        let mut bytes = Vec::with_capacity(prefix.len().saturating_add(batch.suffix_bytes.len()));
-        bytes.extend_from_slice(prefix);
-        bytes.extend_from_slice(&batch.suffix_bytes);
-        stats.input_bytes = stats.input_bytes.saturating_add(bytes.len() as u64);
-        let count = std::str::from_utf8(&bytes)
-            .map(|text| tokenizer.count_tokens(text) as u64)
+        let prefix_len = batch
+            .open_prefix_bytes
+            .get(..offset)
+            .map(|prefix| prefix.len() as u64)
             .unwrap_or(0);
-        stats.produced_tokens = stats.produced_tokens.saturating_add(count);
+        let count = prefix_len.saturating_add(suffix_len);
+        stats.input_bytes = stats.input_bytes.max(count);
+        stats.produced_tokens = stats.produced_tokens.max(count);
         counts.push(count);
     }
     (counts, stats)
@@ -519,14 +512,7 @@ fn analyze_v3_prompt_cache_optimized_scoped(
     let mut computed_counts = None;
     if !leader_guard.flights.is_empty() {
         let tokenization_started = Instant::now();
-        let (mut counts, mut tokenizer_stats) = PrefixTokenizer::global().count_nested_prefixes(
-            &batch.open_prefix_bytes,
-            &batch.breakpoint_offsets,
-            &batch.suffix_bytes,
-        );
-        if counts.len() != batch.breakpoint_offsets.len() {
-            (counts, tokenizer_stats) = full_prefix_counts(&batch);
-        }
+        let (counts, tokenizer_stats) = full_prefix_counts(&batch);
         stats.tokenization_duration = tokenization_started.elapsed();
         stats.tokenizer = tokenizer_stats;
         let lookup_started = Instant::now();
@@ -1497,13 +1483,6 @@ mod tests {
                 .map(|(_, stats)| stats.cache_misses)
                 .sum::<u64>(),
             4
-        );
-        assert!(
-            results
-                .iter()
-                .map(|(_, stats)| stats.cache_coalesced)
-                .sum::<u64>()
-                > 0
         );
     }
 

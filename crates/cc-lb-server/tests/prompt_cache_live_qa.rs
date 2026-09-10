@@ -8,7 +8,7 @@ use fake_anthropic::{AppConfig, MessageScript, ScriptedMessageResponse};
 use serde_json::{Value, json};
 
 const MODEL: &str = "claude-sonnet-4-5-20250929";
-const TOKEN_ESTIMATE_SOURCE: &str = "local_tiktoken_v1";
+const TOKEN_ESTIMATE_SOURCE: &str = "serialized_prefix_bytes_v1";
 const HASH_SCHEMA_VERSION: i64 = cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION as i64;
 
 fn assert_message_response(response: &common::RawResponse, usage_field: &str) -> Value {

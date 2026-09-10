@@ -35,10 +35,9 @@ pub use redaction::{
 pub use trace_layer::{ObservabilityTraceLayer, ProxyMakeSpan, RouteTemplateFn, trace_layer};
 
 pub mod cache_observation_dropped_reason {
-    // Keep this enum-like set bounded: queue_full, below_threshold, status_4xx, abort.
+    // Keep this enum-like set bounded: queue_full, below_threshold, abort.
     pub const QUEUE_FULL: &str = "queue_full";
     pub const BELOW_THRESHOLD: &str = "below_threshold";
-    pub const STATUS_4XX: &str = "status_4xx";
     pub const ABORT: &str = "abort";
 }
 
@@ -66,16 +65,6 @@ pub fn inc_cache_miss(upstream: &str, model: &str) {
     )
     .increment(1);
 }
-
-pub fn observe_cache_token_drift(upstream: &str, model: &str, drift: i32) {
-    metrics::histogram!(
-        "cc_lb_cache_token_drift",
-        "upstream" => upstream.to_owned(),
-        "model" => model.to_owned()
-    )
-    .record(f64::from(drift));
-}
-
 pub fn inc_cache_observation_dropped(reason: &str) {
     metrics::counter!(
         "cc_lb_cache_observation_dropped_total",

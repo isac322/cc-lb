@@ -1,11 +1,13 @@
 //! Single tokenizer wrapper. o200k_base used for ALL Anthropic models.
-//! Drift expected (Anthropic uses its own tokenizer); monitored via cc_lb_cache_token_drift metric.
 
+#[cfg(test)]
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use serde_json::Value as JsonValue;
-use tiktoken_rs::{Rank, o200k_base};
+#[cfg(test)]
+use tiktoken_rs::Rank;
+use tiktoken_rs::o200k_base;
 
 #[cfg(test)]
 thread_local! {
@@ -44,6 +46,7 @@ impl PrefixTokenizer {
         self.encoder.encode_ordinary(text).len()
     }
 
+    #[cfg(test)]
     /// Counts nested JSON prefixes without re-tokenizing stable leading pieces.
     ///
     /// Each prefix is `open_prefix_bytes[..offset] + suffix_bytes`. The encoder's
@@ -148,6 +151,7 @@ impl PrefixTokenizer {
         (counts, stats)
     }
 
+    #[cfg(test)]
     fn extended_unstable_token_len(&self, tokens: &[Rank], last_piece_token_len: usize) -> usize {
         let mut unstable_token_len = last_piece_token_len.min(tokens.len());
         if unstable_token_len == 0
@@ -163,12 +167,14 @@ impl PrefixTokenizer {
         unstable_token_len
     }
 
+    #[cfg(test)]
     fn token_is_all_space(&self, token: Rank) -> bool {
         self.encoder
             .decode_bytes(&[token])
             .is_ok_and(|bytes| bytes.iter().rev().all(|byte| b" \n\t".contains(byte)))
     }
 
+    #[cfg(test)]
     fn count_nested_prefixes_fallback(
         &self,
         open_prefix_bytes: &[u8],

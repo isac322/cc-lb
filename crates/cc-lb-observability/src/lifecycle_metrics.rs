@@ -14,7 +14,6 @@ pub mod lifecycle_bus_channel {
     pub const LIMIT_REJECTION_AUDIT: &str = "lifecycle_limit_rejection_audit_full";
     pub const API_KEY_METRICS: &str = "lifecycle_api_key_metrics_full";
     pub const CACHE_HIT_MISS: &str = "lifecycle_cache_hit_miss_full";
-    pub const PROMPT_CACHE_DRIFT: &str = "lifecycle_prompt_cache_drift_full";
     pub const AGGREGATOR: &str = "lifecycle_aggregator_full";
 }
 

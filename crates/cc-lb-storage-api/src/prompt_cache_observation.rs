@@ -19,10 +19,6 @@ pub struct PromptCacheObservationRecord {
     pub prefix_content_block_index: u32,
     pub estimated_prefix_tokens: u64,
     pub token_estimate_source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_provider_cache_read_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_provider_cache_creation_tokens: Option<u64>,
 }
 
 #[async_trait]
@@ -81,8 +77,6 @@ mod tests {
             prefix_content_block_index: 7,
             estimated_prefix_tokens: 12_345,
             token_estimate_source: "local_tiktoken_v1".to_owned(),
-            last_provider_cache_read_tokens: Some(12_000),
-            last_provider_cache_creation_tokens: Some(345),
         }
     }
 

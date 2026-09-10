@@ -15,12 +15,11 @@ use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-use crate::tokenizer::PrefixTokenizer;
 mod optimized;
 
 pub(crate) use optimized::{PromptCacheAnalysisExecutor, PromptCacheAnalysisTimings};
 
-pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "local_tiktoken_v1";
+pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "serialized_prefix_bytes_v1";
 
 /// Anthropic's shared cap for resolved explicit and automatic breakpoints. Provider-invalid
 /// requests skip analysis before tokenization.
@@ -789,13 +788,9 @@ fn breakpoint_prefix_token_count(
     scratch: &mut SerializationScratch,
 ) -> (u64, Duration) {
     let bytes = serialized_prefix(canonical_model, &blocks[..=breakpoint_index], scratch);
-    let tokenization_started = Instant::now();
-    let token_count = std::str::from_utf8(bytes)
-        .map(|text| PrefixTokenizer::global().count_tokens(text) as u64)
-        .unwrap_or(0);
-    let tokenization_duration = tokenization_started.elapsed();
+    let count = bytes.len() as u64;
     scratch.clear_for_reuse();
-    (token_count, tokenization_duration)
+    (count, Duration::ZERO)
 }
 
 fn serialized_prefix<'a>(
@@ -984,7 +979,7 @@ mod tests {
                 .iter()
                 .all(|breakpoint| breakpoint.ttl.as_deref() == Some("5m"))
         );
-        assert_eq!(tokenizer_call_count(), 4);
+        assert_eq!(tokenizer_call_count(), 0);
 
         let mut synthesized_content = marked_content;
         synthesized_content.push(json!({"type":"text","text":"automatic target"}));
@@ -1283,7 +1278,7 @@ mod tests {
         let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
 
         assert_eq!(analysis.breakpoints.len(), 2);
-        assert_eq!(tokenizer_call_count(), 2);
+        assert_eq!(tokenizer_call_count(), 0);
     }
 
     #[test]
@@ -1326,7 +1321,7 @@ mod tests {
         let analysis = analyze_v3_prompt_cache(&request, canonical_model_id("claude-sonnet-4-5"));
 
         assert_eq!(analysis.breakpoints.len(), 4);
-        assert_eq!(tokenizer_call_count(), 4);
+        assert_eq!(tokenizer_call_count(), 0);
     }
 
     #[test]
@@ -1353,7 +1348,7 @@ mod tests {
                 &one_breakpoint(block_count),
                 canonical_model_id("claude-sonnet-4-5"),
             );
-            assert_eq!(tokenizer_call_count(), 1, "block_count={block_count}");
+            assert_eq!(tokenizer_call_count(), 0, "block_count={block_count}");
         }
     }
 

@@ -58,7 +58,6 @@ fn describes_all_required_metrics() {
             "cclb_streaming_usage_missing_total",
             "cc_lb_cache_hit_total",
             "cc_lb_cache_miss_total",
-            "cc_lb_cache_token_drift",
             "cc_lb_cache_observation_dropped_total",
             "cc_lb_cache_observation_write_failed_total",
             "cc_lb_prompt_cache_analysis_duration_seconds",
