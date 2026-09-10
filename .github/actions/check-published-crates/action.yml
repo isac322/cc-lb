@@ -1,0 +1,58 @@
+name: Check published crates
+description: Set up Rust and validate published crate API and packaging compatibility.
+
+inputs:
+  stable-build-metadata:
+    description: Whether to stabilize build metadata for better compiler cache reuse.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/setup-rustup-home
+
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.98.1
+
+    - uses: ./.github/actions/setup-rust-cache
+      with:
+        stable-build-metadata: ${{ inputs.stable-build-metadata }}
+
+    - name: Install cargo-semver-checks
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-semver-checks@0.50
+
+    - name: Check published crates
+      shell: bash
+      run: |
+        set -uo pipefail
+        status=0
+
+        run_check() {
+          local name="$1"
+          shift
+
+          echo "::group::$name"
+          if "$@"; then
+            echo "::endgroup::"
+          else
+            result=$?
+            echo "::error::$name failed with exit code $result"
+            echo "::endgroup::"
+            status=1
+          fi
+        }
+
+        run_check "cargo semver-checks cc-lb-plugin-wire" \
+          env CC_LB_SKIP_WASM_FIXTURE_BUILD=1 \
+          cargo semver-checks --package cc-lb-plugin-wire
+        run_check "cargo semver-checks cc-lb-plugin-conformance" \
+          env CC_LB_SKIP_WASM_FIXTURE_BUILD=1 \
+          cargo semver-checks --package cc-lb-plugin-conformance
+        run_check "cargo publish --dry-run cc-lb-plugin-wire" \
+          cargo publish --dry-run -p cc-lb-plugin-wire
+
+        exit "$status"

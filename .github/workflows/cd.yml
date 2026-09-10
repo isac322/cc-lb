@@ -48,6 +48,96 @@ jobs:
         with:
           ref: ${{ inputs.source_ref }}
           persist-credentials: false
+      - name: Prepare image revision verifier
+        run: |
+          cat > "$RUNNER_TEMP/verify-image-revision.sh" <<'VERIFY_IMAGE_REVISION'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          if [ "$#" -lt 2 ]; then
+            echo "::error::usage: $0 EXPECTED_REVISION IMAGE [IMAGE...]" >&2
+            exit 2
+          fi
+
+          expected_revision=$1
+          shift
+
+          declare -A verified_revisions=()
+          temp_dir=$(mktemp -d)
+          trap 'rm -rf "$temp_dir"' EXIT
+          raw_file="$temp_dir/manifest.json"
+
+          verify_revision() {
+            local ref=$1
+            local labels revision
+
+            if [[ -v 'verified_revisions[$ref]' ]]; then
+              return
+            fi
+
+            if ! labels=$(docker buildx imagetools inspect "$ref" \
+                --format '{{json .Image.Config.Labels}}'); then
+              echo "::error::could not inspect image config for $ref" >&2
+              exit 1
+            fi
+            revision=$(jq -r '."org.opencontainers.image.revision" // empty' <<<"$labels")
+            if [ "$revision" != "$expected_revision" ]; then
+              echo "::error::image $ref revision '$revision' does not match '$expected_revision'" >&2
+              exit 1
+            fi
+
+            verified_revisions["$ref"]=$revision
+          }
+
+          for image in "$@"; do
+            if ! docker buildx imagetools inspect "$image" --raw > "$raw_file"; then
+              echo "::error::could not inspect image $image" >&2
+              exit 1
+            fi
+
+            repository=${image%%@*}
+            last_component=${repository##*/}
+            if [[ "$last_component" == *:* ]]; then
+              repository=${repository%:*}
+            fi
+
+            refs=()
+            if jq -e 'has("manifests")' "$raw_file" > /dev/null; then
+              digests=()
+              while IFS= read -r digest; do
+                if [ -n "$digest" ]; then
+                  digests+=("$digest")
+                fi
+              done < <(
+                jq -r '
+                  .manifests[]
+                  | select(.platform.os != "unknown")
+                  | .digest
+                ' "$raw_file"
+              )
+              if [ "${#digests[@]}" -eq 0 ]; then
+                echo "::error::image $image contains no runnable platform manifests" >&2
+                exit 1
+              fi
+              for digest in "${digests[@]}"; do
+                refs+=("$repository@$digest")
+              done
+            else
+              manifest_digest=$(sha256sum "$raw_file")
+              manifest_digest=${manifest_digest%% *}
+              refs+=("$repository@sha256:$manifest_digest")
+            fi
+
+            for ref in "${refs[@]}"; do
+              verify_revision "$ref"
+            done
+
+            printf 'verified %s platform manifest(s) for %s at revision %s\n' \
+              "${#refs[@]}" "$image" "$expected_revision"
+          done
+          VERIFY_IMAGE_REVISION
+          chmod 0755 "$RUNNER_TEMP/verify-image-revision.sh"
+
       - uses: ./.github/actions/export-sccache-env
 
       - name: Resolve source revision
@@ -85,72 +175,6 @@ jobs:
           driver: remote
           endpoint: tcp://buildkit.arc-systems.svc.cluster.local:1234
 
-      - name: Prepare image revision verifier
-        run: |
-          command cat > "$RUNNER_TEMP/verify-image-revision" <<'VERIFY_IMAGE_REVISION'
-          #!/usr/bin/env bash
-          set -euo pipefail
-
-          if [ "$#" -ne 2 ]; then
-            echo "::error::usage: $0 IMAGE EXPECTED_REVISION" >&2
-            exit 2
-          fi
-
-          image=$1
-          expected_revision=$2
-          if ! raw=$(docker buildx imagetools inspect "$image" --raw); then
-            echo "::error::could not inspect image $image" >&2
-            exit 1
-          fi
-
-          repository=${image%%@*}
-          last_component=${repository##*/}
-          if [[ "$last_component" == *:* ]]; then
-            repository=${repository%:*}
-          fi
-
-          refs=("$image")
-          if jq -e 'has("manifests")' <<<"$raw" > /dev/null; then
-            digests=()
-            while IFS= read -r digest; do
-              if [ -n "$digest" ]; then
-                digests+=("$digest")
-              fi
-            done < <(
-              jq -r '
-                .manifests[]
-                | select(.platform.os != "unknown")
-                | .digest
-              ' <<<"$raw"
-            )
-            if [ "${#digests[@]}" -eq 0 ]; then
-              echo "::error::image $image contains no runnable platform manifests" >&2
-              exit 1
-            fi
-            refs=()
-            for digest in "${digests[@]}"; do
-              refs+=("$repository@$digest")
-            done
-          fi
-
-          for ref in "${refs[@]}"; do
-            if ! labels=$(docker buildx imagetools inspect "$ref" \
-                --format '{{json .Image.Config.Labels}}'); then
-              echo "::error::could not inspect image config for $ref" >&2
-              exit 1
-            fi
-            revision=$(jq -r '."org.opencontainers.image.revision" // empty' <<<"$labels")
-            if [ "$revision" != "$expected_revision" ]; then
-              echo "::error::image $ref revision '$revision' does not match '$expected_revision'" >&2
-              exit 1
-            fi
-          done
-
-          printf 'verified %s platform manifest(s) for %s at revision %s\n' \
-            "${#refs[@]}" "$image" "$expected_revision"
-          VERIFY_IMAGE_REVISION
-          chmod +x "$RUNNER_TEMP/verify-image-revision"
-
       - name: Inspect existing exact image
         id: existing
         env:
@@ -161,7 +185,7 @@ jobs:
           set -euo pipefail
           error_file="$RUNNER_TEMP/image-inspect-error"
           if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>"$error_file"; then
-            "$RUNNER_TEMP/verify-image-revision" "$IMAGE:$VERSION" "$SOURCE_SHA"
+            "$RUNNER_TEMP/verify-image-revision.sh" "$SOURCE_SHA" "$IMAGE:$VERSION"
             echo "already_published=true" >> "$GITHUB_OUTPUT"
           elif grep -qiE 'not found|manifest unknown' "$error_file"; then
             echo "already_published=false" >> "$GITHUB_OUTPUT"
@@ -267,8 +291,9 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          read -r -a aliases <<< "$ALIASES"
           args=()
-          for alias in $ALIASES; do
+          for alias in "${aliases[@]}"; do
             args+=(--tag "$IMAGE:$alias")
           done
           docker buildx imagetools create "${args[@]}" "$IMAGE:$VERSION"
@@ -281,10 +306,12 @@ jobs:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
         run: |
           set -euo pipefail
-          tags=("$VERSION")
-          for alias in $ALIASES; do
-            tags+=("$alias")
+          aliases=()
+          if [ -n "$ALIASES" ]; then
+            read -r -a aliases <<< "$ALIASES"
+          fi
+          images=("$IMAGE:$VERSION")
+          for alias in "${aliases[@]}"; do
+            images+=("$IMAGE:$alias")
           done
-          for tag in "${tags[@]}"; do
-            "$RUNNER_TEMP/verify-image-revision" "$IMAGE:$tag" "$SOURCE_SHA"
-          done
+          "$RUNNER_TEMP/verify-image-revision.sh" "$SOURCE_SHA" "${images[@]}"

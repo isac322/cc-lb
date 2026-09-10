@@ -40,14 +40,13 @@
 #     - profraw filenames must not collide when the merge job flattens every
 #       shard's artifact (handled here via a shard-unique LLVM_PROFILE_FILE_NAME
 #       prefix — verify the files actually land in target/llvm-cov-target/).
-#     - `report --nextest-archive-file ... --package <p>` must resolve each
-#       package against the archived binaries (verify each gate reports > 0%).
+#     - LCOV SF records must retain /crates/<package-name>/ paths so the shared
+#       gate can attribute every package; compare all 11 totals and verdicts.
 #     - workspace paths embedded in the archive's coverage map must match the
 #       merge runner's checkout path (same runner image => same /home/runner
 #       path, but confirm the ignore-filename-regex still filters correctly).
-#     - actions/download-artifact is pinned @v7 to match upload-artifact; no
-#       existing workflow uses it yet, so confirm the runner action mirror
-#       carries download-artifact@v7 (needs the v4+ pattern / merge-multiple
+#     - confirm the runner action mirror carries the pinned download-artifact
+#       version (needs the v4+ pattern / merge-multiple
 #       inputs used by the merge job).
 # =============================================================================
 name: coverage-sharded
@@ -220,26 +219,13 @@ jobs:
             --lcov \
             --output-path target/coverage.lcov \
             --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-      # The lcov step above merged the shards' profraw into .profdata; drop the
-      # raw profiles so the per-package gates below reuse it and skip re-merging.
-      - name: Drop raw profiles so per-package gates reuse the merged profdata
+      # The lcov file is the gate and upload input. Raw profiles are no longer
+      # needed after it is generated, so remove them without changing the
+      # published artifact (only target/coverage.lcov is uploaded below).
+      - name: Drop raw profiles after generating lcov
         run: cargo llvm-cov clean --profraw-only
       - name: Check per-package coverage gates
-        run: |
-          set -euo pipefail
-          A=(--nextest-archive-file nextest-archive.tar.zst)
-          R=(--ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)')
-          cargo llvm-cov report "${A[@]}" --package cc-lb-engine                  --fail-under-lines 60 "${R[@]}"
-          cargo llvm-cov report "${A[@]}" --package cc-lb-dialect-anthropic       --fail-under-lines 80 "${R[@]}"
-          cargo llvm-cov report "${A[@]}" --package cc-lb-admin                    --fail-under-lines 60 "${R[@]}"
-          cargo llvm-cov report "${A[@]}" --package cc-lb-config                   --fail-under-lines 60 "${R[@]}"
-          cargo llvm-cov report "${A[@]}" --package cc-lb-observability            --fail-under-lines 60 "${R[@]}"
-          cargo llvm-cov report "${A[@]}" --package cc-lb-signer-anthropic-key     --fail-under-lines 60 "${R[@]}"
-          cargo llvm-cov report "${A[@]}" --package cc-lb-signer-anthropic-oauth   --fail-under-lines 60 "${R[@]}"
-          cargo llvm-cov report "${A[@]}" --package cc-lb-server                   --fail-under-lines 60 "${R[@]}"
-          cargo llvm-cov report "${A[@]}" --package cc-lb-storage-sqlite           --fail-under-lines 60 "${R[@]}"
-          cargo llvm-cov report "${A[@]}" --package cc-lb-storage-postgres         --fail-under-lines 60 "${R[@]}"
-          cargo llvm-cov report "${A[@]}" --package cc-lb-scheduler                --fail-under-lines 60 "${R[@]}"
+        run: scripts/coverage-gate.sh target/coverage.lcov
       - uses: actions/upload-artifact@v7
         with:
           name: task-43-coverage-lcov-sharded

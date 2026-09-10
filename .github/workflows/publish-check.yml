@@ -49,6 +49,7 @@ on:
       - 'Cargo.lock'
       - 'release-plz.toml'
       - '.github/workflows/publish-check.yml'
+      - '.github/actions/check-published-crates/action.yml'
 
 permissions:
   contents: read
@@ -58,52 +59,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  semver:
-    name: semver ${{ matrix.crate }}
-    runs-on: cc-lb-2
-    strategy:
-      fail-fast: false
-      matrix:
-        crate:
-          - cc-lb-plugin-wire
-          - cc-lb-plugin-conformance
-    env:
-      # cc-lb-plugin-conformance's semver check transitively pulls
-      # cc-lb-runtime-wasmtime, whose build.rs pre-builds wasm32 test
-      # fixtures. That pre-build has no bearing on the rustdoc surface
-      # semver-checks inspects. Skip via the same escape hatch matched
-      # in release-plz.yml so the guard stays robust to runner drift.
-      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
-      - uses: ./.github/actions/setup-rust-cache
-        with:
-          stable-build-metadata: "true"
-
-      - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-semver-checks@0.50
-
-      - name: cargo semver-checks
-        run: cargo semver-checks --package ${{ matrix.crate }}
-
-  dry-run:
-    name: dry-run cc-lb-plugin-wire
+  published-crates:
+    name: published crates
     runs-on: cc-lb-2
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
-      - uses: ./.github/actions/setup-rust-cache
+      - uses: ./.github/actions/check-published-crates
         with:
           stable-build-metadata: "true"
-
-      - name: cargo publish --dry-run
-        run: cargo publish --dry-run -p cc-lb-plugin-wire
