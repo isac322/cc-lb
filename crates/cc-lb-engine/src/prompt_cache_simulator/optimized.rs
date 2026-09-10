@@ -792,6 +792,7 @@ impl PromptCacheAnalysisExecutor {
                 &cache_scope,
                 &cache,
             );
+            let output = analysis_output(analysis, &canonical_model, token_threshold);
             record_analysis_metrics(stats, total_started.elapsed());
             let mut output =
                 analysis_output(analysis, &canonical_model, token_threshold, durations, true);
@@ -1396,6 +1397,29 @@ mod tests {
                 .map(|(_, stats)| stats.cache_misses)
                 .sum::<u64>(),
             4
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_computes_threshold_eligibility_only_when_requested() {
+        let executor = PromptCacheAnalysisExecutor::default();
+        let request = Arc::new(four_breakpoint_request(&"large-prefix ".repeat(2_000)));
+
+        let without_threshold = executor
+            .analyze(Arc::clone(&request), MODEL.to_owned(), [1; 32], None)
+            .await;
+        assert!(
+            without_threshold
+                .cacheable_breakpoint_prefix_keys
+                .is_empty()
+        );
+
+        let with_threshold = executor
+            .analyze(request, MODEL.to_owned(), [1; 32], Some(1_024))
+            .await;
+        assert_eq!(
+            with_threshold.cacheable_breakpoint_prefix_keys.len(),
+            with_threshold.analysis.breakpoints.len()
         );
     }
 
