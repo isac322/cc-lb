@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RequestEvent } from '../../../lib/api';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
@@ -185,6 +185,159 @@ describe('buildStageDetails', () => {
     ]);
     expect(stages[0]?.ms).toBe(0);
   });
+
+  it('orders request ingress before proxy work and Finalize after the response body', () => {
+    const stages = buildStageDetails(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 100,
+        request_body_read_ms: 5,
+        request_body_bytes: 854336,
+        proxy_setup_ms: 10,
+        shape_ms: 2,
+        sign_ms: 1,
+        upstream_ttfb_ms: 20,
+        upstream_body_ms: 50,
+        finalize_ms: 10,
+        limit_reconcile_ms: 3,
+      }),
+    );
+
+    expect(stages.map((stage) => stage.key)).toEqual([
+      'request_body_read',
+      'setup_overhead',
+      'shape',
+      'sign',
+      'upstream_wait',
+      'body_collect',
+      'finalize',
+    ]);
+    expect(stages.find((stage) => stage.key === 'request_body_read')?.ms).toBe(
+      5,
+    );
+    expect(stages.find((stage) => stage.key === 'finalize')?.ms).toBe(10);
+    expect(stages.map((stage) => stage.key)).not.toContain('limit_reconcile');
+  });
+
+  it('selects one complete stream body stage when both body fields match', () => {
+    const stages = buildStageDetails(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 1000,
+        stream_total_ms: 600,
+        upstream_body_ms: 600,
+      }),
+    );
+
+    expect(
+      stages.filter((stage) =>
+        ['stream_relay', 'body_collect', 'partial_stream'].includes(stage.key),
+      ),
+    ).toMatchObject([{ key: 'stream_relay', ms: 600 }]);
+  });
+
+  it('labels a cancelled 499 body as a partial stream', () => {
+    const stages = buildStageDetails(
+      ev({
+        source_kind: 'proxy',
+        status: 499,
+        duration_ms: 700,
+        upstream_body_ms: 640,
+        stream_total_ms: 690,
+      }),
+    );
+
+    expect(
+      stages.filter((stage) =>
+        ['stream_relay', 'body_collect', 'partial_stream'].includes(stage.key),
+      ),
+    ).toMatchObject([
+      {
+        key: 'partial_stream',
+        label: 'Partial stream (client cancelled)',
+        ms: 640,
+      },
+    ]);
+  });
+
+  it('builds only one Renewal cycle for renewal events', () => {
+    const stages = buildStageDetails(
+      ev({
+        source_kind: 'renewal',
+        duration_ms: 500,
+      }),
+    );
+
+    expect(stages).toMatchObject([
+      { key: 'renewal_cycle', label: 'Renewal cycle', ms: 500 },
+    ]);
+  });
+
+  it('keeps measured-zero renewal distinct from a missing duration', () => {
+    const measuredZero = buildStageDetails(
+      ev({
+        source_kind: 'renewal',
+        duration_ms: 0,
+      }),
+    );
+    const missing = buildStageDetails(
+      ev({
+        source_kind: 'renewal',
+        duration_ms: undefined,
+      }),
+    );
+
+    expect(measuredZero).toMatchObject([
+      { key: 'renewal_cycle', label: 'Renewal cycle', ms: 0 },
+    ]);
+    expect(missing).toEqual([]);
+  });
+
+  it('shows measured zero for new parent stages but omits missing and null', () => {
+    const measuredZero = buildStageDetails(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 100,
+        request_body_read_ms: 0,
+        finalize_ms: 0,
+      }),
+    );
+    const missing = buildStageDetails(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 100,
+      }),
+    );
+    const explicitNull = buildStageDetails(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 100,
+        request_body_read_ms: null,
+        finalize_ms: null,
+      }),
+    );
+    const mixed = buildStageDetails(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 100,
+        request_body_read_ms: 20,
+        finalize_ms: undefined,
+        limit_reconcile_ms: 10,
+      }),
+    );
+
+    expect(measuredZero.map((stage) => stage.key)).toEqual([
+      'request_body_read',
+      'finalize',
+    ]);
+    expect(missing).toEqual([]);
+    expect(explicitNull).toEqual([]);
+    expect(mixed.map((stage) => stage.key)).toEqual([
+      'request_body_read',
+      'limit_reconcile',
+    ]);
+    expect(mixed.find((stage) => stage.key === 'limit_reconcile')?.ms).toBe(10);
+  });
 });
 
 describe('buildSseMarkers', () => {
@@ -332,6 +485,15 @@ describe('LatencyTimeline', () => {
     expect(screen.getByText('Internal post')).toBeTruthy();
     expect(screen.getByText('SSE markers')).toBeTruthy();
     expect(screen.queryByText('Observability post')).toBeNull();
+    const stageDetails = screen
+      .getByText(/^Stage details \(\d+\)$/)
+      .closest('details');
+    expect(stageDetails).not.toBeNull();
+    expect(
+      within(stageDetails!).getByRole('button', {
+        name: /Limit reconcile.*Internal post.*4 ms/,
+      }),
+    ).toBeTruthy();
   });
 
   it('keeps zero and fractional setup details without overlapping tiny segments', () => {
@@ -395,6 +557,205 @@ describe('LatencyTimeline', () => {
     });
     render(<LatencyTimeline event={event} />);
     expect(screen.queryByText('SSE markers')).toBeNull();
+  });
+
+  it('renders request ingress metadata before proxy stages and Finalize after Body', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          duration_ms: 100,
+          request_body_read_ms: 5,
+          request_body_bytes: 854336,
+          proxy_setup_ms: 10,
+          upstream_ttfb_ms: 20,
+          upstream_body_ms: 55,
+          finalize_ms: 10,
+          limit_reconcile_ms: 3,
+        })}
+      />,
+    );
+
+    expect(
+      screen
+        .getByTestId('latency-segment-request_body_read')
+        .getAttribute('aria-label'),
+    ).toBe('Request body read 5 ms, Ingress body: 834.3 KB');
+    const stageDetails = screen
+      .getByText(/^Stage details \(\d+\)$/)
+      .closest('details');
+    expect(stageDetails).not.toBeNull();
+    expect(
+      within(stageDetails!).getByRole('button', {
+        name: /Request body read.*Ingress body: 834\.3 KB.*5 ms/,
+      }),
+    ).toBeTruthy();
+    const groupRows = screen.getByTestId(
+      'latency-timeline-region',
+    ).firstElementChild;
+    expect(groupRows).not.toBeNull();
+    expect(
+      Array.from(
+        groupRows!.children,
+        (row) => row.firstElementChild?.firstElementChild?.textContent,
+      ),
+    ).toEqual(['Internal pre', 'Upstream', 'Body', 'Finalize']);
+    expect(
+      within(stageDetails!).getByRole('button', {
+        name: /Finalize.*Finalize.*10 ms/,
+      }),
+    ).toBeTruthy();
+
+    const internalPreRow = groupRows!.children.item(0) as HTMLElement;
+    const requestBodySegment = within(internalPreRow).getByTestId(
+      'latency-segment-request_body_read',
+    );
+    const setupSegment = within(internalPreRow).getByTestId(
+      'latency-segment-setup_overhead',
+    );
+    expect(
+      requestBodySegment.compareDocumentPosition(setupSegment) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+
+    const requestBodyDetail = within(stageDetails!).getByRole('button', {
+      name: /Request body read.*Ingress body: 834\.3 KB.*5 ms/,
+    });
+    const setupDetail = within(stageDetails!).getByRole('button', {
+      name: /Setup overhead.*Internal pre.*10 ms/,
+    });
+    expect(
+      requestBodyDetail.compareDocumentPosition(setupDetail) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(screen.queryByText('Internal post')).toBeNull();
+    expect(
+      within(stageDetails!).getByRole('button', {
+        name: /Finalize[\s\S]*Limit reconcile: 3 ms[\s\S]*Other finalize: 7 ms[\s\S]*10 ms/,
+      }),
+    ).toBeTruthy();
+  });
+  it('keeps mixed ingress rows on the legacy Internal post path', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          duration_ms: 100,
+          request_body_read_ms: 20,
+          limit_reconcile_ms: 10,
+        })}
+      />,
+    );
+
+    expect(screen.getByText('Internal post')).toBeTruthy();
+    expect(screen.queryByText('Finalize')).toBeNull();
+    const stageDetails = screen
+      .getByText(/^Stage details \(\d+\)$/)
+      .closest('details');
+    expect(stageDetails).not.toBeNull();
+    expect(
+      within(stageDetails!).getByRole('button', {
+        name: /Limit reconcile.*Internal post.*10 ms/,
+      }),
+    ).toBeTruthy();
+  });
+
+  it('renders a cancelled 499 as Partial stream instead of a completed body', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          status: 499,
+          duration_ms: 700,
+          upstream_body_ms: 640,
+          stream_total_ms: 690,
+          finalize_ms: 60,
+        })}
+      />,
+    );
+
+    expect(screen.getByText('Partial stream (client cancelled)')).toBeTruthy();
+    expect(screen.queryByText('Stream relay')).toBeNull();
+    expect(screen.queryByText('Body collect')).toBeNull();
+  });
+
+  it('keeps a positive residual above the budget visible', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          duration_ms: 100,
+          request_body_read_ms: 10,
+          proxy_setup_ms: 10,
+          upstream_ttfb_ms: 20,
+          upstream_body_ms: 30,
+          finalize_ms: 10,
+        })}
+      />,
+    );
+
+    const timeline = screen.getByTestId('latency-timeline-region');
+    expect(timeline.getAttribute('data-raw-residual-ms')).toBe('20');
+    expect(
+      within(timeline).getByRole('button', { name: 'Unaccounted 20 ms' }),
+    ).toBeTruthy();
+    expect(
+      within(timeline)
+        .getAllByText('Unaccounted')
+        .some((label) => label.closest('details') === null),
+    ).toBe(true);
+  });
+  it('renders only Renewal cycle for renewal source rows', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'renewal',
+          duration_ms: 500,
+        })}
+      />,
+    );
+
+    expect(screen.getByText('Renewal cycle')).toBeTruthy();
+    expect(screen.queryByText('Internal pre')).toBeNull();
+    expect(screen.queryByText('Body')).toBeNull();
+    expect(screen.queryByText('Finalize')).toBeNull();
+    expect(screen.queryByText('Unaccounted')).toBeNull();
+  });
+  it('renders a measured zero Renewal cycle instead of the missing-data hint', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'renewal',
+          duration_ms: 0,
+        })}
+      />,
+    );
+
+    expect(screen.queryByText('No latency data recorded.')).toBeNull();
+    expect(screen.getByText('Renewal cycle')).toBeTruthy();
+    const stageDetails = screen
+      .getByText(/^Stage details \(\d+\)$/)
+      .closest('details');
+    expect(stageDetails).not.toBeNull();
+    expect(
+      within(stageDetails!).getByRole('button', {
+        name: /Renewal cycle.*Renewal.*0 ms/,
+      }),
+    ).toBeTruthy();
+  });
+
+  it('keeps a missing Renewal duration on the no-data path', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'renewal',
+          duration_ms: undefined,
+        })}
+      />,
+    );
+
+    expect(screen.getByText('No latency data recorded.')).toBeTruthy();
+    expect(screen.queryByText('Renewal cycle')).toBeNull();
   });
 
   it('shows a hint when there is no latency data', () => {

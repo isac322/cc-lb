@@ -1,19 +1,308 @@
-//! Lifecycle-event logger subscriber.
+//! Lifecycle-event metrics subscriber.
 //!
-//! Consumes the `LifecycleEvent` stream and increments
-//! `cc_lb_lifecycle_events_total{kind="..."}` per event, providing a
-//! coarse volume-and-shape signal for the bus independent of any
-//! semantic subscriber.
+//! Counts every `LifecycleEvent` and keeps a bounded, event-id keyed timing
+//! aggregate until the terminal event arrives. Terminal metrics use only
+//! low-cardinality labels and observe parent stages once.
 //!
 //! ## Shutdown protocol
 //!
 //! Signal, drain, await. Late lifecycle events after shutdown are lost;
 //! this is acceptable because the assembler already persisted the row.
 
-use cc_lb_lifecycle::LifecycleEvent;
+use std::collections::HashMap;
+
+use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+const MAX_ACTIVE_REQUEST_TIMINGS: usize = 16_384;
+const UNACCOUNTED_BUDGET_MS: u64 = 10;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SourceKind {
+    Proxy,
+    Renewal,
+    #[default]
+    Unknown,
+}
+
+impl SourceKind {
+    fn from_event(value: Option<&str>) -> Self {
+        match value {
+            Some("proxy") => Self::Proxy,
+            Some("renewal") => Self::Renewal,
+            _ => Self::Unknown,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proxy => "proxy",
+            Self::Renewal => "renewal",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestOutcome {
+    Success,
+    ClientCancelled,
+    Error,
+    Timeout,
+}
+
+impl RequestOutcome {
+    fn from_terminal(reason: &TerminationReason, client_status: u16) -> Self {
+        if client_status == 499 {
+            Self::ClientCancelled
+        } else if matches!(client_status, 408 | 504) {
+            Self::Timeout
+        } else if reason == &TerminationReason::Success {
+            Self::Success
+        } else {
+            Self::Error
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::ClientCancelled => "client_cancelled",
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct RequestTiming {
+    source_kind: SourceKind,
+    request_body_read_ms: Option<u64>,
+    request_body_bytes: Option<u64>,
+    proxy_setup_ms: Option<u64>,
+    shape_ms: Option<u64>,
+    sign_ms: Option<u64>,
+    upstream_ttfb_ms: Option<u64>,
+    stream_total_ms: Option<u64>,
+    upstream_body_ms: Option<u64>,
+    finalize_ms: Option<u64>,
+}
+
+impl RequestTiming {
+    fn response_body_ms(&self, outcome: RequestOutcome) -> Option<u64> {
+        if outcome == RequestOutcome::ClientCancelled {
+            self.upstream_body_ms
+        } else {
+            self.stream_total_ms.or(self.upstream_body_ms)
+        }
+    }
+
+    fn proxy_accounted_ms(&self, response_body_ms: Option<u64>) -> u64 {
+        [
+            self.request_body_read_ms,
+            self.proxy_setup_ms,
+            self.shape_ms,
+            self.sign_ms,
+            self.upstream_ttfb_ms,
+            response_body_ms,
+            self.finalize_ms,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(0_u64, u64::saturating_add)
+    }
+
+    fn has_complete_proxy_timing(&self, response_body_ms: Option<u64>) -> bool {
+        self.request_body_read_ms.is_some()
+            && self.proxy_setup_ms.is_some()
+            && self.shape_ms.is_some()
+            && self.sign_ms.is_some()
+            && self.upstream_ttfb_ms.is_some()
+            && response_body_ms.is_some()
+            && self.finalize_ms.is_some()
+    }
+}
+
+#[derive(Default)]
+struct RequestTimingAggregator {
+    active: HashMap<String, RequestTiming>,
+}
+
+impl RequestTimingAggregator {
+    fn observe(&mut self, event: &LifecycleEvent) {
+        match event {
+            LifecycleEvent::RequestStarted {
+                event_id,
+                source_kind,
+                ..
+            } => {
+                if !self.active.contains_key(event_id)
+                    && self.active.len() >= MAX_ACTIVE_REQUEST_TIMINGS
+                    && let Some(evicted) = self.active.keys().next().cloned()
+                {
+                    self.active.remove(&evicted);
+                }
+                self.active.entry(event_id.clone()).or_default().source_kind =
+                    SourceKind::from_event(source_kind.as_deref());
+            }
+            LifecycleEvent::UpstreamResponseStarted {
+                event_id,
+                shape_ms,
+                sign_ms,
+                upstream_ttfb_ms,
+                ..
+            } => {
+                let Some(timing) = self.active.get_mut(event_id) else {
+                    return;
+                };
+                timing.shape_ms = *shape_ms;
+                timing.sign_ms = *sign_ms;
+                timing.upstream_ttfb_ms = *upstream_ttfb_ms;
+            }
+            LifecycleEvent::StreamCompleted { event_id, result } => {
+                let Some(timing) = self.active.get_mut(event_id) else {
+                    return;
+                };
+                if let Ok(success) = result {
+                    timing.stream_total_ms = success.stream_total_ms;
+                }
+            }
+            LifecycleEvent::RequestTerminated {
+                event_id,
+                reason,
+                client_status,
+                duration_ms,
+                request_body_read_ms,
+                request_body_bytes,
+                proxy_setup_ms,
+                upstream_body_ms,
+                finalize_ms,
+                ..
+            } => {
+                let Some(mut timing) = self.active.remove(event_id) else {
+                    return;
+                };
+                timing.request_body_read_ms = *request_body_read_ms;
+                timing.request_body_bytes = *request_body_bytes;
+                timing.proxy_setup_ms = *proxy_setup_ms;
+                timing.upstream_body_ms = *upstream_body_ms;
+                timing.finalize_ms = *finalize_ms;
+                emit_terminal_metrics(
+                    &timing,
+                    RequestOutcome::from_terminal(reason, *client_status),
+                    *duration_ms,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn clear(&mut self) {
+        self.active.clear();
+    }
+}
+
+fn emit_terminal_metrics(timing: &RequestTiming, outcome: RequestOutcome, duration_ms: u64) {
+    let source_kind = timing.source_kind.as_str();
+    let outcome_label = outcome.as_str();
+
+    if timing.source_kind == SourceKind::Renewal {
+        record_stage(source_kind, outcome_label, "renewal_cycle", duration_ms);
+        return;
+    }
+
+    if let Some(body_size) = timing.request_body_bytes {
+        metrics::histogram!(
+            "cc_lb_request_body_size_bytes",
+            "source_kind" => source_kind,
+            "outcome" => outcome_label
+        )
+        .record(body_size as f64);
+    }
+
+    let response_body_ms = timing.response_body_ms(outcome);
+    record_optional_stage(
+        source_kind,
+        outcome_label,
+        "request_body_read",
+        timing.request_body_read_ms,
+    );
+    record_optional_stage(
+        source_kind,
+        outcome_label,
+        "proxy_setup",
+        timing.proxy_setup_ms,
+    );
+    record_optional_stage(source_kind, outcome_label, "shape", timing.shape_ms);
+    record_optional_stage(source_kind, outcome_label, "sign", timing.sign_ms);
+    record_optional_stage(
+        source_kind,
+        outcome_label,
+        "upstream_ttfb",
+        timing.upstream_ttfb_ms,
+    );
+    record_optional_stage(
+        source_kind,
+        outcome_label,
+        "response_body",
+        response_body_ms,
+    );
+    record_optional_stage(source_kind, outcome_label, "finalize", timing.finalize_ms);
+
+    if timing.source_kind != SourceKind::Proxy
+        || !timing.has_complete_proxy_timing(response_body_ms)
+    {
+        return;
+    }
+
+    let unaccounted_ms = duration_ms.saturating_sub(timing.proxy_accounted_ms(response_body_ms));
+    metrics::histogram!(
+        "cc_lb_request_unaccounted_duration_seconds",
+        "source_kind" => source_kind,
+        "outcome" => outcome_label
+    )
+    .record(milliseconds_to_seconds(unaccounted_ms));
+
+    if outcome == RequestOutcome::Success && unaccounted_ms > UNACCOUNTED_BUDGET_MS {
+        metrics::counter!(
+            "cc_lb_request_unaccounted_over_budget_total",
+            "source_kind" => source_kind,
+            "outcome" => outcome_label
+        )
+        .increment(1);
+    }
+}
+
+fn record_optional_stage(
+    source_kind: &'static str,
+    outcome: &'static str,
+    stage: &'static str,
+    duration_ms: Option<u64>,
+) {
+    if let Some(duration_ms) = duration_ms {
+        record_stage(source_kind, outcome, stage, duration_ms);
+    }
+}
+
+fn record_stage(
+    source_kind: &'static str,
+    outcome: &'static str,
+    stage: &'static str,
+    duration_ms: u64,
+) {
+    metrics::histogram!(
+        "cc_lb_request_stage_duration_seconds",
+        "source_kind" => source_kind,
+        "stage" => stage,
+        "outcome" => outcome
+    )
+    .record(milliseconds_to_seconds(duration_ms));
+}
+
+fn milliseconds_to_seconds(duration_ms: u64) -> f64 {
+    duration_ms as f64 / 1_000.0
+}
 /// Handle to a spawned lifecycle-event-logger task.
 pub struct LifecycleEventLoggerHandle {
     shutdown_tx: oneshot::Sender<()>,
@@ -30,7 +319,7 @@ impl LifecycleEventLoggerHandle {
     }
 }
 
-/// Spawn the subscriber that counts lifecycle events per kind.
+/// Spawn the subscriber that counts lifecycle events and aggregates request timings.
 ///
 /// `rx` is obtained from
 /// [`InMemoryBus::attach_lifecycle_writer`](crate::event_bus::InMemoryBus::attach_lifecycle_writer).
@@ -43,40 +332,229 @@ pub fn spawn_lifecycle_event_logger(
 }
 
 async fn logger_loop(mut rx: mpsc::Receiver<LifecycleEvent>, mut shutdown: oneshot::Receiver<()>) {
+    let mut timings = RequestTimingAggregator::default();
     loop {
         tokio::select! {
             biased;
             event = rx.recv() => {
                 match event {
-                    Some(event) => record(&event),
-                    None => return,
+                    Some(event) => record(&event, &mut timings),
+                    None => break,
                 }
             }
             _ = &mut shutdown => break,
         }
     }
     while let Ok(event) = rx.try_recv() {
-        record(&event);
+        record(&event, &mut timings);
     }
+    timings.clear();
 }
 
-fn record(event: &LifecycleEvent) {
+fn record(event: &LifecycleEvent, timings: &mut RequestTimingAggregator) {
     metrics::counter!("cc_lb_lifecycle_events_total", "kind" => event.kind()).increment(1);
+    timings.observe(event);
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use cc_lb_lifecycle::{StreamSuccess, TerminationReason};
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
     use super::*;
 
+    #[derive(Debug, PartialEq)]
+    enum MetricValue {
+        Counter(u64),
+        Gauge(f64),
+        Histogram(Vec<f64>),
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct MetricSample {
+        name: String,
+        labels: BTreeMap<String, String>,
+        value: MetricValue,
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct TerminalTiming {
+        duration_ms: u64,
+        request_body_read_ms: Option<u64>,
+        request_body_bytes: Option<u64>,
+        proxy_setup_ms: Option<u64>,
+        upstream_body_ms: Option<u64>,
+        finalize_ms: Option<u64>,
+    }
+
     fn sample_event(request_id: &str) -> LifecycleEvent {
+        started(&format!("evt-{request_id}"), None)
+    }
+
+    fn started(event_id: &str, source_kind: Option<&str>) -> LifecycleEvent {
         LifecycleEvent::RequestStarted {
-            event_id: format!("evt-{request_id}"),
-            request_id: request_id.to_owned(),
+            event_id: event_id.to_owned(),
+            request_id: format!("request-{event_id}"),
             ts_ms: 0,
             stream: false,
-            source_kind: None,
+            source_kind: source_kind.map(str::to_owned),
             source_ref_id: None,
         }
+    }
+
+    fn upstream_started(
+        event_id: &str,
+        shape_ms: Option<u64>,
+        sign_ms: Option<u64>,
+        upstream_ttfb_ms: Option<u64>,
+    ) -> LifecycleEvent {
+        LifecycleEvent::UpstreamResponseStarted {
+            event_id: event_id.to_owned(),
+            status: 200,
+            headers: Default::default(),
+            bulkhead_wait_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            shape_ms,
+            sign_ms,
+            upstream_ttfb_ms,
+        }
+    }
+
+    fn stream_completed(event_id: &str, stream_total_ms: u64) -> LifecycleEvent {
+        LifecycleEvent::StreamCompleted {
+            event_id: event_id.to_owned(),
+            result: Ok(StreamSuccess {
+                stream_total_ms: Some(stream_total_ms),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn terminated(
+        event_id: &str,
+        reason: TerminationReason,
+        client_status: u16,
+        timing: TerminalTiming,
+    ) -> LifecycleEvent {
+        LifecycleEvent::RequestTerminated {
+            event_id: event_id.to_owned(),
+            reason,
+            client_status,
+            duration_ms: timing.duration_ms,
+            request_body_read_ms: timing.request_body_read_ms,
+            request_body_bytes: timing.request_body_bytes,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: timing.proxy_setup_ms,
+            setup_timings: Default::default(),
+            upstream_body_ms: timing.upstream_body_ms,
+            first_body_chunk_ms: None,
+            finalize_ms: timing.finalize_ms,
+            internal_errors: Vec::new(),
+        }
+    }
+
+    fn complete_proxy_events(
+        event_id: &str,
+        reason: TerminationReason,
+        client_status: u16,
+        duration_ms: u64,
+    ) -> Vec<LifecycleEvent> {
+        vec![
+            started(event_id, Some("proxy")),
+            upstream_started(event_id, Some(5), Some(6), Some(7)),
+            stream_completed(event_id, 8),
+            terminated(
+                event_id,
+                reason,
+                client_status,
+                TerminalTiming {
+                    duration_ms,
+                    request_body_read_ms: Some(3),
+                    request_body_bytes: Some(1_024),
+                    proxy_setup_ms: Some(4),
+                    upstream_body_ms: Some(8),
+                    finalize_ms: Some(9),
+                },
+            ),
+        ]
+    }
+
+    fn capture_metrics(
+        events: impl IntoIterator<Item = LifecycleEvent>,
+    ) -> (RequestTimingAggregator, Vec<MetricSample>) {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let mut timings = RequestTimingAggregator::default();
+        metrics::with_local_recorder(&recorder, || {
+            for event in events {
+                record(&event, &mut timings);
+            }
+        });
+
+        let samples = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .map(|(key, _, _, value)| {
+                let labels = key
+                    .key()
+                    .labels()
+                    .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                    .collect();
+                let value = match value {
+                    DebugValue::Counter(value) => MetricValue::Counter(value),
+                    DebugValue::Gauge(value) => MetricValue::Gauge(value.into_inner()),
+                    DebugValue::Histogram(values) => MetricValue::Histogram(
+                        values.into_iter().map(|value| value.into_inner()).collect(),
+                    ),
+                };
+                MetricSample {
+                    name: key.key().name().to_owned(),
+                    labels,
+                    value,
+                }
+            })
+            .collect();
+        (timings, samples)
+    }
+
+    fn named<'a>(samples: &'a [MetricSample], name: &str) -> Vec<&'a MetricSample> {
+        samples
+            .iter()
+            .filter(|sample| sample.name == name)
+            .collect()
+    }
+
+    fn assert_labels(sample: &MetricSample, expected: &[(&str, &str)]) {
+        assert_eq!(
+            sample.labels.len(),
+            expected.len(),
+            "unexpected labels on {sample:?}"
+        );
+        for (key, value) in expected {
+            assert_eq!(
+                sample.labels.get(*key).map(String::as_str),
+                Some(*value),
+                "unexpected {key} label on {sample:?}"
+            );
+        }
+    }
+
+    fn assert_histogram(sample: &MetricSample, expected_ms: &[u64]) {
+        let MetricValue::Histogram(values) = &sample.value else {
+            panic!("expected histogram sample, got {sample:?}");
+        };
+        let expected = expected_ms
+            .iter()
+            .copied()
+            .map(milliseconds_to_seconds)
+            .collect::<Vec<_>>();
+        assert_eq!(values, &expected);
     }
 
     #[tokio::test]
@@ -109,5 +587,254 @@ mod tests {
         tx.send(sample_event("metric-test")).await.expect("send");
         drop(tx);
         handle.shutdown().await;
+    }
+
+    #[test]
+    fn normal_proxy_records_each_parent_stage_once_and_ignores_duplicate_terminal() {
+        let event_id = "normal-proxy";
+        let terminal = terminated(
+            event_id,
+            TerminationReason::Success,
+            200,
+            TerminalTiming {
+                duration_ms: 50,
+                request_body_read_ms: Some(3),
+                request_body_bytes: Some(1_024),
+                proxy_setup_ms: Some(4),
+                upstream_body_ms: Some(8),
+                finalize_ms: Some(9),
+            },
+        );
+        let (timings, samples) = capture_metrics([
+            started(event_id, Some("proxy")),
+            upstream_started(event_id, Some(5), Some(6), Some(7)),
+            stream_completed(event_id, 8),
+            terminal.clone(),
+            terminal,
+        ]);
+
+        assert!(
+            timings.active.is_empty(),
+            "terminal must clean request state"
+        );
+        let stage_samples = named(&samples, "cc_lb_request_stage_duration_seconds");
+        let expected_stages = [
+            ("request_body_read", 3),
+            ("proxy_setup", 4),
+            ("shape", 5),
+            ("sign", 6),
+            ("upstream_ttfb", 7),
+            ("response_body", 8),
+            ("finalize", 9),
+        ];
+        assert_eq!(stage_samples.len(), expected_stages.len());
+        for (stage, expected_ms) in expected_stages {
+            let matching = stage_samples
+                .iter()
+                .copied()
+                .filter(|sample| sample.labels.get("stage").map(String::as_str) == Some(stage))
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "{stage} must be observed exactly once");
+            assert_labels(
+                matching[0],
+                &[
+                    ("source_kind", "proxy"),
+                    ("stage", stage),
+                    ("outcome", "success"),
+                ],
+            );
+            assert_histogram(matching[0], &[expected_ms]);
+        }
+
+        let body_size = named(&samples, "cc_lb_request_body_size_bytes");
+        assert_eq!(body_size.len(), 1);
+        assert_labels(
+            body_size[0],
+            &[("source_kind", "proxy"), ("outcome", "success")],
+        );
+        assert_eq!(body_size[0].value, MetricValue::Histogram(vec![1_024.0]));
+
+        let unaccounted = named(&samples, "cc_lb_request_unaccounted_duration_seconds");
+        assert_eq!(unaccounted.len(), 1);
+        assert_labels(
+            unaccounted[0],
+            &[("source_kind", "proxy"), ("outcome", "success")],
+        );
+        assert_histogram(unaccounted[0], &[8]);
+        assert!(
+            named(&samples, "cc_lb_request_unaccounted_over_budget_total").is_empty(),
+            "an 8ms residual must remain within budget"
+        );
+    }
+
+    #[test]
+    fn client_cancelled_499_uses_terminal_partial_body_and_fixed_outcome() {
+        let event_id = "cancelled";
+        let (_, samples) = capture_metrics([
+            started(event_id, Some("proxy")),
+            upstream_started(event_id, Some(5), Some(6), Some(7)),
+            stream_completed(event_id, 80),
+            terminated(
+                event_id,
+                TerminationReason::Dropped,
+                499,
+                TerminalTiming {
+                    duration_ms: 80,
+                    request_body_read_ms: Some(3),
+                    request_body_bytes: Some(1_024),
+                    proxy_setup_ms: Some(4),
+                    upstream_body_ms: Some(25),
+                    finalize_ms: Some(9),
+                },
+            ),
+        ]);
+
+        let response_body = named(&samples, "cc_lb_request_stage_duration_seconds")
+            .into_iter()
+            .filter(|sample| {
+                sample.labels.get("stage").map(String::as_str) == Some("response_body")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(response_body.len(), 1);
+        assert_labels(
+            response_body[0],
+            &[
+                ("source_kind", "proxy"),
+                ("stage", "response_body"),
+                ("outcome", "client_cancelled"),
+            ],
+        );
+        assert_histogram(response_body[0], &[25]);
+    }
+
+    #[test]
+    fn renewal_records_only_the_source_specific_cycle() {
+        let event_id = "renewal";
+        let (_, samples) = capture_metrics([
+            started(event_id, Some("renewal")),
+            upstream_started(event_id, Some(5), Some(6), Some(7)),
+            stream_completed(event_id, 8),
+            terminated(
+                event_id,
+                TerminationReason::Success,
+                200,
+                TerminalTiming {
+                    duration_ms: 500,
+                    request_body_read_ms: Some(3),
+                    request_body_bytes: Some(1_024),
+                    proxy_setup_ms: Some(4),
+                    upstream_body_ms: Some(8),
+                    finalize_ms: Some(9),
+                },
+            ),
+        ]);
+
+        let request_samples = samples
+            .iter()
+            .filter(|sample| sample.name.starts_with("cc_lb_request_"))
+            .collect::<Vec<_>>();
+        assert_eq!(request_samples.len(), 1);
+        assert_eq!(
+            request_samples[0].name,
+            "cc_lb_request_stage_duration_seconds"
+        );
+        assert_labels(
+            request_samples[0],
+            &[
+                ("source_kind", "renewal"),
+                ("stage", "renewal_cycle"),
+                ("outcome", "success"),
+            ],
+        );
+        assert_histogram(request_samples[0], &[500]);
+    }
+
+    #[test]
+    fn legacy_and_mixed_timings_are_excluded_from_budget_metrics() {
+        let legacy_id = "legacy";
+        let mixed_id = "mixed";
+        let (_, samples) = capture_metrics([
+            started(legacy_id, None),
+            terminated(
+                legacy_id,
+                TerminationReason::Success,
+                200,
+                TerminalTiming {
+                    duration_ms: 100,
+                    proxy_setup_ms: Some(4),
+                    upstream_body_ms: Some(8),
+                    ..Default::default()
+                },
+            ),
+            started(mixed_id, Some("proxy")),
+            upstream_started(mixed_id, Some(5), Some(6), Some(7)),
+            stream_completed(mixed_id, 8),
+            terminated(
+                mixed_id,
+                TerminationReason::Success,
+                200,
+                TerminalTiming {
+                    duration_ms: 100,
+                    proxy_setup_ms: Some(4),
+                    upstream_body_ms: Some(8),
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        assert!(
+            named(&samples, "cc_lb_request_unaccounted_duration_seconds").is_empty(),
+            "legacy and mixed requests must not enter the budget denominator"
+        );
+        assert!(
+            named(&samples, "cc_lb_request_unaccounted_over_budget_total").is_empty(),
+            "legacy and mixed requests must not increment the budget counter"
+        );
+        let unknown_stages = named(&samples, "cc_lb_request_stage_duration_seconds")
+            .into_iter()
+            .filter(|sample| {
+                sample.labels.get("source_kind").map(String::as_str) == Some("unknown")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !unknown_stages.is_empty(),
+            "present legacy stages remain observable with the fixed unknown label"
+        );
+    }
+
+    #[test]
+    fn over_budget_counter_requires_complete_success_and_residual_above_ten_ms() {
+        let mut events = complete_proxy_events("over-budget", TerminationReason::Success, 200, 53);
+        events.extend(complete_proxy_events(
+            "at-budget",
+            TerminationReason::Success,
+            200,
+            52,
+        ));
+        events.extend(complete_proxy_events(
+            "failed",
+            TerminationReason::ErrorCode("upstream_error".to_owned()),
+            500,
+            80,
+        ));
+        let (_, samples) = capture_metrics(events);
+
+        let success_unaccounted = named(&samples, "cc_lb_request_unaccounted_duration_seconds")
+            .into_iter()
+            .find(|sample| sample.labels.get("outcome").map(String::as_str) == Some("success"))
+            .expect("complete successes must enter the budget denominator");
+        assert_labels(
+            success_unaccounted,
+            &[("source_kind", "proxy"), ("outcome", "success")],
+        );
+        assert_histogram(success_unaccounted, &[11, 10]);
+
+        let over_budget = named(&samples, "cc_lb_request_unaccounted_over_budget_total");
+        assert_eq!(over_budget.len(), 1);
+        assert_labels(
+            over_budget[0],
+            &[("source_kind", "proxy"), ("outcome", "success")],
+        );
+        assert_eq!(over_budget[0].value, MetricValue::Counter(1));
     }
 }

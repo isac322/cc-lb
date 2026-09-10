@@ -6,7 +6,7 @@ import {
   useMemo,
   useState,
 } from 'react';
-import { fmtMs, fmtN, fmtSetupMs } from '../../../lib/format';
+import { fmtBytes, fmtMs, fmtN, fmtSetupMs } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Skeleton } from '../primitives';
 import {
@@ -16,6 +16,7 @@ import {
   deriveProxyTimelineDuration,
   deriveSetupOverhead,
   hasSetupTimingBreakdown,
+  responseBodyDuration,
 } from './computeStageGroups';
 
 // -----------------------------------------------------------------------------
@@ -23,6 +24,7 @@ import {
 // -----------------------------------------------------------------------------
 
 type StageGroup =
+  | 'renewal'
   | 'internal_pre'
   | 'wait'
   | 'upstream'
@@ -33,6 +35,12 @@ const GROUP_META: Record<
   StageGroup,
   { label: string; text: string; hue: number; sat: number }
 > = {
+  renewal: {
+    label: 'Renewal',
+    text: 'text-cyan-300',
+    hue: 185,
+    sat: 70,
+  },
   internal_pre: {
     label: 'Internal pre',
     text: 'text-sky-300',
@@ -55,18 +63,27 @@ const GROUP_META: Record<
   },
 };
 
-const GROUP_ORDER: StageGroup[] = [
+function getGroupLabel(group: StageGroup, hasFinalizeTiming: boolean): string {
+  return group === 'internal_post' && hasFinalizeTiming
+    ? 'Finalize'
+    : GROUP_META[group].label;
+}
+
+const PROXY_GROUP_ORDER: StageGroup[] = [
   'internal_pre',
   'wait',
   'upstream',
   'body',
   'internal_post',
 ];
+const RENEWAL_GROUP_ORDER: StageGroup[] = ['renewal'];
 
 const UNACCOUNTED_BG =
   'bg-slate-700/30 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.06)_4px_8px)]';
 
 const STAGE_DESCRIPTIONS: Record<string, string> = {
+  request_body_read:
+    'Time for the server to receive the complete client request body. JSON parsing starts afterward and is excluded.',
   auth: 'Bearer-token validation, principal lookup, and request-context assembly before routing.',
   route:
     'Match the request path against configured upstream routes and pick a candidate list.',
@@ -102,11 +119,17 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   upstream_wait:
     'upstream_ttfb − (bulkhead_wait + dns + connect). Approximates provider-side processing + network RTT.',
   stream_relay:
-    'Total SSE relay: response headers → last downstream chunk. This is what the client experiences as streaming duration.',
+    'Complete SSE response body relay from response headers through the last downstream chunk.',
+  partial_stream:
+    'Partial response body relay from response headers until client cancellation was observed.',
   body_collect:
-    'Non-stream body download: response headers → fully collected body.',
+    'Non-stream response body download from response headers until the complete body was collected.',
+  finalize:
+    'Mandatory accounting and finalization after the response body completed or cancellation was observed, ending immediately before the terminal event is published.',
   limit_reconcile:
-    'Reconcile actual token usage against the reserved budget so remaining quota is accurate.',
+    'Legacy timing for reconciling actual token usage against the reserved budget.',
+  renewal_cycle:
+    'The complete cache-keepalive renewal cycle performed by the scheduler. This is not a proxy request breakdown.',
 };
 
 const MARKER_DESCRIPTIONS: Record<string, string> = {
@@ -133,6 +156,7 @@ interface Stage {
   group: StageGroup;
   ms: number;
   setupTiming?: boolean;
+  detail?: string;
 }
 
 interface StageDetail extends Stage {
@@ -163,8 +187,18 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
     label: string,
     group: StageGroup,
     ms: number | null | undefined,
+    detail?: string,
   ) => {
-    if (ms && ms > 0) raw.push({ key, label, group, ms });
+    if (ms && ms > 0) raw.push({ key, label, group, ms, detail });
+  };
+  const pushRecorded = (
+    key: string,
+    label: string,
+    group: StageGroup,
+    ms: number | null | undefined,
+    detail?: string,
+  ) => {
+    if (ms != null && ms >= 0) raw.push({ key, label, group, ms, detail });
   };
   const pushMeasured = (
     key: string,
@@ -176,77 +210,132 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
       raw.push({ key, label, group, ms, setupTiming: true });
   };
 
-  if (hasSetupTimingBreakdown(e)) {
-    for (const [field, label] of CACHE_SETUP_TIMING_STAGES) {
-      pushMeasured(field, label, 'internal_pre', e[field]);
-    }
-    push('auth', 'Auth', 'internal_pre', e.auth_ms);
-    push('route', 'Route', 'internal_pre', e.route_ms);
-    push('limit_reserve', 'Limit reserve', 'internal_pre', e.limit_reserve_ms);
-    pushMeasured(
-      'prepare_signer_ms',
-      'Prepare signer',
+  if (e._phase === 'final' && e.source_kind === 'renewal') {
+    pushRecorded('renewal_cycle', 'Renewal cycle', 'renewal', e.duration_ms);
+  } else {
+    const requestBodyDetail =
+      e.request_body_bytes != null
+        ? `Ingress body: ${fmtBytes(e.request_body_bytes)}`
+        : undefined;
+    pushRecorded(
+      'request_body_read',
+      'Request body read',
       'internal_pre',
-      e.prepare_signer_ms,
+      e.request_body_read_ms,
+      requestBodyDetail,
     );
-    if (e._phase === 'final' && e.proxy_setup_ms != null) {
-      pushMeasured(
-        'other_setup',
-        'Other setup',
+
+    if (hasSetupTimingBreakdown(e)) {
+      for (const [field, label] of CACHE_SETUP_TIMING_STAGES) {
+        pushMeasured(field, label, 'internal_pre', e[field]);
+      }
+      push('auth', 'Auth', 'internal_pre', e.auth_ms);
+      push('route', 'Route', 'internal_pre', e.route_ms);
+      push(
+        'limit_reserve',
+        'Limit reserve',
         'internal_pre',
-        deriveOtherSetup(e),
+        e.limit_reserve_ms,
+      );
+      pushMeasured(
+        'prepare_signer_ms',
+        'Prepare signer',
+        'internal_pre',
+        e.prepare_signer_ms,
+      );
+      if (e._phase === 'final' && e.proxy_setup_ms != null) {
+        pushMeasured(
+          'other_setup',
+          'Other setup',
+          'internal_pre',
+          deriveOtherSetup(e),
+        );
+      }
+    } else {
+      push('auth', 'Auth', 'internal_pre', e.auth_ms);
+      push('route', 'Route', 'internal_pre', e.route_ms);
+      push(
+        'limit_reserve',
+        'Limit reserve',
+        'internal_pre',
+        e.limit_reserve_ms,
+      );
+      push(
+        'setup_overhead',
+        'Setup overhead',
+        'internal_pre',
+        deriveSetupOverhead(e),
       );
     }
-  } else {
-    push('auth', 'Auth', 'internal_pre', e.auth_ms);
-    push('route', 'Route', 'internal_pre', e.route_ms);
-    push('limit_reserve', 'Limit reserve', 'internal_pre', e.limit_reserve_ms);
-    push(
-      'setup_overhead',
-      'Setup overhead',
-      'internal_pre',
-      deriveSetupOverhead(e),
-    );
+    push('shape', 'Shape', 'internal_pre', e.shape_ms);
+    push('sign', 'Sign', 'internal_pre', e.sign_ms);
+    push('bulkhead_wait', 'Bulkhead wait', 'wait', e.bulkhead_wait_ms);
+    push('dns', 'DNS', 'wait', e.dns_ms);
+    push('connect', 'Connect (TCP+TLS)', 'upstream', e.connect_ms);
+    if (e.upstream_ttfb_ms != null) {
+      const upstreamWait = Math.max(
+        0,
+        e.upstream_ttfb_ms -
+          (e.bulkhead_wait_ms ?? 0) -
+          (e.dns_ms ?? 0) -
+          (e.connect_ms ?? 0),
+      );
+      push('upstream_wait', 'Upstream wait', 'upstream', upstreamWait);
+    }
+
+    if (e._phase === 'final') {
+      const bodyMs = responseBodyDuration(e);
+      const hasIncompleteStream =
+        e.status === 499 ||
+        (e.stream_total_ms == null &&
+          ((e.sse_event_count ?? 0) > 0 ||
+            e.stream_message_start_ms != null ||
+            e.stream_last_chunk_ms != null));
+      if (hasIncompleteStream) {
+        pushRecorded(
+          'partial_stream',
+          e.status === 499
+            ? 'Partial stream (client cancelled)'
+            : 'Partial stream',
+          'body',
+          e.upstream_body_ms,
+        );
+      } else if (e.stream_total_ms != null) {
+        pushRecorded('stream_relay', 'Stream relay', 'body', bodyMs);
+      } else {
+        pushRecorded(
+          'body_collect',
+          'Body collect',
+          'body',
+          e.upstream_body_ms,
+        );
+      }
+
+      if (e.finalize_ms != null) {
+        const reconcileMs = e.limit_reconcile_ms ?? 0;
+        const finalizeDetail =
+          e.limit_reconcile_ms != null
+            ? `Limit reconcile: ${fmtMs(reconcileMs)} · Other finalize: ${fmtMs(
+                Math.max(0, (e.finalize_ms ?? 0) - reconcileMs),
+              )}`
+            : undefined;
+        pushRecorded(
+          'finalize',
+          'Finalize',
+          'internal_post',
+          e.finalize_ms,
+          finalizeDetail,
+        );
+      } else {
+        push(
+          'limit_reconcile',
+          'Limit reconcile',
+          'internal_post',
+          e.limit_reconcile_ms,
+        );
+      }
+    }
   }
-  push('shape', 'Shape', 'internal_pre', e.shape_ms);
-  push('sign', 'Sign', 'internal_pre', e.sign_ms);
-  push('bulkhead_wait', 'Bulkhead wait', 'wait', e.bulkhead_wait_ms);
-  push('dns', 'DNS', 'wait', e.dns_ms);
-  push('connect', 'Connect (TCP+TLS)', 'upstream', e.connect_ms);
-  if (e.upstream_ttfb_ms != null) {
-    const uwait = Math.max(
-      0,
-      (e.upstream_ttfb_ms ?? 0) -
-        (e.bulkhead_wait_ms ?? 0) -
-        (e.dns_ms ?? 0) -
-        (e.connect_ms ?? 0),
-    );
-    if (uwait > 0) push('upstream_wait', 'Upstream wait', 'upstream', uwait);
-  }
-  const isStream =
-    e._phase === 'final' &&
-    ((e.sse_event_count ?? 0) > 0 || e.stream_total_ms != null);
-  if (isStream) {
-    push(
-      'stream_relay',
-      'Stream relay',
-      'body',
-      e._phase === 'final' ? e.stream_total_ms : undefined,
-    );
-  } else {
-    push(
-      'body_collect',
-      'Body collect',
-      'body',
-      e._phase === 'final' ? e.upstream_body_ms : undefined,
-    );
-  }
-  push(
-    'limit_reconcile',
-    'Limit reconcile',
-    'internal_post',
-    e._phase === 'final' ? e.limit_reconcile_ms : undefined,
-  );
 
   const perGroupCount = new Map<StageGroup, number>();
   for (const s of raw) {
@@ -276,7 +365,10 @@ interface SseMarker {
 }
 
 export function buildSseMarkers(e: RequestEventWithPhase): SseMarker[] {
+  if (e.source_kind === 'renewal') return [];
+
   const relayStart =
+    (e.request_body_read_ms ?? 0) +
     (e.auth_ms ?? 0) +
     (e.route_ms ?? 0) +
     (e.limit_reserve_ms ?? 0) +
@@ -459,10 +551,12 @@ function StageInfo({
   stage,
   overview,
   total,
+  groupLabel,
 }: {
   stage: StageDetail;
   overview: StageDetail[];
   total: number;
+  groupLabel: string;
 }) {
   const overviewTotal = overview.reduce((a, s) => a + s.ms, 0);
   const description = STAGE_DESCRIPTIONS[stage.key];
@@ -471,7 +565,7 @@ function StageInfo({
   return (
     <div className="flex flex-col gap-1.5 min-w-[240px]">
       <div className="text-[10px] uppercase tracking-wider text-text-faint">
-        {GROUP_META[stage.group].label}
+        {groupLabel}
         {overview.length > 1 ? ` · ${overview.length} stages` : ''}
       </div>
       {multi ? (
@@ -546,10 +640,13 @@ function StageInfo({
           <div className="flex items-center gap-2 tabular-nums text-text-muted">
             <span>{formatStageMs(stage)}</span>
             <span className="text-text-faint">·</span>
-            <span>{pct(stage.ms, total)}% of request</span>
+            <span>{pct(stage.ms, total)}% of timeline</span>
           </div>
         </div>
       )}
+      {stage.detail ? (
+        <div className="text-text-muted leading-snug">{stage.detail}</div>
+      ) : null}
       {description ? (
         <div className="text-text-faint leading-snug border-t border-subtle/40 pt-1.5">
           {description}
@@ -619,12 +716,14 @@ function SegmentButton({
   total,
   active,
   overview,
+  groupLabel,
 }: {
   stage: StageDetail;
   startMs: number;
   total: number;
   active: ActiveKeyApi;
   overview: StageDetail[];
+  groupLabel: string;
 }) {
   const isActive = active.isActive(stage.key);
   const isSticky = active.isSticky(stage.key);
@@ -638,13 +737,20 @@ function SegmentButton({
 
   return (
     <InfoPopover
-      content={<StageInfo stage={stage} overview={overview} total={total} />}
+      content={
+        <StageInfo
+          stage={stage}
+          overview={overview}
+          total={total}
+          groupLabel={groupLabel}
+        />
+      }
     >
       <button
         type="button"
         {...active.bind(stage.key)}
         data-testid={`latency-segment-${stage.key}`}
-        aria-label={`${stage.label} ${formatStageMs(stage)}`}
+        aria-label={`${stage.label} ${formatStageMs(stage)}${stage.detail ? `, ${stage.detail}` : ''}`}
         className={cx(
           'absolute top-0 h-full rounded-sm outline-none transition-all cursor-pointer',
           isActive
@@ -1010,11 +1116,13 @@ function StageDetailsList({
   total,
   unaccounted,
   active,
+  hasFinalizeTiming,
 }: {
   stages: StageDetail[];
   total: number;
   unaccounted: number;
   active: ActiveKeyApi;
+  hasFinalizeTiming: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const count = stages.length + (unaccounted > 0 ? 1 : 0);
@@ -1053,8 +1161,9 @@ function StageDetailsList({
             ms={s.ms}
             setupTiming={s.setupTiming}
             total={total}
-            hint={GROUP_META[s.group].label}
+            hint={getGroupLabel(s.group, hasFinalizeTiming)}
             description={STAGE_DESCRIPTIONS[s.key]}
+            detail={s.detail}
           />
         ))}
         {unaccounted > 0 && (
@@ -1163,6 +1272,7 @@ function DetailRow({
   ms,
   total,
   hint,
+  detail,
   description,
   setupTiming,
 }: {
@@ -1173,6 +1283,7 @@ function DetailRow({
   ms: number;
   total: number;
   hint?: string;
+  detail?: string;
   description?: string;
   setupTiming?: boolean;
 }) {
@@ -1197,6 +1308,9 @@ function DetailRow({
       {leading}
       <span className="flex-1 truncate">{label}</span>
       {hint ? <span className="text-text-faint shrink-0">· {hint}</span> : null}
+      {detail ? (
+        <span className="text-text-faint shrink-0">· {detail}</span>
+      ) : null}
       <span className="tabular-nums shrink-0 w-16 text-right">
         {setupTiming ? fmtSetupMs(ms) : fmtMs(ms)}
       </span>
@@ -1220,8 +1334,11 @@ function DetailRow({
           <div className="flex items-center gap-2 tabular-nums text-text-muted">
             <span>{setupTiming ? fmtSetupMs(ms) : fmtMs(ms)}</span>
             <span className="text-text-faint">·</span>
-            <span>{pct(ms, total)}% of request</span>
+            <span>{pct(ms, total)}% of timeline</span>
           </div>
+          {detail ? (
+            <div className="text-text-muted leading-snug">{detail}</div>
+          ) : null}
           <div className="text-text-faint leading-snug">{description}</div>
         </div>
       }
@@ -1264,6 +1381,14 @@ export function LatencyTimeline({
   const stages = useMemo(() => buildStageDetails(event), [event]);
   const groups = computeStageGroups(event);
   const markers = useMemo(() => buildSseMarkers(event), [event]);
+  const hasFinalizeTiming = event.finalize_ms != null;
+  const groupOrder =
+    event.source_kind === 'renewal' ? RENEWAL_GROUP_ORDER : PROXY_GROUP_ORDER;
+  const hasMeasuredRenewalCycle =
+    event._phase === 'final' &&
+    event.source_kind === 'renewal' &&
+    event.duration_ms != null &&
+    event.duration_ms >= 0;
   const positioned = useMemo(() => {
     let cursor = 0;
     const out = stages.map((s) => {
@@ -1284,7 +1409,7 @@ export function LatencyTimeline({
         data-testid="latency-timeline-region"
       >
         <div className="space-y-2" aria-hidden="true">
-          {GROUP_ORDER.map((group) => (
+          {groupOrder.map((group) => (
             <div key={group}>
               <div className="flex items-center justify-between mb-0.5">
                 <Skeleton className="h-2.5 w-16" />
@@ -1317,7 +1442,7 @@ export function LatencyTimeline({
     );
   }
 
-  if (total <= 0) {
+  if (total <= 0 && !hasMeasuredRenewalCycle) {
     return (
       <div
         className="min-h-80 text-text-faint text-xs"
@@ -1328,24 +1453,30 @@ export function LatencyTimeline({
     );
   }
 
-  const sum = stages.reduce((a, s) => a + s.ms, 0);
-  const unaccounted = Math.max(0, total - sum);
+  const unaccounted = groups.unaccounted;
   const showStreamLane = markers.length > 0 && !isPartial;
 
   return (
-    <div className={LATENCY_LAYOUT_CLASS} data-testid="latency-timeline-region">
+    <div
+      className={LATENCY_LAYOUT_CLASS}
+      data-testid="latency-timeline-region"
+      data-accounted-ms={groups.accounted}
+      data-raw-residual-ms={groups.rawResidual}
+    >
       <div className="space-y-2">
-        {GROUP_ORDER.map((g) => {
+        {groupOrder.map((g) => {
           const items = positioned.positioned.filter((p) => p.group === g);
           if (items.length === 0) return null;
           const groupSum = items.reduce((a, s) => a + s.ms, 0);
           const groupTotal =
             g === 'internal_pre' ? groups.internalPre : groupSum;
           const interactiveItems = items.filter(
-            (item) => !item.setupTiming || item.ms / total >= 0.001,
+            (item) =>
+              item.ms > 0 && (!item.setupTiming || item.ms / total >= 0.001),
           );
           const anyActive = items.some((it) => active.isActive(it.key));
           const groupItems = stages.filter((s) => s.group === g);
+          const groupLabel = getGroupLabel(g, hasFinalizeTiming);
           return (
             <div key={g}>
               <div className="flex items-center justify-between text-[10px] mb-0.5">
@@ -1355,7 +1486,7 @@ export function LatencyTimeline({
                     anyActive ? 'font-medium' : '',
                   )}
                 >
-                  {GROUP_META[g].label}
+                  {groupLabel}
                 </span>
                 <span className="text-text-muted tabular-nums">
                   {fmtMs(groupTotal)} · {pct(groupTotal, total)}%
@@ -1370,6 +1501,7 @@ export function LatencyTimeline({
                     total={total}
                     active={active}
                     overview={groupItems}
+                    groupLabel={groupLabel}
                   />
                 ))}
               </div>
@@ -1400,6 +1532,7 @@ export function LatencyTimeline({
         total={total}
         unaccounted={unaccounted}
         active={active}
+        hasFinalizeTiming={hasFinalizeTiming}
       />
       {showStreamLane && <SseDetailsList markers={markers} active={active} />}
     </div>

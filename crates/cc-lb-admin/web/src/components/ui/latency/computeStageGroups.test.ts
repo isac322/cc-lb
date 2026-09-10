@@ -32,6 +32,8 @@ describe('computeStageGroups', () => {
       body: 0,
       internalPost: 0,
       unaccounted: 0,
+      accounted: 0,
+      rawResidual: 0,
     });
   });
 
@@ -241,5 +243,162 @@ describe('computeStageGroups', () => {
     expect(setupTimingTotal(partial)).toBe(0.25);
     expect(deriveOtherSetup(partial)).toBe(0);
     expect(computeStageGroups(partial).internalPre).toBe(0);
+  });
+
+  it('accounts for a complete proxy request with a sub-10ms residual', () => {
+    const event = ev({
+      source_kind: 'proxy',
+      duration_ms: 1500,
+      request_body_read_ms: 100,
+      request_body_bytes: 854336,
+      proxy_setup_ms: 200,
+      shape_ms: 10,
+      sign_ms: 5,
+      upstream_ttfb_ms: 300,
+      upstream_body_ms: 875,
+      finalize_ms: 5,
+    });
+
+    const groups = computeStageGroups(event);
+    expect(groups.internalPre).toBe(315);
+    expect(groups.upstream).toBe(300);
+    expect(groups.body).toBe(875);
+    expect(groups.internalPost).toBe(5);
+    expect(groups.accounted).toBe(1495);
+    expect(groups.rawResidual).toBe(5);
+    expect(groups.unaccounted).toBe(5);
+    expect(event.request_body_bytes).toBe(854336);
+  });
+
+  it('counts a completed stream body once when both body timings are present', () => {
+    const groups = computeStageGroups(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 1000,
+        request_body_read_ms: 100,
+        proxy_setup_ms: 100,
+        upstream_ttfb_ms: 100,
+        stream_total_ms: 600,
+        upstream_body_ms: 600,
+        finalize_ms: 100,
+      }),
+    );
+
+    expect(groups.body).toBe(600);
+    expect(groups.accounted).toBe(1000);
+    expect(groups.rawResidual).toBe(0);
+  });
+
+  it('uses the partial stream elapsed time once for a cancelled 499', () => {
+    const groups = computeStageGroups(
+      ev({
+        source_kind: 'proxy',
+        status: 499,
+        duration_ms: 1000,
+        request_body_read_ms: 50,
+        proxy_setup_ms: 100,
+        upstream_ttfb_ms: 200,
+        upstream_body_ms: 600,
+        stream_total_ms: 900,
+        finalize_ms: 40,
+      }),
+    );
+
+    expect(groups.body).toBe(600);
+    expect(groups.accounted).toBe(990);
+    expect(groups.rawResidual).toBe(10);
+    expect(groups.unaccounted).toBe(10);
+  });
+
+  it('uses one source-specific cycle for renewal events', () => {
+    const groups = computeStageGroups(
+      ev({
+        source_kind: 'renewal',
+        duration_ms: 500,
+      }),
+    );
+
+    expect(groups).toMatchObject({
+      internalPre: 0,
+      wait: 0,
+      upstream: 0,
+      body: 0,
+      internalPost: 0,
+      accounted: 500,
+      rawResidual: 0,
+      unaccounted: 0,
+    });
+  });
+
+  it('counts Finalize as the parent without adding Limit reconcile again', () => {
+    const groups = computeStageGroups(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 100,
+        finalize_ms: 20,
+        limit_reconcile_ms: 5,
+      }),
+    );
+
+    expect(groups.internalPost).toBe(20);
+    expect(groups.accounted).toBe(20);
+    expect(groups.rawResidual).toBe(80);
+  });
+
+  it('exposes signed over-accounting instead of hiding it behind the clamp', () => {
+    const groups = computeStageGroups(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 100,
+        request_body_read_ms: 40,
+        proxy_setup_ms: 40,
+        upstream_ttfb_ms: 40,
+        upstream_body_ms: 40,
+        finalize_ms: 40,
+      }),
+    );
+
+    expect(groups.accounted).toBe(200);
+    expect(groups.rawResidual).toBe(-100);
+    expect(groups.unaccounted).toBe(0);
+  });
+
+  it('keeps legacy, mixed, null, and measured-zero rows distinct', () => {
+    const legacy = computeStageGroups(
+      ev({ duration_ms: 100, limit_reconcile_ms: 10 }),
+    );
+    const mixed = computeStageGroups(
+      ev({
+        duration_ms: 100,
+        request_body_read_ms: 20,
+        finalize_ms: undefined,
+        limit_reconcile_ms: 10,
+      }),
+    );
+    const explicitNull = computeStageGroups(
+      ev({
+        duration_ms: 100,
+        request_body_read_ms: null,
+        finalize_ms: null,
+        limit_reconcile_ms: 10,
+      }),
+    );
+    const measuredZero = computeStageGroups(
+      ev({
+        duration_ms: 100,
+        request_body_read_ms: 0,
+        finalize_ms: 0,
+        limit_reconcile_ms: 10,
+      }),
+    );
+
+    expect(legacy.internalPost).toBe(10);
+    expect(mixed.internalPre).toBe(20);
+    expect(mixed.internalPost).toBe(10);
+    expect(mixed.accounted).toBe(30);
+    expect(mixed.rawResidual).toBe(70);
+    expect(explicitNull.internalPost).toBe(10);
+    expect(measuredZero.internalPost).toBe(0);
+    expect(measuredZero.accounted).toBe(0);
   });
 });

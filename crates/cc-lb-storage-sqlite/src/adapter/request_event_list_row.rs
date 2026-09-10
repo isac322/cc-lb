@@ -70,6 +70,14 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .limit_reserve_ms
             .map(|value| i64_to_u64(value, "request event list limit_reserve_ms"))
             .transpose()?,
+        request_body_read_ms: row
+            .request_body_read_ms
+            .map(|value| i64_to_u64(value, "request event list request_body_read_ms"))
+            .transpose()?,
+        request_body_bytes: row
+            .request_body_bytes
+            .map(|value| i64_to_u64(value, "request event list request_body_bytes"))
+            .transpose()?,
         json_parse_ms: row.json_parse_ms,
         cache_structure_ms: row.cache_structure_ms,
         cache_token_key_ms: row.cache_token_key_ms,
@@ -98,6 +106,10 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         observability_post_ms: row
             .observability_post_ms
             .map(|value| i64_to_u64(value, "request event list observability_post_ms"))
+            .transpose()?,
+        finalize_ms: row
+            .finalize_ms
+            .map(|value| i64_to_u64(value, "request event list finalize_ms"))
             .transpose()?,
         proxy_setup_ms: row
             .proxy_setup_ms

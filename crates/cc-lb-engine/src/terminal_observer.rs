@@ -211,6 +211,7 @@ fn redacted_error_chain(
 
 pub(crate) mod error_codes {
     pub(crate) const BODY_TOO_LARGE: &str = "body_too_large";
+    pub(crate) const BODY_READ_FAILED: &str = "body_read_failed";
     pub(crate) const INVALID_JSON: &str = "invalid_json";
     pub(crate) const AUTHENTICATION_FAILED: &str = "authentication_failed";
     pub(crate) const PRINCIPAL_MISSING: &str = "principal_missing";
@@ -249,12 +250,19 @@ struct TerminalState {
     status: u16,
     error_code: Option<&'static str>,
     internal_errors: Vec<InternalError>,
+    request_span: Option<tracing::Span>,
+    request_body_read_ms: Option<u64>,
+    request_body_bytes: Option<u64>,
     limit_reconcile_ms: Option<u64>,
     observability_post_ms: Option<u64>,
     proxy_setup_ms: Option<u64>,
     setup_timings: RequestSetupTimings,
+    shape_ms: Option<u64>,
+    sign_ms: Option<u64>,
+    upstream_ttfb_ms: Option<u64>,
     upstream_body_ms: Option<u64>,
     first_body_chunk_ms: Option<u64>,
+    finalize_ms: Option<u64>,
 }
 
 impl LifecycleContext {
@@ -290,6 +298,27 @@ impl LifecycleContext {
         let mut state = self.lock_state();
         state.status = status.as_u16();
     }
+    pub(crate) fn set_request_span(&self, span: tracing::Span) {
+        self.lock_state().request_span.get_or_insert(span);
+    }
+
+    pub(crate) fn set_attempt_timings(
+        &self,
+        shape_ms: Option<u64>,
+        sign_ms: Option<u64>,
+        upstream_ttfb_ms: Option<u64>,
+    ) {
+        let mut state = self.lock_state();
+        if let Some(value) = shape_ms {
+            state.shape_ms = Some(value);
+        }
+        if let Some(value) = sign_ms {
+            state.sign_ms = Some(value);
+        }
+        if let Some(value) = upstream_ttfb_ms {
+            state.upstream_ttfb_ms = Some(value);
+        }
+    }
 
     pub(crate) fn set_termination_timings(
         &self,
@@ -300,11 +329,44 @@ impl LifecycleContext {
         first_body_chunk_ms: Option<u64>,
     ) {
         let mut state = self.lock_state();
-        state.limit_reconcile_ms = limit_reconcile_ms;
-        state.observability_post_ms = observability_post_ms;
-        state.proxy_setup_ms = proxy_setup_ms;
-        state.upstream_body_ms = upstream_body_ms;
-        state.first_body_chunk_ms = first_body_chunk_ms;
+        if let Some(value) = limit_reconcile_ms {
+            state.limit_reconcile_ms = Some(value);
+        }
+        if let Some(value) = observability_post_ms {
+            state.observability_post_ms = Some(value);
+        }
+        if let Some(value) = proxy_setup_ms {
+            state.proxy_setup_ms = Some(value);
+        }
+        if let Some(value) = upstream_body_ms {
+            state.upstream_body_ms = Some(value);
+        }
+        if let Some(value) = first_body_chunk_ms {
+            state.first_body_chunk_ms = Some(value);
+        }
+    }
+
+    /// Store the measured ingress body read duration and, on success, its
+    /// exact collected byte length.
+    pub fn set_request_body_timing(
+        &self,
+        request_body_read_ms: u64,
+        request_body_bytes: Option<u64>,
+    ) {
+        let mut state = self.lock_state();
+        state.request_body_read_ms = Some(request_body_read_ms);
+        if let Some(value) = request_body_bytes {
+            state.request_body_bytes = Some(value);
+        }
+    }
+
+    pub(crate) fn set_finalize_ms(&self, finalize_ms: u64) {
+        self.lock_state().finalize_ms = Some(finalize_ms);
+    }
+
+    pub(crate) fn set_upstream_body_ms_if_absent(&self, upstream_body_ms: u64) {
+        let mut state = self.lock_state();
+        state.upstream_body_ms.get_or_insert(upstream_body_ms);
     }
 
     pub(crate) fn set_setup_timings(&self, timings: RequestSetupTimings) {
@@ -342,6 +404,14 @@ impl LifecycleContext {
             result: Err(cc_lb_lifecycle::ParseFailure::BodyTooLarge { limit_bytes }),
         });
         self.set_terminal(StatusCode::PAYLOAD_TOO_LARGE, error_codes::BODY_TOO_LARGE);
+        self.finish();
+    }
+
+    /// Record a request body transport failure and publish the terminal event
+    /// explicitly so the drop fallback cannot misclassify it.
+    pub fn record_body_read_failure(&self) {
+        self.emit_request_started(false);
+        self.set_terminal(StatusCode::BAD_REQUEST, error_codes::BODY_READ_FAILED);
         self.finish();
     }
 
@@ -419,18 +489,40 @@ impl Inner {
             Some(code) => TerminationReason::ErrorCode(code.to_owned()),
         };
         let duration_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let accounted_ms = [
+            state.request_body_read_ms,
+            state.proxy_setup_ms,
+            state.shape_ms,
+            state.sign_ms,
+            state.upstream_ttfb_ms,
+            state.upstream_body_ms,
+            state.finalize_ms,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(0_u64, u64::saturating_add);
+        let unaccounted_ms = duration_ms.saturating_sub(accounted_ms);
+        if let Some(span) = state.request_span.as_ref() {
+            if let Some(finalize_ms) = state.finalize_ms {
+                span.record("cc_lb.request.finalize_ms", finalize_ms);
+            }
+            span.record("cc_lb.request.unaccounted_ms", unaccounted_ms);
+        }
         self.bus
             .publish_lifecycle(LifecycleEvent::RequestTerminated {
                 event_id: self.event_id.clone(),
                 reason,
                 client_status: state.status,
                 duration_ms,
+                request_body_read_ms: state.request_body_read_ms,
+                request_body_bytes: state.request_body_bytes,
                 limit_reconcile_ms: state.limit_reconcile_ms,
                 observability_post_ms: state.observability_post_ms,
                 proxy_setup_ms: state.proxy_setup_ms,
                 setup_timings: state.setup_timings,
                 upstream_body_ms: state.upstream_body_ms,
                 first_body_chunk_ms: state.first_body_chunk_ms,
+                finalize_ms: state.finalize_ms,
                 internal_errors: state.internal_errors.clone(),
             });
     }
@@ -454,6 +546,14 @@ impl Drop for Inner {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use tracing::Subscriber;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt as _};
+    use tracing_subscriber::{Layer, Registry};
+
     use super::*;
     use crate::clock::SystemClock;
     use crate::event_bus::InMemoryBus;
@@ -464,6 +564,72 @@ mod tests {
             panic!("expected InMemory lifecycle receiver");
         };
         rx
+    }
+    #[derive(Clone, Default)]
+    struct RequestTimingLayer {
+        span_ids: Arc<Mutex<Vec<Id>>>,
+        values: Arc<Mutex<HashMap<String, u64>>>,
+    }
+
+    impl<S> Layer<S> for RequestTimingLayer
+    where
+        S: Subscriber,
+    {
+        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: LayerContext<'_, S>) {
+            if attrs.metadata().name() == "proxy.handle" {
+                self.span_ids
+                    .lock()
+                    .expect("request timing span ids lock")
+                    .push(id.clone());
+            }
+        }
+
+        fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: LayerContext<'_, S>) {
+            if self
+                .span_ids
+                .lock()
+                .expect("request timing span ids lock")
+                .contains(id)
+            {
+                values.record(&mut RequestTimingVisitor {
+                    values: &self.values,
+                });
+            }
+        }
+    }
+
+    struct RequestTimingVisitor<'a> {
+        values: &'a Arc<Mutex<HashMap<String, u64>>>,
+    }
+
+    impl Visit for RequestTimingVisitor<'_> {
+        fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            if matches!(
+                field.name(),
+                "cc_lb.request.finalize_ms" | "cc_lb.request.unaccounted_ms"
+            ) {
+                self.values
+                    .lock()
+                    .expect("request timing values lock")
+                    .insert(field.name().to_owned(), value);
+            }
+        }
+    }
+
+    fn request_span() -> (tracing::Span, Arc<Mutex<HashMap<String, u64>>>) {
+        let layer = RequestTimingLayer::default();
+        let values = Arc::clone(&layer.values);
+        let subscriber = Registry::default().with(layer);
+        let span = tracing::subscriber::with_default(subscriber, || {
+            tracing::info_span!(
+                "proxy.handle",
+                cc_lb.request.finalize_ms = tracing::field::Empty,
+                cc_lb.request.unaccounted_ms = tracing::field::Empty,
+            )
+        });
+        (span, values)
     }
 
     fn expect_terminated(event: LifecycleEvent) -> (String, TerminationReason, u16) {
@@ -632,6 +798,183 @@ mod tests {
         let (_id, reason, _status) = expect_terminated(rx.recv().await.expect("emit on last drop"));
         assert!(matches!(reason, TerminationReason::Dropped));
     }
+    #[tokio::test]
+    async fn terminal_event_preserves_completed_latency_stages() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_latency_stages".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.set_request_body_timing(7, Some(4_096));
+        observer.set_request_body_timing(8, None);
+        observer.set_termination_timings(Some(1), Some(2), Some(3), Some(4), Some(5));
+        observer.set_termination_timings(None, None, None, None, None);
+        observer.set_upstream_body_ms_if_absent(99);
+        observer.set_finalize_ms(6);
+        observer.finish();
+
+        let event = rx.recv().await.expect("terminal event delivered");
+        let LifecycleEvent::RequestTerminated {
+            request_body_read_ms,
+            request_body_bytes,
+            limit_reconcile_ms,
+            observability_post_ms,
+            proxy_setup_ms,
+            upstream_body_ms,
+            first_body_chunk_ms,
+            finalize_ms,
+            ..
+        } = event
+        else {
+            panic!("expected request termination");
+        };
+        assert_eq!(request_body_read_ms, Some(8));
+        assert_eq!(request_body_bytes, Some(4_096));
+        assert_eq!(limit_reconcile_ms, Some(1));
+        assert_eq!(observability_post_ms, Some(2));
+        assert_eq!(proxy_setup_ms, Some(3));
+        assert_eq!(upstream_body_ms, Some(4));
+        assert_eq!(first_body_chunk_ms, Some(5));
+        assert_eq!(finalize_ms, Some(6));
+    }
+    #[test]
+    fn attempt_timings_preserve_present_zero_across_missing_updates() {
+        let bus = Arc::new(InMemoryBus::new());
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_attempt_timings".to_owned(),
+            bus as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+
+        observer.set_attempt_timings(Some(0), Some(2), Some(3));
+        observer.set_attempt_timings(None, None, None);
+
+        let state = observer.lock_state();
+        assert_eq!(state.shape_ms, Some(0));
+        assert_eq!(state.sign_ms, Some(2));
+        assert_eq!(state.upstream_ttfb_ms, Some(3));
+    }
+
+    #[tokio::test]
+    async fn request_span_records_event_finalize_and_saturating_unaccounted() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_request_span_timings".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        let (span, recorded) = request_span();
+        observer.set_request_span(span);
+        observer.set_request_body_timing(u64::MAX, None);
+        observer.set_termination_timings(None, None, Some(7), Some(11), None);
+        observer.set_attempt_timings(Some(13), Some(17), Some(19));
+        observer.set_finalize_ms(23);
+        observer.finish();
+
+        let event = rx.recv().await.expect("terminal event delivered");
+        let LifecycleEvent::RequestTerminated {
+            duration_ms,
+            finalize_ms,
+            ..
+        } = event
+        else {
+            panic!("expected request termination");
+        };
+        assert_eq!(finalize_ms, Some(23));
+        assert_eq!(duration_ms.saturating_sub(u64::MAX), 0);
+
+        let recorded = recorded.lock().expect("request timing values lock");
+        assert_eq!(recorded.get("cc_lb.request.finalize_ms"), Some(&23));
+        assert_eq!(recorded.get("cc_lb.request.unaccounted_ms"), Some(&0));
+    }
+
+    #[tokio::test]
+    async fn body_read_failure_finishes_explicitly_with_ingress_timing() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_body_read_failure".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.set_request_body_timing(12, None);
+        observer.record_body_read_failure();
+
+        assert!(matches!(
+            rx.recv().await.expect("request started delivered"),
+            LifecycleEvent::RequestStarted { .. }
+        ));
+        let event = rx.recv().await.expect("terminal event delivered");
+        let LifecycleEvent::RequestTerminated {
+            reason,
+            client_status,
+            request_body_read_ms,
+            request_body_bytes,
+            ..
+        } = event
+        else {
+            panic!("expected request termination");
+        };
+        assert!(matches!(
+            &reason,
+            TerminationReason::ErrorCode(code) if code == error_codes::BODY_READ_FAILED
+        ));
+        assert_eq!(client_status, StatusCode::BAD_REQUEST.as_u16());
+        assert_eq!(request_body_read_ms, Some(12));
+        assert_eq!(request_body_bytes, None);
+        drop(observer);
+        assert!(
+            rx.try_recv().is_err(),
+            "explicit body read failure must not re-emit through Drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn body_too_large_rejection_preserves_ingress_timing_without_bytes() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_body_too_large".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.set_request_body_timing(3, None);
+        observer.record_body_too_large_rejection(1_024);
+
+        assert!(matches!(
+            rx.recv().await.expect("request started delivered"),
+            LifecycleEvent::RequestStarted { .. }
+        ));
+        assert!(matches!(
+            rx.recv().await.expect("parse failure delivered"),
+            LifecycleEvent::ParseCompleted {
+                result: Err(cc_lb_lifecycle::ParseFailure::BodyTooLarge { limit_bytes: 1_024 }),
+                ..
+            }
+        ));
+        let event = rx.recv().await.expect("terminal event delivered");
+        let LifecycleEvent::RequestTerminated {
+            client_status,
+            request_body_read_ms,
+            request_body_bytes,
+            ..
+        } = event
+        else {
+            panic!("expected request termination");
+        };
+        assert_eq!(client_status, StatusCode::PAYLOAD_TOO_LARGE.as_u16());
+        assert_eq!(request_body_read_ms, Some(3));
+        assert_eq!(request_body_bytes, None);
+    }
+
     #[test]
     fn stream_error_classifier_extracts_io_reset_and_redacts_bounded_chain() {
         let secret = "Bearer abcdef.ghijkl";

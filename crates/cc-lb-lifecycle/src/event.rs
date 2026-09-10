@@ -142,6 +142,10 @@ pub enum LifecycleEvent {
         client_status: u16,
         duration_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_body_read_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_body_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         limit_reconcile_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         observability_post_ms: Option<u64>,
@@ -153,6 +157,8 @@ pub enum LifecycleEvent {
         upstream_body_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         first_body_chunk_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finalize_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         internal_errors: Vec<cc_lb_domain::InternalError>,
     },

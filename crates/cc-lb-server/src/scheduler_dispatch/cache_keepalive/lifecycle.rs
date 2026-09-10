@@ -25,6 +25,7 @@ pub(super) fn publish_renewal_lifecycle(
     event_bus: &dyn RequestEventBus,
     input: RenewalLifecycleInput<'_>,
 ) {
+    let _renewal_span = renewal_lifecycle_span(input.duration_ms).entered();
     let usage_snapshot = usage_snapshot(input.usage);
     event_bus.publish_lifecycle(LifecycleEvent::RequestStarted {
         event_id: input.event_id.to_owned(),
@@ -133,6 +134,9 @@ pub(super) fn publish_renewal_lifecycle(
         reason: TerminationReason::Success,
         client_status: input.status,
         duration_ms: input.duration_ms,
+        request_body_read_ms: None,
+        request_body_bytes: None,
+        finalize_ms: None,
         limit_reconcile_ms: None,
         observability_post_ms: None,
         proxy_setup_ms: None,
@@ -141,6 +145,15 @@ pub(super) fn publish_renewal_lifecycle(
         first_body_chunk_ms: None,
         internal_errors: Vec::new(),
     });
+}
+
+fn renewal_lifecycle_span(duration_ms: u64) -> tracing::Span {
+    tracing::info_span!(
+        "cache_keepalive.renewal_lifecycle",
+        otel.kind = "internal",
+        cc_lb.source_kind = "renewal",
+        cc_lb.renewal_cycle_ms = duration_ms,
+    )
 }
 
 fn upstream_kind_label(kind: UpstreamKind) -> &'static str {
@@ -187,5 +200,85 @@ fn route_info(upstream: &UpstreamRecord, model: &str) -> RouteInfo {
         quota_warning_multiplier: None,
         lineage_would_have_predicted_read_tokens: None,
         lineage_would_have_picked_upstream_id: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::Subscriber;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id};
+    use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt as _};
+    use tracing_subscriber::{Layer, Registry};
+
+    use super::renewal_lifecycle_span;
+
+    #[derive(Clone, Default)]
+    struct RenewalSpanLayer {
+        values: Arc<Mutex<HashMap<String, String>>>,
+    }
+
+    impl<S> Layer<S> for RenewalSpanLayer
+    where
+        S: Subscriber,
+    {
+        fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: LayerContext<'_, S>) {
+            if attrs.metadata().name() == "cache_keepalive.renewal_lifecycle" {
+                attrs.values().record(&mut RenewalSpanVisitor {
+                    values: &self.values,
+                });
+            }
+        }
+    }
+
+    struct RenewalSpanVisitor<'a> {
+        values: &'a Arc<Mutex<HashMap<String, String>>>,
+    }
+
+    impl Visit for RenewalSpanVisitor<'_> {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.insert(field, format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.insert(field, value.to_owned());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.insert(field, value.to_string());
+        }
+    }
+
+    impl RenewalSpanVisitor<'_> {
+        fn insert(&self, field: &Field, value: String) {
+            self.values
+                .lock()
+                .expect("renewal span values lock")
+                .insert(field.name().to_owned(), value);
+        }
+    }
+
+    #[test]
+    fn renewal_lifecycle_span_records_source_and_cycle_duration() {
+        let layer = RenewalSpanLayer::default();
+        let values = Arc::clone(&layer.values);
+        let subscriber = Registry::default().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let _span = renewal_lifecycle_span(37);
+        });
+
+        let values = values.lock().expect("renewal span values lock");
+        assert_eq!(
+            values.get("cc_lb.source_kind").map(String::as_str),
+            Some("renewal")
+        );
+        assert_eq!(
+            values.get("cc_lb.renewal_cycle_ms").map(String::as_str),
+            Some("37")
+        );
     }
 }

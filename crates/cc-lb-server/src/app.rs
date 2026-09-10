@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -2615,18 +2615,46 @@ async fn lifecycle_handler(
 ) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let cap = state.body_caps.for_path(parts.uri.path());
-    let body = match read_request_body(&parts.headers, body, cap)
-        .instrument(tracing::info_span!("proxy.read_request_body"))
-        .await
-    {
-        Ok(body) => body,
-        Err(RequestBodyReadError::TooLarge) => {
+    let body_read_started = Instant::now();
+    let body_read_span = tracing::info_span!(
+        "proxy.read_request_body",
+        "cc_lb.request_body_read_ms" = tracing::field::Empty,
+        "http.request.body.size" = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+    );
+    let body_result = read_request_body(&parts.headers, body, cap)
+        .instrument(body_read_span.clone())
+        .await;
+    let body_read_ms = body_read_started
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    body_read_span.record("cc_lb.request_body_read_ms", body_read_ms);
+
+    let body = match body_result {
+        Ok(body) => {
+            let body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
+            body_read_span.record("http.request.body.size", body_bytes);
+            body_read_span.record("outcome", "success");
             if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
+                observer.set_request_body_timing(body_read_ms, Some(body_bytes));
+            }
+            body
+        }
+        Err(RequestBodyReadError::TooLarge) => {
+            body_read_span.record("outcome", "too_large");
+            if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
+                observer.set_request_body_timing(body_read_ms, None);
                 observer.record_body_too_large_rejection(cap as u64);
             }
             return body_too_large_response();
         }
         Err(RequestBodyReadError::Read(source)) => {
+            body_read_span.record("outcome", "read_error");
+            if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
+                observer.set_request_body_timing(body_read_ms, None);
+                observer.record_body_read_failure();
+            }
             let mut response = Response::new(Body::from(format!("body read failed: {source}")));
             *response.status_mut() = StatusCode::BAD_REQUEST;
             return response;
