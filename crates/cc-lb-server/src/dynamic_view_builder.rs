@@ -1488,8 +1488,6 @@ mod tests {
             prefix_content_block_index: 0,
             estimated_prefix_tokens: 0,
             token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
-            last_provider_cache_read_tokens: Some(0),
-            last_provider_cache_creation_tokens: Some(0),
         }
     }
 
@@ -1561,8 +1559,6 @@ mod tests {
             prefix_content_block_index: 0,
             estimated_prefix_tokens: 0,
             token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
-            last_provider_cache_read_tokens: Some(0),
-            last_provider_cache_creation_tokens: Some(0),
         };
         sink.enqueue(record.clone())
             .expect("enqueue succeeds while writer is alive");

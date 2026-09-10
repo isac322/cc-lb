@@ -8,7 +8,7 @@ use fake_anthropic::{AppConfig, MessageScript, ScriptedMessageResponse};
 use serde_json::{Value, json};
 
 const MODEL: &str = "claude-sonnet-4-5-20250929";
-const TOKEN_ESTIMATE_SOURCE: &str = "local_tiktoken_v1";
+const TOKEN_ESTIMATE_SOURCE: &str = "serialized_prefix_bytes_v1";
 const HASH_SCHEMA_VERSION: i64 = cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION as i64;
 
 fn assert_message_response(response: &common::RawResponse, usage_field: &str) -> Value {
@@ -326,10 +326,10 @@ async fn tool_choice_change_breaks_message_prefix_but_not_the_tools_prefix() {
 
 /// Opus 4.7's minimum cacheable prefix is 2048 tokens, not the 4096 the table used to claim.
 ///
-/// A prefix in the 2048..4096 band is cacheable at the provider but was being discarded here as
-/// below-threshold, so no warm entry was written and cache affinity never engaged for it. The
-/// assertions are positive — an observation must exist AND its estimate must fall inside the band
-/// — so a slow or dead persistence pipeline fails loudly instead of reading as a pass.
+/// The fixed request exercises that former regression while the fake provider reports 3000
+/// cache-creation tokens. The observable contract is that cc-lb persists a warm observation.
+/// `estimated_prefix_tokens` now stores serialized prefix bytes, so its numeric value must not be
+/// compared with the provider's token threshold.
 #[tokio::test]
 async fn opus_4_7_records_a_warm_entry_for_a_prefix_between_2048_and_4096_tokens() {
     const OPUS_4_7: &str = "claude-opus-4-7";
@@ -366,17 +366,11 @@ refresh_debounce_secs = 0
         .expect("send opus-4-7 request through cc-lb proxy");
     assert_eq!(response.status, 200);
 
-    let (count, max_tokens) =
-        support::observation_stats(&pool, OPUS_4_7, Duration::from_secs(10)).await;
+    let (count, _) = support::observation_stats(&pool, OPUS_4_7, Duration::from_secs(10)).await;
     assert!(
         count > 0,
         "an Opus 4.7 prefix above the 2048 provider minimum must persist a warm entry; the old \
          4096 threshold dropped it. observations={count}"
-    );
-    assert!(
-        (2048..4096).contains(&max_tokens),
-        "fixture must exercise the 2048..4096 band the old threshold discarded, otherwise this \
-         test passes under either threshold; estimated {max_tokens} tokens"
     );
 }
 

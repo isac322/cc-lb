@@ -24,9 +24,6 @@ type BoxedRegistryLayer = Box<dyn Layer<Registry> + Send + Sync>;
 
 static PANIC_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-const CACHE_TOKEN_DRIFT_BUCKETS: [f64; 11] = [
-    -1000.0, -500.0, -100.0, -50.0, -10.0, 0.0, 10.0, 50.0, 100.0, 500.0, 1000.0,
-];
 const REQUEST_DURATION_BUCKETS: [f64; 12] = [
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
@@ -119,7 +116,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 55] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 54] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -283,7 +280,6 @@ const METRIC_DEFINITIONS: [MetricDefinition; 55] = [
     PROMETHEUS14_METRIC_DEFINITIONS[15],
     PROMETHEUS14_METRIC_DEFINITIONS[16],
     PROMETHEUS14_METRIC_DEFINITIONS[17],
-    PROMETHEUS14_METRIC_DEFINITIONS[18],
     MetricDefinition {
         name: "cc_lb_prompt_cache_analysis_duration_seconds",
         kind: MetricKind::Histogram,
@@ -312,7 +308,7 @@ const METRIC_DEFINITIONS: [MetricDefinition; 55] = [
     MetricDefinition {
         name: "cc_lb_prompt_cache_tokenizer_fallback_prefixes_total",
         kind: MetricKind::Counter,
-        description: "Total prompt-cache prefixes counted by the exact fallback path.",
+        description: "Total prompt-cache prefixes requiring tokenizer threshold fallback.",
     },
     MetricDefinition {
         name: "cc_lb_prompt_cache_analysis_worker_failed_total",
@@ -570,7 +566,7 @@ pub fn register_metrics() {
     metrics::describe_counter!(
         "cc_lb_prompt_cache_tokenizer_fallback_prefixes_total",
         Unit::Count,
-        "Total prompt-cache prefixes counted by the exact fallback path."
+        "Total prompt-cache prefixes requiring tokenizer threshold fallback."
     );
     metrics::describe_counter!(
         "cc_lb_prompt_cache_analysis_worker_failed_total",
@@ -615,13 +611,6 @@ fn install_prometheus(cfg: &ObservabilityConfig) -> Result<Option<PrometheusHand
         .set_buckets_for_metric(
             Matcher::Full("subscription_quota_writer_batch_size".to_owned()),
             &SUBSCRIPTION_QUOTA_BATCH_BUCKETS,
-        )
-        .map_err(|source| InitError::Prometheus {
-            message: source.to_string(),
-        })?
-        .set_buckets_for_metric(
-            Matcher::Full("cc_lb_cache_token_drift".to_owned()),
-            &CACHE_TOKEN_DRIFT_BUCKETS,
         )
         .map_err(|source| InitError::Prometheus {
             message: source.to_string(),

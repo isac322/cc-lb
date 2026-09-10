@@ -5,6 +5,7 @@ use cc_lb_engine::clock::{ClockHandle, unix_secs};
 use cc_lb_engine::lifecycle::{
     PromptCacheObservationCacheLike, PromptCacheObservationInput, PromptCacheThreadUsage,
 };
+use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
 use cc_lb_storage_api::{PromptCacheObservationStore, StorageResult};
 use parking_lot::RwLock;
 use uuid::Uuid;
@@ -249,6 +250,9 @@ impl PromptCacheObservationCache {
                 if entry.expires_at_unix_secs <= now_unix_secs {
                     return None;
                 }
+                if entry.token_estimate_source != V3_TOKEN_ESTIMATE_SOURCE {
+                    return None;
+                }
                 let requested =
                     request_breakpoint_hashes
                         .iter()
@@ -299,6 +303,9 @@ impl PromptCacheObservationCache {
                 continue;
             };
             if entry.expires_at_unix_secs <= now_unix_secs {
+                continue;
+            }
+            if entry.token_estimate_source != V3_TOKEN_ESTIMATE_SOURCE {
                 continue;
             }
             let candidate = WarmCacheEntry {
@@ -1174,8 +1181,6 @@ pub(crate) mod tests {
             prefix_content_block_index: 0,
             estimated_prefix_tokens: 0,
             token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
-            last_provider_cache_read_tokens: Some(0),
-            last_provider_cache_creation_tokens: Some(0),
         }
     }
 

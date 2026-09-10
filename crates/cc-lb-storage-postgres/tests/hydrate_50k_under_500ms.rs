@@ -172,8 +172,6 @@ fn observation(
         prefix_content_block_index: u32::try_from(record_index).expect("record index fits u32"),
         estimated_prefix_tokens: 1_000 + record_index as u64,
         token_estimate_source: "local_tiktoken_v1".to_owned(),
-        last_provider_cache_read_tokens: Some(900 + record_index as u64),
-        last_provider_cache_creation_tokens: Some(100),
     }
 }
 

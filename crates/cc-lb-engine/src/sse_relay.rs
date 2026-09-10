@@ -880,6 +880,9 @@ mod tests {
                 upstream_id,
                 canonical_model_id: TEST_MODEL.to_owned(),
                 cache_breakpoints: vec![cache_breakpoint(0, "write", 1_600, TtlClass::Ephemeral5m)],
+                cacheable_breakpoint_prefix_keys: std::collections::HashSet::from([
+                    "write".to_owned()
+                ]),
                 selected_match: None,
                 cache,
             }),

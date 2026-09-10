@@ -40,8 +40,6 @@ async fn prompt_cache_v3_observation_roundtrips_and_filters_by_key() {
         prefix_content_block_index: 17,
         estimated_prefix_tokens: 12_345,
         token_estimate_source: "local_tiktoken_v1".to_owned(),
-        last_provider_cache_read_tokens: Some(12_000),
-        last_provider_cache_creation_tokens: Some(345),
     };
 
     storage

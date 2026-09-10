@@ -20,17 +20,15 @@ impl PromptCacheObservationStore for SqliteStorage {
     async fn upsert_observation(&self, record: &PromptCacheObservationRecord) -> StorageResult<()> {
         sqlx::query(
             "INSERT INTO prompt_cache_observations \
-             (upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source, last_provider_cache_read_tokens, last_provider_cache_creation_tokens) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             (upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(upstream_id, canonical_model_id, v3_prefix_key, ttl_class) DO UPDATE SET \
              expires_at = excluded.expires_at, \
              last_observed_at = excluded.last_observed_at, \
              hash_schema_version = excluded.hash_schema_version, \
              prefix_content_block_index = excluded.prefix_content_block_index, \
              estimated_prefix_tokens = excluded.estimated_prefix_tokens, \
-             token_estimate_source = excluded.token_estimate_source, \
-             last_provider_cache_read_tokens = excluded.last_provider_cache_read_tokens, \
-             last_provider_cache_creation_tokens = excluded.last_provider_cache_creation_tokens",
+             token_estimate_source = excluded.token_estimate_source",
         )
         .bind(record.upstream_id.to_string())
         .bind(&record.canonical_model_id)
@@ -42,8 +40,6 @@ impl PromptCacheObservationStore for SqliteStorage {
         .bind(i64::from(record.prefix_content_block_index))
         .bind(u64_to_i64(record.estimated_prefix_tokens, "prompt cache estimated_prefix_tokens")?)
         .bind(&record.token_estimate_source)
-        .bind(option_u64_to_i64(record.last_provider_cache_read_tokens, "prompt cache last_provider_cache_read_tokens")?)
-        .bind(option_u64_to_i64(record.last_provider_cache_creation_tokens, "prompt cache last_provider_cache_creation_tokens")?)
         .execute(self.pool())
         .await
         .map_err(map_sqlx_error)?;
@@ -56,7 +52,7 @@ impl PromptCacheObservationStore for SqliteStorage {
         not_expired_at_unix_secs: u64,
     ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
         let rows = sqlx::query(
-            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source, last_provider_cache_read_tokens, last_provider_cache_creation_tokens \
+            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source \
              FROM prompt_cache_observations \
              WHERE upstream_id = ? AND expires_at > ? \
              ORDER BY v3_prefix_key, ttl_class",
@@ -83,7 +79,7 @@ impl PromptCacheObservationStore for SqliteStorage {
             return Ok(Vec::new());
         }
         let mut query_builder = QueryBuilder::<Sqlite>::new(
-            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source, last_provider_cache_read_tokens, last_provider_cache_creation_tokens \
+            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source \
              FROM prompt_cache_observations \
              WHERE upstream_id = ",
         );
@@ -188,16 +184,6 @@ fn row_to_record(row: sqlx::sqlite::SqliteRow) -> StorageResult<PromptCacheObser
         token_estimate_source: row
             .try_get("token_estimate_source")
             .map_err(map_sqlx_error)?,
-        last_provider_cache_read_tokens: option_i64_to_u64(
-            row.try_get("last_provider_cache_read_tokens")
-                .map_err(map_sqlx_error)?,
-            "prompt cache last_provider_cache_read_tokens",
-        )?,
-        last_provider_cache_creation_tokens: option_i64_to_u64(
-            row.try_get("last_provider_cache_creation_tokens")
-                .map_err(map_sqlx_error)?,
-            "prompt cache last_provider_cache_creation_tokens",
-        )?,
     })
 }
 
@@ -231,16 +217,8 @@ fn u64_to_i64(value: u64, field: &str) -> StorageResult<i64> {
     })
 }
 
-fn option_u64_to_i64(value: Option<u64>, field: &str) -> StorageResult<Option<i64>> {
-    value.map(|value| u64_to_i64(value, field)).transpose()
-}
-
 fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
     u64::try_from(value).map_err(|_| StorageError::Corrupted {
         message: format!("negative {field} value {value}"),
     })
-}
-
-fn option_i64_to_u64(value: Option<i64>, field: &str) -> StorageResult<Option<u64>> {
-    value.map(|value| i64_to_u64(value, field)).transpose()
 }

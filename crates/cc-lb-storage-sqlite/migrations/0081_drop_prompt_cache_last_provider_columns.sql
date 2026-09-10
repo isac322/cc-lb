@@ -1,0 +1,2 @@
+ALTER TABLE prompt_cache_observations DROP COLUMN last_provider_cache_read_tokens;
+ALTER TABLE prompt_cache_observations DROP COLUMN last_provider_cache_creation_tokens;

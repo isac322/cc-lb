@@ -12,7 +12,7 @@ Request logs expose eight optional, request-scoped setup timings. They originate
 | `cache_serialize_ms` | Materializing exact serialized prefix bytes and breakpoint offsets for token counting. Structural analysis and token-key hashing are outside the interval. |
 | `cache_token_key_ms` | Computing credential-scoped exact token-prefix BLAKE3 keys from the materialized bytes. Serialization and cache access are outside the interval. |
 | `cache_count_lookup_ms` | The sum of distributed exact token-count cache intervals: claim, hit/miss bookkeeping, leader completion, coalesced follower wait, and count retrieval. Actual leader or fallback tokenization intervals are excluded. Paths that bypass the count cache record measured zero. |
-| `cache_tokenize_ms` | Exact BPE tokenization performed by a cache leader or reference fallback, including serialization-error, unavailable-semaphore, and worker-join fallback paths. A completed cache-hit analysis records `0`. |
+| `cache_tokenize_ms` | Exact BPE tokenization used only when serialized prefix bytes fall between the hybrid threshold's fast-reject and fast-accept bounds. Byte fast paths and reference fallbacks record `0`; a warm analysis can still record a positive value when its prefix remains in the ambiguous byte band. |
 | `prepare_signer_ms` | The full awaited `signer_factory.build(&route.upstream)` call, including lookup, decrypt, and lazy OAuth refresh when present. Request signing remains in `sign_ms`. |
 
 Values use fractional milliseconds (`f64` in Rust and `number` in TypeScript). Lifecycle-produced values come from monotonic `Duration` measurements and are finite and non-negative. Every field is optional so rows written by earlier versions still deserialize and render.
@@ -26,7 +26,7 @@ The request path records stages in this order:
 3. Run structural analysis and record `cache_structure_ms`.
 4. Materialize exact token-prefix bytes and record `cache_serialize_ms`.
 5. Compute credential-scoped token keys and record `cache_token_key_ms`.
-6. Claim or retrieve cached token counts and record `cache_count_lookup_ms`. Leader or fallback tokenization is timed separately as `cache_tokenize_ms`.
+6. Claim or retrieve cached prefix sizes and record `cache_count_lookup_ms`. Hybrid threshold evaluation runs afterward; only ambiguous prefixes are tokenized and timed as `cache_tokenize_ms`.
 7. Authenticate, route, and reserve limits using their existing timing fields.
 8. Build the selected upstream signer and record `prepare_signer_ms`.
 9. Shape and sign the outbound request using the existing `shape_ms` and `sign_ms` stages.

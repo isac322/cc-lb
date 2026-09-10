@@ -623,7 +623,6 @@ async fn lqa_3a_bus_drop_counters_do_not_increment_under_burst() {
         "lifecycle_limit_rejection_audit_full",
         "lifecycle_api_key_metrics_full",
         "lifecycle_cache_hit_miss_full",
-        "lifecycle_prompt_cache_drift_full",
         "lifecycle_prompt_cache_observation_full",
         "sse_lagged",
     ] {
