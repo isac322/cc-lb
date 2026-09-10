@@ -593,7 +593,7 @@ Acceptance:
 | Command scope | Result |
 | --- | --- |
 | Rust workspace check and clippy, SQLite and PostgreSQL feature configurations | PASS |
-| Engine tests | PASS — 507 |
+| Engine tests | PASS — 508 |
 | Server tests | PASS — 176 |
 | Lifecycle tests | PASS — 6 |
 | Pricing tests | PASS — 35 + 9 |

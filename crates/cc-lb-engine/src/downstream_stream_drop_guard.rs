@@ -140,13 +140,19 @@ impl Drop for DownstreamStreamDropGuard {
         if self.finalized {
             return;
         }
-        if let Some((outcome, cause)) = self.pending_terminal {
-            self.record_terminal(outcome, cause);
-            return;
-        }
         let cancellation_at = Instant::now();
         let response_body_ms =
             duration_to_ms(cancellation_at.saturating_duration_since(self.relay_start));
+        if let Some((outcome, cause)) = self.pending_terminal {
+            let finalize_ms = duration_to_ms(cancellation_at.elapsed());
+            if let Some(observer) = self.observer.as_ref() {
+                observer.set_upstream_body_ms_if_absent(response_body_ms);
+                observer.set_finalize_ms(finalize_ms);
+            }
+            self.record_response_timings(response_body_ms, finalize_ms);
+            self.record_terminal(outcome, cause);
+            return;
+        }
         if let Some(observer) = self.observer.take()
             && let Ok(status) = StatusCode::from_u16(CLIENT_CLOSED_STATUS)
         {
@@ -364,6 +370,64 @@ mod tests {
         assert_eq!(
             recorded_once(&values, "http.response.status_code"),
             Some(u64::from(StatusCode::BAD_GATEWAY.as_u16()))
+        );
+        assert!(recorded_once(&values, "cc_lb.response_body_ms").is_some());
+        assert!(recorded_once(&values, "cc_lb.request.finalize_ms").is_some());
+    }
+
+    #[tokio::test]
+    async fn pending_error_drop_preserves_partial_body_and_finalize_timing() {
+        let bus = Arc::new(InMemoryBus::new());
+        let LifecycleBusReceiver::InMemory(mut rx) = bus.subscribe_lifecycle() else {
+            panic!("expected in-memory lifecycle receiver");
+        };
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "pending-error-drop".to_owned(),
+            bus as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.set_terminal(StatusCode::BAD_GATEWAY, error_codes::UPSTREAM_5XX);
+        let relay_start = Instant::now()
+            .checked_sub(Duration::from_millis(25))
+            .expect("relay start before error drop");
+        let (span, span_timings) = response_stream_span();
+        let mut guard = DownstreamStreamDropGuard::armed(
+            Some(observer),
+            span,
+            StatusCode::BAD_GATEWAY,
+            None,
+            relay_start,
+        );
+        guard.mark_upstream_error(StreamTerminationCause::H2Reset, None);
+
+        drop(guard);
+
+        let LifecycleEvent::RequestTerminated {
+            reason,
+            client_status,
+            upstream_body_ms,
+            finalize_ms,
+            ..
+        } = rx.recv().await.expect("terminal event delivered")
+        else {
+            panic!("expected request termination");
+        };
+        assert_eq!(
+            reason,
+            TerminationReason::ErrorCode(error_codes::UPSTREAM_5XX.to_owned())
+        );
+        assert_eq!(client_status, StatusCode::BAD_GATEWAY.as_u16());
+        assert!(upstream_body_ms.is_some_and(|elapsed| elapsed >= 25));
+        assert!(finalize_ms.is_some());
+        let span_timings = span_timings.lock().expect("response timing values lock");
+        assert_eq!(
+            recorded_once(&span_timings, "cc_lb.response_body_ms"),
+            upstream_body_ms
+        );
+        assert_eq!(
+            recorded_once(&span_timings, "cc_lb.request.finalize_ms"),
+            finalize_ms
         );
     }
 
