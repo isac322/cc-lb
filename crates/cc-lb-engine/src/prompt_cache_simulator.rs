@@ -15,10 +15,13 @@ use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
+use crate::tokenizer::{PrefixTokenizer, cache_threshold_from_byte_len};
+
 mod optimized;
 
-pub(crate) use optimized::{PromptCacheAnalysisExecutor, PromptCacheAnalysisTimings};
-
+pub(crate) use optimized::{
+    PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
+};
 pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "serialized_prefix_bytes_v1";
 
 /// Anthropic's shared cap for resolved explicit and automatic breakpoints. Provider-invalid
@@ -313,6 +316,43 @@ impl Serialize for PrefixValueSerializer<'_, '_> {
                 map.end()
             }
         }
+    }
+}
+
+struct OwnedPrefixSerializer<'a> {
+    model: &'a str,
+    blocks: &'a [V3PromptCacheBlock],
+}
+
+impl Serialize for OwnedPrefixSerializer<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("content_blocks", &OwnedPrefixBlocksSerializer(self.blocks))?;
+        map.serialize_entry("model", self.model)?;
+        map.end()
+    }
+}
+
+struct OwnedPrefixBlocksSerializer<'a>(&'a [V3PromptCacheBlock]);
+
+impl Serialize for OwnedPrefixBlocksSerializer<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for block in self.0 {
+            sequence.serialize_element(&OwnedPrefixBlockSerializer(block))?;
+        }
+        sequence.end()
+    }
+}
+
+struct OwnedPrefixBlockSerializer<'a>(&'a V3PromptCacheBlock);
+
+impl Serialize for OwnedPrefixBlockSerializer<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("source", source_name(self.0.source))?;
+        map.serialize_entry("value", &self.0.value)?;
+        map.end()
     }
 }
 
@@ -804,6 +844,61 @@ fn serialized_prefix<'a>(
     })
 }
 
+pub(crate) fn cacheable_breakpoint_prefix_keys(
+    analysis: &V3PromptCacheAnalysis,
+    canonical_model: &str,
+    token_threshold: usize,
+) -> Vec<String> {
+    cacheable_breakpoint_prefix_keys_with_tokenize_duration(
+        analysis,
+        canonical_model,
+        token_threshold,
+        true,
+    )
+    .0
+}
+
+pub(super) fn cacheable_breakpoint_prefix_keys_with_tokenize_duration(
+    analysis: &V3PromptCacheAnalysis,
+    canonical_model: &str,
+    token_threshold: usize,
+    tokenize_ambiguous: bool,
+) -> (Vec<String>, Duration) {
+    let mut scratch = SerializationScratch::default();
+    let mut tokenization_duration = Duration::ZERO;
+    let keys = analysis
+        .breakpoints
+        .iter()
+        .filter_map(|breakpoint| {
+            let byte_len = usize::try_from(breakpoint.prefix_token_count).unwrap_or(usize::MAX);
+            let accepted = match cache_threshold_from_byte_len(byte_len, token_threshold) {
+                Some(decision) => decision,
+                None => {
+                    if !tokenize_ambiguous {
+                        return None;
+                    }
+                    let block_index = usize::try_from(breakpoint.block_index).ok()?;
+                    let blocks = analysis.blocks.get(..=block_index)?;
+                    let bytes = scratch.serialize(&OwnedPrefixSerializer {
+                        model: canonical_model,
+                        blocks,
+                    });
+                    debug_assert_eq!(bytes.len(), byte_len);
+                    let started = Instant::now();
+                    let accepted =
+                        PrefixTokenizer::global().meets_cache_threshold(bytes, token_threshold);
+                    tokenization_duration =
+                        tokenization_duration.saturating_add(started.elapsed());
+                    scratch.clear_for_reuse();
+                    accepted
+                }
+            };
+            accepted.then(|| breakpoint.prefix_key.clone())
+        })
+        .collect();
+    (keys, tokenization_duration)
+}
+
 fn lookback_prefixes(
     chain: &PromptCachePrefixChain,
     block_index: usize,
@@ -838,7 +933,9 @@ mod tests {
         tokenizer::{reset_tokenizer_call_count, tokenizer_call_count},
     };
 
-    use super::{V3PromptCacheBlockSource, analyze_v3_prompt_cache};
+    use super::{
+        V3PromptCacheBlockSource, analyze_v3_prompt_cache, cacheable_breakpoint_prefix_keys,
+    };
 
     #[test]
     fn flattens_tools_system_messages_in_provider_order() {
@@ -1322,6 +1419,53 @@ mod tests {
 
         assert_eq!(analysis.breakpoints.len(), 4);
         assert_eq!(tokenizer_call_count(), 0);
+    }
+
+    #[test]
+    fn large_threshold_prefix_skips_tokenizer() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "a".repeat(20_000),
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }]
+        });
+        let model = canonical_model_id("claude-sonnet-4-5");
+        let analysis = analyze_v3_prompt_cache(&request, model);
+
+        reset_tokenizer_call_count();
+        let keys = cacheable_breakpoint_prefix_keys(&analysis, model, 1_024);
+
+        assert_eq!(keys, vec![analysis.breakpoints[0].prefix_key.clone()]);
+        assert_eq!(tokenizer_call_count(), 0);
+    }
+
+    #[test]
+    fn ambiguous_threshold_prefix_uses_tokenizer() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "a".repeat(2_000),
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }]
+        });
+        let model = canonical_model_id("claude-sonnet-4-5");
+        let analysis = analyze_v3_prompt_cache(&request, model);
+        assert!((1_024..8_192).contains(&analysis.breakpoints[0].prefix_token_count));
+
+        reset_tokenizer_call_count();
+        let keys = cacheable_breakpoint_prefix_keys(&analysis, model, 1_024);
+
+        assert!(keys.is_empty());
+        assert_eq!(tokenizer_call_count(), 1);
     }
 
     #[test]

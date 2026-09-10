@@ -13,10 +13,10 @@ use super::analyze_v3_prompt_cache;
 use super::{
     CacheBlockRef, PrefixBlockSerializer, SerializationScratch, V3PromptCacheAnalysis,
     V3StructuralBreakpoint, analyze_v3_prompt_cache_structure,
-    analyze_v3_prompt_cache_with_tokenize_duration, finish_structural_analysis,
+    analyze_v3_prompt_cache_with_tokenize_duration,
+    cacheable_breakpoint_prefix_keys_with_tokenize_duration, finish_structural_analysis,
     unanalyzable_prompt_cache,
 };
-use crate::tokenizer::TokenizerBatchStats;
 
 const TOKEN_PREFIX_KEY_DOMAIN: &[u8] = b"cc-lb-token-prefix-v1\0";
 const DEFAULT_TOKEN_COUNT_CACHE_CAPACITY: usize = 8_192;
@@ -204,6 +204,7 @@ pub(crate) struct PromptCacheAnalysisTimings {
 
 pub(crate) struct PromptCacheAnalysisOutput {
     pub(crate) analysis: V3PromptCacheAnalysis,
+    pub(crate) cacheable_breakpoint_prefix_keys: Vec<String>,
     pub(crate) timings: PromptCacheAnalysisTimings,
 }
 
@@ -271,17 +272,8 @@ struct PromptCacheAnalysisStats {
     cache_hits: u64,
     cache_misses: u64,
     cache_coalesced: u64,
-    tokenization_duration: Duration,
-    tokenizer: TokenizerBatchStats,
 }
 fn record_analysis_metrics(stats: PromptCacheAnalysisStats, total_duration: Duration) {
-    if stats.tokenizer.input_bytes > 0 {
-        metrics::histogram!(
-            "cc_lb_prompt_cache_analysis_duration_seconds",
-            "stage" => "tokenize"
-        )
-        .record(stats.tokenization_duration.as_secs_f64());
-    }
     metrics::histogram!(
         "cc_lb_prompt_cache_analysis_duration_seconds",
         "stage" => "total"
@@ -299,14 +291,6 @@ fn record_analysis_metrics(stats: PromptCacheAnalysisStats, total_duration: Dura
             )
             .increment(count);
         }
-    }
-    metrics::counter!("cc_lb_prompt_cache_tokenized_bytes_total")
-        .increment(stats.tokenizer.input_bytes);
-    metrics::counter!("cc_lb_prompt_cache_tokenized_tokens_total")
-        .increment(stats.tokenizer.produced_tokens);
-    if stats.tokenizer.fallback_prefixes > 0 {
-        metrics::counter!("cc_lb_prompt_cache_tokenizer_fallback_prefixes_total")
-            .increment(stats.tokenizer.fallback_prefixes);
     }
 }
 
@@ -418,22 +402,20 @@ fn compute_token_prefix_keys(
     Some(keys)
 }
 
-fn full_prefix_counts(batch: &ExactPrefixBatch) -> (Vec<u64>, TokenizerBatchStats) {
+fn full_prefix_counts(batch: &ExactPrefixBatch) -> Vec<u64> {
     let suffix_len = batch.suffix_bytes.len() as u64;
-    let mut stats = TokenizerBatchStats::default();
-    let mut counts = Vec::with_capacity(batch.breakpoint_offsets.len());
-    for &offset in &batch.breakpoint_offsets {
-        let prefix_len = batch
-            .open_prefix_bytes
-            .get(..offset)
-            .map(|prefix| prefix.len() as u64)
-            .unwrap_or(0);
-        let count = prefix_len.saturating_add(suffix_len);
-        stats.input_bytes = stats.input_bytes.max(count);
-        stats.produced_tokens = stats.produced_tokens.max(count);
-        counts.push(count);
-    }
-    (counts, stats)
+    batch
+        .breakpoint_offsets
+        .iter()
+        .map(|&offset| {
+            batch
+                .open_prefix_bytes
+                .get(..offset)
+                .map(|prefix| prefix.len() as u64)
+                .unwrap_or(0)
+                .saturating_add(suffix_len)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -511,10 +493,7 @@ fn analyze_v3_prompt_cache_optimized_scoped(
     let mut leader_guard = LeaderFlightsGuard::new(cache, leader_flights);
     let mut computed_counts = None;
     if !leader_guard.flights.is_empty() {
-        let tokenization_started = Instant::now();
-        let (counts, tokenizer_stats) = full_prefix_counts(&batch);
-        stats.tokenization_duration = tokenization_started.elapsed();
-        stats.tokenizer = tokenizer_stats;
+        let counts = full_prefix_counts(&batch);
         let lookup_started = Instant::now();
         for (position, claim) in claims.iter().enumerate() {
             if let CacheClaim::Leader(flight) = claim {
@@ -530,34 +509,11 @@ fn analyze_v3_prompt_cache_optimized_scoped(
     for (position, claim) in claims.into_iter().enumerate() {
         let value = match claim {
             CacheClaim::Hit(value) => value,
-            CacheClaim::Leader(_) => {
-                if let Some(value) = computed_counts
-                    .as_ref()
-                    .and_then(|counts| counts.get(position))
-                    .copied()
-                {
-                    value
-                } else {
-                    let tokenization_started = Instant::now();
-                    let (counts, retry_stats) = full_prefix_counts(&batch);
-                    stats.tokenization_duration = stats
-                        .tokenization_duration
-                        .saturating_add(tokenization_started.elapsed());
-                    stats.tokenizer.input_bytes = stats
-                        .tokenizer
-                        .input_bytes
-                        .saturating_add(retry_stats.input_bytes);
-                    stats.tokenizer.produced_tokens = stats
-                        .tokenizer
-                        .produced_tokens
-                        .saturating_add(retry_stats.produced_tokens);
-                    stats.tokenizer.fallback_prefixes = stats
-                        .tokenizer
-                        .fallback_prefixes
-                        .saturating_add(retry_stats.fallback_prefixes);
-                    counts[position]
-                }
-            }
+            CacheClaim::Leader(_) => computed_counts
+                .as_ref()
+                .and_then(|counts| counts.get(position))
+                .copied()
+                .unwrap_or_else(|| full_prefix_counts(&batch)[position]),
             CacheClaim::Follower(flight) => {
                 let lookup_started = Instant::now();
                 let waited = flight.wait();
@@ -566,23 +522,7 @@ fn analyze_v3_prompt_cache_optimized_scoped(
                 match waited {
                     Some(value) => value,
                     None => {
-                        let tokenization_started = Instant::now();
-                        let (counts, retry_stats) = full_prefix_counts(&batch);
-                        stats.tokenization_duration = stats
-                            .tokenization_duration
-                            .saturating_add(tokenization_started.elapsed());
-                        stats.tokenizer.input_bytes = stats
-                            .tokenizer
-                            .input_bytes
-                            .saturating_add(retry_stats.input_bytes);
-                        stats.tokenizer.produced_tokens = stats
-                            .tokenizer
-                            .produced_tokens
-                            .saturating_add(retry_stats.produced_tokens);
-                        stats.tokenizer.fallback_prefixes = stats
-                            .tokenizer
-                            .fallback_prefixes
-                            .saturating_add(retry_stats.fallback_prefixes);
+                        let counts = full_prefix_counts(&batch);
                         let value = counts[position];
                         let lookup_started = Instant::now();
                         cache.insert_value(batch.token_prefix_keys[position], value);
@@ -597,7 +537,7 @@ fn analyze_v3_prompt_cache_optimized_scoped(
     }
 
     durations.count_lookup = Some(count_lookup_duration);
-    durations.tokenize = Some(stats.tokenization_duration);
+    durations.tokenize = Some(Duration::ZERO);
     let analysis = finish_structural_analysis(structural, prefix_token_counts)
         .unwrap_or_else(unanalyzable_prompt_cache);
     (analysis, stats, durations)
@@ -694,6 +634,67 @@ tokio::task_local! {
     static PROMPT_CACHE_ANALYSIS_TEST_GATE: Arc<AnalysisTestGate>;
 }
 
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct TestExecutionGate {
+    started: Arc<tokio::sync::Notify>,
+    released: Arc<(Mutex<bool>, Condvar)>,
+}
+
+#[cfg(test)]
+impl TestExecutionGate {
+    fn block(&self) {
+        self.started.notify_one();
+        let (released, ready) = &*self.released;
+        let mut released = released.lock();
+        while !*released {
+            ready.wait(&mut released);
+        }
+    }
+
+    async fn wait_until_started(&self) {
+        self.started.notified().await;
+    }
+
+    fn release(&self) {
+        let (released, ready) = &*self.released;
+        *released.lock() = true;
+        ready.notify_all();
+    }
+}
+
+fn analysis_output(
+    analysis: V3PromptCacheAnalysis,
+    canonical_model: &str,
+    token_threshold: Option<usize>,
+    mut durations: PromptCacheAnalysisDurations,
+    tokenize_ambiguous: bool,
+) -> PromptCacheAnalysisOutput {
+    let (cacheable_breakpoint_prefix_keys, threshold_tokenization_duration) = token_threshold
+        .map(|threshold| {
+            cacheable_breakpoint_prefix_keys_with_tokenize_duration(
+                &analysis,
+                canonical_model,
+                threshold,
+                tokenize_ambiguous,
+            )
+        })
+        .unwrap_or_default();
+    if token_threshold.is_some() {
+        durations.tokenize = Some(
+            durations
+                .tokenize
+                .unwrap_or_default()
+                .saturating_add(threshold_tokenization_duration),
+        );
+    }
+    PromptCacheAnalysisOutput {
+        analysis,
+        cacheable_breakpoint_prefix_keys,
+        timings: durations.into_timings(),
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct PromptCacheAnalysisExecutor {
     semaphore: Arc<Semaphore>,
@@ -702,6 +703,8 @@ pub(crate) struct PromptCacheAnalysisExecutor {
     test_delay: Duration,
     #[cfg(test)]
     test_panic: bool,
+    #[cfg(test)]
+    test_gate: Option<TestExecutionGate>,
 }
 
 impl Default for PromptCacheAnalysisExecutor {
@@ -718,6 +721,8 @@ impl Default for PromptCacheAnalysisExecutor {
             test_delay: Duration::ZERO,
             #[cfg(test)]
             test_panic: false,
+            #[cfg(test)]
+            test_gate: None,
         }
     }
 }
@@ -728,6 +733,7 @@ impl PromptCacheAnalysisExecutor {
         value: Arc<Value>,
         canonical_model: String,
         cache_scope: [u8; 32],
+        token_threshold: Option<usize>,
     ) -> PromptCacheAnalysisOutput {
         let queue_started = Instant::now();
         let permit = Arc::clone(&self.semaphore).acquire_owned().await;
@@ -738,17 +744,16 @@ impl PromptCacheAnalysisExecutor {
         )
         .record(queue_duration.as_secs_f64());
         let Ok(permit) = permit else {
-            let (analysis, tokenization_duration) =
-                analyze_v3_prompt_cache_with_tokenize_duration(&value, &canonical_model);
-            return PromptCacheAnalysisOutput {
-                analysis,
-                timings: PromptCacheAnalysisTimings {
-                    cache_count_lookup_ms: Some(0.0),
-                    cache_tokenizer_queue_ms: Some(duration_ms_f64(queue_duration)),
-                    cache_tokenize_ms: Some(duration_ms_f64(tokenization_duration)),
-                    ..PromptCacheAnalysisTimings::default()
-                },
-            };
+            let (analysis, _, durations) = reference_fallback(
+                &value,
+                &canonical_model,
+                PromptCacheAnalysisDurations::default(),
+            );
+            let mut output =
+                analysis_output(analysis, &canonical_model, token_threshold, durations, false);
+            output.timings.cache_tokenizer_queue_ms =
+                Some(duration_ms_f64(queue_duration));
+            return output;
         };
 
         let cache = Arc::clone(&self.cache);
@@ -759,21 +764,14 @@ impl PromptCacheAnalysisExecutor {
         #[cfg(test)]
         let test_panic = self.test_panic;
         #[cfg(test)]
-        let test_gate = PROMPT_CACHE_ANALYSIS_TEST_GATE.try_with(Arc::clone).ok();
+        let analysis_test_gate = PROMPT_CACHE_ANALYSIS_TEST_GATE.try_with(Arc::clone).ok();
+        #[cfg(test)]
+        let test_gate = self.test_gate.clone();
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let inflight = metrics::gauge!("cc_lb_prompt_cache_tokenizer_inflight");
-            inflight.increment(1.0);
-            struct InflightGuard(metrics::Gauge);
-            impl Drop for InflightGuard {
-                fn drop(&mut self) {
-                    self.0.decrement(1.0);
-                }
-            }
-            let _inflight = InflightGuard(inflight);
             #[cfg(test)]
-            if let Some(test_gate) = test_gate {
-                test_gate.wait_for_release();
+            if let Some(analysis_test_gate) = analysis_test_gate {
+                analysis_test_gate.wait_for_release();
             }
             #[cfg(test)]
             if test_panic {
@@ -783,6 +781,10 @@ impl PromptCacheAnalysisExecutor {
             if !test_delay.is_zero() {
                 std::thread::sleep(test_delay);
             }
+            #[cfg(test)]
+            if let Some(gate) = test_gate {
+                gate.block();
+            }
             let total_started = Instant::now();
             let (analysis, stats, durations) = analyze_v3_prompt_cache_optimized_scoped(
                 &value,
@@ -791,32 +793,27 @@ impl PromptCacheAnalysisExecutor {
                 &cache,
             );
             record_analysis_metrics(stats, total_started.elapsed());
-            (analysis, durations)
+            let mut output =
+                analysis_output(analysis, &canonical_model, token_threshold, durations, true);
+            output.timings.cache_tokenizer_queue_ms = Some(duration_ms_f64(queue_duration));
+            output
         });
 
         match task.await {
-            Ok((analysis, durations)) => {
-                let mut timings = durations.into_timings();
-                timings.cache_tokenizer_queue_ms = Some(duration_ms_f64(queue_duration));
-                PromptCacheAnalysisOutput { analysis, timings }
-            }
+            Ok(output) => output,
             Err(error) => {
                 tracing::error!(error = %error, "prompt-cache analysis worker failed; using exact synchronous fallback");
                 metrics::counter!("cc_lb_prompt_cache_analysis_worker_failed_total").increment(1);
-                let (analysis, tokenization_duration) =
-                    analyze_v3_prompt_cache_with_tokenize_duration(
-                        &fallback_value,
-                        &fallback_model,
-                    );
-                PromptCacheAnalysisOutput {
-                    analysis,
-                    timings: PromptCacheAnalysisTimings {
-                        cache_count_lookup_ms: Some(0.0),
-                        cache_tokenizer_queue_ms: Some(duration_ms_f64(queue_duration)),
-                        cache_tokenize_ms: Some(duration_ms_f64(tokenization_duration)),
-                        ..PromptCacheAnalysisTimings::default()
-                    },
-                }
+                let (analysis, _, durations) = reference_fallback(
+                    &fallback_value,
+                    &fallback_model,
+                    PromptCacheAnalysisDurations::default(),
+                );
+                let mut output =
+                    analysis_output(analysis, &fallback_model, token_threshold, durations, false);
+                output.timings.cache_tokenizer_queue_ms =
+                    Some(duration_ms_f64(queue_duration));
+                output
             }
         }
     }
@@ -977,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn metric_emission_uses_fixed_labels_and_skips_zero_tokenize_samples() {
+    fn metric_emission_uses_fixed_cache_labels() {
         let recorder = RecordingMetrics::default();
         let _recorder_guard = metrics::set_default_local_recorder(&recorder);
         record_analysis_metrics(
@@ -989,12 +986,6 @@ mod tests {
                 cache_hits: 2,
                 cache_misses: 1,
                 cache_coalesced: 3,
-                tokenization_duration: Duration::from_millis(4),
-                tokenizer: TokenizerBatchStats {
-                    input_bytes: 100,
-                    produced_tokens: 40,
-                    fallback_prefixes: 2,
-                },
             },
             Duration::from_millis(5),
         );
@@ -1021,37 +1012,9 @@ mod tests {
                 .map(|(_, value)| *value),
             Some(3)
         );
-        assert_eq!(
-            counters
-                .iter()
-                .find(|(key, _)| key.contains("tokenized_bytes_total"))
-                .map(|(_, value)| *value),
-            Some(100)
-        );
-        assert_eq!(
-            counters
-                .iter()
-                .find(|(key, _)| key.contains("tokenized_tokens_total"))
-                .map(|(_, value)| *value),
-            Some(40)
-        );
-        assert_eq!(
-            counters
-                .iter()
-                .find(|(key, _)| key.contains("fallback_prefixes_total"))
-                .map(|(_, value)| *value),
-            Some(2)
-        );
         drop(counters);
 
         let histograms = recorder.histograms.lock().expect("histogram recorder lock");
-        assert_eq!(
-            histograms
-                .iter()
-                .find(|(key, _)| key.contains("stage = tokenize"))
-                .map(|(_, values)| values.len()),
-            Some(1)
-        );
         assert_eq!(
             histograms
                 .iter()
@@ -1062,29 +1025,12 @@ mod tests {
     }
 
     #[test]
-    fn exact_batch_matches_reference_analysis() {
+    fn optimized_analysis_matches_reference() {
         let request = four_breakpoint_request(&"boundary }],\n한글🙂 ".repeat(2_000));
         let reference = analyze_v3_prompt_cache(&request, MODEL);
-        let mut scratch = SerializationScratch::default();
-        let structural = analyze_v3_prompt_cache_structure(&request, MODEL, &mut scratch).unwrap();
-        let batch =
-            prepare_exact_prefix_batch(MODEL, &structural.blocks, &structural.breakpoints).unwrap();
-        let deepest_bytes = batch
-            .breakpoint_offsets
-            .last()
-            .copied()
-            .unwrap_or_default()
-            .saturating_add(batch.suffix_bytes.len()) as u64;
         let cache = PromptTokenCountCache::new(32);
-        let (optimized, stats) = analyze_v3_prompt_cache_optimized(&request, MODEL, &cache);
+        let (optimized, _) = analyze_v3_prompt_cache_optimized(&request, MODEL, &cache);
         assert_eq!(optimized, reference);
-        let deepest = reference
-            .breakpoints
-            .last()
-            .map(|breakpoint| breakpoint.prefix_token_count)
-            .unwrap_or_default();
-        assert!(stats.tokenizer.produced_tokens < deepest.saturating_mul(2));
-        assert!(stats.tokenizer.input_bytes < deepest_bytes.saturating_mul(2));
     }
 
     #[test]
@@ -1120,7 +1066,7 @@ mod tests {
         assert!(compute_token_prefix_keys(&out_of_range, &[1; 32]).is_none());
     }
     #[test]
-    fn reference_fallback_records_only_actual_tokenizer_time_and_zero_lookup() {
+    fn reference_fallback_records_zero_tokenizer_time_and_zero_lookup() {
         let request = four_breakpoint_request("serialization-fallback");
         let reference = analyze_v3_prompt_cache(&request, MODEL);
         let durations = PromptCacheAnalysisDurations {
@@ -1135,11 +1081,7 @@ mod tests {
         assert_eq!(stats.cache_hits, 0);
         assert_eq!(stats.cache_misses, 0);
         assert_eq!(durations.count_lookup, Some(Duration::ZERO));
-        assert!(
-            durations
-                .tokenize
-                .is_some_and(|duration| !duration.is_zero())
-        );
+        assert_eq!(durations.tokenize, Some(Duration::ZERO));
         assert_eq!(durations.structure, Some(Duration::from_micros(1)));
         assert_eq!(durations.serialize, Some(Duration::from_micros(2)));
     }
@@ -1168,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn serialization_error_fallback_reports_reference_tokenization() {
+    fn serialization_error_fallback_records_zero_tokenizer_time() {
         let request = four_breakpoint_request("forced-serialization-error");
         let reference = analyze_v3_prompt_cache(&request, MODEL);
         FORCE_SERIALIZATION_ERROR.with(|force| force.set(true));
@@ -1181,11 +1123,7 @@ mod tests {
         assert_eq!(stats.cache_hits, 0);
         assert_eq!(stats.cache_misses, 0);
         assert_eq!(durations.count_lookup, Some(Duration::ZERO));
-        assert!(
-            durations
-                .tokenize
-                .is_some_and(|duration| !duration.is_zero())
-        );
+        assert_eq!(durations.tokenize, Some(Duration::ZERO));
     }
     #[test]
     fn production_size_prompt_cache_regression_gate() {
@@ -1282,11 +1220,6 @@ mod tests {
             .copied()
             .expect("deepest breakpoint")
             .saturating_add(batch.suffix_bytes.len()) as u64;
-        let deepest_prefix_tokens = reference
-            .breakpoints
-            .last()
-            .expect("deepest reference breakpoint")
-            .prefix_token_count;
         let (owned_serialized_bytes, owned_serialized_capacity) = batch.owned_serialized_storage();
         assert_eq!(owned_serialized_bytes as u64, deepest_prefix_bytes);
         assert!(
@@ -1323,19 +1256,6 @@ mod tests {
         assert_eq!(cold_stats.cache_hits, 0);
         assert_eq!(cold_stats.cache_misses, 4);
         assert_eq!(cold_stats.cache_coalesced, 0);
-        assert_eq!(cold_stats.tokenizer.fallback_prefixes, 0);
-        assert!(
-            cold_stats.tokenizer.input_bytes.saturating_mul(4)
-                <= deepest_prefix_bytes.saturating_mul(5),
-            "cold tokenizer byte work exceeded 1.25x deepest prefix: actual={}, deepest={deepest_prefix_bytes}",
-            cold_stats.tokenizer.input_bytes
-        );
-        assert!(
-            cold_stats.tokenizer.produced_tokens.saturating_mul(4)
-                <= deepest_prefix_tokens.saturating_mul(5),
-            "cold tokenizer token work exceeded 1.25x deepest prefix: actual={}, deepest={deepest_prefix_tokens}",
-            cold_stats.tokenizer.produced_tokens
-        );
 
         let (warm, warm_stats, _warm_durations) =
             analyze_v3_prompt_cache_optimized_scoped(&request, MODEL, &cache_scope, &cache);
@@ -1343,19 +1263,13 @@ mod tests {
         assert_eq!(warm_stats.cache_hits, 4);
         assert_eq!(warm_stats.cache_misses, 0);
         assert_eq!(warm_stats.cache_coalesced, 0);
-        assert_eq!(warm_stats.tokenizer.input_bytes, 0);
-        assert_eq!(warm_stats.tokenizer.produced_tokens, 0);
-        assert_eq!(warm_stats.tokenizer.fallback_prefixes, 0);
 
         println!(
-            "prompt-cache-production-regression fixture_bytes={} messages={} breakpoints={} deepest_prefix_bytes={} deepest_prefix_tokens={} actual_tokenized_bytes={} actual_tokenized_tokens={} warm_hits={} owned_serialized_bytes={} owned_serialized_capacity={}",
+            "prompt-cache-production-regression fixture_bytes={} messages={} breakpoints={} deepest_prefix_bytes={} warm_hits={} owned_serialized_bytes={} owned_serialized_capacity={}",
             serialized_request.len(),
             messages.len(),
             reference.breakpoints.len(),
             deepest_prefix_bytes,
-            deepest_prefix_tokens,
-            cold_stats.tokenizer.input_bytes,
-            cold_stats.tokenizer.produced_tokens,
             warm_stats.cache_hits,
             owned_serialized_bytes,
             owned_serialized_capacity
@@ -1440,7 +1354,6 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first_stats.cache_misses, 4);
         assert_eq!(second_stats.cache_hits, 4);
-        assert_eq!(second_stats.tokenizer.input_bytes, 0);
     }
 
     #[test]
@@ -1504,7 +1417,9 @@ mod tests {
             let executor = executor.clone();
             tokio::spawn(
                 PROMPT_CACHE_ANALYSIS_TEST_GATE.scope(analysis_gate, async move {
-                    executor.analyze(request, MODEL.to_owned(), [1; 32]).await
+                    executor
+                        .analyze(request, MODEL.to_owned(), [1; 32], None)
+                        .await
                 }),
             )
         };
@@ -1542,7 +1457,6 @@ mod tests {
         assert_eq!(optimized, reference);
         assert_eq!(stats.cache_hits, 0);
         assert_eq!(stats.cache_misses, 0);
-        assert_eq!(stats.tokenizer.input_bytes, 0);
     }
 
     #[test]
@@ -1559,7 +1473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executor_reports_non_overlapping_request_timings_and_warm_zero_tokenization() {
+    async fn executor_reports_non_overlapping_request_timings_without_threshold_tokenization() {
         let executor = PromptCacheAnalysisExecutor {
             semaphore: Arc::new(Semaphore::new(1)),
             cache: Arc::new(PromptTokenCountCache::new(32)),
@@ -1568,11 +1482,13 @@ mod tests {
         let request = Arc::new(four_breakpoint_request("timed-analysis"));
         let cold_started = Instant::now();
         let cold = executor
-            .analyze(Arc::clone(&request), MODEL.to_owned(), [3; 32])
+            .analyze(Arc::clone(&request), MODEL.to_owned(), [3; 32], None)
             .await;
         let cold_outer_ms = duration_ms_f64(cold_started.elapsed());
         let warm_started = Instant::now();
-        let warm = executor.analyze(request, MODEL.to_owned(), [3; 32]).await;
+        let warm = executor
+            .analyze(request, MODEL.to_owned(), [3; 32], None)
+            .await;
         let warm_outer_ms = duration_ms_f64(warm_started.elapsed());
 
         assert_eq!(cold.analysis.breakpoints.len(), 4);
@@ -1612,11 +1528,7 @@ mod tests {
                 "nested setup timings double-counted: measured={measured_sum} outer={outer_ms}"
             );
         }
-        assert!(
-            cold.timings
-                .cache_tokenize_ms
-                .is_some_and(|value| value > 0.0)
-        );
+        assert_eq!(cold.timings.cache_tokenize_ms, Some(0.0));
         assert!(
             warm.timings
                 .cache_count_lookup_ms
@@ -1626,7 +1538,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_semaphore_fallback_reports_reference_tokenization() {
+    async fn closed_semaphore_fallback_skips_threshold_tokenization() {
         let semaphore = Arc::new(Semaphore::new(1));
         semaphore.close();
         let executor = PromptCacheAnalysisExecutor {
@@ -1637,20 +1549,18 @@ mod tests {
         let request = Arc::new(four_breakpoint_request("closed-semaphore-fallback"));
         let reference = analyze_v3_prompt_cache(&request, MODEL);
 
-        let output = executor.analyze(request, MODEL.to_owned(), [7; 32]).await;
+        let output = executor
+            .analyze(request, MODEL.to_owned(), [7; 32], Some(1_024))
+            .await;
 
         assert_eq!(output.analysis, reference);
         assert_eq!(output.timings.cache_count_lookup_ms, Some(0.0));
-        assert!(
-            output
-                .timings
-                .cache_tokenize_ms
-                .is_some_and(|value| value.is_finite() && value > 0.0)
-        );
+        assert!(output.cacheable_breakpoint_prefix_keys.is_empty());
+        assert_eq!(output.timings.cache_tokenize_ms, Some(0.0));
     }
 
     #[tokio::test]
-    async fn join_failure_fallback_reports_reference_tokenization() {
+    async fn join_failure_fallback_skips_threshold_tokenization() {
         let executor = PromptCacheAnalysisExecutor {
             semaphore: Arc::new(Semaphore::new(1)),
             cache: Arc::new(PromptTokenCountCache::new(32)),
@@ -1660,43 +1570,47 @@ mod tests {
         let request = Arc::new(four_breakpoint_request("join-failure-fallback"));
         let reference = analyze_v3_prompt_cache(&request, MODEL);
 
-        let output = executor.analyze(request, MODEL.to_owned(), [8; 32]).await;
+        let output = executor
+            .analyze(request, MODEL.to_owned(), [8; 32], Some(1_024))
+            .await;
 
         assert_eq!(output.analysis, reference);
         assert_eq!(output.timings.cache_count_lookup_ms, Some(0.0));
-        assert!(
-            output
-                .timings
-                .cache_tokenize_ms
-                .is_some_and(|value| value.is_finite() && value > 0.0)
-        );
+        assert!(output.cacheable_breakpoint_prefix_keys.is_empty());
+        assert_eq!(output.timings.cache_tokenize_ms, Some(0.0));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_request_does_not_poison_executor_or_cache() {
+        let gate = TestExecutionGate::default();
         let executor = PromptCacheAnalysisExecutor {
             semaphore: Arc::new(Semaphore::new(1)),
             cache: Arc::new(PromptTokenCountCache::new(32)),
-            test_delay: Duration::from_millis(100),
-            test_panic: false,
+            test_gate: Some(gate.clone()),
+            ..PromptCacheAnalysisExecutor::default()
         };
         let request = Arc::new(four_breakpoint_request(&"cancel-safe ".repeat(80_000)));
         let first = {
             let executor = executor.clone();
             let request = Arc::clone(&request);
-            tokio::spawn(async move { executor.analyze(request, MODEL.to_owned(), [1; 32]).await })
+            tokio::spawn(async move {
+                executor
+                    .analyze(request, MODEL.to_owned(), [1; 32], None)
+                    .await
+            })
         };
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        gate.wait_until_started().await;
         first.abort();
         let _ = first.await;
+        gate.release();
 
-        let analysis = tokio::time::timeout(
-            Duration::from_secs(30),
-            executor.analyze(request, MODEL.to_owned(), [1; 32]),
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            executor.analyze(request, MODEL.to_owned(), [1; 32], None),
         )
         .await
         .expect("executor remains available after caller cancellation");
-        assert_eq!(analysis.analysis.breakpoints.len(), 4);
+        assert_eq!(output.analysis.breakpoints.len(), 4);
         assert_eq!(executor.cache.state.lock().values.len(), 4);
     }
 }

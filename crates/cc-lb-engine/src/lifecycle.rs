@@ -65,8 +65,8 @@ use crate::error_normalizer::ErrorNormalizer;
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
-    PromptCacheAnalysisExecutor, PromptCacheAnalysisTimings, V3_TOKEN_ESTIMATE_SOURCE,
-    V3PromptCacheAnalysis, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
+    PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
+    V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
 };
 use crate::request_classification::classify_client_request_kind;
 use crate::request_context::RequestContext;
@@ -1434,6 +1434,7 @@ pub struct PromptCacheObservationContext {
     pub(crate) upstream_id: Uuid,
     pub(crate) canonical_model_id: String,
     pub(crate) cache_breakpoints: Vec<CacheBreakpoint>,
+    pub(crate) cacheable_breakpoint_prefix_keys: HashSet<String>,
     pub(crate) selected_match: Option<SelectedCacheMatch>,
     pub(crate) cache: Arc<dyn PromptCacheObservationCacheLike>,
 }
@@ -1481,6 +1482,7 @@ pub(crate) fn prompt_cache_observation_context(
     upstream_id: Uuid,
     canonical_model_id: &str,
     cache_breakpoints: &[CacheBreakpoint],
+    cacheable_breakpoint_prefix_keys: &HashSet<String>,
     selected_match: Option<SelectedCacheMatch>,
 ) -> Option<PromptCacheObservationContext> {
     if canonical_model_id.is_empty() || cache_breakpoints.is_empty() {
@@ -1491,6 +1493,7 @@ pub(crate) fn prompt_cache_observation_context(
         upstream_id,
         canonical_model_id: canonical_model_id.to_owned(),
         cache_breakpoints: cache_breakpoints.to_vec(),
+        cacheable_breakpoint_prefix_keys: cacheable_breakpoint_prefix_keys.clone(),
         selected_match,
         cache,
     })
@@ -1505,7 +1508,6 @@ pub(crate) fn decode_prompt_cache_observations_pure(
         return PromptCacheObservationDecodeResult::default();
     }
 
-    let threshold = cache_threshold_tokens(&context.canonical_model_id) as u64;
     let hit = (usage.cache_read_input_tokens > 0)
         .then_some(context.selected_match.as_ref())
         .flatten();
@@ -1514,23 +1516,19 @@ pub(crate) fn decode_prompt_cache_observations_pure(
     let mut observations = Vec::new();
     let mut dropped_below_threshold = 0_u32;
     if let Some(matched) = hit {
-        if matched.estimated_prefix_tokens >= threshold {
-            observations.push(DecodedPromptCacheObservation {
-                prefix_hash: matched.prefix_hash.clone(),
-                ttl_class: matched.ttl_class,
-                expires_at_unix_secs: prompt_cache_observation_expires_at(
-                    now_unix_secs,
-                    matched.ttl_class,
-                    grace_secs,
-                ),
-                prefix_content_block_index: matched.content_block_index,
-                estimated_prefix_tokens: matched.estimated_prefix_tokens,
-                token_estimate_source: matched.token_estimate_source.clone(),
-                kind: DecodedPromptCacheObservationKind::Hit,
-            });
-        } else {
-            dropped_below_threshold = dropped_below_threshold.saturating_add(1);
-        }
+        observations.push(DecodedPromptCacheObservation {
+            prefix_hash: matched.prefix_hash.clone(),
+            ttl_class: matched.ttl_class,
+            expires_at_unix_secs: prompt_cache_observation_expires_at(
+                now_unix_secs,
+                matched.ttl_class,
+                grace_secs,
+            ),
+            prefix_content_block_index: matched.content_block_index,
+            estimated_prefix_tokens: matched.estimated_prefix_tokens,
+            token_estimate_source: matched.token_estimate_source.clone(),
+            kind: DecodedPromptCacheObservationKind::Hit,
+        });
     }
 
     if usage.cache_creation_input_tokens > 0 {
@@ -1539,7 +1537,10 @@ pub(crate) fn decode_prompt_cache_observations_pure(
             if !breakpoint_needs_write(breakpoint, anchor) {
                 continue;
             }
-            if breakpoint.prefix_token_count < threshold {
+            if !context
+                .cacheable_breakpoint_prefix_keys
+                .contains(&breakpoint.prefix_hash)
+            {
                 dropped_below_threshold = dropped_below_threshold.saturating_add(1);
                 continue;
             }
@@ -2321,13 +2322,22 @@ impl Lifecycle {
                     .map(canonical_model_id)
                     .unwrap_or_default()
                     .to_owned();
+                let token_threshold = view
+                    .prompt_cache_observation_cache_opt()
+                    .is_some()
+                    .then(|| cache_threshold_tokens(&canonical_model));
                 let output = self
                     .prompt_cache_analysis_executor
-                    .analyze(value, canonical_model, prompt_cache_token_scope)
+                    .analyze(
+                        value,
+                        canonical_model,
+                        prompt_cache_token_scope,
+                        token_threshold,
+                    )
                     .await;
                 apply_prompt_cache_timings(&mut setup_timings, output.timings);
                 store_setup_timings(observer.as_ref(), setup_timings);
-                Some(output.analysis)
+                Some(output)
             }
             None => None,
         };
@@ -2773,6 +2783,7 @@ impl Lifecycle {
             resolved_upstream_id,
             &ctx.canonical_model_id,
             &ctx.cache_breakpoints,
+            &cache_metadata.cacheable_breakpoint_prefix_keys,
             selected_cache_matches.get(&resolved_upstream_id).cloned(),
         );
 
@@ -6138,6 +6149,7 @@ pub(crate) struct RequestCacheMetadata {
     reasoning_effort: Option<String>,
     cache_control_message_indices: Vec<u64>,
     pub(crate) cache_breakpoints: Vec<RequestCacheBreakpoint>,
+    cacheable_breakpoint_prefix_keys: HashSet<String>,
     pub(crate) cache_prefix_hash: Option<String>,
     canonical_model_id: String,
 }
@@ -6278,7 +6290,11 @@ fn request_cache_metadata_from_value(
             .and_then(Value::as_str)
             .map(canonical_model_id)
             .unwrap_or_default();
-        analyze_v3_prompt_cache(value, canonical_model)
+        PromptCacheAnalysisOutput {
+            analysis: analyze_v3_prompt_cache(value, canonical_model),
+            cacheable_breakpoint_prefix_keys: Vec::new(),
+            timings: PromptCacheAnalysisTimings::default(),
+        }
     });
     request_cache_metadata_from_value_with_analysis(headers, value, analysis)
 }
@@ -6286,7 +6302,7 @@ fn request_cache_metadata_from_value(
 fn request_cache_metadata_from_value_with_analysis(
     headers: &HeaderMap,
     value: Option<&Value>,
-    analysis: Option<V3PromptCacheAnalysis>,
+    analysis: Option<PromptCacheAnalysisOutput>,
 ) -> RequestCacheMetadata {
     let metadata = value.map(metadata_identity).unwrap_or_default();
     let (observed_session_id, session_id_source) =
@@ -6341,7 +6357,16 @@ fn request_cache_metadata_from_value_with_analysis(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
 
-    let analysis = analysis.unwrap_or_else(|| analyze_v3_prompt_cache(value, &canonical_model_id));
+    let output = analysis.unwrap_or_else(|| PromptCacheAnalysisOutput {
+        analysis: analyze_v3_prompt_cache(value, &canonical_model_id),
+        cacheable_breakpoint_prefix_keys: Vec::new(),
+        timings: PromptCacheAnalysisTimings::default(),
+    });
+    let cacheable_breakpoint_prefix_keys = output
+        .cacheable_breakpoint_prefix_keys
+        .into_iter()
+        .collect();
+    let analysis = output.analysis;
     let cache_breakpoints = analysis
         .breakpoints
         .iter()
@@ -6408,6 +6433,7 @@ fn request_cache_metadata_from_value_with_analysis(
         reasoning_effort,
         cache_control_message_indices,
         cache_breakpoints,
+        cacheable_breakpoint_prefix_keys,
         cache_prefix_hash,
         canonical_model_id,
     }
@@ -7234,6 +7260,7 @@ mod tests {
                 cache_breakpoint(1, "hit", 2_400, TtlClass::Ephemeral1h),
                 cache_breakpoint(2, "write", 3_200, TtlClass::Ephemeral5m),
             ],
+            cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["write"]),
             selected_match: Some(selected_match_hit("hit", 1, TtlClass::Ephemeral1h, 2_400)),
             cache: cache.clone(),
         };
@@ -7276,6 +7303,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
             cache: cache.clone(),
         };
@@ -7329,6 +7357,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
             cache: cache.clone(),
         };
@@ -7369,6 +7398,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 1_200, TtlClass::Ephemeral5m)],
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: None,
             cache: cache.clone(),
         };
@@ -7395,6 +7425,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "tiny", 1_023, TtlClass::Ephemeral5m)],
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: None,
             cache: cache.clone(),
         };
@@ -7433,6 +7464,7 @@ mod tests {
                 cache_breakpoint(0, "shallow", 1_200, TtlClass::Ephemeral5m),
                 cache_breakpoint(1, "hit", 2_400, TtlClass::Ephemeral1h),
             ],
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(selected_match_hit("hit", 1, TtlClass::Ephemeral1h, 2_400)),
             cache: cache.clone(),
         };
@@ -7464,6 +7496,7 @@ mod tests {
                 cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral1h),
                 cache_breakpoint(1, "write", 3_200, TtlClass::Ephemeral5m),
             ],
+            cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["write"]),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral1h, 2_400)),
             cache: cache.clone(),
         };
@@ -7492,6 +7525,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(2, "owner", 5_000, TtlClass::Ephemeral5m)],
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: Some(SelectedCacheMatch {
                 prefix_hash: "nk".to_owned(),
                 content_block_index: 0,
@@ -7523,7 +7557,7 @@ mod tests {
     }
 
     #[test]
-    fn read_zero_predicted_records_drift_no_refresh() {
+    fn read_zero_does_not_refresh_predicted_match() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000231").unwrap();
         let now = 1_800_000_000;
         let cache =
@@ -7532,6 +7566,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
+            cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["hit"]),
             selected_match: Some(selected_match_hit("hit", 0, TtlClass::Ephemeral5m, 2_400)),
             cache: cache.clone(),
         };
@@ -7570,6 +7605,7 @@ mod tests {
                 2_400,
                 TtlClass::Ephemeral5m,
             )],
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
             selected_match: None,
             cache: cache.clone(),
         };
@@ -7605,6 +7641,7 @@ mod tests {
                 cache_breakpoint(2, "b2", 2_600, TtlClass::Ephemeral5m),
                 cache_breakpoint(3, "b3", 2_700, TtlClass::Ephemeral5m),
             ],
+            cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["b0", "b1", "b2", "b3"]),
             selected_match: Some(selected_match_hit("b1", 1, TtlClass::Ephemeral5m, 2_500)),
             cache: cache.clone(),
         };
@@ -7652,6 +7689,7 @@ mod tests {
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![one_hour, five_minute],
+            cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["shared", "later"]),
             selected_match: Some(SelectedCacheMatch {
                 prefix_hash: "shared".to_owned(),
                 content_block_index: 10,
@@ -8955,6 +8993,10 @@ mod tests {
             .upstream_records(vec![upstream_record(upstream_id)])
             .prompt_cache_observation_cache(cache)
             .build()
+    }
+
+    fn cacheable_prefix_keys(prefixes: &[&str]) -> HashSet<String> {
+        prefixes.iter().map(|prefix| (*prefix).to_owned()).collect()
     }
 
     fn cache_breakpoint(

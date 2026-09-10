@@ -308,7 +308,7 @@ const METRIC_DEFINITIONS: [MetricDefinition; 55] = [
     MetricDefinition {
         name: "cc_lb_prompt_cache_tokenizer_fallback_prefixes_total",
         kind: MetricKind::Counter,
-        description: "Total prompt-cache prefixes counted by the exact fallback path.",
+        description: "Total prompt-cache prefixes requiring tokenizer threshold fallback.",
     },
     MetricDefinition {
         name: "cc_lb_prompt_cache_analysis_worker_failed_total",
@@ -566,7 +566,7 @@ pub fn register_metrics() {
     metrics::describe_counter!(
         "cc_lb_prompt_cache_tokenizer_fallback_prefixes_total",
         Unit::Count,
-        "Total prompt-cache prefixes counted by the exact fallback path."
+        "Total prompt-cache prefixes requiring tokenizer threshold fallback."
     );
     metrics::describe_counter!(
         "cc_lb_prompt_cache_analysis_worker_failed_total",
