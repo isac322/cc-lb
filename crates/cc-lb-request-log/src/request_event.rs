@@ -153,6 +153,12 @@ pub struct RequestEvent {
     pub limit_reconcile_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observability_post_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_read_ms: Option<u64>,
+    /// Actual ingress request bytes collected before parsing. This is distinct
+    /// from the response [`Self::body_bytes`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_bytes: Option<u64>,
     pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_setup_ms: Option<u64>,
@@ -165,9 +171,12 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_body_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_body_chunk_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_chunk_count: Option<u64>,
+    /// Response body bytes relayed to the client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,8 +246,11 @@ mod tests {
     }
 
     #[test]
-    fn request_setup_timings_roundtrip_fractional_zero_and_partial_values() {
+    fn request_latency_fields_roundtrip_measured_zero_and_partial_values() {
         let event = RequestEvent {
+            request_body_read_ms: Some(0),
+            request_body_bytes: Some(854_336),
+            finalize_ms: Some(7),
             json_parse_ms: Some(0.125),
             cache_structure_ms: Some(0.0),
             cache_token_key_ms: Some(0.03125),
@@ -250,21 +262,27 @@ mod tests {
             ..RequestEvent::default()
         };
 
-        let json = serde_json::to_value(&event).expect("serialize request setup timings");
+        let json = serde_json::to_value(&event).expect("serialize request latency fields");
+        assert_eq!(json["request_body_read_ms"], 0);
+        assert_eq!(json["request_body_bytes"], 854_336);
+        assert_eq!(json["finalize_ms"], 7);
         assert_eq!(json["json_parse_ms"], 0.125);
         assert_eq!(json["cache_structure_ms"], 0.0);
         assert!(json.get("cache_tokenize_ms").is_none());
 
         let restored: RequestEvent =
-            serde_json::from_value(json).expect("deserialize request setup timings");
+            serde_json::from_value(json).expect("deserialize request latency fields");
         assert_eq!(restored, event);
     }
 
     #[test]
-    fn legacy_request_event_defaults_request_setup_timings_to_missing() {
+    fn legacy_request_event_defaults_request_latency_fields_to_missing() {
         let event: RequestEvent = serde_json::from_str(r#"{"status":200,"duration_ms":1}"#)
             .expect("deserialize legacy request event");
 
+        assert_eq!(event.request_body_read_ms, None);
+        assert_eq!(event.request_body_bytes, None);
+        assert_eq!(event.finalize_ms, None);
         assert_eq!(event.json_parse_ms, None);
         assert_eq!(event.cache_structure_ms, None);
         assert_eq!(event.cache_token_key_ms, None);

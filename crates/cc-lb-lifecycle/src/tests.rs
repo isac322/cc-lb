@@ -59,6 +59,8 @@ fn request_terminated_flattens_fractional_setup_timings_and_defaults_legacy_payl
         reason: TerminationReason::Success,
         client_status: 200,
         duration_ms: 1,
+        request_body_read_ms: None,
+        request_body_bytes: None,
         limit_reconcile_ms: None,
         observability_post_ms: None,
         proxy_setup_ms: Some(1),
@@ -70,6 +72,7 @@ fn request_terminated_flattens_fractional_setup_timings_and_defaults_legacy_payl
         },
         upstream_body_ms: None,
         first_body_chunk_ms: None,
+        finalize_ms: None,
         internal_errors: Vec::new(),
     };
 
@@ -207,12 +210,15 @@ fn kind_labels_cover_every_variant() {
             reason: TerminationReason::Success,
             client_status: 200,
             duration_ms: 1,
+            request_body_read_ms: None,
+            request_body_bytes: None,
             limit_reconcile_ms: None,
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
+            finalize_ms: None,
             internal_errors: Vec::new(),
         }
         .kind(),

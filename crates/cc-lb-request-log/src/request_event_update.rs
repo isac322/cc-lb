@@ -131,6 +131,11 @@ pub struct RequestEventPartial {
     pub quota_warning_multiplier: Option<f64>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_read_ms: Option<u64>,
+    /// Actual ingress request bytes collected before parsing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_ms: Option<u64>,
@@ -166,6 +171,10 @@ pub struct RequestEventPartial {
     pub sign_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_ttfb_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_body_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_body_chunk_ms: Option<u64>,
 }
@@ -267,6 +276,10 @@ mod tests {
 
         assert_eq!(partial.source_kind, None);
         assert_eq!(partial.source_ref_id, None);
+        assert_eq!(partial.request_body_read_ms, None);
+        assert_eq!(partial.request_body_bytes, None);
+        assert_eq!(partial.upstream_body_ms, None);
+        assert_eq!(partial.finalize_ms, None);
 
         let partial_json = serde_json::to_value(&partial).expect("serialize legacy partial");
         let partial_object = partial_json
@@ -274,12 +287,19 @@ mod tests {
             .expect("request event partial serializes to object");
         assert!(!partial_object.contains_key("source_kind"));
         assert!(!partial_object.contains_key("source_ref_id"));
+        assert!(!partial_object.contains_key("request_body_read_ms"));
+        assert!(!partial_object.contains_key("request_body_bytes"));
+        assert!(!partial_object.contains_key("upstream_body_ms"));
+        assert!(!partial_object.contains_key("finalize_ms"));
     }
+
     #[test]
-    fn request_event_partial_roundtrips_request_setup_timings() {
+    fn request_event_partial_roundtrips_request_latency_fields() {
         let partial = RequestEventPartial {
-            event_id: "event-setup-timings".to_owned(),
-            request_id: "req-setup-timings".to_owned(),
+            event_id: "event-latency-fields".to_owned(),
+            request_id: "req-latency-fields".to_owned(),
+            request_body_read_ms: Some(0),
+            request_body_bytes: Some(917_567),
             json_parse_ms: Some(0.125),
             cache_structure_ms: Some(0.0),
             cache_token_key_ms: Some(0.25),
@@ -288,14 +308,20 @@ mod tests {
             cache_serialize_ms: Some(1.0),
             cache_tokenize_ms: None,
             prepare_signer_ms: Some(2.0),
+            upstream_body_ms: Some(11),
+            finalize_ms: Some(3),
             ..RequestEventPartial::default()
         };
 
-        let json = serde_json::to_value(&partial).expect("serialize partial setup timings");
+        let json = serde_json::to_value(&partial).expect("serialize partial latency fields");
+        assert_eq!(json["request_body_read_ms"], 0);
+        assert_eq!(json["request_body_bytes"], 917_567);
         assert_eq!(json["cache_structure_ms"], 0.0);
+        assert_eq!(json["upstream_body_ms"], 11);
+        assert_eq!(json["finalize_ms"], 3);
         assert!(json.get("cache_tokenize_ms").is_none());
         let restored: RequestEventPartial =
-            serde_json::from_value(json).expect("deserialize partial setup timings");
+            serde_json::from_value(json).expect("deserialize partial latency fields");
         assert_eq!(restored, partial);
     }
 }

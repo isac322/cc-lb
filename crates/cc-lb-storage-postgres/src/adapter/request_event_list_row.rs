@@ -10,6 +10,8 @@ use super::request_event_list_sql::ListRow;
 struct ListPayload {
     request_id: Option<String>,
     duration_ms: Option<i64>,
+    request_body_read_ms: Option<i64>,
+    request_body_bytes: Option<i64>,
     auth_ms: Option<i64>,
     route_ms: Option<i64>,
     limit_reserve_ms: Option<i64>,
@@ -26,6 +28,7 @@ struct ListPayload {
     connect_ms: Option<i64>,
     connection_reused: Option<bool>,
     limit_reconcile_ms: Option<i64>,
+    finalize_ms: Option<i64>,
     observability_post_ms: Option<i64>,
     proxy_setup_ms: Option<i64>,
     shape_ms: Option<i64>,
@@ -101,6 +104,14 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .map(|value| i64_to_u64(value, "request event list duration_ms"))
             .transpose()?
             .unwrap_or(0),
+        request_body_read_ms: payload
+            .request_body_read_ms
+            .map(|value| i64_to_u64(value, "request event list request_body_read_ms"))
+            .transpose()?,
+        request_body_bytes: payload
+            .request_body_bytes
+            .map(|value| i64_to_u64(value, "request event list request_body_bytes"))
+            .transpose()?,
         auth_ms: payload
             .auth_ms
             .map(|value| i64_to_u64(value, "request event list auth_ms"))
@@ -137,6 +148,10 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         limit_reconcile_ms: payload
             .limit_reconcile_ms
             .map(|value| i64_to_u64(value, "request event list limit_reconcile_ms"))
+            .transpose()?,
+        finalize_ms: payload
+            .finalize_ms
+            .map(|value| i64_to_u64(value, "request event list finalize_ms"))
             .transpose()?,
         observability_post_ms: payload
             .observability_post_ms

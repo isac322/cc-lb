@@ -7,6 +7,8 @@ export interface StageGroups {
   upstream: number;
   body: number;
   internalPost: number;
+  accounted: number;
+  rawResidual: number;
   unaccounted: number;
 }
 
@@ -68,6 +70,11 @@ export function deriveProxyTimelineDuration(e: RequestEventWithPhase): number {
   return Math.max(0, e.duration_ms ?? 0);
 }
 
+export function responseBodyDuration(e: RequestEventWithPhase): number {
+  if (e._phase !== 'final') return 0;
+  if (e.status === 499) return e.upstream_body_ms ?? 0;
+  return e.stream_total_ms ?? e.upstream_body_ms ?? 0;
+}
 export function computeStageGroups(e: RequestEventWithPhase): StageGroups {
   if (e._phase === 'partial') {
     return {
@@ -77,11 +84,30 @@ export function computeStageGroups(e: RequestEventWithPhase): StageGroups {
       upstream: 0,
       body: 0,
       internalPost: 0,
+      accounted: 0,
+      rawResidual: 0,
       unaccounted: 0,
     };
   }
+
+  const total = deriveProxyTimelineDuration(e);
+  if (e.source_kind === 'renewal') {
+    return {
+      internalPre: 0,
+      setupOverhead: 0,
+      wait: 0,
+      upstream: 0,
+      body: 0,
+      internalPost: 0,
+      accounted: total,
+      rawResidual: 0,
+      unaccounted: 0,
+    };
+  }
+
   const setupOverhead = deriveSetupOverhead(e);
   const internalPre =
+    (e.request_body_read_ms ?? 0) +
     (e.auth_ms ?? 0) +
     (e.route_ms ?? 0) +
     (e.limit_reserve_ms ?? 0) +
@@ -89,18 +115,19 @@ export function computeStageGroups(e: RequestEventWithPhase): StageGroups {
     (e.shape_ms ?? 0) +
     (e.sign_ms ?? 0);
   const wait = (e.bulkhead_wait_ms ?? 0) + (e.dns_ms ?? 0);
-  const upstream_post_handshake = Math.max(
+  const upstreamPostHandshake = Math.max(
     0,
     (e.upstream_ttfb_ms ?? 0) -
       (e.bulkhead_wait_ms ?? 0) -
       (e.dns_ms ?? 0) -
       (e.connect_ms ?? 0),
   );
-  const upstream = (e.connect_ms ?? 0) + upstream_post_handshake;
-  const body = e.upstream_body_ms ?? 0;
-  const internalPost = e.limit_reconcile_ms ?? 0;
-  const sum = internalPre + wait + upstream + body + internalPost;
-  const unaccounted = Math.max(0, deriveProxyTimelineDuration(e) - sum);
+  const upstream = (e.connect_ms ?? 0) + upstreamPostHandshake;
+  const body = responseBodyDuration(e);
+  const internalPost = e.finalize_ms ?? e.limit_reconcile_ms ?? 0;
+  const accounted = internalPre + wait + upstream + body + internalPost;
+  const rawResidual = total - accounted;
+  const unaccounted = Math.max(0, rawResidual);
   return {
     internalPre,
     setupOverhead,
@@ -108,6 +135,8 @@ export function computeStageGroups(e: RequestEventWithPhase): StageGroups {
     upstream,
     body,
     internalPost,
+    accounted,
+    rawResidual,
     unaccounted,
   };
 }

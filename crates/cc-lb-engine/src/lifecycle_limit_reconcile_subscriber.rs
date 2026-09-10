@@ -413,6 +413,9 @@ mod tests {
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             upstream_body_ms: None,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
         })
         .await
         .unwrap();
@@ -448,6 +451,9 @@ mod tests {
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             upstream_body_ms: None,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
         })
         .await
         .unwrap();
@@ -473,6 +479,9 @@ mod tests {
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             upstream_body_ms: None,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
         })
         .await
         .unwrap();
