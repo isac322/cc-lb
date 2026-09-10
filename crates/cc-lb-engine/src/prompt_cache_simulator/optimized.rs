@@ -749,10 +749,14 @@ impl PromptCacheAnalysisExecutor {
                 &canonical_model,
                 PromptCacheAnalysisDurations::default(),
             );
-            let mut output =
-                analysis_output(analysis, &canonical_model, token_threshold, durations, false);
-            output.timings.cache_tokenizer_queue_ms =
-                Some(duration_ms_f64(queue_duration));
+            let mut output = analysis_output(
+                analysis,
+                &canonical_model,
+                token_threshold,
+                durations,
+                false,
+            );
+            output.timings.cache_tokenizer_queue_ms = Some(duration_ms_f64(queue_duration));
             return output;
         };
 
@@ -792,7 +796,6 @@ impl PromptCacheAnalysisExecutor {
                 &cache_scope,
                 &cache,
             );
-            let output = analysis_output(analysis, &canonical_model, token_threshold);
             record_analysis_metrics(stats, total_started.elapsed());
             let mut output =
                 analysis_output(analysis, &canonical_model, token_threshold, durations, true);
@@ -812,8 +815,7 @@ impl PromptCacheAnalysisExecutor {
                 );
                 let mut output =
                     analysis_output(analysis, &fallback_model, token_threshold, durations, false);
-                output.timings.cache_tokenizer_queue_ms =
-                    Some(duration_ms_f64(queue_duration));
+                output.timings.cache_tokenizer_queue_ms = Some(duration_ms_f64(queue_duration));
                 output
             }
         }

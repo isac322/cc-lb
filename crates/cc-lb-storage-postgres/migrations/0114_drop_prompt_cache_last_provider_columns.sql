@@ -1,4 +1,3 @@
-SET LOCAL statement_timeout = '90s';
 SET LOCAL lock_timeout = '1s';
 
 ALTER TABLE prompt_cache_observations

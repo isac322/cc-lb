@@ -70,7 +70,7 @@ fn describes_all_required_metrics() {
         ]
     );
 
-    assert_eq!(definitions.len(), 55);
+    assert_eq!(definitions.len(), 54);
     assert_eq!(definitions[0].kind, MetricKind::Counter);
     assert_eq!(definitions[1].kind, MetricKind::Histogram);
     assert_eq!(definitions[3].kind, MetricKind::Gauge);

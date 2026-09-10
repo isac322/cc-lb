@@ -844,7 +844,8 @@ fn serialized_prefix<'a>(
     })
 }
 
-pub(crate) fn cacheable_breakpoint_prefix_keys(
+#[cfg(test)]
+fn cacheable_breakpoint_prefix_keys(
     analysis: &V3PromptCacheAnalysis,
     canonical_model: &str,
     token_threshold: usize,
@@ -887,8 +888,7 @@ pub(super) fn cacheable_breakpoint_prefix_keys_with_tokenize_duration(
                     let started = Instant::now();
                     let accepted =
                         PrefixTokenizer::global().meets_cache_threshold(bytes, token_threshold);
-                    tokenization_duration =
-                        tokenization_duration.saturating_add(started.elapsed());
+                    tokenization_duration = tokenization_duration.saturating_add(started.elapsed());
                     scratch.clear_for_reuse();
                     accepted
                 }
