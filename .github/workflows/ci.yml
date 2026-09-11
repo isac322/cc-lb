@@ -372,7 +372,6 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     env:
-      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
       CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
       DATABASE_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
       DATABASE_URL_TEST: postgres://postgres:testpw@localhost:5432/cc_lb_test
@@ -383,7 +382,7 @@ jobs:
       # The ARC container hook cannot serialize the nested rust-toolchain
       # action's live TLS request on this runner. Install through one shell step
       # so the hook receives only the command exit status.
-      - name: Install pinned Rust toolchain
+      - name: Install pinned Rust toolchain and wasm targets
         shell: bash
         run: |
           set -euo pipefail
@@ -395,6 +394,7 @@ jobs:
           fi
           rustup toolchain install 1.98.1 --profile minimal
           rustup default 1.98.1
+          rustup target add --toolchain 1.98.1 wasm32-wasip1 wasm32-unknown-unknown
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"
