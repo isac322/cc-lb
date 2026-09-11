@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -95,8 +96,7 @@ async fn shutdown_during_reconnect_sleep(
     recorder: &ReconnectRecorder,
     mut reconnect_rx: mpsc::Receiver<String>,
 ) -> TestResult<()> {
-    let database_url = crate::postgres_fixture::required_postgres_url();
-    let invalid_pool = invalid_pg_pool(&database_url)?;
+    let (invalid_pool, reset_task) = connection_resetting_pg_pool().await?;
     let consumer_bus = Arc::new(InMemoryBus::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut listener_task = PgListener::spawn(
@@ -116,6 +116,8 @@ async fn shutdown_during_reconnect_sleep(
     .await;
 
     let shutdown_result = shutdown_listener(shutdown_tx, &mut listener_task, &invalid_pool).await;
+    reset_task.abort();
+    let _ = reset_task.await;
 
     test_result?;
     shutdown_result
@@ -143,14 +145,24 @@ fn pg_pool_with_application_name(
         .connect_lazy_with(options))
 }
 
-fn invalid_pg_pool(database_url: &str) -> TestResult<PgPool> {
-    let options = database_url
-        .parse::<PgConnectOptions>()?
-        .password("invalid-pg-listener-password");
-    Ok(PgPoolOptions::new()
+async fn connection_resetting_pg_pool() -> TestResult<(PgPool, JoinHandle<()>)> {
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let addr = listener.local_addr()?;
+    let reset_task = tokio::spawn(async move {
+        while let Ok((stream, _peer)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+    let options = PgConnectOptions::new()
+        .host(&addr.ip().to_string())
+        .port(addr.port())
+        .username("postgres")
+        .database("postgres");
+    let pool = PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(1))
-        .connect_lazy_with(options))
+        .connect_lazy_with(options);
+    Ok((pool, reset_task))
 }
 
 async fn await_listener_ready(receiver: &mut mpsc::UnboundedReceiver<()>) -> TestResult<()> {
