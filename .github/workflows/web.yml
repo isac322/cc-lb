@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   bun-checks:
-    runs-on: cc-lb-1
+    runs-on: cc-lb-2
     defaults:
       run:
         working-directory: crates/cc-lb-admin/web
