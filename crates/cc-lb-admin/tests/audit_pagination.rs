@@ -38,7 +38,7 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
 }
 
 #[tokio::test]
-async fn test_audit_pagination() {
+async fn t3__audit_pagination() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = admin_test_common::sqlite_storage(temp_dir.path(), "test.sqlite").await;
 

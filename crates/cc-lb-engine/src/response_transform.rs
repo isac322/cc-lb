@@ -208,3 +208,85 @@ fn format_sse_events(events: &[SseEvent]) -> Result<Bytes, ResponseTransformErro
 pub(crate) fn make_response_transform_error_frame(error: &ResponseTransformError) -> Bytes {
     make_error_frame("response_transform_error", &error.to_string())
 }
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use http::HeaderName;
+
+    #[test]
+    fn t1__sanitize_host_owned_headers_strips_internal_and_auth() {
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("x-cc-lb-trace", "internal"),
+            ("anthropic-ratelimit-requests-limit", "100"),
+            ("x-ratelimit-remaining", "9"),
+            ("authorization", "Bearer secret"),
+            ("proxy-authorization", "Basic secret"),
+            ("x-api-key", "secret"),
+            ("content-encoding", "gzip"),
+            ("content-length", "42"),
+            ("x-safe", "kept"),
+        ] {
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
+
+        sanitize_host_owned_headers(&mut headers);
+
+        assert_eq!(headers.len(), 1);
+        assert_eq!(
+            headers.get("x-safe"),
+            Some(&HeaderValue::from_static("kept"))
+        );
+    }
+
+    #[test]
+    fn t1__format_sse_events_rejects_crlf_injection() {
+        let result = format_sse_events(&[SseEvent {
+            event: "message\r\nevil: true".to_owned(),
+            data: Bytes::from_static(br#"{"type":"message"}"#),
+        }]);
+
+        assert!(matches!(
+            result,
+            Err(ResponseTransformError::Runtime { reason })
+                if reason == "plugin returned SSE event name containing CR/LF"
+        ));
+    }
+
+    #[test]
+    fn t1__apply_buffered_transform_recalculates_content_length() {
+        let mut upstream_headers = HeaderMap::new();
+        upstream_headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        upstream_headers.insert(CONTENT_LENGTH, HeaderValue::from_static("12"));
+        upstream_headers.insert("x-safe", HeaderValue::from_static("kept"));
+        let replacement = Bytes::from(vec![b'x'; 100]);
+
+        let transformed = apply_buffered_transform_result(
+            StatusCode::OK,
+            upstream_headers,
+            Bytes::from_static(b"compressed"),
+            TransformResponseResult::Replace {
+                status: None,
+                headers: None,
+                body: Some(replacement.clone()),
+            },
+        );
+
+        assert_eq!(transformed.status, StatusCode::OK);
+        assert_eq!(transformed.body, replacement);
+        assert_eq!(
+            transformed.headers.get(CONTENT_LENGTH),
+            Some(&HeaderValue::from_static("100"))
+        );
+        assert!(!transformed.headers.contains_key(CONTENT_ENCODING));
+        assert_eq!(
+            transformed.headers.get("x-safe"),
+            Some(&HeaderValue::from_static("kept"))
+        );
+    }
+}

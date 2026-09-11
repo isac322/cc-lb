@@ -5,7 +5,6 @@
 
 use crate::admin_test_common;
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::{
@@ -17,8 +16,10 @@ use cc_lb_aead::{AeadEncryptedField, AeadService, OAuthTokenBundle};
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{AuditEntry, AuditStore, UpstreamCreate, UpstreamStore};
-use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use cc_lb_storage_api::{
+    AuditEntry, AuditStore, ManagedKeyStore, Storage as StorageTrait, UpstreamCreate, UpstreamStore,
+};
+use cc_lb_testkit::{InMemoryStorage, fixed_uuid};
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
@@ -33,19 +34,64 @@ const MASTER_KEY: [u8; 32] = [7; 32];
 const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
 
 struct Fixture {
-    _temp_dir: tempfile::TempDir,
+    _temp_dir: Option<tempfile::TempDir>,
     app: axum::Router,
-    storage: Arc<Storage>,
+    storage: Arc<dyn StorageTrait>,
     aead: Arc<AeadService>,
     clock: ClockHandle,
+
 }
 
 impl Fixture {
-    async fn new() -> Self {
+    fn route() -> Self {
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
+        let storage = Arc::new(InMemoryStorage::with_clock(clock.clone()));
+        let aead = Arc::new(AeadService::from_master_key(MASTER_KEY));
+        let app = test_app(
+            storage.clone(),
+            Arc::clone(&aead),
+            clock.clone(),
+            test_config("http://oauth.invalid"),
+        );
+        let storage: Arc<dyn StorageTrait> = storage;
+
+        Self {
+            _temp_dir: None,
+            app,
+            storage,
+            aead,
+            clock,
+        }
+    }
+
+    // Completion constructs HyperOAuthHttpClient inside the production handler, so successful
+    // exchanges stay T3 until AdminState has a real composition-root client dependency.
+    async fn protocol() -> Self {
+        let oauth_addr = spawn_fake_anthropic().await;
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
+        let storage = Arc::new(InMemoryStorage::with_clock(clock.clone()));
+        let aead = Arc::new(AeadService::from_master_key(MASTER_KEY));
+        let app = test_app(
+            storage.clone(),
+            Arc::clone(&aead),
+            clock.clone(),
+            test_config(&format!("http://{oauth_addr}")),
+        );
+        let storage: Arc<dyn StorageTrait> = storage;
+
+        Self {
+            _temp_dir: None,
+            app,
+            storage,
+            aead,
+            clock,
+        }
+    }
+
+    async fn protocol_sqlite() -> Self {
         let oauth_addr = spawn_fake_anthropic().await;
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let test_clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
-        let clock: ClockHandle = test_clock.clone();
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
         let storage = admin_test_common::sqlite_storage_with_clock(
             temp_dir.path(),
             "test.sqlite",
@@ -53,34 +99,21 @@ impl Fixture {
         )
         .await;
         let aead = Arc::new(AeadService::from_master_key(MASTER_KEY));
-        let config = test_config(oauth_addr);
-        let state = AdminState {
-            storage: Some(storage.clone()),
-            key_store: Some(admin_test_common::key_store(storage.clone())),
-            aead: Arc::clone(&aead),
-            limit_engine: admin_test_common::limit_engine_with_clock(clock.clone()),
-            lifecycle: None,
-            subscription_metadata_hook: None,
-            lazy_refresher: None,
-            runtime: None,
-            data_dir: None,
-            warmup_dialect_dispatcher: None,
-            dynamic_view: admin_test_common::dynamic_view_holder(&config),
-            config: Arc::new(config),
-            scheduler: None,
-            admin_auth: crate::admin_test_common::static_token_auth("test-token"),
-            start_time: std::time::Instant::now(),
-            event_bus: None,
-            storage_tail: cc_lb_admin::events::storage_tail_channel(),
-            clock: clock.clone(),
-        };
+        let app = test_app(
+            storage.clone(),
+            Arc::clone(&aead),
+            clock.clone(),
+            test_config(&format!("http://{oauth_addr}")),
+        );
+        let storage: Arc<dyn StorageTrait> = storage;
 
         Self {
-            _temp_dir: temp_dir,
-            app: router(state),
+            _temp_dir: Some(temp_dir),
+            app,
             storage,
             aead,
             clock,
+
         }
     }
 
@@ -89,8 +122,9 @@ impl Fixture {
         name: &str,
         kind: UpstreamKind,
     ) -> cc_lb_storage_api::UpstreamRecord {
-        self.storage
-            .create(UpstreamCreate {
+        UpstreamStore::create(
+            self.storage.as_ref(),
+            UpstreamCreate {
                 name: name.to_owned(),
                 kind,
                 base_url: None,
@@ -98,9 +132,10 @@ impl Fixture {
                 oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
-            })
-            .await
-            .expect("create upstream")
+            },
+        )
+        .await
+        .expect("create upstream")
     }
 
     async fn start(&self, upstream_id: Uuid) -> (StatusCode, Value) {
@@ -198,10 +233,14 @@ impl Fixture {
             upstream.id.as_bytes(),
         )
         .expect("encrypt expired bundle");
-        self.storage
-            .store_oauth_tokens(upstream.id, upstream.revision, encrypted)
-            .await
-            .expect("seed expired tokens")
+        UpstreamStore::store_oauth_tokens(
+            self.storage.as_ref(),
+            upstream.id,
+            upstream.revision,
+            encrypted,
+        )
+        .await
+        .expect("seed expired tokens")
     }
 
     async fn audit_entries(&self, needle: &str) -> Vec<AuditEntry> {
@@ -223,13 +262,45 @@ impl Fixture {
     }
 }
 
+fn test_app<S>(
+    storage: Arc<S>,
+    aead: Arc<AeadService>,
+    clock: ClockHandle,
+    config: Config,
+) -> axum::Router
+where
+    S: StorageTrait + ManagedKeyStore + 'static,
+{
+    let state = AdminState {
+        storage: Some(storage.clone()),
+        key_store: Some(admin_test_common::key_store(storage)),
+        aead,
+        limit_engine: admin_test_common::limit_engine_with_clock(clock.clone()),
+        lifecycle: None,
+        subscription_metadata_hook: None,
+        lazy_refresher: None,
+        runtime: None,
+        data_dir: None,
+        warmup_dialect_dispatcher: None,
+        dynamic_view: admin_test_common::dynamic_view_holder(&config),
+        config: Arc::new(config),
+        scheduler: None,
+        admin_auth: crate::admin_test_common::static_token_auth("test-token"),
+        start_time: std::time::Instant::now(),
+        event_bus: None,
+        storage_tail: cc_lb_admin::events::storage_tail_channel(),
+        clock,
+    };
+    router(state)
+}
+
 fn now_unix_secs(clock: &dyn cc_lb_clock::Clock) -> u64 {
     cc_lb_clock::unix_secs(clock.now())
 }
 
 #[tokio::test]
-async fn happy_pkce_roundtrip_persists_encrypted_tokens_and_emits_redacted_audit() {
-    let fixture = Fixture::new().await;
+async fn t3__happy_pkce_roundtrip_persists_encrypted_tokens_and_emits_redacted_audit() {
+    let fixture = Fixture::protocol().await;
     let upstream = fixture
         .create_upstream("claude-sub", UpstreamKind::AnthropicOauth)
         .await;
@@ -250,9 +321,7 @@ async fn happy_pkce_roundtrip_persists_encrypted_tokens_and_emits_redacted_audit
         8
     );
 
-    let stored = fixture
-        .storage
-        .get_by_id(upstream.id)
+    let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
         .await
         .expect("get upstream")
         .expect("stored upstream");
@@ -300,24 +369,25 @@ async fn happy_pkce_roundtrip_persists_encrypted_tokens_and_emits_redacted_audit
 }
 
 #[tokio::test]
-async fn tampered_state_token_returns_400_invalid_state() {
-    let fixture = Fixture::new().await;
+async fn t2__tampered_state_token_returns_400_invalid_state() {
+    let fixture = Fixture::route();
     let upstream = fixture
         .create_upstream("tampered-state", UpstreamKind::AnthropicOauth)
         .await;
-    let (status, start) = fixture.start(upstream.id).await;
+    let (status, _) = fixture.start(upstream.id).await;
     assert_eq!(status, StatusCode::OK);
-    let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
 
-    let (status, body) = fixture.complete(upstream.id, "tampered", &code).await;
+    let (status, body) = fixture
+        .complete(upstream.id, "tampered", "unused-code")
+        .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "invalid_state");
 }
 
 #[tokio::test]
-async fn reusing_code_after_completion_returns_400() {
-    let fixture = Fixture::new().await;
+async fn t3__reusing_code_after_completion_returns_400() {
+    let fixture = Fixture::protocol().await;
     let upstream = fixture
         .create_upstream("reuse-code", UpstreamKind::AnthropicOauth)
         .await;
@@ -335,8 +405,8 @@ async fn reusing_code_after_completion_returns_400() {
 }
 
 #[tokio::test]
-async fn upstream_wrong_kind_anthropic_api_key_returns_400() {
-    let fixture = Fixture::new().await;
+async fn t2__upstream_wrong_kind_anthropic_api_key_returns_400() {
+    let fixture = Fixture::route();
     let upstream = fixture
         .create_upstream("api-key-upstream", UpstreamKind::AnthropicApiKey)
         .await;
@@ -348,18 +418,18 @@ async fn upstream_wrong_kind_anthropic_api_key_returns_400() {
 }
 
 #[tokio::test]
-async fn unknown_upstream_start_returns_json_404() {
-    let fixture = Fixture::new().await;
+async fn t2__unknown_upstream_start_returns_json_404() {
+    let fixture = Fixture::route();
 
-    let (status, body) = fixture.start(Uuid::new_v4()).await;
+    let (status, body) = fixture.start(fixed_uuid(9_999)).await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "upstream_not_found");
 }
 
 #[tokio::test]
-async fn audit_entries_contain_fingerprint_only_no_raw_tokens() {
-    let fixture = Fixture::new().await;
+async fn t3__audit_entries_contain_fingerprint_only_no_raw_tokens() {
+    let fixture = Fixture::protocol().await;
     let upstream = fixture
         .create_upstream("audit-redaction", UpstreamKind::AnthropicOauth)
         .await;
@@ -370,9 +440,7 @@ async fn audit_entries_contain_fingerprint_only_no_raw_tokens() {
     let (status, complete) = fixture.complete(upstream.id, state_token, &code).await;
     assert_eq!(status, StatusCode::OK);
 
-    let stored = fixture
-        .storage
-        .get_by_id(upstream.id)
+    let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
         .await
         .expect("get upstream")
         .expect("stored upstream");
@@ -399,18 +467,21 @@ async fn audit_entries_contain_fingerprint_only_no_raw_tokens() {
 }
 
 #[tokio::test]
-async fn complete_with_stale_revision_returns_409() {
-    let fixture = Fixture::new().await;
+async fn t3__complete_with_stale_revision_returns_409() {
+    let fixture = Fixture::protocol_sqlite().await;
     let upstream = fixture
         .create_upstream("stale-revision", UpstreamKind::AnthropicOauth)
         .await;
     let (status, start) = fixture.start(upstream.id).await;
     assert_eq!(status, StatusCode::OK);
-    fixture
-        .storage
-        .set_enabled(upstream.id, upstream.revision, false)
-        .await
-        .expect("bump revision");
+    UpstreamStore::set_enabled(
+        fixture.storage.as_ref(),
+        upstream.id,
+        upstream.revision,
+        false,
+    )
+    .await
+    .expect("bump revision");
     let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
     let state_token = start["state_token"].as_str().expect("state_token");
 
@@ -422,8 +493,8 @@ async fn complete_with_stale_revision_returns_409() {
 }
 
 #[tokio::test]
-async fn draft_start_returns_top_level_authorize_url_and_state() {
-    let fixture = Fixture::new().await;
+async fn t2__draft_start_returns_top_level_authorize_url_and_state() {
+    let fixture = Fixture::route();
 
     let (status, start) = fixture.start_draft().await;
 
@@ -442,8 +513,8 @@ async fn draft_start_returns_top_level_authorize_url_and_state() {
 }
 
 #[tokio::test]
-async fn draft_complete_invalid_code_reaches_endpoint_and_returns_structured_error() {
-    let fixture = Fixture::new().await;
+async fn t3__draft_complete_invalid_code_reaches_endpoint_and_returns_structured_error() {
+    let fixture = Fixture::protocol().await;
     let (status, start) = fixture.start_draft().await;
     assert_eq!(status, StatusCode::OK);
     let state_token = start["state_token"].as_str().expect("state token");
@@ -457,8 +528,8 @@ async fn draft_complete_invalid_code_reaches_endpoint_and_returns_structured_err
 }
 
 #[tokio::test]
-async fn create_from_incomplete_draft_returns_invalid_state() {
-    let fixture = Fixture::new().await;
+async fn t2__create_from_incomplete_draft_returns_invalid_state() {
+    let fixture = Fixture::route();
     let (status, start) = fixture.start_draft().await;
     assert_eq!(status, StatusCode::OK);
     let state_token = start["state_token"].as_str().expect("state token");
@@ -472,8 +543,8 @@ async fn create_from_incomplete_draft_returns_invalid_state() {
 }
 
 #[tokio::test]
-async fn create_from_draft_with_invalid_name_returns_structured_bad_request() {
-    let fixture = Fixture::new().await;
+async fn t2__create_from_draft_with_invalid_name_returns_structured_bad_request() {
+    let fixture = Fixture::route();
 
     let (status, body) = fixture
         .create_from_draft("unused-state-token", "system.blocked")
@@ -490,8 +561,8 @@ async fn create_from_draft_with_invalid_name_returns_structured_bad_request() {
 }
 
 #[tokio::test]
-async fn create_from_completed_draft_with_active_name_returns_name_conflict() {
-    let fixture = Fixture::new().await;
+async fn t3__create_from_completed_draft_with_active_name_returns_name_conflict() {
+    let fixture = Fixture::protocol_sqlite().await;
     let existing = fixture
         .create_upstream("draft-name-conflict", UpstreamKind::AnthropicOauth)
         .await;
@@ -513,8 +584,8 @@ async fn create_from_completed_draft_with_active_name_returns_name_conflict() {
 }
 
 #[tokio::test]
-async fn create_from_oauth_draft_audits_human_readable_upstream_name() {
-    let fixture = Fixture::new().await;
+async fn t3__create_from_oauth_draft_audits_human_readable_upstream_name() {
+    let fixture = Fixture::protocol().await;
     let (status, start) = fixture.start_draft().await;
     assert_eq!(status, StatusCode::OK);
     let state_token = start["state_token"].as_str().expect("state token");
@@ -541,8 +612,8 @@ async fn create_from_oauth_draft_audits_human_readable_upstream_name() {
 }
 
 #[tokio::test]
-async fn oauth_status_reflects_completion_realtime() {
-    let fixture = Fixture::new().await;
+async fn t3__oauth_status_reflects_completion_realtime() {
+    let fixture = Fixture::protocol().await;
     let upstream = fixture
         .create_upstream("realtime-status", UpstreamKind::AnthropicOauth)
         .await;
@@ -575,8 +646,8 @@ async fn oauth_status_reflects_completion_realtime() {
 }
 
 #[tokio::test]
-async fn oauth_status_unchanged_when_only_start_called() {
-    let fixture = Fixture::new().await;
+async fn t2__oauth_status_unchanged_when_only_start_called() {
+    let fixture = Fixture::route();
     let upstream = fixture
         .create_upstream("start-only-no-flip", UpstreamKind::AnthropicOauth)
         .await;
@@ -599,8 +670,8 @@ async fn oauth_status_unchanged_when_only_start_called() {
 }
 
 #[tokio::test]
-async fn oauth_status_flips_from_expired_to_active_after_reconnect() {
-    let fixture = Fixture::new().await;
+async fn t3__oauth_status_flips_from_expired_to_active_after_reconnect() {
+    let fixture = Fixture::protocol().await;
     let upstream = fixture
         .create_upstream("reconnect-expired", UpstreamKind::AnthropicOauth)
         .await;
@@ -642,20 +713,20 @@ async fn oauth_status_flips_from_expired_to_active_after_reconnect() {
     );
 }
 
-fn test_config(oauth_addr: SocketAddr) -> Config {
+fn test_config(oauth_base: &str) -> Config {
     let mut config = Config::default();
     config.oauth.anthropic = Some(AnthropicOAuthConfig {
         client_id: "client-test".to_owned(),
-        auth_url: Url::parse(&format!("http://{oauth_addr}/oauth/authorize")).expect("auth url"),
-        token_url: Url::parse(&format!("http://{oauth_addr}/oauth/token")).expect("token url"),
+        auth_url: Url::parse(&format!("{oauth_base}/oauth/authorize")).expect("auth url"),
+        token_url: Url::parse(&format!("{oauth_base}/oauth/token")).expect("token url"),
         redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect url"),
         scopes: vec!["org:profile".to_owned()],
     });
     config
 }
 
-async fn spawn_fake_anthropic() -> SocketAddr {
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+async fn spawn_fake_anthropic() -> std::net::SocketAddr {
+    let addr = "127.0.0.1:0";
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind fixture");
@@ -708,6 +779,7 @@ async fn json_response(response: axum::response::Response) -> (StatusCode, Value
     let json = serde_json::from_slice(&body).unwrap_or(Value::Null);
     (status, json)
 }
+
 
 fn fingerprint(access_token: &str) -> String {
     let digest = Sha256::digest(access_token.as_bytes());

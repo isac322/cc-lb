@@ -19,6 +19,7 @@ mod static_assets;
 pub mod subscription_quotas;
 pub mod v1;
 
+use std::env::{VarError, var_os as read_os_env};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -29,6 +30,9 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::Config;
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 
+use crate::ports::{
+    RetainedPartialPort, RoutePreviewPort, SubscriptionQuotaIngestionPort, WarmupPort,
+};
 use cc_lb_clock::ClockHandle;
 use cc_lb_control::RequestEventBus;
 use cc_lb_control::{
@@ -39,9 +43,12 @@ use cc_lb_domain::ReplicaIdentity;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{Storage, UpstreamRecord};
 
-use crate::ports::{
-    RetainedPartialPort, RoutePreviewPort, SubscriptionQuotaIngestionPort, WarmupPort,
-};
+pub(crate) fn read_env_utf8(name: &str) -> Result<String, VarError> {
+    match read_os_env(name) {
+        Some(value) => value.into_string().map_err(VarError::NotUnicode),
+        None => Err(VarError::NotPresent),
+    }
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum WarmupDialectDispatchErrorKind {

@@ -2,6 +2,7 @@ use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand_core::RngCore;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -47,11 +48,15 @@ pub struct NewKeyOutput {
 pub struct ParseError;
 
 pub fn generate_new() -> NewKeyOutput {
+    generate_with(&mut rand::rng())
+}
+
+pub(crate) fn generate_with(rng: &mut impl RngCore) -> NewKeyOutput {
     let mut secret_bytes = [0_u8; SECRET_BYTES_LEN];
-    rand::fill(&mut secret_bytes[..]);
+    rng.fill_bytes(&mut secret_bytes);
 
     let mut salt = [0_u8; SALT_BYTES_LEN];
-    rand::fill(&mut salt[..]);
+    rng.fill_bytes(&mut salt);
 
     let key_id = Ulid::generate().to_string();
     let secret_b64 = URL_SAFE_NO_PAD.encode(secret_bytes);
@@ -120,20 +125,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generate_new_parses_same_key_id() {
-        let generated = generate_new();
+    fn generate_with_uses_supplied_rng_and_produces_valid_ulid() {
+        let mut rng = SequentialRng::default();
+        let generated = generate_with(&mut rng);
 
         let (parsed_key_id, secret_b64_bytes) =
             parse(generated.plaintext.expose()).expect("parse generated key");
+        let secret_bytes = URL_SAFE_NO_PAD
+            .decode(&secret_b64_bytes)
+            .expect("generated secret is valid base64url");
 
         assert_eq!(parsed_key_id, generated.key_id);
-        assert_eq!(secret_b64_bytes.len(), SECRET_B64_LEN);
+        assert!(Ulid::from_string(&generated.key_id).is_ok());
+        assert_eq!(secret_bytes, (0_u8..32).collect::<Vec<_>>());
+        assert_eq!(
+            generated.secret_salt,
+            std::array::from_fn(|index| index as u8 + 32)
+        );
         assert_eq!(generated.last_4.len(), 4);
         assert_eq!(generated.index_hash, compute_index_hash(&secret_b64_bytes));
         assert_eq!(
             generated.verify_hash,
             compute_verify_hash(&secret_b64_bytes, &generated.secret_salt)
         );
+    }
+
+    #[derive(Default)]
+    struct SequentialRng {
+        next: u8,
+    }
+
+    impl rand::TryRng for SequentialRng {
+        type Error = std::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            let mut bytes = [0_u8; 4];
+            self.try_fill_bytes(&mut bytes)?;
+            Ok(u32::from_le_bytes(bytes))
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            let mut bytes = [0_u8; 8];
+            self.try_fill_bytes(&mut bytes)?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+            for byte in dest {
+                *byte = self.next;
+                self.next = self.next.wrapping_add(1);
+            }
+            Ok(())
+        }
     }
 
     #[test]

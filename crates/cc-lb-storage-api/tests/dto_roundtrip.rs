@@ -311,7 +311,7 @@ backend = 'sqlite'"
         name: "test-principal".to_owned(),
         kind: PrincipalKind::Machine,
         allowed_models: vec!["claude-3-5-sonnet".to_owned()],
-        allowed_upstreams: vec![Uuid::new_v4()],
+        allowed_upstreams: vec![Uuid::from_u128(1)],
         default_limits: vec![Limit {
             kind: LimitKind::Requests,
             window_secs: 60,

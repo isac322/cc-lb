@@ -22,6 +22,7 @@ pub mod policy;
 mod probe;
 mod slot;
 #[cfg(test)]
+#[path = "tests.rs"]
 mod tests;
 mod wire_dispatch;
 

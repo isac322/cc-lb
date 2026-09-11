@@ -8,12 +8,12 @@ use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_storage_api::AuditEntry;
 use cc_lb_storage_api::AuditStore;
-use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-fn test_state(storage: Arc<Storage>) -> AdminState {
+fn test_state(storage: Arc<InMemoryStorage>) -> AdminState {
     let config = Config::default();
     AdminState {
         storage: Some(storage.clone()),
@@ -33,14 +33,13 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_clock::SystemClock),
+        clock: fixed_clock(1_700_000_000),
     }
 }
 
 #[tokio::test]
-async fn test_snapshot_audit_query() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = admin_test_common::sqlite_storage(temp_dir.path(), "test.sqlite").await;
+async fn t2__test_snapshot_audit_query() {
+    let storage = Arc::new(InMemoryStorage::with_clock(fixed_clock(1_700_000_000)));
 
     let entry = AuditEntry {
         ts: 1000,

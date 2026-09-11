@@ -1,7 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use http::Uri;
 use tower::Service;
@@ -70,7 +72,9 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+
+    use tokio::time::Instant;
 
     use http::Uri;
     use tower::Service;
@@ -134,7 +138,7 @@ mod tests {
         assert_eq!(timings.connection_reused, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn connector_records_connect_ms_when_call_succeeds() {
         use crate::request_timing::with_timings;
 
@@ -149,14 +153,10 @@ mod tests {
         })
         .await;
 
-        let connect_ms = timings.connect_ms.expect("connect_ms recorded");
-        assert!(
-            (45..=200).contains(&connect_ms),
-            "expected ~50ms connect_ms, got {connect_ms}"
-        );
+        assert_eq!(timings.connect_ms, Some(50));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn connector_subtracts_dns_when_dns_recorded_during_call() {
         use crate::request_timing::{record_dns, with_timings};
 
@@ -192,19 +192,11 @@ mod tests {
         .await;
 
         assert_eq!(timings.dns_ms, Some(30));
-        let connect_ms = timings.connect_ms.expect("connect_ms recorded");
-        let total_ms = total_elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
-        assert!(
-            connect_ms < total_ms,
-            "expected DNS subtraction from total {total_ms}ms, got {connect_ms}ms"
-        );
-        assert!(
-            connect_ms.saturating_add(30) <= total_ms,
-            "expected connect_ms {connect_ms}ms plus DNS 30ms to fit within total {total_ms}ms"
-        );
+        assert_eq!(timings.connect_ms, Some(50));
+        assert_eq!(total_elapsed, Duration::from_millis(80));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn connector_does_not_record_on_inner_error() {
         use crate::request_timing::with_timings;
 

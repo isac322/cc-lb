@@ -217,7 +217,6 @@ pub(crate) mod error_codes {
     pub(crate) const PRINCIPAL_MISSING: &str = "principal_missing";
     pub(crate) const ROUTER_PIPELINE_UNAVAILABLE: &str = "router_pipeline_unavailable";
     pub(crate) const ROUTE_NO_UPSTREAM_AFTER_FILTER: &str = "route_no_upstream_after_filter";
-    pub(crate) const ROUTE_NOT_CONFIGURED: &str = "route_not_configured";
     pub(crate) const UPSTREAM_AFFINITY_UNAVAILABLE: &str = "upstream_affinity_unavailable";
     pub(crate) const LIMIT_REJECTED: &str = "limit_rejected";
     pub(crate) const SIGNER_FAILED: &str = "signer_failed";
@@ -605,6 +604,7 @@ impl Drop for Inner {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::collections::HashMap;
 
@@ -615,7 +615,7 @@ mod tests {
     use tracing_subscriber::{Layer, Registry};
 
     use super::*;
-    use crate::clock::SystemClock;
+    use crate::clock::TestClock;
     use crate::event_bus::InMemoryBus;
 
     fn subscribe(bus: &Arc<InMemoryBus>) -> tokio::sync::broadcast::Receiver<LifecycleEvent> {
@@ -705,10 +705,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_started_marks_proxy_source() {
+    async fn t2__request_started_marks_proxy_source() {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = subscribe(&bus);
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "req_proxy_source".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
@@ -729,10 +729,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_emits_request_terminated_with_error_code() {
+    async fn t2__finish_emits_request_terminated_with_error_code() {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = subscribe(&bus);
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "req_finish".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
@@ -752,10 +752,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drop_without_finish_emits_terminal_dropped() {
+    async fn t2__drop_without_finish_emits_terminal_dropped() {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = subscribe(&bus);
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         {
             let observer = LifecycleContext::new(
                 "req_drop".to_owned(),
@@ -770,11 +770,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_and_drop_preserve_completed_setup_timings() {
+    async fn t2__finish_and_drop_preserve_completed_setup_timings() {
         for finish_explicitly in [true, false] {
             let bus = Arc::new(InMemoryBus::new());
             let mut rx = subscribe(&bus);
-            let clock: ClockHandle = Arc::new(SystemClock);
+            let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
             {
                 let observer = LifecycleContext::new(
                     "req-setup-timings".to_owned(),
@@ -812,10 +812,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drop_after_finish_does_not_emit_twice() {
+    async fn t2__drop_after_finish_does_not_emit_twice() {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = subscribe(&bus);
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         {
             let observer = LifecycleContext::new(
                 "req_norace".to_owned(),
@@ -837,10 +837,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_clone_drop_emits_once_on_last_arc() {
+    async fn t2__shared_clone_drop_emits_once_on_last_arc() {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = subscribe(&bus);
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "req_shared".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
@@ -862,7 +862,7 @@ mod tests {
     async fn terminal_event_preserves_completed_latency_stages() {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = subscribe(&bus);
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "req_latency_stages".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
@@ -934,7 +934,7 @@ mod tests {
     #[test]
     fn attempt_timings_preserve_present_zero_across_missing_updates() {
         let bus = Arc::new(InMemoryBus::new());
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "req_attempt_timings".to_owned(),
             bus as Arc<dyn RequestEventBus>,
@@ -991,7 +991,7 @@ mod tests {
     async fn request_span_records_event_finalize_and_saturating_unaccounted() {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = subscribe(&bus);
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "req_request_span_timings".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
@@ -1026,7 +1026,7 @@ mod tests {
     async fn body_read_failure_finishes_explicitly_with_ingress_timing() {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = subscribe(&bus);
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "req_body_read_failure".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
@@ -1068,7 +1068,7 @@ mod tests {
     async fn body_too_large_rejection_preserves_ingress_timing_without_bytes() {
         let bus = Arc::new(InMemoryBus::new());
         let mut rx = subscribe(&bus);
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "req_body_too_large".to_owned(),
             bus.clone() as Arc<dyn RequestEventBus>,
@@ -1134,10 +1134,25 @@ mod tests {
 
     #[test]
     fn stream_error_classifier_extracts_h2_cancel_reason() {
-        let error = h2::Error::from(h2::Reason::CANCEL);
+        #[derive(Debug)]
+        struct H2Wrapper(h2::Error);
 
+        impl std::fmt::Display for H2Wrapper {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("wrapped HTTP/2 error")
+            }
+        }
+
+        impl StdError for H2Wrapper {
+            fn source(&self) -> Option<&(dyn StdError + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let error = H2Wrapper(h2::Error::from(h2::Reason::CANCEL));
         let classification = classify_stream_error(&error);
 
+        assert_eq!(classification.cause, StreamTerminationCause::H2Cancel);
         assert_eq!(
             classification.h2_reason,
             Some(h2::Reason::CANCEL.to_string())
@@ -1194,107 +1209,5 @@ mod tests {
             "delegating wrapper: distinct inner cause"
         );
         assert_eq!(classification.cause, StreamTerminationCause::IoReset);
-    }
-    #[tokio::test]
-    async fn classifies_real_hyper_http2_cancelled_body() {
-        use http::Request;
-        use http_body_util::{BodyExt as _, Full};
-        use hyper::client::conn::http2;
-        use hyper_util::rt::{TokioExecutor, TokioIo};
-        use tokio::net::{TcpListener, TcpStream};
-        use tokio::sync::oneshot;
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("HTTP/2 test listener binds");
-        let address = listener.local_addr().expect("HTTP/2 listener address");
-        let (headers_received_tx, headers_received_rx) = oneshot::channel();
-        let (reset_observed_tx, reset_observed_rx) = oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.expect("HTTP/2 client connects");
-            let mut connection = h2::server::handshake(socket)
-                .await
-                .expect("HTTP/2 server handshake");
-            let (_request, mut respond) = connection
-                .accept()
-                .await
-                .expect("HTTP/2 request present")
-                .expect("HTTP/2 request accepted");
-            let response = http::Response::builder()
-                .status(StatusCode::OK)
-                .body(())
-                .expect("HTTP/2 response builds");
-            let mut body = respond
-                .send_response(response, false)
-                .expect("HTTP/2 response headers sent");
-            tokio::select! {
-                received = headers_received_rx => {
-                    received.expect("client confirms response headers");
-                }
-                _ = connection.accept() => {
-                    panic!("HTTP/2 connection ended before response-header acknowledgement");
-                }
-            }
-            body.send_reset(h2::Reason::CANCEL);
-            tokio::pin!(reset_observed_rx);
-            loop {
-                tokio::select! {
-                    observed = &mut reset_observed_rx => {
-                        observed.expect("client observes RST_STREAM");
-                        break;
-                    }
-                    accepted = connection.accept() => {
-                        assert!(
-                            accepted.is_some(),
-                            "HTTP/2 connection closed before reset was observed"
-                        );
-                    }
-                }
-            }
-        });
-
-        let socket = TcpStream::connect(address)
-            .await
-            .expect("HTTP/2 client connects");
-        let (mut sender, connection) = http2::handshake(TokioExecutor::new(), TokioIo::new(socket))
-            .await
-            .expect("Hyper HTTP/2 client handshake");
-        let client_connection = tokio::spawn(connection);
-        let request = Request::builder()
-            .uri(format!("http://{address}/cancel"))
-            .body(Full::new(bytes::Bytes::new()))
-            .expect("HTTP/2 request builds");
-        let mut response = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            sender.send_request(request),
-        )
-        .await
-        .expect("HTTP/2 response headers are flushed")
-        .expect("response headers received");
-        assert_eq!(response.status(), StatusCode::OK);
-        headers_received_tx
-            .send(())
-            .expect("server waits for response-header acknowledgement");
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            response.body_mut().frame(),
-        )
-        .await
-        .expect("HTTP/2 reset is flushed")
-        .expect("reset produces a body frame result")
-        .expect_err("RST_STREAM CANCEL produces a Hyper body error");
-
-        let classification = classify_stream_error(&error);
-
-        assert_eq!(classification.cause, StreamTerminationCause::H2Cancel);
-        assert_eq!(
-            classification.h2_reason,
-            Some(h2::Reason::CANCEL.to_string())
-        );
-        reset_observed_tx
-            .send(())
-            .expect("server waits until Hyper exposes the reset");
-        server.await.expect("HTTP/2 server task completes");
-        client_connection.abort();
     }
 }

@@ -41,7 +41,7 @@ fn pool_saturated_variant_is_part_of_error_surface() {
 }
 
 #[test]
-fn pool_utilization_gauges_are_emitted() {
+fn t3__pool_utilization_gauges_are_emitted() {
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
 

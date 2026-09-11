@@ -1,87 +1,57 @@
-use std::env;
-use std::ffi::OsString;
+use std::fs;
+use std::path::PathBuf;
 
-use cc_lb_config::{Config, StorageConfig};
+use cc_lb_config::{Config, ConfigError, ConfigOverrides, StorageConfig};
 
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = env::var_os(key);
-        // SAFETY: test-only; single-threaded test runner, no concurrent env access
-        unsafe { env::set_var(key, value) };
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = &self.previous {
-            // SAFETY: test-only; single-threaded test runner, no concurrent env access
-            unsafe { env::set_var(self.key, previous) };
-        } else {
-            // SAFETY: test-only; single-threaded test runner, no concurrent env access
-            unsafe { env::remove_var(self.key) };
-        }
-    }
+fn load_config(toml: &str) -> Result<Config, ConfigError> {
+    Config::from_toml_str_with_overrides(toml, &ConfigOverrides::default())
+        .map(|(config, _warnings)| config)
 }
 
 #[test]
-fn missing_tls_files_fail_with_field_path() {
-    let (_dir, path) = crate::common::temp_config(
+fn t3__missing_tls_files_fail_with_field_path() {
+    let error = load_config(
         r#"[tls]
 cert_path = "/definitely/missing/cert.pem"
 "#,
-    );
-
-    let error = Config::load(&path).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
 
     assert!(error.contains("tls.cert_path: file not found"), "{error}");
 }
 
 #[test]
 fn encrypted_storage_retains_master_key_env_name() {
-    let _guard = EnvGuard::set("CC_LB_TEST_MASTER_KEY_INVALID", "not-a-32-byte-hex-key");
-    let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"[storage]
-storage_path = "{}"
+    let config = load_config(
+        r#"[storage]
+storage_path = "credentials.sqlite"
 oauth_aead_key_env = "CC_LB_TEST_MASTER_KEY_INVALID"
 "#,
-            crate::common::toml_path(&dir.path().join("credentials.sqlite"))
-        ),
     )
     .unwrap();
-
-    let config = Config::load(&config_path).unwrap();
 
     assert_eq!(config.aead.key_env, "CC_LB_TEST_MASTER_KEY_INVALID");
     assert_eq!(
         config.storage,
         StorageConfig::Sqlite {
-            path: dir.path().join("credentials.sqlite")
+            path: PathBuf::from("credentials.sqlite")
         }
     );
 }
 
 #[test]
 fn zero_upstream_affinity_ttl_fails_with_field_path() {
-    let (_dir, path) = crate::common::temp_config(
+    let error = load_config(
         r#"
 [listener]
 
 [upstream_affinity]
 ttl_days = 0
 "#,
-    );
-
-    let error = Config::load(&path).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
 
     assert!(
         error.contains(
@@ -107,15 +77,15 @@ ttl_days = 4294967296
 
 #[test]
 fn validation_failures_none_mode_legacy_field() {
-    let (_dir, path) = crate::common::temp_config(
+    let error = load_config(
         r#"[none_mode]
 upstream_credential_ref = "x"
 
 [api_keys]
 "#,
-    );
-
-    let error = Config::load(&path).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
 
     assert!(
         error.contains("none_mode.upstream_credential_ref"),
@@ -126,7 +96,7 @@ upstream_credential_ref = "x"
 
 #[test]
 fn none_mode_loads_without_upstream_credential_ref() {
-    let (_dir, path) = crate::common::temp_config(
+    let config = load_config(
         r#"[downstream_auth]
 mode = "none"
 
@@ -136,16 +106,15 @@ upstream_kind = "anthropic_key"
 
 [api_keys]
 "#,
-    );
-
-    let config = Config::load(&path).unwrap();
+    )
+    .unwrap();
 
     assert!(config.downstream_auth.none_mode.is_some());
 }
 
 #[test]
 fn admin_auth_cloudflare_access_requires_audience() {
-    let (_dir, path) = crate::common::temp_config(
+    let error = load_config(
         r#"
 [[admin.auth.providers]]
 kind = "cloudflare_access"
@@ -153,9 +122,9 @@ id = "cf"
 team_domain = "https://team.cloudflareaccess.com"
 audiences = []
 "#,
-    );
-
-    let error = Config::load(&path).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
 
     assert!(
         error.contains("admin.auth.providers[0].audiences"),
@@ -165,7 +134,7 @@ audiences = []
 
 #[test]
 fn admin_auth_cloudflare_access_requires_valid_header_name() {
-    let (_dir, path) = crate::common::temp_config(
+    let error = load_config(
         r#"
 [[admin.auth.providers]]
 kind = "cloudflare_access"
@@ -174,9 +143,79 @@ team_domain = "https://team.cloudflareaccess.com"
 audiences = ["admin"]
 header = "Cf Access Jwt"
 "#,
-    );
-
-    let error = Config::load(&path).unwrap_err().to_string();
+    )
+    .unwrap_err()
+    .to_string();
 
     assert!(error.contains("admin.auth.providers[0].header"), "{error}");
+}
+
+#[test]
+fn t1__oauth_client_id_empty_rejected() {
+    let error = load_config(
+        r#"
+[oauth.anthropic]
+client_id = "   "
+"#,
+    )
+    .expect_err("blank Anthropic OAuth client_id must be rejected");
+
+    match error {
+        ConfigError::Validation(error) => {
+            assert_eq!(error.field, "oauth.anthropic.client_id");
+            assert_eq!(error.message, "client_id cannot be empty");
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn t3__sqlite_path_validation_rejects_readonly_and_missing_parent() {
+    let dir = tempfile::tempdir().expect("create isolated storage directory");
+    let readonly_path = dir.path().join("readonly.sqlite");
+    fs::write(&readonly_path, b"sqlite fixture").expect("create storage file");
+    let mut permissions = fs::metadata(&readonly_path)
+        .expect("inspect storage file")
+        .permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&readonly_path, permissions).expect("mark storage file readonly");
+
+    let readonly_error = load_config(&format!(
+        "[storage]\nkind = \"sqlite\"\npath = \"{}\"\n",
+        crate::common::toml_path(&readonly_path)
+    ))
+    .expect_err("readonly SQLite file must be rejected");
+    match readonly_error {
+        ConfigError::Validation(error) => {
+            assert_eq!(error.field, "storage.path");
+            assert_eq!(
+                error.message,
+                format!("file is not writable: {}", readonly_path.display())
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+
+    let missing_parent_path = dir.path().join("missing").join("storage.sqlite");
+    let missing_parent_error = load_config(&format!(
+        "[storage]\nkind = \"sqlite\"\npath = \"{}\"\n",
+        crate::common::toml_path(&missing_parent_path)
+    ))
+    .expect_err("SQLite path with a missing parent must be rejected");
+    match missing_parent_error {
+        ConfigError::Validation(error) => {
+            assert_eq!(error.field, "storage.path");
+            assert_eq!(
+                error.message,
+                format!(
+                    "parent directory does not exist: {}",
+                    missing_parent_path
+                        .parent()
+                        .expect("path has parent")
+                        .display()
+                )
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
 }

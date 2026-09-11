@@ -1,4 +1,4 @@
-use cc_lb_clock::{Clock, ClockHandle, SystemClock, TestClock, unix_millis, unix_secs};
+use cc_lb_clock::{Clock, ClockHandle, TestClock, unix_millis, unix_secs};
 use cc_lb_storage_api::{
     AuditEntry, AuditStore, BackendKind, MetaStore, RequestEvent, RequestEventStore,
     usage_pruner::{PruneResult, UsagePruner},
@@ -10,9 +10,9 @@ const DAY_MS: u64 = 86_400_000;
 const DAY_SECS: u64 = 86_400;
 
 #[tokio::test]
-async fn prune_old_request_events() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage().await?;
+async fn t3__prune_old_request_events() -> Result<(), Box<dyn std::error::Error>> {
     let clock = test_clock();
+    let (_dir, storage) = new_storage(Arc::clone(&clock)).await?;
     let old_ts_ms = now_unix_ms(&*clock).saturating_sub(100 * DAY_MS);
     insert_request_events(storage.as_ref(), old_ts_ms).await?;
 
@@ -26,9 +26,9 @@ async fn prune_old_request_events() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn retention_zero_is_no_op() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage().await?;
+async fn t3__retention_zero_is_no_op() -> Result<(), Box<dyn std::error::Error>> {
     let clock = test_clock();
+    let (_dir, storage) = new_storage(Arc::clone(&clock)).await?;
     let old_ts_ms = now_unix_ms(&*clock).saturating_sub(100 * DAY_MS);
     insert_request_events(storage.as_ref(), old_ts_ms).await?;
 
@@ -42,9 +42,9 @@ async fn retention_zero_is_no_op() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn recent_rows_preserved() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage().await?;
+async fn t3__recent_rows_preserved() -> Result<(), Box<dyn std::error::Error>> {
     let clock = test_clock();
+    let (_dir, storage) = new_storage(Arc::clone(&clock)).await?;
     insert_request_events(storage.as_ref(), now_unix_ms(&*clock)).await?;
 
     let pruner = UsagePruner::new(Arc::clone(&storage), 90, Arc::clone(&clock));
@@ -57,9 +57,9 @@ async fn recent_rows_preserved() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn prune_old_audit_log() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage().await?;
+async fn t3__prune_old_audit_log() -> Result<(), Box<dyn std::error::Error>> {
     let clock = test_clock();
+    let (_dir, storage) = new_storage(Arc::clone(&clock)).await?;
     let old_ts = now_unix_secs(&*clock).saturating_sub(100 * DAY_SECS);
     insert_audit_entries(storage.as_ref(), old_ts).await?;
 
@@ -72,14 +72,15 @@ async fn prune_old_audit_log() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dyn std::error::Error>>
-{
+async fn new_storage(
+    clock: ClockHandle,
+) -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let database_url = format!(
         "sqlite://{}",
         dir.path().join("usage-pruner.sqlite").display()
     );
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(SystemClock)).await?;
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock).await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok((dir, Arc::new(storage)))
 }

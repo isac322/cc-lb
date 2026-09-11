@@ -36,8 +36,7 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "fs"] }
 tracing.workspace = true
 
 [dev-dependencies]
-cc-lb-storage-api = { path = "../cc-lb-storage-api" }
-cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
+cc-lb-testkit = { path = "../cc-lb-testkit" }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "net"] }
 uuid.workspace = true
-wiremock = "0.6"

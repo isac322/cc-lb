@@ -1,3 +1,4 @@
+// tier-allow(silent-skip): scheduler port optional-return signatures never skip assertions until=2027-03-31
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -215,12 +216,12 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
+async fn t3__expired_before_sweep_lazy_fires_and_retry_succeeds() {
     let fixture = Fixture::new().await;
     let upstream_id = fixture
         .create_oauth_upstream("lazy", now_secs(fixture.clock.as_ref()))
         .await;
-    let replica_id = Uuid::new_v4();
+    let replica_id = Uuid::from_u128(1);
     let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
             stores: fixture.stores.clone(),
@@ -256,7 +257,7 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
 }
 
 #[tokio::test]
-async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_message_request() {
+async fn t3__expired_oauth_upstream_selected_by_router_choice_refreshes_during_message_request() {
     let fixture = Fixture::new().await;
     fixture.create_principal("oauth-principal").await;
     let tokens = initial_tokens(&fixture.fake_base).await;
@@ -269,7 +270,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         )
         .await;
     let cancel = CancellationToken::new();
-    let replica_id = Uuid::new_v4();
+    let replica_id = Uuid::from_u128(2);
     let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
         deps: LazyRefresherDeps {
             stores: fixture.stores.clone(),
@@ -596,7 +597,7 @@ async fn dispatch_oauth_refresh_job(
     };
     let now = now_secs(clock.as_ref());
     let refresh_clock = clock.clone();
-    OAuthRefreshJobHandler::new(TestOAuthRefreshUpstreams { storage }, Uuid::new_v4())
+    OAuthRefreshJobHandler::new(TestOAuthRefreshUpstreams { storage }, Uuid::from_u128(3))
         .handle(
             job,
             now,

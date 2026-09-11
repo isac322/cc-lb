@@ -21,7 +21,7 @@ async fn storage() -> (
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = sqlite_url(&temp_dir);
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage
@@ -110,7 +110,7 @@ async fn row_counts(storage: &cc_lb_storage_sqlite::SqliteStorage) -> (i64, i64,
 }
 
 #[tokio::test]
-async fn proxy_write_reports_busy_until_projection_writer_lock_is_released() {
+async fn t3__proxy_write_reports_busy_until_projection_writer_lock_is_released() {
     let (_temp_dir, database_url, storage) = storage().await;
     let proxy_pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -124,8 +124,10 @@ async fn proxy_write_reports_busy_until_projection_writer_lock_is_released() {
         )
         .await
         .expect("open competing sqlite pool");
-    let proxy_storage =
-        cc_lb_storage_sqlite::SqliteStorage::new(proxy_pool, Arc::new(cc_lb_clock::SystemClock));
+    let proxy_storage = cc_lb_storage_sqlite::SqliteStorage::new(
+        proxy_pool,
+        cc_lb_testkit::fixed_clock(1_700_000_000),
+    );
 
     let mut projection_tx = storage.begin_immediate().await.expect("begin immediate");
     let mut proxy_event = event("proxy-writer-lock");
@@ -163,7 +165,7 @@ async fn proxy_write_reports_busy_until_projection_writer_lock_is_released() {
 }
 
 #[tokio::test]
-async fn proxy_and_projection_writes_are_lossless_under_contention() {
+async fn t3__proxy_and_projection_writes_are_lossless_under_contention() {
     let (_temp_dir, _database_url, storage) = storage().await;
     let storage = Arc::new(storage);
 

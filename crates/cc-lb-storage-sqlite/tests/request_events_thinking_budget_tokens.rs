@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 use sqlx::Row;
 
 #[tokio::test]
-async fn migrated_schema_has_nullable_integer_thinking_budget_tokens() {
+async fn t3__migrated_schema_has_nullable_integer_thinking_budget_tokens() {
     let (_temp_dir, storage) = test_storage("thinking-budget-schema.sqlite").await;
 
     let columns = sqlx::query("PRAGMA table_info('request_events_v1')")
@@ -22,7 +20,7 @@ async fn migrated_schema_has_nullable_integer_thinking_budget_tokens() {
 }
 
 #[tokio::test]
-async fn append_request_event_persists_thinking_budget_tokens_value() {
+async fn t3__append_request_event_persists_thinking_budget_tokens_value() {
     let (_temp_dir, storage) = test_storage("thinking-budget-some.sqlite").await;
     let event = request_event("thinking-budget-some", Some(18_000));
 
@@ -42,7 +40,7 @@ async fn append_request_event_persists_thinking_budget_tokens_value() {
 }
 
 #[tokio::test]
-async fn append_request_event_accepts_null_thinking_budget_tokens() {
+async fn t3__append_request_event_accepts_null_thinking_budget_tokens() {
     let (_temp_dir, storage) = test_storage("thinking-budget-none.sqlite").await;
     let event = request_event("thinking-budget-none", None);
 
@@ -65,7 +63,7 @@ async fn test_storage(filename: &str) -> (tempfile::TempDir, SqliteStorage) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!("sqlite://{}", temp_dir.path().join(filename).display());
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage

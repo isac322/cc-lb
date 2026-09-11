@@ -1,28 +1,49 @@
-use std::env;
-use std::ffi::OsString;
+use std::sync::Arc;
+
+use cc_lb_aead::AeadService;
 
 use cc_lb_config::{
     Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
 };
-use cc_lb_server::app::{BuildError, build_app_with_path};
+use cc_lb_server::app::{BuildError, build_app_with_storage};
 use cc_lb_server::scheduler_factory::SchedulerFactoryError;
-
-const TEST_KEY_ENV: &str = "CC_LB_TASK25_AEAD_KEY";
-const TEST_KEY_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, Storage as StorageTrait};
 
 #[tokio::test]
-async fn sqlite_scheduler_init_failure_aborts_app_build() {
-    let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
-    let _env = EnvGuard::set(TEST_KEY_ENV, TEST_KEY_HEX);
+async fn t3__sqlite_scheduler_init_failure_aborts_app_build() {
+    let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
     let directory = tempfile::tempdir().expect("tempdir is created");
     let storage_path = directory.path().join("cc-lb.sqlite");
     let scheduler_path = storage_path.with_extension("scheduler.sqlite");
     std::fs::create_dir(&scheduler_path).expect("directory blocks scheduler sqlite file creation");
-
+    let main_url = format!(
+        "sqlite://{}",
+        directory.path().join("main-storage.sqlite").display()
+    );
+    let main_storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite(&main_url, clock.clone())
+            .await
+            .expect("main sqlite storage opens"),
+    );
+    main_storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .expect("main sqlite storage initializes");
+    let managed_store: Arc<dyn ManagedKeyStore> = main_storage.clone();
+    let storage: Arc<dyn StorageTrait> = main_storage;
     let mut config = app_config(StorageConfig::Sqlite { path: storage_path });
     config.runtime.data_dir = Some(directory.path().join("data"));
 
-    let error = match build_app_with_path(config, None, clock.clone()).await {
+    let error = match build_app_with_storage(
+        config,
+        None,
+        managed_store,
+        storage,
+        Arc::new(AeadService::from_master_key([0; 32])),
+        clock,
+    )
+    .await
+    {
         Ok(_) => panic!("scheduler sqlite initialization must abort app startup"),
         Err(error) => error,
     };
@@ -31,14 +52,8 @@ async fn sqlite_scheduler_init_failure_aborts_app_build() {
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
-async fn postgres_scheduler_init_failure_aborts_app_build() {
-    use std::sync::Arc;
-
-    use cc_lb_aead::AeadService;
-    use cc_lb_server::app::build_app_with_storage;
-    use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, Storage as StorageTrait};
-
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+async fn t3_postgres__postgres_scheduler_init_failure_aborts_app_build() {
+    let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
     let directory = tempfile::tempdir().expect("tempdir is created");
     let sqlite_url = format!(
         "sqlite://{}",
@@ -84,7 +99,7 @@ fn app_config(storage: StorageConfig) -> Config {
         storage,
         ..Config::default()
     };
-    config.aead.key_env = TEST_KEY_ENV.to_owned();
+    config.aead.key_env = crate::common::TEST_NONEMPTY_ENV.to_owned();
     // Postgres validates the cluster token before opening the scheduler pool.
     // Borrow an immutable harness variable instead of mutating process-wide env.
     config.cluster.token_env = crate::common::TEST_NONEMPTY_ENV.to_owned();
@@ -106,28 +121,5 @@ fn assert_scheduler_factory_error(error: BuildError) {
             | SchedulerFactoryError::StartupFailed { .. },
         ) => {}
         other => panic!("expected scheduler init failure, got {other:?}"),
-    }
-}
-
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = env::var_os(key);
-        unsafe { env::set_var(key, value) };
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = &self.previous {
-            unsafe { env::set_var(self.key, previous) };
-        } else {
-            unsafe { env::remove_var(self.key) };
-        }
     }
 }

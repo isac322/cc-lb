@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,7 +17,7 @@ const NOW_UNIX_SECS: u64 = 1_800_000_000;
 const TTL_SECS: u64 = 90 * 86_400;
 
 #[tokio::test]
-async fn full_batches_continue_until_the_first_partial_batch() {
+async fn t2__affinity_purge_job_in_memory() {
     let store = FakeStore::new([Ok(UPSTREAM_AFFINITY_PURGE_BATCH_SIZE as u64), Ok(7)]);
     let result = UpstreamAffinityPurgeJobHandler::new(&store)
         .handle(
@@ -44,7 +46,7 @@ async fn full_batches_continue_until_the_first_partial_batch() {
 }
 
 #[tokio::test]
-async fn storage_failure_retries_without_discarding_completed_batch_counts() {
+async fn t2__storage_failure_retries_without_discarding_completed_batch_counts() {
     let store = FakeStore::new([
         Ok(UPSTREAM_AFFINITY_PURGE_BATCH_SIZE as u64),
         Err(StorageError::Unavailable {
@@ -73,7 +75,7 @@ async fn storage_failure_retries_without_discarding_completed_batch_counts() {
 }
 
 #[tokio::test]
-async fn job_stops_at_the_bounded_batch_limit() {
+async fn t2__job_stops_at_the_bounded_batch_limit() {
     let store = FakeStore::new(
         (0..UPSTREAM_AFFINITY_PURGE_MAX_BATCHES_PER_JOB)
             .map(|_| Ok(UPSTREAM_AFFINITY_PURGE_BATCH_SIZE as u64)),
@@ -103,7 +105,7 @@ async fn job_stops_at_the_bounded_batch_limit() {
 }
 
 #[tokio::test]
-async fn cancelled_job_does_not_start_another_batch() {
+async fn t2__cancelled_job_does_not_start_another_batch() {
     let store = FakeStore::new([Ok(1)]);
     let cancel = CancellationToken::new();
     cancel.cancel();
@@ -128,7 +130,7 @@ async fn cancelled_job_does_not_start_another_batch() {
 }
 
 #[tokio::test]
-async fn cancellation_after_a_full_batch_prevents_the_next_batch() {
+async fn t2__cancellation_after_a_full_batch_prevents_the_next_batch() {
     let cancel = CancellationToken::new();
     let store = CancelAfterFirstStore {
         calls: AtomicUsize::new(0),

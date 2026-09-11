@@ -9,7 +9,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn test_summary_returns_expected_shape() {
+async fn t3__test_summary_returns_expected_shape() {
     let fixture = support::new_fixture().await;
 
     let (status, body) = support::get_json(
@@ -66,7 +66,7 @@ async fn test_summary_returns_expected_shape() {
 }
 
 #[tokio::test]
-async fn test_summary_404_unknown_upstream() {
+async fn t3__test_summary_404_unknown_upstream() {
     let fixture = support::new_fixture().await;
     let unknown = Uuid::from_u128(0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF);
 
@@ -81,7 +81,7 @@ async fn test_summary_404_unknown_upstream() {
 }
 
 #[tokio::test]
-async fn test_attempts_pagination_returns_next_cursor() {
+async fn t3__attempts_pagination_returns_next_cursor() {
     let fixture = support::new_fixture().await;
 
     let (status, body) = support::get_json(
@@ -106,7 +106,7 @@ async fn test_attempts_pagination_returns_next_cursor() {
 }
 
 #[tokio::test]
-async fn test_attempts_outcome_filter() {
+async fn t3__attempts_outcome_filter() {
     let fixture = support::new_fixture().await;
     let expected = fixture
         .attempts
@@ -140,7 +140,7 @@ async fn test_attempts_outcome_filter() {
 }
 
 #[tokio::test]
-async fn test_attempts_before_cursor_excludes_rows_at_or_before() {
+async fn t3__attempts_before_cursor_excludes_rows_at_or_before() {
     let fixture = support::new_fixture().await;
     let before = support::cursor_for(&fixture.attempts[6]).encode();
 
@@ -161,7 +161,7 @@ async fn test_attempts_before_cursor_excludes_rows_at_or_before() {
 }
 
 #[tokio::test]
-async fn test_attempts_404_unknown_upstream() {
+async fn t3__test_attempts_404_unknown_upstream() {
     let fixture = support::new_fixture().await;
     let unknown = Uuid::from_u128(0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF);
 
@@ -176,7 +176,7 @@ async fn test_attempts_404_unknown_upstream() {
 }
 
 #[tokio::test]
-async fn test_upstream_detail_shape_unchanged() {
+async fn t3__test_upstream_detail_shape_unchanged() {
     let fixture = support::new_fixture().await;
 
     let (status, body) = support::get_json(

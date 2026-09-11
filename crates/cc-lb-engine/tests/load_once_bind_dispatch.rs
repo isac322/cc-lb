@@ -36,7 +36,7 @@ fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error
         DownstreamAuthMode::ApiKey,
         None,
         None,
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     );
 
     let error = tokio::runtime::Builder::new_current_thread()
@@ -53,7 +53,7 @@ fn limit_engine_reserve_accepts_bound_principal_view() {
     let view = principal_view("principal-a", None);
     let engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     );
     let record = StoredApiKeyRecord {
         key_hash_b64: "key-a".to_owned(),
@@ -67,7 +67,7 @@ fn limit_engine_reserve_accepts_bound_principal_view() {
 }
 
 #[tokio::test]
-async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
+async fn t2__lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
 -> Result<(), Box<dyn std::error::Error>> {
     let global_router_hits = Arc::new(Mutex::new(Vec::new()));
     let explicit_hook_events = Arc::new(Mutex::new(Vec::new()));
@@ -120,7 +120,7 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
         Arc::new(DynamicViewHolder::new(dynamic_view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     )
     .with_event_bus(test_bus.bus_arc());
 
@@ -190,7 +190,7 @@ fn none_mode_authn(
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
             }),
             None,
-            Arc::new(cc_lb_engine::SystemClock),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         )),
         principal_view: view,
         state,

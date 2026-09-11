@@ -1,3 +1,4 @@
+// tier-allow(silent-skip): storage trait optional-return signatures never skip assertions until=2027-03-31
 //! Reproducer for `.omo/issues/2026-06-07-dispatch-ignores-admin-state.md`.
 //!
 //! When two AnthropicApiKey upstreams are enabled, the principal allows ONLY
@@ -13,8 +14,8 @@
 //! `base_url` (i.e. the principal-allowed upstream). This test FAILS before
 //! the fix and PASSES after the dialect is rebuilt for the resolved upstream.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -32,29 +33,24 @@ use cc_lb_server::SubscriptionQuotaCache;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult,
-    UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
+    PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult, UpstreamCreate, UpstreamRecord,
+    UpstreamStore, UpstreamUpdate,
 };
-use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use cc_lb_testkit::{InMemoryStorage as Storage, fixed_clock};
 use cc_lb_upstream::SignedRequest;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use url::Url;
 use uuid::Uuid;
 
+use crate::composite_signer_factory::EmptyDynamicStore;
+
+const NOW_UNIX_SECS: u64 = 1_800_000_000;
+
 #[tokio::test]
-async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path().join("base-url-dispatch.sqlite").display()
-    );
-    let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await
-            .expect("storage"),
-    );
-    storage.initialize(BackendKind::Sqlite).await.unwrap();
+async fn t2__dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
+    let clock = fixed_clock(NOW_UNIX_SECS);
+    let storage = Arc::new(Storage::with_clock(clock.clone()));
 
     // Two enabled AnthropicApiKey upstreams.
     //   * A "aaa-primary"          — no base_url override (defaults to https://api.anthropic.com)
@@ -102,24 +98,25 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
             default_limits: Vec::new(),
             cache_keepalive: None,
         },
-        now_secs(),
+        NOW_UNIX_SECS,
     )
     .await
     .expect("principal created");
 
+    let empty = Arc::new(EmptyDynamicStore);
     let stores = Arc::new(Stores {
         upstreams: Arc::new(NameSortedUpstreamStore {
             inner: storage.clone(),
         }),
         principals: storage.clone(),
         plugin_registry: storage.clone(),
-        upstream_rate_limits: storage.clone(),
+        upstream_rate_limits: empty.clone(),
         upstream_subscription_quotas: storage.clone(),
-        upstream_subscription_metadata: storage.clone(),
-        organization_metadata: storage.clone(),
-        plan_tiers: storage.clone(),
+        upstream_subscription_metadata: empty.clone(),
+        organization_metadata: empty.clone(),
+        plan_tiers: empty,
         anthropic_compatibility_kv: storage.clone(),
-        audit: Some(storage.clone()),
+        audit: None,
         prompt_cache_observations: storage.clone(),
     });
 
@@ -139,12 +136,12 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         None,
         0,
         &runtime,
-        dir.path(),
+        Path::new("."),
         Arc::new(SubscriptionQuotaCache::new()),
         None,
         None,
         1800,
-        Arc::new(cc_lb_engine::SystemClock),
+        clock.clone(),
     )
     .await
     .expect("dynamic view builds");
@@ -164,12 +161,12 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
             }),
             None,
-            Arc::new(cc_lb_engine::SystemClock),
+            clock.clone(),
         )),
         holder,
         recording,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        clock,
     );
 
     let response = lifecycle
@@ -356,15 +353,4 @@ fn message_request() -> Request<Bytes> {
             br#"{"model":"claude-3-5-sonnet-20241022","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
         ))
         .expect("request builds")
-}
-
-fn now_secs() -> u64 {
-    use cc_lb_engine::Clock as _;
-
-    let clock = cc_lb_engine::SystemClock;
-    clock
-        .now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

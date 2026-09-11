@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
     PoolQuotaChartPointRecord, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord,
-    SubscriptionQuotaWindow,
+    PoolQuotaSnapshotSummaryRecord, SubscriptionQuotaWindow,
 };
 
 use crate::harness::{ConformanceBackend, with_conformance_fixture};
@@ -165,6 +165,99 @@ where
         Ok(())
     })
     .await
+}
+
+pub async fn summary_latest_and_range<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PoolQuotaHistoryStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let older = summary_record(1_800_001_000, 10);
+        let newer = summary_record(1_800_001_060, 20);
+        let other_window = PoolQuotaSnapshotRecord {
+            window: SubscriptionQuotaWindow::SevenDayFable,
+            ..summary_record(1_800_001_030, 30)
+        };
+        storage
+            .record_pool_quota_snapshots(&[older.clone(), newer.clone(), other_window.clone()])
+            .await?;
+
+        let latest = storage
+            .list_latest_pool_quota_snapshot_summaries(&[SubscriptionQuotaWindow::FiveHour])
+            .await?;
+        ensure!(
+            latest == vec![PoolQuotaSnapshotSummaryRecord::from(&newer)],
+            "latest pool quota summary must preserve every field from the newest stored row"
+        );
+
+        let range = storage
+            .list_pool_quota_snapshot_summaries_in_range(
+                &[SubscriptionQuotaWindow::FiveHour],
+                older.snapshot_at_unix_secs,
+                newer.snapshot_at_unix_secs,
+            )
+            .await?;
+        ensure!(
+            range
+                == vec![
+                    PoolQuotaSnapshotSummaryRecord::from(&older),
+                    PoolQuotaSnapshotSummaryRecord::from(&newer),
+                ],
+            "pool quota summary range must be inclusive and ordered by timestamp ascending"
+        );
+        ensure!(
+            storage
+                .list_latest_pool_quota_snapshot_summaries(&[])
+                .await?
+                .is_empty(),
+            "an empty window list must return no latest pool quota summaries"
+        );
+        ensure!(
+            storage
+                .list_pool_quota_snapshot_summaries_in_range(
+                    &[SubscriptionQuotaWindow::FiveHour],
+                    newer.snapshot_at_unix_secs,
+                    older.snapshot_at_unix_secs,
+                )
+                .await?
+                .is_empty(),
+            "an inverted range must return no pool quota summaries"
+        );
+        ensure!(
+            storage
+                .list_pool_quota_snapshot_summaries_in_range(
+                    &[SubscriptionQuotaWindow::FiveHour],
+                    newer.snapshot_at_unix_secs + 1,
+                    newer.snapshot_at_unix_secs + 10,
+                )
+                .await?
+                .is_empty(),
+            "a range without stored pool quota summaries must return empty"
+        );
+        Ok(())
+    })
+    .await
+}
+
+fn summary_record(snapshot_at_unix_secs: i64, seed: i64) -> PoolQuotaSnapshotRecord {
+    PoolQuotaSnapshotRecord {
+        snapshot_at_unix_secs,
+        window: SubscriptionQuotaWindow::FiveHour,
+        utilization: Some(seed as f64 / 100.0),
+        weighted_utilization_sum: seed as f64 + 0.25,
+        capacity_ratio_sum: seed as f64 + 0.5,
+        eligible_upstreams: seed + 1,
+        contributing_upstreams: seed + 2,
+        stale_upstreams: seed + 3,
+        missing_observation_upstreams: seed + 4,
+        missing_metadata_upstreams: seed + 5,
+        header_contributing_upstreams: seed + 6,
+        api_contributing_upstreams: seed + 7,
+        max_observed_at_unix_millis: Some(snapshot_at_unix_secs * 1_000 + seed),
+        computed_at_unix_millis: snapshot_at_unix_secs * 1_000 + seed + 1,
+        policy_version: seed as i32,
+    }
 }
 
 fn pool_chart_record(

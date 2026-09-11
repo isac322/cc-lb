@@ -700,8 +700,6 @@ pub(crate) struct PromptCacheAnalysisExecutor {
     semaphore: Arc<Semaphore>,
     cache: Arc<PromptTokenCountCache>,
     #[cfg(test)]
-    test_delay: Duration,
-    #[cfg(test)]
     test_panic: bool,
     #[cfg(test)]
     test_gate: Option<TestExecutionGate>,
@@ -717,8 +715,6 @@ impl Default for PromptCacheAnalysisExecutor {
             cache: Arc::new(PromptTokenCountCache::new(
                 DEFAULT_TOKEN_COUNT_CACHE_CAPACITY,
             )),
-            #[cfg(test)]
-            test_delay: Duration::ZERO,
             #[cfg(test)]
             test_panic: false,
             #[cfg(test)]
@@ -764,8 +760,6 @@ impl PromptCacheAnalysisExecutor {
         let fallback_value = Arc::clone(&value);
         let fallback_model = canonical_model.clone();
         #[cfg(test)]
-        let test_delay = self.test_delay;
-        #[cfg(test)]
         let test_panic = self.test_panic;
         #[cfg(test)]
         let analysis_test_gate = PROMPT_CACHE_ANALYSIS_TEST_GATE.try_with(Arc::clone).ok();
@@ -780,10 +774,6 @@ impl PromptCacheAnalysisExecutor {
             #[cfg(test)]
             if test_panic {
                 panic!("forced prompt-cache analysis worker failure");
-            }
-            #[cfg(test)]
-            if !test_delay.is_zero() {
-                std::thread::sleep(test_delay);
             }
             #[cfg(test)]
             if let Some(gate) = test_gate {
@@ -1374,6 +1364,7 @@ mod tests {
         assert_eq!(first_scope_again.cache_hits, 4);
     }
 
+    // tier-allow(multi-thread): os-thread claim
     #[test]
     fn concurrent_identical_analysis_single_flights() {
         let request = Arc::new(four_breakpoint_request(&"x".repeat(40_000)));
@@ -1425,6 +1416,7 @@ mod tests {
         );
     }
 
+    // tier-allow(multi-thread): os-thread claim
     // One worker makes its thread ID authoritative and runtime progress causally meaningful.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn executor_keeps_async_runtime_progressing() {
@@ -1591,7 +1583,7 @@ mod tests {
             semaphore: Arc::new(Semaphore::new(1)),
             cache: Arc::new(PromptTokenCountCache::new(32)),
             test_panic: true,
-            ..PromptCacheAnalysisExecutor::default()
+            test_gate: None,
         };
         let request = Arc::new(four_breakpoint_request("join-failure-fallback"));
         let reference = analyze_v3_prompt_cache(&request, MODEL);
@@ -1606,7 +1598,7 @@ mod tests {
         assert_eq!(output.timings.cache_tokenize_ms, Some(0.0));
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn cancelled_request_does_not_poison_executor_or_cache() {
         let gate = TestExecutionGate::default();
         let executor = PromptCacheAnalysisExecutor {
@@ -1630,12 +1622,9 @@ mod tests {
         let _ = first.await;
         gate.release();
 
-        let output = tokio::time::timeout(
-            Duration::from_secs(5),
-            executor.analyze(request, MODEL.to_owned(), [1; 32], None),
-        )
-        .await
-        .expect("executor remains available after caller cancellation");
+        let output = executor
+            .analyze(request, MODEL.to_owned(), [1; 32], None)
+            .await;
         assert_eq!(output.analysis.breakpoints.len(), 4);
         assert_eq!(executor.cache.state.lock().values.len(), 4);
     }

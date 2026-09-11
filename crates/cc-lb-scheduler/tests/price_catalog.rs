@@ -1,8 +1,7 @@
 #![allow(clippy::manual_async_fn, clippy::too_many_arguments)]
 
+use std::collections::BTreeMap;
 use std::future::Future;
-#[cfg(feature = "postgres")]
-use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -12,50 +11,169 @@ use cc_lb_scheduler::jobs::price_catalog::{
     PriceCatalogRefreshJob, PriceCatalogRefreshJobHandler, PriceCatalogRefreshJobResult,
     PriceCatalogRefreshLoader, PriceCatalogRefreshStatus,
 };
+#[cfg(feature = "sqlite")]
+use cc_lb_scheduler::state_stores::PriceCatalogVersionsStore as SqlitePriceCatalogVersionsStore;
+#[cfg(feature = "postgres")]
 use cc_lb_scheduler::state_stores::PriceCatalogVersionsStore;
+type MaybePriceCatalogVersion = Option<cc_lb_scheduler::state_stores::PriceCatalogVersion>;
 
 mod jobs {
     pub mod price_catalog {
         use super::super::*;
 
-        #[cfg(feature = "sqlite")]
         #[tokio::test]
-        async fn sqlite_noop_skips_snapshot_and_cache_persistence() -> Result<()> {
-            let pool = sqlite_memory().await?;
-            run_noop_case(PriceCatalogVersionsStore::new(pool)).await
+        async fn t2__noop_skips_snapshot_and_cache_persistence() -> Result<()> {
+            let versions = RecordingPriceCatalogVersions::default();
+
+            run_noop_case(versions.clone()).await?;
+
+            assert_eq!(
+                versions.read_sources(),
+                vec!["litellm".to_owned(), "litellm".to_owned()]
+            );
+            assert_eq!(
+                versions.upserts(),
+                vec![PriceCatalogUpsert {
+                    source: "litellm".to_owned(),
+                    fingerprint: "same".to_owned(),
+                    fetched_at_unix_secs: 100,
+                }]
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn t2__changed_catalog_persists_and_updates_fingerprint() -> Result<()> {
+            let versions = RecordingPriceCatalogVersions::default();
+
+            run_changed_case(versions.clone()).await?;
+
+            assert_eq!(
+                versions.read_sources(),
+                vec!["litellm".to_owned(), "litellm".to_owned()]
+            );
+            assert_eq!(
+                versions.upserts(),
+                vec![
+                    PriceCatalogUpsert {
+                        source: "litellm".to_owned(),
+                        fingerprint: "old".to_owned(),
+                        fetched_at_unix_secs: 100,
+                    },
+                    PriceCatalogUpsert {
+                        source: "litellm".to_owned(),
+                        fingerprint: "new".to_owned(),
+                        fetched_at_unix_secs: 300,
+                    },
+                ]
+            );
+            Ok(())
         }
 
         #[cfg(feature = "sqlite")]
         #[tokio::test]
-        async fn sqlite_changed_catalog_persists_and_updates_fingerprint() -> Result<()> {
-            let pool = sqlite_memory().await?;
-            run_changed_case(PriceCatalogVersionsStore::new(pool)).await
+        async fn t3__sqlite_noop_skips_snapshot_and_cache_persistence() -> Result<()> {
+            run_noop_case(sqlite_price_catalog_versions().await?).await
+        }
+
+        #[cfg(feature = "sqlite")]
+        #[tokio::test]
+        async fn t3__sqlite_changed_catalog_persists_and_updates_fingerprint() -> Result<()> {
+            run_changed_case(sqlite_price_catalog_versions().await?).await
         }
 
         #[cfg(feature = "postgres")]
         #[tokio::test]
-        async fn postgres_noop_skips_snapshot_and_cache_persistence() -> Result<()> {
-            let Some(fixture) = PostgresFixture::create().await? else {
-                eprintln!("SKIP: DATABASE_URL not set - skipping postgres price catalog test");
-                return Ok(());
-            };
-            let result = run_noop_case(PriceCatalogVersionsStore::new(fixture.pool.clone())).await;
-            fixture.drop_schema().await?;
-            result
+        async fn t3_postgres__noop_skips_snapshot_and_cache_persistence() -> anyhow::Result<()> {
+            let (fixture, pool) = postgres_fixture().await?;
+            let result = run_noop_case(PriceCatalogVersionsStore::new(pool.clone())).await;
+            pool.close().await;
+            fixture.teardown().await?;
+            result?;
+            Ok(())
         }
 
         #[cfg(feature = "postgres")]
         #[tokio::test]
-        async fn postgres_changed_catalog_persists_and_updates_fingerprint() -> Result<()> {
-            let Some(fixture) = PostgresFixture::create().await? else {
-                eprintln!("SKIP: DATABASE_URL not set - skipping postgres price catalog test");
-                return Ok(());
-            };
-            let result =
-                run_changed_case(PriceCatalogVersionsStore::new(fixture.pool.clone())).await;
-            fixture.drop_schema().await?;
-            result
+        async fn t3_postgres__changed_catalog_persists_and_updates_fingerprint()
+        -> anyhow::Result<()> {
+            let (fixture, pool) = postgres_fixture().await?;
+            let result = run_changed_case(PriceCatalogVersionsStore::new(pool.clone())).await;
+            pool.close().await;
+            fixture.teardown().await?;
+            result?;
+            Ok(())
         }
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingPriceCatalogVersions {
+    state: Arc<Mutex<RecordingPriceCatalogVersionsState>>,
+}
+
+#[derive(Default)]
+struct RecordingPriceCatalogVersionsState {
+    versions: BTreeMap<String, cc_lb_scheduler::state_stores::PriceCatalogVersion>,
+    read_sources: Vec<String>,
+    upserts: Vec<PriceCatalogUpsert>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PriceCatalogUpsert {
+    source: String,
+    fingerprint: String,
+    fetched_at_unix_secs: u64,
+}
+
+impl RecordingPriceCatalogVersions {
+    fn read_sources(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("price catalog versions lock")
+            .read_sources
+            .clone()
+    }
+
+    fn upserts(&self) -> Vec<PriceCatalogUpsert> {
+        self.state
+            .lock()
+            .expect("price catalog versions lock")
+            .upserts
+            .clone()
+    }
+}
+
+impl cc_lb_scheduler::jobs::price_catalog::PriceCatalogVersionRepository
+    for RecordingPriceCatalogVersions
+{
+    async fn read_price_catalog_version(&self, source: &str) -> Result<MaybePriceCatalogVersion> {
+        let mut state = self.state.lock().expect("price catalog versions lock");
+        state.read_sources.push(source.to_owned());
+        Ok(state.versions.get(source).cloned())
+    }
+
+    async fn upsert_price_catalog_fingerprint(
+        &self,
+        source: &str,
+        fingerprint: &str,
+        fetched_at_unix_secs: u64,
+    ) -> Result<()> {
+        let mut state = self.state.lock().expect("price catalog versions lock");
+        state.upserts.push(PriceCatalogUpsert {
+            source: source.to_owned(),
+            fingerprint: fingerprint.to_owned(),
+            fetched_at_unix_secs,
+        });
+        state.versions.insert(
+            source.to_owned(),
+            cc_lb_scheduler::state_stores::PriceCatalogVersion {
+                source: source.to_owned(),
+                fingerprint: fingerprint.to_owned(),
+                fetched_at_unix_secs,
+            },
+        );
+        Ok(())
     }
 }
 
@@ -190,7 +308,7 @@ impl RecordingCalls {
 }
 
 #[cfg(feature = "sqlite")]
-async fn sqlite_memory() -> Result<sqlx::SqlitePool> {
+async fn sqlite_price_catalog_versions() -> Result<SqlitePriceCatalogVersionsStore<sqlx::Sqlite>> {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -200,53 +318,20 @@ async fn sqlite_memory() -> Result<sqlx::SqlitePool> {
     ))
     .execute(&pool)
     .await?;
-    Ok(pool)
+    Ok(SqlitePriceCatalogVersionsStore::new(pool))
 }
 
 #[cfg(feature = "postgres")]
-struct PostgresFixture {
-    schema: String,
-    admin: sqlx::PgPool,
-    pool: sqlx::PgPool,
-}
-
-#[cfg(feature = "postgres")]
-impl PostgresFixture {
-    async fn create() -> Result<Option<Self>> {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            return Ok(None);
-        };
-        let admin = sqlx::PgPool::connect(&url).await?;
-        let schema = format!("price_catalog_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await?;
-        let options = sqlx::postgres::PgConnectOptions::from_str(&url)?
-            .options([("search_path", schema.as_str())]);
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(options)
-            .await?;
-        sqlx::raw_sql(include_str!(
-            "../migrations/postgres/0002_idempotency_tables.sql"
-        ))
-        .execute(&pool)
-        .await?;
-        Ok(Some(Self {
-            schema,
-            admin,
-            pool,
-        }))
-    }
-
-    async fn drop_schema(self) -> Result<()> {
-        self.pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .execute(&self.admin)
-            .await?;
-        self.admin.close().await;
-        Ok(())
-    }
+async fn postgres_fixture()
+-> anyhow::Result<(cc_lb_storage_conformance::PostgresFixture, sqlx::PgPool)> {
+    let fixture = crate::postgres_fixture().await?;
+    let pool = crate::scheduler_postgres_pool(&fixture).await?;
+    sqlx::raw_sql(include_str!(
+        "../migrations/postgres/0002_idempotency_tables.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    Ok((fixture, pool))
 }
 
 const SAMPLE_LITELLM_JSON: &str = r#"

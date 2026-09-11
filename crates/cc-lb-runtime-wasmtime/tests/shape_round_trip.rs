@@ -1,37 +1,12 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::support::required_wasm;
 use cc_lb_plugin_wire::{
     ArchivedShapeResponse, ShapeRequest, ShapeResponse, Upstream as WireUpstream,
 };
 use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
-
-fn wasm_path() -> PathBuf {
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/")
-        .parent()
-        .expect("workspace root")
-        .to_path_buf();
-    workspace_root.join("target/wasm32-unknown-unknown/release/wasmtime_shape_passthrough.wasm")
-}
-
-fn load_wasm_or_skip() -> Option<Vec<u8>> {
-    let path = wasm_path();
-    match std::fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(err) => {
-            eprintln!(
-                "skipping wasmtime-shape-passthrough e2e: wasm artifact missing at {} ({err}). \
-                 Run `cargo build --target wasm32-unknown-unknown --release -p wasmtime-shape-passthrough` first.",
-                path.display(),
-            );
-            None
-        }
-    }
-}
 
 fn fixture_wire_request() -> ShapeRequest {
     use cc_lb_plugin_wire::{Header, Principal as WirePrincipal};
@@ -63,10 +38,8 @@ fn fixture_wire_request() -> ShapeRequest {
 }
 
 #[test]
-fn shape_passthrough_echoes_request_via_wire_dispatch() {
-    let Some(wasm_bytes) = load_wasm_or_skip() else {
-        return;
-    };
+fn t3__shape_passthrough_echoes_request_via_wire_dispatch() {
+    let wasm_bytes = required_wasm("wasmtime_shape_passthrough.wasm");
 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot = runtime

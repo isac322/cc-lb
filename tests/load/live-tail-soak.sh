@@ -273,8 +273,9 @@ wait_http "$admin_port" "/admin/health" "cc-lb-admin"
 wait_http "$metrics_port" "/metrics" "cc-lb-metrics"
 seed_runtime
 
-CC_LB_LOAD_PROFILE=$PROFILE "$ROOT_DIR/target/release/cc-lb-loadgen" \
+"$ROOT_DIR/target/release/cc-lb-loadgen" \
   --mode live-tail-soak \
+  --profile "$PROFILE" \
   --proxy-url "http://127.0.0.1:$proxy_port/v1/messages" \
   --body "$SCRIPT_DIR/small-req.json" \
   --stream-body "$SCRIPT_DIR/stream-req.json" \

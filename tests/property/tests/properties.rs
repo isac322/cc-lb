@@ -47,6 +47,7 @@ fn sse_valid_event_sequences_preserve_raw_bytes() -> Result<(), String> {
     let runtime = runtime()?;
     run_property(
         "sse_valid_event_sequences_preserve_raw_bytes",
+        MIN_PROPTEST_CASES,
         valid_sse_stream_strategy(),
         |(events, split_seed)| {
             let input = render_sse_events(&events);
@@ -64,6 +65,7 @@ fn sse_random_byte_sequences_do_not_panic() -> Result<(), String> {
     let runtime = runtime()?;
     run_property(
         "sse_random_byte_sequences_do_not_panic",
+        MIN_PROPTEST_CASES,
         (
             prop::collection::vec(any::<u8>(), 0..=256),
             prop::collection::vec(0usize..=64, 0..=16),
@@ -81,6 +83,7 @@ fn sse_random_byte_sequences_do_not_panic() -> Result<(), String> {
 fn header_allowlist_preserves_non_hop_headers_unless_connection_listed() -> Result<(), String> {
     run_property(
         "header_allowlist_preserves_non_hop_headers_unless_connection_listed",
+        MIN_PROPTEST_CASES,
         header_preservation_case_strategy(),
         |case| {
             let mut headers = HeaderMap::new();
@@ -124,6 +127,7 @@ fn header_allowlist_preserves_non_hop_headers_unless_connection_listed() -> Resu
 fn hop_by_hop_headers_and_connection_extras_are_removed() -> Result<(), String> {
     run_property(
         "hop_by_hop_headers_and_connection_extras_are_removed",
+        MIN_PROPTEST_CASES,
         prop::collection::vec(non_hop_header_name_strategy("x-hop-extra"), 0..=12),
         |extra_names| {
             let mut headers = HeaderMap::new();
@@ -158,12 +162,12 @@ fn hop_by_hop_headers_and_connection_extras_are_removed() -> Result<(), String> 
     )
 }
 
-fn run_property<S, F>(name: &str, strategy: S, property: F) -> Result<(), String>
+fn run_property<S, F>(name: &str, cases: u32, strategy: S, property: F) -> Result<(), String>
 where
     S: Strategy,
     F: Fn(S::Value) -> TestCaseResult,
 {
-    let cases = proptest_case_count();
+    let cases = cases.max(MIN_PROPTEST_CASES);
     println!("{name}: proptest_cases={cases}");
     let mut runner = TestRunner::new(ProptestConfig {
         cases,
@@ -175,16 +179,8 @@ where
         .map_err(|source| source.to_string())
 }
 
-fn proptest_case_count() -> u32 {
-    std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(MIN_PROPTEST_CASES)
-        .max(MIN_PROPTEST_CASES)
-}
-
 fn runtime() -> Result<Runtime, String> {
-    Builder::new_multi_thread()
+    Builder::new_current_thread()
         .enable_time()
         .build()
         .map_err(|source| source.to_string())

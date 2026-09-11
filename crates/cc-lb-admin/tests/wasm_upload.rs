@@ -7,7 +7,7 @@
 
 use crate::admin_test_common;
 
-use admin_test_common::spawn_admin_server;
+use admin_test_common::{spawn_admin_server, spawn_admin_server_sqlite};
 use axum::http::StatusCode;
 use cc_lb_plugin_wire::schema::{HookKind, WireSchema, WireVersion};
 use cc_lb_plugin_wire::{
@@ -113,13 +113,7 @@ fn metadata_with_version(name: &str, version: &str) -> String {
 }
 
 fn filter_wasm_valid() -> Vec<u8> {
-    wat_with_sections(
-        &minimal_filter_wat(),
-        &[
-            (&schema_section_name(), &schema_section_bytes()),
-            ("cc_lb.plugin.v1", metadata("cache-aware-test").as_bytes()),
-        ],
-    )
+    include_bytes!("fixtures/filter_valid.wasm").to_vec()
 }
 
 fn filter_wasm_wrong_schema() -> Vec<u8> {
@@ -250,11 +244,11 @@ fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, Option<&str>)]) -> Vec<u
 }
 
 #[tokio::test]
-async fn happy_path_accepts_valid_filter_plugin() {
+async fn t3__happy_path_accepts_valid_filter_plugin() {
     use cc_lb_storage_api::PluginRegistryStore;
     use sha2::{Digest, Sha256};
 
-    let server = spawn_admin_server().await;
+    let server = spawn_admin_server_sqlite().await;
     let wasm = filter_wasm_valid();
     let body = multipart_body(&[
         ("name", b"cache-aware-test"),
@@ -292,7 +286,7 @@ async fn happy_path_accepts_valid_filter_plugin() {
 }
 
 #[tokio::test]
-async fn rejects_missing_required_export() {
+async fn t2__rejects_missing_required_export() {
     let server = spawn_admin_server().await;
     let wasm = filter_wasm_missing_export();
     let body = multipart_body(&[
@@ -311,7 +305,7 @@ async fn rejects_missing_required_export() {
 }
 
 #[tokio::test]
-async fn rejects_schema_hash_mismatch() {
+async fn t2__rejects_schema_hash_mismatch() {
     let server = spawn_admin_server().await;
     let wasm = filter_wasm_wrong_schema();
     let body = multipart_body(&[
@@ -330,7 +324,7 @@ async fn rejects_schema_hash_mismatch() {
 }
 
 #[tokio::test]
-async fn rejects_host_import_violation() {
+async fn t2__rejects_host_import_violation() {
     let server = spawn_admin_server().await;
     let wasm = filter_wasm_with_import();
     let body = multipart_body(&[
@@ -366,8 +360,8 @@ fn filter_wasm_with_name_version(name: &str, version: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn same_name_same_hash_upload_is_noop() {
-    let server = spawn_admin_server().await;
+async fn t3__same_name_same_hash_upload_is_noop() {
+    let server = spawn_admin_server_sqlite().await;
     let wasm = filter_wasm_with_name_version("replaceable-filter", "1.0.0");
     let first = multipart_body(&[
         ("name", b"replaceable-filter"),
@@ -391,8 +385,8 @@ async fn same_name_same_hash_upload_is_noop() {
 }
 
 #[tokio::test]
-async fn higher_version_replaces_same_name_entry() {
-    let server = spawn_admin_server().await;
+async fn t3__higher_version_replaces_same_name_entry() {
+    let server = spawn_admin_server_sqlite().await;
     let first_wasm = filter_wasm_with_name_version("replaceable-filter", "1.0.0");
     let first = multipart_body(&[
         ("name", b"replaceable-filter"),
@@ -418,8 +412,8 @@ async fn higher_version_replaces_same_name_entry() {
 }
 
 #[tokio::test]
-async fn same_version_different_hash_requires_confirmation_then_replaces() {
-    let server = spawn_admin_server().await;
+async fn t3__same_version_different_hash_requires_confirmation_then_replaces() {
+    let server = spawn_admin_server_sqlite().await;
     let first_wasm = filter_wasm_with_name_version("replaceable-filter", "1.0.0");
     let first = multipart_body(&[
         ("name", b"replaceable-filter"),
@@ -462,7 +456,7 @@ async fn same_version_different_hash_requires_confirmation_then_replaces() {
 }
 
 #[tokio::test]
-async fn rejects_identity_mismatch_between_multipart_and_embedded_name() {
+async fn t2__rejects_identity_mismatch_between_multipart_and_embedded_name() {
     let server = spawn_admin_server().await;
     let wasm = filter_wasm_with_embedded_name("embedded-name");
     let body = multipart_body(&[
@@ -482,8 +476,8 @@ async fn rejects_identity_mismatch_between_multipart_and_embedded_name() {
 }
 
 #[tokio::test]
-async fn accepts_when_embedded_name_matches_multipart() {
-    let server = spawn_admin_server().await;
+async fn t3__accepts_when_embedded_name_matches_multipart() {
+    let server = spawn_admin_server_sqlite().await;
     let wasm = filter_wasm_with_embedded_name("aligned-name");
     let body = multipart_body(&[
         ("name", b"aligned-name"),
@@ -496,8 +490,8 @@ async fn accepts_when_embedded_name_matches_multipart() {
 }
 
 #[tokio::test]
-async fn accepts_when_multipart_name_absent() {
-    let server = spawn_admin_server().await;
+async fn t3__accepts_when_multipart_name_absent() {
+    let server = spawn_admin_server_sqlite().await;
     let wasm = filter_wasm_with_embedded_name("subscription-launderer");
     let body = multipart_body(&[
         (
@@ -517,7 +511,7 @@ async fn accepts_when_multipart_name_absent() {
 }
 
 #[tokio::test]
-async fn rejects_when_metadata_section_absent() {
+async fn t2__rejects_when_metadata_section_absent() {
     let server = spawn_admin_server().await;
     let wasm = wat_with_sections(
         &minimal_filter_wat(),
@@ -534,9 +528,9 @@ async fn rejects_when_metadata_section_absent() {
 }
 
 #[tokio::test]
-async fn accepts_upload_without_slot_kind() {
+async fn t3__accepts_upload_without_slot_kind() {
     // Given: a valid artifact and multipart body with no legacy slot selector.
-    let server = spawn_admin_server().await;
+    let server = spawn_admin_server_sqlite().await;
     let wasm = filter_wasm_valid();
     let body = multipart_body(&[
         ("name", b"cache-aware-test"),
@@ -553,11 +547,11 @@ async fn accepts_upload_without_slot_kind() {
 }
 
 #[tokio::test]
-async fn registers_all_supported_slots_for_multi_hook_upload_without_slot_kind() {
+async fn t3__registers_all_supported_slots_for_multi_hook_upload_without_slot_kind() {
     use cc_lb_storage_api::{PluginRegistryStore, PluginSlotKind};
 
     // Given: one artifact declaring valid Filter and Observe hooks.
-    let server = spawn_admin_server().await;
+    let server = spawn_admin_server_sqlite().await;
     let wasm = plugin_wasm(
         "multi-slot",
         &[(HookKind::Filter, None), (HookKind::Observe, None)],
@@ -586,7 +580,7 @@ async fn registers_all_supported_slots_for_multi_hook_upload_without_slot_kind()
 }
 
 #[tokio::test]
-async fn rejects_incomplete_shape_without_slot_kind() {
+async fn t2__rejects_incomplete_shape_without_slot_kind() {
     // Given: Shape is declared without either Shape-owned response hook.
     let server = spawn_admin_server().await;
     let wasm = plugin_wasm("incomplete-shape", &[(HookKind::Shape, Some("active"))]);
@@ -611,7 +605,7 @@ async fn rejects_incomplete_shape_without_slot_kind() {
 }
 
 #[tokio::test]
-async fn rejects_legacy_slot_kind_not_derived_from_artifact() {
+async fn t2__rejects_legacy_slot_kind_not_derived_from_artifact() {
     // Given: a Filter-only artifact paired with a legacy Observe selector.
     let server = spawn_admin_server().await;
     let wasm = filter_wasm_valid();
@@ -633,10 +627,13 @@ async fn rejects_legacy_slot_kind_not_derived_from_artifact() {
 
 // === server hookup that bypasses the private AdminClient internals ===
 
-async fn upload(
-    server: &admin_test_common::SpawnedAdminServer,
+async fn upload<S>(
+    server: &admin_test_common::SpawnedAdminServer<S>,
     body: Vec<u8>,
-) -> (StatusCode, serde_json::Value) {
+) -> (StatusCode, serde_json::Value)
+where
+    S: cc_lb_storage_api::Storage + cc_lb_storage_api::ManagedKeyStore + 'static,
+{
     use axum::body::Body;
     use axum::http::{Method, Request, header};
 
@@ -671,10 +668,17 @@ async fn upload(
     (status, value)
 }
 
-async fn build_admin_state(
-    server: &admin_test_common::SpawnedAdminServer,
-) -> cc_lb_admin::AdminState {
+async fn build_admin_state<S>(
+    server: &admin_test_common::SpawnedAdminServer<S>,
+) -> cc_lb_admin::AdminState
+where
+    S: cc_lb_storage_api::Storage + cc_lb_storage_api::ManagedKeyStore + 'static,
+{
     use std::sync::Arc;
+
+    let data_dir = server._dir.as_ref().map(|dir| dir.path().join("data"));
+    let mut config = cc_lb_config::Config::default();
+    config.runtime.data_dir.clone_from(&data_dir);
     cc_lb_admin::AdminState {
         storage: Some(server.storage.clone()),
         key_store: Some(admin_test_common::key_store(server.storage.clone())),
@@ -684,15 +688,15 @@ async fn build_admin_state(
         subscription_metadata_hook: None,
         lazy_refresher: None,
         runtime: None,
-        data_dir: Some(server._dir.path().to_path_buf()),
+        data_dir,
         warmup_dialect_dispatcher: None,
-        dynamic_view: admin_test_common::dynamic_view_holder(&cc_lb_config::Config::default()),
-        config: Arc::new(cc_lb_config::Config::default()),
+        dynamic_view: admin_test_common::dynamic_view_holder(&config),
+        config: Arc::new(config),
         scheduler: None,
         admin_auth: crate::admin_test_common::static_token_auth("test-token"),
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_clock::SystemClock),
+        clock: cc_lb_testkit::fixed_clock(1_700_000_000),
     }
 }

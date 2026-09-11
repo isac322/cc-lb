@@ -11,9 +11,9 @@
 //! `wasm32-unknown-unknown` toolchain is part of the standard dev
 //! setup per docs, so we don't shell out to cargo from the test.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::support::required_wasm;
 use cc_lb_plugin_wire::{
     ArchivedFilterResponse, CachePricingSummary, FilterRequest, FilterResponse, Principal,
     UpstreamCandidate,
@@ -22,31 +22,6 @@ use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use rkyv::rancor::Error;
 use rkyv::util::AlignedVec;
-
-fn wasm_path() -> PathBuf {
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/")
-        .parent()
-        .expect("workspace root")
-        .to_path_buf();
-    workspace_root.join("target/wasm32-unknown-unknown/release/cache_aware_wasmtime.wasm")
-}
-
-fn load_wasm_or_skip() -> Option<Vec<u8>> {
-    let path = wasm_path();
-    match std::fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(err) => {
-            eprintln!(
-                "skipping cache_aware_wasmtime e2e: wasm artifact missing at {} ({err}). \
-                Run `cargo build --target wasm32-unknown-unknown --release -p cache-aware-wasmtime` first.",
-                path.display(),
-            );
-            None
-        }
-    }
-}
 
 fn fixture_request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
     use cc_lb_plugin_wire::Claim;
@@ -110,10 +85,8 @@ fn decode_response(bytes: &[u8]) -> FilterResponse {
 }
 
 #[test]
-fn cache_aware_wasmtime_round_trips_filter() {
-    let Some(wasm) = load_wasm_or_skip() else {
-        return;
-    };
+fn t3__cache_aware_wasmtime_round_trips_filter() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot_key = RuntimeSlotKey::global("cache-aware-wasmtime");
@@ -150,10 +123,8 @@ fn cache_aware_wasmtime_round_trips_filter() {
 }
 
 #[test]
-fn cache_aware_wasmtime_default_keep_k_keeps_one() {
-    let Some(wasm) = load_wasm_or_skip() else {
-        return;
-    };
+fn t3__cache_aware_wasmtime_default_keep_k_keeps_one() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
 
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot_key = RuntimeSlotKey::global("cache-aware-wasmtime-default");

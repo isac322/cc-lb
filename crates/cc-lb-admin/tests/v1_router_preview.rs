@@ -96,7 +96,7 @@ async fn send_preview_request(
 }
 
 #[tokio::test]
-async fn route_preview_returns_admin_port_projection() {
+async fn t2__route_preview_returns_admin_port_projection() {
     let mut state = test_state();
     state.lifecycle = Some(AdminPorts {
         route_preview: Some(Arc::new(PreviewPort)),
@@ -131,7 +131,7 @@ async fn route_preview_returns_admin_port_projection() {
 }
 
 #[tokio::test]
-async fn missing_authorization_returns_401() {
+async fn t2__missing_authorization_returns_401() {
     let (status, _) = send_preview_request(
         None,
         Some((
@@ -144,7 +144,7 @@ async fn missing_authorization_returns_401() {
 }
 
 #[tokio::test]
-async fn wrong_token_returns_401() {
+async fn t2__wrong_admin_token_returns_401() {
     let (status, _) = send_preview_request(
         Some("wrong-token"),
         Some((
@@ -157,7 +157,7 @@ async fn wrong_token_returns_401() {
 }
 
 #[tokio::test]
-async fn lifecycle_unavailable_returns_500_with_structured_error() {
+async fn t2__lifecycle_unavailable_returns_500_with_structured_error() {
     let (status, body) = send_preview_request(
         Some("test-token"),
         Some((
@@ -172,7 +172,7 @@ async fn lifecycle_unavailable_returns_500_with_structured_error() {
 }
 
 #[tokio::test]
-async fn malformed_json_body_returns_400() {
+async fn t2__malformed_json_body_returns_400() {
     let (status, _) = send_preview_request(
         Some("test-token"),
         Some(("application/json", b"{ not json".to_vec())),

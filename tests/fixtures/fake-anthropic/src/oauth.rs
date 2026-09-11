@@ -301,6 +301,7 @@ fn now_unix_secs() -> u64 {
     }
 }
 
+#[allow(non_snake_case)]
 #[cfg(test)]
 mod tests {
     use axum::body::{Body, to_bytes};
@@ -316,7 +317,7 @@ mod tests {
     const REDIRECT_URI: &str = "http://localhost/callback";
 
     #[tokio::test]
-    async fn authorize_redirects_with_code() {
+    async fn t2__authorize_redirects_with_code() {
         let app = app(AppConfig::default());
         let response = authorize_request(app, "test-verifier", Some("state-123")).await;
 
@@ -342,7 +343,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_code_exchange() {
+    async fn t2__token_code_exchange() {
         let app = app(AppConfig::default());
         let verifier = "exchange-verifier";
         let code = authorize_code(app.clone(), verifier).await;
@@ -352,7 +353,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_pkce_verifier_mismatch_rejected() {
+    async fn t2__token_pkce_verifier_mismatch_rejected() {
         let app = app(AppConfig::default());
         let code = authorize_code(app.clone(), "correct-verifier").await;
         let response = token_form(
@@ -373,7 +374,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_refresh_rotates_both() {
+    async fn t2__token_refresh_rotates_both() {
         let app = app(AppConfig::default());
         let code = authorize_code(app.clone(), "refresh-verifier").await;
         let tokens = exchange_code(app.clone(), &code, "refresh-verifier").await;
@@ -391,7 +392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_refresh_invalidates_old_refresh() {
+    async fn t2__token_refresh_invalidates_old_refresh() {
         let app = app(AppConfig::default());
         let code = authorize_code(app.clone(), "invalidate-verifier").await;
         let tokens = exchange_code(app.clone(), &code, "invalidate-verifier").await;

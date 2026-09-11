@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use cc_lb_storage_api::{
     BackendKind, CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, MetaStore,
     RequestEvent, RequestEventProjections, RequestEventStore,
@@ -16,7 +14,7 @@ async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage
@@ -95,7 +93,7 @@ async fn row_counts(storage: &cc_lb_storage_sqlite::SqliteStorage) -> (i64, i64,
 }
 
 #[tokio::test]
-async fn append_with_projections_commits_all_rows_when_valid() {
+async fn t3__append_with_projections_commits_all_rows_when_valid() {
     let (_temp_dir, storage) = storage().await;
     let event = event("renewal-event-success");
     let projections = projections("session-hash:7");
@@ -110,7 +108,7 @@ async fn append_with_projections_commits_all_rows_when_valid() {
 }
 
 #[tokio::test]
-async fn append_with_projections_rolls_back_all_rows_when_turn_insert_fails() {
+async fn t3__append_with_projections_rolls_back_all_rows_when_turn_insert_fails() {
     let (_temp_dir, storage) = storage().await;
     sqlx::query(
         "CREATE TRIGGER reject_keepalive_turn BEFORE INSERT ON cache_keepalive_turns \
@@ -133,7 +131,7 @@ async fn append_with_projections_rolls_back_all_rows_when_turn_insert_fails() {
 }
 
 #[tokio::test]
-async fn append_with_projections_inserts_one_projection_set_when_base_event_exists() {
+async fn t3__append_with_projections_inserts_one_projection_set_when_base_event_exists() {
     let (_temp_dir, storage) = storage().await;
     let event = event("renewal-event-existing-base");
     storage
@@ -156,7 +154,7 @@ async fn append_with_projections_inserts_one_projection_set_when_base_event_exis
 }
 
 #[tokio::test]
-async fn append_request_event_leaves_projection_tables_empty_for_proxy_rows() {
+async fn t3__append_request_event_leaves_projection_tables_empty_for_proxy_rows() {
     let (_temp_dir, storage) = storage().await;
     let mut event = event("proxy-event-single-insert");
     event.source_kind = Some("proxy".to_owned());

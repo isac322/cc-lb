@@ -65,7 +65,7 @@ impl RenewalAccountingScenario {
             fixture,
             limit_engine: LimitEngine::new(
                 Arc::new(KeyConcurrencyManager::new()),
-                Arc::new(cc_lb_engine::SystemClock),
+                cc_lb_testkit::fixed_clock(1_700_000_000),
             ),
             principal_view,
             key_record,

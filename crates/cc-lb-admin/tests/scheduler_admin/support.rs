@@ -17,6 +17,26 @@ pub struct RouteFixture<Pool> {
     pub handle: SchedulerAdminHandle,
 }
 
+#[cfg(feature = "postgres")]
+pub struct PostgresRouteFixture {
+    pub pool: scheduler_sqlx::PgPool,
+    pub handle: SchedulerAdminHandle,
+    database_name: String,
+    base: Option<cc_lb_storage_conformance::PostgresFixture>,
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresRouteFixture {
+    pub async fn teardown(mut self) -> anyhow::Result<()> {
+        self.pool.close().await;
+        let base = self
+            .base
+            .take()
+            .expect("PostgresRouteFixture teardown called once");
+        cleanup_database_and_base(base, &self.database_name).await
+    }
+}
+
 pub fn app_with_scheduler(scheduler: SchedulerAdminHandle) -> axum::Router {
     let config = Config::default();
     let state = cc_lb_admin::AdminState {
@@ -150,51 +170,185 @@ pub async fn seed_sqlite_usage_rollup(
 }
 
 #[cfg(feature = "postgres")]
-pub async fn postgres_fixture() -> Result<
-    Option<(
-        scheduler_sqlx::PgPool,
-        String,
-        RouteFixture<scheduler_sqlx::PgPool>,
-    )>,
-    Box<dyn std::error::Error>,
-> {
+pub async fn postgres_fixture() -> anyhow::Result<PostgresRouteFixture> {
     use std::str::FromStr as _;
 
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        return Ok(None);
-    };
-    if !(url.contains("localhost") || url.contains("127.0.0.1") || url.contains("cc_lb_test")) {
-        return Ok(None);
-    }
-    let options = scheduler_sqlx::postgres::PgConnectOptions::from_str(&url)?;
-    let admin = scheduler_sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(options.clone())
-        .await?;
-    let db = format!("cc_lb_admin_scheduler_{}", uuid::Uuid::new_v4().simple());
-    if scheduler_sqlx::query(&format!(r#"CREATE DATABASE "{db}""#))
-        .execute(&admin)
-        .await
-        .is_err()
+    use anyhow::Context as _;
+    use scheduler_sqlx::postgres::PgConnectOptions;
+
+    let base = cc_lb_storage_conformance::postgres_fixture().await?;
+    let connect_options = match PgConnectOptions::from_str(base.database_url())
+        .context("parse CI_POSTGRES_URL for scheduler admin fixture")
     {
-        admin.close().await;
-        return Ok(None);
+        Ok(options) => options,
+        Err(error) => {
+            let cleanup = base.teardown().await;
+            return Err(with_cleanup_error(error, cleanup, "teardown base fixture"));
+        }
+    };
+    let endpoint = format!(
+        "{} {}",
+        connect_options.get_host(),
+        connect_options.get_database().unwrap_or_default()
+    );
+    if !is_safe_database_url(&endpoint) {
+        let error =
+            anyhow::anyhow!("CI_POSTGRES_URL must identify localhost, 127.0.0.1, or cc_lb_test");
+        let cleanup = base.teardown().await;
+        return Err(with_cleanup_error(error, cleanup, "teardown base fixture"));
     }
-    let pool = scheduler_sqlx::postgres::PgPoolOptions::new()
+
+    let suffix = base.schema_name().trim_start_matches("cc_lb_test_");
+    let database_name = format!("cc_lb_scheduler_admin_{suffix}");
+    if let Err(error) = create_database(base.pool(), &database_name).await {
+        let cleanup = base.teardown().await;
+        return Err(with_cleanup_error(error, cleanup, "teardown base fixture"));
+    }
+
+    match setup_postgres_database(base.database_url(), &connect_options, &database_name).await {
+        Ok((pool, handle)) => Ok(PostgresRouteFixture {
+            pool,
+            handle,
+            database_name,
+            base: Some(base),
+        }),
+        Err(error) => {
+            let cleanup = cleanup_database_and_base(base, &database_name).await;
+            Err(with_cleanup_error(
+                error,
+                cleanup,
+                "drop scheduler database and teardown base fixture",
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn setup_postgres_database(
+    database_url: &str,
+    connect_options: &scheduler_sqlx::postgres::PgConnectOptions,
+    database_name: &str,
+) -> anyhow::Result<(scheduler_sqlx::PgPool, SchedulerAdminHandle)> {
+    use std::str::FromStr as _;
+
+    use anyhow::Context as _;
+    use scheduler_sqlx::postgres::PgPoolOptions;
+
+    let storage_options = sqlx::postgres::PgConnectOptions::from_str(database_url)
+        .context("parse CI_POSTGRES_URL for cc-lb storage migration pool")?
+        .database(database_name)
+        .options([("search_path", "public")]);
+    let storage_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
-        .connect_with(options.database(&db))
-        .await?;
-    apalis_postgres::PostgresStorage::setup(&pool).await?;
-    cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
+        .connect_with(storage_options)
+        .await
+        .context("connect cc-lb storage migration pool")?;
+    let storage_setup = async {
+        sqlx::migrate!("../cc-lb-storage-postgres/migrations")
+            .run(&storage_pool)
+            .await
+            .context("apply cc-lb storage migrations in public schema")?;
+        sqlx::query("CREATE SCHEMA cc_lb_scheduler")
+            .execute(&storage_pool)
+            .await
+            .context("create scheduler migration schema")?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    storage_pool.close().await;
+    storage_setup?;
+
+    let scheduler_options = connect_options
+        .clone()
+        .database(database_name)
+        .options([("search_path", "cc_lb_scheduler,apalis,public")]);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(scheduler_options)
+        .await
+        .context("connect scheduler migration pool")?;
+    let setup = async {
+        apalis_postgres::PostgresStorage::setup(&pool)
+            .await
+            .context("apply Apalis migrations")?;
+        cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
+            .await
+            .context("apply scheduler post-setup migrations")?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = setup {
+        pool.close().await;
+        return Err(error);
+    }
+
     let backend = SchedulerBackend::Postgres(
         cc_lb_scheduler::worker::PostgresSchedulerBackend::new(pool.clone()),
     );
-    Ok(Some((
-        admin,
-        db,
-        RouteFixture {
-            pool,
-            handle: SchedulerAdminHandle::new(backend),
-        },
+    Ok((pool, SchedulerAdminHandle::new(backend)))
+}
+
+#[cfg(feature = "postgres")]
+async fn create_database(pool: &sqlx::PgPool, database_name: &str) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE DATABASE {}",
+        quote_identifier(database_name)
     )))
+    .execute(pool)
+    .await
+    .with_context(|| format!("create scheduler test database {database_name}"))?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+async fn cleanup_database_and_base(
+    base: cc_lb_storage_conformance::PostgresFixture,
+    database_name: &str,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let drop_database = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {}",
+        quote_identifier(database_name)
+    )))
+    .execute(base.pool())
+    .await
+    .map(|_| ())
+    .with_context(|| format!("drop scheduler test database {database_name}"));
+    let teardown_base = base.teardown().await;
+    match (drop_database, teardown_base) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(teardown_error)) => Err(error.context(format!(
+            "also failed to teardown base PostgreSQL fixture: {teardown_error:#}"
+        ))),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn with_cleanup_error(
+    error: anyhow::Error,
+    cleanup: anyhow::Result<()>,
+    cleanup_action: &str,
+) -> anyhow::Error {
+    match cleanup {
+        Ok(()) => error,
+        Err(cleanup_error) => error.context(format!(
+            "also failed to {cleanup_action}: {cleanup_error:#}"
+        )),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+#[cfg(feature = "postgres")]
+fn is_safe_database_url(endpoint: &str) -> bool {
+    endpoint.contains("localhost")
+        || endpoint.contains("127.0.0.1")
+        || endpoint.contains("cc_lb_test")
 }

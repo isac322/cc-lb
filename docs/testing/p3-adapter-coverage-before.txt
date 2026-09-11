@@ -1,0 +1,25 @@
+Phase 3 Admin adapter coverage baseline
+Generated: September 10, 2026
+
+Command:
+  cargo llvm-cov nextest -p cc-lb-admin --all-features --lcov
+
+Local tool environment:
+  LLVM_COV=/Library/Developer/CommandLineTools/usr/bin/llvm-cov
+  LLVM_PROFDATA=/Library/Developer/CommandLineTools/usr/bin/llvm-profdata
+  SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+  LIBRARY_PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib
+
+Command result: PASS
+LCOV bytes: 569536
+LCOV SHA-256: 6ae2b55da9c13ea0a20308f063f58b2614cc3a82bb6c9868d4cc6949df06ad93
+LCOV source-file records: 38
+
+Adapter function records:
+  BLOCKED: 0 matching source-file records were emitted for
+  crates/cc-lb-storage-sqlite/src/** or crates/cc-lb-storage-postgres/src/**.
+
+  The exact package-scoped command emitted coverage only for
+  crates/cc-lb-admin/src/**. Workspace dependency adapters were not
+  instrumented or included in the LCOV report, so no truthful FN/FNDA hit
+  baseline can be derived from this command. No adapter hits are fabricated.

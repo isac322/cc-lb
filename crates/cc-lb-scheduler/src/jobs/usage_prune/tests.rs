@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use std::future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +18,7 @@ const API_KEY_USAGE_RETAIN_FOR_SECS: u64 = 7 * DAY_SECS + 3_600;
 const COMPACTION_BATCH_SIZE: usize = 1_000;
 
 #[tokio::test]
-async fn prune_execution_calls_pruner_and_api_key_compactor_once() {
+async fn t2__prune_execution_calls_pruner_and_api_key_compactor_once() {
     let clock = test_clock();
     let runner = RecordingUsagePruneRunner::default();
     runner.seed_usage_rows(expired_ms(&*clock, 100), 5);
@@ -33,7 +35,7 @@ async fn prune_execution_calls_pruner_and_api_key_compactor_once() {
 }
 
 #[tokio::test]
-async fn retention_cutoff_preserves_rows_inside_retention_window() {
+async fn t2__retention_cutoff_preserves_rows_inside_retention_window() {
     let clock = test_clock();
     let runner = RecordingUsagePruneRunner::default();
     runner.seed_usage_rows(expired_ms(&*clock, 100), 3);
@@ -49,7 +51,7 @@ async fn retention_cutoff_preserves_rows_inside_retention_window() {
 }
 
 #[tokio::test]
-async fn zero_general_retention_still_compacts_api_key_usage() {
+async fn t2__zero_general_retention_still_compacts_api_key_usage() {
     let clock = test_clock();
     let runner = RecordingUsagePruneRunner::default();
     runner.seed_usage_rows(expired_ms(&*clock, 100), 2);

@@ -15,10 +15,10 @@ use http::StatusCode;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
+async fn t3__warmup_attempt_executor_persists_one_row_for_each_outcome() {
     let storage = cc_lb_storage_sqlite::open_sqlite(
         "sqlite::memory:",
-        std::sync::Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_800_002_000),
     )
     .await
     .expect("sqlite opens");

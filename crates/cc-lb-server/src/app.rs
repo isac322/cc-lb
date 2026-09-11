@@ -37,6 +37,8 @@ use cc_lb_engine::{
 };
 use cc_lb_engine::{PromptCacheObservationSinkLike, lifecycle::PromptCacheObservationCacheLike};
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
+#[cfg(test)]
+use cc_lb_runtime_wasmtime::HotEngineAllocationStrategy;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -360,11 +362,24 @@ impl App {
     }
 
     pub async fn start(self) -> Result<(), BuildError> {
+        let proxy_addr = self.proxy_addr;
+        let admin_addr = self.admin_addr;
+        let proxy_listener = TcpListener::bind(proxy_addr).await?;
+        let admin_listener = TcpListener::bind(admin_addr).await?;
+        self.start_with_listeners(proxy_listener, admin_listener)
+            .await
+    }
+
+    pub async fn start_with_listeners(
+        self,
+        proxy_listener: TcpListener,
+        admin_listener: TcpListener,
+    ) -> Result<(), BuildError> {
         let App {
             router,
             admin_router,
-            proxy_addr,
-            admin_addr,
+            proxy_addr: _,
+            admin_addr: _,
             lifecycle,
             reload_task,
             notify_cancel,
@@ -388,8 +403,6 @@ impl App {
             server_state,
         } = self;
         server_state.wait_for_ready().await;
-        let proxy_listener = TcpListener::bind(proxy_addr).await?;
-        let admin_listener = TcpListener::bind(admin_addr).await?;
 
         let (admin_stop_tx, admin_shutdown) = watch::channel(false);
         let admin = tokio::spawn(async move {
@@ -562,9 +575,14 @@ pub async fn build_app(config: Config, clock: ClockHandle) -> Result<App, BuildE
     build_app_with_path(config, None, clock).await
 }
 
-pub async fn build_app_for_testing(
+pub async fn build_app_for_testing(config: Config, clock: ClockHandle) -> Result<App, BuildError> {
+    build_app_for_testing_with_dispatch(config, clock, None).await
+}
+
+pub async fn build_app_for_testing_with_dispatch(
     mut config: Config,
     clock: ClockHandle,
+    dispatcher: Option<Arc<dyn UpstreamDispatch>>,
 ) -> Result<App, BuildError> {
     let dir = tempfile::TempDir::new()?;
     let path = dir.path().join("storage.sqlite");
@@ -576,6 +594,10 @@ pub async fn build_app_for_testing(
     storage_arc.initialize(BackendKind::Sqlite).await?;
     let managed_store: Arc<dyn ManagedKeyStore> = storage_arc.clone();
     let storage: Arc<dyn Storage> = storage_arc.clone();
+    seed_app_testing_principal(storage_arc.as_ref(), &*clock, false).await?;
+    if dispatcher.is_some() {
+        seed_app_testing_upstream(storage_arc.as_ref(), None).await?;
+    }
     config.storage = cc_lb_config::StorageConfig::Sqlite { path };
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
     config.downstream_auth.mode = DownstreamAuthMode::None;
@@ -601,6 +623,7 @@ pub async fn build_app_for_testing(
         None,
         opened_scheduler,
         None,
+        dispatcher,
         clock,
     )
     .await
@@ -694,34 +717,41 @@ pub async fn build_app_for_testing_postgres(
     build_app_with_storage(config, None, managed_store, init_storage, aead, clock).await
 }
 
-#[cfg(feature = "postgres")]
 pub async fn seed_app_testing_storage(
     storage: &dyn Storage,
     upstream_base_url: Option<url::Url>,
     clock: &dyn cc_lb_engine::Clock,
 ) -> Result<(), BuildError> {
+    seed_app_testing_principal(storage, clock, true).await?;
+    seed_app_testing_upstream(storage, upstream_base_url).await
+}
+
+async fn seed_app_testing_principal(
+    storage: &dyn Storage,
+    clock: &dyn cc_lb_engine::Clock,
+    with_request_limit: bool,
+) -> Result<(), BuildError> {
     use cc_lb_engine::clock::unix_secs;
     use cc_lb_storage_api::principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind};
-    use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
-    use cc_lb_storage_api::{PrincipalStore, StorageError, UpstreamStore};
+    use cc_lb_storage_api::{PrincipalStore, StorageError};
 
     let now = unix_secs(clock.now());
-    // NOTE [Priority-3 footgun]: postgres-conformance's managed_key_multi_instance
-    // spawns two cc-lb instances against the same database; both call this seed
-    // helper, race on get_by_name, and one then loses the create with a Conflict
-    // on principals_v1_name_active_uniq. Treat Conflict as success (same pattern
-    // the upstream block below uses) so the test's `concurrent_cross_instance_issue`
-    // scenario stops flaking.
+    // Multiple test apps may seed the same shared storage concurrently. Treat
+    // the active-name conflict as success so both apps observe the same fixture.
     match PrincipalStore::create(
         storage,
         PrincipalCreate {
             name: "test-principal".to_owned(),
             kind: PrincipalKind::Machine,
-            default_limits: vec![Limit {
-                kind: LimitKind::Requests,
-                window_secs: 60,
-                cap_micros: 1_000_000,
-            }],
+            default_limits: if with_request_limit {
+                vec![Limit {
+                    kind: LimitKind::Requests,
+                    window_secs: 60,
+                    cap_micros: 1_000_000,
+                }]
+            } else {
+                Vec::new()
+            },
             allowed_models: vec!["*".to_owned()],
             allowed_upstreams: vec![],
             cache_keepalive: None,
@@ -730,33 +760,41 @@ pub async fn seed_app_testing_storage(
     )
     .await
     {
-        Ok(_) | Err(StorageError::Conflict { .. }) => {}
-        Err(error) => return Err(error.into()),
+        Ok(_) | Err(StorageError::Conflict { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
     }
+}
+
+async fn seed_app_testing_upstream(
+    storage: &dyn Storage,
+    upstream_base_url: Option<url::Url>,
+) -> Result<(), BuildError> {
+    use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
+    use cc_lb_storage_api::{StorageError, UpstreamStore};
 
     if UpstreamStore::get_by_name(storage, "test-upstream")
         .await?
-        .is_none()
+        .is_some()
     {
-        match UpstreamStore::create(
-            storage,
-            UpstreamCreate {
-                name: "test-upstream".to_owned(),
-                kind: UpstreamKind::AnthropicApiKey,
-                base_url: upstream_base_url,
-                api_key_ciphertext: Some(Vec::new()),
-                oauth_token_generation: None,
-                warmup_enabled: false,
-                warmup_dialect_plugin: None,
-            },
-        )
-        .await
-        {
-            Ok(_) | Err(StorageError::Conflict { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
+        return Ok(());
     }
-    Ok(())
+    match UpstreamStore::create(
+        storage,
+        UpstreamCreate {
+            name: "test-upstream".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: upstream_base_url,
+            api_key_ciphertext: Some(Vec::new()),
+            oauth_token_generation: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+        },
+    )
+    .await
+    {
+        Ok(_) | Err(StorageError::Conflict { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -818,6 +856,7 @@ async fn build_app_with_path_inner(
         startup_preflight,
         opened_scheduler,
         Some(lazy_refresh_claim_guard),
+        None,
         clock,
     )
     .await
@@ -877,6 +916,7 @@ pub async fn build_app_with_storage(
         None,
         opened_scheduler,
         None,
+        None,
         clock,
     )
     .await
@@ -893,6 +933,7 @@ async fn build_app_with_storage_inner(
     startup_preflight: Option<StartupPreflight>,
     opened_scheduler: crate::scheduler_factory::OpenedScheduler,
     lazy_refresh_claim_guard: Option<Arc<dyn LazyRefreshClaimGuard>>,
+    dispatcher_override: Option<Arc<dyn UpstreamDispatch>>,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
     let scheduler_lazy_handle = opened_scheduler.lazy_handle();
@@ -1007,7 +1048,7 @@ async fn build_app_with_storage_inner(
         clock.clone(),
     ));
 
-    let (dispatcher, _breaker_registry) = dispatcher(&config, clock.clone());
+    let dispatcher = dispatcher_override.unwrap_or_else(|| dispatcher(&config, clock.clone()).0);
 
     let replica_identity = {
         match replica::load_or_create_replica_id(&data_dir) {
@@ -1317,6 +1358,7 @@ async fn build_app_with_storage_inner(
                     storage.clone(),
                     storage_tail_tx.clone(),
                     Duration::from_millis(config.event_bus.storage_tail_poll_interval_ms.max(1)),
+                    clock.clone(),
                     initial_storage_tail_cursor,
                     event_fanout_shutdown_rx.clone(),
                 ));
@@ -1345,6 +1387,7 @@ async fn build_app_with_storage_inner(
             storage.clone(),
             Some(event_bus.clone()),
             Arc::clone(&metrics_hook),
+            clock.clone(),
         )
     });
     let lifecycle_hook_adapter_handle = lifecycle_hook_adapter_rx.map(|rx| {
@@ -1364,6 +1407,7 @@ async fn build_app_with_storage_inner(
             rx,
             Arc::clone(&initial_view.upstream_rate_limit_cache),
             Some(upstream_rate_limit_sink.clone()),
+            clock.clone(),
         )
     });
     let lifecycle_subscription_quota_subscriber_handle =
@@ -1374,12 +1418,17 @@ async fn build_app_with_storage_inner(
                 rx,
                 Some(cache),
                 Some(subscription_quota_sink.clone()),
+                clock.clone(),
             )
         });
     let lifecycle_limit_rejection_audit_subscriber_handle = lifecycle_limit_rejection_audit_rx
         .and_then(|rx| {
             audit_sink.clone().map(|sink| {
-                cc_lb_engine::spawn_lifecycle_limit_rejection_audit_subscriber(rx, sink)
+                cc_lb_engine::spawn_lifecycle_limit_rejection_audit_subscriber(
+                    rx,
+                    sink,
+                    clock.clone(),
+                )
             })
         });
     let lifecycle_api_key_metrics_subscriber_handle = lifecycle_api_key_metrics_rx
@@ -2732,8 +2781,8 @@ async fn lifecycle_handler(
             drop(body_read_span);
             if let Some(observer) = observer.as_ref() {
                 observer.set_request_body_timing(body_read_ms, None);
-                observer.record_body_too_large_rejection(cap as u64);
             }
+            record_body_too_large_rejection(&parts, cap);
             return body_too_large_response();
         }
         Err(RequestBodyReadError::Read(source)) => {
@@ -2756,6 +2805,12 @@ async fn lifecycle_handler(
             *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
             response
         }
+    }
+}
+
+fn record_body_too_large_rejection(parts: &http::request::Parts, cap: usize) {
+    if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
+        observer.record_body_too_large_rejection(cap as u64);
     }
 }
 
@@ -3097,6 +3152,7 @@ fn dispatcher(
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
@@ -3105,8 +3161,8 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
-    use cc_lb_lifecycle::LifecycleEvent;
+    use cc_lb_control::{InMemoryBus, LifecycleBusReceiver, RequestEventBus};
+    use cc_lb_lifecycle::{LifecycleEvent, ParseFailure, TerminationReason};
     use futures_util::stream;
     use http_body_util::BodyExt;
     use serde_json::Value;
@@ -3567,7 +3623,130 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_health_state_reports_current_state() {
+    async fn lifecycle_handler_oversized_records_observer() {
+        let bus = Arc::new(InMemoryBus::new());
+        let LifecycleBusReceiver::InMemory(mut events) = bus.subscribe_lifecycle() else {
+            panic!("in-memory bus must provide a lifecycle receiver");
+        };
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
+        let observer = cc_lb_engine::LifecycleContext::new("req-oversized".to_owned(), bus, &clock);
+        let mut request = Request::new(Body::empty());
+        request.extensions_mut().insert(observer);
+        let (parts, _) = request.into_parts();
+
+        record_body_too_large_rejection(&parts, 256);
+
+        let started = events.try_recv().expect("request-started event");
+        let parsed = events.try_recv().expect("parse-completed event");
+        let terminated = events.try_recv().expect("request-terminated event");
+        assert!(
+            events.try_recv().is_err(),
+            "exactly three events are emitted"
+        );
+        let event_id = match started {
+            LifecycleEvent::RequestStarted {
+                event_id,
+                request_id,
+                ts_ms,
+                stream,
+                source_kind,
+                source_ref_id,
+            } => {
+                assert_eq!(request_id, "req-oversized");
+                assert_eq!(ts_ms, 1_700_000_000_000);
+                assert!(!stream);
+                assert_eq!(source_kind.as_deref(), Some("proxy"));
+                assert_eq!(source_ref_id, None);
+                event_id
+            }
+            other => panic!("expected request-started event, got {other:?}"),
+        };
+        assert!(matches!(
+            &parsed,
+            LifecycleEvent::ParseCompleted {
+                event_id: parsed_event_id,
+                result: Err(ParseFailure::BodyTooLarge { limit_bytes: 256 }),
+            } if parsed_event_id == &event_id
+        ));
+        assert!(matches!(
+            &terminated,
+            LifecycleEvent::RequestTerminated {
+                event_id: terminated_event_id,
+                reason: TerminationReason::ErrorCode(error_code),
+                client_status: 413,
+                ..
+            } if terminated_event_id == &event_id && error_code == "body_too_large"
+        ));
+    }
+
+    #[tokio::test]
+    async fn request_id_middleware_priorities() {
+        async fn echo_request_id(headers: HeaderMap) -> String {
+            headers
+                .get("request-id")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("missing")
+                .to_owned()
+        }
+
+        let app =
+            Router::new()
+                .route("/", get(echo_request_id))
+                .layer(middleware::from_fn_with_state(
+                    RequestIdState::default(),
+                    request_id_middleware,
+                ));
+        for (case, request_id, x_request_id, expected) in [
+            (
+                "request-id wins",
+                Some("req-primary"),
+                Some("req-secondary"),
+                "req-primary",
+            ),
+            (
+                "x-request-id fallback",
+                None,
+                Some("req-x-only"),
+                "req-x-only",
+            ),
+            ("generated fallback", None, None, "req_server_0"),
+        ] {
+            let mut request = Request::builder().uri("/");
+            if let Some(value) = request_id {
+                request = request.header("request-id", value);
+            }
+            if let Some(value) = x_request_id {
+                request = request.header("x-request-id", value);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).expect("request builds"))
+                .await
+                .expect("middleware responds");
+            assert_eq!(
+                response
+                    .headers()
+                    .get("request-id")
+                    .and_then(|v| v.to_str().ok()),
+                Some(expected),
+                "case={case}: response request-id",
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("echo body collects")
+                .to_bytes();
+            assert_eq!(
+                body.as_ref(),
+                expected.as_bytes(),
+                "case={case}: handler sees injected request-id",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn t2__admin_health_state_reports_current_state() {
         let state = Arc::new(ServerStateHandle::new_starting());
         let router = server_state_router(state.clone());
 
@@ -3584,8 +3763,8 @@ mod tests {
             cc_lb_pricing::CatalogStatus::CostDisabled
         ));
 
-        let clock = cc_lb_engine::SystemClock;
-        install_default_fallback_if_uninitialized(&catalog, &clock);
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
+        install_default_fallback_if_uninitialized(&catalog, &*clock);
 
         assert!(matches!(catalog.status(), cc_lb_pricing::CatalogStatus::Ok));
         assert!(catalog.lookup("claude-opus-4-5", None, None).is_some());
@@ -3638,9 +3817,9 @@ mod tests {
     #[test]
     fn default_fallback_contains_current_anthropic_pricing() {
         let catalog = cc_lb_pricing::PriceCatalog::new_empty();
-        let clock = cc_lb_engine::SystemClock;
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
 
-        install_default_fallback_if_uninitialized(&catalog, &clock);
+        install_default_fallback_if_uninitialized(&catalog, &*clock);
 
         let expected = [
             (
@@ -3801,8 +3980,8 @@ mod tests {
             status: cc_lb_pricing::CatalogStatus::Ok,
         });
 
-        let clock = cc_lb_engine::SystemClock;
-        install_default_fallback_if_uninitialized(&catalog, &clock);
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
+        install_default_fallback_if_uninitialized(&catalog, &*clock);
 
         assert!(catalog.lookup("operator-model-a", None, None).is_some());
         assert!(catalog.lookup("claude-opus-4-5", None, None).is_none());
@@ -3843,7 +4022,7 @@ mod tests {
 
         assert_eq!(
             hot_engine_cfg.allocation_strategy,
-            cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::Pooling,
+            HotEngineAllocationStrategy::Pooling,
         );
         assert_eq!(hot_engine_cfg.memory_max_pages, 4096);
         assert_eq!(hot_engine_cfg.memory_reservation_bytes, 512 * 1024 * 1024);
@@ -3858,13 +4037,13 @@ mod tests {
 
         assert_eq!(
             hot_engine_cfg.allocation_strategy,
-            cc_lb_runtime_wasmtime::HotEngineAllocationStrategy::OnDemand,
+            HotEngineAllocationStrategy::OnDemand,
         );
     }
 
     #[cfg(feature = "postgres")]
     #[tokio::test]
-    async fn postgres_startup_rejects_missing_cluster_token_before_storage_connect() {
+    async fn t2__postgres_startup_rejects_missing_cluster_token_before_storage_connect() {
         let mut config = Config {
             storage: cc_lb_config::StorageConfig::Postgres {
                 url: "postgres://127.0.0.1:1/cc_lb".to_owned(),
@@ -3873,15 +4052,14 @@ mod tests {
             ..Config::default()
         };
         config.cluster.instance_url = Some("http://127.0.0.1:9091".to_owned());
-        config.cluster.token_env = format!(
-            "CC_LB_TEST_MISSING_CLUSTER_TOKEN_{}",
-            uuid::Uuid::now_v7().simple()
-        );
+        config.cluster.token_env =
+            "CC_LB_TEST_MISSING_CLUSTER_TOKEN_00000000000000000000000000000001".to_owned();
 
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
         let preflight_result = preflight::run_offline(
             &config,
             preflight::PreflightOptions { skip_bind: true },
-            Arc::new(cc_lb_engine::SystemClock),
+            clock.clone(),
         )
         .await;
         assert!(matches!(
@@ -3890,7 +4068,7 @@ mod tests {
                 if env == config.cluster.token_env
         ));
 
-        let result = build_app(config.clone(), Arc::new(cc_lb_engine::SystemClock)).await;
+        let result = build_app(config.clone(), clock).await;
 
         assert!(matches!(
             result,

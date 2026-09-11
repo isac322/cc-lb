@@ -17,9 +17,9 @@ use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleCo
 use cc_lb_routing::{
     FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
 };
+use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
-use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_testkit::InMemoryStorage;
 use http::StatusCode;
 use serde_json::Value;
 use url::Url;
@@ -31,14 +31,13 @@ use common::{
 };
 
 #[tokio::test]
-async fn lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
+async fn t2__lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream_id = Uuid::from_u128(1);
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
     let router_calls = Arc::new(Mutex::new(Vec::new()));
     let state = TestState::default();
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "rfc-0002-live-qa.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_pipeline(
         vec![Arc::new(KeepFilter {
@@ -71,7 +70,7 @@ async fn lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
     );
     assert!(router_calls.lock().expect("router calls lock").is_empty());
 
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     let event = &events[0];
     assert_eq!(event.status, StatusCode::SERVICE_UNAVAILABLE.as_u16());
     assert_eq!(
@@ -87,35 +86,6 @@ async fn lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
                 == Some("no upstream candidates remain after routing filters")
     }));
     Ok(())
-}
-
-async fn wait_for_events(
-    storage: &dyn RequestEventStore,
-    expected: usize,
-) -> Result<Vec<cc_lb_storage_api::types::RequestEvent>, Box<dyn std::error::Error>> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
-        if events.len() >= expected {
-            return Ok(events);
-        }
-        if std::time::Instant::now() >= deadline {
-            panic!("expected {expected} request event(s), got {}", events.len());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-}
-
-async fn sqlite_storage(
-    dir: &tempfile::TempDir,
-    file_name: &str,
-) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    Ok(storage)
 }
 
 fn lifecycle_with_pipeline(
@@ -141,7 +111,7 @@ fn lifecycle_with_pipeline(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     )
 }
 

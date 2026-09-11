@@ -10,22 +10,24 @@ request_event_quota_sqlite::define_request_event_quota_sqlite_tests!();
 use std::{future::Future, sync::Arc};
 
 use async_trait::async_trait;
-use cc_lb_engine::{ClockHandle, SystemClock, TestClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
-        anthropic_compatibility_kv_store, atomicity, cache_keepalive_session_reads,
-        organization_metadata_store, plan_tier_store, plan_tier_store_backfill,
-        plugin_registry_store, pool_quota_history_store, price_catalog, principal_store,
-        prompt_cache_observation_store, request_event_key_usage, request_event_list,
-        request_event_principal_costs, storage_roundtrips, storage_roundtrips_cache_split,
-        storage_roundtrips_latency_stages, upstream_rate_limit_store,
-        upstream_subscription_metadata_store, upstream_subscription_quota_store, usage_rollups,
-        warmup_attempts_store,
+        anthropic_compatibility_kv_store, api_key_usage_bucket_store, atomicity, audit_sink,
+        cache_keepalive_projection_store, cache_keepalive_session_reads,
+        cache_keepalive_session_store, organization_metadata_store, plan_tier_store,
+        plan_tier_store_backfill, plugin_blob_repo, plugin_registry_store,
+        pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
+        request_event_key_usage, request_event_list, request_event_principal_costs,
+        request_events_prune, runtime_change_notifier, storage_roundtrips,
+        storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
+        upstream_rate_limit_store, upstream_store, upstream_subscription_metadata_store,
+        upstream_subscription_quota_store, usage_rollups, warmup_attempts_store,
     },
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
+use cc_lb_testkit::TestClock;
 use tokio::runtime::Runtime;
 
 struct SqliteConformanceBackend;
@@ -51,7 +53,11 @@ impl ConformanceBackend for SqliteConformanceBackend {
     }
 
     async fn open(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Storage> {
-        let storage = open_sqlite(&fixture.database_url, system_clock()).await?;
+        let storage = open_sqlite(
+            &fixture.database_url,
+            cc_lb_testkit::fixed_clock(1_700_000_000),
+        )
+        .await?;
         storage.initialize(BackendKind::Sqlite).await?;
         Ok(storage)
     }
@@ -62,6 +68,24 @@ impl ConformanceBackend for SqliteConformanceBackend {
 
     fn kind(&self) -> BackendKind {
         BackendKind::Sqlite
+    }
+}
+
+#[async_trait]
+impl upstream_store::UpstreamStoreBackend for SqliteConformanceBackend {
+    type Store = SqliteStorage;
+    type Fixture = SqliteFixture;
+
+    async fn create_fixture(&self) -> anyhow::Result<Self::Fixture> {
+        <Self as ConformanceBackend>::create_fixture(self).await
+    }
+
+    async fn open(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Store> {
+        <Self as ConformanceBackend>::open(self, fixture).await
+    }
+
+    async fn teardown(&self, fixture: Self::Fixture) -> anyhow::Result<()> {
+        <Self as ConformanceBackend>::teardown(self, fixture).await
     }
 }
 
@@ -86,13 +110,122 @@ impl price_catalog::PriceCatalogCorruptionBackend for SqliteConformanceBackend {
     }
 }
 
+#[async_trait]
+impl cache_keepalive_projection_store::ProjectionAtomicityBackend for SqliteConformanceBackend {
+    async fn install_turn_insert_failure(&self, fixture: &Self::Fixture) -> anyhow::Result<()> {
+        let pool = sqlx::SqlitePool::connect(&fixture.database_url).await?;
+        sqlx::query(
+            "CREATE TRIGGER conformance_fail_projection_turn_insert \
+             BEFORE INSERT ON cache_keepalive_turns \
+             BEGIN \
+                 SELECT RAISE(ABORT, 'forced cache keepalive turn insert failure'); \
+             END",
+        )
+        .execute(&pool)
+        .await?;
+        pool.close().await;
+        Ok(())
+    }
+
+    async fn projection_row_counts(
+        &self,
+        fixture: &Self::Fixture,
+    ) -> anyhow::Result<(i64, i64, i64)> {
+        let pool = sqlx::SqlitePool::connect(&fixture.database_url).await?;
+        let counts = sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT \
+                 (SELECT COUNT(*) FROM request_events_v1), \
+                 (SELECT COUNT(*) FROM cache_keepalive_turns), \
+                 (SELECT COUNT(*) FROM cache_keepalive_decisions)",
+        )
+        .fetch_one(&pool)
+        .await?;
+        pool.close().await;
+        Ok(counts)
+    }
+}
+
 #[test]
-fn storage_roundtrips_sqlite() {
+fn t3__storage_roundtrips_sqlite() {
     run_sqlite_scenario("storage_roundtrips", storage_roundtrips::run_all);
 }
 
 #[test]
-fn pool_quota_history_fable_roundtrip_sqlite() {
+fn t3__runtime_change_notifier_delivery_sqlite() {
+    run_sqlite_scenario(
+        "runtime_change_notifier_delivery",
+        runtime_change_notifier::subscriber_receives_change,
+    );
+}
+
+#[test]
+fn tx__notify_latency_budget_sqlite() {
+    run_sqlite_scenario(
+        "notify_latency_budget",
+        runtime_change_notifier::subscriber_receives_within_latency_budget,
+    );
+}
+
+#[test]
+fn t3__principal_store_full_conformance_sqlite() {
+    run_sqlite_scenario("principal_store", principal_store::run_all);
+}
+
+#[test]
+fn t3__upstream_store_sqlite_conformance() {
+    run_sqlite_scenario("upstream_store", upstream_store::run_all);
+}
+
+#[test]
+fn t3__cache_keepalive_session_store_conformance_sqlite() {
+    run_sqlite_scenario(
+        "cache_keepalive_session_store",
+        cache_keepalive_session_store::run_all,
+    );
+}
+
+#[test]
+fn t3__audit_sink_batch_roundtrip_and_prune_boundary_sqlite() {
+    run_sqlite_scenario(
+        "audit_sink_batch_roundtrip_and_prune_boundary",
+        audit_sink::batch_roundtrip_and_prune_boundary,
+    );
+}
+
+#[test]
+fn t3__cache_keepalive_projection_decision_append_roundtrip_sqlite() {
+    run_sqlite_scenario(
+        "cache_keepalive_projection_decision_append_roundtrip",
+        cache_keepalive_projection_store::decision_append_roundtrip,
+    );
+}
+
+#[test]
+fn t3__cache_keepalive_projection_append_is_atomic_sqlite() {
+    run_sqlite_scenario(
+        "cache_keepalive_projection_append_is_atomic",
+        cache_keepalive_projection_store::append_with_projections_is_atomic,
+    );
+}
+
+#[test]
+fn t3__plugin_blob_repo_roundtrip_delete_and_missing_sqlite() {
+    run_sqlite_scenario(
+        "plugin_blob_repo_roundtrip_delete_and_missing",
+        plugin_blob_repo::roundtrip_delete_and_missing,
+    );
+}
+
+#[test]
+fn t3__request_events_prune_strict_millisecond_boundary_and_batch_limit_sqlite() {
+    run_sqlite_scenario(
+        "request_events_prune_strict_millisecond_boundary_and_batch_limit",
+        request_events_prune::strict_millisecond_boundary_and_batch_limit,
+    );
+}
+
+#[test]
+fn t3__pool_quota_history_fable_roundtrip_sqlite() {
     run_sqlite_scenario(
         "pool_quota_history_fable_roundtrip",
         pool_quota_history_store::fable_roundtrip,
@@ -100,7 +233,15 @@ fn pool_quota_history_fable_roundtrip_sqlite() {
 }
 
 #[test]
-fn request_event_cache_split_round_trip_sqlite() {
+fn t3__pool_quota_summary_latest_and_range_sqlite() {
+    run_sqlite_scenario(
+        "pool_quota_summary_latest_and_range",
+        pool_quota_history_store::summary_latest_and_range,
+    );
+}
+
+#[test]
+fn t3__request_event_cache_split_round_trip_sqlite() {
     run_sqlite_scenario(
         "request_event_cache_split_round_trip",
         storage_roundtrips_cache_split::request_event_cache_split_round_trip,
@@ -108,7 +249,7 @@ fn request_event_cache_split_round_trip_sqlite() {
 }
 
 #[test]
-fn request_event_latency_stage_round_trip_sqlite() {
+fn t3__request_event_latency_stage_round_trip_sqlite() {
     run_sqlite_scenario(
         "request_event_latency_stage_round_trip",
         storage_roundtrips_latency_stages::request_event_latency_stage_round_trip,
@@ -116,7 +257,7 @@ fn request_event_latency_stage_round_trip_sqlite() {
 }
 
 #[test]
-fn request_event_list_projects_rows_and_preserves_detail_sqlite() {
+fn t3__request_event_list_projects_rows_and_preserves_detail_sqlite() {
     run_sqlite_scenario(
         "request_event_list_projects_rows_and_preserves_detail",
         request_event_list::request_event_list_projects_rows_and_preserves_detail,
@@ -124,7 +265,7 @@ fn request_event_list_projects_rows_and_preserves_detail_sqlite() {
 }
 
 #[test]
-fn request_event_list_model_filter_matches_case_insensitive_prefix_sqlite() {
+fn t3__request_event_list_model_filter_matches_case_insensitive_prefix_sqlite() {
     run_sqlite_scenario(
         "request_event_list_model_filter_matches_case_insensitive_prefix",
         request_event_list::request_event_list_model_filter_matches_case_insensitive_prefix,
@@ -132,7 +273,7 @@ fn request_event_list_model_filter_matches_case_insensitive_prefix_sqlite() {
 }
 
 #[test]
-fn request_event_principal_cost_components_sqlite() {
+fn t3__request_event_principal_cost_components_sqlite() {
     run_sqlite_scenario(
         "request_event_principal_cost_components",
         request_event_principal_costs::principal_cost_components_aggregate_without_fabrication,
@@ -140,7 +281,7 @@ fn request_event_principal_cost_components_sqlite() {
 }
 
 #[test]
-fn request_event_key_usage_materialized_columns_sqlite() {
+fn t3__request_event_key_usage_materialized_columns_sqlite() {
     run_sqlite_scenario(
         "request_event_key_usage_materialized_columns",
         request_event_key_usage::materialized_key_usage_preserves_bucket_contract,
@@ -148,7 +289,15 @@ fn request_event_key_usage_materialized_columns_sqlite() {
 }
 
 #[test]
-fn cache_keepalive_batch_turn_reads_match_per_session_sqlite() {
+fn t3__request_event_key_last_used_preserves_inclusive_range_and_filters_sqlite() {
+    run_sqlite_scenario(
+        "request_event_key_last_used_preserves_inclusive_range_and_filters",
+        request_event_key_usage::last_used_preserves_inclusive_range_and_filters,
+    );
+}
+
+#[test]
+fn t3__cache_keepalive_batch_turn_reads_match_per_session_sqlite() {
     run_sqlite_scenario(
         "cache_keepalive_batch_turn_reads_match_per_session",
         cache_keepalive_session_reads::batch_turn_reads_match_canonical_per_session_reads,
@@ -156,7 +305,23 @@ fn cache_keepalive_batch_turn_reads_match_per_session_sqlite() {
 }
 
 #[test]
-fn usage_rollup_v2_preserves_upstream_id_across_renames_sqlite() {
+fn t3__cache_keepalive_session_read_list_detail_filters_sqlite() {
+    run_sqlite_scenario(
+        "cache_keepalive_session_read_list_detail_filters",
+        cache_keepalive_session_reads::list_detail_filters_preserve_frozen_projection_contract,
+    );
+}
+
+#[test]
+fn t3__cache_keepalive_session_read_pagination_cursor_sqlite() {
+    run_sqlite_scenario(
+        "cache_keepalive_session_read_pagination_cursor",
+        cache_keepalive_session_reads::pagination_horizon_cursor_and_frozen_order_contract,
+    );
+}
+
+#[test]
+fn t3__usage_rollup_v2_preserves_upstream_id_across_renames_sqlite() {
     run_sqlite_scenario(
         "usage_rollup_v2_preserves_upstream_id_across_renames",
         |backend| async move {
@@ -171,7 +336,7 @@ fn usage_rollup_v2_preserves_upstream_id_across_renames_sqlite() {
 }
 
 #[test]
-fn usage_rollup_filtered_analysis_query_sqlite() {
+fn t3__usage_rollup_filtered_analysis_query_sqlite() {
     run_sqlite_scenario(
         "usage_rollup_filtered_analysis_query",
         usage_rollups::run_all,
@@ -179,7 +344,31 @@ fn usage_rollup_filtered_analysis_query_sqlite() {
 }
 
 #[test]
-fn principal_allowed_upstreams_roundtrip_sqlite() {
+fn t3__usage_rollup_checkpoint_absent_before_first_rollup_sqlite() {
+    run_sqlite_scenario(
+        "usage_rollup_checkpoint_absent_before_first_rollup",
+        usage_rollups::checkpoint_is_absent_before_first_rollup,
+    );
+}
+
+#[test]
+fn t3__usage_rollup_empty_queries_preserve_range_boundaries_sqlite() {
+    run_sqlite_scenario(
+        "usage_rollup_empty_queries_preserve_range_boundaries",
+        usage_rollups::empty_queries_preserve_range_boundaries,
+    );
+}
+
+#[test]
+fn t3__overview_excluded_error_buckets_preserve_boundaries_sqlite() {
+    run_sqlite_scenario(
+        "overview_excluded_error_buckets_preserve_boundaries",
+        usage_rollups::overview_excluded_error_buckets_preserve_boundaries,
+    );
+}
+
+#[test]
+fn t3__principal_allowed_upstreams_roundtrip_sqlite() {
     run_sqlite_scenario(
         "principal_allowed_upstreams_roundtrip",
         principal_store::principal_allowed_upstreams_roundtrip,
@@ -187,7 +376,7 @@ fn principal_allowed_upstreams_roundtrip_sqlite() {
 }
 
 #[test]
-fn upstream_rate_limit_put_then_list_for_upstream_ids_roundtrip_sqlite() {
+fn t3__upstream_rate_limit_put_then_list_for_upstream_ids_roundtrip_sqlite() {
     run_sqlite_scenario(
         "upstream_rate_limit_put_then_list_for_upstream_ids_roundtrip",
         upstream_rate_limit_store::put_then_list_for_upstream_ids_roundtrip,
@@ -195,7 +384,15 @@ fn upstream_rate_limit_put_then_list_for_upstream_ids_roundtrip_sqlite() {
 }
 
 #[test]
-fn upstream_rate_limit_latest_write_wins_within_same_key_sqlite() {
+fn t3__upstream_rate_limit_roundtrip_and_list_boundary_sqlite() {
+    run_sqlite_scenario(
+        "upstream_rate_limit_roundtrip_and_list_boundary",
+        upstream_rate_limit_store::roundtrip_and_list_boundary,
+    );
+}
+
+#[test]
+fn t3__upstream_rate_limit_latest_write_wins_within_same_key_sqlite() {
     run_sqlite_scenario(
         "upstream_rate_limit_latest_write_wins_within_same_key",
         upstream_rate_limit_store::latest_write_wins_within_same_key,
@@ -203,7 +400,7 @@ fn upstream_rate_limit_latest_write_wins_within_same_key_sqlite() {
 }
 
 #[test]
-fn upstream_rate_limit_latest_write_wins_within_same_key_forward_sqlite() {
+fn t3__upstream_rate_limit_latest_write_wins_within_same_key_forward_sqlite() {
     run_sqlite_scenario(
         "upstream_rate_limit_latest_write_wins_within_same_key_forward",
         upstream_rate_limit_store::latest_write_wins_within_same_key_forward,
@@ -211,7 +408,7 @@ fn upstream_rate_limit_latest_write_wins_within_same_key_forward_sqlite() {
 }
 
 #[test]
-fn upstream_rate_limit_empty_list_for_unknown_id_sqlite() {
+fn t3__upstream_rate_limit_empty_list_for_unknown_id_sqlite() {
     run_sqlite_scenario(
         "upstream_rate_limit_empty_list_for_unknown_id",
         upstream_rate_limit_store::empty_list_for_unknown_id,
@@ -341,7 +538,7 @@ upstream_subscription_quota_sqlite_test!(
 );
 
 #[test]
-fn warmup_attempts_store_sqlite() {
+fn t3__warmup_attempts_store_sqlite() {
     run_sqlite_scenario("warmup_attempts_store", |backend| async move {
         warmup_attempts_store::run_all(backend, warmup_attempts_clock()).await
     });
@@ -384,7 +581,7 @@ prompt_cache_observation_sqlite_test!(
 );
 
 #[test]
-fn upstream_subscription_metadata_store_sqlite() {
+fn t3__upstream_subscription_metadata_store_sqlite() {
     run_sqlite_scenario(
         "upstream_subscription_metadata_store",
         upstream_subscription_metadata_store::run_all,
@@ -392,7 +589,7 @@ fn upstream_subscription_metadata_store_sqlite() {
 }
 
 #[test]
-fn organization_metadata_store_sqlite() {
+fn t3__organization_metadata_store_sqlite() {
     run_sqlite_scenario(
         "organization_metadata_store",
         organization_metadata_store::run_all,
@@ -400,12 +597,12 @@ fn organization_metadata_store_sqlite() {
 }
 
 #[test]
-fn plan_tier_store_sqlite() {
+fn t3__plan_tier_store_sqlite() {
     run_sqlite_scenario("plan_tier_store", plan_tier_store::run_all);
 }
 
 #[test]
-fn plan_tier_store_backfill_sqlite() {
+fn t3__plan_tier_store_backfill_sqlite() {
     run_sqlite_scenario(
         "plan_tier_store_backfill",
         plan_tier_store_backfill::upstream_tier_backfill_intervals,
@@ -428,6 +625,14 @@ plugin_registry_sqlite_test!(
 plugin_registry_sqlite_test!(
     plugin_registry_created_principal_has_builtin_subscription_preference_chain_entry_sqlite,
     created_principal_has_builtin_subscription_preference_chain_entry
+);
+plugin_registry_sqlite_test!(
+    t3__plugin_registry_builtin_subscription_preference_is_visible_and_insertable_sqlite,
+    builtin_subscription_preference_is_visible_and_insertable
+);
+plugin_registry_sqlite_test!(
+    t3__plugin_registry_refcount_transitions_follow_live_chain_and_warmup_references_sqlite,
+    refcount_transitions_follow_live_chain_and_warmup_references
 );
 plugin_registry_sqlite_test!(
     plugin_registry_list_orphan_blobs_returns_blobs_without_registry_sqlite,
@@ -515,7 +720,7 @@ plugin_registry_sqlite_test!(
 );
 
 #[test]
-fn price_catalog_roundtrip_smoke_sqlite() {
+fn t3__price_catalog_roundtrip_smoke_sqlite() {
     run_sqlite_scenario(
         "price_catalog_roundtrip_smoke",
         price_catalog::roundtrip_smoke,
@@ -523,7 +728,7 @@ fn price_catalog_roundtrip_smoke_sqlite() {
 }
 
 #[test]
-fn price_catalog_put_same_payload_twice_updates_fetched_at_sqlite() {
+fn t3__price_catalog_put_same_payload_twice_updates_fetched_at_sqlite() {
     run_sqlite_scenario(
         "price_catalog_put_same_payload_twice_updates_fetched_at",
         price_catalog::put_same_payload_twice_updates_fetched_at,
@@ -531,10 +736,18 @@ fn price_catalog_put_same_payload_twice_updates_fetched_at_sqlite() {
 }
 
 #[test]
-fn price_catalog_corrupted_payload_hash_is_rejected_sqlite() {
+fn t3__price_catalog_corrupted_payload_hash_is_rejected_sqlite() {
     run_sqlite_scenario(
         "price_catalog_corrupted_payload_hash_is_rejected",
         price_catalog::corrupted_payload_hash_is_rejected,
+    );
+}
+
+#[test]
+fn t3__api_key_usage_flush_idempotency_aggregation_and_range_boundary_sqlite() {
+    run_sqlite_scenario(
+        "api_key_usage_flush_idempotency_aggregation_and_range_boundary",
+        api_key_usage_bucket_store::flush_idempotency_aggregation_and_range_boundary,
     );
 }
 
@@ -549,14 +762,10 @@ where
         .unwrap_or_else(|error| panic!("{name} sqlite: {error}"));
 }
 
-fn prompt_cache_clock() -> ClockHandle {
+fn prompt_cache_clock() -> Arc<TestClock> {
     Arc::new(TestClock::new_at_secs(1_700_000_000))
 }
 
-fn warmup_attempts_clock() -> ClockHandle {
+fn warmup_attempts_clock() -> Arc<TestClock> {
     Arc::new(TestClock::new_at_secs(1_800_604_800))
-}
-
-fn system_clock() -> ClockHandle {
-    Arc::new(SystemClock)
 }

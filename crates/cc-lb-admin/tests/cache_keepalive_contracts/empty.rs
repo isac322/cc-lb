@@ -10,7 +10,8 @@ use crate::config_admin_common::{app, authed_bytes, authed_json, temp_storage};
 use super::{NOW_UNIX_SECS, fixtures::principal_create_body};
 
 #[tokio::test]
-async fn cache_keepalive_disabled_principal_and_empty_status_return_empty_rows_without_mutation() {
+async fn t2__cache_keepalive_disabled_principal_and_empty_status_return_empty_rows_without_mutation()
+ {
     // Given: a principal whose Cache keepalive configuration is disabled and has no history.
     let (_directory, storage) = temp_storage().await;
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(NOW_UNIX_SECS));

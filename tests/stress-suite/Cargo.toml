@@ -10,7 +10,7 @@ autotests = false
 [dependencies]
 axum.workspace = true
 bytes.workspace = true
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "env"] }
 hex.workspace = true
 http.workspace = true
 http-body-util.workspace = true

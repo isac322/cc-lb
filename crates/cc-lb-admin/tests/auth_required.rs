@@ -43,7 +43,7 @@ fn test_state_with_auth(admin_auth: Arc<AdminAuthenticator>) -> AdminState {
 }
 
 #[tokio::test]
-async fn test_auth_required() {
+async fn t2__test_auth_required() {
     let app = router(test_state());
 
     let endpoints = vec![
@@ -110,7 +110,7 @@ async fn test_auth_required() {
 }
 
 #[tokio::test]
-async fn test_auth_success() {
+async fn t2__test_auth_success() {
     let app = router(test_state());
 
     let req = Request::builder()

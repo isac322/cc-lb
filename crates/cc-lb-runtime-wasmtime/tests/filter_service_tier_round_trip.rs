@@ -18,7 +18,7 @@ fn wasm_path() -> PathBuf {
 }
 
 #[test]
-fn filter_plugin_admits_and_receives_service_tier() {
+fn t3__filter_plugin_admits_and_receives_service_tier() {
     let wasm =
         std::fs::read(wasm_path()).expect("build script produces filter service-tier fixture");
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");

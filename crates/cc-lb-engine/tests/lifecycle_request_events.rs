@@ -1,13 +1,11 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_control::{BusReceiver, RequestEventBus};
 use cc_lb_engine::{BreakerRegistry, DispatchError, LifecycleConfig, UpstreamDispatch};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
-use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_storage_api::Storage as StorageTrait;
+use cc_lb_testkit::InMemoryStorage;
 use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
@@ -21,18 +19,15 @@ fn lifecycle_request_events_current_registry_smoke() {
     let _registry = BreakerRegistry::new();
 }
 
-#[tokio::test]
-async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
+#[tokio::test(start_paused = true)]
+async fn t2__hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
 -> Result<(), Box<dyn std::error::Error>> {
     let original_body = Bytes::from_static(
         br#"{"model":"claude-test","session_id":"hermes-root-session","tags":["product=hermes-agent","client=hermes-client-v0.19.0","conversation=hermes-root-session"],"system":[{"type":"text","text":"You are a focused subagent working on a specific delegated task.\n\nYOUR TASK:\nReview the auth change"}],"messages":[{"role":"user","content":"Review the auth change"}],"tools":[{"name":"terminal"}]}"#,
     );
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir).await?);
-    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
-    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
-        panic!("expected in-memory request-event receiver");
-    };
+    let storage = InMemoryStorage::new();
+    let mut test_bus =
+        TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let dispatcher = CapturingDispatch::default();
     let lifecycle = lifecycle_with_parts(
         TestAuthn::new(TestState::default()),
@@ -53,19 +48,8 @@ async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
     assert_eq!(response.status(), StatusCode::OK);
     response.into_body().collect().await?;
 
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if matches!(
-                update_rx.recv().await.expect("request update delivered"),
-                cc_lb_request_log::RequestEventUpdate::Final(_)
-            ) {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("final request event arrives");
-
+    test_bus.shutdown_assembler().await;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(
         dispatcher
             .bodies
@@ -74,7 +58,6 @@ async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
             .as_slice(),
         &[original_body]
     );
-    let events = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
     assert_eq!(events.len(), 1);
     let event = &events[0];
     assert_eq!(event.thread_id.as_deref(), Some("hermes-root-session"));
@@ -109,18 +92,4 @@ impl UpstreamDispatch for CapturingDispatch {
         *response.status_mut() = StatusCode::OK;
         Ok(response)
     }
-}
-
-async fn sqlite_storage(
-    dir: &tempfile::TempDir,
-) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path().join("hermes-request-events.sqlite").display()
-    );
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    Ok(storage)
 }

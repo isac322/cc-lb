@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use std::error::Error;
 
 use cc_lb_storage_api::{StorageError, StorageResult};
@@ -33,6 +35,7 @@ fn map_sqlx_error(error: sqlx::Error) -> StorageError {
 }
 
 #[cfg(feature = "postgres")]
+#[path = "tests/postgres.rs"]
 mod postgres;
 
 #[cfg(feature = "sqlite")]

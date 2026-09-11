@@ -5,8 +5,7 @@ mod hot_reload;
 mod types;
 mod validation;
 
-use std::env;
-use std::path::Path;
+use std::{env, path::Path};
 
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
@@ -87,32 +86,53 @@ impl Config {
         toml_path: &Path,
         cli_overrides: ConfigOverrides,
     ) -> Result<(Self, Vec<String>), ConfigError> {
+        let process_env = Env::raw().lowercase(false);
         let raw_toml = std::fs::read_to_string(toml_path).ok();
-        let mut warnings = raw_toml
-            .as_deref()
-            .map(validation::removed_prompt_cache_switches)
-            .unwrap_or_default();
-        let migrated_toml = match raw_toml.as_deref() {
-            Some(raw) => {
-                validation::validate_raw_toml(raw)?;
-                Some(validation::migrate_legacy_storage_toml(raw)?)
-            }
-            None => None,
-        };
-        warnings.extend(validation::removed_prompt_cache_env_switches());
+        if let Some(raw_toml) = raw_toml.as_deref() {
+            return Self::from_toml_str_with_overrides(raw_toml, &cli_overrides);
+        }
 
-        let mut figment = Figment::from(Serialized::defaults(Config::default()));
-        figment = match migrated_toml.as_deref() {
-            Some(migrated) => figment.merge(Toml::string(migrated)),
-            None => figment.merge(Toml::file_exact(toml_path)),
-        };
-        let mut config: Config = figment
+        let mut warnings = removed_prompt_cache_env_switches(&process_env);
+        let mut config: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::file_exact(toml_path))
             .merge(Env::prefixed("CC_LB_").split("__"))
             .merge(Serialized::defaults(cli_overrides))
             .extract()?;
 
         let admin_auth_env_override = config.apply_admin_auth_env_override()?;
-        config.resolve_runtime_values();
+        config.resolve_runtime_values_from(&process_env);
+        config.validate()?;
+        if !admin_auth_env_override
+            && config.admin.auth.providers.is_empty()
+            && config.admin.token.is_some()
+        {
+            warnings.push(format!(
+                "legacy [admin].token_env was automatically migrated in memory to the \
+                 static-token/legacy provider; configure {ADMIN_AUTH_PROVIDERS_JSON_ENV} before \
+                 legacy admin-token compatibility is removed"
+            ));
+        }
+        Ok((config, warnings))
+    }
+
+    pub fn from_toml_str_with_overrides(
+        toml: &str,
+        overrides: &ConfigOverrides,
+    ) -> Result<(Config, Vec<String>), ConfigError> {
+        let process_env = Env::raw().lowercase(false);
+        let mut warnings = validation::removed_prompt_cache_switches(toml);
+        validation::validate_raw_toml(toml)?;
+        let migrated_toml = validation::migrate_legacy_storage_toml(toml)?;
+        warnings.extend(removed_prompt_cache_env_switches(&process_env));
+
+        let mut config: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string(&migrated_toml))
+            .merge(Env::prefixed("CC_LB_").split("__"))
+            .merge(Serialized::defaults(overrides))
+            .extract()?;
+
+        let admin_auth_env_override = config.apply_admin_auth_env_override()?;
+        config.resolve_runtime_values_from(&process_env);
         config.validate()?;
         if !admin_auth_env_override
             && config.admin.auth.providers.is_empty()
@@ -168,13 +188,23 @@ impl Config {
         Ok(true)
     }
 
-    fn resolve_runtime_values(&mut self) {
+    fn resolve_runtime_values_from(&mut self, process_env: &Env) {
         self.admin.token = if self.admin.token_env.trim().is_empty() {
             None
         } else {
-            env::var(&self.admin.token_env)
-                .ok()
-                .filter(|token| !token.is_empty())
+            environment_value(process_env, &self.admin.token_env).filter(|token| !token.is_empty())
         };
     }
+}
+
+fn removed_prompt_cache_env_switches(process_env: &Env) -> Vec<String> {
+    validation::removed_prompt_cache_env_switches_in(|variable| {
+        environment_value(process_env, variable).is_some()
+    })
+}
+
+fn environment_value(process_env: &Env, name: &str) -> Option<String> {
+    process_env
+        .iter()
+        .find_map(|(candidate, value)| (candidate.as_str() == name).then_some(value))
 }

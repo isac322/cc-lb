@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -20,6 +19,7 @@ use cc_lb_engine::{
 use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_testkit::fixed_clock;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
     SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
@@ -73,7 +73,7 @@ impl TestAuthn {
                     upstream_kind: NoneModeUpstreamKind::AnthropicKey,
                 }),
                 None,
-                Arc::new(cc_lb_engine::SystemClock),
+                fixed_clock(1_700_000_000),
             )),
             principal_view: view,
             state,
@@ -336,7 +336,7 @@ pub fn lifecycle_with_parts(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         config,
-        Arc::new(cc_lb_engine::SystemClock),
+        fixed_clock(1_700_000_000),
     )
 }
 
@@ -362,11 +362,11 @@ pub fn lifecycle_with_cache(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        fixed_clock(1_700_000_000),
     )
 }
 
-fn default_upstream_record() -> UpstreamRecord {
+pub fn default_upstream_record() -> UpstreamRecord {
     UpstreamRecord {
         id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
             .expect("default upstream id parses"),
@@ -471,7 +471,7 @@ fn streaming_response(state: TestState) -> Response<Body> {
         for index in 0..54_u64 {
             let frame = format!("event: content_block_delta\ndata: {{\"index\":{index}}}\n\n");
             yield Ok::<Bytes, Infallible>(Bytes::from(frame));
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
         yield Ok::<Bytes, Infallible>(Bytes::from_static(
             b"event: message_stop\ndata: {\"type\":\"message_stop\",\"usage\":{\"input_tokens\":7,\"output_tokens\":42}}\n\n",
@@ -540,8 +540,15 @@ impl TestLifecycleBus {
             storage as Arc<dyn cc_lb_storage_api::RequestEventStore>,
             Some(bus_arc),
             Arc::new(cc_lb_observability::NoopMetricsHook),
+            fixed_clock(1_700_000_000),
         ));
         self
+    }
+
+    pub async fn shutdown_assembler(&mut self) {
+        if let Some(assembler) = self._assembler.take() {
+            assembler.shutdown().await;
+        }
     }
 
     pub fn with_hook_adapter(mut self, hooks: Vec<Arc<dyn ObservabilityHook>>) -> Self {
@@ -566,6 +573,7 @@ impl TestLifecycleBus {
             rx,
             cache,
             Some(sink),
+            fixed_clock(1_700_000_000),
         ));
         self
     }
@@ -582,6 +590,7 @@ impl TestLifecycleBus {
             rx,
             cache,
             Some(sink),
+            fixed_clock(1_700_000_000),
         ));
         self
     }

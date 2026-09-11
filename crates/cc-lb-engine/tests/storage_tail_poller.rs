@@ -12,8 +12,8 @@ use cc_lb_storage_api::{
 };
 use storage_support::TestStorage;
 
-#[tokio::test]
-async fn storage_tail_poller_broadcasts_rows_appended_after_spawn() {
+#[tokio::test(start_paused = true)]
+async fn t2__storage_tail_poller_broadcasts_rows_appended_after_spawn() {
     let storage = TestStorage::new();
     let (tx, mut rx) = tokio::sync::broadcast::channel(16);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -21,6 +21,7 @@ async fn storage_tail_poller_broadcasts_rows_appended_after_spawn() {
         storage.as_request_event_store(),
         tx,
         Duration::from_millis(10),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
         0,
         shutdown_rx,
     );
@@ -49,8 +50,8 @@ async fn storage_tail_poller_broadcasts_rows_appended_after_spawn() {
     handle.await.expect("poller task joins");
 }
 
-#[tokio::test]
-async fn storage_tail_poller_heals_final_missed_by_local_publish_path() {
+#[tokio::test(start_paused = true)]
+async fn t2__storage_tail_poller_heals_final_missed_by_local_publish_path() {
     let storage = TestStorage::new();
     let (tx, mut rx) = tokio::sync::broadcast::channel(16);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -58,6 +59,7 @@ async fn storage_tail_poller_heals_final_missed_by_local_publish_path() {
         storage.as_request_event_store(),
         tx,
         Duration::from_millis(10),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
         0,
         shutdown_rx,
     );
@@ -85,8 +87,8 @@ async fn storage_tail_poller_heals_final_missed_by_local_publish_path() {
     handle.await.expect("poller task joins");
 }
 
-#[tokio::test]
-async fn storage_tail_poller_starts_after_existing_rows() {
+#[tokio::test(start_paused = true)]
+async fn t2__storage_tail_poller_starts_after_existing_rows() {
     let storage = HorizonBlockedStorage::new();
     storage.make_cursor_visible(
         1,
@@ -110,6 +112,7 @@ async fn storage_tail_poller_starts_after_existing_rows() {
         storage.clone(),
         tx,
         Duration::from_millis(10),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
         initial_cursor,
         shutdown_rx,
     );
@@ -138,8 +141,8 @@ async fn storage_tail_poller_starts_after_existing_rows() {
     handle.await.expect("poller task joins");
 }
 
-#[tokio::test]
-async fn storage_tail_poller_does_not_advance_past_ineligible_cursor() {
+#[tokio::test(start_paused = true)]
+async fn t2__storage_tail_poller_does_not_advance_past_ineligible_cursor() {
     let storage = HorizonBlockedStorage::new();
     let (tx, mut rx) = tokio::sync::broadcast::channel(16);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -147,6 +150,7 @@ async fn storage_tail_poller_does_not_advance_past_ineligible_cursor() {
         storage.clone(),
         tx,
         Duration::from_millis(10),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
         0,
         shutdown_rx,
     );

@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 #[path = "auth_required.rs"]
 mod auth_required;
 #[path = "cache_stats_injection.rs"]

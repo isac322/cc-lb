@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use cc_lb_storage_api::{RequestEvent, RequestEventKeyUsageQuery, RequestEventStore};
+use cc_lb_storage_api::{
+    RequestEvent, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKeyUsageQuery,
+    RequestEventStore,
+};
 
 use crate::harness::{ConformanceBackend, with_conformance_fixture};
 
@@ -113,6 +116,102 @@ where
         Ok(())
     })
     .await
+}
+
+pub async fn last_used_preserves_inclusive_range_and_filters<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        const SINCE: u64 = 1_900_700_000;
+        const UNTIL: u64 = SINCE + 60;
+        const PRINCIPAL: &str = "key-last-used-principal";
+
+        let mut events = [
+            last_used_event(SINCE, "last-used-a-start", PRINCIPAL, Some("key-a")),
+            last_used_event(SINCE + 30, "last-used-a-middle", PRINCIPAL, Some("key-a")),
+            last_used_event(UNTIL, "last-used-a-end", PRINCIPAL, Some("key-a")),
+            last_used_event(SINCE + 1, "last-used-b", PRINCIPAL, Some("key-b")),
+            last_used_event(SINCE + 2, "last-used-empty", PRINCIPAL, Some("")),
+            last_used_event(SINCE + 3, "last-used-null", PRINCIPAL, None),
+            last_used_event(
+                SINCE + 40,
+                "last-used-other-principal",
+                "key-last-used-other-principal",
+                Some("key-c"),
+            ),
+            last_used_event(UNTIL + 1, "last-used-after", PRINCIPAL, Some("key-d")),
+        ];
+        for event in &mut events {
+            storage.append_request_event(event).await?;
+        }
+
+        let mut actual = storage
+            .request_event_key_last_used(&RequestEventKeyLastUsedQuery {
+                principal_id: PRINCIPAL.to_owned(),
+                since_unix_secs: SINCE,
+                until_unix_secs: UNTIL,
+            })
+            .await?;
+        actual.sort_unstable_by(|left, right| left.key_id.cmp(&right.key_id));
+        ensure!(
+            actual
+                == vec![
+                    RequestEventKeyLastUsed {
+                        key_id: "key-a".to_owned(),
+                        last_used_at_unix_secs: UNTIL,
+                    },
+                    RequestEventKeyLastUsed {
+                        key_id: "key-b".to_owned(),
+                        last_used_at_unix_secs: SINCE + 1,
+                    },
+                ],
+            "key last-used aggregation must include both range boundaries, retain each key's maximum timestamp, and filter empty/null/foreign keys"
+        );
+        ensure!(
+            storage
+                .request_event_key_last_used(&RequestEventKeyLastUsedQuery {
+                    principal_id: PRINCIPAL.to_owned(),
+                    since_unix_secs: UNTIL,
+                    until_unix_secs: SINCE,
+                })
+                .await?
+                .is_empty(),
+            "an inverted key last-used range must return empty"
+        );
+        ensure!(
+            storage
+                .request_event_key_last_used(&RequestEventKeyLastUsedQuery {
+                    principal_id: "missing-principal".to_owned(),
+                    since_unix_secs: SINCE,
+                    until_unix_secs: UNTIL,
+                })
+                .await?
+                .is_empty(),
+            "an unknown principal must return no key last-used rows"
+        );
+        Ok(())
+    })
+    .await
+}
+
+fn last_used_event(
+    ts: u64,
+    event_id: &str,
+    principal_id: &str,
+    key_id: Option<&str>,
+) -> RequestEvent {
+    RequestEvent {
+        ts,
+        ts_ms: Some(ts * 1_000),
+        request_id: format!("request-{event_id}"),
+        event_id: Some(event_id.to_owned()),
+        principal_id: Some(principal_id.to_owned()),
+        key_id: key_id.map(str::to_owned),
+        status: 200,
+        ..Default::default()
+    }
 }
 
 fn key_usage_event(

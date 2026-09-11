@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
@@ -56,7 +58,7 @@ impl SpanExporter for CapturingExporter {
 }
 
 #[test]
-fn shared_modules_traceparent_round_trips_current_span_into_worker_layer() {
+fn t2__shared_modules_traceparent_round_trips_current_span_into_worker_layer() {
     let (provider, _exporter, subscriber) = test_subscriber();
 
     tracing::subscriber::with_default(subscriber, || {
@@ -105,7 +107,7 @@ fn shared_modules_traceparent_round_trips_current_span_into_worker_layer() {
 }
 
 #[test]
-fn traceparent_span_uses_consumer_kind_and_links_inbound_context() {
+fn t2__traceparent_span_uses_consumer_kind_and_links_inbound_context() {
     let (provider, exporter, subscriber) = test_subscriber();
 
     tracing::subscriber::with_default(subscriber, || {

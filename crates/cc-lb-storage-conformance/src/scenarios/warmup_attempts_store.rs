@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use cc_lb_engine::ClockHandle;
+use cc_lb_clock::{Clock, TestClock};
 use cc_lb_storage_api::{
     UpstreamStore, UpstreamWarmupAttemptStore, WarmupAttemptListFilters, WarmupAttemptOutcome,
     WarmupAttemptStatus, WarmupAttemptSummary, WarmupPermanentFailureReason, WarmupSkipReason,
@@ -17,7 +17,7 @@ use crate::{
 
 const SEVEN_DAYS_SECS: i64 = 7 * 86_400;
 
-pub async fn run_all<B>(backend: Arc<B>, clock: ClockHandle) -> Result<()>
+pub async fn run_all<B>(backend: Arc<B>, clock: Arc<TestClock>) -> Result<()>
 where
     B: ConformanceBackend,
     B::Storage: UpstreamStore + UpstreamWarmupAttemptStore,
@@ -145,7 +145,7 @@ scenario!(outcome_filter, |storage| async move {
     Ok(())
 });
 
-pub async fn summary_7d<B>(backend: Arc<B>, clock: ClockHandle) -> Result<()>
+pub async fn summary_7d<B>(backend: Arc<B>, clock: Arc<TestClock>) -> Result<()>
 where
     B: ConformanceBackend,
     B::Storage: UpstreamStore + UpstreamWarmupAttemptStore,
@@ -195,6 +195,37 @@ where
                     permanent_failure: 1,
                 },
             "summary should count only attempts inside the 7 day window"
+        );
+
+        let future_cutoff = cutoff_unix_secs + 60;
+        storage
+            .insert_warmup_attempt(&attempt(
+                upstream.id,
+                22,
+                future_cutoff,
+                WarmupAttemptOutcome::Success(WarmupSuccessReason::CycleAdvanced),
+            ))
+            .await?;
+        clock.advance_secs(60);
+        let advanced_now = chrono::DateTime::<chrono::Utc>::from(clock.now()).timestamp();
+        let advanced_cutoff = advanced_now
+            .checked_sub(SEVEN_DAYS_SECS)
+            .expect("advanced summary cutoff fits in i64");
+        ensure!(
+            advanced_cutoff == future_cutoff,
+            "test clock should reach the exact inclusive summary boundary"
+        );
+        ensure!(
+            storage
+                .summarize_recent_warmup_attempts(upstream.id, advanced_cutoff)
+                .await?
+                == WarmupAttemptSummary {
+                    success: 4,
+                    skipped: 1,
+                    transient_failure: 1,
+                    permanent_failure: 1,
+                },
+            "summary should include an attempt exactly at the 7 day cutoff"
         );
         Ok(())
     })

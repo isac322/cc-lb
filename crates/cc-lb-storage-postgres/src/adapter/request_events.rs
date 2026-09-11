@@ -8,7 +8,6 @@ use cc_lb_storage_api::{
     RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_pattern,
     model_filter_matches, normalize_usage_rollup_dimension,
 };
-use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, Postgres, QueryBuilder};
 use std::collections::BTreeMap;
 
@@ -142,9 +141,9 @@ impl RequestEventStore for PostgresStorage {
 
         let cutoff_ms = cutoff_ms_x_1m / KEY_SEQUENCE_SCALE;
         let result = sqlx::query(
-            "DELETE FROM request_events_v1              WHERE seq IN (                 SELECT seq FROM request_events_v1                 WHERE ts < $1                 ORDER BY seq ASC                 LIMIT $2             )",
+            "DELETE FROM request_events_v1              WHERE seq IN (                 SELECT seq FROM request_events_v1                 WHERE list_ts_ms < $1                 ORDER BY seq ASC                 LIMIT $2             )",
         )
-        .bind(unix_millis_to_datetime(
+        .bind(u64_to_i64(
             cutoff_ms,
             "request event prune before cutoff",
         )?)
@@ -1153,15 +1152,4 @@ fn add_principal_cost(target: &mut u64, value: i64, field: &str) -> StorageResul
             message: format!("{field} aggregate overflowed"),
         })?;
     Ok(())
-}
-
-fn unix_millis_to_datetime(value: u64, field: &str) -> StorageResult<DateTime<Utc>> {
-    let millis = i64::try_from(value).map_err(|_| cc_lb_storage_api::StorageError::Fatal {
-        message: format!("{field} cannot be represented as postgres timestamptz"),
-    })?;
-    DateTime::<Utc>::from_timestamp_millis(millis).ok_or_else(|| {
-        cc_lb_storage_api::StorageError::Fatal {
-            message: format!("{field} cannot be represented as postgres timestamptz"),
-        }
-    })
 }

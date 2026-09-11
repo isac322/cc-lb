@@ -169,6 +169,7 @@ fn per_candidate_reason_from_label(decision: &str, reason: &str) -> PerCandidate
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use cc_lb_plugin_wire::FilterResponse as WireFilterResponse;
@@ -176,7 +177,7 @@ mod tests {
     use rkyv::rancor::Error as RkyvError;
 
     #[test]
-    fn wire_to_host_splits_kept_and_rejected() {
+    fn t1__wire_to_host_splits_kept_and_rejected() {
         let response = WireFilterResponse {
             results: Box::new([
                 WirePerCandidateReason {
@@ -205,5 +206,22 @@ mod tests {
             out.per_candidate_reasons[0],
             PerCandidateReason::RateLimited
         );
+    }
+
+    #[test]
+    fn t2__guest_trap_normalizes_to_filter_trap_with_exact_reason() {
+        let error = runtime_error_to_filter(WasmtimeRuntimeError::GuestTrap {
+            phase: "cc_lb_filter",
+            source: anyhow::anyhow!("guest exploded"),
+        });
+
+        match error {
+            FilterError::Trap { reason } => {
+                assert_eq!(reason, "cc_lb_filter: guest exploded");
+            }
+            FilterError::Runtime { reason } => {
+                panic!("expected trap normalization, got runtime error: {reason}");
+            }
+        }
     }
 }

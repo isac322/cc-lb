@@ -29,7 +29,7 @@ fn engine_with_allowed_models(
     (
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_engine::SystemClock),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         ),
         view,
     )
@@ -44,7 +44,7 @@ fn active_record() -> StoredApiKeyRecord {
 }
 
 #[tokio::test]
-async fn model_gate_rejects_disallowed_model_before_upstream() {
+async fn t2__model_gate_rejects_disallowed_model_before_upstream() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let (limit_engine, view) = engine_with_allowed_models(vec!["allowed-model".to_owned()]);

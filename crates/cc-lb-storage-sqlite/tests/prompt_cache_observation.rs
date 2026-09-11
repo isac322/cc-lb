@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PromptCacheObservationRecord, PromptCacheObservationStore,
@@ -7,7 +5,7 @@ use cc_lb_storage_api::{
 use uuid::Uuid;
 
 #[tokio::test]
-async fn prompt_cache_v3_observation_roundtrips_and_filters_by_key() {
+async fn t3__prompt_cache_v3_observation_roundtrips_and_filters_by_key() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -17,7 +15,7 @@ async fn prompt_cache_v3_observation_roundtrips_and_filters_by_key() {
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     // Opaque to the storage layer: the column has no default or constraint and this test only

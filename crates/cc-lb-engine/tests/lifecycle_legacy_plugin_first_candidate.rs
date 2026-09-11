@@ -12,7 +12,7 @@ use router_lifecycle_support::{
 };
 
 #[tokio::test]
-async fn legacy_router_without_upstream_id_uses_first_candidate() {
+async fn t2__legacy_router_without_upstream_id_uses_first_candidate() {
     let first = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let second = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let state = RouterLifecycleState::default();

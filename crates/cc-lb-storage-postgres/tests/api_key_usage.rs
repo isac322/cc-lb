@@ -16,16 +16,8 @@ use uuid::Uuid;
 const NOW: u64 = 10_000;
 
 #[test]
-fn api_key_usage_contracts() {
-    let Some(url) = std::env::var("CI_POSTGRES_URL")
-        .ok()
-        .or_else(|| std::env::var("PG_URL").ok())
-    else {
-        eprintln!(
-            "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
-        );
-        return;
-    };
+fn t3_postgres__api_key_usage_contracts() {
+    let url = crate::postgres_fixture::required_postgres_url();
     tokio::runtime::Runtime::new()
         .expect("tokio runtime")
         .block_on(async move {

@@ -1,5 +1,6 @@
 #![allow(dead_code, deprecated)]
 
+use std::fmt::Debug;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use cc_lb_engine::{
 use cc_lb_observability::ObservabilityHook;
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_upstream::SignerFactory;
-use metrics_exporter_prometheus::PrometheusHandle;
+use metrics_util::debugging::Snapshotter;
 use tracing_subscriber::fmt::MakeWriter;
 
 pub const ROUTER_WASM: &[u8] = &[
@@ -143,35 +144,77 @@ pub fn evidence_path(name: &str) -> PathBuf {
     dir.join(name)
 }
 
-pub fn install_prometheus() -> PrometheusHandle {
-    crate::common::install_prometheus().clone()
-}
-
-pub fn counter_value(handle: &PrometheusHandle, name: &str) -> f64 {
-    let prefix = format!("{name} ");
-    handle
-        .render()
-        .lines()
-        .find_map(|line| line.strip_prefix(&prefix))
-        .and_then(|value| value.trim().parse::<f64>().ok())
-        .unwrap_or(0.0)
+pub fn counter_value(snapshotter: &Snapshotter, name: &str) -> f64 {
+    snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .find_map(|(key, _, _, metric)| {
+            (key.key().name() == name)
+                .then(|| debug_counter_value(&metric))
+                .flatten()
+        })
+        .unwrap_or(0) as f64
 }
 
 pub fn labeled_counter_value(
-    handle: &PrometheusHandle,
+    snapshotter: &Snapshotter,
     name: &str,
     label: &str,
     value: &str,
 ) -> f64 {
-    let metric_prefix = format!("{name}{{");
-    let label_fragment = format!(r#"{label}="{value}""#);
-    handle
-        .render()
-        .lines()
-        .find(|line| line.starts_with(&metric_prefix) && line.contains(&label_fragment))
-        .and_then(|line| line.split_whitespace().last())
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(0.0)
+    snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .find_map(|(key, _, _, metric)| {
+            (key.key().name() == name
+                && key
+                    .key()
+                    .labels()
+                    .any(|item| item.key() == label && item.value() == value))
+            .then(|| debug_counter_value(&metric))
+            .flatten()
+        })
+        .unwrap_or(0) as f64
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ReloadFailureCounters {
+    pub failed_total: f64,
+    pub outcome_failure: f64,
+}
+
+pub fn reload_failure_counters(snapshotter: &Snapshotter) -> ReloadFailureCounters {
+    let mut counters = ReloadFailureCounters::default();
+    for (key, _, _, metric) in snapshotter.snapshot().into_vec() {
+        let Some(value) = debug_counter_value(&metric).map(|value| value as f64) else {
+            continue;
+        };
+
+        match key.key().name() {
+            "cc_lb_config_reload_failed_total" => counters.failed_total = value,
+            "cc_lb_config_reload_total"
+                if key
+                    .key()
+                    .labels()
+                    .any(|label| label.key() == "outcome" && label.value() == "failure") =>
+            {
+                counters.outcome_failure = value;
+            }
+            _ => {}
+        }
+    }
+    counters
+}
+
+fn debug_counter_value(value: &impl Debug) -> Option<u64> {
+    let rendered = format!("{value:?}");
+    rendered
+        .strip_prefix("Counter(")?
+        .strip_suffix(')')?
+        .parse()
+        .ok()
 }
 
 pub fn capture_warn_logs(run: impl FnOnce()) -> String {

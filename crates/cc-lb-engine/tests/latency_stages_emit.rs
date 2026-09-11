@@ -22,10 +22,10 @@ use cc_lb_engine::{
 };
 use cc_lb_observability::NoopMetricsHook;
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
+use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::types::{KeyStatus, RequestEvent, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
-use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use http::{HeaderMap, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -109,7 +109,7 @@ impl hyper::rt::Executor<HyperTask> for PoolObservingExecutor {
 }
 
 #[tokio::test]
-async fn cold_request_populates_all_connection_stages_ip_upstream() {
+async fn t2__cold_request_populates_all_connection_stages_ip_upstream() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
     let (dispatcher, _pool_return) = instrumented_bulkhead_dispatcher(None, 8, 8);
     let harness = lifecycle_for(&upstream.ip_base_url(), dispatcher).await;
@@ -141,7 +141,7 @@ async fn cold_request_populates_all_connection_stages_ip_upstream() {
 }
 
 #[tokio::test]
-async fn cold_request_with_hostname_populates_dns_ms() {
+async fn t2__cold_request_with_hostname_populates_dns_ms() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
     let resolver = Arc::new(StaticResolver::new("mock-upstream.test"));
     let (dispatcher, _pool_return) = instrumented_bulkhead_dispatcher(Some(resolver), 8, 8);
@@ -159,7 +159,7 @@ async fn cold_request_with_hostname_populates_dns_ms() {
 }
 
 #[tokio::test]
-async fn warm_pool_request_skips_connection_stages() {
+async fn t2__warm_pool_request_skips_connection_stages() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
     let resolver = Arc::new(StaticResolver::new("mock-upstream.test"));
     let (dispatcher, pool_return) = instrumented_bulkhead_dispatcher(Some(resolver), 8, 8);
@@ -189,14 +189,13 @@ async fn warm_pool_request_skips_connection_stages() {
 }
 
 #[tokio::test]
-async fn bulkhead_contention_records_wait_ms() {
+async fn t2__bulkhead_contention_records_wait_ms() {
     let upstream = MockUpstream::start(Duration::from_millis(40)).await;
     let (dispatcher, _pool_return) = instrumented_bulkhead_dispatcher(None, 1, 1);
     let harness = lifecycle_for(&upstream.ip_base_url(), dispatcher).await;
     let LifecycleHarness {
         lifecycle,
         storage,
-        _dir,
         _assembler,
     } = harness;
     let lifecycle = Arc::new(lifecycle);
@@ -228,25 +227,15 @@ async fn bulkhead_contention_records_wait_ms() {
 
 struct LifecycleHarness {
     lifecycle: Lifecycle,
-    storage: Arc<SqliteStorage>,
-    _dir: tempfile::TempDir,
+    storage: Arc<InMemoryStorage>,
     _assembler: RequestEventAssemblerHandle,
 }
 
 async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) -> LifecycleHarness {
     let state = TestState::default();
     let authn = TestAuthn::new(state);
-    let dir = tempfile::tempdir().expect("request event storage tempdir");
-    let path = dir.path().join("latency-stages.sqlite");
-    let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-        .await
-        .expect("request event storage opens");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize");
-    let storage = Arc::new(storage);
+    let storage = InMemoryStorage::new();
+    let clock = fixed_clock(1_700_000_000);
     let bus = Arc::new(InMemoryBus::new());
     let assembler_rx = bus.attach_lifecycle_assembler(DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY);
     let assembler = spawn_request_event_assembler(
@@ -254,11 +243,9 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
         Arc::clone(&storage) as Arc<dyn StorageTrait>,
         Some(Arc::clone(&bus) as Arc<dyn RequestEventBus>),
         Arc::new(NoopMetricsHook),
+        clock.clone(),
     );
-    let limit_engine = LimitEngine::new(
-        Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(cc_lb_engine::SystemClock),
-    );
+    let limit_engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
     let base_url = Url::parse(base_url).expect("test base URL parses");
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
@@ -272,7 +259,7 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        clock,
     )
     .with_event_bus(Arc::clone(&bus) as Arc<dyn RequestEventBus>)
     .with_static_limit_subject(
@@ -285,7 +272,7 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
     LifecycleHarness {
         lifecycle,
         storage,
-        _dir: dir,
+
         _assembler: assembler,
     }
 }
@@ -339,8 +326,8 @@ async fn send_message_with_model(lifecycle: &Lifecycle, model: &str) {
         .to_bytes();
 }
 
-async fn single_event(storage: &SqliteStorage) -> RequestEvent {
-    let events = wait_for_events(storage, 1).await;
+async fn single_event(storage: &InMemoryStorage) -> RequestEvent {
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(
         events.len(),
         1,
@@ -349,27 +336,8 @@ async fn single_event(storage: &SqliteStorage) -> RequestEvent {
     events.into_iter().next().expect("event exists")
 }
 
-async fn query_events(storage: &SqliteStorage) -> Vec<RequestEvent> {
-    RequestEventStore::query_request_events(storage, 0, u64::MAX, 100)
-        .await
-        .expect("query request events")
-}
-
-async fn wait_for_events(storage: &SqliteStorage, expected: usize) -> Vec<RequestEvent> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        let events = query_events(storage).await;
-        if events.len() >= expected {
-            return events;
-        }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for {expected} request event(s); got {} after 3s: {events:?}",
-                events.len()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+async fn wait_for_events(storage: &InMemoryStorage, expected: usize) -> Vec<RequestEvent> {
+    storage.wait_for_request_events(expected).await
 }
 
 fn assert_bulkhead_wait_under(value: Option<u64>, max_ms: u64) {

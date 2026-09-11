@@ -12,7 +12,7 @@ use router_lifecycle_support::{
 };
 
 #[tokio::test]
-async fn terminal_upstream_id_drives_credentials_and_dispatch_upstream() {
+async fn t2__terminal_upstream_id_drives_credentials_and_dispatch_upstream() {
     let first = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let second = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let state = RouterLifecycleState::default();

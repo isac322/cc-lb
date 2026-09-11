@@ -16,10 +16,10 @@
 //! All scenarios reuse the `cache-aware-wasmtime` artifact produced
 //! for the W7 e2e test; no extra wasm fixtures are needed.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 
+use crate::support::required_wasm;
 use cc_lb_plugin_wire::{
     ArchivedFilterResponse, CachePricingSummary, FilterRequest, FilterResponse, Principal,
     UpstreamCandidate,
@@ -28,30 +28,6 @@ use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use rkyv::rancor::Error;
 use rkyv::util::AlignedVec;
-
-fn wasm_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/")
-        .parent()
-        .expect("workspace root")
-        .join("target/wasm32-unknown-unknown/release/cache_aware_wasmtime.wasm")
-}
-
-fn load_wasm_or_skip() -> Option<Vec<u8>> {
-    let path = wasm_path();
-    match std::fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(err) => {
-            eprintln!(
-                "skipping conformance: wasm artifact missing at {} ({err}). \
-                Run `cargo build --target wasm32-unknown-unknown --release -p cache-aware-wasmtime` first.",
-                path.display(),
-            );
-            None
-        }
-    }
-}
 
 fn request(keep_k: Option<usize>, predicted: &[(&str, u32)]) -> FilterRequest {
     use cc_lb_plugin_wire::Claim;
@@ -127,10 +103,8 @@ fn accepted_ids(resp: &FilterResponse) -> Vec<String> {
 }
 
 #[test]
-fn multi_slot_independent() {
-    let Some(wasm) = load_wasm_or_skip() else {
-        return;
-    };
+fn t3__multi_slot_independent() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
     let slot_a = RuntimeSlotKey::new("tenant-a", "cache-aware-wasmtime");
@@ -159,10 +133,8 @@ fn multi_slot_independent() {
 }
 
 #[test]
-fn concurrent_callers_each_build_their_own_worker() {
-    let Some(wasm) = load_wasm_or_skip() else {
-        return;
-    };
+fn t3__concurrent_callers_each_build_their_own_worker() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
     let slot = RuntimeSlotKey::global("concurrent");
     runtime
@@ -189,10 +161,8 @@ fn concurrent_callers_each_build_their_own_worker() {
 }
 
 #[test]
-fn large_payload_round_trips() {
-    let Some(wasm) = load_wasm_or_skip() else {
-        return;
-    };
+fn t3__large_payload_round_trips() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
     let slot = RuntimeSlotKey::global("large-payload");
     runtime

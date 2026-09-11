@@ -5,7 +5,7 @@ use oauth2::{AuthUrl, ClientId, TokenUrl};
 use url::Url;
 
 #[tokio::test]
-async fn pkce_start_and_complete_flow() {
+async fn t2__pkce_start_and_complete_flow() {
     let clock = common::test_clock();
     let http = common::FakeOAuthClient::new(vec![common::success_response(
         "sk-ant-oat01-pkce",

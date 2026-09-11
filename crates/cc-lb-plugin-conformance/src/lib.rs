@@ -31,12 +31,11 @@
 //! use cc_lb_plugin_conformance::prelude::*;
 //!
 //! fn wasm() -> Vec<u8> {
-//!     std::fs::read(
-//!         std::env::var("CC_LB_PLUGIN_WASM").unwrap_or_else(|_| {
-//!             concat!(env!("CARGO_MANIFEST_DIR"),
-//!                 "/target/wasm32-unknown-unknown/release/my_plugin.wasm").into()
-//!         }),
-//!     ).expect("build plugin wasm first")
+//!     std::fs::read(concat!(
+//!         env!("CARGO_MANIFEST_DIR"),
+//!         "/fixtures/my_plugin.wasm"
+//!     ))
+//!     .expect("build plugin wasm fixture first")
 //! }
 //!
 //! #[test]
@@ -67,8 +66,6 @@
 
 pub mod fixtures;
 pub mod prelude;
-#[cfg(test)]
-mod tests;
 
 use cc_lb_plugin_wire::{
     ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, FilterResponse, ObserveEvent,

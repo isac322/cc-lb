@@ -7,8 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use cc_lb_load_tests::{
-    BASELINE_PATH, Baseline, EVIDENCE_PATH, EndpointSummary, Evidence, ModeSummary, ToolInfo,
-    evaluate_summary, mode_key, round3,
+    BASELINE_PATH, Baseline, EVIDENCE_PATH, EndpointSummary, Evidence, ModeSummary, SoakProfile,
+    ToolInfo, evaluate_summary, mode_key, round3,
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,6 +22,7 @@ mod live_tail;
 #[derive(Clone, Debug)]
 struct Options {
     mode: String,
+    live_tail_profile: SoakProfile,
     direct_url: String,
     proxy_url: String,
     body_path: PathBuf,
@@ -141,6 +142,7 @@ async fn main() -> Result<()> {
 impl Options {
     fn parse() -> Result<Self> {
         let mut mode = None;
+        let mut live_tail_profile = Some(SoakProfile::Smoke);
         let mut direct_url = None;
         let mut proxy_url = None;
         let mut body_path = None;
@@ -172,6 +174,11 @@ impl Options {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--mode" => mode = Some(next_arg(&mut args, &arg)?),
+                "--profile" => {
+                    let value = next_arg(&mut args, &arg)?;
+                    live_tail_profile =
+                        Some(value.parse::<SoakProfile>().map_err(anyhow::Error::msg)?);
+                }
                 "--direct-url" => direct_url = Some(next_arg(&mut args, &arg)?),
                 "--proxy-url" => proxy_url = Some(next_arg(&mut args, &arg)?),
                 "--body" => body_path = Some(PathBuf::from(next_arg(&mut args, &arg)?)),
@@ -269,6 +276,7 @@ impl Options {
         let is_live_tail_soak = mode == "live-tail-soak";
         Ok(Self {
             mode,
+            live_tail_profile: live_tail_profile.unwrap_or(SoakProfile::Smoke),
             direct_url: if is_live_tail_soak {
                 direct_url.unwrap_or_default()
             } else {

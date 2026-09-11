@@ -135,7 +135,7 @@ fn view_with_pipeline(
 
 fn principal(terminal: TerminalStrategy) -> PrincipalRecord {
     PrincipalRecord {
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(0x1004),
         name: PRINCIPAL_ID.to_owned(),
         kind: PrincipalKind::Machine,
         allowed_models: Vec::new(),

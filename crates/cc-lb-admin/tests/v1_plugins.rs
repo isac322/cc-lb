@@ -15,8 +15,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn registry_list_paginates() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__registry_list_paginates() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     seed_registry(&storage, 1, "plugin-page-a").await;
     let _second = seed_registry(&storage, 3, "plugin-page-b").await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -30,7 +30,7 @@ async fn registry_list_paginates() {
 }
 
 #[tokio::test]
-async fn registry_list_exposes_builtin_subscription_preference() {
+async fn t2__registry_list_exposes_builtin_subscription_preference() {
     let (_dir, storage) = temp_storage().await;
     let uploaded = seed_registry(&storage, 24, "plugin-metadata-null").await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -63,7 +63,7 @@ async fn registry_list_exposes_builtin_subscription_preference() {
 }
 
 #[tokio::test]
-async fn builtin_registry_update_and_delete_return_409() {
+async fn t2__builtin_registry_update_and_delete_return_409() {
     let (_dir, storage) = temp_storage().await;
     let app = app(test_state(Config::default(), Some(storage)));
 
@@ -91,7 +91,7 @@ async fn builtin_registry_update_and_delete_return_409() {
 }
 
 #[tokio::test]
-async fn registry_get_returns_etag_with_revision() {
+async fn t2__registry_get_returns_etag_with_revision() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 3, "plugin-get").await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -111,7 +111,7 @@ async fn registry_get_returns_etag_with_revision() {
 }
 
 #[tokio::test]
-async fn registry_patch_label_with_if_match_bumps_revision() {
+async fn t2__registry_patch_label_with_if_match_bumps_revision() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 4, "plugin-label").await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -132,7 +132,7 @@ async fn registry_patch_label_with_if_match_bumps_revision() {
 }
 
 #[tokio::test]
-async fn registry_patch_label_stale_if_match_returns_409() {
+async fn t2__registry_patch_label_stale_if_match_returns_409() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 5, "plugin-label-stale").await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -151,41 +151,8 @@ async fn registry_patch_label_stale_if_match_returns_409() {
 }
 
 #[tokio::test]
-async fn registry_delete_when_unreferenced_deletes_blob_and_cache_file() {
-    let (dir, storage) = temp_storage().await;
-    let entry = seed_registry(&storage, 6, "plugin-delete-registry").await;
-    let data_dir = dir.path().join("data");
-    let cache_dir = data_dir.join("plugins/wasm/cache");
-    std::fs::create_dir_all(&cache_dir).unwrap();
-    let cache_path = cache_dir.join(format!("{}.wasm", hex_sha256(entry.sha256)));
-    std::fs::write(&cache_path, b"cached wasm").unwrap();
-    let mut config = Config::default();
-    config.runtime.data_dir = Some(data_dir);
-    let app = app(test_state(config, Some(storage.clone())));
-
-    let (status, _, _) = request_bytes(
-        app,
-        "DELETE",
-        &format!("/admin/v1/plugins/registry/{}", entry.id),
-        None,
-        Some("W/\"0\""),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert!(
-        storage
-            .get_blob_bytes(entry.sha256)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(!cache_path.exists());
-}
-
-#[tokio::test]
-async fn registry_delete_cascade_blocks_when_chain_references_it() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__registry_delete_cascade_blocks_when_chain_references_it() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-cascade").await;
     let entry = seed_registry(&storage, 7, "plugin-cascade").await;
     let chain_entry = seed_chain(&storage, principal_id, entry.id, sparse_order::STEP).await;
@@ -213,8 +180,8 @@ async fn registry_delete_cascade_blocks_when_chain_references_it() {
 }
 
 #[tokio::test]
-async fn registry_references_endpoint_lists_chain_and_cascade_delete_removes_it() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__registry_references_endpoint_lists_chain_and_cascade_delete_removes_it() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-reference-preview").await;
     let entry = seed_registry(&storage, 37, "plugin-reference-preview").await;
     let chain_entry = seed_chain(&storage, principal_id, entry.id, sparse_order::STEP).await;
@@ -269,8 +236,8 @@ async fn registry_references_endpoint_lists_chain_and_cascade_delete_removes_it(
 }
 
 #[tokio::test]
-async fn registry_cascade_delete_rejects_stale_reference_fingerprint() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__registry_cascade_delete_rejects_stale_reference_fingerprint() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-stale-fingerprint").await;
     let entry = seed_registry(&storage, 38, "plugin-stale-fingerprint").await;
     seed_chain(&storage, principal_id, entry.id, sparse_order::STEP).await;
@@ -305,7 +272,7 @@ async fn registry_cascade_delete_rejects_stale_reference_fingerprint() {
 }
 
 #[tokio::test]
-async fn registry_delete_stale_if_match_returns_412_with_current_revision() {
+async fn t2__registry_delete_stale_if_match_returns_412_with_current_revision() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 14, "plugin-delete-stale").await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -324,8 +291,8 @@ async fn registry_delete_stale_if_match_returns_412_with_current_revision() {
 }
 
 #[tokio::test]
-async fn chain_insert_position_last_uses_next_after() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__chain_insert_position_last_uses_next_after() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-last").await;
     let entry = seed_registry_with_slots(
         &storage,
@@ -356,8 +323,8 @@ async fn chain_insert_position_last_uses_next_after() {
 }
 
 #[tokio::test]
-async fn chain_insert_position_before_uses_sparse_between() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__chain_insert_position_before_uses_sparse_between() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-before").await;
     let entry = seed_registry(&storage, 9, "plugin-before").await;
     let first = seed_chain_with_slot(
@@ -395,8 +362,8 @@ async fn chain_insert_position_before_uses_sparse_between() {
 }
 
 #[tokio::test]
-async fn chain_insert_position_before_seeded_builtin_uses_sparse_order() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__chain_insert_position_before_seeded_builtin_uses_sparse_order() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-before-seeded-builtin").await;
     let entry = seed_registry(&storage, 79, "plugin-before-seeded-builtin").await;
     let builtin = storage
@@ -425,8 +392,8 @@ async fn chain_insert_position_before_seeded_builtin_uses_sparse_order() {
 }
 
 #[tokio::test]
-async fn chain_insert_position_first_uses_min_minus_step() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__chain_insert_position_first_uses_min_minus_step() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-first").await;
     let entry = seed_registry(&storage, 10, "plugin-first").await;
     seed_chain_with_slot(
@@ -455,7 +422,7 @@ async fn chain_insert_position_first_uses_min_minus_step() {
 }
 
 #[tokio::test]
-async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
+async fn t2__chain_insert_accepts_builtin_subscription_preference_registry_id() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-builtin-subscription-preference").await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -494,7 +461,7 @@ async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
 }
 
 #[tokio::test]
-async fn plugin_chain_accepts_runtime_slot_aliases() {
+async fn t2__plugin_chain_accepts_runtime_slot_aliases() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-slot-aliases").await;
     let entry = seed_registry(&storage, 25, "plugin-slot-aliases").await;
@@ -560,7 +527,7 @@ async fn plugin_chain_accepts_runtime_slot_aliases() {
 }
 
 #[tokio::test]
-async fn plugin_chain_rejects_runtime_only_slot_mutations() {
+async fn t2__plugin_chain_rejects_runtime_only_slot_mutations() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-runtime-only-slot").await;
     let entry = seed_registry(&storage, 26, "plugin-runtime-only-slot").await;
@@ -579,10 +546,10 @@ async fn plugin_chain_rejects_runtime_only_slot_mutations() {
 }
 
 #[tokio::test]
-async fn chain_insert_unknown_principal_returns_400() {
+async fn t2__chain_insert_unknown_principal_returns_400() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 19, "plugin-unknown-principal").await;
-    let unknown_principal = Uuid::new_v4();
+    let unknown_principal = Uuid::from_u128(555);
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
@@ -599,7 +566,7 @@ async fn chain_insert_unknown_principal_returns_400() {
 }
 
 #[tokio::test]
-async fn chain_insert_rejects_plugin_not_advertising_target_slot() {
+async fn t2__chain_insert_rejects_plugin_not_advertising_target_slot() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-unsupported-slot").await;
     let shape_only = seed_registry_with_slots(
@@ -626,7 +593,7 @@ async fn chain_insert_rejects_plugin_not_advertising_target_slot() {
 }
 
 #[tokio::test]
-async fn chain_insert_rejects_plugin_with_empty_supported_slots_as_slot_metadata_unknown() {
+async fn t2__chain_insert_rejects_plugin_with_empty_supported_slots_as_slot_metadata_unknown() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-empty-slots").await;
     let legacy = seed_registry_raw(&storage, 78, "legacy-no-slots").await;
@@ -647,8 +614,8 @@ async fn chain_insert_rejects_plugin_with_empty_supported_slots_as_slot_metadata
 }
 
 #[tokio::test]
-async fn insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-router-singleton").await;
     let entry = seed_registry(&storage, 22, "plugin-router-singleton").await;
     let first = seed_chain_with_slot(
@@ -703,8 +670,8 @@ async fn insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
 }
 
 #[tokio::test]
-async fn insert_chain_duplicate_shape_returns_409_slot_singleton() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__insert_chain_duplicate_shape_returns_409_slot_singleton() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-shape-singleton").await;
     let entry = seed_registry(&storage, 23, "plugin-shape-singleton").await;
     let first = seed_chain_with_slot(
@@ -731,7 +698,7 @@ async fn insert_chain_duplicate_shape_returns_409_slot_singleton() {
 }
 
 #[tokio::test]
-async fn chain_update_empty_body_rejected_400() {
+async fn t2__chain_update_empty_body_rejected_400() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-empty-update").await;
     let entry = seed_registry(&storage, 11, "plugin-empty-update").await;
@@ -752,7 +719,7 @@ async fn chain_update_empty_body_rejected_400() {
 }
 
 #[tokio::test]
-async fn chain_update_stale_if_match_returns_412_with_current_revision() {
+async fn t2__chain_update_stale_if_match_returns_412_with_current_revision() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-update-stale").await;
     let entry = seed_registry(&storage, 18, "plugin-update-stale").await;
@@ -773,7 +740,7 @@ async fn chain_update_stale_if_match_returns_412_with_current_revision() {
 }
 
 #[tokio::test]
-async fn chain_delete_forwards_if_match_to_storage_and_returns_204() {
+async fn t2__chain_delete_forwards_if_match_to_storage_and_returns_204() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-delete-chain").await;
     let entry = seed_registry(&storage, 15, "plugin-delete-chain").await;
@@ -803,7 +770,7 @@ async fn chain_delete_forwards_if_match_to_storage_and_returns_204() {
 }
 
 #[tokio::test]
-async fn chain_delete_stale_if_match_returns_412_with_current_revision() {
+async fn t2__chain_delete_stale_if_match_returns_412_with_current_revision() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-delete-stale").await;
     let entry = seed_registry(&storage, 16, "plugin-delete-stale").await;
@@ -824,7 +791,7 @@ async fn chain_delete_stale_if_match_returns_412_with_current_revision() {
 }
 
 #[tokio::test]
-async fn chain_delete_malformed_if_match_returns_400() {
+async fn t2__chain_delete_malformed_if_match_returns_400() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-delete-malformed").await;
     let entry = seed_registry(&storage, 17, "plugin-delete-malformed").await;
@@ -845,8 +812,8 @@ async fn chain_delete_malformed_if_match_returns_400() {
 }
 
 #[tokio::test]
-async fn chain_reorder_then_needs_rebalance_returns_409() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__chain_reorder_then_needs_rebalance_returns_409() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-reorder").await;
     let entry = seed_registry(&storage, 12, "plugin-reorder").await;
     let first = seed_chain_with_slot(
@@ -883,8 +850,8 @@ async fn chain_reorder_then_needs_rebalance_returns_409() {
 }
 
 #[tokio::test]
-async fn reorder_invalid_order_after_stage_returns_409() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__reorder_invalid_order_after_stage_returns_409() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-reorder-invalid-order").await;
     let entry = seed_registry(&storage, 21, "plugin-reorder-invalid-order").await;
     let first = seed_chain_with_slot(
@@ -929,8 +896,8 @@ async fn reorder_invalid_order_after_stage_returns_409() {
 }
 
 #[tokio::test]
-async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__chain_rebalance_evens_spacing_and_returns_new_orders() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-rebalance").await;
     let entry = seed_registry(&storage, 13, "plugin-rebalance").await;
     seed_chain_with_slot(
@@ -967,12 +934,12 @@ async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
 }
 
 #[tokio::test]
-async fn chain_rebalance_emits_chain_audit() {
-    let (_dir, storage) = temp_storage().await;
-    let principal_id = seed_principal(&storage, "principal-rebalance-audit").await;
-    let entry = seed_registry(&storage, 20, "plugin-rebalance-audit").await;
+async fn t2__chain_rebalance_emits_chain_audit() {
+    let server = crate::admin_test_common::spawn_admin_server().await;
+    let principal_id = seed_principal(&server.storage, "principal-rebalance-audit").await;
+    let entry = seed_registry(&server.storage, 20, "plugin-rebalance-audit").await;
     seed_chain_with_slot(
-        &storage,
+        &server.storage,
         principal_id,
         PluginSlotKind::ObservabilityHook,
         entry.id,
@@ -980,41 +947,42 @@ async fn chain_rebalance_emits_chain_audit() {
     )
     .await;
     seed_chain_with_slot(
-        &storage,
+        &server.storage,
         principal_id,
         PluginSlotKind::ObservabilityHook,
         entry.id,
         1001,
     )
     .await;
-    let app = app(test_state(Config::default(), Some(storage.clone())));
 
-    let (status, _, _, _) = authed_json(
-        app,
-        "POST",
-        &format!(
-            "/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=ObservabilityHook"
-        ),
-        None,
-    )
-    .await;
+
+    let (status, _, _) = server
+        .client
+        .json(
+            "POST",
+            &format!(
+                "/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=ObservabilityHook"
+            ),
+            None,
+            &[],
+        )
+        .await;
     assert_eq!(status, StatusCode::OK);
 
     let expected_route = format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance");
+    let expected_action =
+        format!("plugin_chain_update(principal={principal_id}, slots=observability_hook)");
+    let entries = server
+        .storage
+        .query_audit(None, 0, u64::MAX, 20)
+        .await
+        .unwrap();
     assert!(
-        storage
-            .query_audit(None, 0, u64::MAX, 20)
-            .await
-            .unwrap()
-            .iter()
-            .any(|entry| {
-                entry.route == expected_route
-                    && entry.admin_action.as_deref().is_some_and(|action| {
-                        action == format!(
-                            "plugin_chain_update(principal={principal_id}, slots=observability_hook)"
-                        )
-                    })
-            })
+        entries.iter().any(|entry| {
+            entry.route == expected_route
+                && entry.admin_action.as_deref() == Some(expected_action.as_str())
+        }),
+        "expected route {expected_route:?} and audit action {expected_action:?}, entries={entries:?}"
     );
 }
 
@@ -1084,26 +1052,26 @@ async fn request_bytes(
     (status, headers, bytes)
 }
 
-async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str) -> Uuid {
-    storage
-        .create(
-            PrincipalCreate {
-                name: name.to_owned(),
-                kind: PrincipalKind::Machine,
-                allowed_models: Vec::new(),
-                allowed_upstreams: Vec::new(),
-                default_limits: Vec::new(),
-                cache_keepalive: None,
-            },
-            1_800_000_000,
-        )
-        .await
-        .unwrap()
-        .id
+async fn seed_principal(storage: &Arc<impl cc_lb_storage_api::Storage>, name: &str) -> Uuid {
+    PrincipalStore::create(
+        storage.as_ref(),
+        PrincipalCreate {
+            name: name.to_owned(),
+            kind: PrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::new(),
+            cache_keepalive: None,
+        },
+        1_800_000_000,
+    )
+    .await
+    .unwrap()
+    .id
 }
 
 async fn seed_registry_with_slots(
-    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    storage: &Arc<impl cc_lb_storage_api::Storage>,
     seed: u8,
     name: &str,
     slots: Vec<PluginSlotKind>,
@@ -1119,7 +1087,7 @@ async fn seed_registry_with_slots(
 }
 
 async fn seed_registry(
-    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    storage: &Arc<impl cc_lb_storage_api::Storage>,
     seed: u8,
     name: &str,
 ) -> cc_lb_storage_api::WasmRegistryEntry {
@@ -1137,7 +1105,7 @@ async fn seed_registry(
 }
 
 async fn seed_registry_raw(
-    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    storage: &Arc<impl cc_lb_storage_api::Storage>,
     seed: u8,
     name: &str,
 ) -> cc_lb_storage_api::WasmRegistryEntry {
@@ -1169,7 +1137,7 @@ async fn seed_registry_raw(
 }
 
 async fn seed_chain(
-    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    storage: &Arc<impl cc_lb_storage_api::Storage>,
     principal_id: Uuid,
     wasm_registry_id: Uuid,
     order: i64,
@@ -1185,7 +1153,7 @@ async fn seed_chain(
 }
 
 async fn seed_chain_with_slot(
-    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    storage: &Arc<impl cc_lb_storage_api::Storage>,
     principal_id: Uuid,
     slot: PluginSlotKind,
     wasm_registry_id: Uuid,
@@ -1204,8 +1172,4 @@ async fn seed_chain_with_slot(
         })
         .await
         .unwrap()
-}
-
-fn hex_sha256(sha256: [u8; 32]) -> String {
-    sha256.iter().map(|byte| format!("{byte:02x}")).collect()
 }

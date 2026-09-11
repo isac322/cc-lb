@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use cc_lb_load_tests::{
-    LIVE_TAIL_EVIDENCE_SCHEMA_VERSION, LiveTailSoakEvidence, MetricSeriesSummary, SoakProfile,
+    LIVE_TAIL_EVIDENCE_SCHEMA_VERSION, LiveTailSoakEvidence, MetricSeriesSummary,
     evaluate_live_tail_soak, round3,
 };
 use serde_json::json;
@@ -68,10 +68,7 @@ struct ProxyLoadConfig {
 }
 
 pub async fn run(options: Options) -> Result<()> {
-    let profile = std::env::var("CC_LB_LOAD_PROFILE")
-        .unwrap_or_else(|_| "smoke".to_owned())
-        .parse::<SoakProfile>()
-        .map_err(anyhow::Error::msg)?;
+    let profile = options.live_tail_profile;
     let rps = options.rps.context("--rps is required")?;
     let duration_secs = options
         .duration_secs

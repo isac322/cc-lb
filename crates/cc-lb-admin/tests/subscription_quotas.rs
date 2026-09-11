@@ -36,7 +36,7 @@ fn pool_history_record(snapshot_at_unix_secs: i64, utilization: f64) -> PoolQuot
 }
 
 #[tokio::test]
-async fn subscription_quota_latest_is_registered_on_v1_and_legacy_paths() {
+async fn t2__subscription_quota_latest_is_registered_on_v1_and_legacy_paths() {
     let server = admin_test_common::spawn_admin_server().await;
     let (status, _, body) = server
         .client
@@ -60,7 +60,7 @@ async fn subscription_quota_latest_is_registered_on_v1_and_legacy_paths() {
 }
 
 #[tokio::test]
-async fn subscription_quota_series_defaults_missing_upstream_ids_to_all() {
+async fn t2__subscription_quota_series_defaults_missing_upstream_ids_to_all() {
     let server = admin_test_common::spawn_admin_server().await;
     let (status, _, _) = server
         .client
@@ -83,9 +83,9 @@ async fn subscription_quota_series_defaults_missing_upstream_ids_to_all() {
 }
 
 #[tokio::test]
-async fn subscription_quota_series_defaults_exclude_stored_fable_window() {
+async fn t3__subscription_quota_series_defaults_exclude_stored_fable_window() {
     // Given: only a Fable-scoped weekly checkpoint is stored.
-    let server = admin_test_common::spawn_admin_server().await;
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let upstream_id = create_oauth_upstream(&server, "fable-series").await;
     let mut fable = quota_observation(
         upstream_id,
@@ -117,9 +117,9 @@ async fn subscription_quota_series_defaults_exclude_stored_fable_window() {
 }
 
 #[tokio::test]
-async fn subscription_quota_series_explicit_fable_window_includes_stored_series() {
+async fn t3__subscription_quota_series_explicit_fable_window_includes_stored_series() {
     // Given: only a Fable-scoped weekly checkpoint is stored.
-    let server = admin_test_common::spawn_admin_server().await;
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let upstream_id = create_oauth_upstream(&server, "explicit-fable-series").await;
     let mut fable = quota_observation(
         upstream_id,
@@ -153,8 +153,8 @@ async fn subscription_quota_series_explicit_fable_window_includes_stored_series(
 }
 
 #[tokio::test]
-async fn subscription_quota_pool_history_accepts_explicit_fable_window() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__subscription_quota_pool_history_accepts_explicit_fable_window() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     server
         .storage
         .record_pool_quota_snapshots(&[PoolQuotaSnapshotRecord {
@@ -209,8 +209,8 @@ async fn subscription_quota_pool_history_accepts_explicit_fable_window() {
 }
 
 #[tokio::test]
-async fn subscription_quota_pool_history_caps_chart_points_and_preserves_peak() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__subscription_quota_pool_history_caps_chart_points_and_preserves_peak() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     server
         .storage
         .record_pool_quota_snapshots(&[
@@ -255,7 +255,7 @@ async fn subscription_quota_pool_history_caps_chart_points_and_preserves_peak() 
 }
 
 #[tokio::test]
-async fn subscription_quota_analysis_defaults_missing_upstream_ids_to_all() {
+async fn t2__subscription_quota_analysis_defaults_missing_upstream_ids_to_all() {
     let server = admin_test_common::spawn_admin_server().await;
 
     let (status, _, _) = server
@@ -267,7 +267,7 @@ async fn subscription_quota_analysis_defaults_missing_upstream_ids_to_all() {
 }
 
 #[tokio::test]
-async fn subscription_quota_analysis_enforces_bucket_range_guardrail() {
+async fn t2__subscription_quota_analysis_enforces_bucket_range_guardrail() {
     const MAX_ANALYSIS_RANGE_SECS: u64 = 60 * 10_000 * 2;
 
     let server = admin_test_common::spawn_admin_server().await;
@@ -304,8 +304,8 @@ async fn subscription_quota_analysis_enforces_bucket_range_guardrail() {
 }
 
 #[tokio::test]
-async fn subscription_quota_analysis_excludes_unrequested_usage_rollups_and_refreshes() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__subscription_quota_analysis_excludes_unrequested_usage_rollups_and_refreshes() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let selected_upstream_id = create_oauth_upstream(&server, "analysis-selected").await;
     let excluded_upstream_id = create_oauth_upstream(&server, "analysis-excluded").await;
     server
@@ -431,8 +431,9 @@ async fn subscription_quota_analysis_excludes_unrequested_usage_rollups_and_refr
 }
 
 #[tokio::test]
-async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_leading_zeroes() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__subscription_quota_checkpoint_series_returns_steps_without_fabricated_leading_zeroes()
+{
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let upstream_id = create_oauth_upstream(&server, "checkpoint-series").await;
     server
         .storage
@@ -518,8 +519,8 @@ async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_l
 }
 
 #[tokio::test]
-async fn subscription_quota_checkpoint_analysis_uses_exact_checkpoint_intervals() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__subscription_quota_checkpoint_analysis_uses_exact_checkpoint_intervals() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let flat_upstream_id = create_oauth_upstream(&server, "checkpoint-analysis-flat").await;
     let rising_upstream_id = create_oauth_upstream(&server, "checkpoint-analysis-rising").await;
     let latest_only_upstream_id =
@@ -612,10 +613,10 @@ async fn subscription_quota_checkpoint_analysis_uses_exact_checkpoint_intervals(
 }
 
 #[tokio::test]
-async fn subscription_quota_checkpoint_aggregate_carries_unaligned_checkpoints_to_evaluation_time()
-{
+async fn t3__subscription_quota_checkpoint_aggregate_carries_unaligned_checkpoints_to_evaluation_time()
+ {
     let clock = test_clock();
-    let server = admin_test_common::spawn_admin_server_with_clock(clock).await;
+    let server = admin_test_common::spawn_admin_server_sqlite_with_clock(clock).await;
     let first_upstream_id = create_oauth_upstream(&server, "checkpoint-aggregate-a").await;
     let second_upstream_id = create_oauth_upstream(&server, "checkpoint-aggregate-b").await;
     let first_checkpoint = CHECKPOINT_TEST_NOW_UNIX_SECS - 1_200;
@@ -689,12 +690,13 @@ async fn subscription_quota_checkpoint_aggregate_carries_unaligned_checkpoints_t
 }
 
 #[tokio::test]
-async fn subscription_quota_aggregate_matches_legacy_golden_for_multiple_windows_and_boundaries() {
+async fn t3__subscription_quota_aggregate_matches_legacy_golden_for_multiple_windows_and_boundaries()
+ {
     // Given: two upstreams with 5h/7d observations and usage exactly on the
     // provider-start and cc-lb-start interval boundaries.
     let now_unix_secs = CHECKPOINT_TEST_NOW_UNIX_SECS + 3_600;
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(now_unix_secs));
-    let server = admin_test_common::spawn_admin_server_with_clock(clock).await;
+    let server = admin_test_common::spawn_admin_server_sqlite_with_clock(clock).await;
     let first_upstream_id = create_oauth_upstream(&server, "aggregate-golden-a").await;
     let second_upstream_id = create_oauth_upstream(&server, "aggregate-golden-b").await;
     let five_hour_reset = now_unix_secs + 3_600;
@@ -806,7 +808,10 @@ async fn subscription_quota_aggregate_matches_legacy_golden_for_multiple_windows
     );
 }
 
-async fn create_oauth_upstream(server: &admin_test_common::SpawnedAdminServer, name: &str) -> Uuid {
+async fn create_oauth_upstream(
+    server: &admin_test_common::SpawnedAdminServer<impl Sized>,
+    name: &str,
+) -> Uuid {
     let (status, _, body) = server
         .client
         .post_json(

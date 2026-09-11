@@ -2,13 +2,14 @@ services:
   postgres:
     image: postgres:18
     environment:
-      POSTGRES_USER: cc_lb
-      POSTGRES_PASSWORD: cc_lb
-      POSTGRES_DB: cc_lb
+      POSTGRES_USER: "${CC_LB_MULTI_REPLICA_POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${CC_LB_MULTI_REPLICA_POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${CC_LB_MULTI_REPLICA_POSTGRES_DB}"
     ports:
       - "${CC_LB_MULTI_REPLICA_POSTGRES_PORT}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cc_lb -d cc_lb"]
+      test:
+        ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "${CC_LB_MULTI_REPLICA_POSTGRES_USER}", "-d", "${CC_LB_MULTI_REPLICA_POSTGRES_DB}"]
       interval: 1s
       timeout: 5s
-      retries: 30
+      retries: 60

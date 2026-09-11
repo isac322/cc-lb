@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::{BackendKind, MetaStore, PrincipalStore};
 use uuid::Uuid;
 
 #[tokio::test]
-async fn migration_normalizes_legacy_removed_terminal_strategies_to_first_pick() {
+async fn t3__migration_normalizes_legacy_removed_terminal_strategies_to_first_pick() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -15,7 +13,7 @@ async fn migration_normalizes_legacy_removed_terminal_strategies_to_first_pick()
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     let round_robin_id = Uuid::from_u128(1);

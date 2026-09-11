@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use metrics_exporter_prometheus::PrometheusHandle;
+use metrics_util::debugging::Snapshotter;
 use tempfile::TempDir;
 
 pub fn fixture(name: &str) -> PathBuf {
@@ -26,18 +26,25 @@ pub fn overwrite_pair(cert_path: &Path, key_path: &Path, cert_name: &str, key_na
     std::fs::copy(fixture(key_name), key_path).unwrap();
 }
 
-pub fn init_metrics() -> &'static PrometheusHandle {
-    crate::common::install_prometheus()
-}
-
-pub fn tls_reload_counter(handle: &PrometheusHandle, outcome: &str) -> f64 {
-    let needle = format!("cc_lb_tls_reload_total{{outcome=\"{outcome}\"}}");
-    handle
-        .render()
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix(&needle)
-                .and_then(|value| value.trim().parse::<f64>().ok())
+pub fn tls_reload_counter(snapshotter: &Snapshotter, outcome: &str) -> f64 {
+    snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .find_map(|(key, _, _, metric)| {
+            (key.key().name() == "cc_lb_tls_reload_total"
+                && key
+                    .key()
+                    .labels()
+                    .any(|label| label.key() == "outcome" && label.value() == outcome))
+            .then(|| format!("{metric:?}"))
+            .and_then(|rendered| {
+                rendered
+                    .strip_prefix("Counter(")?
+                    .strip_suffix(')')?
+                    .parse::<u64>()
+                    .ok()
+            })
         })
-        .unwrap_or(0.0)
+        .unwrap_or(0) as f64
 }

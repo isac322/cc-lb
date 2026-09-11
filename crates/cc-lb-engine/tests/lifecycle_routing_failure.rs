@@ -13,9 +13,9 @@ use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleCo
 use cc_lb_routing::{
     FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
 };
+use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
-use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use http::StatusCode;
 use serde_json::Value;
 use url::Url;
@@ -27,14 +27,13 @@ use common::{
 };
 
 #[tokio::test]
-async fn no_candidates_after_filters_returns_503_and_logs_request_event()
+async fn t2__no_candidates_after_filters_returns_503_and_logs_request_event()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream_id = upstream_id(1);
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
     let router_calls = Arc::new(Mutex::new(Vec::new()));
     let state = TestState::default();
-    let _dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-routing-failure.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_pipeline(
@@ -68,7 +67,7 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
     );
     assert!(router_calls.lock().expect("router calls lock").is_empty());
 
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     let event = &events[0];
     assert_eq!(event.status, StatusCode::SERVICE_UNAVAILABLE.as_u16());
@@ -96,33 +95,79 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
     Ok(())
 }
 
-async fn wait_for_events(
-    storage: &dyn RequestEventStore,
-    expected: usize,
-) -> Result<Vec<cc_lb_storage_api::types::RequestEvent>, Box<dyn std::error::Error>> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
-        if events.len() >= expected {
-            return Ok(events);
-        }
-        if std::time::Instant::now() >= deadline {
-            panic!("expected {expected} request event(s), got {}", events.len());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+#[tokio::test]
+async fn t2__lifecycle__principal_missing_from_view_returns_500()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = TestState::default();
+    let storage = InMemoryStorage::new();
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let principal_view = Arc::new(PrincipalView::from_db(&[], HashMap::new()));
+    let lifecycle = lifecycle_with_principal_view(
+        principal_view,
+        vec![upstream_record(upstream_id(1), "first")],
+        state.clone(),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        )))
+        .await?;
+    let (status, _headers, body) = collect_body(response).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let body: Value = serde_json::from_slice(&body)?;
+    assert_eq!(
+        body["error"]["message"],
+        "authenticated principal is unavailable"
+    );
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
+    let events = storage.wait_for_request_events(1).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].status, StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+    assert_eq!(events[0].error_code.as_deref(), Some("principal_missing"));
+    Ok(())
 }
 
-async fn sqlite_storage(
-    dir: &tempfile::TempDir,
-    file_name: &str,
-) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    Ok(storage)
+#[tokio::test]
+async fn t2__lifecycle__router_pipeline_unavailable_returns_502()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = TestState::default();
+    let storage = InMemoryStorage::new();
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let principal_view = principal_view_with_error("plugin load error");
+    let lifecycle = lifecycle_with_principal_view(
+        principal_view,
+        vec![upstream_record(upstream_id(1), "first")],
+        state.clone(),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        )))
+        .await?;
+    let (status, _headers, body) = collect_body(response).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let body: Value = serde_json::from_slice(&body)?;
+    assert_eq!(
+        body["error"]["message"],
+        "router pipeline is unavailable for this request"
+    );
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
+    let events = storage.wait_for_request_events(1).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].status, StatusCode::BAD_GATEWAY.as_u16());
+    assert_eq!(
+        events[0].error_code.as_deref(),
+        Some("router_pipeline_unavailable")
+    );
+    Ok(())
 }
 
 fn lifecycle_with_pipeline(
@@ -149,10 +194,61 @@ fn lifecycle_with_pipeline(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        fixed_clock(1_700_000_000),
     )
 }
 
+fn lifecycle_with_principal_view(
+    principal_view: Arc<PrincipalView>,
+    records: Vec<UpstreamRecord>,
+    state: TestState,
+) -> Lifecycle {
+    let authn = TestAuthn::with_principal_view(state.clone(), Arc::clone(&principal_view));
+    let dispatcher = Arc::new(MockDispatch {
+        state,
+        mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
+    });
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .global_router(Arc::new(common::TestRouter {
+            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
+        }))
+        .global_observability_hooks(Vec::new())
+        .principal_view(principal_view)
+        .upstream_records(records)
+        .build();
+    Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
+        LifecycleConfig::default(),
+        fixed_clock(1_700_000_000),
+    )
+}
+
+fn principal_view_with_error(error: &str) -> Arc<PrincipalView> {
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: Vec::new(),
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: Some(Arc::from(error)),
+    });
+    let mut chains = HashMap::new();
+    chains.insert(
+        "principal-test".to_owned(),
+        (
+            Some(pipeline),
+            ObservabilityHooksCache::Inherit,
+            DialectCache::Inherit,
+        ),
+    );
+    Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        chains,
+    ))
+}
 fn principal_view(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<PrincipalView> {
     let pipeline = Arc::new(RouterPipelineCache {
         user_filters: filters,

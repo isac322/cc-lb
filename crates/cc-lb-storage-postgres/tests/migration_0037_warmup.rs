@@ -8,7 +8,6 @@ use sqlx::{
     AssertSqlSafe, PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
-use uuid::Uuid;
 
 const ROW_COUNT: i64 = 1_000;
 const MIN_POSTGRES_VERSION_NUM: u32 = 110_000;
@@ -52,17 +51,31 @@ const MIGRATION_0037: &str = include_str!("../migrations/0037_upstream_warmup.sq
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
-async fn migration_0037_on_populated_upstreams_is_fast_and_backfills_defaults() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
-
-    let result = run_migration_assertions(&fixture).await;
+async fn t3_postgres__migration_0037_backfills_defaults_on_populated_upstreams() -> TestResult {
+    let fixture = Fixture::create("backfills_defaults").await?;
+    let result = migrate_and_assert_defaults(&fixture).await.map(|_| ());
     let teardown = fixture.drop_schema().await;
 
     result?;
-    teardown?;
-    Ok(())
+    teardown
+}
+
+#[tokio::test]
+async fn tx__migration_0037_on_populated_upstreams_under_2s() -> TestResult {
+    let fixture = Fixture::create("latency_budget").await?;
+    let result: TestResult = async {
+        let elapsed = migrate_and_assert_defaults(&fixture).await?;
+        assert!(
+            elapsed < MAX_MIGRATION_ELAPSED,
+            "migration 0037 took {elapsed:?}, expected < {MAX_MIGRATION_ELAPSED:?}"
+        );
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+
+    result?;
+    teardown
 }
 
 struct Fixture {
@@ -72,13 +85,10 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn create() -> TestResult<Option<Self>> {
-        let Some(url) = std::env::var("DATABASE_URL_TEST").ok() else {
-            eprintln!("SKIP: missing_DATABASE_URL_TEST");
-            return Ok(None);
-        };
+    async fn create(case: &str) -> TestResult<Self> {
+        let url = crate::postgres_fixture::required_postgres_url();
 
-        let schema = format!("test_migration_0037_{}", Uuid::new_v4().simple());
+        let schema = format!("test_migration_0037_{case}");
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(PgConnectOptions::from_str(&url)?)
@@ -111,7 +121,7 @@ impl Fixture {
             return Err(error);
         }
 
-        Ok(Some(fixture))
+        Ok(fixture)
     }
 
     async fn apply_migrations_to_0032(&self) -> TestResult {
@@ -130,7 +140,7 @@ impl Fixture {
     }
 }
 
-async fn run_migration_assertions(fixture: &Fixture) -> TestResult {
+async fn migrate_and_assert_defaults(fixture: &Fixture) -> TestResult<Duration> {
     seed_upstreams(&fixture.pool).await?;
     assert_seeded_rows(&fixture.pool).await?;
 
@@ -139,10 +149,6 @@ async fn run_migration_assertions(fixture: &Fixture) -> TestResult {
     let elapsed = started_at.elapsed();
 
     eprintln!("migration_elapsed_secs={:.6}", elapsed.as_secs_f64());
-    assert!(
-        elapsed < MAX_MIGRATION_ELAPSED,
-        "migration 0037 took {elapsed:?}, expected < {MAX_MIGRATION_ELAPSED:?}"
-    );
 
     let counts = warmup_default_counts(&fixture.pool).await?;
     assert_eq!(counts.total, ROW_COUNT, "unexpected upstream row count");
@@ -176,7 +182,7 @@ async fn run_migration_assertions(fixture: &Fixture) -> TestResult {
         index_name.expect("index asserted present")
     );
 
-    Ok(())
+    Ok(elapsed)
 }
 
 async fn require_postgres_11(pool: &PgPool) -> TestResult {

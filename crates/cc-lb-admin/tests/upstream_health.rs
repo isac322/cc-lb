@@ -8,6 +8,7 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
+use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 fn test_state() -> AdminState {
@@ -35,7 +36,7 @@ fn test_state() -> AdminState {
 }
 
 #[tokio::test]
-async fn upstream_health_current_admin_health_smoke() {
+async fn t2__upstream_health_current_admin_health_smoke() {
     let response = router(test_state())
         .oneshot(
             Request::builder()
@@ -48,4 +49,10 @@ async fn upstream_health_current_admin_health_smoke() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    assert!(body["git_sha"].is_string());
+    assert!(body["uptime_secs"].is_number());
 }

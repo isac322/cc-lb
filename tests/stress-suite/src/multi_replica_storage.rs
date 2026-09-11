@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
 
 use crate::docker::Docker;
 use crate::fabric_state::{POSTGRES_IP, ResourceNames, label, label_filter};
@@ -54,27 +53,28 @@ pub fn start_postgres(
 }
 
 pub fn wait_for_postgres(docker: &Docker, postgres: &str) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        if docker
-            .run(&[
-                "exec".to_owned(),
-                postgres.to_owned(),
-                "pg_isready".to_owned(),
-                "-U".to_owned(),
-                "cc_lb".to_owned(),
-                "-d".to_owned(),
-                "cc_lb".to_owned(),
-            ])
-            .is_ok()
-        {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err("postgres did not become ready".to_owned());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    const READINESS_SCRIPT: &str = r#"
+attempt=0
+while [ "$attempt" -lt 1200 ]; do
+  if pg_isready -U cc_lb -d cc_lb >/dev/null 2>&1; then
+    exit 0
+  fi
+  attempt=$((attempt + 1))
+  sleep 0.05
+done
+printf 'postgres did not become ready\n' >&2
+exit 1
+"#;
+    docker
+        .run(&[
+            "exec".to_owned(),
+            postgres.to_owned(),
+            "sh".to_owned(),
+            "-ec".to_owned(),
+            READINESS_SCRIPT.to_owned(),
+        ])
+        .map(|_| ())
+        .map_err(|error| format!("wait for postgres readiness: {error}"))
 }
 
 pub fn address(port: u16) -> SocketAddr {

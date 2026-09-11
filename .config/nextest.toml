@@ -1,0 +1,57 @@
+[profile.default]
+default-filter = 'not test(/(^|::)tx__/)'
+
+[profile.fast]
+default-filter = 'not (test(/(^|::)t3__/) | test(/(^|::)t3_postgres__/) | test(/(^|::)t4__/) | test(/(^|::)t5__/) | test(/(^|::)tx__/))'
+
+[profile.contract]
+default-filter = 'test(/(^|::)t3__/)'
+
+[profile.contract-postgres]
+default-filter = 'test(/(^|::)t3_postgres__/)'
+
+[profile.integration]
+default-filter = 'test(/(^|::)t4__/)'
+
+[profile.e2e]
+default-filter = 'test(/(^|::)t5__/)'
+
+[profile.tx]
+default-filter = 'test(/(^|::)tx__/)'
+
+[test-groups.process]
+max-threads = 1
+
+[test-groups.t4]
+max-threads = 1
+
+[test-groups.postgres]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)t4__/)'
+test-group = 't4'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)t5__process_/)'
+test-group = 'process'
+
+[[profile.default.overrides]]
+filter = 'test(/(^|::)t3_postgres__/)'
+test-group = 'postgres'
+
+[[profile.default.overrides]]
+filter = 'test(/^prompt_cache_simulator::optimized::tests::cancelled_request_does_not_poison_executor_or_cache$/)'
+slow-timeout = { period = "10s", terminate-after = 1 }
+
+[[profile.integration.overrides]]
+filter = 'test(/(^|::)t4__/)'
+test-group = 't4'
+
+[[profile.e2e.overrides]]
+filter = 'test(/(^|::)t5__process_/)'
+test-group = 'process'
+
+[[profile.contract-postgres.overrides]]
+filter = 'test(/(^|::)t3_postgres__/)'
+test-group = 'postgres'

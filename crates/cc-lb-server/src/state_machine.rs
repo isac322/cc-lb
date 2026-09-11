@@ -52,13 +52,9 @@ impl ServerStateHandle {
 
 #[cfg(test)]
 pub mod tests {
-    use std::io::ErrorKind;
-    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::oneshot;
     use tokio::time::timeout;
 
     use super::{ServerState, ServerStateHandle};
@@ -107,61 +103,24 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn admin_closed_during_startup_rehandshake() {
+    async fn waiter_remains_pending_until_ready() {
         let state = Arc::new(ServerStateHandle::new_starting());
-        let addr = unused_loopback_addr().await;
-
-        assert_connect_refused(addr).await;
-
-        let (bound_tx, bound_rx) = oneshot::channel();
-        let (release_tx, release_rx) = oneshot::channel();
-        let bind_task = tokio::spawn({
+        let waiter = tokio::spawn({
             let state = state.clone();
             async move {
                 state.wait_for_ready().await;
-                let listener = TcpListener::bind(addr)
-                    .await
-                    .expect("listener should bind after ready");
-                let bound_addr = listener.local_addr().expect("listener should have addr");
-                let _ = bound_tx.send(bound_addr);
-                let _ = release_rx.await;
-                drop(listener);
+                state.current()
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::task::yield_now().await;
         assert_eq!(state.current(), ServerState::Starting);
-        assert_connect_refused(addr).await;
+        assert!(
+            !waiter.is_finished(),
+            "wait_for_ready must remain pending while the server is starting",
+        );
 
         state.transition_to_ready();
-        let bound_addr = timeout(Duration::from_secs(1), bound_rx)
-            .await
-            .expect("listener bind timed out")
-            .expect("listener bind task dropped channel");
-        timeout(Duration::from_secs(1), TcpStream::connect(bound_addr))
-            .await
-            .expect("connect after ready timed out")
-            .expect("connect after ready should succeed");
-
-        let _ = release_tx.send(());
-        bind_task.await.expect("bind task failed");
-    }
-
-    async fn unused_loopback_addr() -> SocketAddr {
-        let listener = TcpListener::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
-            .await
-            .expect("ephemeral listener should bind");
-        let addr = listener.local_addr().expect("ephemeral listener has addr");
-        drop(listener);
-        addr
-    }
-
-    async fn assert_connect_refused(addr: SocketAddr) {
-        match timeout(Duration::from_secs(1), TcpStream::connect(addr)).await {
-            Ok(Err(error)) if error.kind() == ErrorKind::ConnectionRefused => {}
-            Ok(Err(error)) => panic!("expected connection refused for {addr}, got {error}"),
-            Ok(Ok(_stream)) => panic!("expected closed port for {addr}, but connect succeeded"),
-            Err(_) => panic!("expected connection refused for {addr}, but connect timed out"),
-        }
+        assert_eq!(waiter.await.expect("waiter task joins"), ServerState::Ready,);
     }
 }

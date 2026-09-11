@@ -16,27 +16,15 @@
 //! happened" — a fresh compile always produces a fresh `PluginCell`
 //! allocation.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::support::required_wasm;
 use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 
-fn cache_aware_wasm() -> Option<Vec<u8>> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/")
-        .parent()
-        .expect("workspace root")
-        .join("target/wasm32-unknown-unknown/release/cache_aware_wasmtime.wasm");
-    std::fs::read(path).ok()
-}
-
 #[test]
-fn register_same_content_reuses_cell() {
-    let Some(wasm) = cache_aware_wasm() else {
-        return;
-    };
+fn t3__register_same_content_reuses_cell() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
     let key = RuntimeSlotKey::global("unchanged-short-circuit");
 

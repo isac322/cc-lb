@@ -21,6 +21,12 @@ mod finalizer;
 #[path = "cache_keepalive/lifecycle.rs"]
 mod lifecycle;
 
+fn cache_keepalive_job_is_stale(
+    record: &CacheKeepaliveSessionRecord,
+    job: &CacheKeepaliveJob,
+) -> bool {
+    record.generation != job.generation || record.status == CacheKeepaliveSessionStatus::Terminal
+}
 impl SchedulerDispatch {
     pub(super) async fn dispatch_cache_keepalive(
         &self,
@@ -35,9 +41,7 @@ impl SchedulerDispatch {
         else {
             return Ok(JobOutcome::Noop);
         };
-        if record.generation != job.generation
-            || record.status == CacheKeepaliveSessionStatus::Terminal
-        {
+        if cache_keepalive_job_is_stale(&record, &job) {
             return Ok(JobOutcome::Noop);
         }
 
@@ -379,5 +383,66 @@ impl SchedulerDispatch {
         )
         .await
         .map_err(|error| cc_lb_scheduler::error::SchedulerError::Job(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cc_lb_storage_api::{CacheKeepaliveEnqueueState, CacheTtl};
+    use uuid::Uuid;
+
+    #[test]
+    fn cache_keepalive_generation_and_terminal_status_reject_stale_jobs() {
+        let job = CacheKeepaliveJob {
+            session_key_hash: "session-hash".to_owned(),
+            generation: 7,
+            principal_id: "principal".to_owned(),
+            upstream_id: Uuid::from_u128(42),
+            ttl: CacheTtl::Ttl5m,
+            cache_anchor_at_unix_secs: 1_800_000_000,
+            expires_at_unix_secs: 1_800_000_300,
+            refresh_delay_secs: 270,
+            max_refreshes: 12,
+            max_total_duration_secs: 14_400,
+            traceparent: None,
+        };
+        let record = |generation, status| CacheKeepaliveSessionRecord {
+            session_key_hash: job.session_key_hash.clone(),
+            principal_id: job.principal_id.clone(),
+            accounting_key_id: None,
+            upstream_id: job.upstream_id,
+            generation,
+            refresh_count: 0,
+            first_scheduled_at_unix_secs: 1_800_000_000,
+            cache_anchor_at_unix_secs: job.cache_anchor_at_unix_secs,
+            run_at_unix_secs: 1_800_000_030,
+            ttl: job.ttl,
+            status,
+            enqueue_state: CacheKeepaliveEnqueueState::Enqueued,
+            running_since_unix_secs: None,
+            current_job_key: "cache_keepalive:session-hash:7".to_owned(),
+            encrypted_payload: Vec::new(),
+            display_reason: "scheduled".to_owned(),
+            error: None,
+            config_snapshot: None,
+            terminal_reason: None,
+            expires_at_unix_secs: job.expires_at_unix_secs,
+            created_at_unix_secs: 1_800_000_000,
+            updated_at_unix_secs: 1_800_000_000,
+        };
+
+        assert!(!cache_keepalive_job_is_stale(
+            &record(7, CacheKeepaliveSessionStatus::Active),
+            &job,
+        ));
+        assert!(cache_keepalive_job_is_stale(
+            &record(8, CacheKeepaliveSessionStatus::Active),
+            &job,
+        ));
+        assert!(cache_keepalive_job_is_stale(
+            &record(7, CacheKeepaliveSessionStatus::Terminal),
+            &job,
+        ));
     }
 }

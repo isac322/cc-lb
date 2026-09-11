@@ -23,7 +23,7 @@ use common::{DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState};
 const PRINCIPAL: &str = "principal-test";
 
 #[tokio::test]
-async fn happy_path_returns_trace_with_stages_and_winner() {
+async fn t2__happy_path_returns_trace_with_stages_and_winner() {
     let (lifecycle, upstream_ids) = build_lifecycle(vec![kept_filter("keep-first", vec![0])]);
 
     let outcome = lifecycle
@@ -46,7 +46,7 @@ async fn happy_path_returns_trace_with_stages_and_winner() {
 }
 
 #[tokio::test]
-async fn unknown_principal_returns_error() {
+async fn t2__unknown_principal_returns_error() {
     let (lifecycle, _) = build_lifecycle(vec![kept_filter("keep-first", vec![0])]);
 
     let err = lifecycle
@@ -60,7 +60,7 @@ async fn unknown_principal_returns_error() {
 }
 
 #[tokio::test]
-async fn same_request_id_produces_deterministic_winner() {
+async fn t2__same_request_id_produces_deterministic_winner() {
     let (lifecycle, _) = build_lifecycle(vec![kept_filter("keep-all", vec![0, 1, 2])]);
 
     let first = lifecycle
@@ -75,7 +75,7 @@ async fn same_request_id_produces_deterministic_winner() {
 }
 
 #[tokio::test]
-async fn pipeline_instantiation_error_returns_error() {
+async fn t2__pipeline_instantiation_error_returns_error() {
     let upstream_records = default_upstream_records();
     let principal_view = principal_view_with_broken_pipeline();
     let lifecycle = build_lifecycle_from(principal_view, upstream_records);
@@ -96,7 +96,7 @@ async fn pipeline_instantiation_error_returns_error() {
 }
 
 #[tokio::test]
-async fn empty_candidate_pool_returns_null_winner() {
+async fn t2__empty_candidate_pool_returns_null_winner() {
     let (lifecycle, _) = build_lifecycle(vec![kept_filter("drop-all", vec![])]);
 
     let outcome = lifecycle
@@ -164,7 +164,7 @@ fn build_lifecycle_from(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     )
 }
 

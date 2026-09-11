@@ -714,39 +714,82 @@ mod tests {
     }
 
     #[test]
-    fn detect_mid_stream_error_from_named_event() {
-        let raw = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"upstream overloaded\"}}\n\n";
-        let err = detect_raw_mid_stream_error(raw).expect("detected");
-        assert_eq!(err.error_type.as_deref(), Some("overloaded_error"));
-        assert_eq!(err.error_message.as_deref(), Some("upstream overloaded"));
+    fn detect_mid_stream_error_table() {
+        struct Case {
+            case: &'static str,
+            raw: &'static [u8],
+            expected_type: Option<&'static str>,
+            expected_message: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                case: "detect_mid_stream_error_from_named_event",
+                raw: b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"upstream overloaded\"}}\n\n",
+                expected_type: Some("overloaded_error"),
+                expected_message: Some("upstream overloaded"),
+            },
+            Case {
+                case: "detect_mid_stream_error_from_data_type_only",
+                raw: b"data: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"too many\"}}\n\n",
+                expected_type: Some("rate_limit_error"),
+                expected_message: None,
+            },
+            Case {
+                case: "detect_mid_stream_error_ignores_normal_events",
+                raw: b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
+                expected_type: None,
+                expected_message: None,
+            },
+        ];
+
+        for case in cases {
+            let error = detect_raw_mid_stream_error(case.raw);
+            if let Some(expected_type) = case.expected_type {
+                let error = error.unwrap_or_else(|| panic!("case={} expected an error", case.case));
+                assert_eq!(
+                    error.error_type.as_deref(),
+                    Some(expected_type),
+                    "case={}",
+                    case.case
+                );
+                if let Some(expected_message) = case.expected_message {
+                    assert_eq!(
+                        error.error_message.as_deref(),
+                        Some(expected_message),
+                        "case={}",
+                        case.case
+                    );
+                }
+            } else {
+                assert!(error.is_none(), "case={}", case.case);
+            }
+        }
     }
 
     #[test]
-    fn detect_mid_stream_error_from_data_type_only() {
-        let raw = b"data: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"too many\"}}\n\n";
-        let err = detect_raw_mid_stream_error(raw).expect("detected");
-        assert_eq!(err.error_type.as_deref(), Some("rate_limit_error"));
-    }
+    fn find_sse_event_end_table() {
+        let cases = [
+            (
+                "find_sse_event_end_lf_lf",
+                b"event: a\ndata: b\n\n".as_slice(),
+                Some(18),
+            ),
+            (
+                "find_sse_event_end_crlf_crlf",
+                b"event: a\r\ndata: b\r\n\r\n".as_slice(),
+                Some(21),
+            ),
+            (
+                "find_sse_event_end_incomplete",
+                b"event: a\ndata: b\n".as_slice(),
+                None,
+            ),
+        ];
 
-    #[test]
-    fn detect_mid_stream_error_ignores_normal_events() {
-        let raw = raw_event(r#"{"type":"message_delta","usage":{"output_tokens":1}}"#);
-        assert!(detect_raw_mid_stream_error(&raw).is_none());
-    }
-
-    #[test]
-    fn find_sse_event_end_lf_lf() {
-        assert_eq!(find_sse_event_end(b"event: a\ndata: b\n\n"), Some(18));
-    }
-
-    #[test]
-    fn find_sse_event_end_crlf_crlf() {
-        assert_eq!(find_sse_event_end(b"event: a\r\ndata: b\r\n\r\n"), Some(21));
-    }
-
-    #[test]
-    fn find_sse_event_end_incomplete() {
-        assert_eq!(find_sse_event_end(b"event: a\ndata: b\n"), None);
+        for (case, raw, expected) in cases {
+            assert_eq!(find_sse_event_end(raw), expected, "case={case}");
+        }
     }
 
     #[test]

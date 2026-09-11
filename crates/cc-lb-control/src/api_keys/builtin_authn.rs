@@ -208,6 +208,7 @@ pub fn map_none_mode_upstream_kind(kind: NoneModeUpstreamKind) -> UpstreamKind {
     }
 }
 
+#[allow(non_snake_case)]
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -220,12 +221,13 @@ mod tests {
         types::{ApiKeyMutation, IssueParams, PrincipalKindLite},
     };
     use http::{HeaderMap, HeaderValue};
+    use rand::{SeedableRng, rngs::StdRng};
 
     use super::*;
 
     #[tokio::test]
-    async fn authenticates_valid_key() {
-        let generated = secret::generate_new();
+    async fn t2__authenticates_valid_key() {
+        let generated = generated_key();
         let record = active_record(&generated);
         let (authn, store) = api_key_authn(
             LookupAction::Return(Box::new(Some((
@@ -259,8 +261,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bearer_happy_path() {
-        let generated = secret::generate_new();
+    async fn t2__bearer_happy_path() {
+        let generated = generated_key();
         let record = active_record(&generated);
         let (authn, store) = api_key_authn(
             LookupAction::Return(Box::new(Some((
@@ -289,8 +291,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bearer_lowercase_scheme() {
-        let generated = secret::generate_new();
+    async fn t2__bearer_lowercase_scheme() {
+        let generated = generated_key();
         let record = active_record(&generated);
         let (authn, _store) = api_key_authn(
             LookupAction::Return(Box::new(Some((
@@ -315,7 +317,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bearer_invalid_format() {
+    async fn t2__bearer_invalid_format() {
         let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)), true);
 
         let error = authn_error(
@@ -331,8 +333,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xapikey_wins_over_authorization() {
-        let generated = secret::generate_new();
+    async fn t2__xapikey_wins_over_authorization() {
+        let generated = generated_key();
         let record = active_record(&generated);
         let (authn, _store) = api_key_authn(
             LookupAction::Return(Box::new(Some((
@@ -362,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn neither_header_returns_missing() {
+    async fn t2__neither_header_returns_missing() {
         let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)), true);
 
         let error = authn_error(
@@ -375,8 +377,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_unavailable_returns_503() {
-        let generated = secret::generate_new();
+    async fn t2__storage_unavailable_returns_503() {
+        let generated = generated_key();
         let (authn, _store) = api_key_authn(LookupAction::Unavailable, true);
 
         let error = authn_error(
@@ -393,8 +395,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_transient_returns_503() {
-        let generated = secret::generate_new();
+    async fn t2__storage_transient_returns_503() {
+        let generated = generated_key();
         let (authn, _store) = api_key_authn(LookupAction::Transient, true);
 
         let error = authn_error(
@@ -411,8 +413,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_lookup_stays_401_not_found() {
-        let generated = secret::generate_new();
+    async fn t2__missing_lookup_stays_401_not_found() {
+        let generated = generated_key();
         let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)), true);
 
         let error = authn_error(
@@ -429,7 +431,135 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticate_none_mode_is_async() {
+    async fn t1__signature_mismatch_returns_401() {
+        let generated = generated_key();
+        let mut record = active_record(&generated);
+        record.verify_hash[0] ^= 1;
+        let (authn, _store) = api_key_authn(
+            LookupAction::Return(Box::new(Some((
+                "principal-1".to_owned(),
+                generated.key_id.clone(),
+                record,
+            )))),
+            true,
+        );
+
+        let error = authn_error(
+            authn
+                .authenticate(
+                    &headers(generated.plaintext.expose()),
+                    &principal_view(true),
+                )
+                .await,
+        );
+
+        assert_eq!(error, BuiltinAuthError::SignatureMismatch);
+        assert_eq!(error.http_status(), 401);
+    }
+
+    #[tokio::test]
+    async fn t1__key_status_disabled_and_revoked_matrix() {
+        for (status, expected_error, expected_status) in [
+            (KeyStatus::Disabled, BuiltinAuthError::KeyDisabled, 403),
+            (KeyStatus::Revoked, BuiltinAuthError::KeyRevoked, 401),
+        ] {
+            let generated = generated_key();
+            let mut record = active_record(&generated);
+            record.status = status;
+            let (authn, _store) = api_key_authn(
+                LookupAction::Return(Box::new(Some((
+                    "principal-1".to_owned(),
+                    generated.key_id.clone(),
+                    record,
+                )))),
+                true,
+            );
+
+            let error = authn_error(
+                authn
+                    .authenticate(
+                        &headers(generated.plaintext.expose()),
+                        &principal_view(true),
+                    )
+                    .await,
+            );
+
+            assert_eq!(error, expected_error, "status={status:?}");
+            assert_eq!(error.http_status(), expected_status, "status={status:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn t1__expired_key_returns_401_with_clock() {
+        let generated = generated_key();
+        let mut record = active_record(&generated);
+        record.expires_at_unix_secs = Some(1_699_999_999);
+        let (authn, _store) = api_key_authn(
+            LookupAction::Return(Box::new(Some((
+                "principal-1".to_owned(),
+                generated.key_id.clone(),
+                record,
+            )))),
+            true,
+        );
+
+        let error = authn_error(
+            authn
+                .authenticate(
+                    &headers(generated.plaintext.expose()),
+                    &principal_view(true),
+                )
+                .await,
+        );
+
+        assert_eq!(error, BuiltinAuthError::Expired);
+        assert_eq!(error.http_status(), 401);
+    }
+
+    #[tokio::test]
+    async fn t1__principal_status_disabled_or_missing() {
+        for (principal_id, view, expected_error, expected_status) in [
+            (
+                "missing-principal",
+                principal_view(true),
+                BuiltinAuthError::PrincipalMissing,
+                401,
+            ),
+            (
+                "principal-1",
+                principal_view(false),
+                BuiltinAuthError::PrincipalDisabled,
+                403,
+            ),
+        ] {
+            let generated = generated_key();
+            let record = active_record(&generated);
+            let (authn, _store) = api_key_authn(
+                LookupAction::Return(Box::new(Some((
+                    principal_id.to_owned(),
+                    generated.key_id.clone(),
+                    record,
+                )))),
+                true,
+            );
+
+            let error = authn_error(
+                authn
+                    .authenticate(&headers(generated.plaintext.expose()), &view)
+                    .await,
+            );
+
+            assert_eq!(error, expected_error, "principal_id={principal_id}");
+            assert_eq!(
+                error.http_status(),
+                expected_status,
+                "principal_id={principal_id}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn t2__authenticate_none_mode_is_async() {
         let store = Arc::new(StubManagedKeyStore::new(LookupAction::Return(Box::new(
             None,
         ))));
@@ -440,7 +570,7 @@ mod tests {
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
             }),
             Some(Arc::new(KeyStore::new(store))),
-            Arc::new(cc_lb_clock::SystemClock),
+            fixed_clock(),
         );
 
         let success = authn
@@ -470,9 +600,17 @@ mod tests {
             DownstreamAuthMode::ApiKey,
             None,
             Some(Arc::new(KeyStore::new(store.clone()))),
-            Arc::new(cc_lb_clock::SystemClock),
+            fixed_clock(),
         );
         (authn, store)
+    }
+
+    fn fixed_clock() -> cc_lb_clock::ClockHandle {
+        Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000))
+    }
+
+    fn generated_key() -> secret::NewKeyOutput {
+        secret::generate_with(&mut StdRng::from_seed([42; 32]))
     }
 
     fn principal_view(enabled: bool) -> PrincipalView {

@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use std::{
     future::Future,
     pin::Pin,
@@ -49,10 +51,10 @@ fn clear_after_dispatch_hook() {
 }
 
 #[tokio::test]
-async fn fires_when_upstream_is_live() -> Result<()> {
+async fn t2__fires_when_upstream_is_live() -> Result<()> {
     let _test_guard = after_dispatch_hook_test_guard().await;
     let handler = UpstreamWarmupJobHandler::new();
-    let job = UpstreamWarmupJob::new(Uuid::new_v4(), CYCLE_KEY);
+    let job = UpstreamWarmupJob::new(Uuid::from_u128(1), CYCLE_KEY);
     let fired = Arc::new(AtomicUsize::new(0));
 
     let outcome = handler
@@ -70,10 +72,10 @@ async fn fires_when_upstream_is_live() -> Result<()> {
 }
 
 #[tokio::test]
-async fn retries_after_crash_mid_fire() -> Result<()> {
+async fn t2__retries_after_crash_mid_fire() -> Result<()> {
     let _test_guard = after_dispatch_hook_test_guard().await;
     let handler = UpstreamWarmupJobHandler::new();
-    let job = UpstreamWarmupJob::new(Uuid::new_v4(), CYCLE_KEY);
+    let job = UpstreamWarmupJob::new(Uuid::from_u128(2), CYCLE_KEY);
     let fired = Arc::new(AtomicUsize::new(0));
 
     let failed = handler
@@ -100,10 +102,10 @@ async fn retries_after_crash_mid_fire() -> Result<()> {
 }
 
 #[tokio::test]
-async fn skips_deleted_upstream() -> Result<()> {
+async fn t2__skips_deleted_upstream() -> Result<()> {
     let _test_guard = after_dispatch_hook_test_guard().await;
     let handler = UpstreamWarmupJobHandler::new();
-    let job = UpstreamWarmupJob::new(Uuid::new_v4(), CYCLE_KEY);
+    let job = UpstreamWarmupJob::new(Uuid::from_u128(3), CYCLE_KEY);
     let fired = Arc::new(AtomicUsize::new(0));
 
     let outcome = handler
@@ -121,10 +123,10 @@ async fn skips_deleted_upstream() -> Result<()> {
 }
 
 #[tokio::test]
-async fn after_dispatch_hook_runs_before_success() -> Result<()> {
+async fn t2__after_dispatch_hook_runs_before_success() -> Result<()> {
     let _test_guard = after_dispatch_hook_test_guard().await;
     let handler = UpstreamWarmupJobHandler::new();
-    let job = UpstreamWarmupJob::new(Uuid::new_v4(), CYCLE_KEY);
+    let job = UpstreamWarmupJob::new(Uuid::from_u128(4), CYCLE_KEY);
     let hook_calls = Arc::new(AtomicUsize::new(0));
     let hook_calls_for_hook = Arc::clone(&hook_calls);
     set_after_dispatch_hook(Box::new(move || {
@@ -166,7 +168,7 @@ async fn after_dispatch_hook_test_guard_clears_unconsumed_hook() -> Result<()> {
 
     let _test_guard = after_dispatch_hook_test_guard().await;
     let handler = UpstreamWarmupJobHandler::new();
-    let job = UpstreamWarmupJob::new(Uuid::new_v4(), CYCLE_KEY);
+    let job = UpstreamWarmupJob::new(Uuid::from_u128(5), CYCLE_KEY);
     let outcome = handler
         .handle(
             job,

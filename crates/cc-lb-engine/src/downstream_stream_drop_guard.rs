@@ -209,7 +209,7 @@ mod tests {
     use tracing_subscriber::{Layer, Registry};
 
     use crate::body_io_timing::BodyIoPhase;
-    use crate::clock::{ClockHandle, SystemClock};
+    use crate::clock::{ClockHandle, TestClock};
     use crate::event_bus::InMemoryBus;
 
     use super::*;
@@ -397,7 +397,7 @@ mod tests {
         let LifecycleBusReceiver::InMemory(mut rx) = bus.subscribe_lifecycle() else {
             panic!("expected in-memory lifecycle receiver");
         };
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "pending-error-drop".to_owned(),
             bus as Arc<dyn RequestEventBus>,
@@ -509,7 +509,7 @@ mod tests {
         let LifecycleBusReceiver::InMemory(mut rx) = bus.subscribe_lifecycle() else {
             panic!("expected in-memory lifecycle receiver");
         };
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "client-cancelled-drop".to_owned(),
             bus as Arc<dyn RequestEventBus>,
@@ -586,7 +586,7 @@ mod tests {
         let LifecycleBusReceiver::InMemory(mut rx) = bus.subscribe_lifecycle() else {
             panic!("expected in-memory lifecycle receiver");
         };
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "tower-timeout-after-client-cancellation".to_owned(),
             bus as Arc<dyn RequestEventBus>,
@@ -659,7 +659,7 @@ mod tests {
         let LifecycleBusReceiver::InMemory(mut rx) = bus.subscribe_lifecycle() else {
             panic!("expected in-memory lifecycle receiver");
         };
-        let clock: ClockHandle = Arc::new(SystemClock);
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let observer = LifecycleContext::new(
             "post-eos-drop".to_owned(),
             bus as Arc<dyn RequestEventBus>,

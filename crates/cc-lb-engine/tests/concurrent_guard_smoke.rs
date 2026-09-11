@@ -1,5 +1,4 @@
 use std::sync::{Arc, Barrier};
-use std::time::Duration;
 
 use cc_lb_engine::api_keys::concurrent_guard::{ConcurrencyRejected, KeyConcurrencyManager};
 
@@ -39,6 +38,7 @@ fn drop_releases() {
     assert_eq!(manager.current(key_id), 0);
 }
 
+// tier-allow(multi-thread): os-thread claim
 #[test]
 fn concurrent_try_acquire_allows_exactly_cap() {
     const THREADS: usize = 100;
@@ -84,6 +84,7 @@ fn concurrent_try_acquire_allows_exactly_cap() {
     assert_eq!(manager.current(key_id), 0);
 }
 
+// tier-allow(multi-thread): os-thread claim
 #[test]
 fn concurrent_drop_returns_to_zero() {
     const THREADS: usize = 100;
@@ -103,7 +104,6 @@ fn concurrent_drop_returns_to_zero() {
                 let guard = manager
                     .try_acquire(key_id, THREADS as u32)
                     .expect("acquire slot");
-                std::thread::sleep(Duration::from_millis(1));
                 drop(guard);
             }));
         }

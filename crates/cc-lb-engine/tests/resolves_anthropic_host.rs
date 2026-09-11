@@ -1,31 +1,47 @@
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use cc_lb_engine::{DnsCacheError, DnsResolver, DnsResolverConfig, make_resolver};
+use cc_lb_engine::{DnsResolveFuture, DnsResolver, DnsResolverConfig, make_resolver_with_factory};
 
 #[tokio::test]
-#[ignore]
-async fn resolves_anthropic_host() {
-    let resolver = make_resolver(&DnsResolverConfig::default()).expect("resolver builds");
+async fn resolver_factory_supports_deterministic_mock_lookup() {
+    let resolver = make_resolver_with_factory(&DnsResolverConfig::default(), |_, _, _| {
+        Arc::new(RecordingResolver::new(vec![IpAddr::V4(
+            Ipv4Addr::LOCALHOST,
+        )]))
+    });
     let lookup = resolver
-        .lookup_ip("api.anthropic.com")
+        .resolve("api.anthropic.com".to_owned())
         .await
         .expect("dns lookup");
-    assert!(lookup.iter().next().is_some());
+
+    assert!(!lookup.is_empty());
+    assert_eq!(lookup, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+    assert_eq!(resolver.calls(), vec!["api.anthropic.com".to_owned()]);
 }
 
 #[derive(Clone)]
-struct FakeResolver {
+struct RecordingResolver {
     ips: Vec<IpAddr>,
+    calls: Arc<Mutex<Vec<String>>>,
 }
 
-impl DnsResolver for FakeResolver {
-    fn resolve(
-        &self,
-        _name: String,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Vec<IpAddr>, DnsCacheError>> + Send + '_>,
-    > {
+impl RecordingResolver {
+    fn new(ips: Vec<IpAddr>) -> Self {
+        Self {
+            ips,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("resolver calls").clone()
+    }
+}
+
+impl DnsResolver for RecordingResolver {
+    fn resolve(&self, name: String) -> DnsResolveFuture<'_> {
+        self.calls.lock().expect("resolver calls").push(name);
         let ips = self.ips.clone();
         Box::pin(async move { Ok(ips) })
     }
@@ -33,9 +49,7 @@ impl DnsResolver for FakeResolver {
 
 #[tokio::test]
 async fn resolves_anthropic_host_with_fake_resolver() {
-    let resolver: Arc<dyn DnsResolver> = Arc::new(FakeResolver {
-        ips: vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
-    });
+    let resolver = RecordingResolver::new(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
 
     let ips = resolver
         .resolve("api.anthropic.com".to_owned())
@@ -43,4 +57,5 @@ async fn resolves_anthropic_host_with_fake_resolver() {
         .expect("fake dns lookup");
 
     assert!(!ips.is_empty());
+    assert_eq!(resolver.calls(), vec!["api.anthropic.com".to_owned()]);
 }

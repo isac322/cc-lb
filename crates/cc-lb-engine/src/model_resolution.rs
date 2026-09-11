@@ -127,113 +127,131 @@ mod tests {
     use super::*;
 
     #[test]
-    fn alias_resolves_to_dated_sonnet45() {
-        assert_eq!(
-            canonical_model_id("claude-sonnet-4-5"),
-            "claude-sonnet-4-5-20250929"
-        );
+    fn canonical_model_id_table() {
+        let cases = [
+            (
+                "alias_resolves_to_dated_sonnet45",
+                "claude-sonnet-4-5",
+                "claude-sonnet-4-5-20250929",
+            ),
+            (
+                "dated_sonnet45_passes_through",
+                "claude-sonnet-4-5-20250929",
+                "claude-sonnet-4-5-20250929",
+            ),
+            (
+                "opus45_alias_resolves",
+                "claude-opus-4-5",
+                "claude-opus-4-5-20251101",
+            ),
+            (
+                "unknown_passes_through",
+                "future-model-xyz",
+                "future-model-xyz",
+            ),
+            (
+                "alias_haiku45_resolves",
+                "claude-haiku-4-5",
+                "claude-haiku-4-5-20251001",
+            ),
+            (
+                "fable5_is_a_dateless_canonical_model",
+                "claude-fable-5",
+                "claude-fable-5",
+            ),
+        ];
+
+        for (case, input, expected) in cases {
+            assert_eq!(canonical_model_id(input), expected, "case={case}");
+        }
     }
 
     #[test]
-    fn dated_sonnet45_passes_through() {
-        assert_eq!(
-            canonical_model_id("claude-sonnet-4-5-20250929"),
-            "claude-sonnet-4-5-20250929"
-        );
-    }
+    fn model_cache_threshold_table() {
+        struct Case {
+            case: &'static str,
+            inputs: &'static [&'static str],
+            expected: usize,
+        }
 
-    #[test]
-    fn opus45_alias_resolves() {
-        assert_eq!(
-            canonical_model_id("claude-opus-4-5"),
-            "claude-opus-4-5-20251101"
-        );
-    }
+        let cases = [
+            Case {
+                case: "threshold_sonnet45_is_1024",
+                inputs: &["claude-sonnet-4-5-20250929"],
+                expected: 1024,
+            },
+            Case {
+                case: "threshold_opus45_is_4096",
+                inputs: &["claude-opus-4-5-20251101"],
+                expected: 4096,
+            },
+            Case {
+                case: "threshold_haiku45_is_4096",
+                inputs: &["claude-haiku-4-5-20251001"],
+                expected: 4096,
+            },
+            Case {
+                case: "threshold_opus48_is_1024",
+                inputs: &["claude-opus-4-8-20250514"],
+                expected: 1024,
+            },
+            Case {
+                case: "threshold_haiku45_alias_is_4096",
+                inputs: &["claude-haiku-4-5"],
+                expected: 4096,
+            },
+            Case {
+                case: "threshold_fable5_is_512",
+                inputs: &["claude-fable-5"],
+                expected: 512,
+            },
+            Case {
+                case: "threshold_opus5_is_512",
+                inputs: &["claude-opus-5"],
+                expected: 512,
+            },
+            Case {
+                case: "threshold_mythos5_is_512",
+                inputs: &["claude-mythos-5"],
+                expected: 512,
+            },
+            Case {
+                case: "threshold_mythos_preview_is_2048",
+                inputs: &["claude-mythos-preview"],
+                expected: 2048,
+            },
+            Case {
+                // Haiku 3.5 uses the pre-4.0 `claude-3-5-haiku-*` ordering.
+                case: "threshold_haiku35_is_2048_on_its_real_ids",
+                inputs: &["claude-3-5-haiku-20241022", "claude-3-5-haiku-latest"],
+                expected: 2048,
+            },
+            Case {
+                case: "threshold_opus47_is_2048",
+                inputs: &["claude-opus-4-7"],
+                expected: 2048,
+            },
+            Case {
+                case: "threshold_sonnet5_is_1024",
+                inputs: &["claude-sonnet-5"],
+                expected: 1024,
+            },
+            Case {
+                case: "threshold_unknown_defaults_to_1024",
+                inputs: &["unknown-future-model"],
+                expected: 1024,
+            },
+        ];
 
-    #[test]
-    fn unknown_passes_through() {
-        assert_eq!(canonical_model_id("future-model-xyz"), "future-model-xyz");
-    }
-
-    #[test]
-    fn threshold_sonnet45_is_1024() {
-        assert_eq!(cache_threshold_tokens("claude-sonnet-4-5-20250929"), 1024);
-    }
-
-    #[test]
-    fn threshold_opus45_is_4096() {
-        assert_eq!(cache_threshold_tokens("claude-opus-4-5-20251101"), 4096);
-    }
-
-    #[test]
-    fn threshold_haiku45_is_4096() {
-        assert_eq!(cache_threshold_tokens("claude-haiku-4-5-20251001"), 4096);
-    }
-
-    #[test]
-    fn threshold_opus48_is_1024() {
-        assert_eq!(cache_threshold_tokens("claude-opus-4-8-20250514"), 1024);
-    }
-
-    #[test]
-    fn alias_haiku45_resolves() {
-        assert_eq!(
-            canonical_model_id("claude-haiku-4-5"),
-            "claude-haiku-4-5-20251001"
-        );
-    }
-
-    #[test]
-    fn threshold_haiku45_alias_is_4096() {
-        assert_eq!(cache_threshold_tokens("claude-haiku-4-5"), 4096);
-    }
-
-    #[test]
-    fn fable5_is_a_dateless_canonical_model() {
-        assert_eq!(canonical_model_id("claude-fable-5"), "claude-fable-5");
-    }
-
-    #[test]
-    fn threshold_fable5_is_512() {
-        assert_eq!(cache_threshold_tokens("claude-fable-5"), 512);
-    }
-
-    #[test]
-    fn threshold_opus5_is_512() {
-        assert_eq!(cache_threshold_tokens("claude-opus-5"), 512);
-    }
-
-    #[test]
-    fn threshold_mythos5_is_512() {
-        assert_eq!(cache_threshold_tokens("claude-mythos-5"), 512);
-    }
-
-    #[test]
-    fn threshold_mythos_preview_is_2048() {
-        assert_eq!(cache_threshold_tokens("claude-mythos-preview"), 2048);
-    }
-
-    #[test]
-    fn threshold_haiku35_is_2048_on_its_real_ids() {
-        // Haiku 3.5 uses the pre-4.0 `claude-3-5-haiku-*` ordering, not `claude-haiku-3-5`.
-        // Falling through to the 1024 default would predict a 1024-2047 token prefix as
-        // cacheable when the provider refuses it.
-        assert_eq!(cache_threshold_tokens("claude-3-5-haiku-20241022"), 2048);
-        assert_eq!(cache_threshold_tokens("claude-3-5-haiku-latest"), 2048);
-    }
-
-    #[test]
-    fn threshold_opus47_is_2048() {
-        assert_eq!(cache_threshold_tokens("claude-opus-4-7"), 2048);
-    }
-
-    #[test]
-    fn threshold_sonnet5_is_1024() {
-        assert_eq!(cache_threshold_tokens("claude-sonnet-5"), 1024);
-    }
-
-    #[test]
-    fn threshold_unknown_defaults_to_1024() {
-        assert_eq!(cache_threshold_tokens("unknown-future-model"), 1024);
+        for case in cases {
+            for input in case.inputs {
+                assert_eq!(
+                    cache_threshold_tokens(input),
+                    case.expected,
+                    "case={} input={input}",
+                    case.case
+                );
+            }
+        }
     }
 }

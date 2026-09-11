@@ -1,4 +1,4 @@
-use std::{error::Error, str::FromStr, sync::Arc};
+use std::{error::Error, str::FromStr};
 
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_postgres::PostgresStorage;
@@ -11,10 +11,8 @@ use uuid::Uuid;
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
-async fn migrated_schema_has_nullable_bigint_thinking_budget_tokens() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__migrated_schema_has_nullable_bigint_thinking_budget_tokens() -> TestResult {
+    let fixture = Fixture::create().await?;
 
     let result: TestResult = async {
         let column = sqlx::query_as::<_, (String, String)>(
@@ -37,10 +35,8 @@ async fn migrated_schema_has_nullable_bigint_thinking_budget_tokens() -> TestRes
 }
 
 #[tokio::test]
-async fn append_request_event_persists_thinking_budget_tokens_value() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__append_request_event_persists_thinking_budget_tokens_value() -> TestResult {
+    let fixture = Fixture::create().await?;
     let event = request_event("thinking-budget-some", Some(18_000));
 
     let result: TestResult = async {
@@ -62,10 +58,8 @@ async fn append_request_event_persists_thinking_budget_tokens_value() -> TestRes
 }
 
 #[tokio::test]
-async fn append_request_event_accepts_null_thinking_budget_tokens() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__append_request_event_accepts_null_thinking_budget_tokens() -> TestResult {
+    let fixture = Fixture::create().await?;
     let event = request_event("thinking-budget-none", None);
 
     let result: TestResult = async {
@@ -93,11 +87,8 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn create() -> TestResult<Option<Self>> {
-        let Some(database_url) = std::env::var("CI_POSTGRES_URL").ok() else {
-            eprintln!("skipped: CI_POSTGRES_URL unset");
-            return Ok(None);
-        };
+    async fn create() -> TestResult<Self> {
+        let database_url = crate::postgres_fixture::required_postgres_url();
         let schema = format!("cc_lb_app_test_thinking_budget_{}", Uuid::new_v4().simple());
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -118,7 +109,7 @@ impl Fixture {
                     .options([("search_path", search_path.as_str())]),
             )
             .await?;
-        let storage = PostgresStorage::new(pool, Arc::new(cc_lb_clock::SystemClock));
+        let storage = PostgresStorage::new(pool, cc_lb_testkit::fixed_clock(1_700_000_000));
         if let Err(error) = storage.initialize(BackendKind::Postgres).await {
             storage.pool().close().await;
             sqlx::query(AssertSqlSafe(format!(
@@ -130,11 +121,11 @@ impl Fixture {
             return Err(error.into());
         }
 
-        Ok(Some(Self {
+        Ok(Self {
             schema,
             admin_pool,
             storage,
-        }))
+        })
     }
 
     async fn drop_schema(self) -> TestResult {

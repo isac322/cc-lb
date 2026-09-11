@@ -22,12 +22,19 @@ impl PostgresPluginBlobRepo {
 #[async_trait]
 impl PluginBlobRepo for PostgresPluginBlobRepo {
     async fn put_blob(&self, sha256: &[u8; 32], bytes: &[u8]) -> Result<(), RepoError> {
+        let size_bytes = i64::try_from(bytes.len()).map_err(|_| StorageError::InvalidInput {
+            field: "wasm_blob.bytes".to_owned(),
+            reason: "blob size exceeds PostgreSQL BIGINT".to_owned(),
+        })?;
         sqlx::query(
-            "INSERT INTO plugin_registry_blobs (sha256, bytes) VALUES ($1, $2)
-             ON CONFLICT (sha256) DO UPDATE SET bytes = EXCLUDED.bytes",
+            "INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, created_at)
+             VALUES ($1, $2, $3, NOW(), NOW())
+             ON CONFLICT (sha256) DO UPDATE
+             SET bytes = EXCLUDED.bytes, size_bytes = EXCLUDED.size_bytes",
         )
         .bind(sha256.as_slice())
         .bind(bytes)
+        .bind(size_bytes)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -36,7 +43,7 @@ impl PluginBlobRepo for PostgresPluginBlobRepo {
     }
 
     async fn get_blob(&self, sha256: &[u8; 32]) -> Result<Option<Vec<u8>>, RepoError> {
-        sqlx::query_scalar("SELECT bytes FROM plugin_registry_blobs WHERE sha256 = $1")
+        sqlx::query_scalar("SELECT bytes FROM wasm_blobs_v2 WHERE sha256 = $1")
             .bind(sha256.as_slice())
             .fetch_optional(&self.pool)
             .await
@@ -44,7 +51,7 @@ impl PluginBlobRepo for PostgresPluginBlobRepo {
     }
 
     async fn delete_blob(&self, sha256: &[u8; 32]) -> Result<(), RepoError> {
-        sqlx::query("DELETE FROM plugin_registry_blobs WHERE sha256 = $1")
+        sqlx::query("DELETE FROM wasm_blobs_v2 WHERE sha256 = $1")
             .bind(sha256.as_slice())
             .execute(&self.pool)
             .await
@@ -55,7 +62,7 @@ impl PluginBlobRepo for PostgresPluginBlobRepo {
 
     async fn list_blob_keys(&self) -> Result<Vec<[u8; 32]>, RepoError> {
         let rows = sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT sha256 FROM plugin_registry_blobs ORDER BY sha256 ASC",
+            "SELECT sha256 FROM wasm_blobs_v2 ORDER BY sha256 ASC",
         )
         .fetch_all(&self.pool)
         .await

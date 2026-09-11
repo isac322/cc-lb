@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::str::FromStr;
 
 use anyhow::Result;
 use cc_lb_storage_api::{
@@ -15,16 +15,8 @@ const PRINCIPAL_ID: &str = "principal-a";
 const UPSTREAM_ID: Uuid = Uuid::from_u128(7);
 
 #[test]
-fn cache_keepalive_session_reads_postgres() {
-    let Some(url) = std::env::var("CI_POSTGRES_URL")
-        .ok()
-        .or_else(|| std::env::var("PG_URL").ok())
-    else {
-        eprintln!(
-            "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
-        );
-        return;
-    };
+fn t3_postgres__cache_keepalive_session_reads_postgres() {
+    let url = crate::postgres_fixture::required_postgres_url();
 
     tokio::runtime::Runtime::new()
         .expect("tokio runtime")
@@ -34,7 +26,10 @@ fn cache_keepalive_session_reads_postgres() {
 
 async fn read_model_contract(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
-    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let storage = PostgresStorage::new(
+        fixture.pool.clone(),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
+    );
     storage.initialize(BackendKind::Postgres).await?;
 
     // Given: stateful sessions and an unjoined decision-only row.

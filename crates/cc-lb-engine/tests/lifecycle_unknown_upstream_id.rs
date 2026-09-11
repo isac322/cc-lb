@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::StatusCode;
+use serde_json::json;
 use uuid::Uuid;
 
 use common::{collect_body, messages_request};
@@ -12,9 +13,9 @@ use router_lifecycle_support::{
 };
 
 #[tokio::test]
-async fn unknown_router_upstream_id_is_rejected_before_signing_or_dispatch() {
-    let known = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
-    let unknown = Uuid::parse_str("00000000-0000-0000-0000-0000000000ff").unwrap();
+async fn t2__legacy_router_unknown_id_cannot_enter_pipeline_selection() {
+    let known = Uuid::from_u128(1);
+    let unknown = Uuid::from_u128(0xff);
     let state = RouterLifecycleState::default();
     let lifecycle = lifecycle_with_records(
         vec![api_key_record(known, "known", "http://known.local/")],
@@ -32,16 +33,20 @@ async fn unknown_router_upstream_id_is_rejected_before_signing_or_dispatch() {
         )))
         .await
         .expect("lifecycle handles request");
-    let (status, _headers, _body) = collect_body(response).await;
+    let (status, _headers, body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("response body is JSON"),
+        json!({"type":"message","usage":{"input_tokens":1,"output_tokens":1}})
+    );
     assert!(
         state
             .router_candidates
             .lock()
             .expect("router candidates lock")
             .is_empty(),
-        "legacy global_router is no longer called; selected_id on SelectingRouter has no effect"
+        "the legacy router cannot inject an ID into pipeline terminal selection"
     );
     assert_eq!(
         state
@@ -50,6 +55,14 @@ async fn unknown_router_upstream_id_is_rejected_before_signing_or_dispatch() {
             .expect("router choices lock")
             .as_slice(),
         &["known".to_owned()]
+    );
+    assert_eq!(
+        state
+            .dispatched_urls
+            .lock()
+            .expect("dispatched URLs lock")
+            .as_slice(),
+        &["http://known.local/v1/messages".to_owned()]
     );
     assert_eq!(
         *state.dispatch_calls.lock().expect("dispatch calls lock"),

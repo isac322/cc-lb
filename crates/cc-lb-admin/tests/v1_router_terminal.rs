@@ -1,13 +1,11 @@
 use crate::admin_test_common;
 
-use std::time::{Duration, Instant};
-
 use axum::http::{StatusCode, header};
 use cc_lb_storage_api::AuditStore;
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn put_router_terminal_strategy_persists_and_audits() {
+async fn t2__put_router_terminal_strategy_persists_and_audits() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, _, created) = create_principal(&server.client, "router-terminal-alpha").await;
     let id = created_id(&created);
@@ -53,40 +51,30 @@ async fn put_router_terminal_strategy_persists_and_audits() {
         format!("W/\"{updated_revision}\"")
     );
 
-    let deadline = Instant::now() + Duration::from_secs(5);
     let expected_route = format!("/admin/v1/principals/{id}/router-terminal");
-    let mut saw_audit = false;
-    while Instant::now() < deadline {
-        let entries = server
-            .storage
-            .query_audit(Some(&id), 0, u64::MAX, 20)
-            .await
-            .unwrap();
-        saw_audit = entries.iter().any(|entry| {
-            entry.route == expected_route
-                && entry.admin_action.as_deref().is_some_and(|action| {
-                    action.contains("principal_update")
-                        && action.contains("router_terminal_strategy")
-                })
-        });
-        if saw_audit {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(saw_audit);
+    let entries = server
+        .storage
+        .query_audit(Some(&id), 0, u64::MAX, 20)
+        .await
+        .unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry.route == expected_route
+            && entry.admin_action.as_deref().is_some_and(|action| {
+                action.contains("principal_update")
+                    && action.contains("router_terminal_strategy")
+            })
+    }));
 }
 
 #[tokio::test]
-async fn put_router_terminal_stale_revision_returns_409() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__put_router_terminal_stale_revision_returns_409() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let (_, headers, created) = create_principal(&server.client, "router-terminal-stale").await;
     let id = created_id(&created);
     let etag = server
         .client
         .header_str(&headers, header::ETAG.as_str())
         .to_owned();
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
     let (status, _, first_update) = server
         .client
@@ -113,7 +101,7 @@ async fn put_router_terminal_stale_revision_returns_409() {
 }
 
 #[tokio::test]
-async fn put_router_terminal_rejects_unsupported_strategy() {
+async fn t2__put_router_terminal_rejects_unsupported_strategy() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "router-terminal-invalid").await;
     let id = created_id(&created);

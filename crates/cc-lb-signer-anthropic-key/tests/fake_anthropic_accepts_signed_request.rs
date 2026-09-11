@@ -31,7 +31,7 @@ impl UpstreamDialect for E2EDialect {
 }
 
 #[tokio::test]
-async fn fake_anthropic_accepts_signed_request() {
+async fn t2__fake_anthropic_accepts_signed_request() {
     let ctx = DialectShapeContext {
         request_id: "req-e2e".to_owned(),
         downstream_headers: HeaderMap::new(),

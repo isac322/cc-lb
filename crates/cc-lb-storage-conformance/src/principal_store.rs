@@ -1,57 +1,40 @@
-use std::sync::Arc;
+#![allow(non_snake_case)]
 
-#[cfg(feature = "postgres")]
-use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use cc_lb_engine::{ClockHandle, SystemClock};
+use cc_lb_engine::ClockHandle;
 use cc_lb_storage_api::{BackendKind, MetaStore};
 #[cfg(feature = "postgres")]
 use cc_lb_storage_postgres::PostgresStorage;
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
-#[cfg(feature = "postgres")]
-use sqlx::AssertSqlSafe;
-#[cfg(feature = "postgres")]
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-#[cfg(feature = "postgres")]
-use uuid::Uuid;
 
 use crate::harness::ConformanceBackend;
 use crate::scenarios::principal_store::{run_all, stale_revision_conflict};
 
 #[tokio::test]
-async fn principal_store_sqlite() -> Result<()> {
-    let clock: ClockHandle = Arc::new(SystemClock);
+async fn t3__principal_store_sqlite() -> Result<()> {
+    let clock: ClockHandle = cc_lb_testkit::fixed_clock(1_700_000_000);
     run_all(Arc::new(SqlitePrincipalBackend { clock })).await
 }
 
 #[tokio::test]
 #[cfg(feature = "postgres")]
-async fn principal_store_postgres() -> Result<()> {
-    let Some(url) = postgres_url() else {
-        eprintln!("skip: CI_POSTGRES_URL not set");
-        return Ok(());
-    };
-    let clock: ClockHandle = Arc::new(SystemClock);
-    run_all(Arc::new(PostgresPrincipalBackend { url, clock })).await
+async fn t3_postgres__principal_store_postgres() -> Result<()> {
+    run_all(Arc::new(PostgresPrincipalBackend)).await
 }
 
 #[tokio::test]
-async fn principal_store_stale_revision_conflict_sqlite() -> Result<()> {
-    let clock: ClockHandle = Arc::new(SystemClock);
+async fn t3__principal_store_stale_revision_conflict_sqlite() -> Result<()> {
+    let clock: ClockHandle = cc_lb_testkit::fixed_clock(1_700_000_000);
     stale_revision_conflict(Arc::new(SqlitePrincipalBackend { clock })).await
 }
 
 #[tokio::test]
 #[cfg(feature = "postgres")]
-async fn principal_store_stale_revision_conflict_postgres() -> Result<()> {
-    let Some(url) = postgres_url() else {
-        eprintln!("skip: CI_POSTGRES_URL not set");
-        return Ok(());
-    };
-    let clock: ClockHandle = Arc::new(SystemClock);
-    stale_revision_conflict(Arc::new(PostgresPrincipalBackend { url, clock })).await
+async fn t3_postgres__principal_store_stale_revision_conflict_postgres() -> Result<()> {
+    stale_revision_conflict(Arc::new(PostgresPrincipalBackend)).await
 }
 
 struct SqlitePrincipalBackend {
@@ -94,79 +77,27 @@ impl ConformanceBackend for SqlitePrincipalBackend {
 }
 
 #[cfg(feature = "postgres")]
-struct PostgresPrincipalBackend {
-    url: String,
-    clock: ClockHandle,
-}
-
-#[cfg(feature = "postgres")]
-struct PostgresFixture {
-    url: String,
-    schema: String,
-    pool: sqlx::PgPool,
-}
+struct PostgresPrincipalBackend;
 
 #[async_trait]
 #[cfg(feature = "postgres")]
 impl ConformanceBackend for PostgresPrincipalBackend {
     type Storage = PostgresStorage;
-    type Fixture = PostgresFixture;
+    type Fixture = crate::PostgresFixture;
 
     async fn create_fixture(&self) -> Result<Self::Fixture> {
-        let schema = format!("test_principal_store_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(PgConnectOptions::from_str(&self.url)?)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-            .execute(&admin_pool)
-            .await?;
-        admin_pool.close().await;
-
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(
-                PgConnectOptions::from_str(&self.url)?.options([("search_path", schema.as_str())]),
-            )
-            .await?;
-        let storage = PostgresStorage::new(pool.clone(), self.clock.clone());
-        MetaStore::initialize(&storage, BackendKind::Postgres).await?;
-        Ok(PostgresFixture {
-            url: self.url.clone(),
-            schema,
-            pool,
-        })
+        crate::postgres_fixture().await
     }
 
     async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Storage> {
-        Ok(PostgresStorage::new(
-            fixture.pool.clone(),
-            self.clock.clone(),
-        ))
+        Ok(fixture.storage().clone())
     }
 
     async fn teardown(&self, fixture: Self::Fixture) -> Result<()> {
-        fixture.pool.close().await;
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(PgConnectOptions::from_str(&fixture.url)?)
-            .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            fixture.schema
-        )))
-        .execute(&admin_pool)
-        .await?;
-        admin_pool.close().await;
-        Ok(())
+        fixture.teardown().await
     }
 
     fn kind(&self) -> BackendKind {
         BackendKind::Postgres
     }
-}
-
-#[cfg(feature = "postgres")]
-fn postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL").ok()
 }

@@ -9,7 +9,7 @@ use sse_relay_support::{
 };
 
 #[tokio::test]
-async fn upstream_mid_stream_error_emits_error_frame() {
+async fn t2__upstream_mid_stream_error_emits_error_frame() {
     let hook = Arc::new(RecordingHook::default());
     let relay = relay_for(
         Arc::clone(&hook),

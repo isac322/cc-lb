@@ -1,0 +1,30 @@
+[package]
+name = "cc-lb-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+cc-lb-aead = { path = "../cc-lb-aead" }
+cc-lb-clock = { path = "../cc-lb-clock" }
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+http.workspace = true
+http-body-util.workspace = true
+metrics.workspace = true
+metrics-util.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tokio-util.workspace = true
+tower.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints.rust]
+unused_must_use = "forbid"

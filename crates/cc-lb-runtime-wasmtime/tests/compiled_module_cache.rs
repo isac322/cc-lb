@@ -9,27 +9,15 @@
 //! validation-policy version + engine/config identity, so identical
 //! content compiles once and every slot reuses the same `Arc<InstancePre>`.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::support::required_wasm;
 use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 
-fn cache_aware_wasm() -> Option<Vec<u8>> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/")
-        .parent()
-        .expect("workspace root")
-        .join("target/wasm32-unknown-unknown/release/cache_aware_wasmtime.wasm");
-    std::fs::read(path).ok()
-}
-
 #[test]
-fn identical_bytes_share_compiled_artifact_across_principal_slots() {
-    let Some(wasm) = cache_aware_wasm() else {
-        return;
-    };
+fn t3__identical_bytes_share_compiled_artifact_across_principal_slots() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
     let slot_a = rt
@@ -58,10 +46,8 @@ fn identical_bytes_share_compiled_artifact_across_principal_slots() {
 }
 
 #[test]
-fn identical_bytes_share_compiled_artifact_across_separate_runtimes() {
-    let Some(wasm) = cache_aware_wasm() else {
-        return;
-    };
+fn t3__identical_bytes_share_compiled_artifact_across_separate_runtimes() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
     let rt_a = WasmtimeRuntime::with_defaults().expect("engine A");
     let rt_b = WasmtimeRuntime::with_defaults().expect("engine B");
 
@@ -92,10 +78,8 @@ fn identical_bytes_share_compiled_artifact_across_separate_runtimes() {
 }
 
 #[test]
-fn recompile_after_evict_reuses_cached_artifact_instead_of_recompiling() {
-    let Some(wasm) = cache_aware_wasm() else {
-        return;
-    };
+fn t3__recompile_after_evict_reuses_cached_artifact_instead_of_recompiling() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
     let key = RuntimeSlotKey::global("evict-reregister-cache-probe");
 

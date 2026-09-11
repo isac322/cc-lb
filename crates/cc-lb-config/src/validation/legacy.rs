@@ -27,11 +27,9 @@ pub fn removed_prompt_cache_switches(raw_toml: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn removed_prompt_cache_env_switches() -> Vec<String> {
-    removed_prompt_cache_env_switches_in(|variable| std::env::var_os(variable).is_some())
-}
-
-fn removed_prompt_cache_env_switches_in(mut present: impl FnMut(&str) -> bool) -> Vec<String> {
+pub(crate) fn removed_prompt_cache_env_switches_in(
+    mut present: impl FnMut(&str) -> bool,
+) -> Vec<String> {
     REMOVED_PROMPT_CACHE_ENV_SWITCHES
         .iter()
         .filter(|&&variable| present(variable))
@@ -170,6 +168,26 @@ mod tests {
             fields,
             vec![
                 "CC_LB_PROMPT_CACHE_SHADOW__ENABLED",
+                "CC_LB_LIFECYCLE_PROMPT_CACHE_OBSERVATION_SUBSCRIBER__ENABLED",
+            ]
+        );
+    }
+
+    #[test]
+    fn removed_prompt_cache_env_lookup_preserves_declared_key_order() {
+        let mut probed = Vec::new();
+
+        let fields = removed_prompt_cache_env_switches_in(|variable| {
+            probed.push(variable.to_owned());
+            true
+        });
+
+        assert_eq!(fields, probed);
+        assert_eq!(
+            fields,
+            vec![
+                "CC_LB_PROMPT_CACHE_SHADOW__ENABLED",
+                "CC_LB_LIFECYCLE_PROMPT_CACHE_DRIFT_SUBSCRIBER__ENABLED",
                 "CC_LB_LIFECYCLE_PROMPT_CACHE_OBSERVATION_SUBSCRIBER__ENABLED",
             ]
         );

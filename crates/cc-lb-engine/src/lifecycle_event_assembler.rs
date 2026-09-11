@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use cc_lb_control::RequestEventBus;
 use cc_lb_domain::{InternalError, RoutingTrace};
@@ -17,6 +17,7 @@ use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::clock::ClockHandle;
 use crate::metrics_labels::PartialTrigger;
 pub const DEFAULT_ASSEMBLER_MAP_CAP: usize = 4096;
 pub const DEFAULT_ASSEMBLER_TTL: Duration = Duration::from_secs(300);
@@ -68,12 +69,14 @@ pub fn spawn_request_event_assembler(
     storage: Arc<dyn RequestEventStore>,
     bus: Option<Arc<dyn RequestEventBus>>,
     metrics: Arc<dyn EngineMetricsHook>,
+    clock: ClockHandle,
 ) -> RequestEventAssemblerHandle {
     spawn_with_config(
         rx,
         storage,
         bus,
         metrics,
+        clock,
         DEFAULT_ASSEMBLER_MAP_CAP,
         DEFAULT_ASSEMBLER_TTL,
     )
@@ -84,6 +87,7 @@ pub fn spawn_with_config(
     storage: Arc<dyn RequestEventStore>,
     bus: Option<Arc<dyn RequestEventBus>>,
     metrics: Arc<dyn EngineMetricsHook>,
+    clock: ClockHandle,
     map_cap: usize,
     ttl: Duration,
 ) -> RequestEventAssemblerHandle {
@@ -93,6 +97,7 @@ pub fn spawn_with_config(
         storage,
         bus,
         metrics,
+        clock,
         map_cap,
         ttl,
         shutdown_rx,
@@ -544,18 +549,23 @@ fn publish_usage_partial(
     }
 }
 
-fn unix_now_ms() -> u64 {
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
+fn unix_now_ms(clock: &ClockHandle) -> u64 {
+    match clock.now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_millis().min(u128::from(u64::MAX)) as u64,
         Err(_) => 0,
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the task boundary receives each injected dependency and lifecycle control explicitly"
+)]
 async fn assembler_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
     bus: Option<Arc<dyn RequestEventBus>>,
     metrics: Arc<dyn EngineMetricsHook>,
+    clock: ClockHandle,
     map_cap: usize,
     ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
@@ -573,7 +583,7 @@ async fn assembler_loop(
             biased;
                 event = rx.recv() => {
                     match event {
-                        Some(event) => handle_event(&*storage, bus.as_deref(), metrics.as_ref(), &mut partials, map_cap, event).await,
+                        Some(event) => handle_event(&*storage, bus.as_deref(), metrics.as_ref(), &clock, &mut partials, map_cap, event).await,
                         None => break,
                     }
                 }
@@ -599,6 +609,7 @@ async fn assembler_loop(
             &*storage,
             bus.as_deref(),
             metrics.as_ref(),
+            &clock,
             &mut partials,
             map_cap,
             event,
@@ -768,12 +779,13 @@ async fn handle_event(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics: &dyn EngineMetricsHook,
+    clock: &ClockHandle,
     partials: &mut HashMap<EventId, Partial>,
     map_cap: usize,
     event: LifecycleEvent,
 ) {
     let now = Instant::now();
-    let now_ms = unix_now_ms();
+    let now_ms = unix_now_ms(clock);
     let event_id = event.event_id().clone();
 
     if let LifecycleEvent::RequestTerminated {
@@ -1392,6 +1404,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
@@ -1409,8 +1422,8 @@ mod tests {
     use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};
     use proptest::prelude::*;
     use std::collections::HashMap as StdHashMap;
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Mutex as StdMutex, OnceLock};
     use uuid::Uuid;
 
     #[derive(Default)]
@@ -1499,13 +1512,6 @@ mod tests {
                 .map(|(_, count)| *count)
                 .sum()
         }
-    }
-
-    fn install_counting_recorder() -> CountingRecorder {
-        static RECORDER: OnceLock<CountingRecorder> = OnceLock::new();
-        let recorder = RECORDER.get_or_init(CountingRecorder::default).clone();
-        let _ = metrics::set_global_recorder(recorder.clone());
-        recorder
     }
 
     fn eid(s: &str) -> EventId {
@@ -1631,6 +1637,7 @@ mod tests {
     async fn missing_terminal_timings_do_not_erase_observed_values() {
         let store = CapturingStore::default();
         let metrics = noop_metrics();
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
         let event_id = eid("preserve-observed-terminal-timings");
         let mut partial = Partial::new(Instant::now(), event_id.clone());
         partial.request_id = Some("req-preserve-observed-terminal-timings".to_owned());
@@ -1644,6 +1651,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
+            &clock,
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestTerminated {
@@ -1679,6 +1687,7 @@ mod tests {
     async fn duplicate_terminal_missing_timings_preserves_first_terminal_timings() {
         let store = CapturingStore::default();
         let metrics = noop_metrics();
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
         let event_id = eid("preserve-first-terminal-timings");
         let mut partial = Partial::new(Instant::now(), event_id.clone());
         partial.request_id = Some("req-preserve-first-terminal-timings".to_owned());
@@ -1689,6 +1698,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
+            &clock,
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestTerminated {
@@ -1734,6 +1744,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
+            &clock,
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestTerminated {
@@ -1789,10 +1800,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn success_terminated_persists_row() {
+    async fn t2__success_terminated_persists_row() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            None,
+            noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
+        );
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-1"),
@@ -1847,10 +1864,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn setup_timings_survive_success_and_early_failure_termination() {
+    async fn t2__setup_timings_survive_success_and_early_failure_termination() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            None,
+            noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
+        );
 
         for (event_id, status, reason) in [
             ("setup-success", 200, TerminationReason::Success),
@@ -1917,10 +1940,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn source_metadata_from_request_started_propagates_to_final_event() {
+    async fn t2__source_metadata_from_request_started_propagates_to_final_event() {
         let (tx, rx) = mpsc::channel(4);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            None,
+            noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
+        );
         let event_id = eid("source-metadata");
 
         tx.send(LifecycleEvent::RequestStarted {
@@ -1962,10 +1991,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn stream_error_terminated_carries_error_type_and_message() {
+    async fn t2__stream_error_terminated_carries_error_type_and_message() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            None,
+            noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
+        );
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-2"),
@@ -2018,10 +2053,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn request_log_upstream_error_populates_final_row_with_broad_code() {
+    async fn t2__request_log_upstream_error_populates_final_row_with_broad_code() {
         let (tx, rx) = mpsc::channel(4);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            None,
+            noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
+        );
         let event_id = eid("request-log-upstream-error");
 
         tx.send(LifecycleEvent::RequestStarted {
@@ -2074,10 +2115,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn parse_failed_terminated_still_persists_error_code() {
+    async fn t2__parse_failed_terminated_still_persists_error_code() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            None,
+            noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
+        );
 
         tx.send(LifecycleEvent::RequestStarted {
             event_id: eid("legacy-3"),
@@ -2124,10 +2171,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn terminated_without_partial_writes_orphan_row() {
+    async fn t2__terminated_without_partial_writes_orphan_row() {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            None,
+            noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
+        );
 
         tx.send(LifecycleEvent::RequestTerminated {
             event_id: eid("orphan-terminated"),
@@ -2166,15 +2219,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn request_terminated_before_started_writes_orphan_and_increments_metric() {
-        let recorder = install_counting_recorder();
+    async fn t2__request_terminated_before_started_writes_orphan_and_increments_metric() {
+        let recorder = CountingRecorder::default();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
         let before = recorder.count_matching(
             "cc_lb_lifecycle_assembler_rows_total",
             "terminated_without_partial",
         );
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
-        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            None,
+            noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
+        );
         let event_id = eid("orphan-before-started");
 
         tx.send(LifecycleEvent::RequestTerminated {
@@ -2231,16 +2291,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn renewal_orphan_flush_waits_for_full_renewal_window_then_finalizes() {
+    async fn t2__renewal_orphan_flush_waits_for_full_renewal_window_then_finalizes() {
         // Given
         let store = CapturingStore::default();
         let metrics = noop_metrics();
+        let clock: ClockHandle = cc_lb_testkit::fixed_clock(1_700_000_000);
         let event_id = eid("renewal:orphan-session:1");
         let mut partials = HashMap::new();
         handle_event(
             &store,
             None,
             metrics.as_ref(),
+            &clock,
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestStarted {
@@ -2305,21 +2367,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ignores_unused_auth_failure_variant() {
-        let _ = AuthFailure::AuthenticationFailed {
-            http_status: 401,
-            reason: None,
-        };
-        let _ = StreamSuccess {
-            usage: UsageSnapshot::default(),
-            sse_event_count: 0,
-            ..Default::default()
-        };
-        let _ = cc_lb_lifecycle::UsageSource::NonStreamBody;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn finalized_row_write_republishes_to_bus_for_admin_sse() {
+    async fn t2__finalized_row_write_republishes_to_bus_for_admin_sse() {
         use crate::event_bus::InMemoryBus;
         use cc_lb_control::BusReceiver;
         let (tx, rx) = mpsc::channel(16);
@@ -2333,6 +2381,7 @@ mod tests {
             store.clone(),
             Some(bus.clone() as Arc<dyn RequestEventBus>),
             noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         );
 
         tx.send(LifecycleEvent::RequestStarted {
@@ -2385,7 +2434,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn request_started_then_route_publishes_ordered_enrichment_baseline() {
+    async fn t2__request_started_then_route_publishes_ordered_enrichment_baseline() {
         use crate::event_bus::InMemoryBus;
         use cc_lb_control::BusReceiver;
 
@@ -2402,6 +2451,7 @@ mod tests {
             store,
             Some(bus.clone() as Arc<dyn RequestEventBus>),
             noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         );
 
         // When RequestStarted and successful RouteCompleted arrive in order.
@@ -2470,7 +2520,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn thinking_budget_tokens_preserve_partial_and_final_parity() {
+    async fn t2__thinking_budget_tokens_preserve_partial_and_final_parity() {
         use crate::event_bus::InMemoryBus;
 
         // Given request fixtures with and without enabled thinking budgets.
@@ -2499,6 +2549,7 @@ mod tests {
             store,
             Some(bus.clone() as Arc<dyn RequestEventBus>),
             noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         );
 
         // When each fixture is parsed, assembled, and terminated.
@@ -2604,7 +2655,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn classification_fields_preserve_partial_and_final_parity() {
+    async fn t2__classification_fields_preserve_partial_and_final_parity() {
         use crate::event_bus::InMemoryBus;
 
         let (tx, rx) = mpsc::channel(8);
@@ -2618,6 +2669,7 @@ mod tests {
             store,
             Some(bus.clone() as Arc<dyn RequestEventBus>),
             noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         );
         let event_id = eid("classification-parity");
 
@@ -2737,7 +2789,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn full_lifecycle_publishes_throttled_partials_and_one_final() {
+    async fn t2__full_lifecycle_publishes_throttled_partials_and_one_final() {
         use crate::event_bus::InMemoryBus;
         use cc_lb_control::BusReceiver;
 
@@ -2753,6 +2805,7 @@ mod tests {
             store.clone(),
             Some(bus.clone() as Arc<dyn RequestEventBus>),
             noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         );
 
         tx.send(LifecycleEvent::RequestStarted {
@@ -2872,6 +2925,7 @@ mod tests {
                     ..UsageSnapshot::default()
                 },
                 sse_event_count: 3,
+                body_chunk_count: Some(4),
                 first_body_chunk_ms: Some(11),
                 body_bytes: Some(456),
                 ..StreamSuccess::default()
@@ -2885,7 +2939,7 @@ mod tests {
             client_status: 200,
             duration_ms: 123,
             request_body_read_ms: Some(17),
-            request_body_bytes: None,
+            request_body_bytes: Some(128),
             finalize_ms: Some(3),
             first_body_chunk_ms: Some(11),
             internal_errors: Vec::new(),
@@ -2982,53 +3036,74 @@ mod tests {
             .collect();
         assert_eq!(finals.len(), 1);
         assert_eq!(finals[0].cursor, 1);
-        assert_eq!(finals[0].event.event_id.as_deref(), Some(event_id.as_str()));
-        assert_eq!(finals[0].event.request_body_read_ms, Some(17));
-        assert_eq!(finals[0].event.request_body_bytes, Some(128));
-        assert_eq!(finals[0].event.finalize_ms, Some(3));
-        assert_eq!(finals[0].event.upstream_body_ms, Some(12));
+        let final_event = &finals[0].event;
+        assert_eq!(final_event.event_id.as_deref(), Some(event_id.as_str()));
+        assert_eq!(final_event.request_id, "req-live-1");
         assert_eq!(
-            finals[0].event.request_body_first_chunk_ms,
+            final_event.principal_id.as_deref(),
+            Some("principal-live-1")
+        );
+        assert_eq!(final_event.key_id.as_deref(), Some("key-live-1"));
+        assert_eq!(final_event.principal_kind.as_deref(), Some("api_key"));
+        assert_eq!(final_event.upstream_id, Some(Uuid::nil()));
+        assert_eq!(final_event.upstream_name.as_deref(), Some("primary"));
+        assert_eq!(
+            final_event.model.as_deref(),
+            Some("claude-3-5-sonnet-20241022")
+        );
+        assert_eq!(final_event.status, 200);
+        assert_eq!(final_event.input_tokens, Some(10));
+        assert_eq!(final_event.output_tokens, Some(30));
+        assert_eq!(final_event.request_body_read_ms, Some(17));
+        assert_eq!(final_event.request_body_bytes, Some(128));
+        assert_eq!(final_event.finalize_ms, Some(3));
+        assert_eq!(final_event.body_bytes, Some(456));
+        assert_eq!(final_event.body_chunk_count, Some(4));
+        assert_eq!(final_event.auth_ms, Some(5));
+        assert_eq!(final_event.route_ms, Some(7));
+        assert_eq!(final_event.shape_ms, Some(4));
+        assert_eq!(final_event.sign_ms, Some(5));
+        assert_eq!(final_event.upstream_ttfb_ms, Some(6));
+        assert_eq!(final_event.upstream_body_ms, Some(12));
+        assert_eq!(final_event.error_code, None);
+        assert_eq!(
+            final_event.request_body_first_chunk_ms,
             terminated.request_body_first_chunk_ms
         );
         assert_eq!(
-            finals[0].event.request_body_receive_ms,
+            final_event.request_body_receive_ms,
             terminated.request_body_receive_ms
         );
         assert_eq!(
-            finals[0].event.request_body_wait_ms,
+            final_event.request_body_wait_ms,
             terminated.request_body_wait_ms
         );
         assert_eq!(
-            finals[0].event.request_body_process_ms,
+            final_event.request_body_process_ms,
             terminated.request_body_process_ms
         );
         assert_eq!(
-            finals[0].event.request_body_chunk_count,
+            final_event.request_body_chunk_count,
             terminated.request_body_chunk_count
         );
         assert_eq!(
-            finals[0].event.response_body_wait_ms,
+            final_event.response_body_wait_ms,
             terminated.response_body_wait_ms
         );
         assert_eq!(
-            finals[0].event.response_body_process_ms,
+            final_event.response_body_process_ms,
             terminated.response_body_process_ms
         );
         assert_eq!(
-            finals[0].event.response_body_downstream_poll_gap_ms,
+            final_event.response_body_downstream_poll_gap_ms,
             terminated.response_body_downstream_poll_gap_ms
         );
-        assert_eq!(
-            finals[0].event.retry_overhead_ms,
-            terminated.retry_overhead_ms
-        );
-        assert_eq!(finals[0].event.body_bytes, Some(456));
+        assert_eq!(final_event.retry_overhead_ms, terminated.retry_overhead_ms);
         assert!(matches!(updates.last(), Some(RequestEventUpdate::Final(_))));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn parse_and_auth_failures_emit_no_enrichment_partials_and_finalize_once() {
+    async fn t2__parse_and_auth_failures_emit_no_enrichment_partials_and_finalize_once() {
         use crate::event_bus::InMemoryBus;
         use cc_lb_control::BusReceiver;
 
@@ -3045,6 +3120,7 @@ mod tests {
             store.clone(),
             Some(bus.clone() as Arc<dyn RequestEventBus>),
             noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         );
 
         // When parsing and authentication both fail before termination.
@@ -3108,7 +3184,167 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn delayed_pricing_subscriber_does_not_affect_finalized_row() {
+    async fn t2__invalid_key_auth_failure_persists_exact_terminal_row() {
+        let (tx, rx) = mpsc::channel(4);
+        let store = Arc::new(CapturingStore::default());
+        let event_id = eid("invalid-key-terminal-row");
+        let handle = spawn_request_event_assembler(
+            rx,
+            store.clone(),
+            None,
+            noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
+        );
+
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-invalid-key".to_owned(),
+            ts_ms: 1_700_000_000_000,
+            stream: false,
+            source_kind: Some("proxy".to_owned()),
+            source_ref_id: None,
+        })
+        .await
+        .expect("send request started");
+        tx.send(LifecycleEvent::AuthCompleted {
+            event_id: event_id.clone(),
+            result: Err(AuthFailure::AuthenticationFailed {
+                http_status: 401,
+                reason: Some("InvalidKey".to_owned()),
+            }),
+        })
+        .await
+        .expect("send authentication failure");
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id: event_id.clone(),
+            reason: TerminationReason::ErrorCode("authentication_failed".to_owned()),
+            client_status: 401,
+            duration_ms: 3,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: Some(2),
+            setup_timings: Default::default(),
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+        })
+        .await
+        .expect("send request termination");
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.event_id.as_deref(), Some(event_id.as_str()));
+        assert_eq!(row.request_id, "req-invalid-key");
+        assert_eq!(row.status, 401);
+        assert_eq!(row.error_code.as_deref(), Some("authentication_failed"));
+        assert_eq!(row.proxy_setup_ms, Some(2));
+        assert_eq!(row.principal_id, None);
+        assert_eq!(row.key_id, None);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn t2__assembler_grace_period_merges_late_priced_event() {
+        let store = CapturingStore::default();
+        let metrics = noop_metrics();
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
+        let mut partials = HashMap::new();
+        let event_id = eid("late-priced-within-grace");
+
+        for event in [
+            LifecycleEvent::RequestStarted {
+                event_id: event_id.clone(),
+                request_id: "req-late-priced".to_owned(),
+                ts_ms: 1_700_000_000_000,
+                stream: false,
+                source_kind: None,
+                source_ref_id: None,
+            },
+            LifecycleEvent::ParseCompleted {
+                event_id: event_id.clone(),
+                result: Ok(ParseInfo {
+                    model: Some("claude-test".to_owned()),
+                    ..ParseInfo::default()
+                }),
+            },
+            LifecycleEvent::UsageObserved {
+                event_id: event_id.clone(),
+                usage: UsageSnapshot {
+                    input_tokens: 40,
+                    output_tokens: 0,
+                    ..UsageSnapshot::default()
+                },
+                source: UsageSource::NonStreamBody,
+            },
+            LifecycleEvent::RequestTerminated {
+                event_id: event_id.clone(),
+                reason: TerminationReason::Success,
+                client_status: 200,
+                duration_ms: 10,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                finalize_ms: None,
+                first_body_chunk_ms: None,
+                internal_errors: Vec::new(),
+                limit_reconcile_ms: None,
+                observability_post_ms: None,
+                proxy_setup_ms: None,
+                setup_timings: Default::default(),
+                upstream_body_ms: None,
+            },
+        ] {
+            handle_event(
+                &store,
+                None,
+                metrics.as_ref(),
+                &clock,
+                &mut partials,
+                DEFAULT_ASSEMBLER_MAP_CAP,
+                event,
+            )
+            .await;
+        }
+
+        assert!(store.rows.lock().unwrap().is_empty());
+        assert!(partials.contains_key(&event_id));
+        tokio::time::advance(Duration::from_millis(50)).await;
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &clock,
+            &mut partials,
+            DEFAULT_ASSEMBLER_MAP_CAP,
+            LifecycleEvent::Priced {
+                event_id: event_id.clone(),
+                cost: CostBreakdown {
+                    total_micros: Some(120),
+                    input_micros: Some(120),
+                    output_micros: Some(0),
+                    cache_creation_5m_micros: None,
+                    cache_creation_1h_micros: None,
+                    cache_read_micros: None,
+                },
+            },
+        )
+        .await;
+
+        assert!(!partials.contains_key(&event_id));
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id.as_deref(), Some(event_id.as_str()));
+        assert_eq!(rows[0].input_tokens, Some(40));
+        assert_eq!(rows[0].cost_usd_micros, Some(120));
+        assert_eq!(rows[0].cost_input_micros, Some(120));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn t2__delayed_pricing_subscriber_does_not_affect_finalized_row() {
         use crate::event_bus::InMemoryBus;
 
         let bus = Arc::new(InMemoryBus::new());
@@ -3120,6 +3356,7 @@ mod tests {
             store.clone(),
             Some(bus.clone() as Arc<dyn RequestEventBus>),
             noop_metrics(),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         );
         let delayed_bus = bus.clone();
         let delayed_pricing = tokio::spawn(async move {
@@ -3210,6 +3447,7 @@ mod tests {
         });
 
         handle.shutdown().await;
+        tokio::time::advance(Duration::from_millis(500)).await;
         delayed_pricing.await.expect("delayed pricing task joins");
 
         let rows = store.rows.lock().unwrap();

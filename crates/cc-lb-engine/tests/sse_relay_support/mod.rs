@@ -4,7 +4,7 @@ use std::convert::Infallible;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -18,6 +18,7 @@ use cc_lb_upstream::{
 use http::Response;
 use http_body_util::BodyExt;
 use tokio::sync::Notify;
+use tokio::time::Instant;
 
 #[derive(Default)]
 pub struct RecordingHook {

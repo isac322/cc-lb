@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use axum::http::header;
 use axum::http::{Request, Response, StatusCode};
 use bytes::Bytes;
 use http_body_util::BodyExt;
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use tower::{Layer, Service};
 
 type ChaosFuture<T> = Pin<Box<DynChaosFuture<T>>>;
@@ -18,12 +20,25 @@ const DROP_ENV: &str = "CC_LB_CHAOS_DROP_PCT";
 const RST_ENV: &str = "CC_LB_CHAOS_RST_AFTER_BYTES";
 const TRUNCATE_ENV: &str = "CC_LB_CHAOS_TRUNCATE_AFTER_EVENTS";
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ChaosConfig {
     latency_ms: u64,
     drop_pct: u8,
     rst_after_bytes: u64,
     truncate_after_events: u64,
+    rng: Arc<Mutex<StdRng>>,
+}
+
+impl Default for ChaosConfig {
+    fn default() -> Self {
+        Self {
+            latency_ms: 0,
+            drop_pct: 0,
+            rst_after_bytes: 0,
+            truncate_after_events: 0,
+            rng: Arc::new(Mutex::new(rand::make_rng())),
+        }
+    }
 }
 
 impl ChaosConfig {
@@ -33,6 +48,7 @@ impl ChaosConfig {
             drop_pct: parse_drop_pct_env(),
             rst_after_bytes: parse_u64_env(RST_ENV),
             truncate_after_events: parse_u64_env(TRUNCATE_ENV),
+            rng: Arc::new(Mutex::new(rand::make_rng())),
         }
     }
 
@@ -44,7 +60,13 @@ impl ChaosConfig {
     }
 
     fn should_drop(&self) -> bool {
-        self.drop_pct > 0 && rand::random_range(0_u8..100) < self.drop_pct
+        self.drop_pct > 0
+            && self
+                .rng
+                .lock()
+                .expect("chaos RNG mutex poisoned")
+                .random_range(0_u8..100)
+                < self.drop_pct
     }
 }
 
@@ -58,6 +80,11 @@ impl ChaosLayer {
         Self {
             config: ChaosConfig::from_env(),
         }
+    }
+
+    pub fn with_rng_seed(mut self, seed: [u8; 32]) -> Self {
+        self.config.rng = Arc::new(Mutex::new(StdRng::from_seed(seed)));
+        self
     }
 }
 
@@ -253,4 +280,57 @@ fn parse_drop_pct_env() -> u8 {
         .and_then(|value| value.parse::<u8>().ok())
         .filter(|value| *value <= 100)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seeded_layer(seed: [u8; 32]) -> ChaosLayer {
+        ChaosLayer {
+            config: ChaosConfig::default(),
+        }
+        .with_rng_seed(seed)
+    }
+
+    fn next_roll(layer: &ChaosLayer) -> u8 {
+        layer
+            .config
+            .rng
+            .lock()
+            .expect("chaos RNG mutex poisoned")
+            .random_range(0_u8..100)
+    }
+
+    #[test]
+    fn equal_seeds_produce_equal_shared_sequences() {
+        let seed = [19; 32];
+        let left = seeded_layer(seed);
+        let right = seeded_layer(seed);
+
+        let left_rolls = (0..128).map(|_| next_roll(&left)).collect::<Vec<_>>();
+        let right_rolls = (0..128).map(|_| next_roll(&right)).collect::<Vec<_>>();
+        assert_eq!(left_rolls, right_rolls);
+
+        let shared = seeded_layer(seed);
+        let shared_clone = shared.clone();
+        let reference = seeded_layer(seed);
+        assert_eq!(
+            [next_roll(&shared), next_roll(&shared_clone)],
+            [next_roll(&reference), next_roll(&reference)]
+        );
+    }
+
+    #[test]
+    fn drop_percentage_boundaries_preserve_guard_behavior() {
+        let seed = [23; 32];
+        let mut layer = seeded_layer(seed);
+        layer.config.drop_pct = 0;
+
+        assert!((0..128).all(|_| !layer.config.should_drop()));
+        assert_eq!(next_roll(&layer), next_roll(&seeded_layer(seed)));
+
+        layer.config.drop_pct = 100;
+        assert!((0..128).all(|_| layer.config.should_drop()));
+    }
 }

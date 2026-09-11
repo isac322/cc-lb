@@ -206,6 +206,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use crate::event_bus::InMemoryBus;
@@ -217,7 +218,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hit_state_published_when_only_cache_read_tokens() {
+    async fn t2__hit_state_published_when_only_cache_read_tokens() {
         let bus = Arc::new(InMemoryBus::new());
         let (tx, rx) = mpsc::channel(16);
         let LifecycleBusReceiver::InMemory(mut sub_rx) = bus.subscribe_lifecycle() else {
@@ -283,7 +284,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn write_state_when_only_creation_tokens() {
+    async fn t2__write_state_when_only_creation_tokens() {
         let bus = Arc::new(InMemoryBus::new());
         let (tx, rx) = mpsc::channel(16);
         let LifecycleBusReceiver::InMemory(mut sub_rx) = bus.subscribe_lifecycle() else {
@@ -333,7 +334,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn terminated_without_partial_publishes_unknown() {
+    async fn t2__terminated_without_partial_publishes_unknown() {
         let bus = Arc::new(InMemoryBus::new());
         let (tx, rx) = mpsc::channel(16);
         let LifecycleBusReceiver::InMemory(mut sub_rx) = bus.subscribe_lifecycle() else {

@@ -35,6 +35,7 @@ hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", 
 metrics.workspace = true
 parking_lot = "0.12"
 rand = "0.10"
+rand_core = "0.10"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2 = "0.11"
@@ -48,8 +49,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 bincode.workspace = true
-cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
-tempfile.workspace = true
+cc-lb-testkit = { path = "../cc-lb-testkit" }
 tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(loom)'.dependencies]

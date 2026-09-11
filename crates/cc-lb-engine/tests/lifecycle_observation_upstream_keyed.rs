@@ -21,7 +21,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn successful_response_enqueues_records_keyed_by_selected_upstream() {
+async fn t2__successful_response_enqueues_records_keyed_by_selected_upstream() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let (sink, mut receiver) = UpstreamRateLimitSink::with_capacity(16);
@@ -51,12 +51,12 @@ async fn successful_response_enqueues_records_keyed_by_selected_upstream() {
     for record in records {
         assert_eq!(record.upstream_id, default_upstream_id());
         assert_eq!(record.window, "default");
-        assert!(record.observed_at_unix_secs > 0);
+        assert_eq!(record.observed_at_unix_secs, 1_700_000_000);
     }
 }
 
 #[tokio::test]
-async fn too_many_requests_enqueues_but_server_error_does_not() {
+async fn t2__too_many_requests_enqueues_but_server_error_does_not() {
     let (sink, mut receiver) = UpstreamRateLimitSink::with_capacity(16);
     let test_bus_ok = TestLifecycleBus::new().with_rate_limit_header_subscriber(sink);
     let lifecycle = lifecycle_for_response(StatusCode::TOO_MANY_REQUESTS, rate_limit_headers(0, 1))

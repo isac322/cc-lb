@@ -5,7 +5,7 @@ use std::time::Duration;
 use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, WorkerBuilder, WorkerError};
 use cc_lb_aead::AeadService;
-use cc_lb_clock::SystemClock;
+use cc_lb_clock::TestClock;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::retry::RetryClass;
@@ -19,21 +19,20 @@ use url::Url;
 use uuid::Uuid;
 
 use super::common::{
-    TestResult, create_oauth_upstream, metadata_key_prefix, read_upstream_generation,
-    stores_from_storage,
+    TEST_NOW_UNIX_SECS, TestResult, create_oauth_upstream, metadata_key_prefix,
+    read_upstream_generation, stores_from_storage,
 };
 use super::fake::FakeAnthropic;
 use super::scenario::run_race_scenario;
 use super::worker::{OAuthWorkerProbe, OAuthWorkerState, entity_job_handler};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestResult<()> {
+async fn t3__sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestResult<()> {
     let dir = tempfile::tempdir()?;
+    let clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
     let fake = FakeAnthropic::spawn().await?;
     let storage_url = format!("sqlite://{}", dir.path().join("runtime.sqlite").display());
-    let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&storage_url, Arc::new(cc_lb_clock::SystemClock)).await?,
-    );
+    let storage = Arc::new(cc_lb_storage_sqlite::open_sqlite(&storage_url, clock.clone()).await?);
     storage.initialize(BackendKind::Sqlite).await?;
     let scheduler_url = format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
     let scheduler_options = SqliteConnectOptions::from_str(&scheduler_url)?.create_if_missing(true);
@@ -47,7 +46,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
     let config = sqlite_queue_config();
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
         scheduler_pool.clone(),
-        Arc::new(SystemClock),
+        clock.clone(),
     ));
     let aead = Arc::new(AeadService::from_master_key([38; 32]));
     let oauth_cfg = Arc::new(AnthropicOAuthConfig {
@@ -66,7 +65,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
     let probe = OAuthWorkerProbe::new();
     let state = OAuthWorkerState::new(
         storage.as_ref().clone(),
-        Uuid::new_v4(),
+        Uuid::from_u128(1),
         aead.clone(),
         oauth_cfg.clone(),
         backend.clone(),
@@ -83,9 +82,9 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
             stores: stores_from_storage(storage.clone()),
             aead,
             oauth_cfg,
-            clock: Arc::new(cc_lb_clock::SystemClock),
+            clock,
         },
-        replica_id: Uuid::new_v4(),
+        replica_id: Uuid::from_u128(2),
         metadata_hook: None,
         cancel: CancellationToken::new(),
         apalis_handle: backend.clone(),
@@ -104,10 +103,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
             let pool = scheduler_pool.clone();
             async move { sqlite_metadata_count(&pool, upstream_id).await }
         },
-        || {
-            let probe = probe.clone();
-            async move { Ok(probe.has_started()) }
-        },
+        &probe,
     )
     .await;
     cancel.cancel();

@@ -316,10 +316,12 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use cc_lb_lifecycle::{AuthInfo, ParseInfo, TerminationReason, UsageSnapshot, UsageSource};
     use cc_lb_request_log::CostBreakdown;
+    use metrics_util::debugging::DebugValue;
 
     fn eid(s: &str) -> EventId {
         s.to_owned()
@@ -350,7 +352,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn terminated_after_key_and_usage_sequence_emits_metrics() {
+    async fn t2__terminated_after_key_and_usage_sequence_emits_metrics() {
         let (tx, rx) = mpsc::channel(16);
         let handle = spawn_lifecycle_api_key_metrics_subscriber(rx, bus());
 
@@ -402,12 +404,79 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn terminated_without_partial_shuts_down_cleanly() {
+    async fn t2__terminated_without_partial_shuts_down_cleanly() {
         let (tx, rx) = mpsc::channel(16);
         let handle = spawn_lifecycle_api_key_metrics_subscriber(rx, bus());
 
         tx.send(terminated("api-key-b", 499)).await.unwrap();
         drop(tx);
         handle.shutdown().await;
+    }
+
+    #[test]
+    fn invalid_key_auth_failure_increments_exact_counter() {
+        let mut partials = HashMap::new();
+
+        cc_lb_testkit::with_local_recorder(|snapshotter| {
+            handle_event(
+                &mut partials,
+                DEFAULT_API_KEY_METRICS_MAP_CAP,
+                LifecycleEvent::AuthCompleted {
+                    event_id: eid("invalid-key"),
+                    result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
+                        http_status: 401,
+                        reason: Some("InvalidKey".to_owned()),
+                    }),
+                },
+            );
+
+            let matching = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, _, _, _)| {
+                    key.key().name() == "cclb_key_auth_failures_total"
+                        && key
+                            .key()
+                            .labels()
+                            .any(|label| label.key() == "reason" && label.value() == "InvalidKey")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1);
+            assert_eq!(matching[0].3, DebugValue::Counter(1));
+        });
+    }
+    #[test]
+    fn t1__api_key_metrics_subscriber_ttl_sweep_metric() {
+        let mut partials = HashMap::new();
+        handle_event(
+            &mut partials,
+            DEFAULT_API_KEY_METRICS_MAP_CAP,
+            LifecycleEvent::ParseCompleted {
+                event_id: eid("orphan"),
+                result: Ok(ParseInfo::default()),
+            },
+        );
+
+        cc_lb_testkit::with_local_recorder(|snapshotter| {
+            sweep_orphans(&mut partials, Duration::ZERO);
+
+            assert!(partials.is_empty());
+            let samples = snapshotter.snapshot().into_vec();
+            assert_eq!(samples.len(), 1);
+            let (key, _, _, value) = &samples[0];
+            assert_eq!(
+                key.key().name(),
+                "cc_lb_lifecycle_api_key_metrics_events_total"
+            );
+            assert_eq!(
+                key.key()
+                    .labels()
+                    .find(|label| label.key() == "outcome")
+                    .map(|label| label.value()),
+                Some("orphan_ttl_evicted")
+            );
+            assert_eq!(*value, DebugValue::Counter(1));
+        });
     }
 }

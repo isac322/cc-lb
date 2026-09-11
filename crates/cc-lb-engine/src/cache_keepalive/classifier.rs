@@ -195,222 +195,240 @@ mod tests {
     }
 
     #[test]
-    fn pause_turn_is_agent_in_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({"stop_reason": "pause_turn", "content": []}),
-        );
-        assert_eq!(d, TurnDecision::AgentInTurn);
+    fn stop_reason_table() {
+        struct Case {
+            case: &'static str,
+            response: Value,
+            expected: TurnDecision,
+        }
+
+        let cases = [
+            Case {
+                case: "pause_turn_is_agent_in_turn",
+                response: json!({"stop_reason": "pause_turn", "content": []}),
+                expected: TurnDecision::AgentInTurn,
+            },
+            Case {
+                case: "compaction_stop_reason_is_agent_in_turn",
+                response: json!({"stop_reason": "compaction", "content": []}),
+                expected: TurnDecision::AgentInTurn,
+            },
+            Case {
+                case: "refusal_is_user_turn",
+                response: json!({"stop_reason": "refusal", "content": []}),
+                expected: TurnDecision::UserTurn,
+            },
+            Case {
+                case: "model_context_window_exceeded_is_user_turn",
+                response: json!({"stop_reason": "model_context_window_exceeded", "content": []}),
+                expected: TurnDecision::UserTurn,
+            },
+            Case {
+                case: "max_tokens_is_ambiguous",
+                response: json!({"stop_reason": "max_tokens", "content": []}),
+                expected: TurnDecision::Ambiguous,
+            },
+            Case {
+                case: "stop_sequence_is_ambiguous",
+                response: json!({"stop_reason": "stop_sequence", "content": []}),
+                expected: TurnDecision::Ambiguous,
+            },
+            Case {
+                case: "missing_stop_reason_is_user_turn",
+                response: json!({"content": []}),
+                expected: TurnDecision::UserTurn,
+            },
+            Case {
+                case: "plain_end_turn_is_user_turn",
+                response: json!({
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "hello"}]
+                }),
+                expected: TurnDecision::UserTurn,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                classify(&default_config(), json!({}), case.response),
+                case.expected,
+                "case={}",
+                case.case
+            );
+        }
     }
 
     #[test]
-    fn compaction_stop_reason_is_agent_in_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({"stop_reason": "compaction", "content": []}),
-        );
-        assert_eq!(d, TurnDecision::AgentInTurn);
+    fn end_turn_table() {
+        struct Case {
+            case: &'static str,
+            config: ClassifierConfig,
+            request: Value,
+            response: Value,
+            expected: TurnDecision,
+        }
+
+        let cases = [
+            Case {
+                case: "end_turn_with_compaction_block_is_agent_in_turn",
+                config: default_config(),
+                request: json!({}),
+                response: json!({
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "compaction"}, {"type": "text", "text": "ok"}],
+                }),
+                expected: TurnDecision::AgentInTurn,
+            },
+            Case {
+                case: "end_turn_without_completion_tool_invocation_is_agent_in_turn",
+                config: default_config(),
+                request: json!({
+                    "tools": [
+                        {"name": "read_file"},
+                        {"name": "attempt_completion"},
+                    ]
+                }),
+                response: json!({
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "done"}],
+                }),
+                expected: TurnDecision::AgentInTurn,
+            },
+            Case {
+                case: "end_turn_with_only_non_completion_tool_invoked_is_agent_in_turn",
+                config: default_config(),
+                request: json!({
+                    "tools": [
+                        {"name": "read_file"},
+                        {"name": "attempt_completion"},
+                    ]
+                }),
+                response: json!({
+                    "stop_reason": "end_turn",
+                    "content": [
+                        {"type": "tool_use", "name": "read_file", "id": "t1", "input": {}}
+                    ]
+                }),
+                expected: TurnDecision::AgentInTurn,
+            },
+            Case {
+                case: "end_turn_with_completion_tool_invoked_is_user_turn",
+                config: default_config(),
+                request: json!({
+                    "tools": [
+                        {"name": "read_file"},
+                        {"name": "attempt_completion"},
+                    ]
+                }),
+                response: json!({
+                    "stop_reason": "end_turn",
+                    "content": [
+                        {"type": "text", "text": "done"},
+                        {"type": "tool_use", "name": "attempt_completion", "id": "t1", "input": {}}
+                    ]
+                }),
+                expected: TurnDecision::UserTurn,
+            },
+            Case {
+                case: "end_turn_ambiguous_opt_in_returns_ambiguous",
+                config: ClassifierConfig {
+                    treat_end_turn_as_ambiguous: true,
+                    ..ClassifierConfig::default()
+                },
+                request: json!({}),
+                response: json!({
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "hi"}],
+                }),
+                expected: TurnDecision::Ambiguous,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                classify(&case.config, case.request, case.response),
+                case.expected,
+                "case={}",
+                case.case
+            );
+        }
     }
 
     #[test]
-    fn refusal_is_user_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({"stop_reason": "refusal", "content": []}),
-        );
-        assert_eq!(d, TurnDecision::UserTurn);
-    }
+    fn tool_use_table() {
+        struct Case {
+            case: &'static str,
+            config: ClassifierConfig,
+            content: Value,
+            expected: TurnDecision,
+        }
 
-    #[test]
-    fn model_context_window_exceeded_is_user_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({"stop_reason": "model_context_window_exceeded", "content": []}),
-        );
-        assert_eq!(d, TurnDecision::UserTurn);
-    }
-
-    #[test]
-    fn max_tokens_is_ambiguous() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({"stop_reason": "max_tokens", "content": []}),
-        );
-        assert_eq!(d, TurnDecision::Ambiguous);
-    }
-
-    #[test]
-    fn stop_sequence_is_ambiguous() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({"stop_reason": "stop_sequence", "content": []}),
-        );
-        assert_eq!(d, TurnDecision::Ambiguous);
-    }
-
-    #[test]
-    fn missing_stop_reason_is_user_turn() {
-        let d = classify(&default_config(), json!({}), json!({"content": []}));
-        assert_eq!(d, TurnDecision::UserTurn);
-    }
-
-    #[test]
-    fn end_turn_with_compaction_block_is_agent_in_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({
-                "stop_reason": "end_turn",
-                "content": [{"type": "compaction"}, {"type": "text", "text": "ok"}],
-            }),
-        );
-        assert_eq!(d, TurnDecision::AgentInTurn);
-    }
-
-    #[test]
-    fn end_turn_without_completion_tool_invocation_is_agent_in_turn() {
-        let req = json!({
-            "tools": [
-                {"name": "read_file"},
-                {"name": "attempt_completion"},
-            ]
-        });
-        let resp =
-            json!({"stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]});
-        let d = classify(&default_config(), req, resp);
-        assert_eq!(d, TurnDecision::AgentInTurn);
-    }
-
-    #[test]
-    fn end_turn_with_completion_tool_invoked_is_user_turn() {
-        let req = json!({
-            "tools": [
-                {"name": "read_file"},
-                {"name": "attempt_completion"},
-            ]
-        });
-        let resp = json!({
-            "stop_reason": "end_turn",
-            "content": [
-                {"type": "text", "text": "done"},
-                {"type": "tool_use", "name": "attempt_completion", "id": "t1", "input": {}}
-            ]
-        });
-        let d = classify(&default_config(), req, resp);
-        assert_eq!(d, TurnDecision::UserTurn);
-    }
-
-    #[test]
-    fn end_turn_ambiguous_opt_in_returns_ambiguous() {
-        let cfg = ClassifierConfig {
-            treat_end_turn_as_ambiguous: true,
-            ..ClassifierConfig::default()
-        };
-        let resp = json!({"stop_reason": "end_turn", "content": [{"type": "text", "text": "hi"}]});
-        assert_eq!(classify(&cfg, json!({}), resp), TurnDecision::Ambiguous);
-    }
-
-    #[test]
-    fn plain_end_turn_is_user_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({
-                "stop_reason": "end_turn",
-                "content": [{"type": "text", "text": "hello"}]
-            }),
-        );
-        assert_eq!(d, TurnDecision::UserTurn);
-    }
-
-    #[test]
-    fn tool_use_with_regular_client_tool_is_agent_in_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({
-                "stop_reason": "tool_use",
-                "content": [{"type": "tool_use", "name": "read_file", "id": "t1", "input": {}}],
-            }),
-        );
-        assert_eq!(d, TurnDecision::AgentInTurn);
-    }
-
-    #[test]
-    fn tool_use_with_bash_is_still_agent_in_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({
-                "stop_reason": "tool_use",
-                "content": [{"type": "tool_use", "name": "Bash", "id": "t1", "input": {}}],
-            }),
-        );
-        assert_eq!(d, TurnDecision::AgentInTurn);
-    }
-
-    #[test]
-    fn tool_use_with_only_wait_for_user_tool_is_user_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({
-                "stop_reason": "tool_use",
-                "content": [{"type": "tool_use", "name": "attempt_completion", "id": "t1", "input": {}}],
-            }),
-        );
-        assert_eq!(d, TurnDecision::UserTurn);
-    }
-
-    #[test]
-    fn tool_use_mixed_wait_for_user_and_regular_is_agent_in_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({
-                "stop_reason": "tool_use",
-                "content": [
+        let cases = [
+            Case {
+                case: "tool_use_with_regular_client_tool_is_agent_in_turn",
+                config: default_config(),
+                content: json!([
+                    {"type": "tool_use", "name": "read_file", "id": "t1", "input": {}}
+                ]),
+                expected: TurnDecision::AgentInTurn,
+            },
+            Case {
+                case: "tool_use_with_bash_is_still_agent_in_turn",
+                config: default_config(),
+                content: json!([
+                    {"type": "tool_use", "name": "Bash", "id": "t1", "input": {}}
+                ]),
+                expected: TurnDecision::AgentInTurn,
+            },
+            Case {
+                case: "tool_use_with_only_wait_for_user_tool_is_user_turn",
+                config: default_config(),
+                content: json!([
+                    {"type": "tool_use", "name": "attempt_completion", "id": "t1", "input": {}}
+                ]),
+                expected: TurnDecision::UserTurn,
+            },
+            Case {
+                case: "tool_use_mixed_wait_for_user_and_regular_is_agent_in_turn",
+                config: default_config(),
+                content: json!([
                     {"type": "tool_use", "name": "attempt_completion", "id": "a", "input": {}},
                     {"type": "tool_use", "name": "read_file", "id": "b", "input": {}}
-                ],
-            }),
-        );
-        assert_eq!(d, TurnDecision::AgentInTurn);
-    }
+                ]),
+                expected: TurnDecision::AgentInTurn,
+            },
+            Case {
+                case: "tool_use_with_only_server_tool_use_is_user_turn",
+                config: default_config(),
+                content: json!([
+                    {"type": "server_tool_use", "name": "web_search", "id": "s", "input": {}}
+                ]),
+                expected: TurnDecision::UserTurn,
+            },
+            Case {
+                case: "extra_wait_for_user_tools_are_honored",
+                config: ClassifierConfig {
+                    extra_wait_for_user_tools: vec!["custom_wait".to_owned()],
+                    ..ClassifierConfig::default()
+                },
+                content: json!([
+                    {"type": "tool_use", "name": "custom_wait", "id": "t1", "input": {}}
+                ]),
+                expected: TurnDecision::UserTurn,
+            },
+        ];
 
-    #[test]
-    fn tool_use_with_only_server_tool_use_is_user_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({
-                "stop_reason": "tool_use",
-                "content": [{"type": "server_tool_use", "name": "web_search", "id": "s", "input": {}}],
-            }),
-        );
-        assert_eq!(d, TurnDecision::UserTurn);
-    }
-
-    #[test]
-    fn extra_wait_for_user_tools_are_honored() {
-        let cfg = ClassifierConfig {
-            extra_wait_for_user_tools: vec!["custom_wait".to_owned()],
-            ..ClassifierConfig::default()
-        };
-        let d = classify(
-            &cfg,
-            json!({}),
-            json!({
-                "stop_reason": "tool_use",
-                "content": [{"type": "tool_use", "name": "custom_wait", "id": "t1", "input": {}}],
-            }),
-        );
-        assert_eq!(d, TurnDecision::UserTurn);
+        for case in cases {
+            assert_eq!(
+                classify(
+                    &case.config,
+                    json!({}),
+                    json!({"stop_reason": "tool_use", "content": case.content}),
+                ),
+                case.expected,
+                "case={}",
+                case.case
+            );
+        }
     }
 }

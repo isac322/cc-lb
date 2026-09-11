@@ -4,7 +4,7 @@ use cc_lb_runtime_wasmtime::{
 use wasmtime::{Instance, Module, Store};
 
 #[test]
-fn on_demand_store_limits_reject_initial_memory_above_configured_cap() {
+fn t3__on_demand_store_limits_reject_initial_memory_above_configured_cap() {
     let cfg = HotEngineConfig {
         allocation_strategy: HotEngineAllocationStrategy::OnDemand,
         memory_max_pages: 1,

@@ -4,7 +4,7 @@ use std::time::Duration;
 use cc_lb_engine::{BreakerError, BreakerRuntimeConfig, CircuitBreaker, TestClock};
 use tokio::sync::Barrier;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn half_open_allows_only_one_concurrent_probe() -> Result<(), Box<dyn std::error::Error>> {
     let clock = Arc::new(TestClock::new_at_secs(100));
     let breaker = CircuitBreaker::new(

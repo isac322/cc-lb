@@ -1,3 +1,27 @@
+#![allow(non_snake_case)]
+
+#[cfg(feature = "postgres")]
+async fn postgres_fixture() -> anyhow::Result<cc_lb_storage_conformance::PostgresFixture> {
+    cc_lb_storage_conformance::postgres_fixture().await
+}
+
+#[cfg(feature = "postgres")]
+async fn scheduler_postgres_pool(
+    fixture: &cc_lb_storage_conformance::PostgresFixture,
+) -> anyhow::Result<sqlx::PgPool> {
+    use std::str::FromStr as _;
+
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    let search_path = format!("{},public", fixture.schema_name());
+    let options = PgConnectOptions::from_str(fixture.database_url())?
+        .options([("search_path", search_path.as_str())]);
+    Ok(PgPoolOptions::new()
+        .max_connections(8)
+        .connect_with(options)
+        .await?)
+}
+
 #[path = "admin_next_run.rs"]
 mod admin_next_run;
 #[path = "cron.rs"]

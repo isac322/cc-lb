@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use cc_lb_storage_api::{
     BackendKind, CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow,
     CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore,
@@ -21,7 +19,7 @@ async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage
@@ -180,7 +178,7 @@ fn batched_turn_projection(
 }
 
 #[tokio::test]
-async fn lists_frozen_session_and_decision_projection_rows() {
+async fn t3__lists_frozen_session_and_decision_projection_rows() {
     // Given: sessions in every storage state and a decision-only not-tracked row.
     let (_temp_dir, storage) = storage().await;
     let renewed = storage
@@ -401,7 +399,7 @@ async fn lists_frozen_session_and_decision_projection_rows() {
 }
 
 #[tokio::test]
-async fn paginates_horizon_and_stable_tie_breaks_without_duplicates() {
+async fn t3__paginates_horizon_and_stable_tie_breaks_without_duplicates() {
     // Given: equally recent sessions and one row outside the horizon.
     let (_temp_dir, storage) = storage().await;
     for session_key_hash in ["alpha-session", "beta-session", "old-session"] {
@@ -446,7 +444,8 @@ async fn paginates_horizon_and_stable_tie_breaks_without_duplicates() {
 }
 
 #[tokio::test]
-async fn frozen_message_timestamp_ignores_scheduler_state_updates_and_rejects_malformed_cursor() {
+async fn t3__frozen_message_timestamp_ignores_scheduler_state_updates_and_rejects_malformed_cursor()
+{
     // Given: an older session whose scheduler state changes after a newer message is stored.
     let (_temp_dir, storage) = storage().await;
     let older = storage
@@ -504,7 +503,7 @@ async fn frozen_message_timestamp_ignores_scheduler_state_updates_and_rejects_ma
 }
 
 #[tokio::test]
-async fn batches_turn_reads_with_deduplication_principal_isolation_and_canonical_order() {
+async fn t3__batches_turn_reads_with_deduplication_principal_isolation_and_canonical_order() {
     let (_temp_dir, storage) = storage().await;
     for (source_ref_id, session_key_hash, principal_id, ts) in [
         ("alpha-z", "alpha-session", PRINCIPAL_ID, 20),

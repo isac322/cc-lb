@@ -144,6 +144,7 @@ async fn assemble_route(
         store.clone(),
         Some(bus as Arc<dyn RequestEventBus>),
         noop_metrics(),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     );
 
     tx.send(LifecycleEvent::RequestStarted {

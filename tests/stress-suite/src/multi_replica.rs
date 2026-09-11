@@ -31,6 +31,8 @@ pub struct RunInput {
     pub run_id: String,
     pub output: std::path::PathBuf,
     pub only_wave: Option<String>,
+    pub min_wave_execution_ms: u64,
+    pub load: crate::multi_replica_load::LoadConfig,
 }
 
 impl RunInput {
@@ -54,9 +56,25 @@ impl RunInput {
             (None, None) => return Err("--profile is required".to_owned()),
         };
         let profile = RunProfile::parse(&profile)?;
-        if profile == RunProfile::Full && !full_profile_enabled() {
-            return Err("--profile full requires CC_LB_STRESS_FULL=1".to_owned());
+        if profile == RunProfile::Full && !args.enable_full_profile {
+            return Err("--profile full requires --enable-full-profile".to_owned());
         }
+        let min_wave_execution_ms = match (profile, args.full_window_ms) {
+            (RunProfile::Full, Some(window_ms)) if window_ms >= 1_000 => window_ms,
+            (RunProfile::Full, Some(_)) => {
+                return Err("--full-window-ms must be at least 1000".to_owned());
+            }
+            (RunProfile::Full, None) => FULL_WINDOW_MS,
+            (RunProfile::Smoke, Some(_)) => {
+                return Err("--full-window-ms requires --profile full".to_owned());
+            }
+            (RunProfile::Smoke, None) => SMOKE_WINDOW_MS,
+        };
+        let load = crate::multi_replica_load::LoadConfig::new(
+            args.timed_load,
+            args.load_workers.unwrap_or(16),
+            args.load_ramp,
+        )?;
         let replicas = args.replicas.unwrap_or(2);
         if replicas < 2 {
             return Err("--replicas must be at least 2".to_owned());
@@ -79,7 +97,29 @@ impl RunInput {
                 .output
                 .ok_or_else(|| "--output is required".to_owned())?,
             only_wave,
+            min_wave_execution_ms,
+            load,
         })
+    }
+
+    pub fn wave_duration_ms(&self) -> u64 {
+        self.min_wave_execution_ms
+            .checked_div(u64::try_from(self.profile.wave_count()).unwrap_or(u64::MAX))
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    pub fn target_requests_per_wave(&self) -> u64 {
+        requests_for_window(self.wave_duration_ms(), self.profile.min_achieved_rps()).max(1)
+    }
+
+    pub fn validate_throughput(&self, completed: u64, elapsed_ms: u64) -> Result<(), String> {
+        validate_throughput(
+            self.profile,
+            requests_for_window(self.min_wave_execution_ms, self.profile.min_achieved_rps()),
+            completed,
+            elapsed_ms,
+        )
     }
 }
 
@@ -103,8 +143,11 @@ pub enum RunProfile {
 
 const SMOKE_WINDOW_MS: u64 = 180_000;
 const FULL_WINDOW_MS: u64 = 1_200_000;
-const FULL_WINDOW_ENV: &str = "CC_LB_STRESS_FULL_WINDOW_MS";
 
+#[allow(
+    dead_code,
+    reason = "profile helpers are used by the full stress binary but not every all-targets test harness"
+)]
 impl RunProfile {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
@@ -135,10 +178,10 @@ impl RunProfile {
         }
     }
 
-    pub fn min_wave_execution_ms(self) -> u64 {
+    pub const fn min_wave_execution_ms(self) -> u64 {
         match self {
             Self::Smoke => SMOKE_WINDOW_MS,
-            Self::Full => full_window_ms(),
+            Self::Full => FULL_WINDOW_MS,
         }
     }
 
@@ -173,39 +216,34 @@ impl RunProfile {
     }
 
     pub fn validate_throughput(self, completed: u64, elapsed_ms: u64) -> Result<(), String> {
-        if completed < self.min_total_requests() {
-            return Err(format!(
-                "completed {completed} requests below {} floor {}",
-                self.as_str(),
-                self.min_total_requests()
-            ));
-        }
-        let achieved = completed as f64 / (elapsed_ms.max(1) as f64 / 1_000.0);
-        if achieved < self.min_achieved_rps() {
-            return Err(format!(
-                "achieved RPS {achieved:.3} below {} floor {:.3}",
-                self.as_str(),
-                self.min_achieved_rps()
-            ));
-        }
-        Ok(())
+        validate_throughput(self, self.min_total_requests(), completed, elapsed_ms)
     }
 }
 
-fn full_window_ms() -> u64 {
-    std::env::var(FULL_WINDOW_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value >= 1_000)
-        .unwrap_or(FULL_WINDOW_MS)
+fn validate_throughput(
+    profile: RunProfile,
+    minimum_requests: u64,
+    completed: u64,
+    elapsed_ms: u64,
+) -> Result<(), String> {
+    if completed < minimum_requests {
+        return Err(format!(
+            "completed {completed} requests below {} floor {minimum_requests}",
+            profile.as_str(),
+        ));
+    }
+    let achieved = completed as f64 / (elapsed_ms.max(1) as f64 / 1_000.0);
+    if achieved < profile.min_achieved_rps() {
+        return Err(format!(
+            "achieved RPS {achieved:.3} below {} floor {:.3}",
+            profile.as_str(),
+            profile.min_achieved_rps()
+        ));
+    }
+    Ok(())
 }
-
 fn requests_for_window(window_ms: u64, rps: f64) -> u64 {
     ((window_ms as f64 / 1_000.0) * rps).ceil() as u64
-}
-
-fn full_profile_enabled() -> bool {
-    std::env::var("CC_LB_STRESS_FULL").as_deref() == Ok("1")
 }
 
 fn write_evidence(output: &Path, evidence: &RunEvidence) -> Result<(), String> {
@@ -228,6 +266,11 @@ mod tests {
             run_id: None,
             output: None,
             only_wave: None,
+            enable_full_profile: false,
+            full_window_ms: None,
+            timed_load: false,
+            load_workers: None,
+            load_ramp: false,
         };
 
         // When: run input is parsed.
@@ -238,7 +281,8 @@ mod tests {
     }
 
     #[test]
-    fn full_profile_has_final_gate_shape() {
+    #[allow(non_snake_case)]
+    fn tx__full_profile_has_final_gate_shape() {
         // Given: the final validation profile used by Todo 15.
         let profile = super::RunProfile::Full;
 
@@ -255,7 +299,8 @@ mod tests {
     }
 
     #[test]
-    fn sub_one_rps_full_profile_cannot_pass() {
+    #[allow(non_snake_case)]
+    fn tx__sub_one_rps_full_profile_cannot_pass() {
         let profile = super::RunProfile::Full;
 
         let result = profile.validate_throughput(7, 1_200_000);

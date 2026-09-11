@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use cc_lb_storage_api::{AnthropicCompatibilityKvStore, CompatibilityKvRecord, StorageResult};
+type MaybeCompatibilityKvRecord = Option<CompatibilityKvRecord>;
 
 #[derive(Default)]
 pub(super) struct RecordingCompatibilityKv {
@@ -56,10 +57,7 @@ impl AnthropicCompatibilityKvStore for RecordingCompatibilityKv {
         Ok(())
     }
 
-    async fn get_compatibility_kv(
-        &self,
-        key: &str,
-    ) -> StorageResult<Option<CompatibilityKvRecord>> {
+    async fn get_compatibility_kv(&self, key: &str) -> StorageResult<MaybeCompatibilityKvRecord> {
         Ok(self.records.lock().expect("records lock").get(key).cloned())
     }
 

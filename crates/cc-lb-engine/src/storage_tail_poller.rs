@@ -1,18 +1,20 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use cc_lb_request_log::StorageTailUpdate;
 use cc_lb_storage_api::{RequestEvent, RequestEventStore, RequestEventStreamFilters};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
+use crate::clock::ClockHandle;
 const STORAGE_TAIL_PAGE_LIMIT: usize = 500;
 
 pub struct StorageTailPoller<S: RequestEventStore + ?Sized> {
     storage: Arc<S>,
     tx: broadcast::Sender<StorageTailUpdate>,
     poll_interval: Duration,
+    clock: ClockHandle,
     last_seen: AtomicU64,
 }
 
@@ -24,6 +26,7 @@ where
         storage: Arc<S>,
         tx: broadcast::Sender<StorageTailUpdate>,
         poll_interval: Duration,
+        clock: ClockHandle,
         initial_cursor: u64,
         shutdown_rx: watch::Receiver<bool>,
     ) -> JoinHandle<()> {
@@ -31,6 +34,7 @@ where
             storage,
             tx,
             poll_interval,
+            clock,
             last_seen: AtomicU64::new(initial_cursor),
         };
         tokio::spawn(poller.run(shutdown_rx))
@@ -85,7 +89,7 @@ where
         metrics::gauge!("sse_storage_tail_backlog_rows").set(rows.len() as f64);
         let last_delivered = rows.last().map(|(cursor, _)| *cursor);
         for (cursor, event) in rows {
-            record_lag(&event);
+            record_lag(&self.clock, &event);
             let _ = self.tx.send(StorageTailUpdate { cursor, event });
         }
         if let Some(cursor) = last_delivered {
@@ -94,15 +98,16 @@ where
     }
 }
 
-fn record_lag(event: &RequestEvent) {
+fn record_lag(clock: &ClockHandle, event: &RequestEvent) {
     let event_ms = event.ts_ms.unwrap_or_else(|| event.ts.saturating_mul(1000));
-    let lag = now_ms().saturating_sub(event_ms) as f64;
+    let lag = now_ms(clock).saturating_sub(event_ms) as f64;
     metrics::histogram!("sse_storage_tail_lag_ms").record(lag);
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+fn now_ms(clock: &ClockHandle) -> u64 {
+    clock
+        .now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_millis()
         .try_into()

@@ -4,7 +4,8 @@ use std::process::Command;
 use cc_lb_load_tests::assert_evidence_against_baseline;
 
 #[test]
-fn perf_budget_evidence_passes() {
+#[allow(non_snake_case)]
+fn tx__perf_budget_evidence_passes() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let evidence = root.join(cc_lb_load_tests::EVIDENCE_PATH);
     if !evidence.exists() {

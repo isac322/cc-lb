@@ -172,6 +172,7 @@ fn v5_messages_scope_salt_golden() {
     );
     assert_ne!(fully_salted, baseline);
     for (name, variant) in invalidator_variants(&request) {
+        assert_ne!(variant, request, "{name} mutator must change the request");
         assert_ne!(
             breakpoint_prefix_key(&variant, V3PromptCacheBlockSource::Message),
             baseline,
