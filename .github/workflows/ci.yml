@@ -380,9 +380,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
+      # The ARC container hook cannot serialize the nested rust-toolchain
+      # action's live TLS request on this runner. Install through one shell step
+      # so the hook receives only the command exit status.
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+              https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"
@@ -458,12 +470,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
-          components: llvm-tools-preview
-      - name: Install wasm targets for pinned toolchain
-        run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
+      # See the tx job: keep rustup network activity inside a plain shell step
+      # instead of the nested action that trips the ARC container hook.
+      - name: Install pinned Rust toolchain and wasm targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+              https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install 1.98.1 --profile minimal --component llvm-tools-preview
+          rustup default 1.98.1
+          rustup target add --toolchain 1.98.1 wasm32-wasip1 wasm32-unknown-unknown
       # Unlike clippy, coverage executes fixture-backed WASM tests, so retain
       # both targets installed above.
       - uses: ./.github/actions/setup-rust-cache
