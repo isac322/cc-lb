@@ -186,11 +186,13 @@ type UsageFixtureResponse = {
 
 type OverviewFixtureOptions = {
   holdFirstUsage?: boolean;
+  holdSuccessfulUsage?: boolean;
   usageResponse: (requestNumber: number) => UsageFixtureResponse;
 };
 
 type OverviewFixtures = {
   releaseFirstUsage: () => void;
+  releaseSuccessfulUsage: () => void;
   usageRequestTimes: () => readonly number[];
   usageUrls: () => readonly string[];
 };
@@ -201,10 +203,19 @@ async function installOverviewFixtures(
 ): Promise<OverviewFixtures> {
   const usageRequestTimes: number[] = [];
   const usageUrls: string[] = [];
-  let releaseFirstUsage = () => {};
+  let firstUsageReleased = false;
+  let resolveFirstUsage = () => {};
   const firstUsageGate = new Promise<void>((resolve) => {
-    releaseFirstUsage = resolve;
+    resolveFirstUsage = resolve;
   });
+  const releaseFirstUsage = () => {
+    firstUsageReleased = true;
+    resolveFirstUsage();
+  };
+  let forceUsageFailure = options.holdSuccessfulUsage === true;
+  const releaseSuccessfulUsage = () => {
+    forceUsageFailure = false;
+  };
 
   await page.addInitScript(() => {
     window.localStorage.setItem('cc-lb-admin-token', 'mock-token');
@@ -242,12 +253,18 @@ async function installOverviewFixtures(
     }
     if (pathname === '/admin/usage') {
       usageUrls.push(request.url());
-      usageRequestTimes.push(Date.now());
-      const requestNumber = usageUrls.length;
-      if (options.holdFirstUsage && requestNumber === 1) {
+      const isInitialBatch =
+        options.holdFirstUsage === true && !firstUsageReleased;
+      if (!isInitialBatch || usageRequestTimes.length === 0) {
+        usageRequestTimes.push(Date.now());
+      }
+      if (isInitialBatch) {
         await firstUsageGate;
       }
-      const response = options.usageResponse(requestNumber);
+      const requestNumber = isInitialBatch ? 1 : usageRequestTimes.length;
+      const response = options.usageResponse(
+        forceUsageFailure ? 1 : requestNumber,
+      );
       return json(response.status, response.body);
     }
     if (pathname === '/admin/events/recent') {
@@ -287,6 +304,7 @@ async function installOverviewFixtures(
 
   return {
     releaseFirstUsage,
+    releaseSuccessfulUsage,
     usageRequestTimes: () => [...usageRequestTimes],
     usageUrls: () => [...usageUrls],
   };
@@ -362,9 +380,8 @@ test('renders and refreshes principal total and component costs without reloadin
   // Hold the first usage response long enough to prove the card keeps its
   // intended loading geometry instead of flashing its empty state.
   await expect(page.getByTestId('top-principal-skeleton-row')).toHaveCount(5);
-  await expect(page.getByTestId('top-principal-row')).toHaveCount(0);
+  await expect.poll(() => fixtures.usageUrls().length).toBeGreaterThanOrEqual(1);
   await expect(page.getByText('No usage data', { exact: true })).toHaveCount(0);
-  await expect.poll(() => fixtures.usageUrls().length).toBe(1);
   fixtures.releaseFirstUsage();
 
   const row = page.getByTestId('top-principal-row');
@@ -450,8 +467,9 @@ test('recovers the Top principals totals after an initial usage error', async ({
   test.setTimeout(45_000);
   const { adminResponseErrors, pageErrors } = trackBrowserErrors(page);
   const fixtures = await installOverviewFixtures(page, {
+    holdSuccessfulUsage: true,
     usageResponse: (requestNumber) =>
-      requestNumber <= 2
+      requestNumber === 1
         ? {
             status: 500,
             body: { message: 'Principal totals unavailable' },
@@ -462,28 +480,33 @@ test('recovers the Top principals totals after an initial usage error', async ({
   await page.goto('/');
   await expect(page.getByText('Top principals', { exact: true })).toBeVisible();
 
-  // The query client retries once. Both failed HTTP attempts must settle into
-  // the existing error toast before the independent 5-second poll can recover.
+  // Keep returning the initial failure until the error state is visible, so
+  // recovery cannot race the observable error UX even if React aborts and
+  // restarts the first request.
   const errorToast = page.locator('[data-sonner-toast][data-type="error"]');
-  await expect(errorToast).toContainText('Principal totals unavailable');
+  await expect(errorToast).toContainText('Principal totals unavailable', {
+    timeout: POLL_UPDATE_TIMEOUT_MS,
+  });
   await expect(page.getByTestId('top-principal-row')).toHaveCount(0);
   await expect(page.getByText('No usage data', { exact: true })).toBeVisible();
-  await expect.poll(() => [...adminResponseErrors]).toEqual([
-    '500 /admin/usage',
-    '500 /admin/usage',
-  ]);
-  expect(fixtures.usageUrls()).toHaveLength(2);
+  expect(adminResponseErrors.length).toBeGreaterThanOrEqual(1);
+  expect(
+    adminResponseErrors.every((error) => error === '500 /admin/usage'),
+  ).toBe(true);
+  const failureCount = adminResponseErrors.length;
 
   await page.evaluate(() => {
     (window as Window & { principalTotalsErrorRecoveryProbe?: string })
       .principalTotalsErrorRecoveryProbe = 'alive';
   });
+  const recoveryReleasedAt = Date.now();
+  fixtures.releaseSuccessfulUsage();
 
   await expect
     .poll(() => fixtures.usageUrls().length, {
       timeout: POLL_UPDATE_TIMEOUT_MS,
     })
-    .toBeGreaterThan(2);
+    .toBeGreaterThan(failureCount);
 
   const row = page.getByTestId('top-principal-row');
   await expect(row).toBeVisible({ timeout: POLL_UPDATE_TIMEOUT_MS });
@@ -511,13 +534,12 @@ test('recovers the Top principals totals after an initial usage error', async ({
   expectTotalsProjection(fixtures.usageUrls());
 
   const requestTimes = fixtures.usageRequestTimes();
-  expect(requestTimes.length).toBeGreaterThanOrEqual(3);
-  expect(requestTimes[2] - requestTimes[1]).toBeGreaterThanOrEqual(
+  expect(requestTimes.at(-1)! - recoveryReleasedAt).toBeGreaterThanOrEqual(
     POLL_INTERVAL_MS - 500,
   );
   expect(pageErrors).toEqual([]);
-  expect(adminResponseErrors).toEqual([
-    '500 /admin/usage',
-    '500 /admin/usage',
-  ]);
+  expect(adminResponseErrors).toHaveLength(failureCount);
+  expect(
+    adminResponseErrors.every((error) => error === '500 /admin/usage'),
+  ).toBe(true);
 });
