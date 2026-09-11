@@ -550,8 +550,26 @@ test.describe('Upstream quota analysis browser behavior (mock API)', () => {
     expect(fixtures.analysisRequests[0]).toEqual(initialBounds);
     const initialAnalysisRequestCount = fixtures.analysisRequests.length;
 
-    await page.clock.runFor(60_000);
+    // Advance one polling interval at a time and observe its request before
+    // advancing again. Jumping 60 seconds at once can fire two interval ticks
+    // while the first fetch is still in flight, so React Query correctly
+    // coalesces the second tick and the test never observes the +60 bounds.
+    await page.clock.runFor(30_000);
+    const thirtySecondBounds = {
+      sinceUnixSecs: initialBounds.sinceUnixSecs + 30,
+      untilUnixSecs: initialBounds.untilUnixSecs + 30,
+    };
+    await expect
+      .poll(() =>
+        fixtures.seriesRequests.some(
+          (bounds) =>
+            bounds.sinceUnixSecs === thirtySecondBounds.sinceUnixSecs &&
+            bounds.untilUnixSecs === thirtySecondBounds.untilUnixSecs,
+        ),
+      )
+      .toBe(true);
 
+    await page.clock.runFor(30_000);
     const sixtySecondBounds = {
       sinceUnixSecs: initialBounds.sinceUnixSecs + 60,
       untilUnixSecs: initialBounds.untilUnixSecs + 60,
@@ -569,7 +587,16 @@ test.describe('Upstream quota analysis browser behavior (mock API)', () => {
     await expect(page.locator('.recharts-responsive-container')).toBeVisible();
 
     fixtures.showUpdatedAnalysis();
-    await page.clock.runFor(60_000);
+    await page.clock.runFor(30_000);
+    await expect
+      .poll(() =>
+        fixtures.seriesRequests.some(
+          (bounds) =>
+            bounds.untilUnixSecs === initialBounds.untilUnixSecs + 90,
+        ),
+      )
+      .toBe(true);
+    await page.clock.runFor(30_000);
 
     const oneHundredTwentySecondBounds = {
       sinceUnixSecs: initialBounds.sinceUnixSecs + 120,
