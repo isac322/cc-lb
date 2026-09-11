@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use std::sync::{Arc, Mutex};
 
 use cc_lb_aead::EncryptedOAuthTokens;
@@ -8,11 +10,12 @@ use super::{
     MetadataRefreshJob, MetadataRefreshJobHandler, MetadataRefreshJobOutcome, MetadataRefreshRunner,
 };
 use crate::error::Result;
+type MaybeUpstreamRecord = Option<UpstreamRecord>;
 
 #[tokio::test]
-async fn skips_stale_follow_up_when_current_generation_is_newer() -> Result<()> {
+async fn t2__skips_stale_follow_up_when_current_generation_is_newer() -> Result<()> {
     // Given: a job for generation 4 and storage already at generation 5.
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(1);
     let runner = FakeMetadataRefreshRunner::with_upstream(refreshable_record(upstream_id, 5));
     let handler = MetadataRefreshJobHandler::new(runner.clone());
 
@@ -28,9 +31,9 @@ async fn skips_stale_follow_up_when_current_generation_is_newer() -> Result<()> 
 }
 
 #[tokio::test]
-async fn applies_metadata_refresh_when_generation_is_current() -> Result<()> {
+async fn t2__applies_metadata_refresh_when_generation_is_current() -> Result<()> {
     // Given: a job whose credential generation matches storage.
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(2);
     let runner = FakeMetadataRefreshRunner::with_upstream(refreshable_record(upstream_id, 5));
     let handler = MetadataRefreshJobHandler::new(runner.clone());
 
@@ -46,9 +49,9 @@ async fn applies_metadata_refresh_when_generation_is_current() -> Result<()> {
 }
 
 #[tokio::test]
-async fn skips_when_upstream_was_removed_mid_flight() -> Result<()> {
+async fn t2__skips_when_upstream_was_removed_mid_flight() -> Result<()> {
     // Given: the queued job references an upstream no longer present in storage.
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(3);
     let runner = FakeMetadataRefreshRunner::without_upstream();
     let handler = MetadataRefreshJobHandler::new(runner.clone());
 
@@ -101,7 +104,7 @@ impl FakeMetadataRefreshRunner {
 }
 
 impl MetadataRefreshRunner for FakeMetadataRefreshRunner {
-    async fn load_upstream(&self, _upstream_id: Uuid) -> Result<Option<UpstreamRecord>> {
+    async fn load_upstream(&self, _upstream_id: Uuid) -> Result<MaybeUpstreamRecord> {
         Ok(self
             .state
             .lock()

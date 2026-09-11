@@ -74,6 +74,14 @@ where
         let index_hash = params.index_hash;
         let issued = store.issue("principal-a", "key-a", params.clone()).await?;
         let expected = expected_record(&params, issued.issued_at_unix_secs);
+        ensure!(
+            issued.issued_at_unix_secs == 1_700_000_000,
+            "issued timestamp should equal the fixed test clock"
+        );
+        ensure!(
+            issued.revoked_at_unix_secs.is_none(),
+            "newly issued key should not have a revocation timestamp"
+        );
         assert_record_bytes_eq(&issued, &expected)?;
 
         let fetched = store
@@ -166,8 +174,8 @@ where
             "revoked status mismatch"
         );
         ensure!(
-            revoked.revoked_at_unix_secs.is_some(),
-            "revoked timestamp should be set"
+            revoked.revoked_at_unix_secs == Some(1_700_000_000),
+            "revoked timestamp should equal the fixed test clock"
         );
         ensure!(
             revoked.index_hash == [0; 32],

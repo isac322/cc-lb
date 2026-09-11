@@ -89,6 +89,7 @@ pub fn start_upstream_rate_limit_writer(
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::sync::Arc;
 
@@ -126,7 +127,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_accepts_rate_limit_store_port() {
+    async fn t2__writer_accepts_rate_limit_store_port() {
         // Given: a store that implements only the rate-limit aggregate port.
         let store = Arc::new(RecordingRateLimitStore::default());
         let (sink, receiver) = UpstreamRateLimitSink::new();

@@ -35,7 +35,7 @@ fn test_state() -> AdminState {
 }
 
 #[tokio::test]
-async fn test_snapshot_health() {
+async fn t2__test_snapshot_health() {
     let app = router(test_state());
 
     let req = Request::builder()

@@ -51,7 +51,7 @@ fn tracing_events_have_required_fields() {
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    let upstream_id = uuid::Uuid::new_v4();
+    let upstream_id = uuid::Uuid::from_u128(1);
     let holder = "test-holder";
     let jitter_ms = 1234u64;
 

@@ -1,7 +1,6 @@
-use std::{str::FromStr, sync::Arc};
+use std::str::FromStr;
 
 use anyhow::Result;
-use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
     BackendKind, CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, MetaStore,
     RequestEvent, RequestEventProjections, RequestEventStore,
@@ -10,20 +9,9 @@ use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-fn postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL")
-        .ok()
-        .or_else(|| std::env::var("PG_URL").ok())
-}
-
 #[test]
-fn request_event_projections_postgres() {
-    let Some(url) = postgres_url() else {
-        eprintln!(
-            "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
-        );
-        return;
-    };
+fn t3_postgres__request_event_projections_postgres() {
+    let url = crate::postgres_fixture::required_postgres_url();
 
     tokio::runtime::Runtime::new()
         .expect("tokio runtime")
@@ -33,7 +21,10 @@ fn request_event_projections_postgres() {
 
 async fn run_projection_cases(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
-    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    let storage = PostgresStorage::new(
+        fixture.pool.clone(),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
+    );
     storage.initialize(BackendKind::Postgres).await?;
 
     append_with_projections_commits_all_rows_when_valid(&storage).await?;

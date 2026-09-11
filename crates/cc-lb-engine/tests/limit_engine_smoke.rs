@@ -19,7 +19,7 @@ fn engine(enabled: bool) -> (Arc<LimitEngine>, Arc<PrincipalView>) {
     (
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_engine::SystemClock),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         ),
         view,
     )

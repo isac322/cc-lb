@@ -52,7 +52,7 @@ fn flush(writer_epoch: Uuid, requests: i64, lease_until_unix_secs: u64) -> ApiKe
 }
 
 #[tokio::test]
-async fn api_key_usage_flush_is_idempotent_epoch_isolated_and_lease_guarded() {
+async fn t3__api_key_usage_flush_is_idempotent_epoch_isolated_and_lease_guarded() {
     let (_directory, _clock, storage) = storage().await;
     let first = Uuid::now_v7();
     let second = Uuid::now_v7();
@@ -104,7 +104,7 @@ async fn api_key_usage_flush_is_idempotent_epoch_isolated_and_lease_guarded() {
 }
 
 #[tokio::test]
-async fn api_key_usage_compaction_adds_repeated_folds_into_retired_bucket() {
+async fn t3__api_key_usage_compaction_adds_repeated_folds_into_retired_bucket() {
     let (_directory, clock, storage) = storage().await;
     let first = Uuid::now_v7();
     let second = Uuid::now_v7();

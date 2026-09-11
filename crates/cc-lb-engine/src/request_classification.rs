@@ -315,118 +315,151 @@ fn bounded_prefix(text: &str) -> &str {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use serde_json::json;
 
     use super::*;
 
     #[test]
-    fn header_agent_short_circuits_to_subagent() {
-        assert_eq!(
-            classify_client_request_kind(None, None, None, true),
-            Some("subagent")
-        );
-    }
+    fn request_classification_precedence_table() {
+        struct Case {
+            case: &'static str,
+            body: Option<Value>,
+            session_id: Option<&'static str>,
+            parent_session_id: Option<&'static str>,
+            has_claude_agent: bool,
+            expected: Option<&'static str>,
+        }
 
-    #[test]
-    fn recap_prompt_classifies_before_family_rules() {
-        let value = json!({
-            "system": [{
-                "type": "text",
-                "text": "operating in the Oh My Pi coding harness"
-            }],
-            "messages": [{
-                "role": "user",
-                "content": "The user stepped away and is coming back. Recap in under 40 words. Lead with the goal."
-            }]
-        });
-
-        assert_eq!(
-            classify_client_request_kind(Some(&value), Some("session-1"), None, false),
-            Some("recap")
-        );
-    }
-
-    #[test]
-    fn compaction_precedes_omp_main_marker() {
         let compaction = format!(
             "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n{}",
             SHARED_COMPACTION_SUMMARY_MARKER
         );
-        let value = json!({
-            "system": [{
-                "type": "text",
-                "text": "operating in the Oh My Pi coding harness"
-            }],
-            "messages": [{
-                "role": "user",
-                "content": [{"type": "text", "text": compaction}]
-            }],
-            "tools": [{"name": "Bash"}]
-        });
+        let cases = [
+            Case {
+                case: "header_agent_short_circuits_to_subagent",
+                body: None,
+                session_id: None,
+                parent_session_id: None,
+                has_claude_agent: true,
+                expected: Some("subagent"),
+            },
+            Case {
+                case: "recap_prompt_classifies_before_family_rules",
+                body: Some(json!({
+                    "system": [{
+                        "type": "text",
+                        "text": "operating in the Oh My Pi coding harness"
+                    }],
+                    "messages": [{
+                        "role": "user",
+                        "content": "The user stepped away and is coming back. Recap in under 40 words. Lead with the goal."
+                    }]
+                })),
+                session_id: Some("session-1"),
+                parent_session_id: None,
+                has_claude_agent: false,
+                expected: Some("recap"),
+            },
+            Case {
+                case: "compaction_precedes_omp_main_marker",
+                body: Some(json!({
+                    "system": [{
+                        "type": "text",
+                        "text": "operating in the Oh My Pi coding harness"
+                    }],
+                    "messages": [{
+                        "role": "user",
+                        "content": [{"type": "text", "text": compaction}]
+                    }],
+                    "tools": [{"name": "Bash"}]
+                })),
+                session_id: Some("session-1"),
+                parent_session_id: None,
+                has_claude_agent: false,
+                expected: Some("compaction"),
+            },
+            Case {
+                case: "advisor_precedes_shared_compaction_markers",
+                body: Some(json!({
+                    "system": [
+                        {
+                            "type": "text",
+                            "text": "x-anthropic-billing-header: cc_version=0.3.165.ab1; cc_entrypoint=local-agent; cch=00000"
+                        },
+                        {
+                            "type": "text",
+                            "text": "You shadow the main agent as a peer programmer:"
+                        }
+                    ],
+                    "messages": [{
+                        "role": "user",
+                        "content": format!(
+                            "Review this transcript quoting: {}",
+                            SHARED_COMPACTION_SUMMARY_MARKER
+                        )
+                    }]
+                })),
+                session_id: None,
+                parent_session_id: None,
+                has_claude_agent: false,
+                expected: Some("advisor"),
+            },
+            Case {
+                case: "senpi_auxiliary_marker_precedes_shared_recap_marker",
+                body: Some(json!({
+                    "system": "Generate a concise title for this coding-agent session.\n\nRules:\n- Use 3 to 6 words.",
+                    "messages": [{
+                        "role": "user",
+                        "content": "The user stepped away and is coming back. Recap in under 40 words."
+                    }]
+                })),
+                session_id: None,
+                parent_session_id: None,
+                has_claude_agent: false,
+                expected: Some("session_title"),
+            },
+            Case {
+                case: "request_without_provenance_is_unclassified",
+                body: Some(json!({
+                    "messages": [{
+                        "role": "user",
+                        "content": "The user stepped away and is coming back. Recap in under 40 words."
+                    }]
+                })),
+                session_id: None,
+                parent_session_id: None,
+                has_claude_agent: false,
+                expected: None,
+            },
+        ];
 
-        assert_eq!(
-            classify_client_request_kind(Some(&value), Some("session-1"), None, false),
-            Some("compaction")
-        );
+        for case in cases {
+            assert_eq!(
+                classify_client_request_kind(
+                    case.body.as_ref(),
+                    case.session_id,
+                    case.parent_session_id,
+                    case.has_claude_agent,
+                ),
+                case.expected,
+                "case={}",
+                case.case
+            );
+        }
     }
 
     #[test]
-    fn advisor_precedes_shared_compaction_markers() {
-        let value = json!({
-            "system": [
-                {
-                    "type": "text",
-                    "text": "x-anthropic-billing-header: cc_version=0.3.165.ab1; cc_entrypoint=local-agent; cch=00000"
-                },
-                {
-                    "type": "text",
-                    "text": "You shadow the main agent as a peer programmer:"
-                }
-            ],
-            "messages": [{
-                "role": "user",
-                "content": format!(
-                    "Review this transcript quoting: {}",
-                    SHARED_COMPACTION_SUMMARY_MARKER
-                )
-            }]
-        });
+    fn t1__bounded_prefix_handles_multibyte_boundary_safely() {
+        let mut text = "a".repeat(CLASSIFIER_TEXT_LIMIT - 1);
+        text.push('한');
+        text.push_str("tail");
 
-        assert_eq!(
-            classify_client_request_kind(Some(&value), None, None, false),
-            Some("advisor")
-        );
-    }
+        let prefix = bounded_prefix(&text);
 
-    #[test]
-    fn senpi_auxiliary_marker_precedes_shared_recap_marker() {
-        let value = json!({
-            "system": "Generate a concise title for this coding-agent session.\n\nRules:\n- Use 3 to 6 words.",
-            "messages": [{
-                "role": "user",
-                "content": "The user stepped away and is coming back. Recap in under 40 words."
-            }]
-        });
-
-        assert_eq!(
-            classify_client_request_kind(Some(&value), None, None, false),
-            Some("session_title")
-        );
-    }
-
-    #[test]
-    fn request_without_provenance_is_unclassified() {
-        let value = json!({
-            "messages": [{
-                "role": "user",
-                "content": "The user stepped away and is coming back. Recap in under 40 words."
-            }]
-        });
-
-        assert_eq!(
-            classify_client_request_kind(Some(&value), None, None, false),
-            None
-        );
+        assert_eq!(prefix.len(), CLASSIFIER_TEXT_LIMIT - 1);
+        assert!(prefix.is_char_boundary(prefix.len()));
+        assert_eq!(prefix, "a".repeat(CLASSIFIER_TEXT_LIMIT - 1));
     }
 }

@@ -136,3 +136,80 @@ fn fallback_error_value() -> Value {
         }
     })
 }
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn t1__error_normalizer_sse_canonical_frame() {
+        let normalized = ErrorNormalizer::new().normalize_sse_error_frame(
+            UpstreamKind::AnthropicDirect,
+            &Bytes::from_static(
+                br#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#,
+            ),
+        );
+
+        assert_eq!(
+        normalized,
+        Bytes::from_static(
+            b"event: error\ndata: {\"error\":{\"message\":\"bad\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}\n\n"
+        )
+    );
+    }
+
+    #[test]
+    fn t1__error_normalizer_sse_malformed_falls_back_to_api_error() {
+        let normalized = ErrorNormalizer::new().normalize_sse_error_frame(
+            UpstreamKind::AnthropicDirect,
+            &Bytes::from_static(b"not-json"),
+        );
+
+        assert_eq!(
+        normalized,
+        Bytes::from_static(
+            b"event: error\ndata: {\"error\":{\"message\":\"upstream error\",\"type\":\"api_error\"},\"type\":\"error\"}\n\n"
+        )
+    );
+    }
+
+    #[test]
+    fn t1__error_normalizer_build_http_preserves_protocol_headers_only() {
+        let mut original = HeaderMap::new();
+        for (name, value) in [
+            ("request-id", "req-1"),
+            ("anthropic-ratelimit-tier", "tier-1"),
+            ("set-cookie", "secret=cookie"),
+            ("x-custom", "drop-me"),
+        ] {
+            original.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
+
+        let response = ErrorNormalizer::new().build_http_error_response(
+            UpstreamKind::AnthropicDirect,
+            StatusCode::BAD_GATEWAY,
+            &Bytes::from_static(br#"{"type":"error"}"#),
+            &original,
+        );
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response.headers().get("request-id"),
+            Some(&HeaderValue::from_static("req-1"))
+        );
+        assert_eq!(
+            response.headers().get("anthropic-ratelimit-tier"),
+            Some(&HeaderValue::from_static("tier-1"))
+        );
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/json; charset=utf-8"))
+        );
+        assert!(!response.headers().contains_key("set-cookie"));
+        assert!(!response.headers().contains_key("x-custom"));
+    }
+}

@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 
 use cc_lb_control::audit_writer::{AuditEntry, AuditWriterSink};
 
+use crate::clock::ClockHandle;
 pub struct LimitRejectionAuditSubscriberHandle {
     shutdown_tx: oneshot::Sender<()>,
     join: JoinHandle<()>,
@@ -31,15 +32,17 @@ impl LimitRejectionAuditSubscriberHandle {
 pub fn spawn_lifecycle_limit_rejection_audit_subscriber(
     rx: mpsc::Receiver<LifecycleEvent>,
     audit_sink: Arc<AuditWriterSink>,
+    clock: ClockHandle,
 ) -> LimitRejectionAuditSubscriberHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(rx, audit_sink, shutdown_rx));
+    let join = tokio::spawn(subscriber_loop(rx, audit_sink, clock, shutdown_rx));
     LimitRejectionAuditSubscriberHandle { shutdown_tx, join }
 }
 
 async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     audit_sink: Arc<AuditWriterSink>,
+    clock: ClockHandle,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     loop {
@@ -47,7 +50,7 @@ async fn subscriber_loop(
             biased;
             event = rx.recv() => {
                 match event {
-                    Some(event) => handle_event(&audit_sink, event),
+                    Some(event) => handle_event(&audit_sink, &clock, event),
                     None => break,
                 }
             }
@@ -56,11 +59,11 @@ async fn subscriber_loop(
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(&audit_sink, event);
+        handle_event(&audit_sink, &clock, event);
     }
 }
 
-fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
+fn handle_event(audit_sink: &AuditWriterSink, clock: &ClockHandle, event: LifecycleEvent) {
     let LifecycleEvent::LimitDecision {
         event_id,
         decision:
@@ -116,7 +119,7 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
     });
 
     let entry = AuditEntry {
-        ts: system_time_unix_secs(SystemTime::now()),
+        ts: system_time_unix_secs(clock.now()),
         request_id: event_id,
         principal_id: subject.principal_id,
         route: request_summary.path,
@@ -165,6 +168,7 @@ fn system_time_unix_secs(t: SystemTime) -> u64 {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use cc_lb_control::audit_writer::spawn_audit_writer;
@@ -227,7 +231,11 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let audit_store = Arc::new(RecordingAuditStore::default());
         let (audit_sink, audit_join) = spawn_audit_writer(audit_store.clone(), 16);
-        let handle = spawn_lifecycle_limit_rejection_audit_subscriber(rx, Arc::new(audit_sink));
+        let handle = spawn_lifecycle_limit_rejection_audit_subscriber(
+            rx,
+            Arc::new(audit_sink),
+            Arc::new(crate::clock::TestClock::new_at_secs(1_700_000_000)),
+        );
 
         tx.send(LifecycleEvent::LimitDecision {
             event_id: eid("audit-a"),
@@ -268,11 +276,98 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn t2__concurrent_rejection_records_exact_metrics_and_audit() {
+        let (recorder, snapshotter) = cc_lb_testkit::local_recorder();
+        let _recorder_guard = cc_lb_testkit::install_local_recorder(&recorder);
+        let (tx, rx) = mpsc::channel(16);
+        let audit_store = Arc::new(RecordingAuditStore::default());
+        let (audit_sink, audit_join) = spawn_audit_writer(audit_store.clone(), 16);
+        let handle = spawn_lifecycle_limit_rejection_audit_subscriber(
+            rx,
+            Arc::new(audit_sink),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
+        );
+
+        tx.send(LifecycleEvent::LimitDecision {
+            event_id: eid("concurrent-rejection"),
+            decision: LimitDecisionKind::Rejected {
+                reason: "concurrent request cap exceeded".into(),
+                subject: Some(LimitSubject {
+                    principal_id: "principal-concurrent".into(),
+                    key_id: "key-concurrent".into(),
+                }),
+                request_summary: Some(LimitRequestSummary {
+                    model: "claude-sonnet-4-5-20250929".into(),
+                    path: "/v1/messages".into(),
+                    method: "POST".into(),
+                }),
+                route_summary: Some(RouteSummary {
+                    upstream_name: "fake_anthropic".into(),
+                }),
+                limit_violation: Some("Concurrent".into()),
+            },
+        })
+        .await
+        .expect("send concurrent rejection");
+        drop(tx);
+        handle.shutdown().await;
+        audit_join.await.expect("audit writer joins");
+
+        let entries = audit_store.entries.lock().expect("audit entries lock");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.ts, 1_700_000_000);
+        assert_eq!(entry.request_id, "concurrent-rejection");
+        assert_eq!(entry.principal_id, "principal-concurrent");
+        assert_eq!(entry.api_key_id.as_deref(), Some("key-concurrent"));
+        assert_eq!(entry.route, "/v1/messages");
+        assert_eq!(entry.upstream, "fake_anthropic");
+        assert_eq!(entry.model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+        assert_eq!(entry.status, StatusCode::TOO_MANY_REQUESTS.as_u16());
+        assert_eq!(entry.limit_violation.as_deref(), Some("Concurrent"));
+        drop(entries);
+
+        let samples = snapshotter.snapshot().into_vec();
+        for (name, labels) in [
+            (
+                "cclb_limit_hits_total",
+                vec![("kind", "Concurrent"), ("key_id", "key-concurrent")],
+            ),
+            (
+                "cclb_concurrent_rejects_total",
+                vec![("key_id", "key-concurrent")],
+            ),
+        ] {
+            let matching = samples
+                .iter()
+                .filter(|(key, _, _, _)| {
+                    key.key().name() == name
+                        && labels.iter().all(|(expected_key, expected_value)| {
+                            key.key().labels().any(|label| {
+                                label.key() == *expected_key && label.value() == *expected_value
+                            })
+                        })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "metric {name} with labels {labels:?}");
+            assert_eq!(
+                format!("{:?}", matching[0].3),
+                "Counter(1)",
+                "metric {name} with labels {labels:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn rejected_limit_decision_without_violation_is_skipped() {
         let (tx, rx) = mpsc::channel(16);
         let audit_store = Arc::new(RecordingAuditStore::default());
         let (audit_sink, audit_join) = spawn_audit_writer(audit_store.clone(), 16);
-        let handle = spawn_lifecycle_limit_rejection_audit_subscriber(rx, Arc::new(audit_sink));
+        let handle = spawn_lifecycle_limit_rejection_audit_subscriber(
+            rx,
+            Arc::new(audit_sink),
+            Arc::new(crate::clock::TestClock::new_at_secs(1_700_000_000)),
+        );
 
         tx.send(LifecycleEvent::LimitDecision {
             event_id: eid("audit-b"),

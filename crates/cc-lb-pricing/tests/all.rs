@@ -1,3 +1,7 @@
+#![allow(non_snake_case)]
+
+mod support;
+
 #[path = "lifecycle_pricing_renewal.rs"]
 mod lifecycle_pricing_renewal;
 

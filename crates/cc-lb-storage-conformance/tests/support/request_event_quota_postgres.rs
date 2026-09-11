@@ -9,7 +9,7 @@ macro_rules! define_request_event_quota_postgres_tests {
             FROM request_events_v1 WHERE event_id = $1";
 
         #[test]
-        fn request_event_quota_columns_are_persisted_postgres() {
+        fn t3_postgres__request_event_quota_columns_are_persisted_postgres() {
             run_postgres_scenario(
                 "request_event_quota_columns_are_persisted",
                 |backend| async move {
@@ -33,7 +33,7 @@ macro_rules! define_request_event_quota_postgres_tests {
 
                     let row = sqlx::query_as::<_, PostgresQuotaRow>(POSTGRES_QUOTA_SELECT)
                         .bind(request_event_quota_support::SELECTED_EVENT_ID)
-                        .fetch_one(&fixture.pool)
+                        .fetch_one(fixture.pool())
                         .await?;
                     let quota = request_event_quota_support::SELECTED_QUOTA;
                     assert_eq!(
@@ -53,7 +53,7 @@ macro_rules! define_request_event_quota_postgres_tests {
         }
 
         #[test]
-        fn request_event_cursor_defers_committed_rows_behind_old_snapshot_postgres() {
+        fn t3_postgres__request_event_cursor_defers_committed_rows_behind_old_snapshot_postgres() {
             run_postgres_scenario(
                 "request_event_cursor_defers_committed_rows_behind_old_snapshot",
                 |backend| async move {
@@ -62,7 +62,7 @@ macro_rules! define_request_event_quota_postgres_tests {
                     let event = request_event_quota_support::populated_event()?;
 
                     // Given an older repeatable-read transaction has established its snapshot.
-                    let mut blocker = fixture.pool.begin().await?;
+                    let mut blocker = fixture.pool().begin().await?;
                     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                         .execute(&mut *blocker)
                         .await?;
@@ -93,7 +93,7 @@ macro_rules! define_request_event_quota_postgres_tests {
         }
 
         #[test]
-        fn request_event_cursor_uses_highest_visible_seq_postgres() {
+        fn t3_postgres__request_event_cursor_uses_highest_visible_seq_postgres() {
             run_postgres_scenario(
                 "request_event_cursor_uses_highest_visible_seq",
                 |backend| async move {
@@ -115,7 +115,7 @@ macro_rules! define_request_event_quota_postgres_tests {
                     .bind(ts)
                     .bind(&payload)
                     .bind("cursor-later-xid")
-                    .fetch_one(&fixture.pool)
+                    .fetch_one(fixture.pool())
                     .await?;
 
                     let higher_seq = sqlx::query_scalar::<_, i64>(
@@ -125,7 +125,7 @@ macro_rules! define_request_event_quota_postgres_tests {
                     .bind(ts)
                     .bind(&payload)
                     .bind("cursor-earlier-xid")
-                    .fetch_one(&fixture.pool)
+                    .fetch_one(fixture.pool())
                     .await?;
 
                     assert!(
@@ -142,7 +142,8 @@ macro_rules! define_request_event_quota_postgres_tests {
         }
 
         #[test]
-        fn request_event_quota_columns_null_for_mismatch_and_historical_rows_postgres() {
+        fn t3_postgres__request_event_quota_columns_null_for_mismatch_and_historical_rows_postgres()
+        {
             run_postgres_scenario(
                 "request_event_quota_columns_null_for_mismatch_and_historical_rows",
                 |backend| async move {
@@ -165,18 +166,18 @@ macro_rules! define_request_event_quota_postgres_tests {
                     ))
                     .bind(historical_payload)
                     .bind(request_event_quota_support::HISTORICAL_EVENT_ID)
-                    .execute(&fixture.pool)
+                    .execute(fixture.pool())
                     .await?;
 
                     // When both rows are read directly after the migration.
                     let mismatch_row = sqlx::query_as::<_, PostgresQuotaRow>(POSTGRES_QUOTA_SELECT)
                         .bind(request_event_quota_support::MISMATCH_EVENT_ID)
-                        .fetch_one(&fixture.pool)
+                        .fetch_one(fixture.pool())
                         .await?;
                     let historical_row =
                         sqlx::query_as::<_, PostgresQuotaRow>(POSTGRES_QUOTA_SELECT)
                             .bind(request_event_quota_support::HISTORICAL_EVENT_ID)
-                            .fetch_one(&fixture.pool)
+                            .fetch_one(fixture.pool())
                             .await?;
 
                     // Then all dedicated quota columns stay NULL.

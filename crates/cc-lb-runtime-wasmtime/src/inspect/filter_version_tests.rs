@@ -1,6 +1,9 @@
+#![allow(non_snake_case)]
+
 use cc_lb_plugin_wire::schema::{HookKind, WireSchema, WireVersion};
 
 use super::{inspect_wasm, schema_section_name};
+use crate::WasmtimeRuntimeError;
 
 fn filter_plugin_wat() -> &'static str {
     r#"
@@ -13,16 +16,15 @@ fn filter_plugin_wat() -> &'static str {
     "#
 }
 
-fn metadata(version: WireVersion) -> Vec<u8> {
+fn metadata(version: u8) -> Vec<u8> {
     format!(
-        r#"{{"name":"filter-version-test","version":"0.0.1","description":"filter version fixture","usage":"test only","hooks":{{"filter":{{"wire_version":{},"description":"filter hook","usage":"test only"}}}}}}"#,
-        version.as_u8()
+        r#"{{"name":"filter-version-test","version":"0.0.1","description":"filter version fixture","usage":"test only","hooks":{{"filter":{{"wire_version":{version},"description":"filter hook","usage":"test only"}}}}}}"#
     )
     .into_bytes()
 }
 
 fn wasm_with_filter_schema(
-    declared_version: WireVersion,
+    declared_version: u8,
     section_version: WireVersion,
     fingerprint: &[u8; 32],
 ) -> Vec<u8> {
@@ -63,7 +65,7 @@ fn encode_leb128(buffer: &mut Vec<u8>, mut value: u64) {
 #[test]
 fn accepts_published_filter_v1_fingerprint() {
     let fingerprint = <cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT;
-    let wasm = wasm_with_filter_schema(WireVersion::V1, WireVersion::V1, &fingerprint);
+    let wasm = wasm_with_filter_schema(WireVersion::V1.as_u8(), WireVersion::V1, &fingerprint);
 
     let inspection = inspect_wasm(HookKind::Filter, &wasm).expect("V1 accepted");
 
@@ -71,4 +73,41 @@ fn accepts_published_filter_v1_fingerprint() {
         inspection.hook_versions.get(&HookKind::Filter),
         Some(&WireVersion::V1)
     );
+}
+
+#[test]
+fn t1__plugin_wire__mismatched_blake3_fingerprint_rejected_before_compilation() {
+    let mut fingerprint = <cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT;
+    fingerprint[0] ^= 1;
+    let wasm = wasm_with_filter_schema(WireVersion::V1.as_u8(), WireVersion::V1, &fingerprint);
+
+    let error = inspect_wasm(HookKind::Filter, &wasm)
+        .expect_err("a mismatched schema fingerprint must fail admission");
+
+    match error {
+        WasmtimeRuntimeError::ModuleRejected { reason } => {
+            assert!(reason.contains("cc_lb.schema.filter.v1"), "{reason}");
+            assert!(reason.contains("hash mismatch"), "{reason}");
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn t1__plugin_wire__unsupported_wire_version_rejected() {
+    let fingerprint = <cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT;
+    let wasm = wasm_with_filter_schema(255, WireVersion::V1, &fingerprint);
+
+    let error = inspect_wasm(HookKind::Filter, &wasm)
+        .expect_err("an unsupported declared wire version must fail admission");
+
+    match error {
+        WasmtimeRuntimeError::ModuleRejected { reason } => {
+            assert!(
+                reason.contains("filter") && reason.contains("unsupported wire version 255"),
+                "{reason}"
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
 }

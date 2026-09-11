@@ -323,6 +323,7 @@ fn u64_to_i64(value: u64, field: &str) -> Result<i64, SchedulerError> {
     i64::try_from(value).map_err(|_| SchedulerError::Job(format!("{field} exceeds i64::MAX")))
 }
 
+#[allow(non_snake_case)]
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use cc_lb_storage_api::CacheTtl;
@@ -354,7 +355,7 @@ mod tests {
     ";
 
     #[tokio::test]
-    async fn sqlite_insert_uses_task_max_attempts_override() {
+    async fn t3__sqlite_insert_uses_task_max_attempts_override() {
         let pool = SqlitePool::connect(":memory:").await.expect("sqlite pool");
         sqlx::query(CREATE_JOBS)
             .execute(&pool)

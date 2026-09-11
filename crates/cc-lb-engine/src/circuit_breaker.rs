@@ -423,12 +423,12 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::clock::SystemClock;
+    use crate::clock::TestClock;
 
     #[test]
     fn evict_removes_entry() {
         let registry = BreakerRegistry::new();
-        let clock = Arc::new(SystemClock);
+        let clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let _breaker = registry.breaker("test-upstream", BreakerRuntimeConfig::default(), clock);
         assert!(registry.get("test-upstream").is_some());
 
@@ -444,58 +444,59 @@ mod tests {
         assert!(!removed);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn drain_after_grace_period() {
         let registry = BreakerRegistry::new();
-        let clock = Arc::new(SystemClock);
+        let clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let _breaker = registry.breaker("test-upstream", BreakerRuntimeConfig::default(), clock);
         assert!(registry.get("test-upstream").is_some());
 
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         let grace = Duration::from_millis(50);
         let removed = registry.drain("test-upstream", grace).await;
 
         let elapsed = start.elapsed();
         assert!(removed);
         assert!(registry.get("test-upstream").is_none());
-        assert!(elapsed >= grace);
+        assert_eq!(elapsed, grace);
     }
 
     #[tokio::test]
-    async fn concurrent_evict_and_breaker_creation_safe() {
+    async fn concurrent_evict_then_breaker_recreation_safe() {
         let registry = Arc::new(BreakerRegistry::new());
-        let clock = Arc::new(SystemClock);
+        let clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let mut handles = vec![];
 
         for i in 0..5 {
+            let (evicted_tx, evicted_rx) = tokio::sync::oneshot::channel();
             let reg_clone = Arc::clone(&registry);
-            let clock = Arc::clone(&clock);
-            let handle = tokio::spawn(async move {
+            let evict_clock = Arc::clone(&clock);
+            let evict_handle = tokio::spawn(async move {
                 let upstream_name = format!("upstream-{}", i);
                 let _breaker =
-                    reg_clone.breaker(&upstream_name, BreakerRuntimeConfig::default(), clock);
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                reg_clone.evict(&upstream_name)
+                    reg_clone.breaker(&upstream_name, BreakerRuntimeConfig::default(), evict_clock);
+                let removed = reg_clone.evict(&upstream_name);
+                evicted_tx.send(()).expect("recreation task remains");
+                removed
             });
-            handles.push(handle);
-        }
+            handles.push(evict_handle);
 
-        for i in 0..5 {
             let reg_clone = Arc::clone(&registry);
             let clock = Arc::clone(&clock);
-            let handle = tokio::spawn(async move {
+            let recreate_handle = tokio::spawn(async move {
+                evicted_rx.await.expect("eviction completes");
                 let upstream_name = format!("upstream-{}", i);
-                tokio::time::sleep(Duration::from_millis(2)).await;
                 let _breaker =
                     reg_clone.breaker(&upstream_name, BreakerRuntimeConfig::default(), clock);
                 true
             });
-            handles.push(handle);
+            handles.push(recreate_handle);
         }
 
         for handle in handles {
             let result = handle.await;
             assert!(result.is_ok());
+            assert!(result.unwrap());
         }
 
         let names = registry.names();

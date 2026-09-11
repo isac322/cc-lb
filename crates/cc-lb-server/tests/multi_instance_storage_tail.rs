@@ -9,7 +9,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, PostgresPoolConfig, StorageConfig};
-use cc_lb_engine::{ClockHandle, SystemClock};
 use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
 use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
@@ -28,21 +27,14 @@ const STORAGE_TAIL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
 // seconds, so scale by CC_LB_TEST_READY_TIMEOUT_SECS (120 in CI) like the
 // sibling managed_key_multi_instance test. A hardcoded 5s here flaked.
 fn storage_tail_timeout() -> Duration {
-    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(STORAGE_TAIL_TIMEOUT_DEFAULT)
+    STORAGE_TAIL_TIMEOUT_DEFAULT
 }
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn storage_tail_reaches_second_instance_over_pg_notify() -> TestResult<()> {
-    let Some(database_url) = ci_postgres_url() else {
-        eprintln!("SKIP: CI_POSTGRES_URL unset");
-        return Ok(());
-    };
+#[tokio::test]
+async fn t3_postgres__storage_tail_reaches_second_instance_over_pg_notify() -> TestResult<()> {
+    let database_url = crate::required_ci_postgres_url().await?;
     let _serial = crate::common::postgres_test_lock(&database_url).await?;
 
     reset_request_event_tables(&database_url).await?;
@@ -88,12 +80,8 @@ async fn storage_tail_reaches_second_instance_over_pg_notify() -> TestResult<()>
     Ok(())
 }
 
-fn ci_postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL").ok()
-}
-
 async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {
-    let clock: ClockHandle = Arc::new(SystemClock);
+    let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(database_url)
@@ -108,7 +96,7 @@ async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {
 }
 
 async fn build_running_app(database_url: &str, label: &'static str) -> TestResult<RunningApp> {
-    let clock: ClockHandle = Arc::new(SystemClock);
+    let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
     let pool = PgPoolOptions::new()
         .max_connections(8)
         .connect(database_url)
@@ -212,7 +200,7 @@ async fn next_sse_frame(body: &mut Body, buffer: &mut String) -> TestResult<Stri
 }
 
 fn request_event() -> RequestEvent {
-    let event_id = format!("event-multi-instance-tail-{}", uuid::Uuid::now_v7());
+    let event_id = format!("event-multi-instance-tail-{}", uuid::Uuid::from_u128(1));
     RequestEvent {
         ts: 1_800_000_000,
         ts_ms: Some(1_800_000_000_000),

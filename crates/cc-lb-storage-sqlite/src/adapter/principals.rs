@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheKeepaliveConfig, PrincipalCreate, PrincipalKind,
-    PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageError, StorageResult,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheKeepaliveConfig, ChangeChannel, PrincipalCreate,
+    PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageError, StorageResult,
     validate_identifier,
 };
 use serde::de::DeserializeOwned;
@@ -9,7 +9,7 @@ use serde_json::Value;
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
-use crate::{SqliteStorage, map_sqlx_error};
+use crate::{SqliteStorage, adapter::notifier::publish_change, map_sqlx_error};
 
 #[async_trait]
 impl PrincipalStore for SqliteStorage {
@@ -56,7 +56,9 @@ impl PrincipalStore for SqliteStorage {
         .await
         .map_err(map_sqlite_error)?;
         let record = principal_from_row(row)?;
+        let payload = record.id.to_string();
         tx.commit().await.map_err(map_sqlx_error)?;
+        publish_change(ChangeChannel::Principal, payload, self.clock());
         Ok(record)
     }
 
@@ -197,11 +199,16 @@ impl PrincipalStore for SqliteStorage {
         .fetch_optional(&mut *tx)
         .await
         .map_err(map_sqlite_error)?;
-        if row.is_some() {
+        let record = optional_updated_principal_in_tx(&mut tx, id, row).await?;
+        if record.is_some() {
             cascade_plugin_chains_in_tx(&mut tx, id).await?;
         }
-        let record = optional_updated_principal_in_tx(&mut tx, id, row).await?;
+        let payload = record.as_ref().map(|record| record.id.to_string());
         tx.commit().await.map_err(map_sqlx_error)?;
+        if let Some(payload) = payload {
+            publish_change(ChangeChannel::PluginChain, &payload, self.clock());
+            publish_change(ChangeChannel::Principal, payload, self.clock());
+        }
         Ok(record)
     }
 
@@ -226,7 +233,12 @@ impl PrincipalStore for SqliteStorage {
             .await
             .map_err(map_sqlx_error)?;
         let deleted = result.rows_affected() == 1;
+        let payload = deleted.then(|| id.to_string());
         tx.commit().await.map_err(map_sqlx_error)?;
+        if let Some(payload) = payload {
+            publish_change(ChangeChannel::PluginChain, &payload, self.clock());
+            publish_change(ChangeChannel::Principal, payload, self.clock());
+        }
         Ok(deleted)
     }
 
@@ -246,7 +258,15 @@ impl PrincipalStore for SqliteStorage {
         .fetch_optional(self.pool())
         .await
         .map_err(map_sqlite_error)?;
-        row.map(principal_from_row).transpose()
+        let record = row.map(principal_from_row).transpose()?;
+        if let Some(record) = &record {
+            publish_change(
+                ChangeChannel::Principal,
+                record.id.to_string(),
+                self.clock(),
+            );
+        }
+        Ok(record)
     }
 }
 
@@ -301,7 +321,15 @@ async fn update_principal(
     .fetch_optional(storage.pool())
     .await
     .map_err(map_sqlite_error)?;
-    optional_updated_principal(storage, id, row).await
+    let record = optional_updated_principal(storage, id, row).await?;
+    if let Some(record) = &record {
+        publish_change(
+            ChangeChannel::Principal,
+            record.id.to_string(),
+            storage.clock(),
+        );
+    }
+    Ok(record)
 }
 
 fn cache_keepalive_binding(

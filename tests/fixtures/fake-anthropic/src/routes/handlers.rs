@@ -61,7 +61,7 @@ pub(crate) async fn messages(
             "forced fake weather timeout response",
         );
     }
-    let mode = FakeMode::from_headers(&headers);
+    let mode = FakeMode::from_headers(&headers, state.config.default_mode);
     if let Some(response) = mode_response(mode, weather.retry_after()).await {
         return response;
     }

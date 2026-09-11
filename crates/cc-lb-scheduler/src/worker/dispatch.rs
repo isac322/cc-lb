@@ -59,13 +59,14 @@ pub(super) fn singleton_job_handler(
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use apalis::prelude::Data;
-    use cc_lb_clock::SystemClock;
+    use cc_lb_clock::TestClock;
 
     use crate::error::SchedulerError;
     use crate::jobs::metadata_refresh::MetadataRefreshJob;
@@ -76,7 +77,7 @@ mod tests {
     use super::{ENTITY_TIMEOUT, SINGLETON_TIMEOUT, entity_job_handler, singleton_job_handler};
 
     #[tokio::test]
-    async fn entity_handler_invokes_ctx_dispatch_closure() {
+    async fn t2__entity_handler_invokes_ctx_dispatch_closure() {
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
         let ctx = SchedulerCtx::new(
@@ -86,11 +87,11 @@ mod tests {
                 Box::pin(async { Ok(JobOutcome::Done) })
             }),
             Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            Arc::new(SystemClock),
+            Arc::new(TestClock::new_at_secs(1_800_000_000)),
         );
 
         let outcome = entity_job_handler(
-            AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(uuid::Uuid::new_v4(), 1)),
+            AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(uuid::Uuid::from_u128(1), 1)),
             Data::new(ctx),
         )
         .await
@@ -101,7 +102,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn singleton_handler_invokes_ctx_dispatch_closure() {
+    async fn t2__singleton_handler_invokes_ctx_dispatch_closure() {
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
         let ctx = SchedulerCtx::new(
@@ -115,7 +116,7 @@ mod tests {
                     })
                 })
             }),
-            Arc::new(SystemClock),
+            Arc::new(TestClock::new_at_secs(1_800_000_000)),
         );
 
         let outcome = singleton_job_handler(
@@ -135,17 +136,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn singleton_handler_maps_dispatch_hang_to_job_timeout() {
+    async fn t2__singleton_handler_maps_dispatch_hang_to_job_timeout() {
         let ctx = SchedulerCtx::new(
             Default::default(),
             Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            Arc::new(|_job| {
-                Box::pin(async {
-                    tokio::time::sleep(SINGLETON_TIMEOUT + Duration::from_secs(5)).await;
-                    Ok(JobOutcome::Done)
-                })
-            }),
-            Arc::new(SystemClock),
+            Arc::new(|_job| Box::pin(std::future::pending())),
+            Arc::new(TestClock::new_at_secs(1_800_000_000)),
         );
 
         let err = singleton_job_handler(
@@ -165,21 +161,16 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn entity_handler_maps_dispatch_hang_to_job_timeout() {
+    async fn t2__entity_handler_maps_dispatch_hang_to_job_timeout() {
         let ctx = SchedulerCtx::new(
             Default::default(),
-            Arc::new(|_job| {
-                Box::pin(async {
-                    tokio::time::sleep(ENTITY_TIMEOUT + Duration::from_secs(5)).await;
-                    Ok(JobOutcome::Done)
-                })
-            }),
+            Arc::new(|_job| Box::pin(std::future::pending())),
             Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            Arc::new(SystemClock),
+            Arc::new(TestClock::new_at_secs(1_800_000_000)),
         );
 
         let err = entity_job_handler(
-            AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(uuid::Uuid::new_v4(), 1)),
+            AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(uuid::Uuid::from_u128(2), 1)),
             Data::new(ctx),
         )
         .await

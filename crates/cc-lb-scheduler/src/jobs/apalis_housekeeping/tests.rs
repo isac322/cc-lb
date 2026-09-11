@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 const DAY_SECS: u64 = 86_400;
 const NOW_SECS: u64 = 2_000_000;
 const HOUSEKEEPING_REPEAT_COUNT: usize = 100;
@@ -19,7 +21,8 @@ mod sqlite {
     };
 
     #[tokio::test]
-    async fn prunes_old_workers_done_and_failed_jobs() -> Result<(), Box<dyn std::error::Error>> {
+    async fn t3__prunes_old_workers_done_and_failed_jobs() -> Result<(), Box<dyn std::error::Error>>
+    {
         let pool = SqlitePool::connect(":memory:").await?;
         SqliteStorage::setup(&pool).await?;
         create_cache_keepalive_sessions_table(&pool).await?;
@@ -45,7 +48,8 @@ mod sqlite {
     }
 
     #[tokio::test]
-    async fn remains_successful_across_repeated_runs() -> Result<(), Box<dyn std::error::Error>> {
+    async fn t3__remains_successful_across_repeated_runs() -> Result<(), Box<dyn std::error::Error>>
+    {
         let pool = SqlitePool::connect(":memory:").await?;
         SqliteStorage::setup(&pool).await?;
         create_cache_keepalive_sessions_table(&pool).await?;
@@ -68,7 +72,7 @@ mod sqlite {
     }
 
     #[tokio::test]
-    async fn reaps_stale_running_locks_and_leaves_fresh_locks_alone()
+    async fn t3__reaps_stale_running_locks_and_leaves_fresh_locks_alone()
     -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
         SqliteStorage::setup(&pool).await?;
@@ -121,7 +125,7 @@ mod sqlite {
     }
 
     #[tokio::test]
-    async fn terminalizes_stale_running_keepalive_sessions_without_reenqueuing_jobs()
+    async fn t3__terminalizes_stale_running_keepalive_sessions_without_reenqueuing_jobs()
     -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
         SqliteStorage::setup(&pool).await?;
@@ -317,7 +321,6 @@ mod sqlite {
 
 #[cfg(feature = "postgres")]
 mod postgres {
-    use std::str::FromStr as _;
 
     use apalis_postgres::PostgresStorage;
     use chrono::{DateTime, Utc};
@@ -325,7 +328,7 @@ mod postgres {
         PgPool,
         postgres::{PgConnectOptions, PgPoolOptions},
     };
-    use uuid::Uuid;
+    use std::str::FromStr as _;
 
     use super::{
         ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler, DAY_SECS,
@@ -334,41 +337,49 @@ mod postgres {
     };
 
     #[tokio::test]
-    async fn prunes_old_workers_done_and_failed_jobs() -> Result<(), Box<dyn std::error::Error>> {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!("SKIP: DATABASE_URL not set; skipping postgres housekeeping test");
-            return Ok(());
-        };
-        if !is_safe_database_url(&url) {
-            eprintln!("SKIP: DATABASE_URL is not a recognized local test database");
-            return Ok(());
-        }
-        let db = format!("cc_lb_scheduler_housekeeping_{}", Uuid::new_v4().simple());
-        let options = PgConnectOptions::from_str(&url)?;
-        let admin = PgPoolOptions::new()
+    async fn t3_postgres__prunes_old_workers_done_and_failed_jobs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = cc_lb_storage_conformance::postgres_fixture().await?;
+        let search_path = format!("{},public", fixture.schema_name());
+        let admin_options = PgConnectOptions::from_str(fixture.database_url())?
+            .options([("search_path", search_path.as_str())]);
+        let admin_pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect_with(options.clone())
+            .connect_with(admin_options.clone())
             .await?;
-        if let Err(error) = sqlx::query(&format!(r#"CREATE DATABASE "{db}""#))
-            .execute(&admin)
-            .await
-        {
-            eprintln!("SKIP: could not create temporary postgres database: {error}");
-            admin.close().await;
-            return Ok(());
+        let test_result = async {
+            let endpoint = format!(
+                "{} {}",
+                admin_options.get_host(),
+                admin_options.get_database().unwrap_or_default()
+            );
+            assert!(
+                is_safe_database_url(&endpoint),
+                "CI_POSTGRES_URL must identify localhost, 127.0.0.1, or cc_lb_test"
+            );
+            let suffix = fixture.schema_name().trim_start_matches("cc_lb_test_");
+            let db = format!("cc_lb_scheduler_housekeeping_{suffix}");
+            sqlx::query(&format!(r#"CREATE DATABASE "{db}""#))
+                .execute(&admin_pool)
+                .await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(admin_options.database(&db))
+                .await?;
+            let test_result = assert_postgres_housekeeping(&pool).await;
+            pool.close().await;
+            let drop_result = sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{db}""#))
+                .execute(&admin_pool)
+                .await;
+            test_result?;
+            drop_result?;
+            Ok::<(), Box<dyn std::error::Error>>(())
         }
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(options.database(&db))
-            .await?;
-        let test_result = assert_postgres_housekeeping(&pool).await;
-        pool.close().await;
-        let drop_result = sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{db}""#))
-            .execute(&admin)
-            .await;
-        admin.close().await;
+        .await;
+        admin_pool.close().await;
+        let teardown_result = fixture.teardown().await;
         test_result?;
-        drop_result?;
+        teardown_result?;
         Ok(())
     }
 

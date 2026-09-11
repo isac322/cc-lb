@@ -8,9 +8,10 @@ use axum::body::Bytes;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::time::sleep;
 
+use crate::modes::FakeMode;
 use crate::oauth_pause::OAuthRefreshPause;
 use crate::weather::WeatherConfig;
 
@@ -18,6 +19,7 @@ use super::state::with_fixture_headers;
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
+    pub default_mode: FakeMode,
     pub slow_mode_bps: u64,
     pub files_cap_bytes: usize,
     pub tokens_expire_in: u64,
@@ -29,6 +31,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            default_mode: FakeMode::Ok,
             slow_mode_bps: 1024,
             files_cap_bytes: 104_857_600,
             tokens_expire_in: 3600,
@@ -47,7 +50,7 @@ pub struct MessageScript {
 struct MessageScriptInner {
     responses: Mutex<VecDeque<ScriptedMessageResponse>>,
     requests: Mutex<Vec<RecordedMessageRequest>>,
-    notify: Notify,
+    arrival_tx: watch::Sender<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -71,7 +74,7 @@ impl Default for MessageScript {
             inner: Arc::new(MessageScriptInner {
                 responses: Mutex::new(VecDeque::new()),
                 requests: Mutex::new(Vec::new()),
-                notify: Notify::new(),
+                arrival_tx: watch::channel(0).0,
             }),
         }
     }
@@ -106,13 +109,14 @@ impl MessageScript {
         requests.len()
     }
 
-    pub async fn wait_for_requests(&self, expected: usize, timeout: Duration) -> bool {
+    pub async fn wait_for_request_arrival(&self, expected: usize, timeout: Duration) -> bool {
+        let mut arrivals = self.inner.arrival_tx.subscribe();
         tokio::time::timeout(timeout, async {
-            loop {
-                if self.request_count() >= expected {
-                    return;
-                }
-                self.inner.notify.notified().await;
+            while *arrivals.borrow_and_update() < expected {
+                arrivals
+                    .changed()
+                    .await
+                    .expect("message script arrival sender remains open");
             }
         })
         .await
@@ -130,16 +134,19 @@ impl MessageScript {
             })
             .collect::<BTreeMap<_, _>>();
         let body_json = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
-        let mut requests = match self.inner.requests.lock() {
-            Ok(requests) => requests,
-            Err(poisoned) => poisoned.into_inner(),
+        let request_count = {
+            let mut requests = match self.inner.requests.lock() {
+                Ok(requests) => requests,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            requests.push(RecordedMessageRequest {
+                headers,
+                body: body.to_vec(),
+                body_json,
+            });
+            requests.len()
         };
-        requests.push(RecordedMessageRequest {
-            headers,
-            body: body.to_vec(),
-            body_json,
-        });
-        self.inner.notify.notify_waiters();
+        self.inner.arrival_tx.send_replace(request_count);
     }
 
     pub(crate) fn pop_response(&self) -> Option<ScriptedMessageResponse> {
@@ -166,17 +173,17 @@ impl ScriptedMessageResponse {
             status: StatusCode::OK,
             headers: BTreeMap::new(),
             body: json!({
-                "id": "msg_fake_warmup_000000000000000000",
+                "id": "msg_fake_000000000000000000000000",
                 "type": "message",
                 "role": "assistant",
-                "model": "claude-haiku-4-5-20251001",
+                "model": "claude-3-5-sonnet-20241022",
                 "content": [{
                     "type": "text",
                     "text": "fake anthropic fixture response HELLO"
                 }],
                 "stop_reason": "end_turn",
                 "stop_sequence": null,
-                "usage": {"input_tokens": 1, "output_tokens": 1}
+                "usage": {"input_tokens": 100, "output_tokens": 50}
             }),
             delay: Duration::ZERO,
         }

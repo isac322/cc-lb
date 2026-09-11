@@ -11,9 +11,50 @@ pub(crate) struct FabricRef<'a> {
 
 pub(crate) const MESSAGES_BODY: &str =
     r#"{"model":"fake-alpha","max_tokens":8,"messages":[{"role":"user","content":"stress"}]}"#;
-const TIMED_LOAD_ENV: &str = "CC_LB_STRESS_TIMED_LOAD";
-const LOAD_WORKERS_ENV: &str = "CC_LB_STRESS_LOAD_WORKERS";
-const LOAD_RAMP_ENV: &str = "CC_LB_STRESS_LOAD_RAMP";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoadConfig {
+    timed: bool,
+    workers: u64,
+    ramp: bool,
+}
+
+impl LoadConfig {
+    pub fn new(timed: bool, workers: u64, ramp: bool) -> Result<Self, String> {
+        if workers == 0 {
+            return Err("--load-workers must be positive".to_owned());
+        }
+        Ok(Self {
+            timed,
+            workers,
+            ramp,
+        })
+    }
+
+    pub const fn timed(self) -> bool {
+        self.timed
+    }
+
+    pub fn workers_for_wave(self, wave_index: usize) -> u64 {
+        if !self.ramp {
+            return self.workers;
+        }
+        let exponent = u32::try_from(wave_index).unwrap_or(u32::MAX).min(10);
+        self.workers
+            .saturating_mul(2_u64.saturating_pow(exponent))
+            .min(1_024)
+    }
+}
+
+impl Default for LoadConfig {
+    fn default() -> Self {
+        Self {
+            timed: false,
+            workers: 16,
+            ramp: false,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BatchResult {
@@ -32,20 +73,21 @@ pub fn replica_request_count(total: u64, replica_index: usize, replica_count: us
 
 pub fn request_wave_via_fabric(
     fabric: FabricRef,
+    config: LoadConfig,
     replica_ports: &[ReplicaPorts],
     key: &str,
     target_per_wave: u64,
     duration_secs: u64,
     wave_index: usize,
 ) -> Result<Vec<(usize, BatchResult)>, String> {
-    if timed_load_enabled() {
+    if config.timed() {
         return crate::multi_replica_load_timed::request_timed_wave_via_fabric(
             fabric.names,
             fabric.run_id,
             replica_ports,
             key,
             duration_secs,
-            load_worker_count_for_wave(wave_index),
+            config.workers_for_wave(wave_index),
         );
     }
     replica_ports
@@ -63,28 +105,6 @@ pub fn request_wave_via_fabric(
             Ok((index, result))
         })
         .collect()
-}
-
-pub fn timed_load_enabled() -> bool {
-    std::env::var(TIMED_LOAD_ENV).as_deref() == Ok("1")
-}
-
-pub fn load_worker_count() -> u64 {
-    std::env::var(LOAD_WORKERS_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(16)
-}
-
-pub fn load_worker_count_for_wave(wave_index: usize) -> u64 {
-    let base = load_worker_count();
-    if std::env::var(LOAD_RAMP_ENV).as_deref() != Ok("1") {
-        return base;
-    }
-    let exponent = u32::try_from(wave_index).unwrap_or(u32::MAX).min(10);
-    base.saturating_mul(2_u64.saturating_pow(exponent))
-        .min(1_024)
 }
 
 fn request_count_batch_via_fabric(
@@ -177,7 +197,7 @@ pub(crate) fn parse_batch_output(output: &str) -> Result<BatchResult, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_batch_output;
+    use super::{LoadConfig, parse_batch_output};
 
     #[test]
     fn parse_batch_output_records_failed_requests() {
@@ -203,5 +223,13 @@ mod tests {
     fn replica_request_count_distributes_remainder() {
         assert_eq!(super::replica_request_count(5, 0, 2), 3);
         assert_eq!(super::replica_request_count(5, 1, 2), 2);
+    }
+
+    #[test]
+    fn load_configuration_is_explicit_and_deterministic() {
+        let config = LoadConfig::new(true, 8, true).expect("valid load configuration");
+        assert!(config.timed());
+        assert_eq!(config.workers_for_wave(0), 8);
+        assert_eq!(config.workers_for_wave(3), 64);
     }
 }

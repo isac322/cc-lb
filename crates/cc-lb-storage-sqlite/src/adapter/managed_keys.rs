@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_storage_api::{
-    ManagedKeyStore, StorageError, StorageResult,
+    ChangeChannel, ManagedKeyStore, StorageError, StorageResult,
     types::{
         ApiKeyMutation, IssueParams, KeyStatus, Limit, PrincipalKindLite, StoredApiKeyRecord,
         UpstreamKind,
@@ -10,7 +10,7 @@ use cc_lb_storage_api::{
 };
 use sqlx::{Row, sqlite::SqliteRow};
 
-use crate::{SqliteStorage, map_sqlx_error};
+use crate::{SqliteStorage, adapter::notifier::publish_change, map_sqlx_error};
 
 #[async_trait]
 impl ManagedKeyStore for SqliteStorage {
@@ -45,6 +45,7 @@ impl ManagedKeyStore for SqliteStorage {
         };
 
         insert_record(self, principal_id, key_id, &record).await?;
+        publish_change(ChangeChannel::Principal, principal_id, self.clock());
         Ok(record)
     }
 
@@ -117,7 +118,10 @@ impl ManagedKeyStore for SqliteStorage {
         };
 
         apply_mutation(&mut record, mutation, self.clock());
-        update_record(self, principal_id, key_id, &record).await
+        if update_record(self, principal_id, key_id, &record).await? {
+            publish_change(ChangeChannel::Principal, principal_id, self.clock());
+        }
+        Ok(())
     }
 
     async fn revoke_zero_secrets(&self, principal_id: &str, key_id: &str) -> StorageResult<()> {
@@ -136,7 +140,10 @@ impl ManagedKeyStore for SqliteStorage {
         record.verify_hash = [0; 32];
         record.secret_salt = [0; 16];
 
-        update_record(self, principal_id, key_id, &record).await
+        if update_record(self, principal_id, key_id, &record).await? {
+            publish_change(ChangeChannel::Principal, principal_id, self.clock());
+        }
+        Ok(())
     }
 }
 
@@ -206,10 +213,10 @@ async fn update_record(
     principal_id: &str,
     key_id: &str,
     record: &StoredApiKeyRecord,
-) -> StorageResult<()> {
+) -> StorageResult<bool> {
     let limit_overrides = serde_json::to_string(&record.limit_overrides)?;
 
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE managed_keys_v1 SET \
          secret_hash = ?, expires_at = ?, status = ?, label = ?, revoked_at = ?, verify_hash = ?, \
          secret_salt = ?, upstream_kind = ?, limit_overrides = ?, last_4 = ?, description = ?, \
@@ -242,7 +249,7 @@ async fn update_record(
     .await
     .map_err(map_managed_sqlx_error)?;
 
-    Ok(())
+    Ok(result.rows_affected() == 1)
 }
 
 fn row_to_keyed_record(row: SqliteRow) -> StorageResult<(String, String, StoredApiKeyRecord)> {

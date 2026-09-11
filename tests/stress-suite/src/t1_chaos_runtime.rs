@@ -1,7 +1,8 @@
-use std::net::SocketAddr;
+use std::io::{Read as _, Write as _};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::multi_replica_http::{request, wait_for_healthy, wait_for_tcp};
 use crate::supervisor_process::SupervisedChild;
@@ -9,18 +10,51 @@ use crate::t1_chaos::{Ports, ServerPorts};
 
 const ADMIN_TOKEN: &str = "stress-t1-admin";
 const MASTER_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-const CHAOS_LATENCY_MS: u64 = 250;
+const CHAOS_LATENCY_MS: u64 = 500;
+const DROP_ATTEMPTS: u64 = 200;
+const RST_AFTER_BYTES: u64 = 128;
+const TRUNCATE_AFTER_EVENTS: u64 = 2;
 const MESSAGES_BODY: &str =
     r#"{"model":"fake-alpha","max_tokens":8,"messages":[{"role":"user","content":"T1"}]}"#;
+const STREAM_MESSAGES_BODY: &str = r#"{"model":"fake-alpha","max_tokens":8,"messages":[{"role":"user","content":"T1"}],"stream":true}"#;
 
 pub(super) struct Measurements {
     pub(super) control: RequestMeasurement,
-    pub(super) chaos: RequestMeasurement,
+    pub(super) latency: RequestMeasurement,
+    pub(super) drop: DropMeasurement,
+    pub(super) rst: RstMeasurement,
+    pub(super) truncate: TruncateMeasurement,
 }
 
 pub(super) struct RequestMeasurement {
     pub(super) elapsed_ms: u64,
     pub(super) status: u16,
+}
+
+pub(super) struct DropMeasurement {
+    pub(super) attempts: u64,
+    pub(super) dropped: u64,
+    pub(super) passed: u64,
+}
+
+pub(super) struct RstMeasurement {
+    pub(super) status: Option<u16>,
+    pub(super) body_bytes: usize,
+    pub(super) terminated_early: bool,
+}
+
+pub(super) struct TruncateMeasurement {
+    pub(super) status: u16,
+    pub(super) data_events: usize,
+    pub(super) has_message_stop: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ChaosSettings {
+    latency_ms: u64,
+    drop_pct: u8,
+    rst_after_bytes: u64,
+    truncate_after_events: u64,
 }
 
 pub(super) fn exercise(ports: Ports) -> Result<Measurements, String> {
@@ -39,31 +73,88 @@ fn exercise_in(root: &Path, ports: Ports) -> Result<Measurements, String> {
             fake.readiness_diagnostic()
         )
     })?;
-    let control = exercise_instance(root, &workspace, "control", ports.control, ports.fake, None)?;
-    let chaos = exercise_instance(
+
+    let control = with_instance(
         root,
         &workspace,
-        "chaos",
-        ports.chaos,
+        "control",
+        ports.control,
         ports.fake,
-        Some(CHAOS_LATENCY_MS),
+        ChaosSettings::default(),
+        measure_request,
     )?;
-    Ok(Measurements { control, chaos })
+    let latency = with_instance(
+        root,
+        &workspace,
+        "latency",
+        ports.latency,
+        ports.fake,
+        ChaosSettings {
+            latency_ms: CHAOS_LATENCY_MS,
+            ..ChaosSettings::default()
+        },
+        measure_request,
+    )?;
+    let drop = with_instance(
+        root,
+        &workspace,
+        "drop-pct-50",
+        ports.drop,
+        ports.fake,
+        ChaosSettings {
+            drop_pct: 50,
+            ..ChaosSettings::default()
+        },
+        measure_drop,
+    )?;
+    let rst = with_instance(
+        root,
+        &workspace,
+        "rst-after-bytes",
+        ports.rst,
+        ports.fake,
+        ChaosSettings {
+            rst_after_bytes: RST_AFTER_BYTES,
+            ..ChaosSettings::default()
+        },
+        measure_rst,
+    )?;
+    let truncate = with_instance(
+        root,
+        &workspace,
+        "truncate-mid-stream",
+        ports.truncate,
+        ports.fake,
+        ChaosSettings {
+            truncate_after_events: TRUNCATE_AFTER_EVENTS,
+            ..ChaosSettings::default()
+        },
+        measure_truncate,
+    )?;
+
+    Ok(Measurements {
+        control,
+        latency,
+        drop,
+        rst,
+        truncate,
+    })
 }
 
-fn exercise_instance(
+fn with_instance<T>(
     root: &Path,
     workspace: &Path,
     name: &str,
     ports: ServerPorts,
     fake_port: u16,
-    chaos_latency_ms: Option<u64>,
-) -> Result<RequestMeasurement, String> {
+    settings: ChaosSettings,
+    exercise: impl FnOnce(u16) -> Result<T, String>,
+) -> Result<T, String> {
     let runtime = root.join(name);
     std::fs::create_dir_all(&runtime).map_err(|error| error.to_string())?;
     let config = runtime.join("cc-lb.toml");
     std::fs::write(&config, render_config(ports, &runtime)).map_err(|error| error.to_string())?;
-    let mut proxy = spawn_proxy(workspace, &config, &runtime, chaos_latency_ms)?;
+    let mut proxy = spawn_proxy(workspace, &config, &runtime, settings)?;
     wait_for_healthy(address(ports.proxy)).map_err(|error| {
         format!(
             "{name} proxy unavailable: {error}; {}",
@@ -71,9 +162,16 @@ fn exercise_instance(
         )
     })?;
     seed_runtime(ports.admin, fake_port)?;
+
+    let result = exercise(ports.proxy);
+    let cleanup = proxy.cleanup();
+    result.map_err(|error| format!("{name} chaos exercise failed: {error}; cleanup={cleanup:?}"))
+}
+
+fn measure_request(proxy_port: u16) -> Result<RequestMeasurement, String> {
     let started = Instant::now();
     let response = request(
-        address(ports.proxy),
+        address(proxy_port),
         "POST",
         "/v1/messages",
         &[
@@ -84,16 +182,84 @@ fn exercise_instance(
     )?;
     let elapsed_ms =
         u64::try_from(started.elapsed().as_millis()).map_err(|error| error.to_string())?;
-    let cleanup = proxy.cleanup();
     if response.status != 200 || !response.body.contains("fake anthropic fixture response") {
         return Err(format!(
-            "{name} proxy request did not reach fake upstream: status={}, cleanup={cleanup:?}",
+            "proxy request did not reach fake upstream: status={}",
             response.status
         ));
     }
     Ok(RequestMeasurement {
         elapsed_ms,
         status: response.status,
+    })
+}
+
+fn measure_drop(proxy_port: u16) -> Result<DropMeasurement, String> {
+    let mut dropped = 0_u64;
+    let mut passed = 0_u64;
+    for _ in 0..DROP_ATTEMPTS {
+        match request(address(proxy_port), "GET", "/v1/models", &[], "") {
+            Ok(response) if response.status == 502 => dropped += 1,
+            Ok(response) if response.status == 200 => passed += 1,
+            Ok(response) => {
+                return Err(format!(
+                    "drop-pct-50 returned unexpected status {}",
+                    response.status
+                ));
+            }
+            Err(_) => dropped += 1,
+        }
+    }
+    Ok(DropMeasurement {
+        attempts: DROP_ATTEMPTS,
+        dropped,
+        passed,
+    })
+}
+
+fn measure_rst(proxy_port: u16) -> Result<RstMeasurement, String> {
+    let payload = "x".repeat(4096);
+    let body = format!(r#"{{"data":"{payload}"}}"#);
+    let response = raw_request(
+        address(proxy_port),
+        "POST",
+        "/v1/files",
+        &[
+            ("Content-Type", "application/json"),
+            ("anthropic-version", "2023-06-01"),
+        ],
+        &body,
+    )?;
+    Ok(RstMeasurement {
+        status: response.status,
+        body_bytes: response.body.len(),
+        terminated_early: !response.complete,
+    })
+}
+
+fn measure_truncate(proxy_port: u16) -> Result<TruncateMeasurement, String> {
+    let response = raw_request(
+        address(proxy_port),
+        "POST",
+        "/v1/messages",
+        &[
+            ("Content-Type", "application/json"),
+            ("anthropic-version", "2023-06-01"),
+            ("Accept", "text/event-stream"),
+        ],
+        STREAM_MESSAGES_BODY,
+    )?;
+    let status = response
+        .status
+        .ok_or_else(|| "truncated SSE response is missing HTTP status".to_owned())?;
+    let body = String::from_utf8_lossy(&response.body);
+    Ok(TruncateMeasurement {
+        status,
+        data_events: body
+            .lines()
+            .filter(|line| line.starts_with("data:"))
+            .count(),
+        has_message_stop: body.contains("message_stop"),
     })
 }
 
@@ -108,7 +274,7 @@ fn spawn_proxy(
     workspace: &Path,
     config: &Path,
     runtime: &Path,
-    chaos_latency_ms: Option<u64>,
+    settings: ChaosSettings,
 ) -> Result<SupervisedChild, String> {
     let mut command = cargo_command(workspace);
     command
@@ -127,18 +293,17 @@ fn spawn_proxy(
         .arg(runtime)
         .env("CC_LB_MASTER_KEY", MASTER_KEY)
         .env("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN)
-        .env("CC_LB_BOOTSTRAP_ADMIN_TOKEN", ADMIN_TOKEN);
-    for name in [
-        "CC_LB_CHAOS_LATENCY_MS",
-        "CC_LB_CHAOS_DROP_PCT",
-        "CC_LB_CHAOS_RST_AFTER_BYTES",
-        "CC_LB_CHAOS_TRUNCATE_AFTER_EVENTS",
-    ] {
-        command.env_remove(name);
-    }
-    if let Some(latency_ms) = chaos_latency_ms {
-        command.env("CC_LB_CHAOS_LATENCY_MS", latency_ms.to_string());
-    }
+        .env("CC_LB_BOOTSTRAP_ADMIN_TOKEN", ADMIN_TOKEN)
+        .env("CC_LB_CHAOS_LATENCY_MS", settings.latency_ms.to_string())
+        .env("CC_LB_CHAOS_DROP_PCT", settings.drop_pct.to_string())
+        .env(
+            "CC_LB_CHAOS_RST_AFTER_BYTES",
+            settings.rst_after_bytes.to_string(),
+        )
+        .env(
+            "CC_LB_CHAOS_TRUNCATE_AFTER_EVENTS",
+            settings.truncate_after_events.to_string(),
+        );
     SupervisedChild::spawn(command)
 }
 
@@ -172,6 +337,89 @@ fn seed_runtime(admin_port: u16, fake_port: u16) -> Result<(), String> {
         return Err(format!("create T1 upstream returned {}", upstream.status));
     }
     Ok(())
+}
+
+fn raw_request(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> Result<RawResponse, String> {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| error.to_string())?;
+    let mut request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| error.to_string())?;
+
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let mut read_error = None;
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+            Err(error) => {
+                read_error = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    let head_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| match read_error.as_deref() {
+            Some(error) => format!("response ended before complete HTTP headers: {error}"),
+            None => "response ended before complete HTTP headers".to_owned(),
+        })?;
+    let head = &bytes[..head_end];
+    let body = bytes[head_end + 4..].to_vec();
+    let head_text = String::from_utf8_lossy(head);
+    let status = head_text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok());
+    let complete = read_error.is_none() && response_body_complete(&head_text, &body);
+    Ok(RawResponse {
+        status,
+        body,
+        complete,
+    })
+}
+
+fn response_body_complete(headers: &str, body: &[u8]) -> bool {
+    if headers
+        .lines()
+        .any(|line| line.eq_ignore_ascii_case("transfer-encoding: chunked"))
+    {
+        return body.ends_with(b"0\r\n\r\n")
+            || body.windows(7).any(|window| window == b"\r\n0\r\n\r\n");
+    }
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    content_length.is_none_or(|expected| body.len() >= expected)
+}
+
+struct RawResponse {
+    status: Option<u16>,
+    body: Vec<u8>,
+    complete: bool,
 }
 
 fn cargo_command(workspace: &Path) -> Command {

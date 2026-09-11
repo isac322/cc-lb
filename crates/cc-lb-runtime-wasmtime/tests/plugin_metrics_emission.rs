@@ -8,7 +8,7 @@
 //!   * `cc_lb_plugin_trap_total{plugin, hook, phase}` counter
 //!
 //! `cc_lb_plugin_call_duration_seconds` had bucket boundaries reserved
-//! in `cc-lb-observability/src/init.rs::install_prometheus` (see
+//! in `cc-lb-observability/src/init.rs` (see
 //! `PLUGIN_CALL_DURATION_BUCKETS`) but was never emitted. This test
 //! pins the emission contract:
 //!
@@ -21,24 +21,14 @@
 //! actual production surface (scraped by whatever monitoring stack the
 //! operator wires up).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::support::required_wasm;
 use cc_lb_plugin_wire::{CachePricingSummary, FilterRequest, Principal, UpstreamCandidate};
 use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use rkyv::rancor::Error;
-
-fn cache_aware_wasm() -> Option<Vec<u8>> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/")
-        .parent()
-        .expect("workspace root")
-        .join("target/wasm32-unknown-unknown/release/cache_aware_wasmtime.wasm");
-    std::fs::read(path).ok()
-}
 
 fn tiny_filter_request() -> FilterRequest {
     use cc_lb_plugin_wire::Claim;
@@ -85,10 +75,8 @@ fn tiny_filter_request() -> FilterRequest {
 }
 
 #[test]
-fn successful_filter_call_emits_three_metric_families() {
-    let Some(wasm) = cache_aware_wasm() else {
-        return;
-    };
+fn t3__successful_filter_call_emits_three_metric_families() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
 

@@ -111,9 +111,48 @@ impl Listener for ReloadableListener {
     }
 }
 
+const IN_MEMORY_CERT_PATH: &str = "<in-memory-cert-pem>";
+const IN_MEMORY_KEY_PATH: &str = "<in-memory-key-pem>";
+
 pub fn load_certs(cert_path: &Path, key_path: &Path) -> Result<rustls::ServerConfig, TlsError> {
-    let certs = load_certificate_chain(cert_path)?;
-    let key = load_private_key(key_path)?;
+    let cert_pem = read_tls_file(cert_path)?;
+    let certs = parse_certificate_chain(&cert_pem, cert_path)?;
+    let key_pem = read_tls_file(key_path)?;
+    let key = parse_private_key(&key_pem, key_path)?;
+    build_server_config(certs, key)
+}
+
+pub fn parse_certs_pem(cert_pem: &[u8], key_pem: &[u8]) -> Result<rustls::ServerConfig, TlsError> {
+    parse_certs_pem_with_paths(
+        cert_pem,
+        key_pem,
+        Path::new(IN_MEMORY_CERT_PATH),
+        Path::new(IN_MEMORY_KEY_PATH),
+    )
+}
+
+fn read_tls_file(path: &Path) -> Result<Vec<u8>, TlsError> {
+    std::fs::read(path).map_err(|source| TlsError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn parse_certs_pem_with_paths(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<rustls::ServerConfig, TlsError> {
+    let certs = parse_certificate_chain(cert_pem, cert_path)?;
+    let key = parse_private_key(key_pem, key_path)?;
+    build_server_config(certs, key)
+}
+
+fn build_server_config(
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<rustls::ServerConfig, TlsError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -125,12 +164,11 @@ pub fn load_certs(cert_path: &Path, key_path: &Path) -> Result<rustls::ServerCon
     Ok(config)
 }
 
-fn load_certificate_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsError> {
-    let bytes = std::fs::read(path).map_err(|source| TlsError::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut reader = std::io::BufReader::new(bytes.as_slice());
+fn parse_certificate_chain(
+    cert_pem: &[u8],
+    path: &Path,
+) -> Result<Vec<CertificateDer<'static>>, TlsError> {
+    let mut reader = std::io::BufReader::new(cert_pem);
     let certs = rustls_pemfile::certs(&mut reader)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|source| TlsError::ParseCert {
@@ -147,17 +185,12 @@ fn load_certificate_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, T
     Ok(certs)
 }
 
-fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsError> {
-    let bytes = std::fs::read(path).map_err(|source| TlsError::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
-
-    if let Some(key) = first_pkcs8_key(&bytes, path)? {
+fn parse_private_key(key_pem: &[u8], path: &Path) -> Result<PrivateKeyDer<'static>, TlsError> {
+    if let Some(key) = first_pkcs8_key(key_pem, path)? {
         return Ok(PrivateKeyDer::from(key));
     }
 
-    if let Some(key) = first_rsa_key(&bytes, path)? {
+    if let Some(key) = first_rsa_key(key_pem, path)? {
         return Ok(PrivateKeyDer::from(key));
     }
 

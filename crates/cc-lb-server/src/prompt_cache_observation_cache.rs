@@ -585,6 +585,7 @@ fn ttl_matches_request(request_ttl: TtlClass, entry_ttl: TtlClass) -> bool {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 pub(crate) mod tests {
     use async_trait::async_trait;
     use cc_lb_domain::TtlClass as StorageTtlClass;
@@ -633,7 +634,7 @@ pub(crate) mod tests {
     #[test]
     fn trait_upsert_preserves_live_metadata_before_hydration() {
         let cache = test_cache();
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(1);
         let now_unix_secs = base_now();
 
         PromptCacheObservationCacheLike::upsert_observation(
@@ -669,7 +670,7 @@ pub(crate) mod tests {
     #[test]
     fn overloaded_partition_rejects_new_entries_and_serves_cache_negative() {
         let cache = test_cache().with_max_entries_per_partition(4);
-        let upstream = Uuid::new_v4();
+        let upstream = Uuid::from_u128(2);
         let now = base_now();
         for index in 0..4 {
             upsert(
@@ -714,7 +715,7 @@ pub(crate) mod tests {
         const SECOND_MODEL: &str = "claude-opus-4-1-20250805";
 
         let cache = test_cache().with_max_entries_per_partition(2);
-        let upstream = Uuid::new_v4();
+        let upstream = Uuid::from_u128(3);
         let now = base_now();
         for prefix_hash in ["model-a-0", "model-a-1", "model-a-overflow"] {
             upsert(
@@ -769,7 +770,7 @@ pub(crate) mod tests {
     #[test]
     fn overloaded_partition_recovers_below_ninety_percent_after_sweep() {
         let cache = test_cache().with_max_entries_per_partition(10);
-        let upstream = Uuid::new_v4();
+        let upstream = Uuid::from_u128(4);
         let now = base_now();
         for index in 0..3 {
             upsert(
@@ -833,7 +834,7 @@ pub(crate) mod tests {
     #[test]
     fn lookup_warm_entry_hit_at_window_head_and_tail() {
         let cache = test_cache();
-        let upstream = Uuid::new_v4();
+        let upstream = Uuid::from_u128(5);
         let now = base_now();
         upsert(
             &cache,
@@ -877,7 +878,7 @@ pub(crate) mod tests {
     #[test]
     fn lookup_warm_entry_ineligible_ttl_returns_none() {
         let cache = test_cache();
-        let upstream = Uuid::new_v4();
+        let upstream = Uuid::from_u128(6);
         let now = base_now();
         upsert(
             &cache,
@@ -916,7 +917,7 @@ pub(crate) mod tests {
     #[test]
     fn same_key_greatest_expiry_eligible() {
         let cache = test_cache();
-        let upstream = Uuid::new_v4();
+        let upstream = Uuid::from_u128(7);
         let now = base_now();
         upsert(
             &cache,
@@ -954,7 +955,7 @@ pub(crate) mod tests {
     #[test]
     fn lookup_warm_entry_expired_returns_none() {
         let cache = test_cache();
-        let upstream = Uuid::new_v4();
+        let upstream = Uuid::from_u128(8);
         let now = base_now();
         upsert(&cache, upstream, "old", TtlClass::Ephemeral5m, now, now);
         assert!(
@@ -973,7 +974,7 @@ pub(crate) mod tests {
     #[test]
     fn lookup_warm_entry_inspects_bounded_entries() {
         let cache = test_cache();
-        let upstream = Uuid::new_v4();
+        let upstream = Uuid::from_u128(9);
         let now = base_now();
         for index in 0..1000 {
             upsert(
@@ -1008,7 +1009,7 @@ pub(crate) mod tests {
     #[test]
     fn deep_entry_survives_beyond_recency_without_warm_set_cap() {
         let cache = test_cache();
-        let upstream = Uuid::new_v4();
+        let upstream = Uuid::from_u128(10);
         let now = base_now();
         upsert(
             &cache,
@@ -1042,7 +1043,7 @@ pub(crate) mod tests {
     #[test]
     fn expiry_eviction_shrinks_map() {
         let cache = test_cache();
-        let upstream = Uuid::new_v4();
+        let upstream = Uuid::from_u128(11);
         let now = base_now();
         upsert(
             &cache,
@@ -1185,10 +1186,10 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn hydrate_filters() {
+    async fn t2__hydrate_filters() {
         let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
         let cache = PromptCacheObservationCache::new(clock, 30);
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(12);
         let store = MockStore::new(vec![
             storage_record(
                 upstream_id,
@@ -1237,10 +1238,10 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn hydrate_cold_starts_previous_schema_and_keeps_current() {
+    async fn t2__hydrate_cold_starts_previous_schema_and_keeps_current() {
         let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
         let cache = PromptCacheObservationCache::new(clock, 30);
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(13);
         let store = MockStore::new(vec![
             storage_record(
                 upstream_id,
@@ -1291,7 +1292,7 @@ pub(crate) mod tests {
     fn refresh_debounce() {
         let clock = Arc::new(TestClock::new_at_secs(BASE_TS));
         let cache = PromptCacheObservationCache::new_with_debounce(clock.clone(), 30, 60);
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(14);
 
         upsert(
             &cache,
@@ -1334,10 +1335,10 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn hydrate_returns_zero_when_store_empty() {
+    async fn t2__hydrate_returns_zero_when_store_empty() {
         let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
         let cache = PromptCacheObservationCache::new(clock, 30);
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(15);
         let store = MockStore::default();
 
         let loaded = cache
@@ -1358,7 +1359,7 @@ pub(crate) mod tests {
     #[test]
     fn snapshot_asymmetric_ttl() {
         let cache = test_cache();
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(16);
         let now = base_now();
 
         upsert(
@@ -1401,7 +1402,7 @@ pub(crate) mod tests {
     #[test]
     fn upsert_replaces_existing_and_preserves_last_persisted_at() {
         let cache = test_cache();
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(17);
         let now = base_now();
         let partition_key = (upstream_id, MODEL.to_owned());
         let key = ("same-prefix".to_owned(), TtlClass::Ephemeral5m);
@@ -1434,7 +1435,7 @@ pub(crate) mod tests {
     #[test]
     fn snapshot_excludes_expired_at_now() {
         let cache = test_cache();
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(18);
         let now = base_now();
 
         upsert(
@@ -1471,7 +1472,7 @@ pub(crate) mod tests {
     #[test]
     fn hit_upsert_extends_expiry_and_keeps_snapshot_warm() {
         let cache = test_cache();
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(19);
         let now = base_now();
         let original_expiry = now + 60;
         let refreshed_expiry = now + 270;
@@ -1520,7 +1521,7 @@ pub(crate) mod tests {
     #[test]
     fn snapshot_filters_to_request_breakpoints_only() {
         let cache = test_cache();
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(20);
         let now = base_now();
 
         upsert(
@@ -1554,8 +1555,8 @@ pub(crate) mod tests {
     #[test]
     fn snapshot_ignores_other_upstream() {
         let cache = test_cache();
-        let upstream_id = Uuid::new_v4();
-        let other_upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(21);
+        let other_upstream_id = Uuid::from_u128(22);
         let now = base_now();
 
         upsert(

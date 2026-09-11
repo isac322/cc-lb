@@ -1,10 +1,9 @@
-use cc_lb_config::{Config, SchedulerConfig};
+use cc_lb_config::{Config, ConfigOverrides, SchedulerConfig};
 
 #[test]
 fn missing_scheduler_section_applies_default_config() {
-    let (_dir, path) = crate::common::temp_config("[listener]\n");
-
-    let config = Config::load(&path).unwrap();
+    let (config, _warnings) =
+        Config::from_toml_str_with_overrides("[listener]\n", &ConfigOverrides::default()).unwrap();
 
     assert_eq!(config.scheduler, SchedulerConfig::default());
     assert_eq!(

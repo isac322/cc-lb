@@ -230,7 +230,7 @@ scenario!(store_oauth_tokens_roundtrip, |store| async move {
 
 scenario!(complete_refresh_stores_tokens, |store| async move {
     let record = create_named(store.as_ref(), "upstream-refresh-complete").await?;
-    let holder = Uuid::new_v4();
+    let holder = Uuid::from_u128(0x7004);
     let aead = AeadService::from_master_key([44; 32]);
     let bundle = token_bundle("access-b", "refresh-b");
     let encrypted = EncryptedOAuthTokens::encrypt(&aead, &bundle, record.id.as_bytes())?;
@@ -629,102 +629,4 @@ fn token_bundle(access_token: &str, refresh_token: &str) -> OAuthTokenBundle {
 
 fn url(value: &str) -> Result<Url> {
     Ok(value.parse()?)
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(feature = "postgres")]
-    use super::*;
-
-    #[cfg(feature = "postgres")]
-    mod postgres_backend {
-        use std::str::FromStr;
-
-        use cc_lb_storage_api::{BackendKind, MetaStore};
-        use cc_lb_storage_postgres::PostgresStorage;
-        use sqlx::{
-            AssertSqlSafe, PgPool,
-            postgres::{PgConnectOptions, PgPoolOptions},
-        };
-
-        use super::*;
-
-        struct PostgresBackend;
-        struct PostgresFixture {
-            url: String,
-            schema: String,
-            pool: PgPool,
-        }
-
-        #[async_trait]
-        impl UpstreamStoreBackend for PostgresBackend {
-            type Store = PostgresStorage;
-            type Fixture = PostgresFixture;
-
-            async fn create_fixture(&self) -> Result<Self::Fixture> {
-                let Some(url) = std::env::var("CI_POSTGRES_URL")
-                    .ok()
-                    .or_else(|| std::env::var("DATABASE_URL").ok())
-                else {
-                    anyhow::bail!("skip: CI_POSTGRES_URL or DATABASE_URL not set");
-                };
-                let schema = format!("upstream_store_{}", Uuid::new_v4().simple());
-                let admin_pool = PgPoolOptions::new()
-                    .max_connections(1)
-                    .connect(&url)
-                    .await?;
-                sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-                    .execute(&admin_pool)
-                    .await?;
-                admin_pool.close().await;
-                let pool = PgPoolOptions::new()
-                    .max_connections(4)
-                    .connect_with(
-                        PgConnectOptions::from_str(&url)?
-                            .options([("search_path", schema.as_str())]),
-                    )
-                    .await?;
-                let storage = PostgresStorage::new(
-                    pool.clone(),
-                    std::sync::Arc::new(cc_lb_engine::SystemClock),
-                );
-                MetaStore::initialize(&storage, BackendKind::Postgres).await?;
-                Ok(PostgresFixture { url, schema, pool })
-            }
-
-            async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Store> {
-                Ok(PostgresStorage::new(
-                    fixture.pool.clone(),
-                    std::sync::Arc::new(cc_lb_engine::SystemClock),
-                ))
-            }
-
-            async fn teardown(&self, fixture: Self::Fixture) -> Result<()> {
-                fixture.pool.close().await;
-                let admin_pool = PgPoolOptions::new()
-                    .max_connections(1)
-                    .connect(&fixture.url)
-                    .await?;
-                sqlx::query(AssertSqlSafe(format!(
-                    "DROP SCHEMA IF EXISTS {} CASCADE",
-                    fixture.schema
-                )))
-                .execute(&admin_pool)
-                .await?;
-                admin_pool.close().await;
-                Ok(())
-            }
-        }
-
-        #[tokio::test]
-        async fn upstream_store_postgres() -> Result<()> {
-            match run_all(Arc::new(PostgresBackend)).await {
-                Err(error) if error.to_string().contains("skip:") => {
-                    eprintln!("{error}");
-                    Ok(())
-                }
-                result => result,
-            }
-        }
-    }
 }

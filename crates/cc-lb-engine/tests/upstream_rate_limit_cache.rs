@@ -44,6 +44,7 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
         vec![upstream(upstream_id), upstream(other_upstream_id)],
         cache,
     );
+    let clock = cc_lb_engine::TestClock::new_at_secs(1_236);
 
     let candidates = build_candidates(
         &view,
@@ -52,7 +53,7 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
         "",
         &[],
         None,
-        &cc_lb_engine::SystemClock,
+        &clock,
     );
 
     let candidate = candidates
@@ -69,7 +70,7 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
 }
 
 #[tokio::test]
-async fn lifecycle_updates_dynamic_view_cache_when_headers_are_observed() {
+async fn t2__lifecycle_updates_dynamic_view_cache_when_headers_are_observed() {
     let state = TestState::default();
     let shared_cache = Arc::new(RwLock::new(UpstreamRateLimitCache::default()));
     let (sink, mut receiver) = cc_lb_engine::UpstreamRateLimitSink::with_capacity(16);
@@ -97,10 +98,7 @@ async fn lifecycle_updates_dynamic_view_cache_when_headers_are_observed() {
     assert_eq!(status, StatusCode::OK);
     // Drain at least one record from the sink so we know the subscriber
     // processed the response before we inspect the cache snapshot.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
-        .await
-        .expect("subscriber emitted a record")
-        .expect("channel open");
+    let _ = receiver.recv().await.expect("channel open");
 
     let view = lifecycle.dynamic_view().load();
     let cache = view.upstream_rate_limit_cache.read();
@@ -134,7 +132,7 @@ fn test_view(
 
 fn principal(name: &str, allowed_upstreams: Vec<Uuid>) -> PrincipalRecord {
     PrincipalRecord {
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(0x100),
         name: name.to_owned(),
         kind: PrincipalKind::Machine,
         allowed_models: Vec::new(),

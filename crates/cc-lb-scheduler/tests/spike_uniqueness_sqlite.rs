@@ -110,7 +110,7 @@ async fn mark_done(pool: &SqlitePool, id: &str) {
 // ── Test 1: duplicate push is silently ignored ────────────────────────────────
 
 #[tokio::test]
-async fn sqlite_duplicate_idempotency_key_is_silently_ignored() {
+async fn t3__sqlite_duplicate_idempotency_key_is_silently_ignored() {
     let pool = SqlitePool::connect(":memory:").await.unwrap();
     sqlx::query(CREATE_JOBS).execute(&pool).await.unwrap();
     sqlx::query(FULL_UNIQUE_IDX).execute(&pool).await.unwrap();
@@ -136,7 +136,7 @@ async fn sqlite_duplicate_idempotency_key_is_silently_ignored() {
 // ── Test 2: non-partial index blocks re-push of Done jobs (the bug) ──────────
 
 #[tokio::test]
-async fn sqlite_non_partial_index_blocks_repush_of_done_jobs() {
+async fn t3__sqlite_non_partial_index_blocks_repush_of_done_jobs() {
     let pool = SqlitePool::connect(":memory:").await.unwrap();
     sqlx::query(CREATE_JOBS).execute(&pool).await.unwrap();
     sqlx::query(FULL_UNIQUE_IDX).execute(&pool).await.unwrap();
@@ -159,7 +159,7 @@ async fn sqlite_non_partial_index_blocks_repush_of_done_jobs() {
 // ── Test 3: partial index fix allows re-push after Done ───────────────────────
 
 #[tokio::test]
-async fn sqlite_partial_index_allows_repush_after_done() {
+async fn t3__sqlite_partial_index_allows_repush_after_done() {
     let pool = SqlitePool::connect(":memory:").await.unwrap();
     sqlx::query(CREATE_JOBS).execute(&pool).await.unwrap();
     // Use the partial index migration instead

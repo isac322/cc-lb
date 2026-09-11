@@ -1,4 +1,4 @@
-#[path = "filter_service_tier_dispatch.rs"]
-mod filter_service_tier_dispatch;
-#[path = "response_transform_dispatch.rs"]
-mod response_transform_dispatch;
+#![allow(non_snake_case)]
+
+// Dispatch coverage lives in the crate's inline tests so native host builds can
+// resolve the guest ABI's u32 allocation handles without exporting test hooks.

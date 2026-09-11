@@ -15,7 +15,7 @@ const MESSAGE_DELTA_OUTPUT: &str =
 const MESSAGE_STOP: &str = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
 #[tokio::test]
-async fn full_stream_captures_anthropic_usage() {
+async fn t2__full_stream_captures_anthropic_usage() {
     let relay = relay_for(
         Arc::new(RecordingHook::default()),
         SseBatchConfig::default(),
@@ -47,7 +47,7 @@ async fn full_stream_captures_anthropic_usage() {
 }
 
 #[tokio::test]
-async fn mid_cancel_preserves_last_anthropic_usage() {
+async fn t2__mid_cancel_preserves_last_anthropic_usage() {
     let relay = relay_for(
         Arc::new(RecordingHook::default()),
         SseBatchConfig::default(),
@@ -86,7 +86,7 @@ async fn mid_cancel_preserves_last_anthropic_usage() {
 }
 
 #[tokio::test]
-async fn no_message_delta_keeps_zero_output_tokens() {
+async fn t2__no_message_delta_keeps_zero_output_tokens() {
     let relay = relay_for(
         Arc::new(RecordingHook::default()),
         SseBatchConfig::default(),
@@ -117,7 +117,7 @@ async fn no_message_delta_keeps_zero_output_tokens() {
 }
 
 #[tokio::test]
-async fn message_delta_can_supply_cache_creation_tokens() {
+async fn t2__message_delta_can_supply_cache_creation_tokens() {
     let relay = relay_for(
         Arc::new(RecordingHook::default()),
         SseBatchConfig::default(),

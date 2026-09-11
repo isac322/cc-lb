@@ -1717,11 +1717,18 @@ fn encrypt_env_value(
     env_name: &str,
     aad: &[u8],
 ) -> Result<Vec<u8>, UpstreamError> {
-    let value = std::env::var(env_name).map_err(|error| UpstreamError::BadRequest {
+    let value = lookup_env_value(env_name, crate::read_env_utf8)?;
+    encrypt_plaintext_value(state, &value, aad)
+}
+
+fn lookup_env_value(
+    env_name: &str,
+    lookup: impl FnOnce(&str) -> Result<String, std::env::VarError>,
+) -> Result<String, UpstreamError> {
+    lookup(env_name).map_err(|error| UpstreamError::BadRequest {
         error: "missing_api_key_env_value",
         detail: format!("{env_name}: {error}"),
-    })?;
-    encrypt_plaintext_value(state, &value, aad)
+    })
 }
 
 fn encrypt_plaintext_value(
@@ -1802,6 +1809,7 @@ fn unix_now_millis(clock: &dyn Clock) -> Result<u64, UpstreamError> {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::collections::HashMap;
 
@@ -2040,7 +2048,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fire_now_rejects_non_oauth_400() {
+    async fn t2__fire_now_rejects_non_oauth_400() {
         let context = test_context().await;
         let upstream = create_api_key_upstream(context.storage.as_ref(), true).await;
 
@@ -2052,7 +2060,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fire_now_rejects_warmup_disabled_400() {
+    async fn t2__fire_now_rejects_warmup_disabled_400() {
         let context = test_context().await;
         let upstream =
             create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), false, None)
@@ -2065,7 +2073,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fire_now_returns_200_on_success() {
+    async fn t2__fire_now_returns_200_on_success() {
         let context = test_context().await;
         let (base_url, server) = spawn_warmup_server(StatusCode::OK).await;
         let upstream = create_oauth_upstream(
@@ -2085,7 +2093,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fire_now_returns_502_on_permanent_abandon() {
+    async fn t2__fire_now_returns_502_on_permanent_abandon() {
         let context = test_context().await;
         let (base_url, server) = spawn_warmup_server(StatusCode::UNAUTHORIZED).await;
         let upstream = create_oauth_upstream(
@@ -2105,7 +2113,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fire_now_returns_503_on_transient() {
+    async fn t2__fire_now_returns_503_on_transient() {
         let context = test_context().await;
         let (base_url, server) = spawn_warmup_server(StatusCode::INTERNAL_SERVER_ERROR).await;
         let upstream = create_oauth_upstream(
@@ -2295,11 +2303,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fire_now_with_dialect_plugin_returns_502_when_runtime_unavailable() {
+    async fn t2__fire_now_with_dialect_plugin_returns_502_when_runtime_unavailable() {
         let context = test_context().await;
         let (base_url, server) = spawn_warmup_server(StatusCode::OK).await;
         let plugin = UpstreamWarmupDialectPlugin {
-            wasm_registry_id: Uuid::new_v4(),
+            wasm_registry_id: Uuid::from_u128(0x2146),
             config: serde_json::Value::Null,
             wire_version: Some(1),
         };
@@ -2321,7 +2329,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_upstream_defaults_warmup_enabled_for_anthropic_oauth_kind() {
+    async fn t2__create_upstream_defaults_warmup_enabled_for_anthropic_oauth_kind() {
         let context = test_context().await;
         let body = serde_json::json!({
             "name": "oauth-warmup-default",
@@ -2350,7 +2358,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_upstream_defaults_warmup_disabled_for_api_key_kind() {
+    async fn t2__create_upstream_defaults_warmup_disabled_for_api_key_kind() {
         let context = test_context().await;
         let body = serde_json::json!({
             "name": "api-key-warmup-default",
@@ -2380,7 +2388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_warmup_enabled_bootstraps_when_currently_null() {
+    async fn t2__update_warmup_enabled_bootstraps_when_currently_null() {
         let context = test_context().await;
         let upstream =
             create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), false, None)
@@ -2432,12 +2440,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_warmup_enabled_rejects_when_oauth_credentials_missing() {
+    async fn t2__update_warmup_enabled_rejects_when_oauth_credentials_missing() {
         let context = test_context().await;
         let upstream = context
             .storage
             .create(UpstreamCreate {
-                name: format!("oauth-no-creds-{}", Uuid::new_v4().simple()),
+                name: format!("oauth-no-creds-{}", Uuid::from_u128(0x2281).simple()),
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
@@ -2480,12 +2488,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fire_now_returns_400_when_oauth_credentials_missing() {
+    async fn t2__fire_now_returns_400_when_oauth_credentials_missing() {
         let context = test_context().await;
         let upstream = context
             .storage
             .create(UpstreamCreate {
-                name: format!("oauth-fire-no-creds-{}", Uuid::new_v4().simple()),
+                name: format!("oauth-fire-no-creds-{}", Uuid::from_u128(0x2328).simple()),
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
@@ -2520,5 +2528,42 @@ mod tests {
         let body: Value = serde_json::from_slice(&bytes).expect("response is json");
         assert_eq!(body["fired"], false);
         assert_eq!(body["reason"], "oauth_credentials_missing");
+    }
+
+    #[test]
+    fn api_key_env_lookup_preserves_success_and_error_semantics() {
+        let value = match lookup_env_value("UPSTREAM_API_KEY", |name| {
+            assert_eq!(name, "UPSTREAM_API_KEY");
+            Ok("sk-ant-injected".to_owned())
+        }) {
+            Ok(value) => value,
+            Err(_) => panic!("injected environment value must resolve"),
+        };
+        assert_eq!(value, "sk-ant-injected");
+
+        let not_present = std::env::VarError::NotPresent;
+        let expected_not_present = format!("MISSING_API_KEY: {not_present}");
+        let error = lookup_env_value("MISSING_API_KEY", |_| Err(not_present))
+            .expect_err("missing environment value is rejected");
+        match error {
+            super::UpstreamError::BadRequest { error, detail } => {
+                assert_eq!(error, "missing_api_key_env_value");
+                assert_eq!(detail, expected_not_present);
+            }
+            _ => panic!("unexpected missing environment error"),
+        }
+
+        let not_unicode =
+            std::env::VarError::NotUnicode(std::ffi::OsString::from("invalid-unicode"));
+        let expected_not_unicode = format!("INVALID_API_KEY: {not_unicode}");
+        let error = lookup_env_value("INVALID_API_KEY", |_| Err(not_unicode))
+            .expect_err("non-Unicode environment value is rejected");
+        match error {
+            super::UpstreamError::BadRequest { error, detail } => {
+                assert_eq!(error, "missing_api_key_env_value");
+                assert_eq!(detail, expected_not_unicode);
+            }
+            _ => panic!("unexpected invalid environment error"),
+        }
     }
 }

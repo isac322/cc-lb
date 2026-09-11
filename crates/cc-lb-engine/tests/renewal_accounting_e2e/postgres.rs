@@ -1,23 +1,20 @@
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow,
-    CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore, CacheKeepaliveTurnRow, CacheTtl,
-    MetaStore, RequestEvent, RequestEventProjections, RequestEventStore,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow, CacheKeepaliveReplaceRequest,
+    CacheKeepaliveSessionStore, CacheKeepaliveTurnRow, CacheTtl, RequestEvent,
+    RequestEventProjections, RequestEventStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 #[tokio::test]
-async fn postgres_renewal_storage_paths_require_live_dsn() {
+async fn t3_postgres__renewal_storage_paths_require_live_dsn() {
     // Given
-    let fixture = PostgresFixture::create(&required_postgres_url()).await;
-    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_engine::SystemClock));
-    storage
-        .initialize(BackendKind::Postgres)
+    let fixture = crate::postgres_fixture::postgres_fixture()
         .await
-        .expect("initialize isolated postgres schema");
+        .expect("create isolated postgres fixture");
+    let storage = fixture.storage().clone();
     let session = storage
         .replace_from_real_request(&CacheKeepaliveReplaceRequest {
             session_key_hash: "postgres-renewal-session".to_owned(),
@@ -58,16 +55,10 @@ async fn postgres_renewal_storage_paths_require_live_dsn() {
     // Then
     assert_eq!(claims, 1);
     assert_eq!(row_counts(&storage).await, (1, 1, 1));
-    fixture.drop_schema().await;
-}
-
-fn required_postgres_url() -> String {
-    std::env::var("CI_POSTGRES_URL")
-        .ok()
-        .or_else(|| std::env::var("PG_URL").ok())
-        .expect(
-            "renewal_accounting_e2e requires CI_POSTGRES_URL or PG_URL with --features postgres",
-        )
+    fixture
+        .teardown()
+        .await
+        .expect("drop isolated postgres fixture");
 }
 
 async fn concurrent_claims(storage: Arc<PostgresStorage>, generation: u64) -> u8 {
@@ -168,65 +159,4 @@ async fn row_counts(storage: &PostgresStorage) -> (i64, i64, i64) {
         .await
         .expect("count postgres renewal decisions");
     (events, turns, decisions)
-}
-
-struct PostgresFixture {
-    schema: String,
-    admin_pool: PgPool,
-    pool: PgPool,
-}
-
-impl PostgresFixture {
-    async fn create(url: &str) -> Self {
-        let schema = format!("renewal_accounting_e2e_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(url)
-            .await
-            .expect("connect postgres admin pool");
-        sqlx::query(AssertSqlSafe(format!(
-            "CREATE SCHEMA {}",
-            quote_ident(&schema)
-        )))
-        .execute(&admin_pool)
-        .await
-        .expect("create isolated postgres schema");
-        let options = PgConnectOptions::from_str(url)
-            .expect("parse postgres URL")
-            .options([("search_path", schema.as_str())]);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(options)
-            .await
-            .expect("connect isolated postgres pool");
-        Self {
-            schema,
-            admin_pool,
-            pool,
-        }
-    }
-
-    async fn drop_schema(self) {
-        self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            quote_ident(&self.schema)
-        )))
-        .execute(&self.admin_pool)
-        .await
-        .expect("drop isolated postgres schema");
-        self.admin_pool.close().await;
-    }
-}
-
-fn quote_ident(identifier: &str) -> String {
-    assert!(
-        identifier
-            .chars()
-            .all(|character| character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || character == '_'),
-        "unsafe postgres identifier: {identifier}"
-    );
-    format!("\"{identifier}\"")
 }

@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
-use cc_lb_clock::SystemClock;
+use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
 use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, SchedulerBackend};
 use uuid::Uuid;
 
 #[tokio::test]
-async fn next_run_for_upstream_returns_earliest_active_warmup() {
+async fn t3__next_run_for_upstream_returns_earliest_active_warmup() {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -20,8 +20,9 @@ async fn next_run_for_upstream_returns_earliest_active_warmup() {
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
         .await
         .expect("scheduler migrations apply");
+    let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_800_000_000));
     let handle = SchedulerAdminHandle::new(SchedulerBackend::Sqlite(
-        cc_lb_scheduler::worker::SqliteSchedulerBackend::new(pool.clone(), Arc::new(SystemClock)),
+        cc_lb_scheduler::worker::SqliteSchedulerBackend::new(pool.clone(), clock),
     ));
     let upstream_id = Uuid::from_u128(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef);
 
@@ -86,7 +87,7 @@ async fn next_run_for_upstream_returns_earliest_active_warmup() {
 }
 
 #[tokio::test]
-async fn next_run_for_upstream_returns_none_without_active_warmup() {
+async fn t3__next_run_for_upstream_returns_none_without_active_warmup() {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -98,12 +99,13 @@ async fn next_run_for_upstream_returns_none_without_active_warmup() {
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
         .await
         .expect("scheduler migrations apply");
+    let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_800_000_000));
     let handle = SchedulerAdminHandle::new(SchedulerBackend::Sqlite(
-        cc_lb_scheduler::worker::SqliteSchedulerBackend::new(pool, Arc::new(SystemClock)),
+        cc_lb_scheduler::worker::SqliteSchedulerBackend::new(pool, clock),
     ));
 
     let next_run = handle
-        .next_run_for_upstream(Uuid::new_v4(), "warmup")
+        .next_run_for_upstream(Uuid::from_u128(1), "warmup")
         .await
         .expect("next run query succeeds");
 

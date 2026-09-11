@@ -20,20 +20,15 @@ pub enum FakeMode {
 }
 
 impl FakeMode {
-    pub fn from_headers(headers: &HeaderMap) -> Self {
+    pub fn from_headers(headers: &HeaderMap, default: Self) -> Self {
         headers
             .get("x-fake-mode")
             .and_then(|value| value.to_str().ok())
-            .map(Self::from_str)
-            .or_else(|| {
-                std::env::var("FAKE_DEFAULT_MODE")
-                    .ok()
-                    .map(|value| Self::from_str(&value))
-            })
-            .unwrap_or(Self::Ok)
+            .map(Self::parse)
+            .unwrap_or(default)
     }
 
-    fn from_str(value: &str) -> Self {
+    pub fn parse(value: &str) -> Self {
         match value {
             "401" => Self::Unauthorized,
             "429" => Self::RateLimited,
@@ -48,5 +43,27 @@ impl FakeMode {
             "senpi-tools" => Self::SenpiTools,
             _ => Self::Ok,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use http::{HeaderMap, HeaderValue};
+
+    use super::FakeMode;
+
+    #[test]
+    fn explicit_default_mode_is_used_and_request_header_takes_precedence() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            FakeMode::from_headers(&headers, FakeMode::Overloaded),
+            FakeMode::Overloaded
+        );
+
+        headers.insert("x-fake-mode", HeaderValue::from_static("401"));
+        assert_eq!(
+            FakeMode::from_headers(&headers, FakeMode::Overloaded),
+            FakeMode::Unauthorized
+        );
     }
 }

@@ -18,7 +18,7 @@ use tokio::time::timeout;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn events_stream_opens_with_sse_content_type() {
+async fn t2__events_stream_opens_with_sse_content_type() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -48,7 +48,7 @@ async fn events_stream_opens_with_sse_content_type() {
 }
 
 #[tokio::test]
-async fn events_stream_first_byte_is_connected_comment() {
+async fn t2__events_stream_first_byte_is_connected_comment() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -75,15 +75,15 @@ async fn events_stream_first_byte_is_connected_comment() {
 }
 
 #[tokio::test]
-async fn events_stream_503_when_storage_missing() {
+async fn t2__events_stream_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
     let (status, _, _) = authed_bytes(app(state), "GET", "/admin/events/stream", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
-async fn events_stream_backfills_initial_cursor_in_order_and_bookmarks() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__events_stream_backfills_initial_cursor_in_order_and_bookmarks() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     append_events(storage.as_ref(), 1, 100).await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -99,8 +99,8 @@ async fn events_stream_backfills_initial_cursor_in_order_and_bookmarks() {
 }
 
 #[tokio::test]
-async fn events_stream_reconnect_drains_after_last_event_id() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__events_stream_reconnect_drains_after_last_event_id() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     append_events(storage.as_ref(), 1, 5).await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -113,7 +113,7 @@ async fn events_stream_reconnect_drains_after_last_event_id() {
 }
 
 #[tokio::test]
-async fn events_stream_writes_reset_frame_when_bus_lagged() {
+async fn t2__events_stream_writes_reset_frame_when_bus_lagged() {
     let (_dir, storage) = temp_storage().await;
     let bus = Arc::new(InMemoryBus::with_capacity(1));
     let mut state = test_state(Config::default(), Some(storage));
@@ -152,8 +152,8 @@ async fn events_stream_writes_reset_frame_when_bus_lagged() {
 }
 
 #[tokio::test]
-async fn events_stream_resets_after_one_backfill_page_when_over_cap() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__events_stream_resets_after_one_backfill_page_when_over_cap() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     append_events(storage.as_ref(), 1, 501).await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -166,7 +166,7 @@ async fn events_stream_resets_after_one_backfill_page_when_over_cap() {
     assert!(text.contains(r#"reason":"backfill_cap"#));
 }
 #[tokio::test]
-async fn events_stream_applies_combined_filters_to_partial_updates() {
+async fn t2__events_stream_applies_combined_filters_to_partial_updates() {
     let (_dir, storage) = temp_storage().await;
     let bus = Arc::new(InMemoryBus::with_capacity(8));
     let mut state = test_state(Config::default(), Some(storage));
@@ -227,7 +227,7 @@ async fn events_stream_applies_combined_filters_to_partial_updates() {
 }
 
 #[tokio::test]
-async fn events_stream_reconnect_with_last_event_id_still_requires_auth() {
+async fn t2__events_stream_reconnect_with_last_event_id_still_requires_auth() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
     let response = app(state)

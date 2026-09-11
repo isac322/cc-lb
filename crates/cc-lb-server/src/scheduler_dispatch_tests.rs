@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use super::*;
 
 #[path = "scheduler_dispatch_tests/support.rs"]
@@ -14,7 +16,6 @@ use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveEnqueuer, DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher,
     RenewalFinalization, RenewalUsage, RequestSnapshot,
 };
-use cc_lb_engine::clock::SystemClock;
 use cc_lb_lifecycle::LifecycleEvent;
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
 use cc_lb_scheduler::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJob;
@@ -22,16 +23,17 @@ use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::CronJob;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, Limit,
-    LimitKind, PrincipalKindLite, RequestEventStore,
+    CacheKeepaliveEnqueueState, CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore,
+    CacheKeepaliveTerminalReason, CacheTtl, Limit, LimitKind, PrincipalKindLite,
 };
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use serde_json::Value;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
 
-use self::support::{FailingPusher, Fixture};
+use self::support::{FailingPusher, Fixture, empty_dynamic_view};
 
 struct StaticRenewalDispatcher {
     finalization: Mutex<Option<RenewalFinalization>>,
@@ -57,8 +59,51 @@ impl KeepaliveDispatcher for StaticRenewalDispatcher {
 }
 
 #[tokio::test]
-async fn default_upstream_affinity_purge_physically_removes_stale_null_expiry_rows() {
-    let fixture = Fixture::new().await;
+async fn pool_quota_snapshot_job_records_current_windows() {
+    let clock = fixed_clock(1_700_000_000);
+    let storage = InMemoryStorage::with_clock(clock.clone());
+    let dynamic_view = empty_dynamic_view();
+
+    let outcome = crate::scheduler_dispatch::cron::handle_pool_quota_snapshot(
+        &storage,
+        dynamic_view.as_ref(),
+        &*clock,
+        cc_lb_scheduler::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob::new(1_700_000_000),
+    )
+    .await
+    .expect("pool quota snapshot job succeeds");
+
+    assert_eq!(outcome, JobOutcome::Done);
+    let records = cc_lb_storage_api::PoolQuotaHistoryStore::list_pool_quota_snapshots_in_range(
+        &storage,
+        cc_lb_admin::subscription_quotas::POOLED_HISTORY_WINDOWS,
+        1_700_000_000,
+        1_700_000_000,
+    )
+    .await
+    .expect("pool quota snapshots load");
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.window)
+            .collect::<Vec<_>>(),
+        cc_lb_admin::subscription_quotas::POOLED_HISTORY_WINDOWS,
+    );
+    for record in records {
+        assert_eq!(record.snapshot_at_unix_secs, 1_700_000_000);
+        assert_eq!(record.computed_at_unix_millis, 1_700_000_000_000);
+        assert_eq!(record.utilization, None);
+        assert_eq!(record.eligible_upstreams, 0);
+        assert_eq!(record.contributing_upstreams, 0);
+        assert_eq!(record.stale_upstreams, 0);
+        assert_eq!(record.missing_observation_upstreams, 0);
+    }
+}
+
+#[tokio::test]
+async fn t3__default_upstream_affinity_purge_physically_removes_stale_null_expiry_rows() {
+    let fixture = Fixture::new_sqlite().await;
     sqlx::query(
         "INSERT INTO upstream_affinity_v1
          (principal_id, provider, kind, value_sha256, upstream_id, observed_at_unix_secs, expires_at_unix_secs)
@@ -70,7 +115,7 @@ async fn default_upstream_affinity_purge_physically_removes_stale_null_expiry_ro
     .bind(vec![7_u8; 32])
     .bind(fixture.upstream_id.to_string())
     .bind(0_i64)
-    .execute(fixture.storage.pool())
+    .execute(fixture.sqlite_pool())
     .await
     .expect("seed stale upstream affinity");
 
@@ -84,19 +129,16 @@ async fn default_upstream_affinity_purge_physically_removes_stale_null_expiry_ro
 
     assert_eq!(outcome, JobOutcome::Done);
     let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_affinity_v1")
-        .fetch_one(fixture.storage.pool())
+        .fetch_one(fixture.sqlite_pool())
         .await
         .expect("count upstream affinity rows");
     assert_eq!(remaining, 0);
 }
 
 #[tokio::test]
-async fn upstream_affinity_purge_uses_the_captured_configured_retention() {
-    let fixture = Fixture::new().await;
-    let now_unix_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_secs();
+async fn t3__upstream_affinity_purge_uses_the_captured_configured_retention() {
+    let fixture = Fixture::new_sqlite().await;
+    let now_unix_secs = 1_700_000_000;
     for (value_sha256, observed_at_unix_secs) in [
         (vec![8_u8; 32], now_unix_secs - 2 * 86_400),
         (vec![9_u8; 32], now_unix_secs - 12 * 3_600),
@@ -111,8 +153,8 @@ async fn upstream_affinity_purge_uses_the_captured_configured_retention() {
         .bind("anthropic_web_search_encrypted_content")
         .bind(value_sha256)
         .bind(fixture.upstream_id.to_string())
-        .bind(i64::try_from(observed_at_unix_secs).expect("test timestamp fits i64"))
-        .execute(fixture.storage.pool())
+        .bind(i64::from(observed_at_unix_secs))
+        .execute(fixture.sqlite_pool())
         .await
         .expect("seed upstream affinity");
     }
@@ -130,19 +172,19 @@ async fn upstream_affinity_purge_uses_the_captured_configured_retention() {
     assert_eq!(outcome, JobOutcome::Done);
     let remaining: Vec<Vec<u8>> =
         sqlx::query_scalar("SELECT value_sha256 FROM upstream_affinity_v1")
-            .fetch_all(fixture.storage.pool())
+            .fetch_all(fixture.sqlite_pool())
             .await
             .expect("read remaining upstream affinity rows");
     assert_eq!(remaining, vec![vec![9_u8; 32]]);
 }
 
 #[tokio::test]
-async fn renewal_reconciles_real_reservation_once_before_forget() {
+async fn t2__renewal_reconciles_real_reservation_once_before_forget() {
     // Given
     let fixture = Fixture::new().await;
     fixture.http.return_cache_hit_usage(100, 0, 10);
     let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     let mut request = fixture.enqueue_request();
     request.accounting_key_id = Some(key_id.clone());
@@ -153,7 +195,7 @@ async fn renewal_reconciles_real_reservation_once_before_forget() {
     let job = fixture.pending_keepalive_job(1).await;
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(SystemClock),
+        fixed_clock(1_700_000_000),
     );
     let dispatch = fixture.dispatch_with_limit_engine(Arc::clone(&pusher), limit_engine.clone());
 
@@ -171,7 +213,7 @@ async fn renewal_reconciles_real_reservation_once_before_forget() {
     assert!(matches!(outcome, JobOutcome::Done));
     assert!(matches!(redelivery, JobOutcome::Noop));
     assert_eq!(request_event_count(&fixture).await, 1);
-    let key_store = KeyStore::new(fixture.storage.clone());
+    let key_store = KeyStore::new(fixture.managed_store.clone());
     let key = key_store
         .get("principal", &key_id)
         .await
@@ -207,7 +249,7 @@ async fn renewal_reconciles_real_reservation_once_before_forget() {
 }
 
 #[tokio::test]
-async fn renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
+async fn t2__renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
     // Given
     let fixture = Fixture::new().await;
     let bus = fixture.event_bus();
@@ -215,7 +257,7 @@ async fn renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
         panic!("expected in-memory lifecycle receiver");
     };
     let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
-    let key_store = KeyStore::new(fixture.storage.clone());
+    let key_store = KeyStore::new(fixture.managed_store.clone());
     let key = key_store
         .get("principal", &key_id)
         .await
@@ -223,7 +265,7 @@ async fn renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
         .expect("key exists");
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(SystemClock),
+        fixed_clock(1_700_000_000),
     );
     let view = fixture.dynamic_view().load();
     let reservation = limit_engine
@@ -253,7 +295,7 @@ async fn renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
             accounting_guard,
         })),
     });
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -313,7 +355,8 @@ async fn renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
 }
 
 #[tokio::test]
-async fn observe_only_renewal_writes_priced_durable_row_and_projection_without_limit_decision() {
+async fn t2__observe_only_renewal_writes_priced_durable_row_and_projection_without_limit_decision()
+{
     // Given
     install_test_pricing();
     let fixture = Fixture::new().await;
@@ -322,7 +365,7 @@ async fn observe_only_renewal_writes_priced_durable_row_and_projection_without_l
     let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = bus.subscribe_lifecycle() else {
         panic!("expected in-memory lifecycle receiver");
     };
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -347,21 +390,14 @@ async fn observe_only_renewal_writes_priced_durable_row_and_projection_without_l
         .expect("query renewal events");
     assert_eq!(events[0].key_id, None);
     assert_eq!(events[0].cost_usd_micros, Some(140));
-    let projection_key_id: Option<String> = sqlx::query_scalar(
-        "SELECT accounting_key_id FROM cache_keepalive_turns WHERE source_ref_id = ?",
-    )
-    .bind("session-hash:1")
-    .fetch_one(fixture.storage.pool())
-    .await
-    .expect("load observe-only turn projection key");
-    let projection_cost_micros: i64 =
-        sqlx::query_scalar("SELECT cost_micros FROM cache_keepalive_turns WHERE source_ref_id = ?")
-            .bind("session-hash:1")
-            .fetch_one(fixture.storage.pool())
-            .await
-            .expect("load observe-only turn projection cost");
-    assert_eq!(projection_key_id, None);
-    assert_eq!(projection_cost_micros, 140);
+    let projections = fixture
+        .storage
+        .list_cache_keepalive_turns("principal", "session-hash")
+        .await
+        .expect("load observe-only turn projection");
+    assert_eq!(projections.len(), 1);
+    assert_eq!(projections[0].accounting_key_id, None);
+    assert_eq!(projections[0].cost_micros, 140);
     let record = fixture
         .storage
         .get_cache_keepalive_session("session-hash")
@@ -377,7 +413,7 @@ async fn observe_only_renewal_writes_priced_durable_row_and_projection_without_l
 }
 
 #[tokio::test]
-async fn repeated_null_key_renewals_remain_observe_only() {
+async fn t2__repeated_null_key_renewals_remain_observe_only() {
     // Given
     install_test_pricing();
     let fixture = Fixture::new().await;
@@ -386,7 +422,7 @@ async fn repeated_null_key_renewals_remain_observe_only() {
     let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = bus.subscribe_lifecycle() else {
         panic!("expected in-memory lifecycle receiver");
     };
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -415,12 +451,14 @@ async fn repeated_null_key_renewals_remain_observe_only() {
         .expect("observe-only session exists");
     assert_eq!(record.generation, 3);
     assert_eq!(record.accounting_key_id, None);
-    let projections: Vec<(Option<String>, i64)> = sqlx::query_as(
-        "SELECT accounting_key_id, cost_micros FROM cache_keepalive_turns ORDER BY source_ref_id",
-    )
-    .fetch_all(fixture.storage.pool())
-    .await
-    .expect("load observe-only renewal projections");
+    let projections = fixture
+        .storage
+        .list_cache_keepalive_turns("principal", "session-hash")
+        .await
+        .expect("load observe-only renewal projections")
+        .into_iter()
+        .map(|turn| (turn.accounting_key_id, turn.cost_micros))
+        .collect::<Vec<_>>();
     assert_eq!(projections, vec![(None, 140), (None, 140)]);
     let events = fixture
         .storage
@@ -442,12 +480,12 @@ async fn repeated_null_key_renewals_remain_observe_only() {
 }
 
 #[tokio::test]
-async fn real_request_reseeds_observe_only_session_without_double_reserve() {
+async fn t2__real_request_reseeds_observe_only_session_without_double_reserve() {
     // Given
     let fixture = Fixture::new().await;
     fixture.http.return_cache_hit_usage(100, 0, 10);
     let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -455,7 +493,7 @@ async fn real_request_reseeds_observe_only_session_without_double_reserve() {
         .expect("enqueue initial observe-only keepalive");
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(SystemClock),
+        fixed_clock(1_700_000_000),
     );
     let dispatch = fixture.dispatch_with_limit_engine(Arc::clone(&pusher), limit_engine.clone());
     dispatch
@@ -491,7 +529,7 @@ async fn real_request_reseeds_observe_only_session_without_double_reserve() {
         .expect("reseeded session exists");
     assert_eq!(record.accounting_key_id.as_deref(), Some(key_id.as_str()));
     assert_eq!(request_event_count(&fixture).await, 2);
-    let key_store = KeyStore::new(fixture.storage.clone());
+    let key_store = KeyStore::new(fixture.managed_store.clone());
     let key = key_store
         .get("principal", &key_id)
         .await
@@ -527,7 +565,7 @@ async fn real_request_reseeds_observe_only_session_without_double_reserve() {
 }
 
 #[tokio::test]
-async fn renewal_inline_price_matches_pricing_subscriber_priced_event() {
+async fn t2__renewal_inline_price_matches_pricing_subscriber_priced_event() {
     // Given
     install_test_pricing();
     let fixture = Fixture::new().await;
@@ -541,7 +579,7 @@ async fn renewal_inline_price_matches_pricing_subscriber_priced_event() {
         pricing_rx,
         bus.clone() as Arc<dyn RequestEventBus>,
     );
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -576,13 +614,13 @@ async fn renewal_inline_price_matches_pricing_subscriber_priced_event() {
 }
 
 #[tokio::test]
-async fn saturated_lifecycle_bus_still_persists_and_reconciles_once() {
+async fn t2__saturated_lifecycle_bus_still_persists_and_reconciles_once() {
     // Given
     let fixture = Fixture::new().await;
     fixture.http.return_cache_hit_usage(100, 0, 10);
     let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
     let _full_receivers = saturate_lifecycle_bus(&fixture);
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     let mut request = fixture.enqueue_request();
     request.accounting_key_id = Some(key_id.clone());
@@ -593,7 +631,7 @@ async fn saturated_lifecycle_bus_still_persists_and_reconciles_once() {
     let job = fixture.pending_keepalive_job(1).await;
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(SystemClock),
+        fixed_clock(1_700_000_000),
     );
     let dispatch = fixture.dispatch_with_limit_engine(pusher, limit_engine.clone());
 
@@ -606,12 +644,14 @@ async fn saturated_lifecycle_bus_still_persists_and_reconciles_once() {
     // Then
     assert!(matches!(outcome, JobOutcome::Done));
     assert_eq!(request_event_count(&fixture).await, 1);
-    let turn_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_keepalive_turns")
-        .fetch_one(fixture.storage.pool())
+    let turn_count = fixture
+        .storage
+        .list_cache_keepalive_turns("principal", "session-hash")
         .await
-        .expect("count turn projections");
+        .expect("count turn projections")
+        .len();
     assert_eq!(turn_count, 1);
-    let key_store = KeyStore::new(fixture.storage.clone());
+    let key_store = KeyStore::new(fixture.managed_store.clone());
     let key = key_store
         .get("principal", &key_id)
         .await
@@ -633,10 +673,10 @@ async fn saturated_lifecycle_bus_still_persists_and_reconciles_once() {
 }
 
 #[tokio::test]
-async fn renewal_response_persists_one_attributed_event_and_projection_set() {
+async fn t2__renewal_response_persists_one_attributed_event_and_projection_set() {
     // Given
     let fixture = Fixture::new().await;
-    let key_store = KeyStore::new(fixture.storage.clone());
+    let key_store = KeyStore::new(fixture.managed_store.clone());
     let (_key, secret) = key_store
         .create(
             "principal",
@@ -655,7 +695,7 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
         )
         .await
         .expect("create renewal accounting key");
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     let mut request = fixture.enqueue_request();
     let key_id = api_key_id(secret.expose());
@@ -675,10 +715,12 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
 
     // Then
     assert!(matches!(outcome, JobOutcome::Done));
-    let row_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_events_v1")
-        .fetch_one(fixture.storage.pool())
+    let row_count = fixture
+        .storage
+        .query_request_events(0, u64::MAX, 10)
         .await
-        .expect("count renewal event rows");
+        .expect("count renewal event rows")
+        .len();
     assert_eq!(row_count, 1);
     let events = fixture
         .storage
@@ -695,24 +737,30 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
     assert_eq!(event.upstream_id, Some(fixture.upstream_id));
     assert_eq!(event.model.as_deref(), Some("claude-test"));
     assert!(event.cost_usd_micros.is_some());
-    let turn_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_keepalive_turns")
-        .fetch_one(fixture.storage.pool())
+    let turn_count = fixture
+        .storage
+        .list_cache_keepalive_turns("principal", "session-hash")
         .await
-        .expect("count renewal turn projections");
-    let decision_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_keepalive_decisions")
-        .fetch_one(fixture.storage.pool())
-        .await
-        .expect("count renewal decision projections");
+        .expect("count renewal turn projections")
+        .len();
+    let decision_count = usize::from(
+        fixture
+            .storage
+            .get_cache_keepalive_decision_for_principal("principal", "session-hash:1")
+            .await
+            .expect("count renewal decision projections")
+            .is_some(),
+    );
     assert_eq!(turn_count, 1);
     assert_eq!(decision_count, 1);
 }
 
 #[tokio::test]
-async fn cache_keepalive_disable_mid_cycle_drops_open_reservation_without_finalizing() {
+async fn t2__cache_keepalive_disable_mid_cycle_drops_open_reservation_without_finalizing() {
     // Given
     let fixture = Fixture::new().await;
     let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     let mut request = fixture.enqueue_request();
     request.accounting_key_id = Some(key_id.clone());
@@ -723,7 +771,7 @@ async fn cache_keepalive_disable_mid_cycle_drops_open_reservation_without_finali
     let job = fixture.pending_keepalive_job(1).await;
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(SystemClock),
+        fixed_clock(1_700_000_000),
     );
     fixture.disable_cache_keepalive_on_next_http_dispatch();
     let dispatch = fixture.dispatch_with_limit_engine(pusher, limit_engine.clone());
@@ -753,7 +801,7 @@ async fn cache_keepalive_disable_mid_cycle_drops_open_reservation_without_finali
         session.terminal_reason,
         Some(CacheKeepaliveTerminalReason::Cancelled)
     );
-    let key = KeyStore::new(fixture.storage.clone())
+    let key = KeyStore::new(fixture.managed_store.clone())
         .get("principal", &key_id)
         .await
         .expect("load accounting key")
@@ -796,7 +844,7 @@ fn api_key_id(secret: &str) -> String {
 }
 
 async fn create_accounting_key(fixture: &Fixture, kind: LimitKind, cap_micros: i64) -> String {
-    let key_store = KeyStore::new(fixture.storage.clone());
+    let key_store = KeyStore::new(fixture.managed_store.clone());
     let (_, secret) = key_store
         .create(
             "principal",
@@ -819,10 +867,15 @@ async fn create_accounting_key(fixture: &Fixture, kind: LimitKind, cap_micros: i
 }
 
 async fn request_event_count(fixture: &Fixture) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM request_events_v1")
-        .fetch_one(fixture.storage.pool())
-        .await
-        .expect("count request events")
+    i64::try_from(
+        fixture
+            .storage
+            .query_request_events(0, u64::MAX, usize::MAX)
+            .await
+            .expect("count request events")
+            .len(),
+    )
+    .expect("request event count fits i64")
 }
 
 fn install_test_pricing() {
@@ -869,9 +922,9 @@ fn saturate_lifecycle_bus(fixture: &Fixture) -> Vec<tokio::sync::mpsc::Receiver<
 }
 
 #[tokio::test]
-async fn durable_cache_keepalive_job_reschedules_without_rewriting_payload() {
+async fn t2__durable_cache_keepalive_job_reschedules_without_rewriting_payload() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -937,25 +990,35 @@ async fn durable_cache_keepalive_job_reschedules_without_rewriting_payload() {
 }
 
 #[tokio::test]
-async fn legacy_cache_keepalive_payload_migrates_on_first_cache_hit() {
+async fn t2__legacy_cache_keepalive_payload_migrates_on_first_cache_hit() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     let request = fixture.enqueue_request();
     let legacy_plaintext =
         serde_json::to_vec(&request.snapshot.to_persisted()).expect("serialize legacy payload");
+    let legacy_payload = fixture.encrypt_generation_payload(1, &legacy_plaintext);
+    fixture.replace_payload_during_next_enqueue(1, legacy_payload.clone());
     enqueuer
         .enqueue_cache_keepalive(request)
         .await
         .expect("enqueue durable keepalive");
-    let legacy_payload = fixture.encrypt_generation_payload(1, &legacy_plaintext);
-    fixture
-        .replace_encrypted_payload(legacy_payload.clone())
-        .await;
+    let initial = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load legacy session")
+        .expect("legacy session exists");
+    assert_eq!(initial.generation, 1);
+    assert_eq!(initial.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(initial.enqueue_state, CacheKeepaliveEnqueueState::Enqueued);
+    assert_eq!(initial.encrypted_payload, legacy_payload);
+    let first_job = fixture.pending_keepalive_job(1).await;
+    assert_eq!(first_job.generation, 1);
     let dispatch = fixture.dispatch(Arc::clone(&pusher));
 
     let first_outcome = dispatch
-        .dispatch_cache_keepalive(fixture.pending_keepalive_job(1).await)
+        .dispatch_cache_keepalive(first_job)
         .await
         .expect("dispatch legacy cache keepalive job");
 
@@ -986,23 +1049,17 @@ async fn legacy_cache_keepalive_payload_migrates_on_first_cache_hit() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_missing_accounting_key_terminalizes_without_dispatch() {
+async fn t2__cache_keepalive_missing_accounting_key_terminalizes_without_dispatch() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    let mut request = fixture.enqueue_request();
+    request.accounting_key_id = Some("missing-accounting-key".to_owned());
     enqueuer
-        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .enqueue_cache_keepalive(request)
         .await
         .expect("enqueue durable keepalive");
     let job = fixture.pending_keepalive_job(1).await;
-    sqlx::query(
-        "UPDATE cache_keepalive_sessions SET accounting_key_id = ? WHERE session_key_hash = ?",
-    )
-    .bind("missing-accounting-key")
-    .bind("session-hash")
-    .execute(fixture.storage.pool())
-    .await
-    .expect("set missing accounting key");
     let dispatch = fixture.dispatch(pusher);
 
     let outcome = dispatch
@@ -1040,9 +1097,9 @@ async fn cache_keepalive_missing_accounting_key_terminalizes_without_dispatch() 
 }
 
 #[tokio::test]
-async fn cache_keepalive_accounting_key_uses_real_reserve_before_dispatch() {
+async fn t2__cache_keepalive_accounting_key_uses_real_reserve_before_dispatch() {
     let fixture = Fixture::new().await;
-    let key_store = KeyStore::new(fixture.storage.clone());
+    let key_store = KeyStore::new(fixture.managed_store.clone());
     let (record, _) = key_store
         .create(
             "principal",
@@ -1061,7 +1118,7 @@ async fn cache_keepalive_accounting_key_uses_real_reserve_before_dispatch() {
         )
         .await
         .expect("create accounting key");
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     let mut request = fixture.enqueue_request();
     request.accounting_key_id = Some(record.key_hash_b64);
@@ -1107,9 +1164,9 @@ async fn cache_keepalive_accounting_key_uses_real_reserve_before_dispatch() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_redelivered_job_dispatches_once() {
+async fn t2__cache_keepalive_redelivered_job_dispatches_once() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -1144,23 +1201,26 @@ async fn cache_keepalive_redelivered_job_dispatches_once() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_running_turn_does_not_redispatch() {
+async fn t2__cache_keepalive_lease_mismatch_skips_dispatch() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
         .await
         .expect("enqueue durable keepalive");
     let job = fixture.pending_keepalive_job(1).await;
-    sqlx::query(
-        "UPDATE cache_keepalive_sessions SET enqueue_state = 'running', running_since_unix_secs = 1 WHERE session_key_hash = ?",
-    )
-    .bind("session-hash")
-    .execute(fixture.storage.pool())
-    .await
-    .expect("mark turn running");
-    let dispatch = fixture.dispatch(pusher);
+    assert!(
+        CacheKeepaliveSessionStore::claim_cache_keepalive_turn(
+            fixture.storage.as_ref(),
+            "session-hash",
+            1,
+            1_700_000_000,
+        )
+        .await
+        .expect("mark turn running")
+    );
+    let dispatch = fixture.dispatch(Arc::new(FailingPusher));
 
     let outcome = dispatch
         .dispatch_cache_keepalive(job)
@@ -1168,6 +1228,16 @@ async fn cache_keepalive_running_turn_does_not_redispatch() {
         .expect("dispatch running turn");
 
     assert!(matches!(outcome, JobOutcome::Noop));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load leased session")
+        .expect("leased session exists");
+    assert_eq!(record.generation, 1);
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(record.enqueue_state, CacheKeepaliveEnqueueState::Running);
+    assert_eq!(record.running_since_unix_secs, Some(1_700_000_000));
     assert!(
         fixture
             .http
@@ -1186,9 +1256,9 @@ async fn cache_keepalive_running_turn_does_not_redispatch() {
 }
 
 #[tokio::test]
-async fn hit_reschedule_enqueue_failure_terminalizes_new_generation() {
+async fn t2__hit_reschedule_enqueue_failure_terminalizes_new_generation() {
     let fixture = Fixture::new().await;
-    let enqueuer = fixture.enqueuer(Arc::new(fixture.backend.backend.clone()));
+    let enqueuer = fixture.enqueuer(fixture.pusher());
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
         .await
@@ -1214,16 +1284,28 @@ async fn hit_reschedule_enqueue_failure_terminalizes_new_generation() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_job_terminalizes_on_decrypt_failure() {
+async fn t2__cache_keepalive_job_terminalizes_on_decrypt_failure() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    let corrupt_payload = vec![0; 32];
+    fixture.replace_payload_during_next_enqueue(1, corrupt_payload.clone());
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
         .await
         .expect("enqueue durable keepalive");
     let job = fixture.pending_keepalive_job(1).await;
-    fixture.replace_encrypted_payload(vec![0; 32]).await;
+    let corrupt = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load corrupt session")
+        .expect("corrupt session exists");
+    assert_eq!(corrupt.generation, 1);
+    assert_eq!(corrupt.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(corrupt.enqueue_state, CacheKeepaliveEnqueueState::Enqueued);
+    assert_eq!(corrupt.encrypted_payload, corrupt_payload);
+    assert_eq!(job.generation, 1);
     let dispatch = fixture.dispatch(pusher);
 
     let outcome = dispatch
@@ -1238,6 +1320,7 @@ async fn cache_keepalive_job_terminalizes_on_decrypt_failure() {
         .await
         .expect("load session")
         .expect("session exists");
+    assert_eq!(record.generation, 1);
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
     assert_eq!(
         record.terminal_reason,
@@ -1248,17 +1331,28 @@ async fn cache_keepalive_job_terminalizes_on_decrypt_failure() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_job_terminalizes_on_deserialization_failure() {
+async fn t2__cache_keepalive_job_terminalizes_on_deserialization_failure() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
-    enqueuer
-        .enqueue_cache_keepalive(fixture.enqueue_request())
-        .await
-        .expect("enqueue durable keepalive");
-    let job = fixture.pending_keepalive_job(1).await;
     let encrypted = fixture.encrypt_generation_payload(1, br#"{}"#);
-    fixture.replace_encrypted_payload(encrypted).await;
+    fixture.replace_payload_during_next_enqueue(1, encrypted.clone());
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    let corrupt = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load invalid serialized session")
+        .expect("invalid serialized session exists");
+    assert_eq!(corrupt.generation, 1);
+    assert_eq!(corrupt.status, CacheKeepaliveSessionStatus::Active);
+    assert_eq!(corrupt.enqueue_state, CacheKeepaliveEnqueueState::Enqueued);
+    assert_eq!(corrupt.encrypted_payload, encrypted);
+    assert_eq!(job.generation, 1);
     let dispatch = fixture.dispatch(pusher);
 
     let outcome = dispatch
@@ -1273,6 +1367,7 @@ async fn cache_keepalive_job_terminalizes_on_deserialization_failure() {
         .await
         .expect("load session")
         .expect("session exists");
+    assert_eq!(record.generation, 1);
     assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
     assert_eq!(
         record.terminal_reason,
@@ -1283,10 +1378,10 @@ async fn cache_keepalive_job_terminalizes_on_deserialization_failure() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_miss_terminalizes_session() {
+async fn t2__cache_keepalive_miss_terminalizes_session() {
     let fixture = Fixture::new().await;
     fixture.http.return_cache_miss();
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -1315,9 +1410,9 @@ async fn cache_keepalive_miss_terminalizes_session() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_unsupported_provider_terminalizes_session() {
+async fn t2__cache_keepalive_unsupported_provider_terminalizes_session() {
     let fixture = Fixture::new_with_upstream_kind(UpstreamKind::AnthropicApiKey).await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -1348,13 +1443,13 @@ async fn cache_keepalive_unsupported_provider_terminalizes_session() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_dispatch_error_terminalizes_session() {
+async fn t2__cache_keepalive_dispatch_error_terminalizes_session() {
     let fixture = Fixture::new().await;
     fixture.http.return_status(
         StatusCode::INTERNAL_SERVER_ERROR,
         serde_json::json!({"error":"boom"}),
     );
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -1383,9 +1478,9 @@ async fn cache_keepalive_dispatch_error_terminalizes_session() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_hit_terminalizes_when_max_refreshes_reached() {
+async fn t2__cache_keepalive_hit_terminalizes_when_max_refreshes_reached() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -1418,9 +1513,9 @@ async fn cache_keepalive_hit_terminalizes_when_max_refreshes_reached() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_hit_terminalizes_when_max_duration_reached() {
+async fn t2__cache_keepalive_hit_terminalizes_when_max_duration_reached() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -1453,9 +1548,9 @@ async fn cache_keepalive_hit_terminalizes_when_max_duration_reached() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_durable_cancel_makes_queued_old_generation_noop() {
+async fn t2__cache_keepalive_durable_cancel_terminalizes_and_skips_queued_job() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -1469,7 +1564,7 @@ async fn cache_keepalive_durable_cancel_makes_queued_old_generation_noop() {
         })
         .await
         .expect("cancel durable keepalive");
-    let dispatch = fixture.dispatch(pusher);
+    let dispatch = fixture.dispatch(Arc::new(FailingPusher));
 
     let outcome = dispatch
         .dispatch_cache_keepalive(queued_job)
@@ -1477,14 +1572,35 @@ async fn cache_keepalive_durable_cancel_makes_queued_old_generation_noop() {
         .expect("dispatch terminalized keepalive job");
 
     assert!(matches!(outcome, JobOutcome::Noop));
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load cancelled session")
+        .expect("cancelled session exists");
+    assert_eq!(record.generation, 1);
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Cancelled)
+    );
+    assert_eq!(record.running_since_unix_secs, None);
+    assert!(record.encrypted_payload.is_empty());
     let requests = fixture.http.requests.lock().expect("requests lock").clone();
     assert!(requests.is_empty());
+    assert!(
+        fixture
+            .signer_calls
+            .lock()
+            .expect("signer calls lock")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
-async fn cache_keepalive_new_real_request_makes_queued_old_generation_noop() {
+async fn t2__cache_keepalive_generation_cas_pure() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())
@@ -1496,7 +1612,7 @@ async fn cache_keepalive_new_real_request_makes_queued_old_generation_noop() {
         .await
         .expect("replace durable keepalive from new real request");
     fixture.pending_keepalive_job(2).await;
-    let dispatch = fixture.dispatch(pusher);
+    let dispatch = fixture.dispatch(Arc::new(FailingPusher));
 
     let outcome = dispatch
         .dispatch_cache_keepalive(queued_old_job)
@@ -1515,19 +1631,27 @@ async fn cache_keepalive_new_real_request_makes_queued_old_generation_noop() {
     assert_eq!(record.refresh_count, 0);
     let requests = fixture.http.requests.lock().expect("requests lock").clone();
     assert!(requests.is_empty());
+    assert!(
+        fixture
+            .signer_calls
+            .lock()
+            .expect("signer calls lock")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
-async fn cache_keepalive_expired_session_terminalizes_before_dispatch() {
+async fn t2__cache_keepalive_expired_session_terminalizes_before_dispatch() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    let mut request = fixture.enqueue_request();
+    request.cache_anchor_age = Duration::from_secs(CacheTtl::Ttl5m.as_secs() + 1);
     enqueuer
-        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .enqueue_cache_keepalive(request)
         .await
         .expect("enqueue durable keepalive");
     let job = fixture.pending_keepalive_job(1).await;
-    fixture.expire_session().await;
     let dispatch = fixture.dispatch(pusher);
 
     let outcome = dispatch
@@ -1552,9 +1676,9 @@ async fn cache_keepalive_expired_session_terminalizes_before_dispatch() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_revoked_principal_terminalizes_before_dispatch() {
+async fn t2__cache_keepalive_revoked_principal_terminalizes_before_dispatch() {
     let fixture = Fixture::new().await;
-    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = fixture.pusher();
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
         .enqueue_cache_keepalive(fixture.enqueue_request())

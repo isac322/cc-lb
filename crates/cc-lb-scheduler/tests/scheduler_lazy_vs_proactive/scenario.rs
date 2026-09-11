@@ -8,18 +8,15 @@ use cc_lb_server::refresh::LazyRefresher;
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use uuid::Uuid;
 
-use super::common::{
-    LAZY_REQUEST_DELAY, LOSER_SETTLE_DELAY, POLL_INTERVAL, TestResult, WAIT_TIMEOUT,
-};
+use super::common::{POLL_INTERVAL, TestResult, WAIT_TIMEOUT};
 use super::fake::FakeAnthropic;
+use super::worker::OAuthWorkerProbe;
 
 pub async fn run_race_scenario<
     ReadUpstream,
     ReadUpstreamFuture,
     CountMetadata,
     CountMetadataFuture,
-    OAuthRunning,
-    OAuthRunningFuture,
 >(
     fake: &FakeAnthropic,
     backend: SchedulerBackend,
@@ -27,15 +24,13 @@ pub async fn run_race_scenario<
     upstream_id: Uuid,
     mut read_upstream_generation: ReadUpstream,
     mut metadata_count: CountMetadata,
-    mut oauth_job_running: OAuthRunning,
+    oauth_probe: &OAuthWorkerProbe,
 ) -> TestResult<()>
 where
     ReadUpstream: FnMut() -> ReadUpstreamFuture,
     ReadUpstreamFuture: Future<Output = TestResult<u64>>,
     CountMetadata: FnMut() -> CountMetadataFuture,
     CountMetadataFuture: Future<Output = TestResult<i64>>,
-    OAuthRunning: FnMut() -> OAuthRunningFuture,
-    OAuthRunningFuture: Future<Output = TestResult<bool>>,
 {
     let upstream_before = read_upstream_generation().await?;
 
@@ -43,13 +38,13 @@ where
         .push_job(AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)))
         .await?;
     fake.wait_for_refresh_request().await?;
-    if let Err(error) = wait_for_oauth_job_running(&mut oauth_job_running).await {
+    if let Err(error) = wait_for_oauth_job_state(oauth_probe, true).await {
         fake.release_refresh_response();
         return Err(error);
     }
     fake.release_refresh_response();
     wait_for_metadata_count(&mut metadata_count, 1).await?;
-    tokio::time::sleep(LAZY_REQUEST_DELAY + LOSER_SETTLE_DELAY).await;
+    wait_for_oauth_job_state(oauth_probe, false).await?;
     lazy.refresh_one(upstream_id)
         .await
         .map_err(|error| format!("lazy refresh failed: {error}"))?;
@@ -85,21 +80,19 @@ fn assert_generation_incremented_by(
     Ok(())
 }
 
-async fn wait_for_oauth_job_running<Check, CheckFuture>(check: &mut Check) -> TestResult<()>
-where
-    Check: FnMut() -> CheckFuture,
-    CheckFuture: Future<Output = TestResult<bool>>,
-{
-    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
-    loop {
-        if check().await? {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err("timed out waiting for OAuthRefreshJob to run".into());
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
+async fn wait_for_oauth_job_state(
+    probe: &OAuthWorkerProbe,
+    expected_running: bool,
+) -> TestResult<()> {
+    if probe.wait_for_running(expected_running, WAIT_TIMEOUT).await {
+        return Ok(());
     }
+
+    Err(format!(
+        "timed out waiting for OAuthRefreshJob running={expected_running}; last state: {:?}",
+        probe.state()
+    )
+    .into())
 }
 
 async fn wait_for_metadata_count<Count, CountFuture>(
@@ -110,20 +103,26 @@ where
     Count: FnMut() -> CountFuture,
     CountFuture: Future<Output = TestResult<i64>>,
 {
-    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
-    loop {
-        let current = count().await?;
-        if current == expected {
-            return Ok(());
+    match tokio::time::timeout(WAIT_TIMEOUT, async {
+        let mut poll = tokio::time::interval(POLL_INTERVAL);
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            poll.tick().await;
+            let current = count().await?;
+            if current == expected {
+                return Ok(());
+            }
+            if current > expected {
+                return Err(format!(
+                    "metadata refresh enqueued {current} rows, expected {expected}"
+                )
+                .into());
+            }
         }
-        if current > expected {
-            return Err(
-                format!("metadata refresh enqueued {current} rows, expected {expected}").into(),
-            );
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err("timed out waiting for MetadataRefreshJob enqueue".into());
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err("timed out waiting for MetadataRefreshJob enqueue".into()),
     }
 }

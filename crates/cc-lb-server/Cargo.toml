@@ -119,10 +119,13 @@ toml.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+cc-lb-testkit = { path = "../cc-lb-testkit" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
+cc-lb-storage-conformance = { path = "../cc-lb-storage-conformance", features = ["postgres"] }
 metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 jemalloc_ctl = { package = "tikv-jemalloc-ctl", version = "0.7", features = ["stats"] }
+metrics-util.workspace = true
 sqlx.workspace = true
 tracing-subscriber.workspace = true
 wat.workspace = true

@@ -14,7 +14,7 @@ macro_rules! define_request_event_quota_sqlite_tests {
             FROM request_events_v1 WHERE event_id = ?";
 
         #[test]
-        fn request_event_quota_columns_are_persisted_sqlite() {
+        fn t3__request_event_quota_columns_are_persisted_sqlite() {
             run_sqlite_scenario(
                 "request_event_quota_columns_are_persisted",
                 |backend| async move {
@@ -71,7 +71,7 @@ macro_rules! define_request_event_quota_sqlite_tests {
         }
 
         #[test]
-        fn request_event_quota_columns_null_for_mismatch_and_historical_rows_sqlite() {
+        fn t3__request_event_quota_columns_null_for_mismatch_and_historical_rows_sqlite() {
             run_sqlite_scenario(
                 "request_event_quota_columns_null_for_mismatch_and_historical_rows",
                 |backend| async move {

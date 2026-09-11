@@ -19,9 +19,9 @@ use subscription_quota_fixture::{
 };
 
 #[tokio::test]
-async fn subscription_quota_aggregate_exact_boundary_tokens_match_legacy_inclusive_bytes() {
+async fn t3__subscription_quota_aggregate_exact_boundary_tokens_match_legacy_inclusive_bytes() {
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(NOW_UNIX_SECS));
-    let server = admin_test_common::spawn_admin_server_with_clock(clock).await;
+    let server = admin_test_common::spawn_admin_server_sqlite_with_clock(clock).await;
     let upstream_id = create_oauth_upstream(&server, "quota-exact-boundary").await;
     let provider_sample_end = NOW_UNIX_SECS - 600;
     let provider_start = provider_sample_end - 5 * 3_600;
@@ -87,10 +87,10 @@ async fn subscription_quota_aggregate_exact_boundary_tokens_match_legacy_inclusi
 }
 
 #[tokio::test]
-async fn subscription_quota_slim_aggregate_matches_legacy_reference_for_seven_days_and_fifty_upstreams()
+async fn t3__subscription_quota_slim_aggregate_matches_legacy_reference_for_seven_days_and_fifty_upstreams()
  {
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(NOW_UNIX_SECS));
-    let server = admin_test_common::spawn_admin_server_with_clock(clock).await;
+    let server = admin_test_common::spawn_admin_server_sqlite_with_clock(clock).await;
     let mut upstream_ids = Vec::with_capacity(50);
     let mut checkpoints = Vec::with_capacity(100);
     let mut buckets = Vec::with_capacity(50);
@@ -182,9 +182,10 @@ async fn subscription_quota_slim_aggregate_matches_legacy_reference_for_seven_da
 }
 
 #[tokio::test]
-async fn subscription_quota_aggregate_is_identical_after_independent_storage_and_view_restart() {
+async fn t3__subscription_quota_aggregate_is_identical_after_independent_storage_and_view_restart()
+{
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(NOW_UNIX_SECS));
-    let server = admin_test_common::spawn_admin_server_with_clock(clock.clone()).await;
+    let server = admin_test_common::spawn_admin_server_sqlite_with_clock(clock.clone()).await;
     let upstream_id = create_oauth_upstream(&server, "quota-restart").await;
     server
         .storage
@@ -219,7 +220,7 @@ async fn subscription_quota_aggregate_is_identical_after_independent_storage_and
     assert_eq!(status, StatusCode::OK);
 
     let restarted_storage = admin_test_common::sqlite_storage_with_clock(
-        server._dir.path(),
+        server._dir.as_ref().expect("sqlite harness tempdir").path(),
         "admin.sqlite",
         clock.clone(),
     )

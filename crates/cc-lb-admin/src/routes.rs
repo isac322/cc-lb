@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Json, Router,
     body::Body,
@@ -21,7 +23,37 @@ use crate::{
     static_assets::{serve_asset, serve_index},
 };
 
+trait ReloadSignalSender: Send + Sync {
+    fn send_reload(&self) -> Result<(), String>;
+}
+
+struct ProcessReloadSignalSender;
+
+impl ReloadSignalSender for ProcessReloadSignalSender {
+    fn send_reload(&self) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            nix::sys::signal::kill(nix::unistd::Pid::this(), nix::sys::signal::Signal::SIGHUP)
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ReloadSignalSenderHandle(Arc<dyn ReloadSignalSender>);
+
 pub fn build_router(state: AdminState) -> Router {
+    build_router_with_reload_signal_sender(state, Arc::new(ProcessReloadSignalSender))
+}
+
+fn build_router_with_reload_signal_sender(
+    state: AdminState,
+    reload_signal_sender: Arc<dyn ReloadSignalSender>,
+) -> Router {
     let protected_routes = Router::new()
         .route("/admin/principals/{id}/usage", get(principal_usage))
         .route("/admin/principals/{id}/limits", get(principal_limits))
@@ -116,7 +148,8 @@ pub fn build_router(state: AdminState) -> Router {
             state.clone(),
             require_admin_auth,
         ))
-        .layer(middleware::map_response(json_extractor_rejection));
+        .layer(middleware::map_response(json_extractor_rejection))
+        .layer(Extension(ReloadSignalSenderHandle(reload_signal_sender)));
 
     Router::new()
         .merge(protected_routes)
@@ -804,6 +837,7 @@ fn dashboard_error(status: StatusCode, error: &str) -> axum::response::Response 
 async fn reload_config(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
+    Extension(reload_signal_sender): Extension<ReloadSignalSenderHandle>,
 ) -> axum::response::Response {
     let action = "config_reload_signal";
     if let Err(error) = record_admin_audit(
@@ -825,32 +859,27 @@ async fn reload_config(
         return audit_write_failed_response(action, &error);
     }
 
-    #[cfg(unix)]
-    {
-        if let Err(error) =
-            nix::sys::signal::kill(nix::unistd::Pid::this(), nix::sys::signal::Signal::SIGHUP)
+    if let Err(error) = reload_signal_sender.0.send_reload() {
+        tracing::error!(%error, "failed to send SIGHUP");
+        if let Err(audit_error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action,
+                route: "/admin/v1/config/reload",
+                target_principal_id: None,
+                target_upstream: None,
+                api_key_id: None,
+                status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                payload: None,
+            },
+        )
+        .await
         {
-            tracing::error!(%error, "failed to send SIGHUP");
-            if let Err(audit_error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action,
-                    route: "/admin/v1/config/reload",
-                    target_principal_id: None,
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: 500,
-                    payload: None,
-                },
-            )
-            .await
-            {
-                return audit_write_failed_response(action, &audit_error);
-            }
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            return audit_write_failed_response(action, &audit_error);
         }
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     Json(json!({ "status": "ok", "reloading": true })).into_response()
 }
@@ -858,4 +887,259 @@ async fn reload_config(
 fn audit_write_failed_response(action: &str, error: &StorageError) -> axum::response::Response {
     tracing::error!(%error, action, "admin audit write failed");
     dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed")
+}
+
+fn emit_admin_audit(
+    state: &AdminState,
+    payload: AuditPayload,
+    route: &str,
+    api_key_id: Option<String>,
+    status: u16,
+) {
+    emit_admin_action(state, &payload.to_string(), route, api_key_id, status);
+}
+
+#[allow(non_snake_case)]
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use async_trait::async_trait;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use cc_lb_clock::ClockHandle;
+    use cc_lb_config::Config;
+    use cc_lb_control::api_keys::{
+        concurrent_guard::KeyConcurrencyManager, limit_engine::LimitEngine,
+        principal_view::PrincipalView,
+    };
+    use cc_lb_control::{
+        DynamicViewBuilder, DynamicViewHolder, RouteDecision, RouteError, RouterPlugin,
+        RoutingContext, UpstreamStatusSnapshot,
+    };
+    use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
+    use cc_lb_storage_api::AuditStore;
+    use cc_lb_testkit::InMemoryStorage;
+    use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+    use tokio::time::Instant as Tick;
+    use tower::ServiceExt;
+
+    use super::{ReloadSignalSender, build_router_with_reload_signal_sender};
+    use crate::AdminState;
+
+    struct RecordingReloadSignalSender {
+        calls: AtomicUsize,
+        error: Option<String>,
+    }
+
+    impl RecordingReloadSignalSender {
+        fn new(error: Option<&str>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                error: error.map(str::to_owned),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Acquire)
+        }
+    }
+
+    impl ReloadSignalSender for RecordingReloadSignalSender {
+        fn send_reload(&self) -> Result<(), String> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            match &self.error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    struct NoopSignerFactory;
+
+    impl ApiKeyAwareSignerFactory for NoopSignerFactory {
+        fn with_router_choice(
+            &self,
+            _api_key: String,
+            _router_chosen_upstream_name: String,
+        ) -> Arc<dyn SignerFactory> {
+            Arc::new(Self)
+        }
+    }
+
+    #[async_trait]
+    impl SignerFactory for NoopSignerFactory {
+        async fn build(
+            &self,
+            _upstream: &Upstream,
+        ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
+            Err(cc_lb_upstream::SignerError::MissingCredentials {
+                reason: "reload route does not build signers".to_owned(),
+            })
+        }
+    }
+
+    struct NoopRouter;
+
+    impl RouterPlugin for NoopRouter {
+        fn route(
+            &self,
+            _ctx: &RoutingContext,
+            _principal: &Principal,
+            _candidates: &[UpstreamCandidate],
+        ) -> Result<RouteDecision, RouteError> {
+            Err(RouteError::NoRoute {
+                reason: "reload route does not route upstream traffic".to_owned(),
+            })
+        }
+    }
+
+    fn test_state(clock: ClockHandle, storage: Arc<InMemoryStorage>) -> AdminState {
+        let principal_view = Arc::new(PrincipalView::from_db(&[], HashMap::new()));
+        let dynamic_view = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(NoopSignerFactory))
+            .global_router(Arc::new(NoopRouter))
+            .global_observability_hooks(Vec::new())
+            .principal_view(principal_view)
+            .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
+            .build();
+        let providers = crate::auth::build_providers(
+            &cc_lb_config::AdminAuthConfig::default(),
+            Some("test-token".to_owned()),
+        )
+        .expect("static token provider builds");
+        AdminState {
+            storage: Some(storage),
+            key_store: None,
+            aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
+            limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone()),
+            lifecycle: None,
+            subscription_metadata_hook: None,
+            lazy_refresher: None,
+            runtime: None,
+            data_dir: None,
+            warmup_dialect_dispatcher: None,
+            dynamic_view: Arc::new(DynamicViewHolder::new(dynamic_view)),
+            config: Arc::new(Config::default()),
+            scheduler: None,
+            admin_auth: Arc::new(crate::auth::AdminAuthenticator::new(providers)),
+            start_time: Tick::now().into_std(),
+            event_bus: None,
+            storage_tail: crate::events::storage_tail_channel(),
+            clock,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn t2__manual_reload_route_preserves_signal_response_and_audit_contract() {
+        struct Case {
+            name: &'static str,
+            signal_error: Option<&'static str>,
+            expected_status: StatusCode,
+            expected_body: Option<Value>,
+            expected_audit_statuses: &'static [u16],
+        }
+
+        let cases = [
+            Case {
+                name: "success",
+                signal_error: None,
+                expected_status: StatusCode::OK,
+                expected_body: Some(json!({ "status": "ok", "reloading": true })),
+                expected_audit_statuses: &[200],
+            },
+            Case {
+                name: "signal_failure",
+                signal_error: Some("reload signal rejected"),
+                expected_status: StatusCode::INTERNAL_SERVER_ERROR,
+                expected_body: None,
+                expected_audit_statuses: &[200, 500],
+            },
+        ];
+
+        for case in cases {
+            let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
+            let storage = Arc::new(InMemoryStorage::with_clock(clock.clone()));
+            let signal_sender = Arc::new(RecordingReloadSignalSender::new(case.signal_error));
+            let app = build_router_with_reload_signal_sender(
+                test_state(clock, storage.clone()),
+                signal_sender.clone(),
+            );
+
+            let response = app
+                .oneshot(
+                    Request::post("/admin/v1/config/reload")
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .body(Body::empty())
+                        .expect("reload request builds"),
+                )
+                .await
+                .expect("reload route responds");
+
+            assert_eq!(
+                response.status(),
+                case.expected_status,
+                "case={}",
+                case.name
+            );
+            let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("reload response body collects")
+                .to_bytes();
+            match case.expected_body {
+                Some(expected_body) => {
+                    assert_eq!(
+                        content_type.as_ref().and_then(|value| value.to_str().ok()),
+                        Some("application/json"),
+                        "case={}",
+                        case.name
+                    );
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&body)
+                            .expect("success response contains JSON"),
+                        expected_body,
+                        "case={}",
+                        case.name
+                    );
+                }
+                None => {
+                    assert_eq!(
+                        content_type.as_ref().and_then(|value| value.to_str().ok()),
+                        None,
+                        "case={}",
+                        case.name
+                    );
+                    assert!(body.is_empty(), "case={}: body={body:?}", case.name);
+                }
+            }
+            assert_eq!(signal_sender.calls(), 1, "case={}", case.name);
+
+            let mut audit_statuses = storage
+                .query_audit(None, 0, u64::MAX, 10)
+                .await
+                .expect("reload audits are queryable")
+                .into_iter()
+                .filter(|entry| entry.admin_action.as_deref() == Some("config_reload_signal"))
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>();
+            audit_statuses.sort_unstable();
+            assert_eq!(
+                audit_statuses.as_slice(),
+                case.expected_audit_statuses,
+                "case={}",
+                case.name
+            );
+        }
+    }
 }

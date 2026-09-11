@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 #[path = "dual_hash_verify.rs"]
 mod dual_hash_verify;
 #[path = "limit_subset.rs"]

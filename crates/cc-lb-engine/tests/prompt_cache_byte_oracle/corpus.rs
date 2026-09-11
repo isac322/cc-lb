@@ -13,11 +13,11 @@ pub fn wide_corpus() -> Vec<CorpusCase> {
     cases.extend([
         case(
             "key-reordered-a",
-            parse(r#"{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":[{"type":"text","text":"ordered","metadata":{"z":0,"a":1},"cache_control":{"type":"ephemeral"}}]}]}"#),
+            parse(r#"{"model":"claude-sonnet-4-5-20250929","tools":[{"name":"lookup","description":"nested schema","input_schema":{"type":"object","properties":{"z":{"type":"string","metadata":{"rank":2,"label":"z"}},"a":{"type":"integer","metadata":{"label":"a","rank":1}}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"ordered","metadata":{"outer":{"z":0,"a":1},"label":"message"},"cache_control":{"type":"ephemeral"}}]}]}"#),
         ),
         case(
             "key-reordered-b",
-            parse(r#"{"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"metadata":{"a":1,"z":0},"text":"ordered","type":"text"}],"role":"user"}],"model":"claude-sonnet-4-5-20250929"}"#),
+            parse(r#"{"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"metadata":{"label":"message","outer":{"a":1,"z":0}},"text":"ordered","type":"text"}],"role":"user"}],"tools":[{"input_schema":{"properties":{"a":{"metadata":{"rank":1,"label":"a"},"type":"integer"},"z":{"metadata":{"label":"z","rank":2},"type":"string"}},"type":"object"},"description":"nested schema","name":"lookup"}],"model":"claude-sonnet-4-5-20250929"}"#),
         ),
         case(
             "synthetic-system-and-message-strings",

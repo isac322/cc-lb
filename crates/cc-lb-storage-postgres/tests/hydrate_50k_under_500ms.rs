@@ -26,11 +26,8 @@ use cc_lb_storage_api::{BackendKind, MetaStore};
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
-#[ignore = "requires CI_POSTGRES_URL; run with --release --ignored"]
-async fn hydrate_50k_rows_90percent_expired_under_500ms() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn tx__hydrate_50k_rows_90percent_expired_under_500ms() -> TestResult {
+    let fixture = Fixture::create().await?;
     let store = fixture.store();
     let upstream_ids = upstream_ids();
 
@@ -89,11 +86,8 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn create() -> TestResult<Option<Self>> {
-        let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
-            eprintln!("skipped: CI_POSTGRES_URL not set");
-            return Ok(None);
-        };
+    async fn create() -> TestResult<Self> {
+        let url = crate::postgres_fixture::required_postgres_url();
         let schema = format!("test_hydrate_50k_{}", Uuid::new_v4().simple());
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -111,18 +105,15 @@ impl Fixture {
             )
             .await?;
         // Real migrator, not a hand-picked subset — see the note in `prompt_cache_observation.rs`.
-        PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock))
+        PostgresStorage::new(pool.clone(), cc_lb_testkit::fixed_clock(1_700_000_000))
             .initialize(BackendKind::Postgres)
             .await?;
 
-        Ok(Some(Self { url, schema, pool }))
+        Ok(Self { url, schema, pool })
     }
 
     fn store(&self) -> PostgresStorage {
-        PostgresStorage::new(
-            self.pool.clone(),
-            std::sync::Arc::new(cc_lb_clock::SystemClock),
-        )
+        PostgresStorage::new(self.pool.clone(), cc_lb_testkit::fixed_clock(1_700_000_000))
     }
 
     async fn drop_schema(self) -> TestResult {

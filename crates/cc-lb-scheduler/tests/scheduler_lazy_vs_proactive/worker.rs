@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use apalis::prelude::Data;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
@@ -35,32 +35,89 @@ pub struct OAuthWorkerState<Upstreams> {
     probe: OAuthWorkerProbe,
 }
 
+const OAUTH_STARTED: u8 = 1 << 0;
+const OAUTH_RUNNING: u8 = 1 << 1;
+const OAUTH_FINISHED: u8 = 1 << 2;
+
 #[derive(Clone)]
 pub struct OAuthWorkerProbe {
     inner: Arc<OAuthWorkerProbeInner>,
 }
 
 struct OAuthWorkerProbeInner {
-    started: AtomicBool,
+    state: AtomicU8,
     notify: tokio::sync::Notify,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OAuthWorkerProbeState {
+    started: bool,
+    running: bool,
+    finished: bool,
+}
+
+impl OAuthWorkerProbeState {
+    fn matches_running(self, running: bool) -> bool {
+        if running {
+            self.started && self.running && !self.finished
+        } else {
+            self.started && !self.running && self.finished
+        }
+    }
 }
 
 impl OAuthWorkerProbe {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(OAuthWorkerProbeInner {
-                started: AtomicBool::new(false),
+                state: AtomicU8::new(0),
                 notify: tokio::sync::Notify::new(),
             }),
         }
     }
 
-    pub fn has_started(&self) -> bool {
-        self.inner.started.load(Ordering::SeqCst)
+    pub fn state(&self) -> OAuthWorkerProbeState {
+        let state = self.inner.state.load(Ordering::Acquire);
+        OAuthWorkerProbeState {
+            started: state & OAUTH_STARTED != 0,
+            running: state & OAUTH_RUNNING != 0,
+            finished: state & OAUTH_FINISHED != 0,
+        }
+    }
+
+    pub async fn wait_for_running(&self, running: bool, timeout: std::time::Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                if self.state().matches_running(running) {
+                    return;
+                }
+
+                let notified = self.inner.notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+
+                if self.state().matches_running(running) {
+                    return;
+                }
+
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
     }
 
     fn mark_started(&self) {
-        self.inner.started.store(true, Ordering::SeqCst);
+        self.inner
+            .state
+            .store(OAUTH_STARTED | OAUTH_RUNNING, Ordering::Release);
+        self.inner.notify.notify_waiters();
+    }
+
+    fn mark_finished(&self) {
+        self.inner
+            .state
+            .store(OAUTH_STARTED | OAUTH_FINISHED, Ordering::Release);
         self.inner.notify.notify_waiters();
     }
 }
@@ -102,7 +159,8 @@ where
         let aead = ctx.aead.clone();
         let oauth_cfg = ctx.oauth_cfg.clone();
         let backend = ctx.backend.clone();
-        ctx.handler
+        let result = ctx
+            .handler
             .handle(
                 job,
                 now_secs(),
@@ -110,7 +168,9 @@ where
                 move |metadata| enqueue_metadata(backend, metadata),
                 |_upstream_id, _expires_at_unix_secs| async { Ok(()) },
             )
-            .await
+            .await;
+        ctx.probe.mark_finished();
+        result
     })
 }
 

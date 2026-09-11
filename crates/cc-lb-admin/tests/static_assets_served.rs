@@ -76,7 +76,7 @@ fn discover_index_asset(index_html: &str, suffix: &str) -> String {
 }
 
 #[tokio::test]
-async fn test_static_assets_served() {
+async fn t2__test_static_assets_served() {
     let app = router(test_state());
 
     let response = get(&app, "/").await;

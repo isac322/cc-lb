@@ -18,26 +18,20 @@ fn wasm_path() -> PathBuf {
     workspace_root.join("target/wasm32-unknown-unknown/release/wasmtime_shape_passthrough.wasm")
 }
 
-fn load_wasm_or_skip() -> Option<Vec<u8>> {
+fn load_wasm_fixture() -> Vec<u8> {
     let path = wasm_path();
-    match std::fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) => {
-            eprintln!(
-                "skipping wasmtime-shape-passthrough e2e: wasm artifact missing at {} ({error})",
-                path.display(),
-            );
-            None
-        }
-    }
+    std::fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "required wasmtime-shape-passthrough fixture missing at {}: {error}",
+            path.display(),
+        )
+    })
 }
 
 #[test]
-fn shape_adapter_when_wasm_passthrough_then_shapes_and_strips_auth_header() {
+fn t3__shape_adapter_when_wasm_passthrough_then_shapes_and_strips_auth_header() {
     // Given: a real PDK-built shape plugin and a request that carries credentials.
-    let Some(wasm_bytes) = load_wasm_or_skip() else {
-        return;
-    };
+    let wasm_bytes = load_wasm_fixture();
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot = runtime
         .register_shape(

@@ -17,6 +17,8 @@ on:
       - 'LICENSE'
       - '.gitignore'
       - '.editorconfig'
+  schedule:
+    - cron: '0 4 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -43,6 +45,10 @@ jobs:
         run: bash scripts/lint-audit-redaction.sh
       - name: Integration-test consolidation guard
         run: bash scripts/check-integration-test-consolidation.sh
+      - name: Workspace scaffold guard
+        run: python3 scripts/check-workspace-scaffold.py
+      # The tier lint runs in rust-fast, where cargo-nextest and the workspace
+      # test build are already required.
 
   guard-crate-versions:
     name: guard crate versions
@@ -327,6 +333,65 @@ jobs:
       - name: Validate Grafana dashboards
         run: scripts/validate-grafana-dashboard.sh
 
+  rust-fast:
+    runs-on: cc-lb-4
+    env:
+      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Run fast Rust tests
+        run: cargo nextest run --workspace --exclude cc-lb-loadgen --exclude cc-lb-stress-suite --exclude tests-multi-replica --all-features --profile fast
+      - name: Test-tier lint
+        run: bash scripts/check-test-tiers.sh
+
+  tx:
+    runs-on: cc-lb-2
+    container:
+      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-fe7ac6d6df4f@sha256:c2f09887524d6616d0b97be3316822b47466f5633409f743d6e1bab277deefb4
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: testpw
+          POSTGRES_DB: cc_lb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
+      CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      DATABASE_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      DATABASE_URL_TEST: postgres://postgres:testpw@localhost:5432/cc_lb_test
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rustup-home
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Run non-functional Rust tests
+        run: cargo nextest run --workspace --exclude cc-lb-loadgen --exclude cc-lb-stress-suite --exclude tests-multi-replica --all-features --profile tx
+
   # A sharded, multi-node version of this job is prepared (inactive) in
   # coverage-sharded.yml — enable it once the ARC pool has more than one node.
   # See that file's header for the exact steps. Do not run both: they enforce
@@ -432,6 +497,7 @@ jobs:
             --workspace \
             --exclude cc-lb-loadgen \
             --exclude cc-lb-stress-suite \
+            --exclude tests-multi-replica \
             --all-features \
             --test-threads=4 \
             --no-report
@@ -484,10 +550,15 @@ jobs:
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Install pinned real clients
         run: tests/real-client/install.sh
       - name: Run real-client matrix
         run: tests/real-client/matrix.sh
+      - name: Run Rust E2E profile
+        run: cargo nextest run -p cc-lb-server -p tests-integration --profile e2e
       - name: Show sccache stats
         if: always()
         run: |

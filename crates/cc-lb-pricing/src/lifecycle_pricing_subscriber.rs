@@ -271,9 +271,11 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 
 #[cfg(test)]
 #[path = "lifecycle_pricing_subscriber_tier_tests.rs"]
+#[allow(non_snake_case)]
 mod tier_tests;
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use cc_lb_control::{BusReceiver, LifecycleBusReceiver};
@@ -317,7 +319,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn terminated_with_usage_emits_priced() {
+    async fn t2__terminated_with_usage_emits_priced() {
         let bus = Arc::new(TestBus::new());
         let LifecycleBusReceiver::InMemory(mut rx_bcast) = bus.subscribe_lifecycle() else {
             panic!("expected in-memory lifecycle receiver");
@@ -414,7 +416,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn terminated_without_usage_skips_priced() {
+    async fn t2__terminated_without_usage_skips_priced() {
         let bus = Arc::new(TestBus::new());
         let LifecycleBusReceiver::InMemory(mut rx_bcast) = bus.subscribe_lifecycle() else {
             panic!("expected in-memory lifecycle receiver");
@@ -453,7 +455,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn stream_success_terminated_emits_priced() {
+    async fn t2__stream_success_terminated_emits_priced() {
         let bus = Arc::new(TestBus::new());
         let LifecycleBusReceiver::InMemory(mut rx_bcast) = bus.subscribe_lifecycle() else {
             panic!("expected in-memory lifecycle receiver");

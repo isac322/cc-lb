@@ -52,13 +52,13 @@ fn wasm_registry_entry_defaults_missing_metadata_to_none() {
 fn legacy_wasm_registry_entry_defaults_supported_slots_to_empty() {
     let sha: [u8; 32] = [1; 32];
     let value = json!({
-        "id": Uuid::new_v4(),
+        "id": Uuid::from_u128(1),
         "sha256": sha,
         "name": "legacy",
         "original_filename": "legacy.wasm",
         "label": null,
         "uploaded_at_unix_secs": 1_800_000_000u64,
-        "uploaded_by_admin_id": Uuid::new_v4(),
+        "uploaded_by_admin_id": Uuid::from_u128(2),
         "refcount": 0u64,
         "revision": 0u64,
         "kind": "filter",
@@ -99,14 +99,14 @@ fn builtin_subscription_preference_entry_synthesizes_metadata() {
 fn uploaded_entry(metadata: Option<PluginMetadata>) -> WasmRegistryEntry {
     WasmRegistryEntry {
         schema_hash: None,
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(1),
         sha256: [1; 32],
         name: "uploaded".to_owned(),
         version: None,
         original_filename: "uploaded.wasm".to_owned(),
         label: None,
         uploaded_at_unix_secs: 1_800_000_000,
-        uploaded_by_admin_id: Uuid::new_v4(),
+        uploaded_by_admin_id: Uuid::from_u128(2),
         refcount: 0,
         revision: 0,
         kind: "filter".to_owned(),

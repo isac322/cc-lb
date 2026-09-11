@@ -5,7 +5,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn record_whitelist_headers() {
+async fn t2__record_whitelist_headers() {
     let app = app(AppConfig::default());
 
     let response = app

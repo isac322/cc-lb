@@ -17,7 +17,7 @@ const ALIGNED_HOUR_UNIX_SECS: u64 = 1_700_002_800;
 const ALIGNED_MINUTE_UNIX_SECS: u64 = ALIGNED_HOUR_UNIX_SECS + 60;
 
 #[tokio::test]
-async fn summary_returns_200_with_empty_storage() {
+async fn t2__summary_returns_200_with_empty_storage() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -30,7 +30,7 @@ async fn summary_returns_200_with_empty_storage() {
 }
 
 #[tokio::test]
-async fn summary_accepts_multiple_ranges() {
+async fn t2__summary_accepts_multiple_ranges() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
     let app = app(state);
@@ -48,7 +48,7 @@ async fn summary_accepts_multiple_ranges() {
 }
 
 #[tokio::test]
-async fn summary_rejects_invalid_range() {
+async fn t2__summary_rejects_invalid_range() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -63,7 +63,7 @@ async fn summary_rejects_invalid_range() {
 }
 
 #[tokio::test]
-async fn summary_503_when_storage_missing() {
+async fn t2__summary_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
     let (status, _, _) =
         authed_bytes(app(state), "GET", "/admin/dashboard/summary?range=1h", None).await;
@@ -71,9 +71,10 @@ async fn summary_503_when_storage_missing() {
 }
 
 #[tokio::test]
-async fn summary_includes_current_partial_minute_and_hour_rollups() {
+async fn t3__summary_includes_current_partial_minute_and_hour_rollups() {
     let clock = test_clock(UNALIGNED_NOW_UNIX_SECS);
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     storage
         .append_request_event(&usage_event(UNALIGNED_NOW_UNIX_SECS))
         .await
@@ -119,7 +120,7 @@ async fn summary_includes_current_partial_minute_and_hour_rollups() {
 }
 
 #[tokio::test]
-async fn summary_exact_boundaries_do_not_advance_or_change_bucket_count() {
+async fn t2__summary_exact_boundaries_do_not_advance_or_change_bucket_count() {
     let minute_clock = test_clock(ALIGNED_MINUTE_UNIX_SECS);
     let (_minute_dir, minute_storage) = temp_storage_with_clock(minute_clock.clone()).await;
     let minute_app = app(test_state_with_clock(

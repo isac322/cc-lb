@@ -8,7 +8,7 @@ use cc_lb_engine::SseBatchConfig;
 use sse_relay_support::{RecordingHook, body_from_chunks, collect_response_body, relay_for};
 
 #[tokio::test]
-async fn utf8_boundary_handling() {
+async fn t2__utf8_boundary_handling() {
     let input = "event: content_block_delta\ndata: {\"text\":\"hi 👍 there\"}\n\n";
     let bytes = input.as_bytes();
     let split = input.find('👍').expect("fixture contains multibyte char") + 2;

@@ -7,7 +7,8 @@ use axum::http::StatusCode;
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn scheduler_admin_sqlite_status_and_failures() -> Result<(), Box<dyn std::error::Error>> {
+async fn t3__scheduler_admin_sqlite_status_and_failures() -> Result<(), Box<dyn std::error::Error>>
+{
     let fixture = support::sqlite_fixture().await?;
     support::seed_sqlite_usage_rollup(&fixture.pool).await?;
     support::seed_sqlite_failed_warmup(&fixture.pool).await?;
@@ -56,16 +57,17 @@ async fn scheduler_admin_sqlite_status_and_failures() -> Result<(), Box<dyn std:
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
-async fn scheduler_admin_postgres_status_and_failures() -> Result<(), Box<dyn std::error::Error>> {
-    let Some((admin, db_name, fixture)) = support::postgres_fixture().await? else {
-        return Ok(());
-    };
-    let result = async {
+async fn t3_postgres__scheduler_admin_status_and_failures() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = support::postgres_fixture().await?;
+    let result: Result<(), Box<dyn std::error::Error>> = async {
         support::seed_postgres_failed_warmup(&fixture.pool).await?;
         let app = support::app_with_scheduler(fixture.handle.clone());
         let (status, _body) =
             support::authed_json(app.clone(), "GET", "/admin/scheduler/status", &[]).await?;
-        assert_eq!(status, StatusCode::OK);
+        if status != StatusCode::OK {
+            return Err(format!("scheduler status endpoint returned {status}").into());
+        }
         let (failures_status, failures_body) = support::authed_json(
             app.clone(),
             "GET",
@@ -73,17 +75,29 @@ async fn scheduler_admin_postgres_status_and_failures() -> Result<(), Box<dyn st
             &[],
         )
         .await?;
-        assert_eq!(failures_status, StatusCode::OK);
-        assert_eq!(failures_body["failures"][0]["job_type"], "adaptive");
+        if failures_status != StatusCode::OK {
+            return Err(format!("scheduler failures endpoint returned {failures_status}").into());
+        }
+        if failures_body["failures"][0]["job_type"] != "adaptive" {
+            return Err(format!(
+                "expected adaptive failure, got {}",
+                failures_body["failures"][0]["job_type"]
+            )
+            .into());
+        }
         let response = support::request(app, "POST", "/admin/scheduler/reconcile", &[]).await?;
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-        Ok::<(), Box<dyn std::error::Error>>(())
+        if response.status() != StatusCode::METHOD_NOT_ALLOWED {
+            return Err(format!(
+                "scheduler reconcile endpoint returned {}",
+                response.status()
+            )
+            .into());
+        }
+        Ok(())
     }
     .await;
-    fixture.pool.close().await;
-    scheduler_sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{db_name}""#))
-        .execute(&admin)
-        .await?;
-    admin.close().await;
-    result
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown?;
+    Ok(())
 }

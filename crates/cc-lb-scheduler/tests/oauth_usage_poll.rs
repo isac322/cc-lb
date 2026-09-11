@@ -1,4 +1,4 @@
-use cc_lb_scheduler::error::Result;
+use cc_lb_scheduler::error::{Result, SchedulerError};
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
 use cc_lb_scheduler::state_stores::OAuthUsagePollCursorsStore;
 use cc_lb_scheduler::worker::CronJob;
@@ -6,9 +6,10 @@ use uuid::Uuid;
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn sqlite_record_attempt_appends_successive_statuses_and_increments_count() -> Result<()> {
+async fn t3__sqlite_record_attempt_appends_successive_statuses_and_increments_count() -> Result<()>
+{
     let pool = sqlite_memory().await?;
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(1);
     let cursors = OAuthUsagePollCursorsStore::new(pool);
 
     cursors.record_attempt(upstream_id, 1_000, 200).await?;
@@ -23,9 +24,9 @@ async fn sqlite_record_attempt_appends_successive_statuses_and_increments_count(
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn sqlite_record_attempt_does_not_let_older_tick_overwrite_newer_state() -> Result<()> {
+async fn t3__sqlite_record_attempt_does_not_let_older_tick_overwrite_newer_state() -> Result<()> {
     let pool = sqlite_memory().await?;
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(2);
     let cursors = OAuthUsagePollCursorsStore::new(pool);
 
     cursors.record_attempt(upstream_id, 1_060, 200).await?;
@@ -40,9 +41,9 @@ async fn sqlite_record_attempt_does_not_let_older_tick_overwrite_newer_state() -
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn sqlite_record_attempt_increments_count_under_concurrent_writers() -> Result<()> {
-    let pool = sqlite_file_with_pool(8).await?;
-    let upstream_id = Uuid::new_v4();
+async fn t3__sqlite_record_attempt_increments_count_under_concurrent_writers() -> Result<()> {
+    let (_dir, pool) = sqlite_file_with_pool(8).await?;
+    let upstream_id = Uuid::from_u128(3);
     let cursors = OAuthUsagePollCursorsStore::new(pool.clone());
 
     let mut handles = Vec::new();
@@ -85,8 +86,12 @@ async fn sqlite_memory() -> Result<sqlx::SqlitePool> {
 }
 
 #[cfg(feature = "sqlite")]
-async fn sqlite_file_with_pool(max_connections: u32) -> Result<sqlx::SqlitePool> {
-    let path = std::env::temp_dir().join(format!("oauth-usage-{}.db", Uuid::new_v4()));
+async fn sqlite_file_with_pool(
+    max_connections: u32,
+) -> Result<(tempfile::TempDir, sqlx::SqlitePool)> {
+    let dir = tempfile::tempdir()
+        .map_err(|error| SchedulerError::Job(format!("create OAuth usage tempdir: {error}")))?;
+    let path = dir.path().join("oauth-usage.db");
     let url = format!("sqlite://{}?mode=rwc", path.display());
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(max_connections)
@@ -99,7 +104,7 @@ async fn sqlite_file_with_pool(max_connections: u32) -> Result<sqlx::SqlitePool>
         .execute(&pool)
         .await?;
     apply_cursor_migrations(&pool).await?;
-    Ok(pool)
+    Ok((dir, pool))
 }
 
 #[cfg(feature = "sqlite")]

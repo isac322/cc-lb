@@ -1,86 +1,126 @@
-#![cfg(all(feature = "sqlite", not(feature = "postgres")))]
-
+#[cfg(feature = "sqlite")]
+use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink, WorkerError};
+#[cfg(feature = "sqlite")]
 use std::collections::BTreeSet;
+#[cfg(feature = "sqlite")]
 use std::str::FromStr as _;
 use std::sync::Arc;
+#[cfg(feature = "sqlite")]
 use std::time::Duration;
 
-use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink, WorkerError};
-use cc_lb_clock::SystemClock;
+use cc_lb_clock::TestClock;
 use cc_lb_config::SchedulerConfig;
+#[cfg(feature = "sqlite")]
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
+#[cfg(feature = "sqlite")]
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
+#[cfg(feature = "sqlite")]
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;
+#[cfg(feature = "sqlite")]
+use cc_lb_scheduler::scheduler_metrics;
+#[cfg(feature = "sqlite")]
 use cc_lb_scheduler::worker::{
-    ADAPTIVE_QUEUE, AdaptiveJob, CronJob, SchedulerBackend, SchedulerCtx, SchedulerPushTask,
-    SqliteSchedulerBackend, build_adaptive_worker,
+    ADAPTIVE_QUEUE, SchedulerBackend, SchedulerPushTask, SqliteSchedulerBackend,
+    build_adaptive_worker,
 };
+use cc_lb_scheduler::worker::{AdaptiveJob, CronJob, SchedulerCtx};
+#[cfg(feature = "sqlite")]
 use cc_lb_storage_api::CacheTtl;
+#[cfg(feature = "sqlite")]
+use metrics_exporter_prometheus::PrometheusBuilder;
+#[cfg(feature = "sqlite")]
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+#[cfg(feature = "sqlite")]
 use tempfile::TempDir;
+#[cfg(feature = "sqlite")]
 use tokio::sync::mpsc;
+#[cfg(feature = "sqlite")]
 use tokio::task::JoinHandle;
+#[cfg(feature = "sqlite")]
 use tokio::time::timeout;
+#[cfg(feature = "sqlite")]
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+const TEST_NOW_UNIX_SECS: u64 = 1_800_000_000;
+#[cfg(feature = "sqlite")]
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(feature = "sqlite")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
--> Result<(), Box<dyn std::error::Error>> {
-    let db = sqlite_test_db().await?;
-    let pool = db.pool.clone();
-    let queue = ADAPTIVE_QUEUE;
-    let config = fast_queue_config(queue);
-    let mut storage =
-        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(&pool, &config);
-    let upstream_id = Uuid::new_v4();
+#[test]
+fn t3__worker_sqlite_runs_one_of_each_entity_job_to_done() -> Result<(), Box<dyn std::error::Error>>
+{
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let metrics_handle = recorder.handle();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
 
-    for job in entity_jobs(upstream_id) {
-        storage.push(job).await?;
-    }
+    metrics::with_local_recorder(&recorder, || {
+        runtime.block_on(async {
+            let db = sqlite_test_db().await?;
+            let pool = db.pool.clone();
+            let config = fast_queue_config(ADAPTIVE_QUEUE);
+            let mut storage =
+                apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(&pool, &config);
+            let upstream_id = Uuid::from_u128(1);
 
-    let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
-        pool.clone(),
-        Arc::new(SystemClock),
-    ));
-    let (dispatch_tx, mut dispatch_rx) = mpsc::channel::<&'static str>(8);
-    let worker = build_adaptive_worker(&backend, dispatching_scheduler_ctx(dispatch_tx))?;
-    let cancel = CancellationToken::new();
-    let handle: JoinHandle<Result<(), WorkerError>> =
-        tokio::spawn(worker.run_until_cancelled(cancel.clone()));
+            for job in entity_jobs(upstream_id) {
+                storage.push(job).await?;
+            }
 
-    // Completion-driven teardown (issue #267): wait until the worker has driven each
-    // distinct entity job to Ok(JobOutcome::Done), then stop it. The former run_for(5s)
-    // wall-clock budget raced job completion and flaked under load.
-    let mut dispatched = BTreeSet::new();
-    while dispatched.len() < 4 {
-        let kind = timeout(COMPLETION_TIMEOUT, dispatch_rx.recv())
-            .await
-            .map_err(|_| format!("timed out waiting for entity-job dispatch; saw {dispatched:?}"))?
-            .ok_or("dispatch channel closed before all four entity jobs ran")?;
-        dispatched.insert(kind);
-    }
-    cancel.cancel();
-    handle.abort();
-    let _ = handle.await;
+            let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
+                pool,
+                Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
+            ));
+            let observer_pool = db.pool.clone();
+            let (dispatch_tx, mut dispatch_rx) = mpsc::channel::<&'static str>(8);
+            let worker = build_adaptive_worker(&backend, dispatching_scheduler_ctx(dispatch_tx))?;
+            let cancel = CancellationToken::new();
+            let handle: JoinHandle<Result<(), WorkerError>> =
+                tokio::spawn(worker.run_until_cancelled(cancel.clone()));
 
-    assert_eq!(
-        dispatched,
-        BTreeSet::from([
-            "cache_keepalive",
-            "metadata_refresh",
-            "oauth_refresh",
-            "warmup"
-        ]),
-        "worker must run one of each entity job to Ok(JobOutcome::Done)",
-    );
-    Ok(())
+            let mut dispatched = BTreeSet::new();
+            while dispatched.len() < 4 {
+                let kind = timeout(COMPLETION_TIMEOUT, dispatch_rx.recv())
+                    .await
+                    .map_err(|_| {
+                        format!("timed out waiting for entity-job dispatch; saw {dispatched:?}")
+                    })?
+                    .ok_or("dispatch channel closed before all four entity jobs ran")?;
+                dispatched.insert(kind);
+            }
+            wait_for_done_entity_jobs(&observer_pool, 4).await?;
+            cancel.cancel();
+            handle.abort();
+            let _ = handle.await;
+
+            assert_eq!(
+                dispatched,
+                BTreeSet::from([
+                    "cache_keepalive",
+                    "metadata_refresh",
+                    "oauth_refresh",
+                    "warmup"
+                ]),
+                "worker must run one of each entity job to Ok(JobOutcome::Done)",
+            );
+            let rendered = metrics_handle.render();
+            assert_eq!(
+                counter_value(
+                    &rendered,
+                    scheduler_metrics::JOBS_TOTAL,
+                    &[("job_type", "upstream_warmup"), ("status", "done")],
+                ),
+                1.0,
+                "builder-wired scheduler metrics must count the completed warmup exactly once:\n{rendered}",
+            );
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+    })
 }
 
 #[cfg(feature = "sqlite")]
@@ -95,17 +135,16 @@ fn fast_queue_config(queue: &str) -> apalis_sqlite::Config {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
+async fn t3__scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
 -> Result<(), Box<dyn std::error::Error>> {
     let db = sqlite_test_db().await?;
     let pool = db.pool.clone();
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
         pool.clone(),
-        Arc::new(SystemClock),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
     ));
-    let upstream_id = Uuid::new_v4();
-
+    let upstream_id = Uuid::from_u128(2);
     backend
         .push_job(AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(
             upstream_id,
@@ -126,7 +165,7 @@ async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
     .await?;
     assert_eq!(active_count, 1);
 
-    sqlx::query("UPDATE Jobs SET status = 'Done', done_at = strftime('%s', 'now')")
+    sqlx::query("UPDATE Jobs SET status = 'Done', done_at = 1800000000")
         .execute(&pool)
         .await?;
     backend
@@ -146,17 +185,16 @@ async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn scheduler_backend_routes_keepalive_to_dedicated_queue()
+async fn t3__scheduler_backend_routes_keepalive_to_dedicated_queue()
 -> Result<(), Box<dyn std::error::Error>> {
     let db = sqlite_test_db().await?;
     let pool = db.pool.clone();
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
         pool.clone(),
-        Arc::new(SystemClock),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
     ));
-    let upstream_id = Uuid::new_v4();
-
+    let upstream_id = Uuid::from_u128(3);
     backend
         .push_keepalive_task(SchedulerPushTask {
             args: AdaptiveJob::CacheKeepalive(keepalive_job(upstream_id)),
@@ -189,14 +227,13 @@ async fn scheduler_backend_routes_keepalive_to_dedicated_queue()
     Ok(())
 }
 
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn worker_sqlite_uses_default_entity_concurrency() {
+#[test]
+fn worker_uses_default_entity_concurrency() {
     let ctx = SchedulerCtx::new(
         SchedulerConfig::default(),
         Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
         Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-        Arc::new(SystemClock),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
     );
 
     assert_eq!(
@@ -206,16 +243,15 @@ async fn worker_sqlite_uses_default_entity_concurrency() {
     assert_eq!(ctx.config.entity_concurrency, 8);
 }
 
-#[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::error::Error>> {
+async fn t2__scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = SchedulerCtx::new(
         SchedulerConfig::default(),
         Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
         Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-        Arc::new(SystemClock),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
     );
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(4);
 
     let entity =
         (ctx.adaptive_dispatch)(AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)))
@@ -250,6 +286,7 @@ async fn sqlite_test_db() -> Result<SqliteTestDb, Box<dyn std::error::Error>> {
     Ok(SqliteTestDb { pool, _dir: dir })
 }
 
+#[cfg(feature = "sqlite")]
 fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 4] {
     [
         AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)),
@@ -259,6 +296,7 @@ fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 4] {
     ]
 }
 
+#[cfg(feature = "sqlite")]
 fn keepalive_job(upstream_id: Uuid) -> CacheKeepaliveJob {
     CacheKeepaliveJob {
         session_key_hash: "worker-session".to_owned(),
@@ -275,6 +313,7 @@ fn keepalive_job(upstream_id: Uuid) -> CacheKeepaliveJob {
     }
 }
 
+#[cfg(feature = "sqlite")]
 fn dispatching_scheduler_ctx(dispatch_tx: mpsc::Sender<&'static str>) -> SchedulerCtx {
     SchedulerCtx::new(
         SchedulerConfig::default(),
@@ -295,6 +334,51 @@ fn dispatching_scheduler_ctx(dispatch_tx: mpsc::Sender<&'static str>) -> Schedul
             })
         }),
         Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-        Arc::new(SystemClock),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
     )
+}
+
+#[cfg(feature = "sqlite")]
+async fn wait_for_done_entity_jobs(
+    pool: &sqlx::SqlitePool,
+    expected: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    timeout(COMPLETION_TIMEOUT, async {
+        let mut poll = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            poll.tick().await;
+            let done: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM Jobs WHERE job_type = ? AND status = 'Done'",
+            )
+            .bind(ADAPTIVE_QUEUE)
+            .fetch_one(pool)
+            .await?;
+            if done == expected {
+                return Ok::<(), sqlx::Error>(());
+            }
+            if done > expected {
+                return Err(sqlx::Error::Protocol(format!(
+                    "observed {done} completed entity jobs, expected {expected}"
+                )));
+            }
+        }
+    })
+    .await
+    .map_err(|_| "timed out waiting for entity jobs to reach Done")??;
+    Ok(())
+}
+#[cfg(feature = "sqlite")]
+fn counter_value(rendered: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
+    let metric_prefix = format!("{name}{{");
+    rendered
+        .lines()
+        .find(|line| {
+            line.starts_with(&metric_prefix)
+                && labels
+                    .iter()
+                    .all(|(label, value)| line.contains(&format!(r#"{label}="{value}""#)))
+        })
+        .and_then(|line| line.split_whitespace().last())
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0)
 }

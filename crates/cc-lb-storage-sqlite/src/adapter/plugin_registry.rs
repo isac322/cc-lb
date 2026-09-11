@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use async_trait::async_trait;
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
-    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, ChangeChannel,
     MAX_WASM_BLOB_BYTES, PluginBlobRepo, PluginChainConflictReason, PluginChainEntry,
     PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind, RepoError,
     StorageError, StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryCascadeDelete,
@@ -14,7 +14,7 @@ use serde_json::Value;
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
-use crate::{SqliteStorage, map_sqlx_error};
+use crate::{SqliteStorage, adapter::notifier::publish_change, map_sqlx_error};
 
 const LIST_REGISTRY_SQL: &str = "SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND json_extract(u.warmup_dialect_plugin, '$.wasm_registry_id') = r.id) AS refcount FROM wasm_registry_v2 r WHERE (? IS NULL OR r.id > ?) ORDER BY r.id ASC LIMIT ?";
 const GET_REGISTRY_BY_SHA_SQL: &str = "SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND json_extract(u.warmup_dialect_plugin, '$.wasm_registry_id') = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.sha256 = ?";
@@ -86,8 +86,13 @@ impl PluginRegistryStore for SqliteStorage {
             .ok_or_else(|| StorageError::Fatal {
                 message: "wasm registry row missing after upload".to_owned(),
             })?;
+        let payload = (!existed).then(|| entry.id.to_string());
+        let was_fully_existing = existed && blob_insert.rows_affected() == 0;
         tx.commit().await.map_err(map_sqlx_error)?;
-        Ok((entry, existed && blob_insert.rows_affected() == 0))
+        if let Some(payload) = payload {
+            publish_change(ChangeChannel::PluginRegistry, payload, self.clock());
+        }
+        Ok((entry, was_fully_existing))
     }
 
     async fn get_blob(&self, sha256: [u8; 32]) -> StorageResult<Option<WasmBlobRecord>> {
@@ -255,7 +260,9 @@ impl PluginRegistryStore for SqliteStorage {
         let entry = registry_by_id_in_tx(&mut tx, current.id)
             .await?
             .ok_or_else(|| conflict("updated plugin registry row disappeared"))?;
+        let payload = entry.id.to_string();
         tx.commit().await.map_err(map_sqlx_error)?;
+        publish_change(ChangeChannel::PluginRegistry, payload, self.clock());
         Ok(entry)
     }
 
@@ -313,7 +320,28 @@ impl PluginRegistryStore for SqliteStorage {
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        let mut notifications = Vec::with_capacity(references.references.len() + 1);
+        let mut principals = HashSet::new();
+        for reference in &references.references {
+            match reference {
+                WasmRegistryReference::PluginChain { principal_id, .. } => {
+                    principals.insert(*principal_id);
+                }
+                WasmRegistryReference::UpstreamWarmupDialect { upstream_id, .. } => {
+                    notifications.push((ChangeChannel::Upstream, upstream_id.to_string()));
+                }
+            }
+        }
+        notifications.extend(
+            principals
+                .into_iter()
+                .map(|principal_id| (ChangeChannel::PluginChain, principal_id.to_string())),
+        );
+        notifications.push((ChangeChannel::PluginRegistry, id.to_string()));
         tx.commit().await.map_err(map_sqlx_error)?;
+        for (channel, payload) in notifications {
+            publish_change(channel, payload, self.clock());
+        }
         Ok(Some(WasmRegistryCascadeDelete {
             entry,
             references: references.references,
@@ -338,7 +366,9 @@ impl PluginRegistryStore for SqliteStorage {
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
+        let payload = id.to_string();
         tx.commit().await.map_err(map_sqlx_error)?;
+        publish_change(ChangeChannel::PluginRegistry, payload, self.clock());
         self.get_registry_entry_by_id(id)
             .await?
             .ok_or_else(|| conflict("updated plugin registry row disappeared"))
@@ -396,7 +426,9 @@ impl PluginRegistryStore for SqliteStorage {
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
+        let payload = id.to_string();
         tx.commit().await.map_err(map_sqlx_error)?;
+        publish_change(ChangeChannel::PluginRegistry, payload, self.clock());
         Ok(Some(entry))
     }
 
@@ -479,7 +511,9 @@ impl PluginRegistryStore for SqliteStorage {
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlite_error)?;
+        let payload = input.principal_id.to_string();
         tx.commit().await.map_err(map_sqlx_error)?;
+        publish_change(ChangeChannel::PluginChain, payload, self.clock());
         let entry = chain_from_row(row)?;
         Ok(entry)
     }
@@ -583,7 +617,15 @@ impl PluginRegistryStore for SqliteStorage {
         .fetch_optional(self.pool())
         .await
         .map_err(map_sqlite_error)?;
-        row.map(chain_from_row).transpose()
+        let entry = row.map(chain_from_row).transpose()?;
+        if let Some(entry) = &entry {
+            publish_change(
+                ChangeChannel::PluginChain,
+                entry.principal_id.to_string(),
+                self.clock(),
+            );
+        }
+        Ok(entry)
     }
 
     async fn reorder_chain(
@@ -592,6 +634,7 @@ impl PluginRegistryStore for SqliteStorage {
         slot: PluginSlotKind,
         new_orders: Vec<(Uuid, i64, u64)>,
     ) -> StorageResult<Vec<PluginChainEntry>> {
+        let changed = !new_orders.is_empty();
         let mut tx = self.begin_immediate().await?;
         let mut staged_orders = HashMap::with_capacity(new_orders.len());
         let mut seen_ids = HashSet::with_capacity(new_orders.len());
@@ -668,7 +711,11 @@ impl PluginRegistryStore for SqliteStorage {
         .fetch_all(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        let payload = changed.then(|| principal_id.to_string());
         tx.commit().await.map_err(map_sqlx_error)?;
+        if let Some(payload) = payload {
+            publish_change(ChangeChannel::PluginChain, payload, self.clock());
+        }
         rows.into_iter().map(chain_from_row).collect()
     }
 
@@ -697,7 +744,9 @@ impl PluginRegistryStore for SqliteStorage {
                 current: entry.revision,
             });
         }
+        let payload = entry.principal_id.to_string();
         tx.commit().await.map_err(map_sqlx_error)?;
+        publish_change(ChangeChannel::PluginChain, payload, self.clock());
         Ok(Some(entry))
     }
 

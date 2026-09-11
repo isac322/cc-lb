@@ -5,9 +5,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use cc_lb_engine::event_bus::{BusReceiver, RequestEventBus, RequestEventUpdate};
 use cc_lb_observability::ObserveEvent;
+use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::types::RequestEvent;
-use cc_lb_storage_api::{BackendKind, MetaStore, Storage as StorageTrait};
-use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_testkit::InMemoryStorage;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use tokio::time::{Duration, timeout};
@@ -20,7 +20,7 @@ use common::{
 const CANONICAL_RATE_LIMIT_BODY: &[u8] = br#"{"type":"error","error":{"type":"rate_limit_error","message":"forced fake rate limit response"}}"#;
 
 #[tokio::test]
-async fn non_stream_429_preserves_client_status_and_body_bytes() {
+async fn t2__non_stream_429_preserves_client_status_and_body_bytes() {
     // Given
     let state = TestState::default();
     let upstream_body = Bytes::from_static(CANONICAL_RATE_LIMIT_BODY);
@@ -54,7 +54,7 @@ async fn non_stream_429_preserves_client_status_and_body_bytes() {
 }
 
 #[tokio::test]
-async fn canonical_non_stream_429_records_structured_error_and_preserves_client_response()
+async fn t2__canonical_non_stream_429_records_structured_error_and_preserves_client_response()
 -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let upstream_body = Bytes::from_static(CANONICAL_RATE_LIMIT_BODY);
@@ -83,7 +83,7 @@ async fn canonical_non_stream_429_records_structured_error_and_preserves_client_
 }
 
 #[tokio::test]
-async fn noncanonical_non_stream_429_captures_raw_body_as_error_message()
+async fn t2__noncanonical_non_stream_429_captures_raw_body_as_error_message()
 -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let raw_bodies = [
@@ -111,7 +111,8 @@ async fn noncanonical_non_stream_429_captures_raw_body_as_error_message()
 }
 
 #[tokio::test]
-async fn empty_non_stream_429_records_no_error_body() -> Result<(), Box<dyn std::error::Error>> {
+async fn t2__empty_non_stream_429_records_no_error_body() -> Result<(), Box<dyn std::error::Error>>
+{
     // Given / When
     let observed = observe_non_stream_429(Bytes::new()).await?;
 
@@ -124,7 +125,7 @@ async fn empty_non_stream_429_records_no_error_body() -> Result<(), Box<dyn std:
 }
 
 #[tokio::test]
-async fn oversized_non_stream_429_truncates_captured_error_body()
+async fn t2__oversized_non_stream_429_truncates_captured_error_body()
 -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let upstream_body = Bytes::from(vec![b'x'; 10 * 1024]);
@@ -149,7 +150,7 @@ async fn oversized_non_stream_429_truncates_captured_error_body()
 }
 
 #[tokio::test]
-async fn canonical_non_stream_429_preserves_usage_and_body_metrics()
+async fn t2__canonical_non_stream_429_preserves_usage_and_body_metrics()
 -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let upstream_body = Bytes::from_static(
@@ -178,7 +179,7 @@ async fn canonical_non_stream_429_preserves_usage_and_body_metrics()
 }
 
 #[tokio::test]
-async fn canonical_non_stream_429_exposes_only_broad_error_to_observe_plugin()
+async fn t2__canonical_non_stream_429_exposes_only_broad_error_to_observe_plugin()
 -> Result<(), Box<dyn std::error::Error>> {
     // Given / When
     let observed = observe_non_stream_429(Bytes::from_static(CANONICAL_RATE_LIMIT_BODY)).await?;
@@ -202,7 +203,7 @@ async fn canonical_non_stream_429_exposes_only_broad_error_to_observe_plugin()
 }
 
 #[tokio::test]
-async fn noncanonical_stream_429_captures_raw_body_as_error_message()
+async fn t2__noncanonical_stream_429_captures_raw_body_as_error_message()
 -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let upstream_body =
@@ -240,8 +241,7 @@ async fn observe_429(
     client_stream: bool,
     upstream_body: Bytes,
 ) -> Result<ObservedErrorResponse, Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let storage = InMemoryStorage::new();
     let hook = Arc::new(RecordingHook::default());
     let test_bus = TestLifecycleBus::new()
         .with_assembler(storage.clone() as Arc<dyn StorageTrait>)
@@ -301,18 +301,4 @@ async fn observe_429(
         event,
         observe_events,
     })
-}
-
-async fn sqlite_storage(
-    dir: &tempfile::TempDir,
-) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path().join("provider-error.sqlite").display()
-    );
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    Ok(storage)
 }

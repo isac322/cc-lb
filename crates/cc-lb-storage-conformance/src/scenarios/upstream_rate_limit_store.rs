@@ -57,6 +57,47 @@ scenario!(
     }
 );
 
+scenario!(roundtrip_and_list_boundary, |storage| async move {
+    let upstream_a = upstream_id(7);
+    let upstream_b = upstream_id(8);
+    let ignored_upstream = upstream_id(9);
+    let unknown_upstream = upstream_id(10);
+    let observation_a_minute =
+        observation(upstream_a, "minute", RateLimitKind::OutputTokens, 103, 93);
+    let observation_a_hour = observation(upstream_a, "hour", RateLimitKind::InputTokens, 102, 92);
+    let observation_b = observation(upstream_b, "minute", RateLimitKind::Tokens, 101, 91);
+    let ignored = observation(ignored_upstream, "minute", RateLimitKind::Requests, 100, 90);
+
+    for record in [
+        &ignored,
+        &observation_b,
+        &observation_a_minute,
+        &observation_a_hour,
+    ] {
+        storage.put_observation(record).await?;
+    }
+
+    let listed = storage
+        .list_for_upstream_ids(&[upstream_b, upstream_a])
+        .await?;
+    ensure!(
+        listed == [observation_a_hour, observation_a_minute, observation_b],
+        "listing should filter to requested upstreams and use canonical order"
+    );
+    ensure!(
+        storage.list_for_upstream_ids(&[]).await?.is_empty(),
+        "an empty upstream boundary should return no observations"
+    );
+    ensure!(
+        storage
+            .list_for_upstream_ids(&[unknown_upstream])
+            .await?
+            .is_empty(),
+        "an unknown upstream boundary should return no observations"
+    );
+    Ok(())
+});
+
 scenario!(latest_write_wins_within_same_key, |storage| async move {
     let upstream_id = upstream_id(3);
     let latest = observation(upstream_id, "minute", RateLimitKind::Requests, 100, 80);

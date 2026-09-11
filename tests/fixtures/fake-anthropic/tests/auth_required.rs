@@ -5,7 +5,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn missing_auth_returns_anthropic_error_shape() {
+async fn t2__missing_auth_returns_anthropic_error_shape() {
     let response = app(AppConfig::default())
         .oneshot(
             Request::builder()
@@ -29,7 +29,7 @@ async fn missing_auth_returns_anthropic_error_shape() {
 }
 
 #[tokio::test]
-async fn invalid_auth_is_rejected_and_bearer_sk_ant_is_accepted() {
+async fn t2__invalid_auth_is_rejected_and_bearer_sk_ant_is_accepted() {
     let invalid = app(AppConfig::default())
         .oneshot(
             Request::builder()

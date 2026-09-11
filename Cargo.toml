@@ -14,7 +14,6 @@ members = [
     "tests/loom",
     "tests/property",
     "tests/stress-suite",
-    "tests/tls",
     "tests/integration",
     "tests/multi-replica",
 ]

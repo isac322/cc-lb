@@ -87,7 +87,7 @@ fn discover_index_asset(index_html: &str) -> String {
 }
 
 #[tokio::test]
-async fn asset_responses_are_immutable_and_support_conditional_get() {
+async fn t2__asset_responses_are_immutable_and_support_conditional_get() {
     let app = router(test_state());
 
     let index = get(&app, "/").await;
@@ -128,7 +128,7 @@ async fn asset_responses_are_immutable_and_support_conditional_get() {
 }
 
 #[tokio::test]
-async fn index_and_spa_fallback_revalidate_and_support_conditional_get() {
+async fn t2__index_and_spa_fallback_revalidate_and_support_conditional_get() {
     let app = router(test_state());
 
     let response = get(&app, "/").await;
@@ -161,7 +161,7 @@ async fn index_and_spa_fallback_revalidate_and_support_conditional_get() {
 }
 
 #[tokio::test]
-async fn admin_unknown_paths_do_not_fallback_to_spa() {
+async fn t2__admin_unknown_paths_do_not_fallback_to_spa() {
     let app = router(test_state());
 
     let response = get(&app, "/admin").await;

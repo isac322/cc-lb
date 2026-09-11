@@ -626,6 +626,7 @@ fn bearer_header_value(token: &str) -> Result<HeaderValue, SignerError> {
 }
 
 #[cfg(test)]
+
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -909,7 +910,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_missing_returns_missing_credentials() {
+    async fn t2__build_missing_returns_missing_credentials() {
         let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let factory =
@@ -921,7 +922,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_disabled_returns_missing_credentials() {
+    async fn t2__build_disabled_returns_missing_credentials() {
         let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
@@ -948,7 +949,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_disabled_with_allow_disabled_upstream_succeeds() {
+    async fn t2__build_disabled_with_allow_disabled_upstream_succeeds() {
         let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
@@ -988,7 +989,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_deleted_with_allow_disabled_upstream_still_rejects() {
+    async fn t2__build_deleted_with_allow_disabled_upstream_still_rejects() {
         let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
@@ -1013,7 +1014,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_expired_token_returns_expired_token_error() {
+    async fn t2__build_expired_token_returns_expired_token_error() {
         let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
@@ -1041,7 +1042,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decryption_failure_with_wrong_aad_returns_aead_error() {
+    async fn t2__decryption_failure_with_wrong_aad_returns_aead_error() {
         let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
@@ -1066,7 +1067,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signer_sets_bearer_header_with_access_token() {
+    async fn t2__signer_sets_bearer_header_with_access_token() {
         let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;
@@ -1184,7 +1185,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_signer_refreshes_on_unauthorized() {
+    async fn t2__persisted_signer_refreshes_on_unauthorized() {
         let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
         let record = create_upstream(&store, "primary").await;

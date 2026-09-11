@@ -1,3 +1,4 @@
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +19,7 @@ pub struct FakeOAuthClient {
     calls: AtomicU32,
     responses: Mutex<VecDeque<OAuthTokenResponse>>,
     bodies: Mutex<Vec<String>>,
+
 }
 
 impl FakeOAuthClient {
@@ -49,6 +51,7 @@ impl OAuthHttpClient for FakeOAuthClient {
             .lock()
             .expect("bodies lock")
             .push(request.form_body.expose_secret().to_owned());
+
         self.responses
             .lock()
             .expect("responses lock")
@@ -58,6 +61,7 @@ impl OAuthHttpClient for FakeOAuthClient {
             })
     }
 }
+
 
 pub fn success_response(
     access_token: &str,
@@ -92,3 +96,4 @@ pub fn success_response(
 pub fn test_clock() -> ClockHandle {
     Arc::new(TestClock::new_at_secs(TEST_NOW_SECS))
 }
+

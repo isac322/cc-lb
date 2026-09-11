@@ -185,6 +185,7 @@ fn increment_drop_metric(metrics: &dyn EngineMetricsHook, reason: &'static str, 
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -202,7 +203,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn success_event_upserts_and_enqueues_observations() {
+    async fn t2__success_event_upserts_and_enqueues_observations() {
         let cache = Arc::new(RecordingPromptCacheObservationCache::default());
         let sink = Arc::new(RecordingPromptCacheObservationSink::default());
         let (tx, rx) = mpsc::channel(16);
@@ -226,11 +227,20 @@ mod tests {
         assert_eq!(upserts[0].prefix_content_block_index, 1);
         assert_eq!(upserts[0].estimated_prefix_tokens, 2_400);
         assert_eq!(upserts[0].token_estimate_source, "test");
+        assert_eq!(upserts[0].ttl_class, TtlClass::Ephemeral5m);
+        assert_eq!(upserts[0].expires_at_unix_secs, 1_800_000_300);
+        assert_eq!(upserts[0].observed_at_unix_secs, 1_800_000_000);
         let records = sink.records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].v3_prefix_key, "write");
         assert_eq!(records[0].canonical_model_id, TEST_MODEL);
         assert_eq!(records[0].hash_schema_version, HASH_SCHEMA_VERSION);
+        assert_eq!(records[0].ttl_class, TtlClass::Ephemeral5m);
+        assert_eq!(records[0].expires_at_unix_secs, 1_800_000_300);
+        assert_eq!(records[0].last_observed_at_unix_secs, 1_800_000_000);
+        assert_eq!(records[0].prefix_content_block_index, 1);
+        assert_eq!(records[0].estimated_prefix_tokens, 2_400);
+        assert_eq!(records[0].token_estimate_source, "test");
     }
 
     #[tokio::test(flavor = "current_thread")]

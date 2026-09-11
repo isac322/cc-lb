@@ -48,7 +48,7 @@ impl UpstreamDispatch for TimedDispatch {
 }
 
 #[tokio::test]
-async fn unauthorized_refresh_retries_once_then_succeeds() {
+async fn t2__unauthorized_refresh_retries_once_then_succeeds() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let test_bus = TestLifecycleBus::new();

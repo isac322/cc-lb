@@ -1,7 +1,8 @@
 use std::io::Read;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
@@ -30,7 +31,13 @@ pub struct SupervisedChild {
     child_reaped: bool,
 }
 
-type Capture = Arc<Mutex<Vec<u8>>>;
+#[derive(Default)]
+struct CapturedOutput {
+    bytes: Mutex<Vec<u8>>,
+    changed: Condvar,
+}
+
+type Capture = Arc<CapturedOutput>;
 
 impl SupervisedChild {
     pub fn spawn(mut command: Command) -> Result<Self, String> {
@@ -47,8 +54,8 @@ impl SupervisedChild {
             reap_child(&mut child);
             return Err("spawned child has no stderr pipe".to_owned());
         };
-        let stdout = Arc::new(Mutex::new(Vec::new()));
-        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let stdout = Arc::new(CapturedOutput::default());
+        let stderr = Arc::new(CapturedOutput::default());
         let stdout_thread = capture_thread(stdout_pipe, Arc::clone(&stdout));
         let stderr_thread = capture_thread(stderr_pipe, Arc::clone(&stderr));
         Ok(Self {
@@ -124,6 +131,30 @@ impl SupervisedChild {
         )
     }
 
+    #[allow(
+        dead_code,
+        reason = "used by supervisor integration tests that are not linked into every binary target"
+    )]
+    pub(crate) fn wait_for_stdout(&self, expected: &[u8], timeout: Duration) -> bool {
+        let Ok(bytes) = self.stdout.bytes.lock() else {
+            return false;
+        };
+        let Ok((bytes, _)) = self
+            .stdout
+            .changed
+            .wait_timeout_while(bytes, timeout, |bytes| {
+                !bytes
+                    .windows(expected.len())
+                    .any(|window| window == expected)
+            })
+        else {
+            return false;
+        };
+        bytes
+            .windows(expected.len())
+            .any(|window| window == expected)
+    }
+
     fn finish_capture(&mut self) -> (Vec<u8>, Vec<u8>) {
         if let Some(thread) = self.stdout_thread.take() {
             let _ = thread.join();
@@ -186,16 +217,23 @@ where
     R: Read + Send + 'static,
 {
     thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = pipe.read_to_end(&mut bytes);
-        if let Ok(mut target) = capture.lock() {
-            target.extend(bytes);
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = match pipe.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            if let Ok(mut target) = capture.bytes.lock() {
+                target.extend_from_slice(&buffer[..read]);
+                capture.changed.notify_all();
+            }
         }
     })
 }
 
 fn capture_bytes(capture: &Capture) -> Vec<u8> {
     capture
+        .bytes
         .lock()
         .map(|bytes| bytes.clone())
         .unwrap_or_default()

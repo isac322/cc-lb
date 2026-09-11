@@ -1,13 +1,12 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use cc_lb_engine::{AuditEntry, spawn_audit_writer};
-use cc_lb_storage_api::{AuditStore, BackendKind, MetaStore};
-use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_storage_api::AuditStore;
+use cc_lb_testkit::InMemoryStorage;
 
 #[tokio::test(flavor = "current_thread")]
-async fn flush_100() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage().await?;
+async fn t2__flush_100() -> Result<(), Box<dyn std::error::Error>> {
+    let storage = InMemoryStorage::new();
     let audit_storage: Arc<dyn AuditStore> = storage.clone();
     let (sink, join) = spawn_audit_writer(audit_storage, 1024);
 
@@ -16,26 +15,16 @@ async fn flush_100() -> Result<(), Box<dyn std::error::Error>> {
             .expect("enqueue succeeds");
     }
 
-    const BUDGET: Duration = Duration::from_secs(10);
-    const INTERVAL: Duration = Duration::from_millis(25);
-    let deadline = std::time::Instant::now() + BUDGET;
-    let final_count = loop {
-        let count = audit_count(storage.as_ref()).await?;
-        if count == 100 || std::time::Instant::now() >= deadline {
-            break count;
-        }
-        tokio::time::sleep(INTERVAL).await;
-    };
-    assert_eq!(final_count, 100);
-
     drop(sink);
     join.await?;
+    assert_eq!(audit_count(storage.as_ref()).await?, 100);
+
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn full_drops() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage().await?;
+async fn t2__full_drops() -> Result<(), Box<dyn std::error::Error>> {
+    let storage = InMemoryStorage::new();
     let audit_storage: Arc<dyn AuditStore> = storage.clone();
     let (sink, join) = spawn_audit_writer(audit_storage, 4);
 
@@ -51,8 +40,8 @@ async fn full_drops() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn shutdown_drain() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage().await?;
+async fn t2__shutdown_drain() -> Result<(), Box<dyn std::error::Error>> {
+    let storage = InMemoryStorage::new();
     let audit_storage: Arc<dyn AuditStore> = storage.clone();
     let (sink, join) = spawn_audit_writer(audit_storage, 1024);
 
@@ -67,21 +56,7 @@ async fn shutdown_drain() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dyn std::error::Error>>
-{
-    let dir = tempfile::tempdir()?;
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path().join("audit-writer.sqlite").display()
-    );
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    Ok((dir, Arc::new(storage)))
-}
-
-async fn audit_count(storage: &SqliteStorage) -> Result<usize, Box<dyn std::error::Error>> {
+async fn audit_count(storage: &InMemoryStorage) -> Result<usize, Box<dyn std::error::Error>> {
     Ok(storage.query_audit(None, 0, u64::MAX, 1_000).await?.len())
 }
 

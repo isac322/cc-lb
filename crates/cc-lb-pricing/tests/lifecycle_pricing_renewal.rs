@@ -40,7 +40,7 @@ impl RequestEventBus for RecordingBus {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn renewal_is_priced_only_after_terminal_with_oauth_route_kind() {
+async fn t2__renewal_is_priced_only_after_terminal_with_oauth_route_kind() {
     // Given a renewal lifecycle that has usage and an OAuth upstream route, but no terminal.
     install_renewal_pricing();
     let incomplete_bus = Arc::new(RecordingBus::default());

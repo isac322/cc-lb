@@ -71,7 +71,7 @@ impl UpstreamDispatch for FailingSecondAttemptDispatch {
 }
 
 #[tokio::test]
-async fn unauthorized_refresh_retries_once_then_stops() {
+async fn t2__unauthorized_refresh_retries_once_then_stops() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let test_bus = TestLifecycleBus::new();

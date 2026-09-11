@@ -26,11 +26,11 @@ use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_routing::{
     FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
 };
+use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
-use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
     SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
@@ -64,15 +64,14 @@ fn terminal_strategy_label_for_exhaustive_test(strategy: TerminalStrategy) -> &'
 }
 
 #[tokio::test]
-async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn t2__first_pick_selects_first_candidate_after_filters()
+-> Result<(), Box<dyn std::error::Error>> {
     let first = upstream_id(1);
     let second = upstream_id(2);
     let third = upstream_id(3);
     let choices = Arc::new(Mutex::new(Vec::new()));
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
-    let _dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-terminal.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_terminal(
@@ -92,7 +91,7 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
     .with_static_limit_subject(
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_engine::SystemClock),
+            fixed_clock(1_700_000_000),
         ),
         "principal-test".to_owned(),
         "key-test".to_owned(),
@@ -109,7 +108,7 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
         choices.lock().expect("choices lock").as_slice(),
         &["second".to_owned()]
     );
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     let trace = events
         .first()
         .and_then(|event| event.routing_trace.as_ref())
@@ -128,11 +127,10 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
 }
 
 #[tokio::test]
-async fn signer_build_failure_preserves_request_setup_timings()
+async fn t2__signer_build_failure_preserves_request_setup_timings()
 -> Result<(), Box<dyn std::error::Error>> {
     let choices = Arc::new(Mutex::new(Vec::new()));
-    let _dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-signer-failure.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_terminal_and_signer_failure(
@@ -151,7 +149,7 @@ async fn signer_build_failure_preserves_request_setup_timings()
         .await?;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     let event = events.first().expect("signer failure event");
     assert_eq!(event.error_code.as_deref(), Some("signer_failed"));
     assert_request_setup_timings(event);
@@ -338,37 +336,8 @@ fn assert_request_setup_timings(event: &cc_lb_storage_api::types::RequestEvent) 
     }
 }
 
-async fn sqlite_storage(
-    dir: &tempfile::TempDir,
-    file_name: &str,
-) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    Ok(storage)
-}
-
-async fn wait_for_events(
-    storage: &dyn RequestEventStore,
-    expected: usize,
-) -> Result<Vec<cc_lb_storage_api::types::RequestEvent>, Box<dyn std::error::Error>> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
-        if events.len() >= expected {
-            return Ok(events);
-        }
-        if std::time::Instant::now() >= deadline {
-            panic!("expected {expected} request event(s), got {}", events.len());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-}
-
 #[tokio::test]
-async fn random_terminal_uses_seeded_rng_and_distributes_choices()
+async fn t2__random_terminal_uses_seeded_rng_and_distributes_choices()
 -> Result<(), Box<dyn std::error::Error>> {
     let first = upstream_id(1);
     let second = upstream_id(2);
@@ -488,7 +457,7 @@ fn lifecycle_with_terminal_and_upstream_dispatch(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        fixed_clock(1_700_000_000),
     )
 }
 
@@ -563,7 +532,7 @@ fn principal_view(
 
 fn principal() -> PrincipalRecord {
     PrincipalRecord {
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(0x1003),
         name: "principal-test".to_owned(),
         kind: PrincipalKind::Machine,
         allowed_models: Vec::new(),

@@ -3,7 +3,9 @@ use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tokio::time::Instant;
 
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
@@ -652,6 +654,7 @@ fn eligible_ttls_for_entry(requested: TtlClass, entry: TtlClass) -> bool {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod cache_score_tests {
     use std::collections::BTreeMap;
 
@@ -908,156 +911,240 @@ mod cache_score_tests {
     }
 
     #[test]
-    fn fold_decreasing_tokens_picks_later_structural() {
-        let score = build_cache_score(
-            &[
-                breakpoint(0, 100, TtlClass::Ephemeral5m),
-                breakpoint(1, 90, TtlClass::Ephemeral5m),
-            ],
-            &[],
-        )
-        .expect("cache score for cacheable request");
+    fn cache_score_folding_table() {
+        struct ExpectedScore {
+            predicted_cache_read_tokens: Option<u32>,
+            predicted_cache_creation_tokens_5m: Option<u32>,
+            predicted_cache_creation_tokens_1h: Option<u32>,
+            ambiguity_present: Option<bool>,
+            matched_breakpoint_index: Option<Option<u32>>,
+            predicted_expires_at_unix_secs: Option<Option<u64>>,
+            matched_content_block_index: Option<Option<u32>>,
+        }
 
-        assert_eq!(score.predicted_cache_read_tokens, 0);
-        assert_eq!(score.predicted_cache_creation_tokens_5m, 90);
-        assert_eq!(score.predicted_cache_creation_tokens_1h, 0);
-    }
+        struct Case {
+            case: &'static str,
+            breakpoints: Vec<CacheBreakpoint>,
+            warm: Vec<WarmCacheEntry>,
+            expected: Option<ExpectedScore>,
+        }
 
-    #[test]
-    fn fold_all_5m() {
-        let score = build_cache_score(
-            &[
-                breakpoint(0, 100_000, TtlClass::Ephemeral5m),
-                breakpoint(1, 250_000, TtlClass::Ephemeral5m),
-                breakpoint(2, 500_000, TtlClass::Ephemeral5m),
-            ],
-            &[],
-        )
-        .expect("cache score for cacheable request");
+        let cases = [
+            Case {
+                case: "fold_decreasing_tokens_picks_later_structural",
+                breakpoints: vec![
+                    breakpoint(0, 100, TtlClass::Ephemeral5m),
+                    breakpoint(1, 90, TtlClass::Ephemeral5m),
+                ],
+                warm: vec![],
+                expected: Some(ExpectedScore {
+                    predicted_cache_read_tokens: Some(0),
+                    predicted_cache_creation_tokens_5m: Some(90),
+                    predicted_cache_creation_tokens_1h: Some(0),
+                    ambiguity_present: None,
+                    matched_breakpoint_index: None,
+                    predicted_expires_at_unix_secs: None,
+                    matched_content_block_index: None,
+                }),
+            },
+            Case {
+                case: "fold_all_5m",
+                breakpoints: vec![
+                    breakpoint(0, 100_000, TtlClass::Ephemeral5m),
+                    breakpoint(1, 250_000, TtlClass::Ephemeral5m),
+                    breakpoint(2, 500_000, TtlClass::Ephemeral5m),
+                ],
+                warm: vec![],
+                expected: Some(ExpectedScore {
+                    predicted_cache_read_tokens: None,
+                    predicted_cache_creation_tokens_5m: Some(500_000),
+                    predicted_cache_creation_tokens_1h: Some(0),
+                    ambiguity_present: None,
+                    matched_breakpoint_index: None,
+                    predicted_expires_at_unix_secs: None,
+                    matched_content_block_index: None,
+                }),
+            },
+            Case {
+                case: "fold_all_1h",
+                breakpoints: vec![
+                    breakpoint(0, 100_000, TtlClass::Ephemeral1h),
+                    breakpoint(1, 250_000, TtlClass::Ephemeral1h),
+                    breakpoint(2, 500_000, TtlClass::Ephemeral1h),
+                ],
+                warm: vec![],
+                expected: Some(ExpectedScore {
+                    predicted_cache_read_tokens: None,
+                    predicted_cache_creation_tokens_5m: Some(0),
+                    predicted_cache_creation_tokens_1h: Some(500_000),
+                    ambiguity_present: None,
+                    matched_breakpoint_index: None,
+                    predicted_expires_at_unix_secs: None,
+                    matched_content_block_index: None,
+                }),
+            },
+            Case {
+                case: "fold_1h_then_5m_index_split",
+                breakpoints: vec![
+                    breakpoint(0, 100_000, TtlClass::Ephemeral1h),
+                    breakpoint(1, 300_000, TtlClass::Ephemeral5m),
+                ],
+                warm: vec![],
+                expected: Some(ExpectedScore {
+                    predicted_cache_read_tokens: None,
+                    predicted_cache_creation_tokens_5m: Some(200_000),
+                    predicted_cache_creation_tokens_1h: Some(100_000),
+                    ambiguity_present: Some(false),
+                    matched_breakpoint_index: None,
+                    predicted_expires_at_unix_secs: None,
+                    matched_content_block_index: None,
+                }),
+            },
+            Case {
+                case: "fold_non_monotonic_1h_then_5m_saturates_and_flags",
+                breakpoints: vec![
+                    breakpoint(0, 100, TtlClass::Ephemeral1h),
+                    breakpoint(1, 90, TtlClass::Ephemeral5m),
+                ],
+                warm: vec![],
+                expected: Some(ExpectedScore {
+                    predicted_cache_read_tokens: None,
+                    predicted_cache_creation_tokens_5m: Some(0),
+                    predicted_cache_creation_tokens_1h: Some(100),
+                    ambiguity_present: Some(true),
+                    matched_breakpoint_index: None,
+                    predicted_expires_at_unix_secs: None,
+                    matched_content_block_index: None,
+                }),
+            },
+            Case {
+                case: "fold_same_index_ttl_upgrade",
+                breakpoints: vec![breakpoint(2, 200_000, TtlClass::Ephemeral1h)],
+                warm: vec![warm_entry("bp-2", TtlClass::Ephemeral5m, 200_000)],
+                expected: Some(ExpectedScore {
+                    predicted_cache_read_tokens: Some(0),
+                    predicted_cache_creation_tokens_5m: Some(0),
+                    predicted_cache_creation_tokens_1h: Some(200_000),
+                    ambiguity_present: None,
+                    matched_breakpoint_index: Some(None),
+                    predicted_expires_at_unix_secs: None,
+                    matched_content_block_index: None,
+                }),
+            },
+            Case {
+                case: "five_minute_request_matches_one_hour_entry_at_same_key",
+                breakpoints: vec![breakpoint(2, 200_000, TtlClass::Ephemeral5m)],
+                warm: vec![warm_entry("bp-2", TtlClass::Ephemeral1h, 200_000)],
+                expected: Some(ExpectedScore {
+                    predicted_cache_read_tokens: Some(200_000),
+                    predicted_cache_creation_tokens_5m: Some(0),
+                    predicted_cache_creation_tokens_1h: Some(0),
+                    ambiguity_present: None,
+                    matched_breakpoint_index: Some(Some(2)),
+                    predicted_expires_at_unix_secs: None,
+                    matched_content_block_index: None,
+                }),
+            },
+            Case {
+                case: "overlapping_memberships_select_greatest_eligible_expiry",
+                breakpoints: overlapping_mixed_ttl_breakpoints().to_vec(),
+                warm: {
+                    let mut one_hour = warm_entry("shared", TtlClass::Ephemeral1h, 90_000);
+                    one_hour.expires_at_unix_secs = 1_700_000_200;
+                    let mut five_minute = warm_entry("shared", TtlClass::Ephemeral5m, 100_000);
+                    five_minute.expires_at_unix_secs = 1_700_000_300;
+                    vec![one_hour, five_minute]
+                },
+                expected: Some(ExpectedScore {
+                    predicted_cache_read_tokens: Some(100_000),
+                    predicted_cache_creation_tokens_5m: None,
+                    predicted_cache_creation_tokens_1h: None,
+                    ambiguity_present: None,
+                    matched_breakpoint_index: Some(Some(15)),
+                    predicted_expires_at_unix_secs: Some(Some(1_700_000_300)),
+                    matched_content_block_index: None,
+                }),
+            },
+            Case {
+                case: "overlapping_five_minute_hit_prices_same_index_one_hour_upgrade",
+                breakpoints: overlapping_mixed_ttl_breakpoints().to_vec(),
+                warm: vec![warm_entry("shared", TtlClass::Ephemeral5m, 100_000)],
+                expected: Some(ExpectedScore {
+                    predicted_cache_read_tokens: Some(100_000),
+                    predicted_cache_creation_tokens_5m: Some(50_000),
+                    predicted_cache_creation_tokens_1h: Some(100_000),
+                    ambiguity_present: None,
+                    matched_breakpoint_index: Some(Some(15)),
+                    predicted_expires_at_unix_secs: None,
+                    matched_content_block_index: Some(Some(10)),
+                }),
+            },
+            Case {
+                case: "invalid_ttl_order_marks_ineligible",
+                breakpoints: vec![
+                    breakpoint(0, 100_000, TtlClass::Ephemeral5m),
+                    breakpoint(1, 200_000, TtlClass::Ephemeral1h),
+                ],
+                warm: vec![],
+                expected: None,
+            },
+        ];
 
-        assert_eq!(score.predicted_cache_creation_tokens_5m, 500_000);
-        assert_eq!(score.predicted_cache_creation_tokens_1h, 0);
-    }
+        for case in cases {
+            let score = build_cache_score(&case.breakpoints, &case.warm);
+            let Some(expected) = case.expected else {
+                assert!(score.is_none(), "case={}", case.case);
+                continue;
+            };
+            let score = score.unwrap_or_else(|| panic!("case={} expected cache score", case.case));
 
-    #[test]
-    fn fold_all_1h() {
-        let score = build_cache_score(
-            &[
-                breakpoint(0, 100_000, TtlClass::Ephemeral1h),
-                breakpoint(1, 250_000, TtlClass::Ephemeral1h),
-                breakpoint(2, 500_000, TtlClass::Ephemeral1h),
-            ],
-            &[],
-        )
-        .expect("cache score for cacheable request");
-
-        assert_eq!(score.predicted_cache_creation_tokens_1h, 500_000);
-        assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
-    }
-
-    #[test]
-    fn fold_1h_then_5m_index_split() {
-        let score = build_cache_score(
-            &[
-                breakpoint(0, 100_000, TtlClass::Ephemeral1h),
-                breakpoint(1, 300_000, TtlClass::Ephemeral5m),
-            ],
-            &[],
-        )
-        .expect("cache score for cacheable request");
-
-        assert_eq!(score.predicted_cache_creation_tokens_1h, 100_000);
-        assert_eq!(score.predicted_cache_creation_tokens_5m, 200_000);
-        assert_eq!(score.ambiguity_reason, None);
-    }
-
-    #[test]
-    fn fold_non_monotonic_1h_then_5m_saturates_and_flags() {
-        let score = build_cache_score(
-            &[
-                breakpoint(0, 100, TtlClass::Ephemeral1h),
-                breakpoint(1, 90, TtlClass::Ephemeral5m),
-            ],
-            &[],
-        )
-        .expect("cache score for cacheable request");
-
-        assert_eq!(score.predicted_cache_creation_tokens_1h, 100);
-        assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
-        assert!(score.ambiguity_reason.is_some());
-    }
-
-    #[test]
-    fn fold_same_index_ttl_upgrade() {
-        let score = build_cache_score(
-            &[breakpoint(2, 200_000, TtlClass::Ephemeral1h)],
-            &[warm_entry("bp-2", TtlClass::Ephemeral5m, 200_000)],
-        )
-        .expect("cache score for cacheable request");
-
-        assert_eq!(score.predicted_cache_read_tokens, 0);
-        assert_eq!(score.matched_breakpoint_index, None);
-        assert_eq!(score.predicted_cache_creation_tokens_1h, 200_000);
-        assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
-    }
-
-    #[test]
-    fn five_minute_request_matches_one_hour_entry_at_same_key() {
-        let score = build_cache_score(
-            &[breakpoint(2, 200_000, TtlClass::Ephemeral5m)],
-            &[warm_entry("bp-2", TtlClass::Ephemeral1h, 200_000)],
-        )
-        .expect("cache score for cacheable request");
-
-        assert_eq!(score.predicted_cache_read_tokens, 200_000);
-        assert_eq!(score.matched_breakpoint_index, Some(2));
-        assert_eq!(score.predicted_cache_creation_tokens_5m, 0);
-        assert_eq!(score.predicted_cache_creation_tokens_1h, 0);
-    }
-
-    #[test]
-    fn overlapping_memberships_select_greatest_eligible_expiry() {
-        let breakpoints = overlapping_mixed_ttl_breakpoints();
-        let mut one_hour = warm_entry("shared", TtlClass::Ephemeral1h, 90_000);
-        one_hour.expires_at_unix_secs = 1_700_000_200;
-        let mut five_minute = warm_entry("shared", TtlClass::Ephemeral5m, 100_000);
-        five_minute.expires_at_unix_secs = 1_700_000_300;
-
-        let score = build_cache_score(&breakpoints, &[one_hour, five_minute])
-            .expect("cache score for overlapping memberships");
-
-        assert_eq!(score.predicted_cache_read_tokens, 100_000);
-        assert_eq!(score.predicted_expires_at_unix_secs, Some(1_700_000_300));
-        assert_eq!(score.matched_breakpoint_index, Some(15));
-    }
-
-    #[test]
-    fn overlapping_five_minute_hit_prices_same_index_one_hour_upgrade() {
-        let breakpoints = overlapping_mixed_ttl_breakpoints();
-        let score = build_cache_score(
-            &breakpoints,
-            &[warm_entry("shared", TtlClass::Ephemeral5m, 100_000)],
-        )
-        .expect("cache score for overlapping memberships");
-
-        assert_eq!(score.predicted_cache_read_tokens, 100_000);
-        assert_eq!(score.predicted_cache_creation_tokens_1h, 100_000);
-        assert_eq!(score.predicted_cache_creation_tokens_5m, 50_000);
-        assert_eq!(score.matched_breakpoint_index, Some(15));
-        assert_eq!(score.matched_content_block_index, Some(10));
-    }
-
-    #[test]
-    fn invalid_ttl_order_marks_ineligible() {
-        let score = build_cache_score(
-            &[
-                breakpoint(0, 100_000, TtlClass::Ephemeral5m),
-                breakpoint(1, 200_000, TtlClass::Ephemeral1h),
-            ],
-            &[],
-        );
-
-        assert!(score.is_none());
+            if let Some(value) = expected.predicted_cache_read_tokens {
+                assert_eq!(
+                    score.predicted_cache_read_tokens, value,
+                    "case={}",
+                    case.case
+                );
+            }
+            if let Some(value) = expected.predicted_cache_creation_tokens_5m {
+                assert_eq!(
+                    score.predicted_cache_creation_tokens_5m, value,
+                    "case={}",
+                    case.case
+                );
+            }
+            if let Some(value) = expected.predicted_cache_creation_tokens_1h {
+                assert_eq!(
+                    score.predicted_cache_creation_tokens_1h, value,
+                    "case={}",
+                    case.case
+                );
+            }
+            if let Some(present) = expected.ambiguity_present {
+                assert_eq!(
+                    score.ambiguity_reason.is_some(),
+                    present,
+                    "case={}",
+                    case.case
+                );
+            }
+            if let Some(value) = expected.matched_breakpoint_index {
+                assert_eq!(score.matched_breakpoint_index, value, "case={}", case.case);
+            }
+            if let Some(value) = expected.predicted_expires_at_unix_secs {
+                assert_eq!(
+                    score.predicted_expires_at_unix_secs, value,
+                    "case={}",
+                    case.case
+                );
+            }
+            if let Some(value) = expected.matched_content_block_index {
+                assert_eq!(
+                    score.matched_content_block_index, value,
+                    "case={}",
+                    case.case
+                );
+            }
+        }
     }
 
     fn reference_cache_score(
@@ -2631,34 +2718,11 @@ impl Lifecycle {
             .first()
             .expect("routed candidates are non-empty after terminal selection")
             .upstream_id;
-        let Some(resolved_record) = view
+        let resolved_record = view
             .upstreams_snapshot()
             .iter()
             .find(|record| record.id == resolved_upstream_id)
-        else {
-            if let Some(o) = observer.as_ref() {
-                o.emit_provider_error(
-                    "route_not_configured",
-                    "router selected an upstream missing from the dynamic view",
-                    "router",
-                );
-            }
-            let response = anthropic_error_response(
-                StatusCode::BAD_GATEWAY,
-                "route_not_configured",
-                "no upstream route is configured for this request",
-            );
-            if let Some(o) = observer.as_ref() {
-                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
-                    event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
-                    routing_trace: None,
-                });
-                o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
-                o.finish();
-            }
-            return Ok(response);
-        };
+            .expect("terminal candidate must reference the loaded upstream snapshot");
         let router_chosen_upstream_name = resolved_record.name.clone();
         handle_span.record("cc_lb.upstream.name", router_chosen_upstream_name.as_str());
         handle_span.record(
@@ -2671,29 +2735,7 @@ impl Lifecycle {
                 .clone()
                 .unwrap_or_else(default_anthropic_base_url),
         });
-        let route_upstream = match upstream_for_record(resolved_record) {
-            Ok(upstream) => upstream,
-            Err(reason) => {
-                if let Some(o) = observer.as_ref() {
-                    o.emit_provider_error("route_not_configured", &reason, "router");
-                }
-                let response = anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "route_not_configured",
-                    "no upstream route is configured for this request",
-                );
-                if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
-                        event_id: o.event_id().to_owned(),
-                        result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
-                        routing_trace: None,
-                    });
-                    o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
-                    o.finish();
-                }
-                return Ok(response);
-            }
-        };
+        let route_upstream = upstream_for_record(resolved_record);
         let dialect = cached.resolved_dialect(&route_dialect).clone();
         let route = RouteDecision {
             upstream_id: Some(resolved_upstream_id),
@@ -3981,7 +4023,7 @@ impl Lifecycle {
             stream_span.clone(),
             status,
             upstream_error_status.then_some(StreamTerminationCause::ProviderError),
-            relay_start,
+            relay_start.into_std(),
             response_body_timing.clone(),
         );
         let completion_observer = Arc::clone(&self.completion_observer);
@@ -6245,6 +6287,7 @@ fn prompt_cache_token_scope(headers: &HeaderMap) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod prompt_cache_token_scope_tests {
     use super::*;
 
@@ -6805,12 +6848,12 @@ fn pricing_upstream_kind_label(upstream: &Upstream) -> Option<&'static str> {
     }
 }
 
-fn upstream_for_record(record: &UpstreamRecord) -> Result<Upstream, String> {
+fn upstream_for_record(record: &UpstreamRecord) -> Upstream {
     match record.kind {
         StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
-            Ok(Upstream::AnthropicDirect {
+            Upstream::AnthropicDirect {
                 base_url: record.base_url.clone(),
-            })
+            }
         }
     }
 }
@@ -6913,11 +6956,13 @@ fn principal_kind_lite_as_str(kind: &cc_lb_storage_api::types::PrincipalKindLite
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
     use cc_lb_routing::RouteError;
     use cc_lb_storage_api::{
         SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
@@ -6990,6 +7035,264 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_limit_rejection_maps_to_429_and_audit_kind() {
+        let response = limit_rejection_response(
+            RejectReason::ConcurrentRateLimit,
+            TEST_MODEL,
+            "principal-a",
+            Some(1),
+        );
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        assert_eq!(
+            limit_retry_after_secs(RejectReason::ConcurrentRateLimit),
+            Some(1)
+        );
+        assert_eq!(
+            limit_violation_name(&RejectReason::ConcurrentRateLimit),
+            Some("Concurrent")
+        );
+    }
+
+    #[test]
+    fn t1__lifecycle__parse_payload_cap_returns_413() {
+        let lifecycle = unit_lifecycle(LifecycleConfig {
+            messages_body_cap_bytes: 4,
+            ..LifecycleConfig::default()
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .body(Bytes::from_static(b"12345"))
+            .expect("request builds");
+
+        let (context, response) = lifecycle.parse(request);
+
+        assert_eq!(context.body_bytes, Bytes::from_static(b"12345"));
+        assert_eq!(
+            response.expect("oversized response").status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn t1__lifecycle__request_body_view_json_and_model_extraction() {
+        let valid = RequestBodyView::new(&Bytes::from_static(
+            br#"{"model":"claude-test","stream":true,"max_tokens":123,"service_tier":"priority"}"#,
+        ));
+        assert!(valid.is_valid_json());
+        assert_eq!(valid.model().as_deref(), Some("claude-test"));
+        assert!(valid.stream());
+        assert!(valid.json_parse_ms().is_finite());
+        assert!(valid.json_parse_ms() >= 0.0);
+        let limit = valid.limit_request();
+        assert_eq!(limit.model, "claude-test");
+        assert_eq!(limit.max_tokens, 123);
+        assert!(limit.stream);
+        assert_eq!(limit.service_tier.as_deref(), Some("priority"));
+
+        let invalid = RequestBodyView::new(&Bytes::from_static(b"{broken"));
+        assert!(!invalid.is_valid_json());
+        assert_eq!(invalid.model(), None);
+        assert!(!invalid.stream());
+        let limit = invalid.limit_request();
+        assert_eq!(limit.model, "unknown");
+        assert_eq!(limit.max_tokens, 0);
+        assert!(!limit.stream);
+        assert_eq!(limit.service_tier, None);
+    }
+
+    #[test]
+    fn t1__routing__validate_filter_output_rejects_duplicate_unknown_superset() {
+        let first = candidate(Uuid::from_u128(1));
+        let second = candidate(Uuid::from_u128(2));
+        let input = vec![first, second];
+        let unknown = Uuid::from_u128(99);
+
+        let cases = [
+            (
+                "duplicate",
+                vec![input[0].upstream_id, input[0].upstream_id],
+                ValidationError::Duplicate {
+                    id: input[0].upstream_id,
+                },
+            ),
+            (
+                "unknown",
+                vec![unknown],
+                ValidationError::Unknown {
+                    unknown_id: unknown,
+                },
+            ),
+            (
+                "superset",
+                vec![input[0].upstream_id, input[1].upstream_id, unknown],
+                ValidationError::Superset {
+                    kept_len: 3,
+                    input_len: 2,
+                },
+            ),
+        ];
+
+        for (case, kept_upstream_ids, expected) in cases {
+            let output = FilterOutput {
+                kept_upstream_ids,
+                reason: case.to_owned(),
+                per_candidate_reasons: Vec::new(),
+                subscription_preference: None,
+            };
+            match validate_filter_output(&output, &input, 0, &mut Vec::new()) {
+                Err(actual) => assert_eq!(actual, expected, "case={case}"),
+                Ok(_) => panic!("case={case}: invalid filter output was accepted"),
+            }
+        }
+    }
+
+    #[test]
+    fn t1__routing__select_terminal_upstream_first_pick_random_and_empty() {
+        let lifecycle = unit_lifecycle(LifecycleConfig::default()).with_terminal_rng_seed([7; 32]);
+        let candidates = vec![
+            candidate(Uuid::from_u128(1)),
+            candidate(Uuid::from_u128(2)),
+            candidate(Uuid::from_u128(3)),
+        ];
+
+        assert_eq!(
+            lifecycle
+                .select_terminal_upstream(TerminalStrategy::FirstPick, &candidates)
+                .upstream_id,
+            Some(candidates[0].upstream_id)
+        );
+        assert_eq!(
+            lifecycle
+                .select_terminal_upstream(TerminalStrategy::Random, &[])
+                .upstream_id,
+            None
+        );
+
+        let random = (0..64)
+            .filter_map(|_| {
+                lifecycle
+                    .select_terminal_upstream(TerminalStrategy::Random, &candidates)
+                    .upstream_id
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            random,
+            candidates
+                .iter()
+                .map(|candidate| candidate.upstream_id)
+                .collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn t1__routing__terminal_candidate_is_backed_by_loaded_upstream_record() {
+        let upstream_id = Uuid::from_u128(1);
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
+        let view = cache_score_view(
+            upstream_id,
+            Arc::new(TestPromptCacheObservationCache::new(TEST_MODEL)),
+        );
+        let candidates = build_candidates(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &[],
+            None,
+            clock.as_ref(),
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.upstream_id)
+                .collect::<Vec<_>>(),
+            vec![upstream_id]
+        );
+
+        let selected = terminal_candidates(
+            &candidates,
+            &TerminalDecision {
+                upstream_id: Some(upstream_id),
+                strategy: TerminalStrategy::FirstPick,
+            },
+        );
+        assert_eq!(
+            selected
+                .iter()
+                .map(|candidate| candidate.upstream_id)
+                .collect::<Vec<_>>(),
+            vec![upstream_id]
+        );
+        assert!(
+            view.upstreams_snapshot()
+                .iter()
+                .any(|record| record.id == selected[0].upstream_id)
+        );
+
+        assert!(
+            terminal_candidates(
+                &candidates,
+                &TerminalDecision {
+                    upstream_id: Some(Uuid::from_u128(99)),
+                    strategy: TerminalStrategy::FirstPick,
+                },
+            )
+            .is_empty(),
+            "a terminal decision cannot materialize an ID outside the candidate set"
+        );
+    }
+
+    fn unit_lifecycle(config: LifecycleConfig) -> Lifecycle {
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
+        let authn = Arc::new(BuiltinAuthn::new(
+            DownstreamAuthMode::None,
+            Some(NoneModeConfig {
+                principal_id: "principal".to_owned(),
+                upstream_kind: NoneModeUpstreamKind::AnthropicKey,
+            }),
+            None,
+            clock.clone(),
+        ));
+        let view = cache_score_view(
+            Uuid::from_u128(1),
+            Arc::new(TestPromptCacheObservationCache::new(TEST_MODEL)),
+        );
+        Lifecycle::new_with_dynamic_view(
+            authn,
+            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(HyperDispatcher::default()),
+            config,
+            clock,
+        )
+    }
+
+    fn candidate(upstream_id: Uuid) -> UpstreamCandidate {
+        UpstreamCandidate {
+            upstream_id,
+            name: format!("upstream-{upstream_id}"),
+            kind: CandidateUpstreamKind::AnthropicApiKey,
+            observed_rate_limits: Vec::new(),
+            subscription_quotas: Vec::new(),
+            observed_at_unix_secs: 0,
+            cache_score: None,
+            base_url: None,
+            plan_capacity_ratio: None,
+            organization_type: None,
+            rate_limit_tier: None,
+            seat_tier: None,
+        }
+    }
+
+    #[test]
     fn build_candidates_cache_score() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000201").unwrap();
         let cache = TestPromptCacheObservationCache::new(TEST_MODEL).with_entries(
@@ -7012,7 +7315,7 @@ mod tests {
             TEST_MODEL,
             &breakpoints,
             None,
-            &crate::clock::SystemClock,
+            &crate::clock::TestClock::new_at_secs(1_700_000_000),
         );
 
         let score = candidates[0].cache_score.as_ref().expect("cache score");
@@ -7063,7 +7366,7 @@ mod tests {
             TEST_MODEL,
             &breakpoints,
             None,
-            &crate::clock::SystemClock,
+            &crate::clock::TestClock::new_at_secs(1_700_000_000),
         );
 
         let score = candidates[0].cache_score.as_ref().expect("cache score");
@@ -7077,8 +7380,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "release-only perf assertion; run with --release --ignored"]
-    fn build_candidates_cache_routing_latency_under_baseline_plus_2ms_p99() {
+    fn tx__build_candidates_cache_routing_latency_under_baseline_plus_2ms_p99() {
         const ITERATIONS: usize = 10_000;
         const ROUTING_BUDGET_P99_NANOS: u128 = 5_000_000;
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000299").unwrap();
@@ -7157,7 +7459,7 @@ mod tests {
             TEST_MODEL,
             &breakpoints,
             None,
-            &crate::clock::SystemClock,
+            &crate::clock::TestClock::new_at_secs(1_700_000_000),
         );
 
         assert_eq!(
@@ -7214,7 +7516,7 @@ mod tests {
             TEST_MODEL,
             &breakpoints,
             Some(thread_id),
-            &crate::clock::SystemClock,
+            &crate::clock::TestClock::new_at_secs(1_700_000_000),
         );
 
         let score = candidates[0].cache_score.as_ref().expect("cache score");
@@ -7260,7 +7562,7 @@ mod tests {
             TEST_MODEL,
             &breakpoints,
             None,
-            &crate::clock::SystemClock,
+            &crate::clock::TestClock::new_at_secs(1_700_000_000),
         );
 
         let score = candidates[0].cache_score.as_ref().expect("cache score");
@@ -7407,11 +7709,6 @@ mod tests {
     }
 
     #[test]
-    fn response_decoder_error_response_skips_observation() {
-        empty_usage_decodes_no_observations();
-    }
-
-    #[test]
     fn empty_usage_decodes_no_observations() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000222").unwrap();
         let now = 1_800_000_000;
@@ -7469,6 +7766,47 @@ mod tests {
         assert!(decoded.observations.is_empty());
         assert_eq!(decoded.dropped_below_threshold, 1);
         assert!(cache.upserts().is_empty());
+    }
+
+    #[test]
+    fn opus_4_7_prefix_between_2048_and_4096_produces_write_observation() {
+        let upstream_id = Uuid::from_u128(0x247);
+        let now = 1_800_000_000;
+        let cache =
+            Arc::new(RecordingPromptCacheObservationCache::new(Vec::new()).with_clock_now(now));
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: "claude-opus-4-7".to_owned(),
+            cache_breakpoints: vec![cache_breakpoint(
+                0,
+                "opus-4-7-prefix",
+                3_000,
+                TtlClass::Ephemeral5m,
+            )],
+            cacheable_breakpoint_prefix_keys: cacheable_prefix_keys(&["opus-4-7-prefix"]),
+            selected_match: None,
+            cache,
+        };
+
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 3_000,
+                cache_read_input_tokens: 0,
+            },
+            now,
+        );
+
+        assert_eq!(decoded.dropped_below_threshold, 0);
+        assert_eq!(decoded.observations.len(), 1);
+        let observation = &decoded.observations[0];
+        assert_eq!(observation.kind, DecodedPromptCacheObservationKind::Write);
+        assert_eq!(observation.prefix_hash, "opus-4-7-prefix");
+        assert_eq!(observation.estimated_prefix_tokens, 3_000);
+        assert!((2_048..4_096).contains(&observation.estimated_prefix_tokens));
+        assert_eq!(observation.ttl_class, TtlClass::Ephemeral5m);
+        assert_eq!(observation.expires_at_unix_secs, now + 270);
+        assert_eq!(observation.token_estimate_source.as_deref(), Some("test"));
     }
 
     #[test]
@@ -7581,6 +7919,12 @@ mod tests {
         );
         assert_eq!(hit.prefix_content_block_index, 0);
         assert_eq!(hit.estimated_prefix_tokens, 2_000);
+        assert_eq!(hit.ttl_class, TtlClass::Ephemeral5m);
+        assert_eq!(hit.expires_at_unix_secs, now + 270);
+        assert_eq!(
+            hit.token_estimate_source.as_deref(),
+            Some("local_tiktoken_v1")
+        );
     }
 
     #[test]
@@ -7785,7 +8129,7 @@ mod tests {
 
     #[test]
     fn build_subscription_quota_samples_from_headers() {
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(1);
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static("anthropic-ratelimit-unified-7d-sonnet-utilization"),
@@ -7862,16 +8206,16 @@ mod tests {
             HeaderValue::from_static("thread-123"),
         );
         let body = Bytes::from_static(
-            br#"{
-                "model":"claude-sonnet-4-5",
-                "tools":[{"name":"secret_tool","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],
-                "system":[{"type":"text","text":"secret system","cache_control":{"type":"ephemeral","ttl":"1h"}}],
-                "messages":[
-                    {"role":"user","content":"first secret"},
-                    {"id":"msg_2","role":"user","content":[{"type":"text","text":"second secret","cache_control":{"type":"ephemeral"}}]}
-                ]
-            }"#,
-        );
+        br#"{
+            "model":"claude-sonnet-4-5",
+            "tools":[{"name":"secret_tool","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],
+            "system":[{"type":"text","text":"secret system","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+            "messages":[
+                {"role":"user","content":"first secret"},
+                {"id":"msg_2","role":"user","content":[{"type":"text","text":"second secret","cache_control":{"type":"ephemeral"}}]}
+            ]
+        }"#,
+    );
 
         let metadata = request_cache_metadata(&headers, &body);
 
@@ -8039,8 +8383,8 @@ mod tests {
             HeaderValue::from_static("generic-affinity-session"),
         );
         let body = Bytes::from_static(
-            br#"{"system":"You are Hermes Agent, an intelligent AI assistant created by Nous Research.","messages":[{"role":"user","content":"hello"}]}"#,
-        );
+        br#"{"system":"You are Hermes Agent, an intelligent AI assistant created by Nous Research.","messages":[{"role":"user","content":"hello"}]}"#,
+    );
 
         let metadata = request_cache_metadata(&headers, &body);
 
@@ -8115,8 +8459,8 @@ mod tests {
     #[test]
     fn request_cache_metadata_uses_hermes_conversation_tag_fallback() {
         let body = Bytes::from_static(
-            br#"{"tags":["product=hermes-agent","conversation=hermes-root-fallback"],"system":"You are Hermes Agent, an intelligent AI assistant created by Nous Research.","messages":[{"role":"user","content":"hello"}]}"#,
-        );
+        br#"{"tags":["product=hermes-agent","conversation=hermes-root-fallback"],"system":"You are Hermes Agent, an intelligent AI assistant created by Nous Research.","messages":[{"role":"user","content":"hello"}]}"#,
+    );
 
         let metadata = request_cache_metadata(&HeaderMap::new(), &body);
 
@@ -8279,8 +8623,8 @@ mod tests {
             HeaderValue::from_static("senpi-affinity-session"),
         );
         let body = Bytes::from_static(
-            br#"{"model":"mock-with-affinity","system":"You are senpi, a coding agent. Your work should be indistinguishable from a careful senior engineer's.\n\n## Intent Gate (EVERY message)","messages":[{"role":"user","content":"Reply exactly SENPI_FAKE_OK"}],"tools":[]}"#,
-        );
+        br#"{"model":"mock-with-affinity","system":"You are senpi, a coding agent. Your work should be indistinguishable from a careful senior engineer's.\n\n## Intent Gate (EVERY message)","messages":[{"role":"user","content":"Reply exactly SENPI_FAKE_OK"}],"tools":[]}"#,
+    );
 
         let metadata = request_cache_metadata(&headers, &body);
 
@@ -8409,16 +8753,16 @@ mod tests {
             HeaderValue::from_static("87b3d2e6-ce49-439d-9e68-0c90138a726a"),
         );
         let body = Bytes::from(
-            serde_json::to_vec(&serde_json::json!({
-                "system": [{
-                    "type": "text",
-                    "text": "\nYou are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user."
-                }],
-                "messages": [{"role": "user", "content": "QA main turn reply ok"}],
-                "tools": [{"name": "Agent"}]
-            }))
-            .expect("serialize Claude Code main request fixture"),
-        );
+        serde_json::to_vec(&serde_json::json!({
+            "system": [{
+                "type": "text",
+                "text": "\nYou are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user."
+            }],
+            "messages": [{"role": "user", "content": "QA main turn reply ok"}],
+            "tools": [{"name": "Agent"}]
+        }))
+        .expect("serialize Claude Code main request fixture"),
+    );
 
         let metadata = request_cache_metadata(&headers, &body);
 
@@ -8477,21 +8821,21 @@ mod tests {
             HeaderValue::from_static("session-with-large-context"),
         );
         let body = Bytes::from(
-            serde_json::to_vec(&serde_json::json!({
-                "system": [
-                    {
-                        "type": "text",
-                        "text": "x".repeat(crate::request_classification::CLASSIFIER_TEXT_LIMIT + 1),
-                    },
-                    {
-                        "type": "text",
-                        "text": "You are a helpful assistant the team trusts with load-bearing changes, operating in the Oh My Pi coding harness.",
-                    },
-                ],
-                "messages": [{"role": "user", "content": "hello"}],
-            }))
-            .expect("serialize OMP request fixture"),
-        );
+        serde_json::to_vec(&serde_json::json!({
+            "system": [
+                {
+                    "type": "text",
+                    "text": "x".repeat(crate::request_classification::CLASSIFIER_TEXT_LIMIT + 1),
+                },
+                {
+                    "type": "text",
+                    "text": "You are a helpful assistant the team trusts with load-bearing changes, operating in the Oh My Pi coding harness.",
+                },
+            ],
+            "messages": [{"role": "user", "content": "hello"}],
+        }))
+        .expect("serialize OMP request fixture"),
+    );
 
         let metadata = request_cache_metadata(&headers, &body);
 
@@ -8502,8 +8846,8 @@ mod tests {
     fn request_cache_metadata_extracts_omp_metadata_session_id() {
         let headers = HeaderMap::new();
         let json_metadata = Bytes::from_static(
-            br#"{"metadata":{"user_id":"{\"session_id\":\"session-from-body\",\"account_uuid\":\"account\"}"},"system":"You are a helpful assistant the team trusts with load-bearing changes, operating in the Oh My Pi coding harness.","messages":[{"role":"user","content":"hello"}]}"#,
-        );
+        br#"{"metadata":{"user_id":"{\"session_id\":\"session-from-body\",\"account_uuid\":\"account\"}"},"system":"You are a helpful assistant the team trusts with load-bearing changes, operating in the Oh My Pi coding harness.","messages":[{"role":"user","content":"hello"}]}"#,
+    );
         let legacy_metadata = Bytes::from_static(
             br#"{"metadata":{"user_id":"user_account_session_legacy-session"},"messages":[]}"#,
         );
@@ -8551,8 +8895,8 @@ mod tests {
             HeaderValue::from_static("cli-bg"),
         );
         let body = Bytes::from_static(
-            br#"{"model":"claude-sonnet-4-5","metadata":{"user_id":"{\"device_id\":\"d\",\"account_uuid\":\"acc\",\"session_id\":\"7f25b3d8-6bf2-4832-94e5-66394f785210\",\"parent_session_id\":\"0714858d-c434-4aae-8bc0-5f33cf6cf63d\"}"},"messages":[{"role":"user","content":"hi"}]}"#,
-        );
+        br#"{"model":"claude-sonnet-4-5","metadata":{"user_id":"{\"device_id\":\"d\",\"account_uuid\":\"acc\",\"session_id\":\"7f25b3d8-6bf2-4832-94e5-66394f785210\",\"parent_session_id\":\"0714858d-c434-4aae-8bc0-5f33cf6cf63d\"}"},"messages":[{"role":"user","content":"hi"}]}"#,
+    );
 
         let metadata = request_cache_metadata(&headers, &body);
 
@@ -8584,8 +8928,8 @@ mod tests {
     fn request_cache_metadata_reports_metadata_session_source() {
         let headers = HeaderMap::new();
         let body = Bytes::from_static(
-            br#"{"metadata":{"user_id":"{\"session_id\":\"session-from-body\",\"parent_session_id\":\"session-parent\"}"},"messages":[]}"#,
-        );
+        br#"{"metadata":{"user_id":"{\"session_id\":\"session-from-body\",\"parent_session_id\":\"session-parent\"}"},"messages":[]}"#,
+    );
 
         let metadata = request_cache_metadata(&headers, &body);
 
@@ -8664,8 +9008,8 @@ mod tests {
     fn request_cache_metadata_does_not_fingerprint_without_omp_provenance() {
         let headers = HeaderMap::new();
         let body = Bytes::from_static(
-            br#"{"messages":[{"role":"user","content":"The user stepped away and is coming back. Recap in under 40 words."}]}"#,
-        );
+        br#"{"messages":[{"role":"user","content":"The user stepped away and is coming back. Recap in under 40 words."}]}"#,
+    );
 
         let metadata = request_cache_metadata(&headers, &body);
 
@@ -8677,12 +9021,12 @@ mod tests {
         let headers = HeaderMap::new();
         let body = Bytes::from_static(
             br#"{
-                "model":"claude-sonnet-4-5",
-                "system":[{"type":"text","text":"stable system","cache_control":{"type":"ephemeral"}}],
-                "messages":[{"role":"user","content":"hello"}],
-                "tool_choice":{"type":"auto"},
-                "thinking":{"type":"enabled","budget_tokens":1024}
-            }"#,
+            "model":"claude-sonnet-4-5",
+            "system":[{"type":"text","text":"stable system","cache_control":{"type":"ephemeral"}}],
+            "messages":[{"role":"user","content":"hello"}],
+            "tool_choice":{"type":"auto"},
+            "thinking":{"type":"enabled","budget_tokens":1024}
+        }"#,
         );
         let request: Value = serde_json::from_slice(&body).expect("request json");
 
@@ -8707,12 +9051,12 @@ mod tests {
     fn request_cache_metadata_fills_prefix_token_count() {
         let headers = HeaderMap::new();
         let body = Bytes::from_static(
-            br#"{
-                "model":"claude-sonnet-4-5",
-                "system":[{"type":"text","text":"You are a helpful assistant. Please be concise.","cache_control":{"type":"ephemeral"}}],
-                "messages":[{"role":"user","content":"hello"}]
-            }"#,
-        );
+        br#"{
+            "model":"claude-sonnet-4-5",
+            "system":[{"type":"text","text":"You are a helpful assistant. Please be concise.","cache_control":{"type":"ephemeral"}}],
+            "messages":[{"role":"user","content":"hello"}]
+        }"#,
+    );
 
         let metadata = request_cache_metadata(&headers, &body);
 
@@ -8737,10 +9081,10 @@ mod tests {
         let headers = HeaderMap::new();
         let short_body = Bytes::from_static(
             br#"{
-                "model":"claude-sonnet-4-5",
-                "system":[{"type":"text","text":"short","cache_control":{"type":"ephemeral"}}],
-                "messages":[{"role":"user","content":"hello"}]
-            }"#,
+            "model":"claude-sonnet-4-5",
+            "system":[{"type":"text","text":"short","cache_control":{"type":"ephemeral"}}],
+            "messages":[{"role":"user","content":"hello"}]
+        }"#,
         );
         let long_text: String = "lorem ipsum ".repeat(2_000);
         let long_body_string = format!(
@@ -8784,23 +9128,23 @@ mod tests {
     fn request_cache_breakpoint_hashes_ignore_later_prompt_suffixes() {
         let headers = HeaderMap::new();
         let first = Bytes::from_static(
-            br#"{
-                "model":"claude-sonnet-4-5",
-                "messages":[
-                    {"role":"user","content":[{"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}]},
-                    {"role":"user","content":[{"type":"text","text":"suffix-a","cache_control":{"type":"ephemeral"}}]}
-                ]
-            }"#,
-        );
+        br#"{
+            "model":"claude-sonnet-4-5",
+            "messages":[
+                {"role":"user","content":[{"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}]},
+                {"role":"user","content":[{"type":"text","text":"suffix-a","cache_control":{"type":"ephemeral"}}]}
+            ]
+        }"#,
+    );
         let second = Bytes::from_static(
-            br#"{
-                "model":"claude-sonnet-4-5",
-                "messages":[
-                    {"role":"user","content":[{"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}]},
-                    {"role":"user","content":[{"type":"text","text":"suffix-b","cache_control":{"type":"ephemeral"}}]}
-                ]
-            }"#,
-        );
+        br#"{
+            "model":"claude-sonnet-4-5",
+            "messages":[
+                {"role":"user","content":[{"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}]},
+                {"role":"user","content":[{"type":"text","text":"suffix-b","cache_control":{"type":"ephemeral"}}]}
+            ]
+        }"#,
+    );
 
         let first = request_cache_metadata(&headers, &first);
         let second = request_cache_metadata(&headers, &second);
@@ -9101,7 +9445,7 @@ mod tests {
 
     fn principal_record(name: &str) -> PrincipalRecord {
         PrincipalRecord {
-            id: Uuid::new_v4(),
+            id: Uuid::from_u128(0x1008),
             name: name.to_owned(),
             kind: StoragePrincipalKind::Machine,
             allowed_models: Vec::new(),
@@ -9187,16 +9531,16 @@ mod tests {
         use std::io::Write as _;
 
         let sse_plaintext = concat!(
-            "event: message_start\n",
-            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":48,\"output_tokens\":1}}}\n\n",
-            "event: content_block_delta\n",
-            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
-            "event: message_delta\n",
-            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":72}}\n\n",
-            "event: message_stop\n",
-            "data: {\"type\":\"message_stop\"}\n\n",
-        )
-        .as_bytes();
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":48,\"output_tokens\":1}}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":72}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    )
+    .as_bytes();
 
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(sse_plaintext).expect("gzip encode");

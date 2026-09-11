@@ -385,7 +385,7 @@ fn lifecycle_default_affinity_ttl_matches_config_default() {
 }
 
 #[tokio::test]
-async fn legacy_null_binding_expires_at_retention_boundary_without_read_extension() {
+async fn t2__legacy_null_binding_expires_at_retention_boundary_without_read_extension() {
     let first = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let origin = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let store = Arc::new(MemoryAffinityStore::default());
@@ -440,7 +440,7 @@ async fn legacy_null_binding_expires_at_retention_boundary_without_read_extensio
 }
 
 #[tokio::test]
-async fn memory_affinity_purge_removes_explicit_and_retention_expiry_in_bounded_batches() {
+async fn t2__memory_affinity_purge_removes_explicit_and_retention_expiry_in_bounded_batches() {
     let origin = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let store = MemoryAffinityStore::default();
     store.insert_binding(UpstreamAffinityBinding {
@@ -496,7 +496,7 @@ async fn memory_affinity_purge_removes_explicit_and_retention_expiry_in_bounded_
 }
 
 #[tokio::test]
-async fn memory_affinity_bind_replaces_expired_target_without_waiting_for_purge() {
+async fn t2__memory_affinity_bind_replaces_expired_target_without_waiting_for_purge() {
     let old = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let new = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let key = affinity_key("expired-rebind");
@@ -526,7 +526,7 @@ async fn memory_affinity_bind_replaces_expired_target_without_waiting_for_purge(
 }
 
 #[tokio::test]
-async fn response_learning_pins_a_later_request_and_learns_pending_keys() {
+async fn t2__response_learning_pins_a_later_request_and_learns_pending_keys() {
     let first = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let origin = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let store = Arc::new(MemoryAffinityStore::default());
@@ -586,7 +586,7 @@ async fn response_learning_pins_a_later_request_and_learns_pending_keys() {
 }
 
 #[tokio::test]
-async fn maximum_key_request_resolves_from_one_known_key_and_learns_the_rest() {
+async fn t2__maximum_key_request_resolves_from_one_known_key_and_learns_the_rest() {
     let first = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let origin = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let store = Arc::new(MemoryAffinityStore::default());
@@ -625,7 +625,7 @@ async fn maximum_key_request_resolves_from_one_known_key_and_learns_the_rest() {
 }
 
 #[tokio::test]
-async fn opaque_requests_fail_closed_before_dispatch_when_affinity_is_not_usable() {
+async fn t2__opaque_requests_fail_closed_before_dispatch_when_affinity_is_not_usable() {
     let first = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let second = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
 
@@ -710,7 +710,7 @@ async fn opaque_requests_fail_closed_before_dispatch_when_affinity_is_not_usable
 }
 
 #[tokio::test]
-async fn lookup_and_bind_failures_do_not_expose_ciphertext() {
+async fn t2__lookup_and_bind_failures_do_not_expose_ciphertext() {
     let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let lookup_ciphertext = "raw-lookup-ciphertext";
     let lookup_store = Arc::new(MemoryAffinityStore::default());
@@ -761,7 +761,7 @@ async fn lookup_and_bind_failures_do_not_expose_ciphertext() {
 }
 
 #[tokio::test]
-async fn sse_bind_failure_suppresses_the_encrypted_content_block() {
+async fn t2__sse_bind_failure_suppresses_the_encrypted_content_block() {
     let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let ciphertext = "raw-stream-ciphertext";
     let store = Arc::new(MemoryAffinityStore::default());
@@ -800,7 +800,7 @@ async fn sse_bind_failure_suppresses_the_encrypted_content_block() {
     assert_eq!(dispatch.call_count(), 1);
 }
 #[tokio::test]
-async fn ordinary_non_json_sse_without_affinity_signal_passes_through() {
+async fn t2__ordinary_non_json_sse_without_affinity_signal_passes_through() {
     let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let raw = Bytes::from_static(b"event: ping\ndata: hello\n\n");
     let dispatch = RecordingDispatch::with_response(ResponseSpec::Sse(raw.clone()));
@@ -826,7 +826,7 @@ async fn ordinary_non_json_sse_without_affinity_signal_passes_through() {
 }
 
 #[tokio::test]
-async fn request_key_limit_rejects_before_dispatch() {
+async fn t2__request_key_limit_rejects_before_dispatch() {
     let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let content = (0..1025)
         .map(|index| json!({"encrypted_content": format!("request-opaque-{index}")}))
@@ -867,7 +867,7 @@ async fn request_key_limit_rejects_before_dispatch() {
 }
 
 #[tokio::test]
-async fn buffered_response_key_limit_fails_closed() {
+async fn t2__buffered_response_key_limit_fails_closed() {
     let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let content = (0..1025)
         .map(|index| json!({"encrypted_content": format!("response-opaque-{index}")}))
@@ -904,7 +904,7 @@ async fn buffered_response_key_limit_fails_closed() {
 }
 
 #[tokio::test]
-async fn sse_response_key_limit_fails_closed_before_event_delivery() {
+async fn t2__sse_response_key_limit_fails_closed_before_event_delivery() {
     let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let content = (0..1025)
         .map(|index| json!({"encrypted_content": format!("sse-opaque-{index}")}))
@@ -942,7 +942,7 @@ async fn sse_response_key_limit_fails_closed_before_event_delivery() {
 }
 
 #[tokio::test]
-async fn incomplete_sse_budget_overflow_does_not_passthrough_opaque_bytes() {
+async fn t2__incomplete_sse_budget_overflow_does_not_passthrough_opaque_bytes() {
     let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let ciphertext = "incomplete-opaque-ciphertext";
     let incomplete = Bytes::from(format!(
@@ -978,7 +978,7 @@ async fn incomplete_sse_budget_overflow_does_not_passthrough_opaque_bytes() {
 }
 
 #[tokio::test]
-async fn malformed_and_uninspectable_success_sse_fail_closed() {
+async fn t2__malformed_and_uninspectable_success_sse_fail_closed() {
     let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let malformed_ciphertext = "malformed-opaque-ciphertext";
     let malformed = Bytes::from(format!(
@@ -1031,7 +1031,7 @@ async fn malformed_and_uninspectable_success_sse_fail_closed() {
 }
 
 #[tokio::test]
-async fn buffered_body_frame_error_discards_partial_opaque_body() {
+async fn t2__buffered_body_frame_error_discards_partial_opaque_body() {
     let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let ciphertext = "partial-buffered-opaque-ciphertext";
     let partial = Bytes::from(

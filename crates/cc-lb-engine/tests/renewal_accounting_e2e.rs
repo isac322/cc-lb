@@ -14,7 +14,7 @@ use cc_lb_storage_api::CacheKeepaliveTerminalReason;
 use support::RenewalAccountingScenario;
 
 #[tokio::test]
-async fn renewal_cycle_bills_once() {
+async fn t2__renewal_cycle_bills_once() {
     // Given
     let scenario = RenewalAccountingScenario::new().await;
     let session = scenario.schedule(Some("renewal-key")).await;
@@ -31,7 +31,7 @@ async fn renewal_cycle_bills_once() {
 }
 
 #[tokio::test]
-async fn renewal_duplicate_bills_once() {
+async fn t2__renewal_duplicate_bills_once() {
     // Given
     let scenario = RenewalAccountingScenario::new().await;
     let session = scenario.schedule(Some("renewal-key")).await;
@@ -49,7 +49,7 @@ async fn renewal_duplicate_bills_once() {
 }
 
 #[tokio::test]
-async fn renewal_observeonly_then_reseed() {
+async fn t2__renewal_observeonly_then_reseed() {
     // Given
     let scenario = RenewalAccountingScenario::new().await;
     let observe_only = scenario.schedule(None).await;
@@ -78,7 +78,7 @@ async fn renewal_observeonly_then_reseed() {
 }
 
 #[tokio::test]
-async fn renewal_survives_full_channels() {
+async fn t2__renewal_survives_full_channels() {
     // Given
     let scenario = RenewalAccountingScenario::new().await;
     let bus = Arc::new(InMemoryBus::new());
@@ -111,7 +111,7 @@ async fn renewal_survives_full_channels() {
 }
 
 #[tokio::test]
-async fn renewal_disable_stops_cleanly() {
+async fn t2__renewal_disable_stops_cleanly() {
     // Given
     let scenario = RenewalAccountingScenario::new().await;
     let session = scenario.schedule(Some("renewal-key")).await;
@@ -134,7 +134,7 @@ async fn renewal_disable_stops_cleanly() {
 }
 
 #[tokio::test]
-async fn renewal_stale_running_reclaimed_no_redispatch() {
+async fn t2__renewal_stale_running_reclaimed_no_redispatch() {
     // Given
     let scenario = RenewalAccountingScenario::new().await;
     let session = scenario.schedule(None).await;
@@ -158,7 +158,7 @@ async fn renewal_stale_running_reclaimed_no_redispatch() {
 }
 
 #[tokio::test]
-async fn renewal_duplicate_dispatch_blocked_by_claim() {
+async fn t2__renewal_duplicate_dispatch_blocked_by_claim() {
     // Given
     let scenario = RenewalAccountingScenario::new().await;
     let session = scenario.schedule(None).await;

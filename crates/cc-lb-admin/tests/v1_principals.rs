@@ -10,7 +10,7 @@ use cc_lb_storage_api::{
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn create_201_with_etag_and_location() {
+async fn t2__create_201_with_etag_and_location() {
     let server = admin_test_common::spawn_admin_server().await;
 
     let (status, headers, body) = server
@@ -45,8 +45,8 @@ async fn create_201_with_etag_and_location() {
 }
 
 #[tokio::test]
-async fn list_paginates_with_x_total_count() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__list_paginates_with_x_total_count() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     for name in ["alpha", "bravo", "charlie"] {
         server
             .client
@@ -69,7 +69,7 @@ async fn list_paginates_with_x_total_count() {
 }
 
 #[tokio::test]
-async fn get_returns_etag_with_weak_revision() {
+async fn t2__get_returns_etag_with_weak_revision() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, _, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
@@ -89,7 +89,7 @@ async fn get_returns_etag_with_weak_revision() {
 }
 
 #[tokio::test]
-async fn get_allowed_models_returns_state_with_etag() {
+async fn t2__get_allowed_models_returns_state_with_etag() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = server
         .client
@@ -120,7 +120,7 @@ async fn get_allowed_models_returns_state_with_etag() {
 }
 
 #[tokio::test]
-async fn legacy_admin_routes_are_aliased_under_v1() {
+async fn t2__legacy_admin_routes_are_aliased_under_v1() {
     let server = admin_test_common::spawn_admin_server().await;
 
     for uri in [
@@ -137,7 +137,7 @@ async fn legacy_admin_routes_are_aliased_under_v1() {
 }
 
 #[tokio::test]
-async fn update_correct_if_match_bumps_revision() {
+async fn t2__update_correct_if_match_bumps_revision() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
@@ -166,7 +166,7 @@ async fn update_correct_if_match_bumps_revision() {
 }
 
 #[tokio::test]
-async fn update_endpoints_audit_distinct_concrete_routes() {
+async fn t2__update_endpoints_audit_distinct_concrete_routes() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "audit-routes").await;
     let id = created_id(&created);
@@ -223,7 +223,7 @@ async fn update_endpoints_audit_distinct_concrete_routes() {
 }
 
 #[tokio::test]
-async fn allowed_upstreams_round_trips_through_create_patch_and_get() {
+async fn t2__allowed_upstreams_round_trips_through_create_patch_and_get() {
     let server = admin_test_common::spawn_admin_server().await;
     let first_upstream = "11111111-1111-1111-1111-111111111111";
     let second_upstream = "22222222-2222-2222-2222-222222222222";
@@ -276,15 +276,14 @@ async fn allowed_upstreams_round_trips_through_create_patch_and_get() {
 }
 
 #[tokio::test]
-async fn update_stale_if_match_returns_conflict() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__update_stale_if_match_returns_conflict() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
     let etag = server
         .client
         .header_str(&headers, header::ETAG.as_str())
         .to_owned();
-    tokio::time::sleep(Duration::from_secs(1)).await;
     let (status, _, first_update) = server
         .client
         .put_json(
@@ -311,7 +310,7 @@ async fn update_stale_if_match_returns_conflict() {
 }
 
 #[tokio::test]
-async fn update_without_if_match_returns_428() {
+async fn t2__update_without_if_match_returns_428() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, _, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
@@ -329,8 +328,8 @@ async fn update_without_if_match_returns_428() {
     assert_eq!(body["error"], "if_match_required");
 }
 
-#[tokio::test]
-async fn enable_disable_persists_and_audits() {
+#[tokio::test(start_paused = true)]
+async fn t2__enable_disable_persists_and_audits() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
@@ -372,8 +371,8 @@ async fn enable_disable_persists_and_audits() {
 }
 
 #[tokio::test]
-async fn delete_principal_cascades_owned_plugin_chains() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__delete_principal_cascades_owned_plugin_chains() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
     let principal_route = format!("/admin/v1/principals/{id}");
@@ -453,8 +452,8 @@ async fn delete_principal_cascades_owned_plugin_chains() {
 }
 
 #[tokio::test]
-async fn recreate_after_delete_returns_created_then_name_conflict() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__recreate_after_delete_returns_created_then_name_conflict() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let (status, headers, first) = create_principal(&server.client, "primary").await;
     assert_eq!(status, StatusCode::CREATED);
     let first_id = created_id(&first);
@@ -492,8 +491,8 @@ async fn recreate_after_delete_returns_created_then_name_conflict() {
 }
 
 #[tokio::test]
-async fn concurrent_same_name_create_has_one_winner() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__concurrent_same_name_create_has_one_winner() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let (left, right) = tokio::join!(
         create_principal(&server.client, "concurrent-name"),
         create_principal(&server.client, "concurrent-name")

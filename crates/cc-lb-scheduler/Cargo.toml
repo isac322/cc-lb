@@ -66,6 +66,7 @@ base64.workspace = true
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-server = { path = "../cc-lb-server", default-features = false }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
+cc-lb-storage-conformance = { path = "../cc-lb-storage-conformance", default-features = false, features = ["postgres"] }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 cron = "0.17"

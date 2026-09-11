@@ -35,7 +35,7 @@ fn test_state() -> AdminState {
 }
 
 #[tokio::test]
-async fn config_draft_persists_current_admin_health_smoke() {
+async fn t2__config_draft_persists_current_admin_health_smoke() {
     let response = router(test_state())
         .oneshot(
             Request::builder()

@@ -59,6 +59,37 @@ pub struct RunArgs {
     pub output: Option<PathBuf>,
     #[arg(long)]
     pub only_wave: Option<String>,
+    #[arg(
+        long,
+        env = "CC_LB_STRESS_FULL",
+        value_parser = parse_switch,
+        num_args = 0..=1,
+        default_missing_value = "1",
+        default_value = "0"
+    )]
+    pub enable_full_profile: bool,
+    #[arg(long, env = "CC_LB_STRESS_FULL_WINDOW_MS")]
+    pub full_window_ms: Option<u64>,
+    #[arg(
+        long,
+        env = "CC_LB_STRESS_TIMED_LOAD",
+        value_parser = parse_switch,
+        num_args = 0..=1,
+        default_missing_value = "1",
+        default_value = "0"
+    )]
+    pub timed_load: bool,
+    #[arg(long, env = "CC_LB_STRESS_LOAD_WORKERS")]
+    pub load_workers: Option<u64>,
+    #[arg(
+        long,
+        env = "CC_LB_STRESS_LOAD_RAMP",
+        value_parser = parse_switch,
+        num_args = 0..=1,
+        default_missing_value = "1",
+        default_value = "0"
+    )]
+    pub load_ramp: bool,
 }
 
 #[derive(Debug, Args)]
@@ -129,6 +160,7 @@ pub enum SelfCheck {
     Classify,
     Executor,
     ExecutorSse,
+
     EvidenceSchema,
     Redaction,
 }
@@ -137,6 +169,14 @@ pub enum SelfCheck {
 pub enum DummyMode {
     Ok,
     Panic,
+}
+
+fn parse_switch(value: &str) -> Result<bool, String> {
+    match value {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        other => Err(format!("expected 0, 1, false, or true; got {other}")),
+    }
 }
 
 #[cfg(test)]

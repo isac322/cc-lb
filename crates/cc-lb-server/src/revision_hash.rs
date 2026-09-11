@@ -48,3 +48,47 @@ fn append_sha256_hex(bytes: &mut Vec<u8>, sha256: &[u8; 32]) {
         bytes.push(HEX[(byte & 0x0f) as usize]);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revision_hash_is_order_independent_and_detects_mutation() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+        let upstreams = vec![(b, 20), (a, 10)];
+        let principals = vec![(c, 30), (a, 11)];
+        let chains = vec![(b, 21), (c, 31)];
+        let registry = vec![(c, 32, [3; 32]), (a, 12, [1; 32])];
+
+        let baseline = compute_revision_hash(&upstreams, &principals, &chains, &registry);
+        let reordered = compute_revision_hash(
+            &upstreams.iter().copied().rev().collect::<Vec<_>>(),
+            &principals.iter().copied().rev().collect::<Vec<_>>(),
+            &chains.iter().copied().rev().collect::<Vec<_>>(),
+            &registry.iter().copied().rev().collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            reordered, baseline,
+            "input ordering must not affect the hash"
+        );
+
+        let mut revision_changed = upstreams.clone();
+        revision_changed[0].1 ^= 1;
+        assert_ne!(
+            compute_revision_hash(&revision_changed, &principals, &chains, &registry),
+            baseline,
+            "a one-bit revision change must invalidate the hash",
+        );
+
+        let mut fingerprint_changed = registry.clone();
+        fingerprint_changed[0].2[0] ^= 1;
+        assert_ne!(
+            compute_revision_hash(&upstreams, &principals, &chains, &fingerprint_changed),
+            baseline,
+            "a one-bit plugin fingerprint change must invalidate the hash",
+        );
+    }
+}

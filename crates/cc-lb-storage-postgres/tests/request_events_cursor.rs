@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     str::FromStr,
-    sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
@@ -22,20 +21,9 @@ const CURRENT_REQUEST_EVENT_CURSOR_SQL: &str =
     include_str!("../src/adapter/current_request_event_cursor.sql");
 const PAGE_LIMIT: usize = 2;
 
-fn postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL")
-        .ok()
-        .or_else(|| std::env::var("PG_URL").ok())
-}
-
 #[test]
-fn request_event_history_uses_materialized_cursor_columns_and_index() {
-    let Some(url) = postgres_url() else {
-        eprintln!(
-            "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
-        );
-        return;
-    };
+fn t3_postgres__request_event_history_uses_materialized_cursor_columns_and_index() {
+    let url = crate::postgres_fixture::required_postgres_url();
 
     tokio::runtime::Runtime::new()
         .expect("tokio runtime")
@@ -52,13 +40,8 @@ fn request_event_history_uses_materialized_cursor_columns_and_index() {
 }
 
 #[test]
-fn request_event_principal_cost_shapes_use_covering_indexes() {
-    let Some(url) = postgres_url() else {
-        eprintln!(
-            "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
-        );
-        return;
-    };
+fn t3_postgres__request_event_principal_cost_shapes_use_covering_indexes() {
+    let url = crate::postgres_fixture::required_postgres_url();
 
     tokio::runtime::Runtime::new()
         .expect("tokio runtime")
@@ -122,7 +105,7 @@ async fn explain_filtered_principal_cost_shape(
 }
 
 async fn assert_principal_cost_shapes_use_covering_indexes(pool: &PgPool) -> Result<()> {
-    let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let storage = PostgresStorage::new(pool.clone(), cc_lb_testkit::fixed_clock(1_700_000_000));
     storage.initialize(BackendKind::Postgres).await?;
     let upstream_id = Uuid::from_u128(0x51);
     let uuid_principal = upstream_id.to_string();
@@ -244,7 +227,7 @@ async fn assert_principal_cost_shapes_use_covering_indexes(pool: &PgPool) -> Res
 }
 
 async fn run_regression(pool: &PgPool) -> Result<()> {
-    let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let storage = PostgresStorage::new(pool.clone(), cc_lb_testkit::fixed_clock(1_700_000_000));
     storage.initialize(BackendKind::Postgres).await?;
 
     assert_materialized_schema(pool).await?;

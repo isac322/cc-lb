@@ -1,22 +1,24 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use cc_lb_engine::LifecycleConfig;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::preflight::{self, PreflightReport};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
-    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob,
-    WasmRegistryEntry, WasmRegistryEntryInput,
+    PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind,
+    PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntry,
+    WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use serde_json::json;
-use tempfile::TempDir;
 use uuid::Uuid;
 
+const NOW_UNIX_SECS: u64 = 1_800_000_000;
+
 #[tokio::test]
-async fn empty_db_report() {
+async fn t2__empty_db_report() {
     let fixture = Fixture::new().await;
 
     let report = run_preflight(&fixture).await;
@@ -31,7 +33,7 @@ async fn empty_db_report() {
 }
 
 #[tokio::test]
-async fn partial_state() {
+async fn t3__partial_state() {
     let fixture = Fixture::new().await;
     seed_upstream(
         &fixture.storage,
@@ -127,25 +129,15 @@ async fn partial_state() {
 }
 
 struct Fixture {
-    _db_dir: TempDir,
-    data_dir: TempDir,
-    storage: Arc<SqliteStorage>,
+    storage: Arc<InMemoryStorage>,
     stores: Stores,
+    clock: cc_lb_engine::ClockHandle,
 }
 
 impl Fixture {
     async fn new() -> Self {
-        let db_dir = tempfile::tempdir().unwrap();
-        let data_dir = tempfile::tempdir().unwrap();
-        let database_url = format!(
-            "sqlite://{}",
-            db_dir.path().join("preflight.sqlite").display()
-        );
-        let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await
-            .unwrap();
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
-        let storage = Arc::new(storage);
+        let clock = fixed_clock(NOW_UNIX_SECS);
+        let storage = Arc::new(InMemoryStorage::with_clock(clock.clone()));
         let upstreams: Arc<dyn UpstreamStore> = storage.clone();
         let principals: Arc<dyn PrincipalStore> = storage.clone();
         let plugin_registry: Arc<dyn PluginRegistryStore> = storage.clone();
@@ -163,21 +155,19 @@ impl Fixture {
             audit: None,
         };
         Self {
-            _db_dir: db_dir,
-            data_dir,
             storage,
             stores,
+            clock,
         }
     }
 }
 
 async fn run_preflight(fixture: &Fixture) -> PreflightReport {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     preflight::run_preflight(
         &fixture.stores,
         &LifecycleConfig::default(),
-        fixture.data_dir.path(),
-        clock,
+        Path::new("unused-preflight-data"),
+        fixture.clock.clone(),
     )
     .await
     .unwrap()
@@ -206,7 +196,7 @@ fn print_report(report: &PreflightReport) {
 }
 
 async fn seed_upstream(
-    storage: &SqliteStorage,
+    storage: &InMemoryStorage,
     name: &str,
     kind: UpstreamKind,
     base_url: Option<&str>,
@@ -228,7 +218,7 @@ async fn seed_upstream(
 }
 
 async fn seed_principal(
-    storage: &SqliteStorage,
+    storage: &InMemoryStorage,
     name: &str,
     allowed_models: Vec<String>,
 ) -> cc_lb_storage_api::PrincipalRecord {
@@ -242,20 +232,20 @@ async fn seed_principal(
             default_limits: Vec::new(),
             cache_keepalive: None,
         },
-        1_800_000_000,
+        NOW_UNIX_SECS,
     )
     .await
     .unwrap()
 }
 
-async fn seed_registry(storage: &SqliteStorage, seed: u8, name: &str) -> WasmRegistryEntry {
+async fn seed_registry(storage: &InMemoryStorage, seed: u8, name: &str) -> WasmRegistryEntry {
     let (entry, _) = storage
         .persist_wasm_upload(
             WasmBlob {
                 sha256: [seed; 32],
                 bytes: vec![seed; 4],
                 size_bytes: 4,
-                parse_validated_at_unix_secs: 1_800_000_000,
+                parse_validated_at_unix_secs: NOW_UNIX_SECS,
             },
             WasmRegistryEntryInput {
                 schema_hash: None,
@@ -263,8 +253,8 @@ async fn seed_registry(storage: &SqliteStorage, seed: u8, name: &str) -> WasmReg
                 version: None,
                 original_filename: format!("{name}.wasm"),
                 label: None,
-                uploaded_at_unix_secs: 1_800_000_000,
-                uploaded_by_admin_id: Uuid::new_v4(),
+                uploaded_at_unix_secs: NOW_UNIX_SECS,
+                uploaded_by_admin_id: Uuid::from_u128(u128::from(seed)),
                 description: format!("{name} description"),
                 usage: "test fixture".to_owned(),
                 hook_metadata: Default::default(),
@@ -277,7 +267,7 @@ async fn seed_registry(storage: &SqliteStorage, seed: u8, name: &str) -> WasmReg
 }
 
 async fn seed_chain(
-    storage: &SqliteStorage,
+    storage: &InMemoryStorage,
     principal_id: Uuid,
     slot: PluginSlotKind,
     wasm_registry_id: Uuid,

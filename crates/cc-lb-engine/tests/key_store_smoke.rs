@@ -1,15 +1,13 @@
-use std::sync::Arc;
-
 use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore, KeyStoreError};
 use cc_lb_engine::api_keys::secret;
 use cc_lb_storage_api::types::{
     ApiKeyMutation, KeyStatus, Limit, LimitKind, PrincipalKindLite, UpstreamKind,
 };
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_testkit::InMemoryStorage;
 
 #[tokio::test]
-async fn create_lists_principal() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, store) = new_store().await?;
+async fn t2__create_lists_principal() -> Result<(), Box<dyn std::error::Error>> {
+    let store = new_store();
 
     store
         .create("principal-1", create_params("managed key"))
@@ -23,8 +21,8 @@ async fn create_lists_principal() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn lookup_by_index_hash_returns_matching_key() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, store) = new_store().await?;
+async fn t2__lookup_by_index_hash_returns_matching_key() -> Result<(), Box<dyn std::error::Error>> {
+    let store = new_store();
     let (record, secret) = store
         .create("principal-1", create_params("managed key"))
         .await?;
@@ -43,8 +41,8 @@ async fn lookup_by_index_hash_returns_matching_key() -> Result<(), Box<dyn std::
 }
 
 #[tokio::test]
-async fn revoke_removes_index() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, store) = new_store().await?;
+async fn t2__revoke_removes_index() -> Result<(), Box<dyn std::error::Error>> {
+    let store = new_store();
     let (record, secret) = store
         .create("principal-1", create_params("managed key"))
         .await?;
@@ -68,8 +66,8 @@ async fn revoke_removes_index() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn disable_keeps_index() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, store) = new_store().await?;
+async fn t2__disable_keeps_index() -> Result<(), Box<dyn std::error::Error>> {
+    let store = new_store();
     let (record, secret) = store
         .create("principal-1", create_params("managed key"))
         .await?;
@@ -87,8 +85,8 @@ async fn disable_keeps_index() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn patch_label_change_reflected_in_list() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, store) = new_store().await?;
+async fn t2__patch_label_change_reflected_in_list() -> Result<(), Box<dyn std::error::Error>> {
+    let store = new_store();
     let (_record, secret) = store
         .create("principal-1", create_params("managed key"))
         .await?;
@@ -113,8 +111,8 @@ async fn patch_label_change_reflected_in_list() -> Result<(), Box<dyn std::error
 }
 
 #[tokio::test]
-async fn enable_on_revoked_returns_err() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, store) = new_store().await?;
+async fn t2__enable_on_revoked_returns_err() -> Result<(), Box<dyn std::error::Error>> {
+    let store = new_store();
     let (_record, secret) = store
         .create("principal-1", create_params("managed key"))
         .await?;
@@ -131,14 +129,8 @@ async fn enable_on_revoked_returns_err() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-async fn new_store() -> Result<(tempfile::TempDir, KeyStore), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let database_url = format!("sqlite://{}", dir.path().join("key_store.sqlite").display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    Ok((dir, KeyStore::new(Arc::new(storage))))
+fn new_store() -> KeyStore {
+    KeyStore::new(InMemoryStorage::new())
 }
 
 fn create_params(label: &str) -> CreateParams {

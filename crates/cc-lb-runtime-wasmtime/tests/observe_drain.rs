@@ -1,37 +1,12 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::support::required_wasm;
 use cc_lb_plugin_wire::ObserveEvent as WireObserveEvent;
 use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmPluginWireDispatch, WasmtimeRuntime};
 use rkyv::rancor::Error as RkyvError;
 
-fn wasm_path() -> PathBuf {
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/")
-        .parent()
-        .expect("workspace root")
-        .to_path_buf();
-    workspace_root.join("target/wasm32-unknown-unknown/release/wasmtime_observe_noop.wasm")
-}
-
-fn load_wasm_or_skip() -> Option<Vec<u8>> {
-    let path = wasm_path();
-    match std::fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(err) => {
-            eprintln!(
-                "skipping wasmtime-observe-noop e2e: wasm artifact missing at {} ({err}). \
-                 Run `cargo build --target wasm32-unknown-unknown --release -p wasmtime-observe-noop` first.",
-                path.display(),
-            );
-            None
-        }
-    }
-}
-
-fn setup() -> Option<WasmPluginWireDispatch> {
-    let wasm_bytes = load_wasm_or_skip()?;
+fn setup() -> WasmPluginWireDispatch {
+    let wasm_bytes = required_wasm("wasmtime_observe_noop.wasm");
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let slot = runtime
         .register_observe(
@@ -40,10 +15,7 @@ fn setup() -> Option<WasmPluginWireDispatch> {
             &wasm_bytes,
         )
         .expect("register_observe OK");
-    Some(WasmPluginWireDispatch::from_slot(
-        slot,
-        runtime.config_arc(),
-    ))
+    WasmPluginWireDispatch::from_slot(slot, runtime.config_arc())
 }
 
 fn encode_event(event: WireObserveEvent) -> Vec<u8> {
@@ -53,8 +25,8 @@ fn encode_event(event: WireObserveEvent) -> Vec<u8> {
 }
 
 #[test]
-fn observe_accepts_single_event_best_effort() {
-    let Some(dispatch) = setup() else { return };
+fn t3__observe_accepts_single_event_best_effort() {
+    let dispatch = setup();
 
     dispatch
         .call_observe(&encode_event(WireObserveEvent::RequestStarted {
@@ -83,8 +55,8 @@ fn observe_accepts_single_event_best_effort() {
 }
 
 #[test]
-fn observe_drains_bounded_burst_without_error() {
-    let Some(dispatch) = setup() else { return };
+fn t3__observe_drains_bounded_burst_without_error() {
+    let dispatch = setup();
 
     let upstream_wire = cc_lb_plugin_wire::Upstream::AnthropicDirect { base_url: None };
     for batch in 0..256u64 {

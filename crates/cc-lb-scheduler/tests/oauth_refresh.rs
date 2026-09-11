@@ -19,10 +19,10 @@ mod jobs {
         use super::super::*;
 
         #[tokio::test]
-        async fn success_bumps_generation_and_enqueues_metadata() -> Result<()> {
-            let upstream_id = Uuid::new_v4();
+        async fn t2__success_bumps_generation_and_enqueues_metadata() -> Result<()> {
+            let upstream_id = Uuid::from_u128(1);
             let upstreams = FakeUpstreams::new(refreshable_record(upstream_id, 4), 5);
-            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::new_v4());
+            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::from_u128(101));
             let enqueued = Arc::new(Mutex::new(None));
             let scheduled = Arc::new(Mutex::new(None));
             let scheduled_clone = Arc::clone(&scheduled);
@@ -59,14 +59,14 @@ mod jobs {
         }
 
         #[tokio::test]
-        async fn refresh_failure_retries() -> Result<()> {
-            let upstream_id = Uuid::new_v4();
+        async fn t2__refresh_failure_retries() -> Result<()> {
+            let upstream_id = Uuid::from_u128(2);
             let config = OAuthRefreshConfig {
                 retry_delay: Duration::from_secs(7),
             };
             let handler = OAuthRefreshJobHandler::with_config(
                 FakeUpstreams::new(refreshable_record(upstream_id, 4), 5),
-                Uuid::new_v4(),
+                Uuid::from_u128(102),
                 config,
             );
 
@@ -90,13 +90,13 @@ mod jobs {
         }
 
         #[tokio::test]
-        async fn disabled_registered_oauth_upstream_refreshes() -> Result<()> {
-            let upstream_id = Uuid::new_v4();
+        async fn t2__disabled_registered_oauth_upstream_refreshes() -> Result<()> {
+            let upstream_id = Uuid::from_u128(3);
             let mut upstream = refreshable_record(upstream_id, 4);
             upstream.enabled = false;
             upstream.warmup_enabled = false;
             let upstreams = FakeUpstreams::new(upstream, 5);
-            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::new_v4());
+            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::from_u128(103));
 
             let outcome = handler
                 .handle(
@@ -119,12 +119,12 @@ mod jobs {
         }
 
         #[tokio::test]
-        async fn deleted_oauth_upstream_skips_refresh() -> Result<()> {
-            let upstream_id = Uuid::new_v4();
+        async fn t2__deleted_oauth_upstream_skips_refresh() -> Result<()> {
+            let upstream_id = Uuid::from_u128(4);
             let mut upstream = refreshable_record(upstream_id, 4);
             upstream.deleted_at_unix_secs = Some(1_800_000_000);
             let upstreams = FakeUpstreams::new(upstream, 5);
-            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::new_v4());
+            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::from_u128(104));
 
             let outcome = handler
                 .handle(
@@ -147,12 +147,12 @@ mod jobs {
         }
 
         #[tokio::test]
-        async fn missing_oauth_credentials_skip_refresh() -> Result<()> {
-            let upstream_id = Uuid::new_v4();
+        async fn t2__missing_oauth_credentials_skip_refresh() -> Result<()> {
+            let upstream_id = Uuid::from_u128(5);
             let mut upstream = refreshable_record(upstream_id, 4);
             upstream.oauth_credentials = None;
             let upstreams = FakeUpstreams::new(upstream, 5);
-            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::new_v4());
+            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::from_u128(105));
 
             let outcome = handler
                 .handle(
@@ -175,12 +175,12 @@ mod jobs {
         }
 
         #[tokio::test]
-        async fn non_oauth_upstream_skips_refresh() -> Result<()> {
-            let upstream_id = Uuid::new_v4();
+        async fn t2__non_oauth_upstream_skips_refresh() -> Result<()> {
+            let upstream_id = Uuid::from_u128(6);
             let mut upstream = refreshable_record(upstream_id, 4);
             upstream.kind = UpstreamKind::AnthropicApiKey;
             let upstreams = FakeUpstreams::new(upstream, 5);
-            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::new_v4());
+            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::from_u128(106));
 
             let outcome = handler
                 .handle(

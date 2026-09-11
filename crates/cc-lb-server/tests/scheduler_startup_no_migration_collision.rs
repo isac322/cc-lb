@@ -1,21 +1,19 @@
 #![cfg(feature = "sqlite")]
 
-use std::sync::Arc;
-
 use cc_lb_config::{SchedulerConfig, StorageConfig};
 use cc_lb_server::scheduler_factory::{SchedulerBackend, open_scheduler_storage};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 
 #[tokio::test]
-async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_collision() {
+async fn t3__sqlite_main_storage_and_apalis_setup_share_file_without_migration_collision() {
     let directory = tempfile::tempdir().expect("tempdir is created");
     let database_path = directory.path().join("cc-lb.sqlite");
     let database_url = format!("sqlite://{}", database_path.display());
 
-    let main_storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await
-            .expect("main sqlite storage opens");
+    let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
+    let main_storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+        .await
+        .expect("main sqlite storage opens");
     main_storage
         .initialize(BackendKind::Sqlite)
         .await
@@ -30,13 +28,10 @@ async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_colli
     let storage_config = StorageConfig::Sqlite {
         path: database_path,
     };
-    let opened_scheduler = open_scheduler_storage(
-        &storage_config,
-        &SchedulerConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
-    )
-    .await
-    .expect("scheduler storage opens after main migrations using derived sqlite file");
+    let opened_scheduler =
+        open_scheduler_storage(&storage_config, &SchedulerConfig::default(), clock)
+            .await
+            .expect("scheduler storage opens after main migrations using derived sqlite file");
 
     #[allow(clippy::infallible_destructuring_match)]
     let sqlite_scheduler = match opened_scheduler.backend {

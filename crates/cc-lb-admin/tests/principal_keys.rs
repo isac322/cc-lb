@@ -37,7 +37,7 @@ fn test_state() -> AdminState {
 }
 
 #[tokio::test]
-async fn principal_keys_current_admin_principals_smoke() {
+async fn t2__principal_keys_current_admin_principals_smoke() {
     let response = router(test_state())
         .oneshot(
             Request::builder()
@@ -54,7 +54,7 @@ async fn principal_keys_current_admin_principals_smoke() {
 }
 
 #[tokio::test]
-async fn revoked_key_list_preserves_key_id_last4_and_audit_rows() {
+async fn t2__revoked_key_list_preserves_key_id_last4_and_audit_rows() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, _, principal) = server
         .client
@@ -104,7 +104,7 @@ async fn revoked_key_list_preserves_key_id_last4_and_audit_rows() {
 }
 
 #[tokio::test]
-async fn legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() {
+async fn t2__legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, _, principal) = server
         .client
@@ -175,8 +175,8 @@ async fn legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() 
 }
 
 #[tokio::test]
-async fn principal_key_usage_uses_persisted_request_events() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__principal_key_usage_uses_persisted_request_events() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let (_, _, principal) = server
         .client
         .post_json(
@@ -196,8 +196,8 @@ async fn principal_key_usage_uses_persisted_request_events() {
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let key_id = issued["key_id"].as_str().unwrap();
-    let event_ts = cc_lb_clock::unix_secs(std::time::SystemTime::now());
-    let event_ts_ms = event_ts.saturating_mul(1_000);
+    let event_ts = 1_700_000_000;
+    let event_ts_ms = event_ts * 1_000;
 
     server
         .storage
@@ -251,7 +251,7 @@ async fn principal_key_usage_uses_persisted_request_events() {
 }
 
 async fn wait_for_audit_action(
-    storage: &std::sync::Arc<cc_lb_storage_sqlite::SqliteStorage>,
+    storage: &std::sync::Arc<impl cc_lb_storage_api::AuditStore>,
     needle: &str,
     key_id: &str,
 ) {

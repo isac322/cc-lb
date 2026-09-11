@@ -18,10 +18,12 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
+async fn t2__status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
     let (_dir, storage) = temp_storage().await;
     let mut state = test_state(Config::default(), Some(storage.clone()));
-    let replica = ReplicaIdentity { id: Uuid::new_v4() };
+    let replica = ReplicaIdentity {
+        id: Uuid::from_u128(24),
+    };
     state.lifecycle = Some(AdminPorts {
         replica_identity: Some(replica.clone()),
         ..AdminPorts::default()
@@ -36,7 +38,7 @@ async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
 }
 
 #[tokio::test]
-async fn status_shows_partial_failure_when_upstream_marked_error_in_snapshot() {
+async fn t2__status_shows_partial_failure_when_upstream_marked_error_in_snapshot() {
     let (_dir, storage) = temp_storage().await;
     let upstream = UpstreamStore::create(
         storage.as_ref(),
@@ -65,7 +67,7 @@ async fn status_shows_partial_failure_when_upstream_marked_error_in_snapshot() {
 }
 
 #[tokio::test]
-async fn export_contains_no_plaintext_oauth_tokens() {
+async fn t2__export_contains_no_plaintext_oauth_tokens() {
     let (_dir, storage) = temp_storage().await;
     let upstream = UpstreamStore::create(
         storage.as_ref(),
@@ -106,7 +108,7 @@ async fn export_contains_no_plaintext_oauth_tokens() {
 }
 
 #[tokio::test]
-async fn export_schema_version_field_present_and_equals_1() {
+async fn t2__export_schema_version_field_present_and_equals_1() {
     let (_dir, storage) = temp_storage().await;
 
     let (status, _, body, _) = authed_json(
@@ -122,7 +124,7 @@ async fn export_schema_version_field_present_and_equals_1() {
 }
 
 #[tokio::test]
-async fn export_round_trips_through_stable_key_ordering() {
+async fn t2__export_round_trips_through_stable_key_ordering() {
     let (_dir, storage) = temp_storage().await;
     seed_upstream(&storage, "bravo").await;
     seed_upstream(&storage, "alpha").await;
@@ -159,6 +161,7 @@ async fn export_round_trips_through_stable_key_ordering() {
     insta::assert_json_snapshot!(body);
 }
 
+
 fn bump_dynamic_generation(state: &cc_lb_admin::AdminState, snapshot: UpstreamStatusSnapshot) {
     let current = state.dynamic_view.load();
     let next = DynamicViewBuilder::from_view(&current)
@@ -182,7 +185,7 @@ fn snapshot_with_upstream_error(name: &str) -> UpstreamStatusSnapshot {
     }
 }
 
-async fn seed_upstream(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str) {
+async fn seed_upstream(storage: &cc_lb_testkit::InMemoryStorage, name: &str) {
     UpstreamStore::create(
         storage,
         UpstreamCreate {
@@ -199,7 +202,7 @@ async fn seed_upstream(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str
     .unwrap();
 }
 
-async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str) -> Uuid {
+async fn seed_principal(storage: &cc_lb_testkit::InMemoryStorage, name: &str) -> Uuid {
     PrincipalStore::create(
         storage,
         PrincipalCreate {
@@ -218,7 +221,7 @@ async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &st
 }
 
 async fn seed_registry(
-    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    storage: &cc_lb_testkit::InMemoryStorage,
     seed: u8,
     name: &str,
 ) -> cc_lb_storage_api::WasmRegistryEntry {

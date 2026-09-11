@@ -11,13 +11,11 @@ use std::time::{Duration, Instant};
 use cc_lb_admin::internal_partials::{InternalPartialsState, router as internal_partials_router};
 use cc_lb_admin::ports::{RetainedPartialPort, RetainedPartialSnapshot};
 use cc_lb_control::{BusReceiver, RequestEventBus};
-use cc_lb_engine::{
-    ClockHandle, InMemoryBus, PartialRetentionCache, PgListener, PgNotifier, SystemClock,
-};
+use cc_lb_engine::{InMemoryBus, PartialRetentionCache, PgListener, PgNotifier};
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_postgres::PostgresStorage;
-use metrics_exporter_prometheus::PrometheusHandle;
+use metrics_util::debugging::Snapshotter;
 use secrecy::SecretString;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
@@ -32,19 +30,11 @@ const LARGE_PAYLOAD_MIN_BYTES: usize = 7_500;
 // NEGATIVE_RECEIVE_TIMEOUT stays fixed: it bounds a "confirm nothing arrives"
 // wait, which contention cannot make flake (an absent event never appears).
 fn receive_timeout() -> Duration {
-    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(15))
+    Duration::from_secs(15)
 }
 const NEGATIVE_RECEIVE_TIMEOUT: Duration = Duration::from_millis(500);
 fn warmup_timeout() -> Duration {
-    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(10))
+    Duration::from_secs(10)
 }
 const WARMUP_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -68,13 +58,13 @@ impl RetainedPartialPort for TestRetainedPartialPort {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn truncated_partial_http_fallback_reaches_consumer_bus() -> TestResult<()> {
+#[tokio::test]
+async fn t3_postgres__truncated_partial_http_fallback_reaches_consumer_bus() -> TestResult<()> {
     run_truncated_partial_case(true).await
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn truncated_partial_http_fallback_rejects_wrong_token() -> TestResult<()> {
+#[tokio::test]
+async fn t3_postgres__truncated_partial_http_fallback_rejects_wrong_token() -> TestResult<()> {
     run_truncated_partial_case(false).await
 }
 
@@ -97,14 +87,13 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
                 "fallback-wrong-token",
             )
         };
-    let Some(database_url) = ci_postgres_url() else {
-        eprintln!("SKIP: CI_POSTGRES_URL unset");
-        return Ok(());
-    };
+    let (recorder, metrics) = cc_lb_testkit::local_recorder();
+    let _recorder_guard = cc_lb_testkit::install_local_recorder(&recorder);
+    let database_url = crate::required_ci_postgres_url().await?;
     let _serial = crate::common::postgres_test_lock(&database_url).await?;
 
     reset_request_event_tables(&database_url).await?;
-    let handle = metrics_handle();
+    let handle = &metrics;
     let producer_pool = pg_pool(&database_url, 4).await?;
     let consumer_pool = pg_pool(&database_url, 4).await?;
     let retention = PartialRetentionCache::new(Duration::from_secs(300), 256);
@@ -125,7 +114,10 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
     // Each test run uses a unique NOTIFY channel so a concurrently-running sibling
     // test's producer cannot deliver into this consumer over the shared Postgres
     // database (Postgres NOTIFY broadcasts to every session listening on a channel).
-    let channel = format!("cc_lb_test_partial_{}", uuid::Uuid::now_v7().simple());
+    let channel = format!(
+        "cc_lb_test_partial_{}",
+        uuid::Uuid::from_u128(if expect_delivery { 1 } else { 2 }).simple()
+    );
     let (producer_tx, producer_rx) = mpsc::channel(16);
     let (notifier_shutdown_tx, notifier_shutdown_rx) = watch::channel(false);
     let notifier_task = PgNotifier::spawn_with_channel(
@@ -187,16 +179,8 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
     Ok(())
 }
 
-fn ci_postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL").ok()
-}
-
-fn metrics_handle() -> &'static PrometheusHandle {
-    crate::common::install_prometheus()
-}
-
 async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {
-    let clock: ClockHandle = Arc::new(SystemClock);
+    let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
     let pool = pg_pool(database_url, 1).await?;
     let storage = PostgresStorage::new(pool.clone(), clock);
     storage.initialize(BackendKind::Postgres).await?;
@@ -303,7 +287,7 @@ async fn wait_for_partial(
 
 fn small_partial(name: &str) -> RequestEventPartial {
     RequestEventPartial {
-        event_id: format!("event-{name}-{}", uuid::Uuid::now_v7()),
+        event_id: format!("event-{name}-{}", uuid::Uuid::from_u128(3)),
         request_id: format!("req-{name}"),
         ts: 1_800_000_000,
         ts_ms: 1_800_000_000_000,
@@ -344,12 +328,7 @@ fn large_partial(name: &str) -> RequestEventPartial {
     }
 }
 
-async fn wait_for_counter(
-    handle: &PrometheusHandle,
-    name: &str,
-    outcome: &str,
-    expected: f64,
-) -> f64 {
+async fn wait_for_counter(handle: &Snapshotter, name: &str, outcome: &str, expected: f64) -> f64 {
     let deadline = Instant::now() + receive_timeout();
     loop {
         let value = labeled_counter_value(handle, name, outcome);
@@ -360,16 +339,27 @@ async fn wait_for_counter(
     }
 }
 
-fn labeled_counter_value(handle: &PrometheusHandle, name: &str, outcome: &str) -> f64 {
-    let metric_prefix = format!("{name}{{");
-    let label_fragment = format!("outcome=\"{outcome}\"");
-    handle
-        .render()
-        .lines()
-        .find(|line| line.starts_with(&metric_prefix) && line.contains(&label_fragment))
-        .and_then(|line| line.split_whitespace().last())
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(0.0)
+fn labeled_counter_value(snapshotter: &Snapshotter, name: &str, outcome: &str) -> f64 {
+    snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .find_map(|(key, _, _, metric)| {
+            (key.key().name() == name
+                && key
+                    .key()
+                    .labels()
+                    .any(|label| label.key() == "outcome" && label.value() == outcome))
+            .then(|| format!("{metric:?}"))
+            .and_then(|rendered| {
+                rendered
+                    .strip_prefix("Counter(")?
+                    .strip_suffix(')')?
+                    .parse::<u64>()
+                    .ok()
+            })
+        })
+        .unwrap_or(0) as f64
 }
 
 fn error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {

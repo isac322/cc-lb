@@ -13,74 +13,75 @@ use cc_lb_scheduler::worker::{
     ADAPTIVE_QUEUE, AdaptiveJob, PostgresSchedulerBackend, SchedulerBackend, SchedulerCtx,
     build_adaptive_worker,
 };
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use url::Url;
 use uuid::Uuid;
 
 const DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
 const JOB_B_DELAY_SECS: i64 = 2;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replacement_worker_dispatches_distinct_job_from_same_postgres_backend() -> Result<()> {
-    let admin_url = std::env::var("DATABASE_URL")
-        .context("DATABASE_URL must be set to a PostgreSQL administrative database")?;
-    ensure!(
-        !admin_url.trim().is_empty(),
-        "DATABASE_URL must not be empty"
-    );
+async fn t3_postgres__replacement_worker_dispatches_distinct_job_from_same_postgres_backend()
+-> Result<()> {
+    let fixture = crate::postgres_fixture().await?;
+    let admin_pool = crate::scheduler_postgres_pool(&fixture).await?;
+    let test_result = async {
+        let admin_options = admin_pool.connect_options().as_ref().clone();
+        let suffix = fixture.schema_name().trim_start_matches("cc_lb_test_");
+        let database_name = format!("cclb_parity_{suffix}");
+        let server_version: String = sqlx::query_scalar("SHOW server_version")
+            .fetch_one(&admin_pool)
+            .await
+            .context("read PostgreSQL server version")?;
+        ensure!(
+            server_version.starts_with("18."),
+            "restart parity test requires PostgreSQL 18, reached {server_version}"
+        );
 
-    let database_name = format!("cclb_parity_{}", Uuid::new_v4().simple());
-    let admin_pool = PgPoolOptions::new()
-        .connect(&admin_url)
-        .await
-        .context("connect to PostgreSQL administrative database")?;
-    let server_version: String = sqlx::query_scalar("SHOW server_version")
-        .fetch_one(&admin_pool)
-        .await
-        .context("read PostgreSQL server version")?;
-    ensure!(
-        server_version.starts_with("18."),
-        "restart parity test requires PostgreSQL 18, reached {server_version}"
-    );
+        let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
+        sqlx::query(&create_database)
+            .execute(&admin_pool)
+            .await
+            .with_context(|| format!("create isolated database {database_name}"))?;
 
-    let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
-    sqlx::query(&create_database)
-        .execute(&admin_pool)
-        .await
-        .with_context(|| format!("create isolated database {database_name}"))?;
+        let test_result = run_in_isolated_database(admin_options, &database_name).await;
+        let drop_database = format!(r#"DROP DATABASE "{database_name}" WITH (FORCE)"#);
+        let drop_result = sqlx::query(&drop_database).execute(&admin_pool).await;
 
-    let test_result = run_in_isolated_database(&admin_url, &database_name).await;
-    let drop_database = format!(r#"DROP DATABASE "{database_name}" WITH (FORCE)"#);
-    let drop_result = sqlx::query(&drop_database).execute(&admin_pool).await;
-    admin_pool.close().await;
-
-    match (test_result, drop_result) {
-        (Ok((job_a, job_b)), Ok(_)) => {
-            println!(
-                "postgres_restart_parity_receipt server_version={server_version} database={database_name} dispatched_a={job_a} generation_1_joined=true dispatched_b={job_b} generation_2_joined=true database_dropped=true"
-            );
-            Ok(())
+        match (test_result, drop_result) {
+            (Ok((job_a, job_b)), Ok(_)) => {
+                println!(
+                    "postgres_restart_parity_receipt server_version={server_version} database={database_name} dispatched_a={job_a} generation_1_joined=true dispatched_b={job_b} generation_2_joined=true database_dropped=true"
+                );
+                Ok(())
+            }
+            (Err(test_error), Ok(_)) => Err(test_error.context(format!(
+                "restart parity contract failed; isolated database {database_name} was dropped"
+            ))),
+            (Ok(_), Err(drop_error)) => Err(drop_error)
+                .with_context(|| format!("drop isolated database {database_name} after contract")),
+            (Err(test_error), Err(drop_error)) => Err(anyhow::anyhow!(
+                "restart parity contract failed: {test_error:#}; dropping isolated database {database_name} also failed: {drop_error}"
+            )),
         }
-        (Err(test_error), Ok(_)) => Err(test_error.context(format!(
-            "restart parity contract failed; isolated database {database_name} was dropped"
-        ))),
-        (Ok(_), Err(drop_error)) => Err(drop_error)
-            .with_context(|| format!("drop isolated database {database_name} after contract")),
-        (Err(test_error), Err(drop_error)) => Err(anyhow::anyhow!(
-            "restart parity contract failed: {test_error:#}; dropping isolated database {database_name} also failed: {drop_error}"
-        )),
     }
+    .await;
+    admin_pool.close().await;
+    let teardown_result = fixture.teardown().await;
+    test_result?;
+    teardown_result?;
+    Ok(())
 }
 
-async fn run_in_isolated_database(admin_url: &str, database_name: &str) -> Result<(Uuid, Uuid)> {
-    let mut database_url = Url::parse(admin_url).context("parse DATABASE_URL")?;
-    database_url.set_path(database_name);
+async fn run_in_isolated_database(
+    admin_options: PgConnectOptions,
+    database_name: &str,
+) -> Result<(Uuid, Uuid)> {
     let pool = PgPoolOptions::new()
-        .connect(database_url.as_str())
+        .connect_with(admin_options.database(database_name))
         .await
         .with_context(|| format!("connect to isolated database {database_name}"))?;
     let result = run_two_generation_contract(&pool).await;
@@ -98,7 +99,7 @@ async fn run_two_generation_contract(pool: &sqlx::PgPool) -> Result<(Uuid, Uuid)
     let backend = SchedulerBackend::Postgres(PostgresSchedulerBackend::new(pool.clone()));
     let (dispatch_tx, mut dispatch_rx) = mpsc::channel(1);
 
-    let job_a = Uuid::new_v4();
+    let job_a = Uuid::from_u128(1);
     backend
         .push_job(AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(job_a)))
         .await
@@ -116,7 +117,7 @@ async fn run_two_generation_contract(pool: &sqlx::PgPool) -> Result<(Uuid, Uuid)
         "generation 1 dispatched the wrong job"
     );
 
-    let job_b = Uuid::new_v4();
+    let job_b = Uuid::from_u128(2);
     ensure!(job_b != job_a, "jobs A and B must be distinct");
     backend
         .push_job(AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(job_b)))

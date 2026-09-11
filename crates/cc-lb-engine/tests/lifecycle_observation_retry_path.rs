@@ -21,7 +21,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn unauthorized_refresh_observes_only_final_attempt() {
+async fn t2__unauthorized_refresh_observes_only_final_attempt() {
     let state = TestState::default();
     let (sink, mut receiver) = UpstreamRateLimitSink::with_capacity(16);
     let test_bus = TestLifecycleBus::new().with_rate_limit_header_subscriber(sink);

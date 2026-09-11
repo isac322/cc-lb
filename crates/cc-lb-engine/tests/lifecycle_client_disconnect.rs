@@ -2,7 +2,6 @@ mod client_disconnect_support;
 use crate::common;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::body::Body;
 use bytes::Bytes;
@@ -12,8 +11,9 @@ use cc_lb_engine::{
     NoopSubscriptionQuotaCache,
 };
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason, UsageSource};
+use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use http::header::CONTENT_ENCODING;
 use http::{HeaderMap, StatusCode};
 use http_body_util::BodyExt;
@@ -22,17 +22,16 @@ use client_disconnect_support::{
     assert_dropped_terminal, assert_error_terminal, assert_one_final, assert_stream_error,
     assert_success_terminal, canonical_error_frame, encoded_sse_dispatch, json_dispatch, lifecycle,
     lifecycle_receiver, normal_sse_frame, pending_sse, persistent_upstream_frame_error,
-    sqlite_storage, sse_dispatch, transform_body, transform_lifecycle, upstream_frame_error,
+    sse_dispatch, transform_body, transform_lifecycle, upstream_frame_error,
     upstream_frame_error_after,
 };
 use common::{RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState, messages_request};
 use url::Url;
 
 #[tokio::test]
-async fn unpolled_stream_body_drop_persists_one_client_closed_final()
+async fn t2__unpolled_stream_body_drop_persists_one_client_closed_final()
 -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
@@ -50,7 +49,7 @@ async fn unpolled_stream_body_drop_persists_one_client_closed_final()
 
     assert_error_terminal(&mut lifecycle_rx, 499, "client_closed_request").await;
     assert_one_final(&mut update_rx).await;
-    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let rows = storage.wait_for_request_events(1).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, 499);
     assert_eq!(rows[0].error_code.as_deref(), Some("client_closed_request"));
@@ -58,7 +57,7 @@ async fn unpolled_stream_body_drop_persists_one_client_closed_final()
 }
 
 #[tokio::test]
-async fn stream_body_drop_after_normal_frame_is_client_closed() {
+async fn t2__stream_body_drop_after_normal_frame_is_client_closed() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let waiting = Arc::new(tokio::sync::Notify::new());
@@ -80,7 +79,7 @@ async fn stream_body_drop_after_normal_frame_is_client_closed() {
 }
 
 #[tokio::test]
-async fn stream_body_drop_while_awaiting_upstream_is_client_closed() {
+async fn t2__stream_body_drop_while_awaiting_upstream_is_client_closed() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let waiting = Arc::new(tokio::sync::Notify::new());
@@ -96,9 +95,7 @@ async fn stream_body_drop_while_awaiting_upstream_is_client_closed() {
         .into_body();
     let _ = body.frame().await.expect("normal frame").expect("frame ok");
     let poll_task = tokio::spawn(async move { body.frame().await });
-    tokio::time::timeout(Duration::from_secs(1), waiting.notified())
-        .await
-        .expect("relay awaits upstream");
+    waiting.notified().await;
     poll_task.abort();
     let _ = poll_task.await;
 
@@ -106,7 +103,7 @@ async fn stream_body_drop_while_awaiting_upstream_is_client_closed() {
 }
 
 #[tokio::test]
-async fn normal_stream_eof_remains_success() {
+async fn t2__normal_stream_eof_remains_success() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let lifecycle = lifecycle(
@@ -124,7 +121,7 @@ async fn normal_stream_eof_remains_success() {
 }
 
 #[tokio::test]
-async fn aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observation_event() {
+async fn t2__aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observation_event() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let lifecycle = prompt_cache_lifecycle(
@@ -151,62 +148,60 @@ async fn aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observa
         .await
         .expect("aborted prompt-cache stream body collects");
 
-    let (client_status, reason, prefix_token_counts, cache_usage_observed) =
-        tokio::time::timeout(Duration::from_secs(1), async {
-            let mut prefix_token_counts = None;
-            let mut cache_usage_observed = false;
-            loop {
-                match lifecycle_rx
-                    .recv()
-                    .await
-                    .expect("lifecycle event delivered")
-                {
-                    LifecycleEvent::ParseCompleted {
-                        result: Ok(info), ..
-                    } => {
-                        prefix_token_counts = Some(
-                            info.cache_breakpoints
-                                .into_iter()
-                                .map(|breakpoint| breakpoint.prefix_token_count)
-                                .collect::<Vec<_>>(),
-                        );
-                    }
-                    LifecycleEvent::UsageObserved {
-                        usage,
-                        source: UsageSource::MessageStart,
-                        ..
-                    } => {
-                        cache_usage_observed = usage.cache_creation_input_tokens == 12;
-                    }
-                    LifecycleEvent::PromptCacheObservationsProduced {
-                        observations,
-                        dropped_below_threshold,
-                        dropped_aborted,
-                        ..
-                    } => panic!(
-                        "aborted below-threshold stream published an observation event: \
-                         observations={}, dropped_below_threshold={dropped_below_threshold}, \
-                         dropped_aborted={dropped_aborted}",
-                        observations.len(),
-                    ),
-                    LifecycleEvent::RequestTerminated {
+    let (client_status, reason, prefix_token_counts, cache_usage_observed) = async {
+        let mut prefix_token_counts = None;
+        let mut cache_usage_observed = false;
+        loop {
+            match lifecycle_rx
+                .recv()
+                .await
+                .expect("lifecycle event delivered")
+            {
+                LifecycleEvent::ParseCompleted {
+                    result: Ok(info), ..
+                } => {
+                    prefix_token_counts = Some(
+                        info.cache_breakpoints
+                            .into_iter()
+                            .map(|breakpoint| breakpoint.prefix_token_count)
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                LifecycleEvent::UsageObserved {
+                    usage,
+                    source: UsageSource::MessageStart,
+                    ..
+                } => {
+                    cache_usage_observed = usage.cache_creation_input_tokens == 12;
+                }
+                LifecycleEvent::PromptCacheObservationsProduced {
+                    observations,
+                    dropped_below_threshold,
+                    dropped_aborted,
+                    ..
+                } => panic!(
+                    "aborted below-threshold stream published an observation event: \
+                     observations={}, dropped_below_threshold={dropped_below_threshold}, \
+                     dropped_aborted={dropped_aborted}",
+                    observations.len(),
+                ),
+                LifecycleEvent::RequestTerminated {
+                    client_status,
+                    reason,
+                    ..
+                } => {
+                    break (
                         client_status,
                         reason,
-                        ..
-                    } => {
-                        break (
-                            client_status,
-                            reason,
-                            prefix_token_counts,
-                            cache_usage_observed,
-                        );
-                    }
-                    _ => {}
+                        prefix_token_counts,
+                        cache_usage_observed,
+                    );
                 }
+                _ => {}
             }
-        })
-        .await
-        .expect("request terminates");
+        }
+    }
+    .await;
 
     assert_eq!(client_status, StatusCode::OK.as_u16());
     assert!(matches!(reason, TerminationReason::Success));
@@ -230,7 +225,7 @@ async fn aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observa
 }
 
 #[tokio::test]
-async fn streaming_http_error_body_drop_remains_upstream_error() {
+async fn t2__streaming_http_error_body_drop_remains_upstream_error() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let waiting = Arc::new(tokio::sync::Notify::new());
@@ -254,7 +249,7 @@ async fn streaming_http_error_body_drop_remains_upstream_error() {
 }
 
 #[tokio::test]
-async fn canonical_sse_error_then_drop_remains_upstream_stream_error() {
+async fn t2__canonical_sse_error_then_drop_remains_upstream_stream_error() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let lifecycle = lifecycle(
@@ -274,7 +269,7 @@ async fn canonical_sse_error_then_drop_remains_upstream_stream_error() {
 }
 
 #[tokio::test]
-async fn fatal_transform_frame_then_drop_remains_transform_error() {
+async fn t2__fatal_transform_frame_then_drop_remains_transform_error() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let lifecycle = transform_lifecycle(sse_dispatch(StatusCode::OK, transform_body()), &test_bus);
@@ -305,7 +300,7 @@ async fn fatal_transform_frame_then_drop_remains_transform_error() {
 }
 
 #[tokio::test]
-async fn upstream_frame_error_is_recorded_as_upstream_stream_error() {
+async fn t2__upstream_frame_error_is_recorded_as_upstream_stream_error() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let lifecycle = lifecycle(
@@ -337,7 +332,7 @@ async fn upstream_frame_error_is_recorded_as_upstream_stream_error() {
 }
 
 #[tokio::test]
-async fn uncompressed_sse_terminal_body_error_reaches_eos_once()
+async fn t2__uncompressed_sse_terminal_body_error_reaches_eos_once()
 -> Result<(), Box<dyn std::error::Error>> {
     let (headers, body) = terminal_body_error_case(None).await?;
 
@@ -353,7 +348,7 @@ async fn uncompressed_sse_terminal_body_error_reaches_eos_once()
 }
 
 #[tokio::test]
-async fn compressed_sse_terminal_body_error_reaches_eos_without_plaintext_frame()
+async fn t2__compressed_sse_terminal_body_error_reaches_eos_without_plaintext_frame()
 -> Result<(), Box<dyn std::error::Error>> {
     let (headers, body) = terminal_body_error_case(Some("gzip")).await?;
 
@@ -373,8 +368,7 @@ async fn compressed_sse_terminal_body_error_reaches_eos_without_plaintext_frame(
 async fn terminal_body_error_case(
     content_encoding: Option<&'static str>,
 ) -> Result<(HeaderMap, Bytes), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
@@ -411,7 +405,7 @@ async fn terminal_body_error_case(
     assert_error_terminal(&mut lifecycle_rx, 200, "upstream_stream_error").await;
     assert_one_final(&mut update_rx).await;
 
-    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let rows = storage.wait_for_request_events(1).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].error_code.as_deref(),
@@ -431,7 +425,7 @@ async fn terminal_body_error_case(
 }
 
 #[tokio::test]
-async fn upstream_frame_error_after_partial_event_starts_separate_error_frame() {
+async fn t2__upstream_frame_error_after_partial_event_starts_separate_error_frame() {
     let test_bus = TestLifecycleBus::new();
     let lifecycle = lifecycle(
         sse_dispatch(
@@ -462,10 +456,9 @@ async fn upstream_frame_error_after_partial_event_starts_separate_error_frame() 
 }
 
 #[tokio::test]
-async fn upstream_frame_error_preserves_http_error_classification()
+async fn t2__upstream_frame_error_preserves_http_error_classification()
 -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
@@ -503,7 +496,7 @@ async fn upstream_frame_error_preserves_http_error_classification()
     )
     .await;
     assert_one_final(&mut update_rx).await;
-    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let rows = storage.wait_for_request_events(1).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].error_code.as_deref(), Some("upstream_4xx"));
     assert_eq!(
@@ -518,10 +511,9 @@ async fn upstream_frame_error_preserves_http_error_classification()
 }
 
 #[tokio::test]
-async fn provider_error_before_body_failure_preserves_provider_error()
+async fn t2__provider_error_before_body_failure_preserves_provider_error()
 -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
@@ -549,7 +541,7 @@ async fn provider_error_before_body_failure_preserves_provider_error()
     assert_eq!(text.matches("event: error\n").count(), 1);
 
     assert_one_final(&mut update_rx).await;
-    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let rows = storage.wait_for_request_events(1).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].upstream_error_type.as_deref(),
@@ -565,20 +557,20 @@ async fn provider_error_before_body_failure_preserves_provider_error()
 }
 
 #[tokio::test]
-async fn timeout_before_stream_guard_drop_remains_timeout() {
+async fn t2__timeout_before_stream_guard_drop_remains_timeout() {
     timeout_ordering(true).await;
 }
 
 #[tokio::test]
-async fn timeout_after_stream_guard_drop_remains_timeout() {
+async fn t2__timeout_after_stream_guard_drop_remains_timeout() {
     timeout_ordering(false).await;
 }
 
 #[tokio::test]
-async fn generic_observer_drop_remains_terminal_dropped() {
+async fn t2__generic_observer_drop_remains_terminal_dropped() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock = fixed_clock(1_700_000_000);
     let observer = LifecycleContext::new("generic-drop".to_owned(), test_bus.bus_arc(), &clock);
 
     drop(observer);
@@ -587,7 +579,7 @@ async fn generic_observer_drop_remains_terminal_dropped() {
 }
 
 #[tokio::test]
-async fn non_stream_body_drop_remains_success() {
+async fn t2__non_stream_body_drop_remains_success() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let lifecycle = lifecycle(
@@ -614,7 +606,7 @@ async fn non_stream_body_drop_remains_success() {
 async fn timeout_ordering(timeout_first: bool) {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock = fixed_clock(1_700_000_000);
     let observer = LifecycleContext::new("timeout-ordering".to_owned(), test_bus.bus_arc(), &clock);
     let waiting = Arc::new(tokio::sync::Notify::new());
     let lifecycle = lifecycle(
@@ -670,7 +662,7 @@ fn prompt_cache_lifecycle(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        fixed_clock(1_700_000_000),
     )
     .with_event_bus(test_bus.bus_arc())
 }

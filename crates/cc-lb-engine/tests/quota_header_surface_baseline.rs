@@ -11,8 +11,8 @@ use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 use http::{HeaderMap, HeaderValue, StatusCode};
 use uuid::Uuid;
 
-#[tokio::test]
-async fn quota_header_surface_and_sample_remain_byte_stable() {
+#[test]
+fn unified_quota_headers_parse_to_samples() {
     let headers = quota_headers();
     let observations = parse_anthropic_unified_headers(&headers);
     let samples = build_subscription_quota_samples(&headers, Uuid::nil(), 1_700_000_000_000);
@@ -31,7 +31,11 @@ async fn quota_header_surface_and_sample_remain_byte_stable() {
         samples[0].status,
         Some(SubscriptionQuotaStatus::AllowedWarning)
     );
+}
 
+#[tokio::test]
+async fn t2__lifecycle_preserves_rate_limit_headers_surface() {
+    let headers = quota_headers();
     let state = TestState::default();
     let lifecycle = lifecycle_with(
         TestAuthn::new(state.clone()),

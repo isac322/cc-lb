@@ -21,23 +21,13 @@
 //!     that slot working — the runtime never yanks state out from
 //!     under a live dispatch.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::support::required_wasm;
 use cc_lb_plugin_wire::{CachePricingSummary, FilterRequest, Principal, UpstreamCandidate};
 use cc_lb_runtime_wasmtime::RuntimeSlotKey;
 use cc_lb_runtime_wasmtime::{WasmtimeRuntime, call_filter_hook};
 use rkyv::rancor::Error;
-
-fn cache_aware_wasm() -> Option<Vec<u8>> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/")
-        .parent()
-        .expect("workspace root")
-        .join("target/wasm32-unknown-unknown/release/cache_aware_wasmtime.wasm");
-    std::fs::read(path).ok()
-}
 
 fn tiny_filter_request() -> FilterRequest {
     use cc_lb_plugin_wire::Claim;
@@ -84,13 +74,8 @@ fn tiny_filter_request() -> FilterRequest {
 }
 
 #[test]
-fn evict_slot_drops_registration_and_returns_true() {
-    let Some(wasm) = cache_aware_wasm() else {
-        // Wasm fixture missing on this machine — dispatch is exercised
-        // by the workspace lib tests. Skip cleanly rather than fail so
-        // the workstation-config path doesn't tank CI-adjacent runs.
-        return;
-    };
+fn t3__evict_slot_drops_registration_and_returns_true() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
     let key = RuntimeSlotKey::global("evict-probe-A");
 
@@ -111,7 +96,7 @@ fn evict_slot_drops_registration_and_returns_true() {
 }
 
 #[test]
-fn evict_slot_is_idempotent_when_key_missing() {
+fn t3__evict_slot_is_idempotent_when_key_missing() {
     let rt = WasmtimeRuntime::with_defaults().expect("engine");
     let key = RuntimeSlotKey::global("never-registered");
 
@@ -126,10 +111,8 @@ fn evict_slot_is_idempotent_when_key_missing() {
 }
 
 #[test]
-fn evict_slot_leaves_prior_arc_dispatchable() {
-    let Some(wasm) = cache_aware_wasm() else {
-        return;
-    };
+fn t3__evict_slot_leaves_prior_arc_dispatchable() {
+    let wasm = required_wasm("cache_aware_wasmtime.wasm");
     let rt = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
     let key = RuntimeSlotKey::global("evict-probe-B");
 

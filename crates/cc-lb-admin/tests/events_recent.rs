@@ -7,49 +7,70 @@ use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::Config;
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{
-    app, authed_bytes, authed_json, temp_storage, temp_storage_with_clock, test_state,
-    test_state_with_clock,
+    app, authed_bytes, authed_json, temp_storage, test_state, test_state_with_clock,
 };
 use uuid::Uuid;
 
 const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
 
 #[tokio::test]
-async fn events_recent_returns_empty_with_no_traffic() {
-    let (_dir, storage) = temp_storage().await;
-    let state = test_state(Config::default(), Some(storage));
+async fn events_recent_params_table() {
+    struct Case {
+        case: &'static str,
+        uri: &'static str,
+        expected_status: StatusCode,
+        expected_limit: Option<u64>,
+        expect_empty_events: bool,
+    }
 
-    let (status, _, body, _) = authed_json(app(state), "GET", "/admin/events/recent", None).await;
-    assert_eq!(status, StatusCode::OK);
-    let events = body["events"].as_array().expect("events array");
-    assert_eq!(events.len(), 0);
-    assert_eq!(body["count"], 0);
+    let cases = [
+        Case {
+            case: "events_recent_returns_empty_with_no_traffic",
+            uri: "/admin/events/recent",
+            expected_status: StatusCode::OK,
+            expected_limit: None,
+            expect_empty_events: true,
+        },
+        Case {
+            case: "events_recent_accepts_limit_param",
+            uri: "/admin/events/recent?limit=10",
+            expected_status: StatusCode::OK,
+            expected_limit: Some(10),
+            expect_empty_events: false,
+        },
+        Case {
+            case: "events_recent_rejects_invalid_limit",
+            uri: "/admin/events/recent?limit=abc",
+            expected_status: StatusCode::BAD_REQUEST,
+            expected_limit: None,
+            expect_empty_events: false,
+        },
+    ];
+
+    for case in cases {
+        let (_dir, storage) = temp_storage().await;
+        let state = test_state(Config::default(), Some(storage));
+        let (status, _, body, _) = authed_json(app(state), "GET", case.uri, None).await;
+
+        assert_eq!(status, case.expected_status, "case={}", case.case);
+        if case.expect_empty_events {
+            let events = body["events"]
+                .as_array()
+                .unwrap_or_else(|| panic!("events array; case={}", case.case));
+            assert_eq!(events.len(), 0, "case={}", case.case);
+            assert_eq!(body["count"], 0, "case={}", case.case);
+        }
+        if let Some(expected_limit) = case.expected_limit {
+            assert_eq!(body["limit"], expected_limit, "case={}", case.case);
+        }
+    }
 }
 
 #[tokio::test]
-async fn events_recent_accepts_limit_param() {
-    let (_dir, storage) = temp_storage().await;
-    let state = test_state(Config::default(), Some(storage));
-
-    let (status, _, body, _) =
-        authed_json(app(state), "GET", "/admin/events/recent?limit=10", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["limit"], 10);
-}
-
-#[tokio::test]
-async fn events_recent_rejects_invalid_limit() {
-    let (_dir, storage) = temp_storage().await;
-    let state = test_state(Config::default(), Some(storage));
-    let (status, _, _) =
-        authed_bytes(app(state), "GET", "/admin/events/recent?limit=abc", None).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn events_recent_filters_by_upstream_id() {
+async fn t3__events_recent_filters_by_upstream_id() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(1);
     let other_upstream_id = Uuid::from_u128(2);
 
@@ -92,7 +113,7 @@ async fn events_recent_filters_by_upstream_id() {
 }
 
 #[tokio::test]
-async fn events_recent_serializes_request_timings_without_losing_zero_or_fraction() {
+async fn t2__events_recent_serializes_request_setup_timings_without_losing_zero_or_fraction() {
     let (_dir, storage) = temp_storage().await;
     let event = RequestEvent {
         ts: TEST_NOW_UNIX_SECS,
@@ -175,8 +196,8 @@ async fn events_recent_serializes_request_timings_without_losing_zero_or_fractio
 }
 
 #[tokio::test]
-async fn events_recent_uses_compound_cursor_for_same_timestamp_pages() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__events_recent_uses_compound_cursor_for_same_timestamp_pages() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let ts_ms = 1_800_000_000_000;
     let upstream_id = Uuid::from_u128(1);
     storage
@@ -222,9 +243,10 @@ async fn events_recent_uses_compound_cursor_for_same_timestamp_pages() {
 }
 
 #[tokio::test]
-async fn events_recent_cursor_paginates_past_five_hundred_rows() {
+async fn t3__events_recent_cursor_paginates_past_five_hundred_rows() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(1);
     for index in 0..675 {
         storage
@@ -279,9 +301,10 @@ async fn events_recent_cursor_paginates_past_five_hundred_rows() {
 }
 
 #[tokio::test]
-async fn events_recent_applies_each_filter_and_their_combination() {
+async fn t3__events_recent_applies_each_filter_and_their_combination() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(1);
     let other_upstream_id = Uuid::from_u128(2);
 
@@ -399,7 +422,7 @@ async fn events_recent_applies_each_filter_and_their_combination() {
 }
 
 #[tokio::test]
-async fn events_recent_503_when_storage_missing() {
+async fn t2__events_recent_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
     let (status, _, _) = authed_bytes(app(state), "GET", "/admin/events/recent", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

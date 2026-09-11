@@ -12,19 +12,10 @@ use uuid::Uuid;
 const TIMEOUT_ITERATIONS: usize = 50;
 const CONNECTION_DROP_ITERATIONS: usize = 50;
 const EVENTS_PER_ITERATION: u64 = 5;
-fn get_postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL").ok()
-}
 
 #[test]
-fn client_timeout_mid_commit() {
-    let url = match get_postgres_url() {
-        Some(url) => url,
-        None => {
-            eprintln!("skip: CI_POSTGRES_URL not set");
-            return;
-        }
-    };
+fn t3_postgres__client_timeout_mid_commit() {
+    let url = crate::postgres_fixture::required_postgres_url();
 
     Runtime::new()
         .expect("tokio runtime")
@@ -59,14 +50,8 @@ fn client_timeout_mid_commit() {
 }
 
 #[test]
-fn connection_drop_mid_commit() {
-    let url = match get_postgres_url() {
-        Some(url) => url,
-        None => {
-            eprintln!("skip: CI_POSTGRES_URL not set");
-            return;
-        }
-    };
+fn t3_postgres__connection_drop_mid_commit() {
+    let url = crate::postgres_fixture::required_postgres_url();
 
     Runtime::new()
         .expect("tokio runtime")
@@ -142,8 +127,7 @@ impl CrashFixture {
 
         let app_name = format!("cc_lb_crash_{scenario}_{}", Uuid::new_v4().simple());
         let pool = schema_pool(url, schema, &app_name, 1).await?;
-        let storage =
-            PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock));
+        let storage = PostgresStorage::new(pool.clone(), cc_lb_testkit::fixed_clock(1_700_000_000));
         storage.initialize(BackendKind::Postgres).await?;
         install_checkpoint_sleep_trigger(&pool, checkpoint_sleep_secs).await?;
         seed_request_events(&storage).await?;
@@ -160,8 +144,7 @@ impl CrashFixture {
 
     async fn reconnect(&self) -> Result<Self, Box<dyn std::error::Error>> {
         let pool = schema_pool(&self.url, &self.schema, &self.app_name, 1).await?;
-        let storage =
-            PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock));
+        let storage = PostgresStorage::new(pool.clone(), cc_lb_testkit::fixed_clock(1_700_000_000));
         Ok(Self {
             url: self.url.clone(),
             schema: self.schema.clone(),

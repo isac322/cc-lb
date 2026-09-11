@@ -15,7 +15,7 @@ use cc_lb_storage_api::{
     CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore,
     CacheTtl, UpstreamCreate, UpstreamStore,
 };
-use config_admin_common::{app, authed_bytes, authed_json, temp_storage};
+use config_admin_common::{app, authed_bytes, authed_json};
 use fixtures::{principal_create_body, seed_cache_keepalive_contract_rows};
 use serde_json::{Value, json};
 
@@ -27,7 +27,7 @@ async fn create_principal_id() -> (
     cc_lb_admin::AdminState,
     String,
 ) {
-    let (directory, storage) = temp_storage().await;
+    let (directory, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(NOW_UNIX_SECS));
     let state =
         config_admin_common::test_state_with_clock(Config::default(), Some(storage.clone()), clock);
@@ -51,7 +51,7 @@ async fn create_principal_id() -> (
 }
 
 #[tokio::test]
-async fn cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_zero() {
+async fn t3__cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_zero() {
     // Given: a principal with persisted sessions and a deterministic current time.
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     seed_cache_keepalive_contract_rows(&storage, &principal_id).await;
@@ -76,7 +76,7 @@ async fn cache_keepalive_list_returns_card_summary_without_rows_when_limit_is_ze
 }
 
 #[tokio::test]
-async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
+async fn t3__cache_keepalive_list_preserves_soft_deleted_upstream_names() {
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     let upstream = storage
         .create(UpstreamCreate {
@@ -141,7 +141,7 @@ async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_detail_returns_frozen_multi_turn_fields() {
+async fn t3__cache_keepalive_detail_returns_frozen_multi_turn_fields() {
     // Given: a principal with a terminal session and its persisted renewal turns.
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     seed_cache_keepalive_contract_rows(&storage, &principal_id).await;
@@ -190,7 +190,7 @@ async fn cache_keepalive_detail_returns_frozen_multi_turn_fields() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_list_scopes_rows_by_horizon_and_paginates_with_a_cursor() {
+async fn t3__cache_keepalive_list_scopes_rows_by_horizon_and_paginates_with_a_cursor() {
     // Given: one terminal session outside 24 hours and several recent rows.
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     seed_cache_keepalive_contract_rows(&storage, &principal_id).await;
@@ -236,7 +236,7 @@ async fn cache_keepalive_list_scopes_rows_by_horizon_and_paginates_with_a_cursor
 }
 
 #[tokio::test]
-async fn cache_keepalive_list_filters_base_states_and_orthogonal_errors() {
+async fn t3__cache_keepalive_list_filters_base_states_and_orthogonal_errors() {
     // Given: persisted Renewed, Scheduled, Capped, Expired, Not tracked, and Error rows.
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     seed_cache_keepalive_contract_rows(&storage, &principal_id).await;
@@ -298,7 +298,7 @@ async fn cache_keepalive_list_filters_base_states_and_orthogonal_errors() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_detail_resolves_not_tracked_decision_and_rejects_malformed_queries() {
+async fn t3__cache_keepalive_detail_resolves_not_tracked_decision_and_rejects_malformed_queries() {
     // Given: a decision-only Not tracked entry.
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     seed_cache_keepalive_contract_rows(&storage, &principal_id).await;

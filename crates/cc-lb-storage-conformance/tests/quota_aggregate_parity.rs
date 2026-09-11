@@ -1,9 +1,6 @@
 #![cfg(feature = "postgres")]
 
-use std::{str::FromStr, sync::Arc};
-
 use anyhow::Result;
-use cc_lb_engine::SystemClock;
 use cc_lb_storage_api::{
     BackendKind, MetaStore, SubscriptionQuotaCheckpointRangeQuery,
     SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
@@ -13,27 +10,23 @@ use cc_lb_storage_api::{
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use cc_lb_storage_sqlite::open_sqlite;
-use sqlx::{
-    AssertSqlSafe, PgPool, SqlitePool,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::{PgPool, SqlitePool};
 use uuid::Uuid;
 
 #[tokio::test]
-async fn quota_aggregate_parity_is_byte_equal() -> Result<()> {
-    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
-        eprintln!("skip: CI_POSTGRES_URL not set; requires isolated local/test postgres DSN");
-        return Ok(());
-    };
-    let postgres = PostgresFixture::create(&url).await?;
-    let postgres_storage = PostgresStorage::new(postgres.pool.clone(), Arc::new(SystemClock));
-    postgres_storage.initialize(BackendKind::Postgres).await?;
+async fn t3_postgres__quota_aggregate_parity_is_byte_equal() -> Result<()> {
+    let postgres = cc_lb_storage_conformance::postgres_fixture().await?;
+    let postgres_storage = PostgresStorage::new(
+        postgres.pool().clone(),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
+    );
     let sqlite_dir = tempfile::tempdir()?;
     let sqlite_url = format!(
         "sqlite://{}",
         sqlite_dir.path().join("quota-parity.sqlite").display()
     );
-    let sqlite_storage = open_sqlite(&sqlite_url, Arc::new(SystemClock)).await?;
+    let sqlite_storage =
+        open_sqlite(&sqlite_url, cc_lb_testkit::fixed_clock(1_700_000_000)).await?;
     sqlite_storage.initialize(BackendKind::Sqlite).await?;
     let sqlite_pool = SqlitePool::connect(&sqlite_url).await?;
     let upstream_id = Uuid::from_u128(7);
@@ -62,7 +55,7 @@ async fn quota_aggregate_parity_is_byte_equal() -> Result<()> {
         (120, [5, 6, 7, 8]),
         (180, [9, 10, 11, 12]),
     ] {
-        insert_postgres_rollup(&postgres.pool, upstream_id, bucket, tokens).await?;
+        insert_postgres_rollup(postgres.pool(), upstream_id, bucket, tokens).await?;
         insert_sqlite_rollup(&sqlite_pool, upstream_id, bucket, tokens).await?;
     }
     let range_query = SubscriptionQuotaCheckpointRangeQuery {
@@ -125,7 +118,7 @@ async fn quota_aggregate_parity_is_byte_equal() -> Result<()> {
     ))?;
     assert_eq!(postgres_bytes, sqlite_bytes);
     sqlite_pool.close().await;
-    postgres.drop_schema().await
+    postgres.teardown().await
 }
 
 fn checkpoint(
@@ -211,42 +204,4 @@ async fn insert_sqlite_rollup(
     .execute(pool)
     .await?;
     Ok(())
-}
-
-struct PostgresFixture {
-    schema: String,
-    admin_pool: PgPool,
-    pool: PgPool,
-}
-
-impl PostgresFixture {
-    async fn create(url: &str) -> Result<Self> {
-        let schema = format!("quota_parity_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-            .execute(&admin_pool)
-            .await?;
-        let options = PgConnectOptions::from_str(url)?.options([("search_path", schema.as_str())]);
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(options)
-            .await?;
-        Ok(Self {
-            schema,
-            admin_pool,
-            pool,
-        })
-    }
-
-    async fn drop_schema(self) -> Result<()> {
-        self.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE",
-            self.schema
-        )))
-        .execute(&self.admin_pool)
-        .await?;
-        self.admin_pool.close().await;
-        Ok(())
-    }
 }

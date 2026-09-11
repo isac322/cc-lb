@@ -1,6 +1,24 @@
 #[allow(dead_code)]
-#[path = "../src/response_cache.rs"]
-mod response_cache;
+mod response_cache {
+    include!("../src/response_cache.rs");
+
+    pub(super) fn expire_ready_entries<K, V, E, O: ?Sized>(
+        cache: &ShortTtlSingleFlightCache<K, V, E, O>,
+        ttl: Duration,
+    ) -> usize {
+        let mut state = lock_cache_state(&cache.inner.state);
+        let mut expired = 0;
+        for entry in state.entries.values_mut() {
+            if let CacheEntry::Ready { expires_at, .. } = entry {
+                *expires_at = expires_at
+                    .checked_sub(ttl)
+                    .expect("ready expiry was initialized from now plus the TTL");
+                expired += 1;
+            }
+        }
+        expired
+    }
+}
 
 use std::{
     sync::{
@@ -10,8 +28,9 @@ use std::{
     time::Duration,
 };
 
-use response_cache::{PRINCIPAL_TOTALS_CACHE_TTL, ShortTtlSingleFlightCache};
-use tokio::sync::{Barrier, watch};
+use cc_lb_testkit::ManualGate;
+use response_cache::{PRINCIPAL_TOTALS_CACHE_TTL, ShortTtlSingleFlightCache, expire_ready_entries};
+use tokio::{sync::Barrier, task::JoinSet};
 
 #[derive(Debug)]
 struct StorageOwner;
@@ -48,17 +67,34 @@ type TestCache = ShortTtlSingleFlightCache<QueryKey, u64, BuildFailure, StorageO
 
 async fn gated_build(
     builds: Arc<AtomicUsize>,
-    started: watch::Sender<usize>,
-    mut release: watch::Receiver<bool>,
+    release: ManualGate,
     result: Result<u64, BuildFailure>,
 ) -> Result<u64, BuildFailure> {
     builds.fetch_add(1, Ordering::SeqCst);
-    started.send_modify(|count| *count += 1);
-    release
-        .wait_for(|released| *released)
-        .await
-        .expect("release sender remains alive");
+    release.wait().await;
     result
+}
+
+async fn wait_for_count(counter: &AtomicUsize, expected: usize, state: &str) {
+    const MAX_YIELDS: usize = 1_024;
+
+    for _ in 0..MAX_YIELDS {
+        let actual = counter.load(Ordering::SeqCst);
+        assert!(
+            actual <= expected,
+            "{state}: expected {expected}, got {actual}"
+        );
+        if actual == expected {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        expected,
+        "{state} did not settle after {MAX_YIELDS} scheduler yields"
+    );
 }
 
 async fn panicking_build(builds: Arc<AtomicUsize>) -> Result<u64, BuildFailure> {
@@ -66,58 +102,56 @@ async fn panicking_build(builds: Arc<AtomicUsize>) -> Result<u64, BuildFailure> 
     panic!("simulated leader panic");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn fifty_waiters_share_one_backend_build() {
     const WAITER_COUNT: usize = 50;
+    const REQUEST_COUNT: usize = WAITER_COUNT + 1;
 
     let cache = Arc::new(TestCache::new(Duration::from_secs(1)));
     let owner = Arc::new(StorageOwner);
     let key = QueryKey::principal_totals();
+    let entered = Arc::new(AtomicUsize::new(0));
     let builds = Arc::new(AtomicUsize::new(0));
-    let barrier = Arc::new(Barrier::new(WAITER_COUNT + 2));
-    let (started_tx, mut started_rx) = watch::channel(0usize);
-    let (release_tx, release_rx) = watch::channel(false);
-    let mut requests = Vec::with_capacity(WAITER_COUNT + 1);
+    let barrier = Arc::new(Barrier::new(REQUEST_COUNT + 1));
+    let release = ManualGate::new();
+    let mut requests = JoinSet::new();
 
-    for _ in 0..=WAITER_COUNT {
+    for _ in 0..REQUEST_COUNT {
         let cache = Arc::clone(&cache);
         let owner = Arc::clone(&owner);
         let key = key.clone();
+        let entered = Arc::clone(&entered);
         let builds = Arc::clone(&builds);
         let barrier = Arc::clone(&barrier);
-        let started = started_tx.clone();
-        let release = release_rx.clone();
-        requests.push(tokio::spawn(async move {
+        let release = release.clone();
+        requests.spawn(async move {
             barrier.wait().await;
+            entered.fetch_add(1, Ordering::SeqCst);
             cache
-                .get_or_build(&owner, key, gated_build(builds, started, release, Ok(41)))
+                .get_or_build(&owner, key, gated_build(builds, release, Ok(41)))
                 .await
-        }));
+        });
     }
 
     barrier.wait().await;
-    started_rx
-        .wait_for(|count| *count >= 1)
-        .await
-        .expect("leader starts");
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    release_tx
-        .send(true)
-        .expect("leader holds release receiver");
+    wait_for_count(&entered, REQUEST_COUNT, "requests entered cache").await;
+    wait_for_count(&builds, 1, "single backend build started").await;
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+    release.open();
 
-    for request in requests {
+    let mut completed = 0;
+    while let Some(request) = requests.join_next().await {
         assert_eq!(
-            *request
-                .await
-                .expect("request joins")
-                .expect("request succeeds"),
+            *request.expect("request joins").expect("request succeeds"),
             41
         );
+        completed += 1;
     }
+    assert_eq!(completed, REQUEST_COUNT);
     assert_eq!(builds.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn different_queries_and_storage_owners_never_share() {
     let cache = TestCache::new(Duration::from_secs(1));
     let first_owner = Arc::new(StorageOwner);
@@ -158,18 +192,18 @@ async fn different_queries_and_storage_owners_never_share() {
     assert_eq!(builds.load(Ordering::SeqCst), 3);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn successful_values_expire_and_bound_live_tail_staleness() {
     assert!(PRINCIPAL_TOTALS_CACHE_TTL >= Duration::from_secs(1));
     assert!(PRINCIPAL_TOTALS_CACHE_TTL <= Duration::from_secs(3));
 
-    let ttl = Duration::from_millis(100);
-    let cache = TestCache::new(ttl);
     let owner = Arc::new(StorageOwner);
     let key = QueryKey::principal_totals();
     let backend_value = Arc::new(AtomicU64::new(10));
-    let builds = Arc::new(AtomicUsize::new(0));
 
+    let builds = Arc::new(AtomicUsize::new(0));
+    let ttl = Duration::from_millis(100);
+    let cache = TestCache::new(ttl);
     let first = cache
         .get_or_build(&owner, key.clone(), {
             let backend_value = Arc::clone(&backend_value);
@@ -193,10 +227,10 @@ async fn successful_values_expire_and_bound_live_tail_staleness() {
             }
         })
         .await;
-    assert_eq!(*cached.expect("cached request succeeds"), 10);
+    assert_eq!(*cached.expect("unexpired value remains cached"), 10);
     assert_eq!(builds.load(Ordering::SeqCst), 1);
 
-    tokio::time::sleep(ttl + Duration::from_millis(100)).await;
+    assert_eq!(expire_ready_entries(&cache, ttl), 1);
     let refreshed = cache
         .get_or_build(&owner, key, {
             let backend_value = Arc::clone(&backend_value);
@@ -211,53 +245,55 @@ async fn successful_values_expire_and_bound_live_tail_staleness() {
     assert_eq!(builds.load(Ordering::SeqCst), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn leader_errors_wake_waiters_and_retry_immediately() {
+    const REQUEST_COUNT: usize = 2;
+
     let cache = Arc::new(TestCache::new(Duration::from_secs(1)));
     let owner = Arc::new(StorageOwner);
     let key = QueryKey::principal_totals();
+    let entered = Arc::new(AtomicUsize::new(0));
     let builds = Arc::new(AtomicUsize::new(0));
-    let (started_tx, mut started_rx) = watch::channel(0usize);
-    let (release_tx, release_rx) = watch::channel(false);
+    let barrier = Arc::new(Barrier::new(REQUEST_COUNT + 1));
+    let release = ManualGate::new();
+    let mut requests = JoinSet::new();
 
-    let requests = tokio::spawn({
+    for _ in 0..REQUEST_COUNT {
         let cache = Arc::clone(&cache);
         let owner = Arc::clone(&owner);
-        let key_for_second = key.clone();
-        let builds_for_first = Arc::clone(&builds);
-        let builds_for_second = Arc::clone(&builds);
-        let started_for_first = started_tx.clone();
-        async move {
-            tokio::join!(
-                cache.get_or_build(
-                    &owner,
-                    key,
-                    gated_build(
-                        builds_for_first,
-                        started_for_first,
-                        release_rx.clone(),
-                        Err(BuildFailure),
-                    ),
-                ),
-                cache.get_or_build(
-                    &owner,
-                    key_for_second,
-                    gated_build(builds_for_second, started_tx, release_rx, Err(BuildFailure),),
-                ),
-            )
-        }
-    });
+        let key = key.clone();
+        let entered = Arc::clone(&entered);
+        let builds = Arc::clone(&builds);
+        let barrier = Arc::clone(&barrier);
+        let release = release.clone();
+        requests.spawn(async move {
+            barrier.wait().await;
+            entered.fetch_add(1, Ordering::SeqCst);
+            cache
+                .get_or_build(&owner, key, gated_build(builds, release, Err(BuildFailure)))
+                .await
+        });
+    }
 
-    started_rx
-        .wait_for(|count| *count >= 1)
+    barrier.wait().await;
+    wait_for_count(&entered, REQUEST_COUNT, "error requests entered cache").await;
+    wait_for_count(&builds, 1, "failing backend build started").await;
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+    release.open();
+
+    let first_error = requests
+        .join_next()
         .await
-        .expect("leader starts");
-    release_tx
-        .send(true)
-        .expect("leader holds release receiver");
-    let (first, second) = requests.await.expect("requests join");
-    let first_error = first.expect_err("leader error propagates");
-    let second_error = second.expect_err("waiter receives leader error");
+        .expect("first request exists")
+        .expect("first request joins")
+        .expect_err("first request receives leader error");
+    let second_error = requests
+        .join_next()
+        .await
+        .expect("second request exists")
+        .expect("second request joins")
+        .expect_err("second request receives leader error");
+    assert!(requests.is_empty());
     assert!(Arc::ptr_eq(&first_error, &second_error));
     assert_eq!(builds.load(Ordering::SeqCst), 1);
 
@@ -274,7 +310,7 @@ async fn leader_errors_wake_waiters_and_retry_immediately() {
     assert_eq!(builds.load(Ordering::SeqCst), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn panicked_leader_does_not_poison_the_cache_key() {
     let cache = Arc::new(TestCache::new(Duration::from_secs(1)));
     let owner = Arc::new(StorageOwner);
@@ -312,41 +348,38 @@ async fn panicked_leader_does_not_poison_the_cache_key() {
     assert_eq!(builds.load(Ordering::SeqCst), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancelling_a_waiter_does_not_cancel_the_leader() {
     let cache = Arc::new(TestCache::new(Duration::from_secs(1)));
     let owner = Arc::new(StorageOwner);
     let key = QueryKey::principal_totals();
+    let waiter_entered = Arc::new(AtomicUsize::new(0));
     let builds = Arc::new(AtomicUsize::new(0));
-    let (started_tx, mut started_rx) = watch::channel(0usize);
-    let (release_tx, release_rx) = watch::channel(false);
+    let release = ManualGate::new();
+    let mut requests = JoinSet::new();
 
-    let leader = tokio::spawn({
+    requests.spawn({
         let cache = Arc::clone(&cache);
         let owner = Arc::clone(&owner);
         let key = key.clone();
         let builds = Arc::clone(&builds);
+        let release = release.clone();
         async move {
             cache
-                .get_or_build(
-                    &owner,
-                    key,
-                    gated_build(builds, started_tx, release_rx, Ok(77)),
-                )
+                .get_or_build(&owner, key, gated_build(builds, release, Ok(77)))
                 .await
         }
     });
-    started_rx
-        .wait_for(|count| *count >= 1)
-        .await
-        .expect("leader starts");
+    wait_for_count(&builds, 1, "leader backend build started").await;
 
-    let waiter = tokio::spawn({
+    let waiter_abort = requests.spawn({
         let cache = Arc::clone(&cache);
         let owner = Arc::clone(&owner);
         let key = key.clone();
+        let waiter_entered = Arc::clone(&waiter_entered);
         let builds = Arc::clone(&builds);
         async move {
+            waiter_entered.fetch_add(1, Ordering::SeqCst);
             cache
                 .get_or_build(&owner, key, async move {
                     builds.fetch_add(1, Ordering::SeqCst);
@@ -355,25 +388,31 @@ async fn cancelling_a_waiter_does_not_cancel_the_leader() {
                 .await
         }
     });
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    waiter.abort();
+    wait_for_count(&waiter_entered, 1, "waiter entered cache").await;
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+    waiter_abort.abort();
     assert!(
-        waiter
+        requests
+            .join_next()
             .await
+            .expect("cancelled waiter exists")
             .expect_err("waiter is cancelled")
             .is_cancelled()
     );
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
 
-    release_tx
-        .send(true)
-        .expect("leader holds release receiver");
+    release.open();
     assert_eq!(
-        *leader
+        *requests
+            .join_next()
             .await
+            .expect("leader exists")
             .expect("leader joins")
             .expect("leader succeeds"),
         77
     );
+    assert!(requests.is_empty());
     assert_eq!(builds.load(Ordering::SeqCst), 1);
 
     let cached = cache

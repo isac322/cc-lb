@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -38,8 +40,8 @@ impl RequestSender for StalledFirstSender {
     }
 }
 
-#[tokio::test]
-async fn executor_is_open_loop() {
+#[tokio::test(start_paused = true)]
+async fn t2__executor_is_open_loop() {
     // Given: the first response is held while a second request is scheduled one millisecond later.
     let (started_tx, mut started_rx) = mpsc::channel(2);
     let (release_tx, release_rx) = oneshot::channel();

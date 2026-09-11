@@ -18,6 +18,7 @@ sqlite = ["dep:sqlx"]
 
 [dependencies]
 cc-lb-domain.workspace = true
+cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-engine = { path = "../cc-lb-engine" }
@@ -38,4 +39,5 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+cc-lb-testkit = { path = "../cc-lb-testkit" }
 tempfile = { workspace = true }

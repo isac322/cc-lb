@@ -90,20 +90,17 @@ impl RequestEventStore for SqliteStorage {
             return Ok(0);
         }
 
-        let cutoff_secs = (cutoff_ms_x_1m / KEY_SEQUENCE_SCALE) / 1_000;
+        let cutoff_ms = cutoff_ms_x_1m / KEY_SEQUENCE_SCALE;
         let result = sqlx::query(
             "DELETE FROM request_events_v1 \
              WHERE id IN ( \
                  SELECT id FROM request_events_v1 \
-                 WHERE ts < ? \
+                 WHERE list_ts_ms < ? \
                  ORDER BY id ASC \
                  LIMIT ? \
              )",
         )
-        .bind(u64_to_i64(
-            cutoff_secs,
-            "request event prune before cutoff",
-        )?)
+        .bind(u64_to_i64(cutoff_ms, "request event prune before cutoff")?)
         .bind(u64_to_i64(
             batch_size as u64,
             "request event prune before batch size",

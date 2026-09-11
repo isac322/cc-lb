@@ -7,8 +7,8 @@ use cc_lb_engine::SseBatchConfig;
 use http_body_util::BodyExt;
 use sse_relay_support::{DropSignal, RecordingHook, body_from_chunks, numbered_events, relay_for};
 
-#[tokio::test]
-async fn client_disconnect_cancels_upstream() {
+#[tokio::test(start_paused = true)]
+async fn t2__client_disconnect_cancels_upstream() {
     let hook = Arc::new(RecordingHook::default());
     let drop_signal = DropSignal::new();
     let relay = relay_for(
@@ -31,9 +31,6 @@ async fn client_disconnect_cancels_upstream() {
     }
     drop(body);
 
-    let elapsed = tokio::time::timeout(Duration::from_secs(1), drop_signal.wait_closed_ms())
-        .await
-        .expect("upstream closed within 1s");
-    println!("upstream_closed_within_ms={elapsed}");
-    assert!(elapsed < 1000);
+    let elapsed = drop_signal.wait_closed_ms().await;
+    assert_eq!(elapsed, 20);
 }

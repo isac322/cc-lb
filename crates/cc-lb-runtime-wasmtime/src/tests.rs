@@ -1,17 +1,19 @@
+#![allow(non_snake_case)]
+
 use crate::{
     HotEngineAllocationStrategy, HotEngineConfig, RuntimeSlotKey, WasmtimeRuntime,
     WasmtimeRuntimeError,
 };
 
 #[test]
-fn engine_build_only() {
+fn t3__engine_build_only() {
     let rt = WasmtimeRuntime::with_defaults().expect("engine build");
     let _ = rt.engine();
     assert_eq!(rt.slot_count(), 0);
 }
 
 #[test]
-fn pooling_engine_builds_when_selected() {
+fn t3__pooling_engine_builds_when_selected() {
     let rt = WasmtimeRuntime::new(HotEngineConfig {
         allocation_strategy: HotEngineAllocationStrategy::Pooling,
         ..HotEngineConfig::default()
@@ -23,7 +25,7 @@ fn pooling_engine_builds_when_selected() {
 }
 
 #[test]
-fn missing_slot_returns_error() {
+fn t3__missing_slot_returns_error() {
     let rt = WasmtimeRuntime::with_defaults().expect("engine build");
     let err = rt
         .call_filter(&RuntimeSlotKey::global("nonexistent"), &[])

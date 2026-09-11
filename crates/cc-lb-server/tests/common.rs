@@ -1,11 +1,8 @@
 #![allow(dead_code)]
 
-use std::io::Read;
-use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread::JoinHandle as ThreadJoinHandle;
+use std::process::ExitStatus;
 
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
@@ -14,11 +11,11 @@ use cc_lb_storage_api::{
     types::{PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
 };
 
+use crate::t5__process::support::{ChildProcess as TestProcess, ReservedAddrs, serve_command};
 use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::open_sqlite;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -41,78 +38,6 @@ pub async fn postgres_test_lock(database_url: &str) -> Result<sqlx::PgConnection
 /// Runtime environment variable that Cargo-invoked tests inherit without
 /// mutating the integration binary's process-global environment.
 pub const TEST_NONEMPTY_ENV: &str = "CARGO_PKG_NAME";
-
-pub fn install_prometheus() -> &'static PrometheusHandle {
-    static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
-    PROMETHEUS.get_or_init(|| {
-        PrometheusBuilder::new()
-            .install_recorder()
-            .expect("prometheus recorder")
-    })
-}
-pub struct TestProcess {
-    child: Child,
-    stderr: Arc<Mutex<Vec<u8>>>,
-    stderr_thread: Option<ThreadJoinHandle<()>>,
-}
-
-impl Drop for TestProcess {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        if let Some(stderr_thread) = self.stderr_thread.take() {
-            let _ = stderr_thread.join();
-        }
-    }
-}
-
-impl TestProcess {
-    fn spawn(config_path: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
-            .arg("serve")
-            .arg("--config")
-            .arg(config_path)
-            .env(
-                "CC_LB_MASTER_KEY",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            )
-            .env("CC_LB_ADMIN_TOKEN", "admin-token")
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn cc-lb binary");
-        let mut stderr_pipe = child.stderr.take().expect("child stderr pipe");
-        let stderr = Arc::new(Mutex::new(Vec::new()));
-        let stderr_sink = Arc::clone(&stderr);
-        let stderr_thread = std::thread::spawn(move || {
-            let mut stderr_bytes = Vec::new();
-            let _ = stderr_pipe.read_to_end(&mut stderr_bytes);
-            if let Ok(mut captured) = stderr_sink.lock() {
-                *captured = stderr_bytes;
-            }
-        });
-
-        Self {
-            child,
-            stderr,
-            stderr_thread: Some(stderr_thread),
-        }
-    }
-
-    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
-        self.child.try_wait()
-    }
-
-    fn finish_stderr(&mut self) -> String {
-        if let Some(stderr_thread) = self.stderr_thread.take() {
-            let _ = stderr_thread.join();
-        }
-        self.stderr
-            .lock()
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default()
-    }
-}
 
 pub struct TestServer {
     pub proxy_addr: SocketAddr,
@@ -234,10 +159,7 @@ struct SpawnedTestServer {
 
 struct StartupFailure {
     message: String,
-    address_in_use: bool,
 }
-
-const SERVER_START_ATTEMPTS: usize = 4;
 
 async fn spawn_test_server_with_options(
     extra_toml: &str,
@@ -255,54 +177,41 @@ async fn spawn_test_server_with_options(
             async move { axum::serve(fake_listener, fake_anthropic_app(fake_config)).await },
         );
 
-    for attempt in 1..=SERVER_START_ATTEMPTS {
-        match spawn_test_server_attempt(
-            extra_toml,
-            fake_addr,
-            &auth_config,
-            principal_limits.clone(),
-            topology,
-        )
-        .await
-        {
-            Ok(spawned) => {
-                return TestServer {
-                    proxy_addr: spawned.proxy_addr,
-                    admin_addr: spawned.admin_addr,
-                    metrics_addr: spawned.metrics_addr,
-                    sqlite_path: spawned.sqlite_path,
-                    managed_key: spawned.managed_key,
-                    _fake: fake,
-                    _config_dir: spawned.config_dir,
-                    _process: spawned.process,
-                };
-            }
-            Err(error) if error.address_in_use && attempt < SERVER_START_ATTEMPTS => {
-                eprintln!(
-                    "cc-lb test server hit address-in-use during reserved-port handoff; retrying with fresh ports ({attempt}/{SERVER_START_ATTEMPTS})\n{}",
-                    error.message
-                );
-            }
-            Err(error) => panic!("{}", error.message),
-        }
-    }
+    let spawned = spawn_test_server_once(
+        extra_toml,
+        fake_addr,
+        &auth_config,
+        principal_limits,
+        topology,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{}", error.message));
 
-    unreachable!("server start attempts loop always returns or panics")
+    TestServer {
+        proxy_addr: spawned.proxy_addr,
+        admin_addr: spawned.admin_addr,
+        metrics_addr: spawned.metrics_addr,
+        sqlite_path: spawned.sqlite_path,
+        managed_key: spawned.managed_key,
+        _fake: fake,
+        _config_dir: spawned.config_dir,
+        _process: spawned.process,
+    }
 }
 
-async fn spawn_test_server_attempt(
+async fn spawn_test_server_once(
     extra_toml: &str,
     fake_addr: SocketAddr,
     auth_config: &AuthConfig,
     principal_limits: Vec<Limit>,
     topology: TestTopology,
 ) -> Result<SpawnedTestServer, StartupFailure> {
-    let proxy_listener = reserve_addr();
-    let admin_listener = reserve_addr();
-    let metrics_listener = reserve_addr();
-    let proxy_addr = proxy_listener.local_addr().expect("proxy local addr");
-    let admin_addr = admin_listener.local_addr().expect("admin local addr");
-    let metrics_addr = metrics_listener.local_addr().expect("metrics local addr");
+    let reservations = ReservedAddrs::bind().map_err(|error| StartupFailure {
+        message: format!("reserve server ports: {error}"),
+    })?;
+    let proxy_addr = reservations.proxy.addr();
+    let admin_addr = reservations.admin.addr();
+    let metrics_addr = reservations.metrics.addr();
     let config_dir = tempfile::tempdir().expect("temp config dir");
     let config_path = config_dir.path().join("cc-lb.toml");
     let sqlite_path = config_path.with_file_name("cc-lb.sqlite");
@@ -324,9 +233,21 @@ async fn spawn_test_server_attempt(
     )
     .await;
 
-    drop((proxy_listener, admin_listener, metrics_listener));
+    let released = reservations.release();
+    debug_assert_eq!(released.proxy, proxy_addr);
+    debug_assert_eq!(released.admin, admin_addr);
+    debug_assert_eq!(released.metrics, metrics_addr);
 
-    let mut process = TestProcess::spawn(&config_path);
+    let mut command = serve_command(&config_path);
+    command
+        .env(
+            "CC_LB_MASTER_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .env("CC_LB_ADMIN_TOKEN", "admin-token");
+    let mut process = TestProcess::spawn(command).map_err(|error| StartupFailure {
+        message: format!("spawn cc-lb binary: {error}"),
+    })?;
 
     wait_for_proxy_ready_or_exit(&mut process, proxy_addr, managed_key.as_ref()).await?;
     wait_for_status_or_exit(&mut process, admin_addr, "/admin/health", 200).await?;
@@ -340,15 +261,6 @@ async fn spawn_test_server_attempt(
         config_dir,
         process,
     })
-}
-
-pub fn free_addr() -> SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().expect("free local addr")
-}
-
-fn reserve_addr() -> StdTcpListener {
-    StdTcpListener::bind("127.0.0.1:0").expect("reserve free port")
 }
 
 fn write_config(
@@ -472,12 +384,9 @@ async fn seed_storage(
 ) -> Option<ManagedTestKey> {
     let database_url = format!("sqlite://{}", storage_path.display());
     let storage = std::sync::Arc::new(
-        open_sqlite(
-            &database_url,
-            std::sync::Arc::new(cc_lb_engine::SystemClock),
-        )
-        .await
-        .expect("test storage opens"),
+        open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
+            .await
+            .expect("test storage opens"),
     );
     storage
         .initialize(BackendKind::Sqlite)
@@ -544,12 +453,8 @@ async fn seed_storage(
     }
 }
 
-fn ready_timeout(default: std::time::Duration) -> std::time::Duration {
-    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or(default)
+fn ready_timeout(_default: std::time::Duration) -> std::time::Duration {
+    std::time::Duration::from_secs(120)
 }
 
 pub async fn wait_for_status(addr: SocketAddr, path: &str, status: u16) {
@@ -627,8 +532,12 @@ async fn wait_for_status_with_request_or_exit(
     let deadline = std::time::Instant::now() + ready_timeout(std::time::Duration::from_secs(60));
     loop {
         if let Some(exit_status) = process.try_wait().expect("poll cc-lb child") {
-            let stderr = process.finish_stderr();
-            return Err(startup_failure_for_exit(exit_status, stderr));
+            let output = process.finish_after_exit(exit_status);
+            return Err(startup_failure_for_exit(
+                output.status,
+                output.stdout,
+                output.stderr,
+            ));
         }
 
         let last = match raw_http(addr, request).await {
@@ -646,21 +555,21 @@ async fn wait_for_status_with_request_or_exit(
                 message: format!(
                     "server did not become ready at http://{addr}{path}; expected status {status}; last {last}"
                 ),
-                address_in_use: false,
             });
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
-fn startup_failure_for_exit(exit_status: ExitStatus, stderr: String) -> StartupFailure {
-    let address_in_use =
-        stderr.contains("Address already in use") || stderr.contains("os error 98");
+fn startup_failure_for_exit(
+    exit_status: ExitStatus,
+    stdout: String,
+    stderr: String,
+) -> StartupFailure {
     StartupFailure {
         message: format!(
-            "cc-lb child exited before becoming ready: {exit_status}\nstderr:\n{stderr}"
+            "cc-lb child exited before becoming ready: {exit_status}\nstdout:\n{stdout}\nstderr:\n{stderr}"
         ),
-        address_in_use,
     }
 }
 

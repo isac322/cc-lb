@@ -15,7 +15,7 @@ use cc_lb_storage_api::{
 };
 use uuid::Uuid;
 
-use crate::cache_keepalive_payload::encrypt_cache_keepalive_payload;
+use crate::cache_keepalive_payload::{CacheKeepalivePayloadError, encrypt_cache_keepalive_payload};
 
 #[async_trait]
 pub(crate) trait CacheKeepaliveTaskPusher: Send + Sync {
@@ -34,6 +34,51 @@ impl CacheKeepaliveTaskPusher for crate::scheduler_factory::SchedulerBackend {
         self.push_keepalive_task(task).await
     }
 }
+trait CacheKeepalivePayloadEncryptor: Send + Sync {
+    fn encrypt(
+        &self,
+        principal_id: &str,
+        session_key_hash: &str,
+        upstream_id: Uuid,
+        payload_generation: u64,
+        snapshot: &cc_lb_engine::cache_keepalive::PersistedRequestSnapshot,
+    ) -> Result<Vec<u8>, CacheKeepalivePayloadError>;
+}
+
+struct AeadCacheKeepalivePayloadEncryptor {
+    aead: Arc<AeadService>,
+}
+
+impl CacheKeepalivePayloadEncryptor for AeadCacheKeepalivePayloadEncryptor {
+    fn encrypt(
+        &self,
+        principal_id: &str,
+        session_key_hash: &str,
+        upstream_id: Uuid,
+        payload_generation: u64,
+        snapshot: &cc_lb_engine::cache_keepalive::PersistedRequestSnapshot,
+    ) -> Result<Vec<u8>, CacheKeepalivePayloadError> {
+        encrypt_cache_keepalive_payload(
+            self.aead.as_ref(),
+            principal_id,
+            session_key_hash,
+            upstream_id,
+            payload_generation,
+            snapshot,
+        )
+    }
+}
+trait CacheKeepaliveDecisionIdGenerator: Send + Sync {
+    fn next_id(&self) -> String;
+}
+
+struct UuidCacheKeepaliveDecisionIdGenerator;
+
+impl CacheKeepaliveDecisionIdGenerator for UuidCacheKeepaliveDecisionIdGenerator {
+    fn next_id(&self) -> String {
+        format!("not-tracked:{}", Uuid::now_v7())
+    }
+}
 
 pub(crate) struct ServerCacheKeepaliveEnqueuerDeps {
     pub storage: Arc<dyn Storage>,
@@ -45,18 +90,39 @@ pub(crate) struct ServerCacheKeepaliveEnqueuerDeps {
 pub(crate) struct ServerCacheKeepaliveEnqueuer {
     storage: Arc<dyn Storage>,
     pusher: Arc<dyn CacheKeepaliveTaskPusher>,
-    aead: Arc<AeadService>,
+    payload_encryptor: Arc<dyn CacheKeepalivePayloadEncryptor>,
+    decision_id_generator: Arc<dyn CacheKeepaliveDecisionIdGenerator>,
     clock: ClockHandle,
 }
 
 impl ServerCacheKeepaliveEnqueuer {
     pub(crate) fn new(deps: ServerCacheKeepaliveEnqueuerDeps) -> Self {
+        let payload_encryptor = Arc::new(AeadCacheKeepalivePayloadEncryptor { aead: deps.aead });
         Self {
             storage: deps.storage,
             pusher: deps.pusher,
-            aead: deps.aead,
+            payload_encryptor,
+            decision_id_generator: Arc::new(UuidCacheKeepaliveDecisionIdGenerator),
             clock: deps.clock,
         }
+    }
+
+    #[cfg(test)]
+    fn with_payload_encryptor(
+        mut self,
+        payload_encryptor: Arc<dyn CacheKeepalivePayloadEncryptor>,
+    ) -> Self {
+        self.payload_encryptor = payload_encryptor;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_decision_id_generator(
+        mut self,
+        decision_id_generator: Arc<dyn CacheKeepaliveDecisionIdGenerator>,
+    ) -> Self {
+        self.decision_id_generator = decision_id_generator;
+        self
     }
 }
 
@@ -91,15 +157,27 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         )
         .await
         .map_err(cache_keepalive_enqueue_error)?;
-        let encrypted_payload = encrypt_cache_keepalive_payload(
-            self.aead.as_ref(),
+        let encrypted_payload = match self.payload_encryptor.encrypt(
             &record.principal_id,
             &record.session_key_hash,
             record.upstream_id,
             record.generation,
             &request.snapshot.to_persisted(),
-        )
-        .map_err(cache_keepalive_enqueue_error)?;
+        ) {
+            Ok(encrypted_payload) => encrypted_payload,
+            Err(error) => {
+                CacheKeepaliveSessionStore::mark_cache_keepalive_terminal(
+                    self.storage.as_ref(),
+                    &record.session_key_hash,
+                    record.generation,
+                    CacheKeepaliveTerminalReason::DispatchError,
+                    now_unix_secs,
+                )
+                .await
+                .map_err(cache_keepalive_enqueue_error)?;
+                return Err(cache_keepalive_enqueue_error(error));
+            }
+        };
         if !CacheKeepaliveSessionStore::update_cache_keepalive_payload(
             self.storage.as_ref(),
             &record.session_key_hash,
@@ -181,7 +259,7 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         request: CacheKeepaliveNotTrackedRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         let now_unix_secs = unix_secs(self.clock.now());
-        let source_ref_id = format!("not-tracked:{}", Uuid::now_v7());
+        let source_ref_id = self.decision_id_generator.next_id();
         CacheKeepaliveProjectionStore::append_cache_keepalive_decision(
             self.storage.as_ref(),
             &CacheKeepaliveDecisionRow {

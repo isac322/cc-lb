@@ -58,6 +58,69 @@ impl TokenHttpClient {
     }
 }
 
+#[async_trait]
+trait LazyRefreshMetadataTaskPusher: Send + Sync {
+    async fn push_metadata_refresh(
+        &self,
+        upstream_id: Uuid,
+        generation: u64,
+    ) -> Result<(), cc_lb_scheduler::error::SchedulerError>;
+}
+
+#[derive(Clone, Debug)]
+struct SchedulerLazyRefreshMetadataTaskPusher {
+    backend: SchedulerBackend,
+}
+
+#[async_trait]
+impl LazyRefreshMetadataTaskPusher for SchedulerLazyRefreshMetadataTaskPusher {
+    async fn push_metadata_refresh(
+        &self,
+        upstream_id: Uuid,
+        generation: u64,
+    ) -> Result<(), cc_lb_scheduler::error::SchedulerError> {
+        self.backend
+            .push_job(AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(
+                upstream_id,
+                generation,
+            )))
+            .await
+    }
+}
+
+#[async_trait]
+trait LazyRefreshExecutor: Send + Sync {
+    async fn refresh(
+        &self,
+        refresher: &LazyRefresher,
+        upstream: UpstreamRecord,
+    ) -> Result<u64, RefreshError>;
+}
+
+struct ProductionLazyRefreshExecutor;
+
+#[async_trait]
+impl LazyRefreshExecutor for ProductionLazyRefreshExecutor {
+    async fn refresh(
+        &self,
+        refresher: &LazyRefresher,
+        upstream: UpstreamRecord,
+    ) -> Result<u64, RefreshError> {
+        refresh_flow(
+            &refresher.stores,
+            refresher.stores.audit.as_deref(),
+            &refresher.aead,
+            &refresher.oauth_cfg,
+            refresher.replica_id,
+            &refresher.http,
+            &refresher.cancel,
+            upstream,
+            &*refresher.clock,
+        )
+        .await
+    }
+}
+
 #[derive(Clone)]
 pub struct LazyRefresher {
     stores: Arc<Stores>,
@@ -69,8 +132,9 @@ pub struct LazyRefresher {
     cancel: CancellationToken,
     claim_guard: Arc<dyn LazyRefreshClaimGuard>,
     contention: LazyRefreshContentionConfig,
-    apalis_handle: SchedulerBackend,
+    metadata_task_pusher: Arc<dyn LazyRefreshMetadataTaskPusher>,
     clock: ClockHandle,
+    refresh_executor: Arc<dyn LazyRefreshExecutor>,
 }
 
 #[derive(Clone, Copy)]
@@ -296,17 +360,22 @@ impl LazyRefresher {
         cancel: CancellationToken,
         claim_guard: Arc<dyn LazyRefreshClaimGuard>,
         contention: LazyRefreshContentionConfig,
-        apalis_handle: SchedulerBackend,
+        refresh_executor: Arc<dyn LazyRefreshExecutor>,
     ) -> Self {
-        Self::new_with_claim_guard_and_config(
-            deps,
+        Self {
+            stores: deps.stores,
+            aead: deps.aead,
+            oauth_cfg: deps.oauth_cfg,
             replica_id,
+            http: TokenHttpClient::new(Duration::from_secs(30)),
             metadata_hook,
             cancel,
             claim_guard,
             contention,
-            apalis_handle,
-        )
+            metadata_task_pusher: Arc::new(SuccessfulMetadataTaskPusher),
+            clock: deps.clock,
+            refresh_executor,
+        }
     }
 
     fn new_with_claim_guard_and_config(
@@ -319,6 +388,9 @@ impl LazyRefresher {
         apalis_handle: SchedulerBackend,
     ) -> Self {
         let http = TokenHttpClient::new(Duration::from_secs(30));
+        let metadata_task_pusher = Arc::new(SchedulerLazyRefreshMetadataTaskPusher {
+            backend: apalis_handle,
+        });
         Self {
             stores: deps.stores,
             aead: deps.aead,
@@ -329,8 +401,9 @@ impl LazyRefresher {
             cancel,
             claim_guard,
             contention,
-            apalis_handle,
+            metadata_task_pusher,
             clock: deps.clock,
+            refresh_executor: Arc::new(ProductionLazyRefreshExecutor),
         }
     }
 
@@ -438,6 +511,26 @@ pub struct LazyRefresherParams {
     pub apalis_handle: SchedulerBackend,
 }
 
+#[cfg(test)]
+struct SuccessfulMetadataTaskPusher;
+
+#[cfg(test)]
+#[async_trait]
+impl LazyRefreshMetadataTaskPusher for SuccessfulMetadataTaskPusher {
+    async fn push_metadata_refresh(
+        &self,
+        _upstream_id: Uuid,
+        _generation: u64,
+    ) -> Result<(), cc_lb_scheduler::error::SchedulerError> {
+        Ok(())
+    }
+}
+
+impl LazyRefresher {
+    async fn execute_refresh(&self, upstream: UpstreamRecord) -> Result<u64, RefreshError> {
+        self.refresh_executor.refresh(self, upstream).await
+    }
+}
 impl LazyRefresher {
     async fn in_process_refresh(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
         let upstream = self
@@ -449,18 +542,7 @@ impl LazyRefresher {
             .ok_or_else(|| LazyRefreshError::Failed {
                 reason: "oauth upstream not found".to_owned(),
             })?;
-        let result = refresh_flow(
-            &self.stores,
-            self.stores.audit.as_deref(),
-            &self.aead,
-            &self.oauth_cfg,
-            self.replica_id,
-            &self.http,
-            &self.cancel,
-            upstream,
-            &*self.clock,
-        )
-        .await;
+        let result = self.execute_refresh(upstream).await;
         match result {
             Ok(generation) => {
                 if let Some(metadata_hook) = &self.metadata_hook {
@@ -527,18 +609,7 @@ impl LazyRefreshHandle for LazyRefresher {
                 }
             }
         }
-        let result = refresh_flow(
-            &self.stores,
-            self.stores.audit.as_deref(),
-            &self.aead,
-            &self.oauth_cfg,
-            self.replica_id,
-            &self.http,
-            &self.cancel,
-            upstream,
-            &*self.clock,
-        )
-        .await;
+        let result = self.execute_refresh(upstream).await;
         match result {
             Ok(generation) => {
                 let completed = self
@@ -561,11 +632,8 @@ impl LazyRefreshHandle for LazyRefresher {
                         .await
                         .map_err(lazy_metadata_hook_error)?;
                 } else {
-                    self.apalis_handle
-                        .push_job(AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(
-                            upstream_id,
-                            generation,
-                        )))
+                    self.metadata_task_pusher
+                        .push_metadata_refresh(upstream_id, generation)
                         .await
                         .map_err(lazy_scheduler_error)?;
                 }
@@ -904,34 +972,32 @@ fn scheduler_claim_error(error: cc_lb_scheduler::error::SchedulerError) -> Stora
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use axum::extract::State;
-    use axum::routing::post;
-    use axum::{Json, Router};
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
     use cc_lb_config::AnthropicOAuthConfig;
-    use cc_lb_engine::clock::{ClockHandle, TestClock};
+    use cc_lb_engine::clock::ClockHandle;
     use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
     use cc_lb_storage_api::upstream::UpstreamKind;
-    use cc_lb_storage_api::{BackendKind, MetaStore, StorageResult, UpstreamCreate, UpstreamStore};
-    use tokio::net::TcpListener;
+    use cc_lb_storage_api::{StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore};
+    use cc_lb_testkit::{InMemoryStorage, fixed_clock};
     use tokio::sync::{Notify, watch};
     use tokio_util::sync::CancellationToken;
     use url::Url;
     use uuid::Uuid;
 
     use super::{
-        LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefreshContentionConfig, LazyRefreshTaskState,
-        LazyRefresher, LazyRefresherDeps, SchedulerBackend,
+        LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefreshContentionConfig, LazyRefreshExecutor,
+        LazyRefreshTaskState, LazyRefresher, LazyRefresherDeps, RefreshError,
     };
 
-    #[tokio::test]
-    async fn lazy_refresher_single_flight_under_concurrency() {
-        let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
+    #[tokio::test(start_paused = true)]
+    async fn t2__lazy_refresher_single_flight_under_concurrency() {
+        let fixture = LazyRefreshFixture::new();
         fixture.hold_refresh_response();
         let upstream_id = fixture.create_oauth_upstream().await;
         let claims = Arc::new(TestOAuthRefreshClaims::single_winner());
@@ -960,27 +1026,31 @@ mod tests {
         assert_eq!(claims.completed_generation(), Some(1));
     }
 
-    #[tokio::test]
-    async fn lazy_refresher_falls_back_to_inproc_when_scheduler_wait_times_out() {
-        let fixture = LazyRefreshFixture::new(Duration::from_millis(0)).await;
+    #[tokio::test(start_paused = true)]
+    async fn t2__lazy_refresher_falls_back_to_inproc_when_scheduler_wait_times_out() {
+        let fixture = LazyRefreshFixture::new();
         let upstream_id = fixture.create_oauth_upstream().await;
         let claims = Arc::new(TestOAuthRefreshClaims::always_contended());
         let config = LazyRefreshContentionConfig::for_tests(
             Duration::from_millis(20),
             Duration::from_millis(5),
         );
-        let refresher = fixture.lazy_refresher(claims, config);
+        let refresher = fixture.lazy_refresher(claims.clone(), config);
 
-        refresher
-            .refresh_one(upstream_id)
+        let refresh = tokio::spawn(async move { refresher.refresh_one(upstream_id).await });
+        claims.wait_for_contention().await;
+        tokio::time::advance(Duration::from_millis(20)).await;
+        refresh
             .await
+            .expect("lazy refresh task joins")
             .expect("scheduler-backed wait times out and falls back to in-proc refresh");
 
         assert_eq!(fixture.refresh_call_count(), 1);
     }
 
     #[tokio::test]
-    async fn wait_for_token_generation_returns_ok_when_done_state_races_with_generation_advance() {
+    async fn t2__wait_for_token_generation_returns_ok_when_done_state_races_with_generation_advance()
+     {
         // Race between wait_for_token_generation's two consecutive reads:
         //   1. Lazy reads upstream snapshot → generation still equals the starting value
         //      (the worker has not yet committed complete_refresh).
@@ -993,7 +1063,7 @@ mod tests {
         // refresh against the OAuth provider. With the fix the lazy refresher re-reads
         // the upstream after observing the terminal task state, sees the advanced
         // generation, and returns Ok without triggering the fallback.
-        let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
+        let fixture = LazyRefreshFixture::new();
         let upstream_id = fixture.create_oauth_upstream().await;
         let claims: Arc<dyn LazyRefreshClaimGuard> = Arc::new(RaceDoneClaims::new(
             fixture.storage.clone(),
@@ -1019,70 +1089,18 @@ mod tests {
     }
 
     struct LazyRefreshFixture {
-        _dir: tempfile::TempDir,
-        storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+        storage: Arc<InMemoryStorage>,
         stores: Arc<crate::dynamic_view_builder::Stores>,
         aead: Arc<AeadService>,
         oauth_cfg: Arc<AnthropicOAuthConfig>,
-        refresh_calls: Arc<AtomicUsize>,
-        refresh_started: watch::Sender<bool>,
-        hold_refresh_response: Arc<AtomicBool>,
-        refresh_release: Arc<Notify>,
-        scheduler_backend: SchedulerBackend,
+        refresh_executor: Arc<ScriptedRefreshExecutor>,
         clock: ClockHandle,
     }
 
     impl LazyRefreshFixture {
-        async fn new(refresh_delay: Duration) -> Self {
-            let refresh_calls = Arc::new(AtomicUsize::new(0));
-            let (refresh_started, _) = watch::channel(false);
-            let hold_refresh_response = Arc::new(AtomicBool::new(false));
-            let refresh_release = Arc::new(Notify::new());
-            let token_url = spawn_lazy_refresh_token_server(
-                refresh_calls.clone(),
-                refresh_delay,
-                refresh_started.clone(),
-                hold_refresh_response.clone(),
-                refresh_release.clone(),
-            )
-            .await;
-            let dir = tempfile::tempdir().expect("tempdir");
-            let database_url = format!(
-                "sqlite://{}",
-                dir.path().join("lazy-refresh.sqlite").display()
-            );
-            let storage = Arc::new(
-                cc_lb_storage_sqlite::open_sqlite(
-                    &database_url,
-                    Arc::new(cc_lb_engine::SystemClock),
-                )
-                .await
-                .expect("storage opens"),
-            );
-            storage
-                .initialize(BackendKind::Sqlite)
-                .await
-                .expect("storage initializes");
-            let scheduler_db_url =
-                format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
-            use std::str::FromStr as _;
-            let scheduler_options =
-                scheduler_sqlx::sqlite::SqliteConnectOptions::from_str(&scheduler_db_url)
-                    .expect("parse url")
-                    .create_if_missing(true);
-            let scheduler_pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
-                .max_connections(5)
-                .connect_with(scheduler_options)
-                .await
-                .expect("scheduler storage opens");
-            apalis_sqlite::SqliteStorage::setup(&scheduler_pool)
-                .await
-                .expect("scheduler storage initializes");
-            let scheduler_backend =
-                SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerBackend::new(
-                    scheduler_pool,
-                    Arc::new(cc_lb_engine::SystemClock),
-                ));
+        fn new() -> Self {
+            let clock = fixed_clock(1_700_000_000);
+            let storage = Arc::new(InMemoryStorage::with_clock(clock.clone()));
             let stores = Arc::new(crate::dynamic_view_builder::Stores {
                 upstreams: storage.clone(),
                 principals: storage.clone(),
@@ -1099,23 +1117,19 @@ mod tests {
             let aead = Arc::new(AeadService::from_master_key([42; 32]));
             let oauth_cfg = Arc::new(AnthropicOAuthConfig {
                 client_id: "lazy-client".to_owned(),
-                auth_url: Url::parse("http://127.0.0.1/oauth/authorize").expect("auth url"),
-                token_url,
-                redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect url"),
+                auth_url: Url::parse("https://oauth.test/authorize").expect("auth url"),
+                token_url: Url::parse("https://oauth.test/token").expect("token url"),
+                redirect_uri: Url::parse("https://oauth.test/callback").expect("redirect url"),
                 scopes: vec!["messages".to_owned()],
             });
-            let clock = Arc::new(TestClock::new_at_secs(1_700_000_000)) as ClockHandle;
+            let refresh_executor =
+                Arc::new(ScriptedRefreshExecutor::new(storage.clone(), aead.clone()));
             Self {
-                _dir: dir,
                 storage,
                 stores,
                 aead,
                 oauth_cfg,
-                refresh_calls,
-                refresh_started,
-                hold_refresh_response,
-                refresh_release,
-                scheduler_backend,
+                refresh_executor,
                 clock,
             }
         }
@@ -1165,92 +1179,112 @@ mod tests {
                     oauth_cfg: self.oauth_cfg.clone(),
                     clock: self.clock.clone(),
                 },
-                Uuid::new_v4(),
+                Uuid::from_u128(0xfeed),
                 None,
                 CancellationToken::new(),
                 claims,
                 config,
-                self.scheduler_backend.clone(),
+                self.refresh_executor.clone(),
             )
         }
 
         fn refresh_call_count(&self) -> usize {
-            self.refresh_calls.load(Ordering::SeqCst)
+            self.refresh_executor.call_count()
         }
 
         fn hold_refresh_response(&self) {
-            self.hold_refresh_response.store(true, Ordering::SeqCst);
+            self.refresh_executor.hold_response();
         }
 
         async fn wait_for_refresh_start(&self) {
-            let mut refresh_started = self.refresh_started.subscribe();
-            if *refresh_started.borrow() {
-                return;
-            }
-            refresh_started
-                .changed()
-                .await
-                .expect("test token server start sender remains alive");
+            self.refresh_executor.wait_for_start().await;
         }
 
         fn release_refresh_response(&self) {
-            self.hold_refresh_response.store(false, Ordering::SeqCst);
-            self.refresh_release.notify_one();
+            self.refresh_executor.release_response();
         }
     }
 
-    async fn spawn_lazy_refresh_token_server(
-        refresh_calls: Arc<AtomicUsize>,
-        refresh_delay: Duration,
-        refresh_started: watch::Sender<bool>,
-        hold_refresh_response: Arc<AtomicBool>,
-        refresh_release: Arc<Notify>,
-    ) -> Url {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("token listener binds");
-        let addr = listener.local_addr().expect("token listener addr");
-        let app = Router::new()
-            .route("/oauth/token", post(lazy_refresh_token_response))
-            .with_state(TokenServerState {
-                refresh_calls,
-                refresh_delay,
-                refresh_started,
-                hold_refresh_response,
-                refresh_release,
-            });
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("token server runs");
-        });
-        Url::parse(&format!("http://{addr}/oauth/token")).expect("token url")
+    struct ScriptedRefreshExecutor {
+        storage: Arc<InMemoryStorage>,
+        aead: Arc<AeadService>,
+        calls: AtomicUsize,
+        started: watch::Sender<bool>,
+        hold_response: AtomicBool,
+        release: Notify,
     }
 
-    #[derive(Clone)]
-    struct TokenServerState {
-        refresh_calls: Arc<AtomicUsize>,
-        refresh_delay: Duration,
-        refresh_started: watch::Sender<bool>,
-        hold_refresh_response: Arc<AtomicBool>,
-        refresh_release: Arc<Notify>,
+    impl ScriptedRefreshExecutor {
+        fn new(storage: Arc<InMemoryStorage>, aead: Arc<AeadService>) -> Self {
+            let (started, _) = watch::channel(false);
+            Self {
+                storage,
+                aead,
+                calls: AtomicUsize::new(0),
+                started,
+                hold_response: AtomicBool::new(false),
+                release: Notify::new(),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn hold_response(&self) {
+            self.hold_response.store(true, Ordering::SeqCst);
+        }
+
+        async fn wait_for_start(&self) {
+            let mut started = self.started.subscribe();
+            if *started.borrow() {
+                return;
+            }
+            started
+                .changed()
+                .await
+                .expect("scripted refresh executor remains alive");
+        }
+
+        fn release_response(&self) {
+            self.hold_response.store(false, Ordering::SeqCst);
+            self.release.notify_one();
+        }
     }
 
-    async fn lazy_refresh_token_response(
-        State(state): State<TokenServerState>,
-    ) -> Json<serde_json::Value> {
-        state.refresh_calls.fetch_add(1, Ordering::SeqCst);
-        state.refresh_started.send_replace(true);
-        if state.hold_refresh_response.load(Ordering::SeqCst) {
-            state.refresh_release.notified().await;
+    #[async_trait::async_trait]
+    impl LazyRefreshExecutor for ScriptedRefreshExecutor {
+        async fn refresh(
+            &self,
+            _refresher: &LazyRefresher,
+            upstream: UpstreamRecord,
+        ) -> Result<u64, RefreshError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.send_replace(true);
+            if self.hold_response.load(Ordering::SeqCst) {
+                self.release.notified().await;
+            }
+            let encrypted = EncryptedOAuthTokens::encrypt(
+                self.aead.as_ref(),
+                &OAuthTokenBundle {
+                    access_token: "sk-ant-oat01-new".to_owned(),
+                    refresh_token: "sk-ant-ort01-new".to_owned(),
+                    expires_at_unix_secs: 1_700_003_600,
+                    refresh_token_expires_at_unix_secs: None,
+                    scopes: vec!["messages".to_owned()],
+                },
+                upstream.id.as_bytes(),
+            )
+            .map_err(|_| RefreshError::Encrypt)?;
+            let updated = UpstreamStore::complete_refresh(
+                self.storage.as_ref(),
+                upstream.id,
+                Uuid::from_u128(0xbeef),
+                encrypted,
+            )
+            .await?;
+            Ok(updated.oauth_token_generation)
         }
-        if !state.refresh_delay.is_zero() {
-            tokio::time::sleep(state.refresh_delay).await;
-        }
-        Json(serde_json::json!({
-            "access_token": "sk-ant-oat01-new",
-            "refresh_token": "sk-ant-ort01-new",
-            "expires_in": 3600,
-            "scope": "messages"
-        }))
     }
 
     #[derive(Debug)]
@@ -1351,18 +1385,14 @@ mod tests {
     }
 
     struct RaceDoneClaims {
-        storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+        storage: Arc<InMemoryStorage>,
         aead: Arc<AeadService>,
         upstream_id: Uuid,
         invoked: AtomicBool,
     }
 
     impl RaceDoneClaims {
-        fn new(
-            storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
-            aead: Arc<AeadService>,
-            upstream_id: Uuid,
-        ) -> Self {
+        fn new(storage: Arc<InMemoryStorage>, aead: Arc<AeadService>, upstream_id: Uuid) -> Self {
             Self {
                 storage,
                 aead,
@@ -1420,7 +1450,7 @@ mod tests {
                 UpstreamStore::complete_refresh(
                     self.storage.as_ref(),
                     self.upstream_id,
-                    Uuid::new_v4(),
+                    Uuid::from_u128(0xcafe),
                     rotated,
                 )
                 .await?;

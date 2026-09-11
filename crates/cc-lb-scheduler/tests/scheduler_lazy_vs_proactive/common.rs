@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_clock::{Clock, SystemClock, unix_secs};
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -15,16 +14,15 @@ use uuid::Uuid;
 
 use super::fake::InitialTokens;
 
-pub const LAZY_REQUEST_DELAY: Duration = Duration::from_millis(10);
-pub const LOSER_SETTLE_DELAY: Duration = Duration::from_millis(50);
 pub const WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 pub const POLL_INTERVAL: Duration = Duration::from_millis(25);
+pub const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
 pub const NEAR_EXPIRY_OFFSET_SECS: u64 = 5;
 
 pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub fn now_secs() -> u64 {
-    unix_secs(SystemClock.now())
+pub const fn now_secs() -> u64 {
+    TEST_NOW_UNIX_SECS
 }
 
 pub fn near_expiry_secs() -> u64 {

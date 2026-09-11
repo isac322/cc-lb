@@ -5,11 +5,12 @@ use crate::jobs::prompt_cache_purge::{
     PromptCacheObservationPurgeJob, PromptCacheObservationPurgeJobHandler,
     PromptCacheObservationPurgeStore,
 };
+type MaybePrefix = Option<String>;
 
 #[tokio::test]
-async fn sqlite_purge_job_removes_expired_observations() -> TestResult {
+async fn t3__sqlite_purge_job_removes_expired_observations() -> TestResult {
     let pool = sqlite_pool().await?;
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(1);
     seed_sqlite(&pool, upstream_id, ACTIVE_PREFIX, "0", NOW_UNIX_SECS + 300).await?;
     seed_sqlite(
         &pool,
@@ -106,7 +107,7 @@ async fn sqlite_count(pool: &sqlx::SqlitePool) -> Result<i64, sqlx::Error> {
 async fn sqlite_active_prefix(
     pool: &sqlx::SqlitePool,
     upstream_id: Uuid,
-) -> Result<Option<String>, sqlx::Error> {
+) -> Result<MaybePrefix, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT prefix_hash FROM prompt_cache_observations \
          WHERE upstream_id = ? AND expires_at > ?",

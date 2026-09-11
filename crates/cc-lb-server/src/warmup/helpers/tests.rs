@@ -58,8 +58,8 @@ fn jitter_is_under_30s() {
 #[test]
 fn jitter_distributes_across_upstreams() {
     let candidate_resets_at_unix_secs = 1_800_000_000;
-    let distinct_jitters = (0..10)
-        .map(|_| stable_jitter_ms(Uuid::new_v4(), candidate_resets_at_unix_secs))
+    let distinct_jitters = (1..=10)
+        .map(|index| stable_jitter_ms(Uuid::from_u128(index), candidate_resets_at_unix_secs))
         .collect::<HashSet<_>>();
 
     assert!(

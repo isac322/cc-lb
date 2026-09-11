@@ -3,19 +3,8 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_request() {
-    // CI latency budget, not a correctness bound: this drives a full proxy ->
-    // lazy-refresh-enqueue -> scheduler-dispatch async chain that normally
-    // finishes in well under a second, but under llvm-cov instrumentation plus
-    // a co-scheduled heavy build on the shared runner it overran even a 30s
-    // ceiling and flaked (the dispatch still happens; only the wait was too
-    // short). Scale by CC_LB_TEST_READY_TIMEOUT_SECS (240 in active CI), the
-    // repo's convention for these tests, instead of a hardcoded value.
-    let qa_timeout = std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(30));
+async fn t3__replacement_worker_refreshes_selected_oauth_upstream_during_message_request() {
+    let qa_timeout = Duration::from_secs(240);
 
     let message_script = MessageScript::new();
     let refresh_pause = OAuthRefreshPause::new();
@@ -46,7 +35,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
     let (stored_principal_id, key_id, _) = stored_keys.pop().expect("managed key exists");
 
     let (dispatch_tx, mut dispatch_rx) = mpsc::channel(2);
-    let job_a = Uuid::new_v4();
+    let job_a = Uuid::from_u128(1);
     fixture
         .scheduler_backend
         .push_job(AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(job_a)))
@@ -134,7 +123,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
             oauth_cfg: fixture.oauth_cfg.clone(),
             clock: fixture.clock.clone(),
         },
-        replica_id: Uuid::new_v4(),
+        replica_id: Uuid::from_u128(2),
         metadata_hook: None,
         cancel: lazy_cancel.clone(),
         apalis_handle: fixture.scheduler_backend.clone(),

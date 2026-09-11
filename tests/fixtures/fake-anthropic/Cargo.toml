@@ -20,7 +20,7 @@ async-stream.workspace = true
 axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "env"] }
 http.workspace = true
 ring.workspace = true
 serde = { workspace = true, features = ["derive"] }

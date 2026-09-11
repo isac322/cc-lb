@@ -3,7 +3,7 @@
 use std::str::FromStr as _;
 use std::sync::Arc;
 
-use cc_lb_clock::SystemClock;
+use cc_lb_clock::TestClock;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::jobs::watchdog::{WatchdogEntityKind, run_entity_watchdog};
 use cc_lb_scheduler::worker::{
@@ -17,12 +17,14 @@ const RUN_AT_UNIX_SECS: u64 = 1_782_000_030;
 const SEVEN_DAY_RESET: u64 = 1_782_414_000;
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+type MaybeUnixSecs = Option<u64>;
 
 #[tokio::test]
-async fn watchdog_keeps_future_cycle_keyed_warmup_from_being_pulled_forward() -> TestResult<()> {
+async fn t3__watchdog_keeps_future_cycle_keyed_warmup_from_being_pulled_forward() -> TestResult<()>
+{
     for scenario in active_cycle_key_scenarios() {
         let fixture = Fixture::new().await?;
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(1);
         fixture
             .insert_warmup_cycle(upstream_id, scenario.into_existing_cycle())
             .await?;
@@ -40,9 +42,9 @@ async fn watchdog_keeps_future_cycle_keyed_warmup_from_being_pulled_forward() ->
 }
 
 #[tokio::test]
-async fn watchdog_bootstraps_warmup_when_only_cycle_keyed_dlq_remains() -> TestResult<()> {
+async fn t3__watchdog_bootstraps_warmup_when_only_cycle_keyed_dlq_remains() -> TestResult<()> {
     let fixture = Fixture::new().await?;
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(2);
     fixture
         .insert_warmup_cycle(
             upstream_id,
@@ -66,9 +68,9 @@ async fn watchdog_bootstraps_warmup_when_only_cycle_keyed_dlq_remains() -> TestR
 }
 
 #[tokio::test]
-async fn watchdog_bootstrap_for_idle_warmup_runs_at_current_tick() -> TestResult<()> {
+async fn t3__watchdog_bootstrap_for_idle_warmup_runs_at_current_tick() -> TestResult<()> {
     let fixture = Fixture::new().await?;
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(3);
 
     let stats = fixture.run_warmup_watchdog(upstream_id).await?;
 
@@ -135,7 +137,7 @@ impl Fixture {
         cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
         let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
             pool.clone(),
-            Arc::new(SystemClock),
+            Arc::new(TestClock::new_at_secs(TICK_UNIX_SECS)),
         ));
         Ok(Self {
             _dir: dir,
@@ -195,18 +197,18 @@ impl Fixture {
         )
     }
 
-    async fn cycle_run_at(&self, upstream_id: Uuid) -> TestResult<Option<u64>> {
+    async fn cycle_run_at(&self, upstream_id: Uuid) -> TestResult<MaybeUnixSecs> {
         let key =
             UpstreamWarmupJob::new(upstream_id, SEVEN_DAY_RESET).idempotency_key(SEVEN_DAY_RESET);
         self.run_at_for_key(key).await
     }
 
-    async fn bootstrap_run_at(&self, upstream_id: Uuid) -> TestResult<Option<u64>> {
+    async fn bootstrap_run_at(&self, upstream_id: Uuid) -> TestResult<MaybeUnixSecs> {
         self.run_at_for_key(WatchdogEntityKind::Warmup.bootstrap_key(upstream_id, TICK_UNIX_SECS))
             .await
     }
 
-    async fn run_at_for_key(&self, key: String) -> TestResult<Option<u64>> {
+    async fn run_at_for_key(&self, key: String) -> TestResult<MaybeUnixSecs> {
         let run_at = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT run_at FROM Jobs WHERE idempotency_key = ?1",
         )

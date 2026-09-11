@@ -1,5 +1,8 @@
+// tier-allow(silent-skip): storage trait optional-return signatures never skip assertions until=2027-03-31
+use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method};
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
@@ -9,67 +12,83 @@ use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamCreate, UpstreamStore};
-use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use cc_lb_storage_api::{
+    BackfillApplyOutcome, MetadataTierMappingOverrideRecord, OrganizationMetadataRecord,
+    OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, StorageResult, UpstreamCreate,
+    UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamStore, UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
+};
+use cc_lb_testkit::{InMemoryStorage as Storage, fixed_clock};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerError,
     SignerFactory, UpstreamDialect, shape_request, sign_request,
 };
-use fake_anthropic::{AppConfig, app as fake_anthropic_app};
-use tokio::net::TcpListener;
 use url::Url;
 use uuid::Uuid;
 
+const NOW_UNIX_SECS: u64 = 1_800_000_000;
+
 struct Fixture {
-    _dir: tempfile::TempDir,
     storage: Arc<Storage>,
-    _stores: Arc<Stores>,
+    stores: Arc<Stores>,
     aead: Arc<AeadService>,
-    _oauth_cfg: Arc<AnthropicOAuthConfig>,
-    _fake_base: String,
+    oauth_cfg: Arc<AnthropicOAuthConfig>,
+    clock: cc_lb_engine::ClockHandle,
 }
 
 impl Fixture {
     async fn new() -> Self {
-        let fake_addr = spawn_fake_anthropic().await;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let database_url = format!("sqlite://{}", dir.path().join("composite.sqlite").display());
-        let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-                .await
-                .expect("storage"),
-        );
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
+        let clock = fixed_clock(NOW_UNIX_SECS);
+        let storage = Arc::new(Storage::with_clock(clock.clone()));
+        let empty = Arc::new(EmptyDynamicStore);
         let stores = Arc::new(Stores {
             upstreams: storage.clone(),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
-            upstream_rate_limits: storage.clone(),
+            upstream_rate_limits: empty.clone(),
             upstream_subscription_quotas: storage.clone(),
-            upstream_subscription_metadata: storage.clone(),
-            organization_metadata: storage.clone(),
-            plan_tiers: storage.clone(),
+            upstream_subscription_metadata: empty.clone(),
+            organization_metadata: empty.clone(),
+            plan_tiers: empty,
             prompt_cache_observations: storage.clone(),
             anthropic_compatibility_kv: storage.clone(),
-            audit: Some(storage.clone()),
+            audit: None,
         });
         let aead = Arc::new(AeadService::from_master_key([32; 32]));
-        let fake_base = format!("http://{fake_addr}");
         let oauth_cfg = Arc::new(AnthropicOAuthConfig {
             client_id: "test-client".to_owned(),
-            auth_url: Url::parse(&format!("{fake_base}/oauth/authorize")).expect("auth url"),
-            token_url: Url::parse(&format!("{fake_base}/oauth/token")).expect("token url"),
+            auth_url: Url::parse("http://oauth.invalid/authorize").expect("auth url"),
+            token_url: Url::parse("http://oauth.invalid/token").expect("token url"),
             redirect_uri: Url::parse("http://localhost/callback").expect("redirect url"),
             scopes: vec!["messages".to_owned()],
         });
         Self {
-            _dir: dir,
             storage,
-            _stores: stores,
+            stores,
             aead,
-            _oauth_cfg: oauth_cfg,
-            _fake_base: fake_base,
+            oauth_cfg,
+            clock,
         }
+    }
+
+    async fn build_view(&self) -> Arc<cc_lb_engine::DynamicView> {
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+        build_dynamic_view(
+            self.stores.as_ref(),
+            self.oauth_cfg.as_ref(),
+            self.aead.clone(),
+            None,
+            0,
+            &runtime,
+            Path::new("."),
+            Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+            None,
+            None,
+            1800,
+            self.clock.clone(),
+        )
+        .await
+        .expect("dynamic view builds")
     }
 
     async fn create_oauth_upstream(&self, name: &str) -> Uuid {
@@ -104,7 +123,7 @@ impl Fixture {
             &OAuthTokenBundle {
                 access_token: access_token.to_owned(),
                 refresh_token: format!("sk-ant-ort01-{name}-refresh-token-123456789"),
-                expires_at_unix_secs: now_secs() + 3600,
+                expires_at_unix_secs: NOW_UNIX_SECS + 3600,
                 refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
             },
@@ -152,8 +171,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn oauth_upstream_routes_to_oauth_signer() {
-    let _ = crate::common::install_prometheus();
+async fn t2__oauth_upstream_routes_to_oauth_signer() {
     let fixture = Fixture::new().await;
     let _upstream_id = fixture.create_oauth_upstream("oauth-test").await;
 
@@ -161,7 +179,7 @@ async fn oauth_upstream_routes_to_oauth_signer() {
         fixture.storage.clone(),
         fixture.aead.clone(),
         "oauth-test",
-        Arc::new(cc_lb_engine::SystemClock),
+        fixture.clock.clone(),
     );
 
     let signer = factory
@@ -214,8 +232,7 @@ async fn apikey_upstream_routes_to_key_signer() {
 }
 
 #[tokio::test]
-async fn router_choice_selects_matching_oauth_upstream() {
-    let _ = crate::common::install_prometheus();
+async fn t2__router_choice_selects_matching_oauth_upstream() {
     let fixture = Fixture::new().await;
     fixture
         .create_oauth_upstream_with_access_token("oauth-alice", "sk-ant-oat01-alice-token")
@@ -223,23 +240,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
     fixture
         .create_oauth_upstream_with_access_token("oauth-bob", "sk-ant-oat01-bob-token")
         .await;
-    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
-    let view = build_dynamic_view(
-        fixture._stores.as_ref(),
-        fixture._oauth_cfg.as_ref(),
-        fixture.aead.clone(),
-        None,
-        0,
-        &runtime,
-        fixture._dir.path(),
-        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
-        None,
-        None,
-        1800,
-        Arc::new(cc_lb_engine::SystemClock),
-    )
-    .await
-    .expect("dynamic view builds");
+    let view = fixture.build_view().await;
 
     let signer_factory = view
         .signer_factory
@@ -263,26 +264,10 @@ async fn router_choice_selects_matching_oauth_upstream() {
 }
 
 #[tokio::test]
-async fn empty_router_choice_errors() {
+async fn t2__empty_router_choice_errors() {
     let fixture = Fixture::new().await;
     fixture.create_oauth_upstream("oauth-only").await;
-    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
-    let view = build_dynamic_view(
-        fixture._stores.as_ref(),
-        fixture._oauth_cfg.as_ref(),
-        fixture.aead.clone(),
-        None,
-        0,
-        &runtime,
-        fixture._dir.path(),
-        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
-        None,
-        None,
-        1800,
-        Arc::new(cc_lb_engine::SystemClock),
-    )
-    .await
-    .expect("dynamic view builds");
+    let view = fixture.build_view().await;
 
     let signer_factory = view
         .signer_factory
@@ -305,7 +290,7 @@ async fn empty_router_choice_errors() {
 }
 
 #[tokio::test]
-async fn missing_oauth_credentials_returns_proper_signer_error() {
+async fn t2__missing_oauth_credentials_returns_proper_signer_error() {
     let fixture = Fixture::new().await;
     let _upstream_id = fixture
         .create_oauth_upstream_no_credentials("oauth-missing")
@@ -315,7 +300,7 @@ async fn missing_oauth_credentials_returns_proper_signer_error() {
         fixture.storage.clone(),
         fixture.aead.clone(),
         "oauth-missing",
-        Arc::new(cc_lb_engine::SystemClock),
+        fixture.clock.clone(),
     );
 
     let result = factory
@@ -335,22 +320,6 @@ async fn missing_oauth_credentials_returns_proper_signer_error() {
         Ok(_) => panic!("expected MissingCredentials error, got Ok"),
         Err(other) => panic!("expected MissingCredentials error, got: {:?}", other),
     }
-}
-
-async fn spawn_fake_anthropic() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    let app = fake_anthropic_app(AppConfig::default());
-    tokio::spawn(async move {
-        let _ = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await;
-    });
-    addr.to_string()
 }
 
 fn encrypted(
@@ -403,13 +372,131 @@ impl UpstreamDialect for DirectDialect {
     }
 }
 
-fn now_secs() -> u64 {
-    use cc_lb_engine::Clock as _;
+pub(crate) struct EmptyDynamicStore;
 
-    let clock = cc_lb_engine::SystemClock;
-    clock
-        .now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+#[async_trait]
+impl UpstreamRateLimitStateStore for EmptyDynamicStore {
+    async fn put_observation(
+        &self,
+        _record: &UpstreamRateLimitObservationRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn list_for_upstream_ids(
+        &self,
+        _upstream_ids: &[Uuid],
+    ) -> StorageResult<Vec<UpstreamRateLimitObservationRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl PlanTierStore for EmptyDynamicStore {
+    async fn upsert_plan_tier_ratio(&self, _record: &PlanTierRatioRecord) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn list_current_plan_tier_ratios(&self) -> StorageResult<Vec<PlanTierRatioRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_plan_tier_ratios_as_of(
+        &self,
+        _as_of_unix_millis: i64,
+    ) -> StorageResult<Vec<PlanTierRatioRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn upsert_metadata_tier_override(
+        &self,
+        _record: &MetadataTierMappingOverrideRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn list_current_metadata_tier_overrides(
+        &self,
+    ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_metadata_tier_overrides_as_of(
+        &self,
+        _as_of_unix_millis: i64,
+    ) -> StorageResult<Vec<MetadataTierMappingOverrideRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn append_upstream_plan_tier(
+        &self,
+        _record: &UpstreamPlanTierRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn backfill_upstream_plan_tier_intervals(
+        &self,
+        _upstream_id: Uuid,
+        _intervals: &[UpstreamPlanTierRecord],
+        _terminal_cap_unix_millis: i64,
+        _provenance: &str,
+    ) -> StorageResult<BackfillApplyOutcome> {
+        Ok(BackfillApplyOutcome::Skipped)
+    }
+
+    async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_upstream_plan_tiers_as_of(
+        &self,
+        _as_of_unix_millis: i64,
+    ) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl UpstreamSubscriptionMetadataStore for EmptyDynamicStore {
+    async fn put_upstream_subscription_metadata(
+        &self,
+        _record: &UpstreamSubscriptionMetadataRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn get_upstream_subscription_metadata(
+        &self,
+        _upstream_id: Uuid,
+    ) -> StorageResult<Option<UpstreamSubscriptionMetadataRecord>> {
+        Ok(None)
+    }
+
+    async fn list_upstream_subscription_metadata(
+        &self,
+    ) -> StorageResult<Vec<UpstreamSubscriptionMetadataRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl OrganizationMetadataStore for EmptyDynamicStore {
+    async fn put_organization_metadata(
+        &self,
+        _record: &OrganizationMetadataRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn get_organization_metadata(
+        &self,
+        _organization_uuid: &str,
+    ) -> StorageResult<Option<OrganizationMetadataRecord>> {
+        Ok(None)
+    }
+
+    async fn list_organization_metadata(&self) -> StorageResult<Vec<OrganizationMetadataRecord>> {
+        Ok(Vec::new())
+    }
 }

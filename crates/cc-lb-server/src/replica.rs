@@ -63,11 +63,12 @@ pub fn load_or_create_replica_id(data_dir: &Path) -> io::Result<Uuid> {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn creates_when_missing() {
+    fn t3__creates_when_missing() {
         let dir = tempfile::TempDir::new().unwrap();
         let data_dir = dir.path();
 
@@ -79,13 +80,13 @@ mod tests {
     }
 
     #[test]
-    fn reads_existing() {
+    fn t3__reads_existing() {
         let dir = tempfile::TempDir::new().unwrap();
         let data_dir = dir.path();
         let replica_id_path = data_dir.join("replica_id");
 
         // Pre-create a replica_id file with a known UUID
-        let known_uuid = Uuid::new_v4();
+        let known_uuid = Uuid::from_u128(1);
         fs::write(&replica_id_path, format!("{}\n", known_uuid)).unwrap();
 
         let loaded_uuid = load_or_create_replica_id(data_dir).unwrap();
@@ -93,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_regenerates_and_logs() {
+    fn t3__corrupt_file_regenerates_and_logs() {
         let dir = tempfile::TempDir::new().unwrap();
         let data_dir = dir.path();
         let replica_id_path = data_dir.join("replica_id");
@@ -110,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn permissions_0600() {
+    fn t3__permissions_0600() {
         let dir = tempfile::TempDir::new().unwrap();
         let data_dir = dir.path();
 
@@ -125,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_across_restarts() {
+    fn t3__stable_across_restarts() {
         let dir = tempfile::TempDir::new().unwrap();
         let data_dir = dir.path();
 

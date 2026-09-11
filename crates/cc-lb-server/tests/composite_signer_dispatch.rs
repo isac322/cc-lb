@@ -1,43 +1,41 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+// tier-allow(silent-skip): storage trait optional-return signatures never skip assertions until=2027-03-31
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::body::Bytes;
-use axum::http::{HeaderMap, Method, StatusCode};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use axum::http::{Method, StatusCode};
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::{
     AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
 };
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_engine::{DynamicViewHolder, Lifecycle, LifecycleConfig};
+use cc_lb_engine::{
+    Body, DispatchError, DynamicViewHolder, Lifecycle, LifecycleConfig, UpstreamDispatch,
+};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
-use cc_lb_storage_api::{
-    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult,
-    UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
-};
-
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
-use cc_lb_storage_sqlite::SqliteStorage as Storage;
-use fake_anthropic::{AppConfig, app as fake_anthropic_app};
-use http::Request;
-use http::header::LOCATION;
-use http_body_util::BodyExt;
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use cc_lb_storage_api::{
+    PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult, UpstreamCreate, UpstreamRecord,
+    UpstreamStore, UpstreamUpdate,
+};
+use cc_lb_testkit::{InMemoryStorage as Storage, fixed_clock};
+use cc_lb_upstream::SignedRequest;
+use http::{Request, Response};
+use http_body_util::{BodyExt, Full};
 use url::Url;
 use uuid::Uuid;
 
+use crate::composite_signer_factory::EmptyDynamicStore;
+
+const NOW_UNIX_SECS: u64 = 1_800_000_000;
+
 #[tokio::test]
-async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic_direct() {
+async fn t2__router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic_direct() {
     let fixture = Fixture::new().await;
     let target_id = fixture
-        .create_oauth_upstream("oauth-target", now_secs() + 3600, true)
+        .create_oauth_upstream("oauth-target", NOW_UNIX_SECS + 3600, true)
         .await;
     fixture
         .create_missing_oauth_upstream_before(target_id)
@@ -45,7 +43,7 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
     fixture
         .create_principal("oauth-principal", vec![target_id])
         .await;
-    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
         fixture.oauth_cfg.as_ref(),
@@ -53,15 +51,16 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
         None,
         0,
         &runtime,
-        fixture._dir.path(),
+        Path::new("."),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         None,
         None,
         1800,
-        Arc::new(cc_lb_engine::SystemClock),
+        fixture.clock.clone(),
     )
     .await
     .expect("dynamic view builds");
+    let captured = Arc::new(Mutex::new(Vec::new()));
     let lifecycle = Lifecycle::new_with_dynamic_view(
         Arc::new(BuiltinAuthn::new(
             DownstreamAuthMode::None,
@@ -70,12 +69,14 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
             }),
             None,
-            Arc::new(cc_lb_engine::SystemClock),
+            fixture.clock.clone(),
         )),
         Arc::new(DynamicViewHolder::new(view)),
-        cc_lb_engine::make_default_dispatcher(50),
+        Arc::new(RecordingDispatcher {
+            captured: captured.clone(),
+        }),
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        fixture.clock.clone(),
     );
 
     let response = lifecycle
@@ -91,62 +92,57 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
         .to_bytes();
 
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let captured = captured.lock().expect("captured dispatch lock");
+    assert_eq!(captured.len(), 1, "expected one upstream dispatch");
+    assert_eq!(captured[0].url.host_str(), Some("oauth-target.invalid"));
+    assert_eq!(
+        captured[0].authorization.as_deref(),
+        Some("Bearer sk-ant-oat01-oauth-target-access-token")
+    );
 }
 
 struct Fixture {
-    _dir: tempfile::TempDir,
     storage: Arc<Storage>,
     stores: Arc<Stores>,
     aead: Arc<AeadService>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
-    fake_base: String,
+    clock: cc_lb_engine::ClockHandle,
 }
 
 impl Fixture {
     async fn new() -> Self {
-        let fake_addr = spawn_fake_anthropic().await;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let database_url = format!(
-            "sqlite://{}",
-            dir.path().join("composite-dispatch.sqlite").display()
-        );
-        let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-                .await
-                .expect("storage"),
-        );
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
+        let clock = fixed_clock(NOW_UNIX_SECS);
+        let storage = Arc::new(Storage::with_clock(clock.clone()));
+        let empty = Arc::new(EmptyDynamicStore);
         let stores = Arc::new(Stores {
             upstreams: Arc::new(OrderedUpstreamStore {
                 inner: storage.clone(),
             }),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
-            upstream_rate_limits: storage.clone(),
+            upstream_rate_limits: empty.clone(),
             upstream_subscription_quotas: storage.clone(),
-            upstream_subscription_metadata: storage.clone(),
-            organization_metadata: storage.clone(),
-            plan_tiers: storage.clone(),
+            upstream_subscription_metadata: empty.clone(),
+            organization_metadata: empty.clone(),
+            plan_tiers: empty,
             prompt_cache_observations: storage.clone(),
             anthropic_compatibility_kv: storage.clone(),
-            audit: Some(storage.clone()),
+            audit: None,
         });
         let aead = Arc::new(AeadService::from_master_key([33; 32]));
-        let fake_base = format!("http://{fake_addr}");
         let oauth_cfg = Arc::new(AnthropicOAuthConfig {
             client_id: "test-client".to_owned(),
-            auth_url: Url::parse(&format!("{fake_base}/oauth/authorize")).expect("auth url"),
-            token_url: Url::parse(&format!("{fake_base}/oauth/token")).expect("token url"),
+            auth_url: Url::parse("http://oauth.invalid/authorize").expect("auth url"),
+            token_url: Url::parse("http://oauth.invalid/token").expect("token url"),
             redirect_uri: Url::parse("http://localhost/callback").expect("redirect url"),
             scopes: vec!["messages".to_owned()],
         });
         Self {
-            _dir: dir,
             storage,
             stores,
             aead,
             oauth_cfg,
-            fake_base,
+            clock,
         }
     }
 
@@ -161,7 +157,7 @@ impl Fixture {
                 default_limits: Vec::new(),
                 cache_keepalive: None,
             },
-            now_secs(),
+            NOW_UNIX_SECS,
         )
         .await
         .expect("principal created");
@@ -173,7 +169,9 @@ impl Fixture {
             UpstreamCreate {
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
-                base_url: Some(Url::parse(&self.fake_base).expect("fake url")),
+                base_url: Some(
+                    Url::parse(&format!("http://{name}.invalid")).expect("test base URL parses"),
+                ),
                 api_key_ciphertext: None,
                 oauth_token_generation: None,
                 warmup_enabled: false,
@@ -183,7 +181,6 @@ impl Fixture {
         .await
         .expect("upstream created");
         if store_tokens {
-            let tokens = initial_tokens(&self.fake_base).await;
             UpstreamStore::store_oauth_tokens(
                 self.storage.as_ref(),
                 record.id,
@@ -192,8 +189,8 @@ impl Fixture {
                     &self.aead,
                     record.id,
                     &OAuthTokenBundle {
-                        access_token: tokens.access_token,
-                        refresh_token: tokens.refresh_token,
+                        access_token: format!("sk-ant-oat01-{name}-access-token"),
+                        refresh_token: format!("sk-ant-ort01-{name}-refresh-token"),
                         expires_at_unix_secs: expires_at,
                         refresh_token_expires_at_unix_secs: None,
                         scopes: vec!["messages".to_owned()],
@@ -208,9 +205,45 @@ impl Fixture {
 
     async fn create_missing_oauth_upstream_before(&self, before: Uuid) {
         let id = self
-            .create_oauth_upstream("missing-before-target", now_secs() + 3600, false)
+            .create_oauth_upstream("missing-before-target", NOW_UNIX_SECS + 3600, false)
             .await;
         assert_ne!(id, before);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ObservedDispatch {
+    url: Url,
+    authorization: Option<String>,
+}
+
+struct RecordingDispatcher {
+    captured: Arc<Mutex<Vec<ObservedDispatch>>>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for RecordingDispatcher {
+    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        self.captured
+            .lock()
+            .expect("captured dispatch lock")
+            .push(ObservedDispatch {
+                url: request.url().clone(),
+                authorization: request
+                    .headers()
+                    .get(http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map(ToOwned::to_owned),
+            });
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::new(Full::from(Bytes::from_static(
+                br#"{"type":"message","content":[]}"#,
+            ))))
+            .map_err(|error| DispatchError::RequestBuild {
+                reason: error.to_string(),
+            })
     }
 }
 
@@ -324,186 +357,6 @@ impl UpstreamStore for OrderedUpstreamStore {
     }
 }
 
-#[derive(Deserialize)]
-struct InitialTokens {
-    access_token: String,
-    refresh_token: String,
-}
-
-async fn initial_tokens(base: &str) -> InitialTokens {
-    let verifier = "verifier";
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let mut authorize_url = Url::parse(&format!("{base}/oauth/authorize")).expect("authorize url");
-    authorize_url
-        .query_pairs_mut()
-        .append_pair("response_type", "code")
-        .append_pair("client_id", "test-client")
-        .append_pair("redirect_uri", "http://localhost/callback")
-        .append_pair("code_challenge", challenge.as_str())
-        .append_pair("code_challenge_method", "S256");
-    let authorize = raw_http("GET", authorize_url.as_str(), &[], &[])
-        .await
-        .expect("authorize");
-    assert!(
-        authorize.status.is_redirection(),
-        "authorize status {}",
-        authorize.status
-    );
-    let location = authorize
-        .headers
-        .get(LOCATION)
-        .expect("location")
-        .to_str()
-        .expect("location str");
-    let code = Url::parse(location)
-        .expect("location url")
-        .query_pairs()
-        .find_map(|(name, value)| (name == "code").then(|| value.into_owned()))
-        .expect("code");
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair("grant_type", "authorization_code");
-    serializer.append_pair("client_id", "test-client");
-    serializer.append_pair("redirect_uri", "http://localhost/callback");
-    serializer.append_pair("code", &code);
-    serializer.append_pair("code_verifier", verifier);
-    let body = serializer.finish();
-    let token = raw_http(
-        "POST",
-        &format!("{base}/oauth/token"),
-        &[("content-type", "application/x-www-form-urlencoded")],
-        body.as_bytes(),
-    )
-    .await
-    .expect("token");
-    assert!(token.status.is_success(), "token status {}", token.status);
-    serde_json::from_slice(&token.body).expect("token json")
-}
-
-struct RawHttpResponse {
-    status: StatusCode,
-    headers: HeaderMap,
-    body: Bytes,
-}
-
-async fn raw_http(
-    method: &str,
-    url: &str,
-    headers: &[(&str, &str)],
-    body: &[u8],
-) -> std::io::Result<RawHttpResponse> {
-    let url = Url::parse(url).expect("test url");
-    let host = url.host_str().expect("test url host");
-    let port = url.port_or_known_default().expect("test url port");
-    let mut target = url.path().to_owned();
-    if let Some(query) = url.query() {
-        target.push('?');
-        target.push_str(query);
-    }
-    let authority = if url.port().is_some() {
-        format!("{host}:{port}")
-    } else {
-        host.to_owned()
-    };
-    let mut request = format!(
-        "{method} {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nContent-Length: {}\r\n",
-        body.len()
-    );
-    for (name, value) in headers {
-        request.push_str(name);
-        request.push_str(": ");
-        request.push_str(value);
-        request.push_str("\r\n");
-    }
-    request.push_str("\r\n");
-
-    let mut stream = TcpStream::connect((host, port)).await?;
-    stream.write_all(request.as_bytes()).await?;
-    stream.write_all(body).await?;
-    let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await?;
-    parse_raw_response(&bytes)
-}
-
-fn parse_raw_response(bytes: &[u8]) -> std::io::Result<RawHttpResponse> {
-    let header_end = bytes
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing headers"))?;
-    let head = String::from_utf8_lossy(&bytes[..header_end]);
-    let mut lines = head.split("\r\n");
-    let status_line = lines
-        .next()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing status"))?;
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse::<u16>().ok())
-        .and_then(|code| StatusCode::from_u16(code).ok())
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid status"))?;
-    let mut headers = HeaderMap::new();
-    for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            let name = http::header::HeaderName::from_bytes(name.trim().as_bytes())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            let value = http::HeaderValue::from_str(value.trim())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            headers.insert(name, value);
-        }
-    }
-    let body = &bytes[header_end + 4..];
-    let body = if headers
-        .get(http::header::TRANSFER_ENCODING)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
-    {
-        decode_chunked(body)?
-    } else {
-        body.to_vec()
-    };
-    Ok(RawHttpResponse {
-        status,
-        headers,
-        body: Bytes::from(body),
-    })
-}
-
-fn decode_chunked(mut bytes: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut decoded = Vec::new();
-    loop {
-        let line_end = bytes
-            .windows(2)
-            .position(|window| window == b"\r\n")
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk size"))?;
-        let size_text = std::str::from_utf8(&bytes[..line_end])
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let size = usize::from_str_radix(size_text.trim(), 16)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        bytes = &bytes[line_end + 2..];
-        if size == 0 {
-            return Ok(decoded);
-        }
-        if bytes.len() < size + 2 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "chunk body",
-            ));
-        }
-        decoded.extend_from_slice(&bytes[..size]);
-        bytes = &bytes[size + 2..];
-    }
-}
-
-async fn spawn_fake_anthropic() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake");
-    let addr = listener.local_addr().expect("fake addr");
-    tokio::spawn(async move {
-        axum::serve(listener, fake_anthropic_app(AppConfig::default()))
-            .await
-            .expect("fake server")
-    });
-    addr
-}
-
 fn encrypted(
     aead: &AeadService,
     upstream_id: Uuid,
@@ -523,15 +376,4 @@ fn message_request() -> Request<Bytes> {
             br#"{"model":"claude-3-5-sonnet-20241022","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
         ))
         .expect("request builds")
-}
-
-fn now_secs() -> u64 {
-    use cc_lb_engine::Clock as _;
-
-    let clock = cc_lb_engine::SystemClock;
-    clock
-        .now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

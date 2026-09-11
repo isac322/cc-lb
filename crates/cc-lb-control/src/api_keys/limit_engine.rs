@@ -1643,16 +1643,15 @@ fn sweep_expired(engine: &LimitEngine, ttl: Duration) {
     }
 }
 
+#[allow(non_snake_case)]
 #[cfg(test)]
 mod tests {
-    use cc_lb_clock::Clock;
     use std::collections::HashMap;
 
-    use cc_lb_storage_api::BackendKind;
-    use cc_lb_storage_api::MetaStore;
     use cc_lb_storage_api::types::{
         PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
     };
+    use cc_lb_testkit::InMemoryStorage;
 
     use super::*;
 
@@ -1660,7 +1659,7 @@ mod tests {
     fn record_principal_limit_state_feeds_limit_engine_snapshot() {
         let engine = LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_clock::SystemClock),
+            fixed_clock(1_700_000_000),
         );
         let observed_at_unix_secs = unix_secs(engine.inner.clock.now());
 
@@ -1703,7 +1702,7 @@ mod tests {
     ) -> (Arc<LimitEngine>, PrincipalView, StoredApiKeyRecord) {
         let engine = LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_clock::SystemClock),
+            fixed_clock(1_700_000_000),
         );
         let default_limits = vec![cc_lb_storage_api::principal::Limit {
             kind: cc_lb_storage_api::principal::LimitKind::OutputTokens,
@@ -1722,6 +1721,61 @@ mod tests {
             ..StoredApiKeyRecord::default()
         };
         (engine, view, record)
+    }
+
+    fn fixed_clock(unix_secs: u64) -> ClockHandle {
+        Arc::new(cc_lb_clock::TestClock::new_at_secs(unix_secs))
+    }
+
+    #[test]
+    fn t1__reserve_rejects_disallowed_model() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000_000);
+
+        assert_eq!(
+            engine
+                .reserve(&view, &record, "principal-a", "gpt-4", 10, 0, None)
+                .err(),
+            Some(RejectReason::ModelNotAllowed),
+        );
+    }
+
+    #[test]
+    fn t1__reserve_acquires_and_releases_concurrency_guard() {
+        let engine = LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            fixed_clock(1_700_000_000),
+        );
+        let view = PrincipalView::for_tests(
+            "principal-a",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![cc_lb_storage_api::principal::Limit {
+                kind: cc_lb_storage_api::principal::LimitKind::Concurrent,
+                window_secs: 60,
+                cap_micros: 1,
+            }],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            index_hash: [8u8; 32],
+            ..StoredApiKeyRecord::default()
+        };
+
+        let reservation = engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+            .expect("first reservation acquires the only concurrency slot");
+        assert_eq!(
+            engine
+                .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                .err(),
+            Some(RejectReason::ConcurrentRateLimit),
+        );
+
+        drop(reservation);
+
+        engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+            .expect("dropping the first reservation releases the concurrency slot");
     }
 
     #[test]
@@ -1930,21 +1984,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_usage_coordinates_request_limits_across_engines() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let database_url = format!(
-            "sqlite://{}",
-            directory.path().join("durable-limits.sqlite").display()
-        );
-        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
-        let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
-            .await
-            .expect("open sqlite");
-        storage_impl
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("migrate sqlite");
-        let storage: Arc<dyn Storage> = Arc::new(storage_impl);
+    #[allow(non_snake_case)]
+    async fn t2__durable_usage_coordinates_request_limits_across_engines() {
+        let clock = fixed_clock(1_800_000_000);
+        let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_clock(clock.clone()));
         let engine_a = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
         let engine_b = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
         engine_a

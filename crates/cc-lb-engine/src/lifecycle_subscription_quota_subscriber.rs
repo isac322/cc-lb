@@ -23,6 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::clock::ClockHandle;
 use crate::lifecycle::SubscriptionQuotaCacheLike;
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 
@@ -48,11 +49,13 @@ pub fn spawn_lifecycle_subscription_quota_subscriber(
     rx: mpsc::Receiver<LifecycleEvent>,
     cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     sink: Option<SubscriptionQuotaSink>,
+    clock: ClockHandle,
 ) -> SubscriptionQuotaSubscriberHandle {
     spawn_with_config(
         rx,
         cache,
         sink,
+        clock,
         DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP,
         DEFAULT_SUBSCRIPTION_QUOTA_TTL,
     )
@@ -62,11 +65,20 @@ pub fn spawn_with_config(
     rx: mpsc::Receiver<LifecycleEvent>,
     cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     sink: Option<SubscriptionQuotaSink>,
+    clock: ClockHandle,
     map_cap: usize,
     ttl: Duration,
 ) -> SubscriptionQuotaSubscriberHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(rx, cache, sink, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(subscriber_loop(
+        rx,
+        cache,
+        sink,
+        clock,
+        map_cap,
+        ttl,
+        shutdown_rx,
+    ));
     SubscriptionQuotaSubscriberHandle { shutdown_tx, join }
 }
 
@@ -89,6 +101,7 @@ async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     sink: Option<SubscriptionQuotaSink>,
+    clock: ClockHandle,
     map_cap: usize,
     ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
@@ -103,7 +116,7 @@ async fn subscriber_loop(
             biased;
             event = rx.recv() => {
                 match event {
-                    Some(event) => handle_event(cache.as_deref(), sink.as_ref(), &mut partials, map_cap, event),
+                    Some(event) => handle_event(cache.as_deref(), sink.as_ref(), &clock, &mut partials, map_cap, event),
                     None => break,
                 }
             }
@@ -116,6 +129,7 @@ async fn subscriber_loop(
         handle_event(
             cache.as_deref(),
             sink.as_ref(),
+            &clock,
             &mut partials,
             map_cap,
             event,
@@ -126,6 +140,7 @@ async fn subscriber_loop(
 fn handle_event(
     cache: Option<&dyn SubscriptionQuotaCacheLike>,
     sink: Option<&SubscriptionQuotaSink>,
+    clock: &ClockHandle,
     partials: &mut HashMap<EventId, Partial>,
     map_cap: usize,
     event: LifecycleEvent,
@@ -167,7 +182,7 @@ fn handle_event(
                 .increment(1);
                 return;
             };
-            apply_observations(cache, sink, upstream_id, &headers);
+            apply_observations(cache, sink, clock, upstream_id, &headers);
         }
         LifecycleEvent::RequestTerminated { .. } => {
             partials.remove(&event_id);
@@ -183,10 +198,11 @@ fn handle_event(
 fn apply_observations(
     cache: Option<&dyn SubscriptionQuotaCacheLike>,
     sink: Option<&SubscriptionQuotaSink>,
+    clock: &ClockHandle,
     upstream_id: Uuid,
     snapshot: &HeaderSnapshot,
 ) {
-    let observed_at_unix_millis = system_time_unix_millis(SystemTime::now());
+    let observed_at_unix_millis = system_time_unix_millis(clock.now());
     let header_map = header_map_from_snapshot(snapshot);
     let records =
         build_subscription_quota_samples(&header_map, upstream_id, observed_at_unix_millis);
@@ -346,8 +362,12 @@ mod tests {
         let cache = Arc::new(RecordingSubscriptionQuotaCache::default());
         let subscriber_cache: Arc<dyn SubscriptionQuotaCacheLike> = cache.clone();
         let (sink, mut sink_rx) = SubscriptionQuotaSink::with_capacity(16);
-        let handle =
-            spawn_lifecycle_subscription_quota_subscriber(rx, Some(subscriber_cache), Some(sink));
+        let handle = spawn_lifecycle_subscription_quota_subscriber(
+            rx,
+            Some(subscriber_cache),
+            Some(sink),
+            Arc::new(crate::clock::TestClock::new_at_secs(1_700_000_000)),
+        );
 
         tx.send(LifecycleEvent::UpstreamAttempt {
             event_id: eid("quota-a"),
@@ -385,8 +405,12 @@ mod tests {
         let cache = Arc::new(RecordingSubscriptionQuotaCache::default());
         let subscriber_cache: Arc<dyn SubscriptionQuotaCacheLike> = cache.clone();
         let (sink, mut sink_rx) = SubscriptionQuotaSink::with_capacity(16);
-        let handle =
-            spawn_lifecycle_subscription_quota_subscriber(rx, Some(subscriber_cache), Some(sink));
+        let handle = spawn_lifecycle_subscription_quota_subscriber(
+            rx,
+            Some(subscriber_cache),
+            Some(sink),
+            Arc::new(crate::clock::TestClock::new_at_secs(1_700_000_000)),
+        );
 
         tx.send(response_started("quota-b", quota_headers()))
             .await

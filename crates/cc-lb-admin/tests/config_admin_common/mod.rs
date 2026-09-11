@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use bytes::Bytes;
 use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, router};
-use cc_lb_clock::{ClockHandle, SystemClock};
+use cc_lb_clock::ClockHandle;
 use cc_lb_config::Config;
 use cc_lb_control::api_keys::{
     concurrent_guard::KeyConcurrencyManager, key_store::KeyStore, limit_engine::LimitEngine,
@@ -21,8 +21,9 @@ use cc_lb_control::{
 };
 use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_observability::ObservabilityHook;
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, Storage};
 use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -30,34 +31,42 @@ use tower::ServiceExt;
 
 pub const TOKEN: &str = "test-token";
 
-pub async fn temp_storage() -> (tempfile::TempDir, Arc<SqliteStorage>) {
-    temp_storage_with_clock(system_clock()).await
+pub async fn temp_storage() -> ((), Arc<InMemoryStorage>) {
+    temp_storage_with_clock(fixed_clock(1_700_000_000)).await
 }
 
-pub async fn temp_storage_with_clock(
+pub async fn temp_storage_with_clock(clock: ClockHandle) -> ((), Arc<InMemoryStorage>) {
+    ((), test_storage_with_clock(clock).await)
+}
+
+pub async fn test_storage() -> Arc<InMemoryStorage> {
+    test_storage_with_clock(fixed_clock(1_700_000_000)).await
+}
+
+pub async fn test_storage_with_clock(clock: ClockHandle) -> Arc<InMemoryStorage> {
+    Arc::new(InMemoryStorage::with_clock(clock))
+}
+
+pub async fn sqlite_temp_storage() -> (tempfile::TempDir, Arc<SqliteStorage>) {
+    sqlite_temp_storage_with_clock(fixed_clock(1_700_000_000)).await
+}
+
+pub async fn sqlite_temp_storage_with_clock(
     clock: ClockHandle,
 ) -> (tempfile::TempDir, Arc<SqliteStorage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = open_storage(dir.path(), "test.sqlite", clock).await;
+    let storage = open_sqlite_storage(dir.path(), "test.sqlite", clock).await;
     (dir, storage)
 }
 
-pub async fn test_storage() -> Arc<SqliteStorage> {
-    test_storage_with_clock(system_clock()).await
-}
-
-pub async fn test_storage_with_clock(clock: ClockHandle) -> Arc<SqliteStorage> {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = open_storage(dir.path(), "test.sqlite", clock).await;
-    std::mem::forget(dir);
-    storage
-}
-
-pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<KeyStore> {
+pub fn key_store<S>(storage: Arc<S>) -> Arc<KeyStore>
+where
+    S: ManagedKeyStore + 'static,
+{
     Arc::new(KeyStore::new(storage))
 }
 
-async fn open_storage(dir: &Path, filename: &str, clock: ClockHandle) -> Arc<SqliteStorage> {
+async fn open_sqlite_storage(dir: &Path, filename: &str, clock: ClockHandle) -> Arc<SqliteStorage> {
     let database_url = format!("sqlite://{}", dir.join(filename).display());
     let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock)
         .await
@@ -81,15 +90,21 @@ pub fn config_value(default_requests_per_window: u64) -> Value {
     value
 }
 
-pub fn test_state(config: Config, storage: Option<Arc<SqliteStorage>>) -> AdminState {
-    test_state_with_clock(config, storage, system_clock())
+pub fn test_state<S>(config: Config, storage: Option<Arc<S>>) -> AdminState
+where
+    S: Storage + ManagedKeyStore + 'static,
+{
+    test_state_with_clock(config, storage, fixed_clock(1_700_000_000))
 }
 
-pub fn test_state_with_clock(
+pub fn test_state_with_clock<S>(
     config: Config,
-    storage: Option<Arc<SqliteStorage>>,
+    storage: Option<Arc<S>>,
     clock: ClockHandle,
-) -> AdminState {
+) -> AdminState
+where
+    S: Storage + ManagedKeyStore + 'static,
+{
     let principal_view = Arc::new(PrincipalView::from_db(
         &[],
         std::collections::HashMap::new(),
@@ -121,24 +136,20 @@ pub fn test_state_with_clock(
     }
 }
 
-fn system_clock() -> ClockHandle {
-    Arc::new(SystemClock)
-}
-
 pub fn test_state_without_storage() -> AdminState {
-    test_state(minimal_config(), None)
+    test_state(minimal_config(), None::<Arc<InMemoryStorage>>)
 }
 
 pub async fn apply_state(
-    _storage: Arc<SqliteStorage>,
-    _config_path: PathBuf,
+    storage: Arc<InMemoryStorage>,
+    config_path: PathBuf,
     reloader: Arc<TestReloader>,
 ) -> AdminState {
-    apply_state_with_clock(_storage, _config_path, reloader, system_clock()).await
+    apply_state_with_clock(storage, config_path, reloader, fixed_clock(1_700_000_000)).await
 }
 
 pub async fn apply_state_with_clock(
-    _storage: Arc<SqliteStorage>,
+    _storage: Arc<InMemoryStorage>,
     _config_path: PathBuf,
     reloader: Arc<TestReloader>,
     clock: ClockHandle,

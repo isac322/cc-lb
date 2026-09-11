@@ -1209,15 +1209,15 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+#[allow(non_snake_case)]
+mod t2__tests {
     use std::collections::BTreeSet;
 
     use cc_lb_domain::{TtlClass as PluginTtlClass, TtlClass as StorageTtlClass};
-    use cc_lb_engine::clock::{Clock, TestClock};
     use cc_lb_engine::lifecycle::PromptCacheObservationCacheLike;
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
-    use cc_lb_storage_api::{BackendKind, MetaStore, PromptCacheObservationRecord, UpstreamCreate};
-    use cc_lb_storage_sqlite::SqliteStorage as Storage;
+    use cc_lb_storage_api::{PromptCacheObservationRecord, UpstreamCreate};
+    use cc_lb_testkit::{InMemoryStorage as Storage, fixed_clock};
 
     use super::*;
     use crate::prompt_cache_observation_cache::HASH_SCHEMA_VERSION;
@@ -1236,7 +1236,7 @@ mod tests {
     async fn router_pipeline_for_seeded_principal(
         include_router_entries: bool,
     ) -> Option<Arc<RouterPipelineCache>> {
-        let (dir, storage) = storage_fixture(9).await;
+        let storage = storage_fixture();
         let stores = stores(
             storage.clone(),
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
@@ -1277,23 +1277,21 @@ mod tests {
             .collect();
 
         let mut slot_keys = HashSet::new();
-        let pipeline = build_router_pipeline(
+        build_router_pipeline(
             &stores,
             &runtime,
-            dir.path(),
+            Path::new("."),
             &principal,
             router_entries,
             &registry,
             &mut slot_keys,
         )
         .await
-        .expect("pipeline builds");
-        drop(dir);
-        pipeline
+        .expect("pipeline builds")
     }
 
     #[tokio::test]
-    async fn seeded_subscription_preference_chain_yields_the_builtin_filter() {
+    async fn t2__seeded_subscription_preference_chain_yields_the_builtin_filter() {
         let pipeline = router_pipeline_for_seeded_principal(true)
             .await
             .expect("seeded entry produces a router pipeline");
@@ -1306,7 +1304,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_router_chain_yields_no_pipeline() {
+    async fn t2__empty_router_chain_yields_no_pipeline() {
         assert!(
             router_pipeline_for_seeded_principal(false).await.is_none(),
             "an absent chain means no router filter pipeline"
@@ -1318,6 +1316,7 @@ mod tests {
         records: Arc<Vec<PromptCacheObservationRecord>>,
         list_delay: Option<Duration>,
         upserts: Arc<tokio::sync::Mutex<Vec<PromptCacheObservationRecord>>>,
+        upserted: Arc<tokio::sync::Notify>,
     }
 
     impl FakePromptCacheObservationStore {
@@ -1326,6 +1325,7 @@ mod tests {
                 records: Arc::new(records),
                 list_delay: None,
                 upserts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                upserted: Arc::new(tokio::sync::Notify::new()),
             }
         }
 
@@ -1334,11 +1334,18 @@ mod tests {
                 records: Arc::new(Vec::new()),
                 list_delay: Some(delay),
                 upserts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                upserted: Arc::new(tokio::sync::Notify::new()),
             }
         }
 
         async fn list_count(&self) -> usize {
             self.upserts.lock().await.len()
+        }
+
+        async fn wait_for_upserts(&self, expected: usize) {
+            while self.list_count().await < expected {
+                self.upserted.notified().await;
+            }
         }
 
         async fn list_all(&self) -> Vec<PromptCacheObservationRecord> {
@@ -1372,25 +1379,13 @@ mod tests {
             record: &PromptCacheObservationRecord,
         ) -> StorageResult<()> {
             self.upserts.lock().await.push(record.clone());
+            self.upserted.notify_one();
             Ok(())
         }
     }
 
-    async fn storage_fixture(seed: u8) -> (tempfile::TempDir, Arc<Storage>) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let database_url = format!(
-            "sqlite://{}",
-            dir.path()
-                .join(format!("dynamic-view-builder-{seed}.sqlite"))
-                .display()
-        );
-        let storage =
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-                .await
-                .expect("storage");
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
-        let storage = Arc::new(storage);
-        (dir, storage)
+    fn storage_fixture() -> Arc<Storage> {
+        Arc::new(Storage::with_clock(fixed_clock(1_700_000_000)))
     }
 
     fn stores(
@@ -1444,7 +1439,7 @@ mod tests {
         data_dir: &Path,
         config: cc_lb_config::Config,
     ) -> Arc<DynamicView> {
-        let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let clock = fixed_clock(1_700_000_000);
         let cache = new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
         let (sink, _writer) = PromptCacheObservationSink::new(
             stores.prompt_cache_observations.clone(),
@@ -1492,8 +1487,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn includes_prompt_cache() {
-        let (dir, storage) = storage_fixture(19).await;
+    async fn t2__includes_prompt_cache() {
+        let storage = storage_fixture();
         let upstream = create_upstream(&storage, "prompt-cache-upstream").await;
         let prompt_store = Arc::new(FakePromptCacheObservationStore::new(vec![
             prompt_record(upstream.id, "hash-a", 1_700_000_001),
@@ -1503,8 +1498,8 @@ mod tests {
         let stores = stores(storage, prompt_store);
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
-        let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
-        let clock = TestClock::new_at_secs(1_700_000_000);
+        let dynamic_view = build_view(&stores, &runtime, Path::new(".")).await;
+        let clock = fixed_clock(1_700_000_000);
 
         let snapshot = dynamic_view
             .prompt_cache_observation_cache_opt()
@@ -1536,14 +1531,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observation_sink_routes_records_to_store() {
-        let (dir, storage) = storage_fixture(22).await;
+    async fn t2__observation_sink_routes_records_to_store() {
+        let storage = storage_fixture();
         let upstream = create_upstream(&storage, "sink-wiring-upstream").await;
         let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
         let stores = stores(storage, prompt_store.clone());
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
-        let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
+        let dynamic_view = build_view(&stores, &runtime, Path::new(".")).await;
         let sink = dynamic_view
             .prompt_cache_observation_sink_opt()
             .expect("sink wired when prompt_cache_shadow enabled")
@@ -1562,12 +1557,7 @@ mod tests {
         };
         sink.enqueue(record.clone())
             .expect("enqueue succeeds while writer is alive");
-        for _ in 0..50 {
-            if prompt_store.list_count().await >= 1 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        prompt_store.wait_for_upserts(1).await;
         let stored = prompt_store.list_all().await;
         assert_eq!(
             stored.len(),
@@ -1579,15 +1569,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_prompt_cache_observation_cache_sees_live_upsert_after_rebind() {
+    async fn t2__shared_prompt_cache_observation_cache_sees_live_upsert_after_rebind() {
         // Given: two DynamicView builds share the process-level observation cache handle.
-        let (dir, storage) = storage_fixture(23).await;
+        let storage = storage_fixture();
         let upstream = create_upstream(&storage, "shared-cache-upstream").await;
         let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
         let stores = stores(storage, prompt_store);
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
         let config = cc_lb_config::Config::default();
-        let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let clock = fixed_clock(1_700_000_000);
         let shared_cache =
             new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
         let shared_cache_trait: Arc<dyn PromptCacheObservationCacheLike> = shared_cache.clone();
@@ -1599,7 +1589,7 @@ mod tests {
             None,
             0,
             &runtime,
-            dir.path(),
+            Path::new("."),
             Arc::new(SubscriptionQuotaCache::new()),
             Some(shared_cache.clone()),
             None,
@@ -1615,7 +1605,7 @@ mod tests {
             None,
             view_a.generation,
             &runtime,
-            dir.path(),
+            Path::new("."),
             Arc::new(SubscriptionQuotaCache::new()),
             Some(shared_cache.clone()),
             None,
@@ -1661,9 +1651,9 @@ mod tests {
         assert_eq!(snapshot[0].prefix_hash, "live-prefix");
     }
 
-    #[tokio::test]
-    async fn hydrate_timeout_logs_warn_and_continues() {
-        let (dir, storage) = storage_fixture(20).await;
+    #[tokio::test(start_paused = true)]
+    async fn t2__hydrate_timeout_logs_warn_and_continues() {
+        let storage = storage_fixture();
         let upstream = create_upstream(&storage, "timeout-upstream").await;
         let stores = stores(
             storage,
@@ -1672,12 +1662,9 @@ mod tests {
             )),
         );
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-        let started = tokio::time::Instant::now();
 
-        let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
-        let clock = TestClock::new_at_secs(1_700_000_000);
-
-        assert!(started.elapsed() <= Duration::from_secs(6));
+        let dynamic_view = build_view(&stores, &runtime, Path::new(".")).await;
+        let clock = fixed_clock(1_700_000_000);
         let snapshot = dynamic_view
             .prompt_cache_observation_cache_opt()
             .expect("prompt cache enabled")
@@ -1691,8 +1678,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_config_constructs_cache() {
-        let (dir, storage) = storage_fixture(21).await;
+    async fn t2__default_config_constructs_cache() {
+        let storage = storage_fixture();
         let stores = stores(
             storage,
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
@@ -1702,7 +1689,7 @@ mod tests {
         let dynamic_view = build_view_with_config(
             &stores,
             &runtime,
-            dir.path(),
+            Path::new("."),
             cc_lb_config::Config::default(),
         )
         .await;
@@ -1715,8 +1702,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tunables_propagate_to_cache() {
-        let (dir, storage) = storage_fixture(22).await;
+    async fn t2__tunables_propagate_to_cache() {
+        let storage = storage_fixture();
         let stores = stores(
             storage,
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
@@ -1726,7 +1713,7 @@ mod tests {
         config.prompt_cache_shadow.grace_margin_secs = 99;
         config.prompt_cache_shadow.refresh_debounce_secs = 123;
 
-        let dynamic_view = build_view_with_config(&stores, &runtime, dir.path(), config).await;
+        let dynamic_view = build_view_with_config(&stores, &runtime, Path::new("."), config).await;
 
         let cache = dynamic_view
             .prompt_cache_observation_cache_opt()

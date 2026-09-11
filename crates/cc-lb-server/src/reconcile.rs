@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cc_lb_aead::AeadService;
@@ -8,6 +8,7 @@ use cc_lb_engine::DynamicViewHolder;
 use cc_lb_engine::clock::ClockHandle;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{PluginSlotKind, StorageResult};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -31,6 +32,7 @@ pub struct Reconciler {
     pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub clock: ClockHandle,
+    rng: Mutex<StdRng>,
 }
 
 impl Reconciler {
@@ -64,11 +66,18 @@ impl Reconciler {
             prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs,
             clock,
+            rng: Mutex::new(rand::make_rng()),
         }
     }
 
+    pub fn with_rng_seed(mut self, seed: [u8; 32]) -> Self {
+        self.rng = Mutex::new(StdRng::from_seed(seed));
+        self
+    }
+
     pub async fn run(self: Arc<Self>) {
-        let mut interval = tokio::time::interval(Duration::from_millis(60_000 + jitter_millis()));
+        let mut interval =
+            tokio::time::interval(Duration::from_millis(60_000 + jitter_millis(&self.rng)));
         interval.tick().await;
 
         loop {
@@ -77,7 +86,7 @@ impl Reconciler {
                 _ = interval.tick() => {}
             }
 
-            let jitter = tokio::time::sleep(Duration::from_millis(jitter_millis()));
+            let jitter = tokio::time::sleep(Duration::from_millis(jitter_millis(&self.rng)));
             tokio::pin!(jitter);
             tokio::select! {
                 _ = self.cancel.cancelled() => return,
@@ -213,6 +222,35 @@ async fn chain_revisions(
         .collect())
 }
 
-fn jitter_millis() -> u64 {
-    rand::random_range(0..=10_000)
+fn jitter_millis(rng: &Mutex<StdRng>) -> u64 {
+    rng.lock()
+        .expect("reconciler RNG mutex poisoned")
+        .random_range(0..=10_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seeded_rng(seed: [u8; 32]) -> Mutex<StdRng> {
+        Mutex::new(StdRng::from_seed(seed))
+    }
+
+    #[test]
+    fn equal_seeds_produce_equal_jitter_sequences() {
+        let left = seeded_rng([31; 32]);
+        let right = seeded_rng([31; 32]);
+
+        let left_jitter = (0..256).map(|_| jitter_millis(&left)).collect::<Vec<_>>();
+        let right_jitter = (0..256).map(|_| jitter_millis(&right)).collect::<Vec<_>>();
+
+        assert_eq!(left_jitter, right_jitter);
+    }
+
+    #[test]
+    fn jitter_stays_within_inclusive_bounds() {
+        let rng = seeded_rng([37; 32]);
+
+        assert!((0..10_000).all(|_| (0..=10_000).contains(&jitter_millis(&rng))));
+    }
 }

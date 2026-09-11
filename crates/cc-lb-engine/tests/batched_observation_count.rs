@@ -9,7 +9,7 @@ use sse_relay_support::{
 };
 
 #[tokio::test]
-async fn batched_observation_count() {
+async fn t2__batched_observation_count() {
     let hook = Arc::new(RecordingHook::default());
     let relay = relay_for(
         Arc::clone(&hook),

@@ -108,7 +108,7 @@ impl RouterPlugin for FirstRouter {
 
 pub(crate) fn principal_with_keepalive() -> PrincipalRecord {
     PrincipalRecord {
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(0x1006),
         name: "principal-test".to_owned(),
         kind: PrincipalKind::Machine,
         allowed_models: vec!["*".to_owned()],

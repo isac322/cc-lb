@@ -156,3 +156,60 @@ async fn flush_batch(storage: &Arc<dyn Storage>, batch: Vec<SubscriptionQuotaSam
         tracing::warn!(error = %error, batch_size = batch.len(), "subscription quota batch persistence failed");
     }
 }
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use cc_lb_storage_api::{
+        SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
+        SubscriptionQuotaWindow,
+    };
+    use metrics_util::debugging::DebugValue;
+    use uuid::Uuid;
+
+    #[test]
+    fn t1__subscription_quota_sink_full_drops_and_increments_metric() {
+        let (sink, _receiver) = SubscriptionQuotaSink::with_capacity(1);
+        sink.enqueue(sample(1)).expect("first record fits");
+
+        cc_lb_testkit::with_local_recorder(|snapshotter| {
+            assert!(matches!(
+                sink.enqueue(sample(2)),
+                Err(SubscriptionQuotaEnqueueError::Full)
+            ));
+
+            let samples = snapshotter.snapshot().into_vec();
+            assert_eq!(samples.len(), 1);
+            let (key, _, _, value) = &samples[0];
+            assert_eq!(key.key().name(), "subscription_quota_full");
+            assert_eq!(*value, DebugValue::Counter(1));
+        });
+    }
+
+    fn sample(id: u128) -> SubscriptionQuotaSample {
+        SubscriptionQuotaSample {
+            upstream_id: Uuid::from_u128(id),
+            window: SubscriptionQuotaWindow::FiveHour,
+            source: SubscriptionQuotaSource::Api,
+            sample_kind: SubscriptionQuotaSampleKind::Sample,
+            observed_at_unix_millis: 1_700_000_000_000,
+            sample_id: Uuid::from_u128(100 + id),
+            utilization: Some(0.5),
+            status: Some(SubscriptionQuotaStatus::Allowed),
+            resets_at_unix_secs: Some(1_700_018_000),
+            surpassed_threshold: None,
+            representative_claim: None,
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            ingested_at_unix_millis: 1_700_000_000_001,
+        }
+    }
+}

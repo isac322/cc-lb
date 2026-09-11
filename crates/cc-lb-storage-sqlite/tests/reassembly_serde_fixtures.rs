@@ -1,4 +1,4 @@
-use std::{fs, path::Path, sync::Arc};
+use std::{fs, path::Path};
 
 use cc_lb_domain::{
     InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace, StageDecision,
@@ -22,20 +22,9 @@ const FIXTURE_NAMES: [&str; 4] = [
 ];
 
 #[tokio::test]
-async fn golden_serde_bytes_match_current_types_and_storage_path() {
+async fn t3__golden_serde_bytes_match_current_types_and_storage_path() {
     let generated_dir = tempfile::tempdir().expect("create generated fixture directory");
     generate_fixtures(generated_dir.path()).await;
-
-    if std::env::var_os("UPDATE_REASSEMBLY_FIXTURES").is_some() {
-        fs::create_dir_all(FIXTURE_ROOT).expect("create committed fixture directory");
-        for name in FIXTURE_NAMES {
-            fs::copy(
-                generated_dir.path().join(name),
-                Path::new(FIXTURE_ROOT).join(name),
-            )
-            .expect("copy generated fixture");
-        }
-    }
 
     for name in FIXTURE_NAMES {
         let generated = fs::read(generated_dir.path().join(name)).expect("read generated fixture");
@@ -189,7 +178,7 @@ async fn generate_fixtures(output_dir: &Path) {
         database_dir.path().join("reassembly.sqlite").display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open fixture sqlite database");
     storage
