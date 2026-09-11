@@ -356,6 +356,8 @@ jobs:
 
   tx:
     runs-on: cc-lb-2
+    container:
+      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-fe7ac6d6df4f@sha256:c2f09887524d6616d0b97be3316822b47466f5633409f743d6e1bab277deefb4
     services:
       postgres:
         image: postgres:18
@@ -375,20 +377,42 @@ jobs:
       DATABASE_URL_TEST: postgres://postgres:testpw@localhost:5432/cc_lb_test
       SQLX_OFFLINE: "true"
     steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
-          targets: wasm32-wasip1,wasm32-unknown-unknown
-      - uses: ./.github/actions/setup-rust-cache
-        with:
-          stable-build-metadata: "true"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
+      # ARC's job-container hook intermittently fails while serializing live
+      # Node-action HTTP objects. Keep this job shell-only: fetch the exact
+      # workflow commit directly and use Cargo's test-name filter for TX.
+      - name: Checkout source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Install pinned Rust toolchain and wasm targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
+          export RUSTUP_HOME="$RUNNER_TEMP/rustup"
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+              https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+          rustup target add --toolchain 1.98.1 wasm32-wasip1 wasm32-unknown-unknown
       - name: Run non-functional Rust tests
-        run: cargo nextest run --workspace --exclude cc-lb-loadgen --exclude cc-lb-stress-suite --exclude tests-multi-replica --all-features --profile tx
+        run: >-
+          cargo test --workspace
+          --exclude cc-lb-loadgen
+          --exclude cc-lb-stress-suite
+          --exclude tests-multi-replica
+          --all-features
+          tx__
 
   # A sharded, multi-node version of this job is prepared (inactive) in
   # coverage-sharded.yml — enable it once the ARC pool has more than one node.
