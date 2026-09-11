@@ -334,7 +334,7 @@ pub mod __private {
         target_os = "macos",
         target_pointer_width = "64"
     )))]
-    fn guest_ptr(ptr: u32) -> *mut u8 {
+    pub(crate) fn guest_ptr(ptr: u32) -> *mut u8 {
         ptr as usize as *mut u8
     }
 
