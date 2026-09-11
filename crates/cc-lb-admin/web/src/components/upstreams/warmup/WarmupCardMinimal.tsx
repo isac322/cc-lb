@@ -113,6 +113,7 @@ function HelpIcon({
       side="top"
     >
       <span
+        role="img"
         aria-label={label}
         className="inline-flex h-4 w-4 cursor-help items-center justify-center text-text-faint transition-colors hover:text-text"
       >
