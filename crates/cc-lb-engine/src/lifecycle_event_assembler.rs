@@ -990,7 +990,18 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.limit_reserve_ms = limit_reserve_ms;
         }
         LifecycleEvent::LimitDecision { .. } => {}
-        LifecycleEvent::UpstreamAttempt { .. } => {}
+        LifecycleEvent::UpstreamAttempt { attempt_num, .. } => {
+            if attempt_num > 1 {
+                partial.upstream_response_status = None;
+                partial.bulkhead_wait_ms = None;
+                partial.dns_ms = None;
+                partial.connect_ms = None;
+                partial.connection_reused = None;
+                partial.shape_ms = None;
+                partial.sign_ms = None;
+                partial.upstream_ttfb_ms = None;
+            }
+        }
         LifecycleEvent::UpstreamResponseStarted {
             status,
             headers: _,

@@ -47,6 +47,29 @@ impl UpstreamDispatch for TimedDispatch {
     }
 }
 
+#[derive(Clone)]
+struct FailingSecondAttemptDispatch {
+    first: TimedDispatch,
+    attempt_count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for FailingSecondAttemptDispatch {
+    async fn dispatch(
+        &self,
+        request: SignedRequest,
+    ) -> Result<http::Response<Body>, DispatchError> {
+        let count = self.attempt_count.fetch_add(1, Ordering::SeqCst);
+        if count == 0 {
+            self.first.dispatch(request).await
+        } else {
+            Err(DispatchError::Transport {
+                reason: "simulated retry connection reset".to_owned(),
+            })
+        }
+    }
+}
+
 #[tokio::test]
 async fn unauthorized_refresh_retries_once_then_stops() {
     let state = TestState::default();
@@ -146,4 +169,88 @@ async fn unauthorized_refresh_retries_once_then_stops() {
         retry_overhead_ms >= first_attempt_ttfb_ms as f64,
         "retry overhead must include the completed first attempt and refresh before attempt two"
     );
+}
+
+#[tokio::test]
+async fn unauthorized_refresh_second_attempt_dispatch_error_clears_stale_stage_timings() {
+    let state = TestState::default();
+    let hook = Arc::new(RecordingHook::default());
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_events = test_bus.bus.attach_lifecycle_writer(32);
+    let dispatcher = MockDispatch {
+        state: state.clone(),
+        mode: DispatchMode::Statuses(Arc::new(Mutex::new(VecDeque::from([
+            StatusCode::UNAUTHORIZED,
+        ])))),
+    };
+    let timed_dispatch = TimedDispatch {
+        inner: dispatcher,
+        attempts: Arc::new(Mutex::new(VecDeque::from([Duration::from_millis(
+            FIRST_ATTEMPT_DELAY_MS,
+        )]))),
+    };
+    let failing_dispatch = FailingSecondAttemptDispatch {
+        first: timed_dispatch,
+        attempt_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+    let lifecycle = lifecycle_with_parts(
+        TestAuthn::new(state.clone()),
+        Arc::new(TestRouter {
+            base_url: url::Url::parse("http://upstream.local/").expect("test URL parses"),
+        }),
+        Arc::new(failing_dispatch),
+        vec![hook],
+        LifecycleConfig::default(),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        )))
+        .await
+        .expect("lifecycle handles request");
+    let (status, _headers, _body) = collect_body(response).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+
+    let (first_attempt_ttfb, terminal_event) =
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let mut first_ttfb = None;
+            loop {
+                match lifecycle_events
+                    .recv()
+                    .await
+                    .expect("lifecycle event channel remains open")
+                {
+                    LifecycleEvent::UpstreamResponseStarted {
+                        upstream_ttfb_ms, ..
+                    } if first_ttfb.is_none() => {
+                        first_ttfb = upstream_ttfb_ms;
+                    }
+                    LifecycleEvent::RequestTerminated {
+                        client_status,
+                        upstream_body_ms,
+                        io_timings,
+                        ..
+                    } => {
+                        break (first_ttfb, (client_status, upstream_body_ms, io_timings));
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("terminal lifecycle event arrives");
+
+    assert!(first_attempt_ttfb.is_some());
+    let (client_status, upstream_body_ms, io_timings) = terminal_event;
+    assert_eq!(client_status, StatusCode::BAD_GATEWAY.as_u16());
+    assert_eq!(upstream_body_ms, None);
+    let retry_overhead_ms = io_timings
+        .retry_overhead_ms
+        .expect("retry overhead is recorded");
+    assert!(retry_overhead_ms.is_finite());
+    assert!(retry_overhead_ms >= 0.0);
 }

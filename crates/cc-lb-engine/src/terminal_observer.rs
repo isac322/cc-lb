@@ -321,6 +321,13 @@ impl LifecycleContext {
         }
     }
 
+    pub(crate) fn reset_attempt_timings(&self) {
+        let mut state = self.lock_state();
+        state.shape_ms = None;
+        state.sign_ms = None;
+        state.upstream_ttfb_ms = None;
+    }
+
     pub(crate) fn set_termination_timings(
         &self,
         limit_reconcile_ms: Option<u64>,

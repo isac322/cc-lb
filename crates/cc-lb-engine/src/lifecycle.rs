@@ -2980,6 +2980,7 @@ impl Lifecycle {
             {
                 attempt_timings.reset_attempt_stages();
                 if let Some(o) = observer.as_ref() {
+                    o.reset_attempt_timings();
                     o.set_io_timings(cc_lb_lifecycle::RequestIoTimings {
                         retry_overhead_ms: Some(dispatch_started.elapsed().as_secs_f64() * 1_000.0),
                         ..Default::default()
