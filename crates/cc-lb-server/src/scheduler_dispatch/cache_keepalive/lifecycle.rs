@@ -144,6 +144,7 @@ pub(super) fn publish_renewal_lifecycle(
         upstream_body_ms: None,
         first_body_chunk_ms: None,
         internal_errors: Vec::new(),
+        io_timings: Default::default(),
     });
 }
 

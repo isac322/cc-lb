@@ -2,15 +2,20 @@ import { describe, expect, it } from 'vitest';
 import type { RequestEvent } from '../../../lib/api';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import {
+  computeLatencyAttribution,
   computeStageGroups,
   deriveOtherSetup,
   deriveProxyTimelineDuration,
   deriveSetupOverhead,
   hasSetupTimingBreakdown,
+  LATENCY_CATEGORY_META,
+  responseBodyDuration,
   setupTimingTotal,
 } from './computeStageGroups';
 
-function ev(overrides: Partial<RequestEvent>): RequestEventWithPhase {
+function ev(
+  overrides: Partial<RequestEvent>,
+): RequestEvent & { _phase: 'final' } {
   return {
     ts: 1234567890,
     request_id: 'req_test',
@@ -31,6 +36,7 @@ describe('computeStageGroups', () => {
       upstream: 0,
       body: 0,
       internalPost: 0,
+      retryOverhead: 0,
       unaccounted: 0,
       accounted: 0,
       rawResidual: 0,
@@ -421,5 +427,455 @@ describe('computeStageGroups', () => {
     expect(explicitNull.internalPost).toBe(10);
     expect(measuredZero.internalPost).toBe(0);
     expect(measuredZero.accounted).toBe(0);
+  });
+});
+
+describe('computeLatencyAttribution', () => {
+  it('publishes four fixed category anchors in display order', () => {
+    expect(Object.keys(LATENCY_CATEGORY_META)).toEqual([
+      'downstream_network',
+      'cc_lb',
+      'upstream_network',
+      'upstream_processing',
+    ]);
+    expect(
+      Object.values(LATENCY_CATEGORY_META).map(({ label, fill }) => ({
+        label,
+        fill,
+      })),
+    ).toEqual([
+      { label: 'Downstream network', fill: '#06b6d4' },
+      { label: 'cc-lb processing', fill: '#6366f1' },
+      { label: 'Upstream network', fill: '#f59e0b' },
+      { label: 'Upstream processing', fill: '#10b981' },
+    ]);
+  });
+
+  it('separates measured categories, combined waits, retry, and unknown time', () => {
+    const attribution = computeLatencyAttribution(
+      ev({
+        duration_ms: 1000,
+        request_body_read_ms: 100,
+        request_body_wait_ms: 60,
+        request_body_process_ms: 20,
+        proxy_setup_ms: 100,
+        auth_ms: 30,
+        route_ms: 20,
+        limit_reserve_ms: 10,
+        shape_ms: 10,
+        sign_ms: 5,
+        bulkhead_wait_ms: 20,
+        dns_ms: 30,
+        connect_ms: 50,
+        upstream_ttfb_ms: 300,
+        upstream_body_ms: 400,
+        stream_total_ms: 400,
+        response_body_wait_ms: 250,
+        response_body_process_ms: 40,
+        response_body_downstream_poll_gap_ms: 30,
+        finalize_ms: 20,
+        limit_reconcile_ms: 5,
+        retry_overhead_ms: 50,
+      }),
+    );
+
+    expect(attribution.categories.map(({ key, ms }) => ({ key, ms }))).toEqual([
+      { key: 'downstream_network', ms: 90 },
+      { key: 'cc_lb', ms: 215 },
+      { key: 'upstream_network', ms: 80 },
+      { key: 'upstream_processing', ms: null },
+    ]);
+    expect(attribution.mixedUpstreamMs).toBe(450);
+    expect(attribution.mixedRetryMs).toBe(50);
+    expect(attribution.accountedMs).toBe(885);
+    expect(attribution.unattributedMs).toBe(115);
+    expect(attribution.hasIoTimings).toBe(true);
+    expect(attribution.accountingWarning).toBe(false);
+  });
+
+  it('keeps legacy ingress unattributed and legacy response explicitly mixed', () => {
+    const attribution = computeLatencyAttribution(
+      ev({
+        duration_ms: 500,
+        request_body_read_ms: 100,
+        proxy_setup_ms: 50,
+        upstream_ttfb_ms: 100,
+        upstream_body_ms: 200,
+        finalize_ms: 25,
+      }),
+    );
+
+    expect(attribution.categories.map(({ ms }) => ms)).toEqual([
+      null,
+      75,
+      null,
+      null,
+    ]);
+    expect(attribution.mixedUpstreamMs).toBe(300);
+    expect(attribution.accountedMs).toBe(375);
+    expect(attribution.unattributedMs).toBe(125);
+    expect(attribution.hasIoTimings).toBe(false);
+    expect(attribution.categories[3]?.note).toContain(
+      'Legacy response-body time combines',
+    );
+  });
+
+  it('distinguishes a measured zero from missing category data', () => {
+    const attribution = computeLatencyAttribution(
+      ev({
+        duration_ms: 0,
+        request_body_wait_ms: 0,
+      }),
+    );
+
+    expect(attribution.categories.map(({ ms }) => ms)).toEqual([
+      0,
+      null,
+      null,
+      null,
+    ]);
+    expect(attribution.mixedUpstreamMs).toBeNull();
+    expect(attribution.mixedRetryMs).toBeNull();
+    expect(attribution.hasIoTimings).toBe(true);
+    expect(attribution.accountingWarning).toBe(false);
+  });
+
+  it('ignores negative and non-finite measurements instead of manufacturing zeroes', () => {
+    const attribution = computeLatencyAttribution(
+      ev({
+        duration_ms: Number.NaN,
+        request_body_wait_ms: -1,
+        request_body_process_ms: Number.POSITIVE_INFINITY,
+        response_body_wait_ms: Number.NEGATIVE_INFINITY,
+        retry_overhead_ms: Number.NaN,
+        proxy_setup_ms: Number.POSITIVE_INFINITY,
+        dns_ms: -2,
+        request_body_chunk_count: 1.5,
+      }),
+    );
+
+    expect(attribution.timelineTotalMs).toBe(0);
+    expect(attribution.categories.map(({ ms }) => ms)).toEqual([
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(attribution.mixedUpstreamMs).toBeNull();
+    expect(attribution.mixedRetryMs).toBeNull();
+    expect(attribution.hasIoTimings).toBe(false);
+    expect(attribution.accountedMs).toBe(0);
+    expect(attribution.unattributedMs).toBe(0);
+    expect(attribution.accountingWarning).toBe(false);
+  });
+
+  it('keeps invalid loose partial timing fields unmeasured', () => {
+    const partial = {
+      event_id: 'evt-partial-invalid-timing',
+      request_id: 'req-partial-invalid-timing',
+      ts: 1,
+      ts_ms: 1000,
+      elapsed_ms: 40,
+      stream: true,
+      proxy_setup_ms: '12',
+      limit_reconcile_ms: { milliseconds: 3 },
+      _phase: 'partial',
+    } satisfies RequestEventWithPhase;
+
+    const attribution = computeLatencyAttribution(partial);
+
+    expect(attribution.categories.map(({ ms }) => ms)).toEqual([
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(attribution.accountedMs).toBe(0);
+    expect(attribution.unattributedMs).toBe(40);
+    expect(attribution.accountingWarning).toBe(false);
+  });
+
+  it('renders known partial measurements without treating missing fields as zero', () => {
+    const partial = {
+      event_id: 'evt-partial-attribution',
+      request_id: 'req-partial-attribution',
+      ts: 1,
+      ts_ms: 1000,
+      last_update_ms: 1100,
+      elapsed_ms: 100,
+      stream: true,
+      request_body_wait_ms: 20,
+      request_body_process_ms: 5,
+      response_body_wait_ms: 10,
+      cache_structure_ms: 0,
+      _phase: 'partial',
+    } satisfies RequestEventWithPhase;
+
+    const attribution = computeLatencyAttribution(partial);
+    expect(attribution.categories.map(({ ms }) => ms)).toEqual([
+      20,
+      5,
+      null,
+      null,
+    ]);
+    expect(attribution.mixedUpstreamMs).toBe(10);
+    expect(attribution.accountedMs).toBe(35);
+    expect(attribution.unattributedMs).toBe(65);
+    expect(attribution.timelineTotalMs).toBe(100);
+    expect(attribution.hasIoTimings).toBe(true);
+  });
+
+  it('treats real sub-millisecond child overruns from u64 parents as rounding, not corruption', () => {
+    const attribution = computeLatencyAttribution(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 7,
+        request_body_read_ms: 0,
+        request_body_first_chunk_ms: 0.005875,
+        request_body_receive_ms: 0.193167,
+        request_body_wait_ms: 0.120708,
+        request_body_process_ms: 0.078334,
+        request_body_chunk_count: 5,
+        proxy_setup_ms: 5,
+        auth_ms: 0,
+        route_ms: 0,
+        limit_reserve_ms: 0,
+        json_parse_ms: 0.629958,
+        cache_structure_ms: 3.634917,
+        cache_token_key_ms: 0.001958,
+        cache_count_lookup_ms: 0,
+        cache_tokenizer_queue_ms: 0.001458,
+        cache_serialize_ms: 0.0005,
+        cache_tokenize_ms: 0,
+        prepare_signer_ms: 0.011208,
+        bulkhead_wait_ms: 0,
+        dns_ms: 0,
+        connect_ms: 0,
+        upstream_ttfb_ms: 1,
+        upstream_body_ms: 0,
+        response_body_wait_ms: 0.003541,
+        response_body_process_ms: 0.002042,
+        response_body_downstream_poll_gap_ms: null,
+        finalize_ms: 0,
+      }),
+    );
+
+    expect(attribution.categories[0]?.ms).toBe(0.120708);
+    expect(attribution.categories[1]?.ms).toBeCloseTo(5.080376);
+    expect(attribution.categories[2]?.ms).toBe(0);
+    expect(attribution.categories[3]?.ms).toBeNull();
+    expect(attribution.mixedUpstreamMs).toBeCloseTo(1.003541);
+    expect(attribution.accountedMs).toBeCloseTo(6.204625);
+    expect(attribution.unattributedMs).toBeCloseTo(0.795375);
+    expect(attribution.accountingWarning).toBe(false);
+  });
+
+  it('warns at the exact one-millisecond limit that truncation cannot explain', () => {
+    const roundingOnly = computeLatencyAttribution(
+      ev({
+        duration_ms: 0,
+        request_body_read_ms: 0,
+        request_body_wait_ms: 0.02,
+        request_body_process_ms: 0.014041,
+      }),
+    );
+    expect(roundingOnly.accountedMs).toBeCloseTo(0.034041);
+    expect(roundingOnly.accountingWarning).toBe(false);
+
+    const localParentOverrun = computeLatencyAttribution(
+      ev({
+        duration_ms: 10,
+        request_body_read_ms: 0,
+        request_body_wait_ms: 0.6,
+        request_body_process_ms: 0.4,
+      }),
+    );
+    const globalTotalOverrun = computeLatencyAttribution(
+      ev({
+        duration_ms: 0,
+        request_body_wait_ms: 1,
+      }),
+    );
+
+    expect(localParentOverrun.accountedMs).toBe(1);
+    expect(localParentOverrun.accountingWarning).toBe(true);
+    expect(globalTotalOverrun.accountedMs).toBe(1);
+    expect(globalTotalOverrun.accountingWarning).toBe(true);
+  });
+
+  it('preserves raw child values and warns when they overrun measured parents', () => {
+    const attribution = computeLatencyAttribution(
+      ev({
+        duration_ms: 100,
+        request_body_read_ms: 10,
+        request_body_wait_ms: 8,
+        request_body_process_ms: 7,
+        proxy_setup_ms: 5,
+        auth_ms: 10,
+        bulkhead_wait_ms: 8,
+        dns_ms: 5,
+        connect_ms: 5,
+        upstream_ttfb_ms: 10,
+        upstream_body_ms: 20,
+        response_body_wait_ms: 15,
+        response_body_process_ms: 10,
+        response_body_downstream_poll_gap_ms: 5,
+        finalize_ms: 5,
+        limit_reconcile_ms: 10,
+      }),
+    );
+
+    expect(attribution.categories.map(({ ms }) => ms)).toEqual([
+      13,
+      35,
+      10,
+      null,
+    ]);
+    expect(attribution.mixedUpstreamMs).toBe(15);
+    expect(attribution.accountedMs).toBe(73);
+    expect(attribution.unattributedMs).toBe(27);
+    expect(attribution.accountingWarning).toBe(true);
+  });
+
+  it('keeps response children diagnostic and counts retry overhead once in parent chronology', () => {
+    const parentOnly = ev({
+      source_kind: 'proxy',
+      duration_ms: 900,
+      request_body_read_ms: 100,
+      proxy_setup_ms: 100,
+      upstream_ttfb_ms: 200,
+      upstream_body_ms: 400,
+      finalize_ms: 50,
+      retry_overhead_ms: 50,
+    });
+    const withChildren = ev({
+      ...parentOnly,
+      request_body_first_chunk_ms: 80,
+      request_body_receive_ms: 90,
+      request_body_wait_ms: 80,
+      request_body_process_ms: 20,
+      request_body_chunk_count: 4,
+      response_body_wait_ms: 300,
+      response_body_process_ms: 50,
+      response_body_downstream_poll_gap_ms: 50,
+    });
+
+    expect(computeStageGroups(withChildren)).toEqual(
+      computeStageGroups(parentOnly),
+    );
+    expect(computeStageGroups(withChildren)).toMatchObject({
+      internalPre: 200,
+      upstream: 200,
+      body: 400,
+      internalPost: 50,
+      retryOverhead: 50,
+      accounted: 900,
+      rawResidual: 0,
+    });
+  });
+
+  it('keeps overlapping ingress markers out of category accounting', () => {
+    const attribution = computeLatencyAttribution(
+      ev({
+        duration_ms: 100,
+        request_body_read_ms: 50,
+        request_body_first_chunk_ms: 30,
+        request_body_receive_ms: 45,
+        request_body_chunk_count: 2,
+      }),
+    );
+
+    expect(attribution.categories.map(({ ms }) => ms)).toEqual([
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(attribution.accountedMs).toBe(0);
+    expect(attribution.unattributedMs).toBe(100);
+    expect(attribution.hasIoTimings).toBe(true);
+    expect(attribution.accountingWarning).toBe(false);
+  });
+
+  it('falls back to a valid response parent when stream total is invalid', () => {
+    const event = ev({
+      duration_ms: 50,
+      stream_total_ms: -1,
+      upstream_body_ms: 20,
+    });
+
+    expect(responseBodyDuration(event)).toBe(20);
+    expect(computeLatencyAttribution(event).mixedUpstreamMs).toBe(20);
+  });
+
+  it('uses the cancelled response parent and keeps provider processing unknown', () => {
+    const attribution = computeLatencyAttribution(
+      ev({
+        status: 499,
+        duration_ms: 1000,
+        request_body_read_ms: 50,
+        proxy_setup_ms: 100,
+        upstream_ttfb_ms: 200,
+        upstream_body_ms: 600,
+        stream_total_ms: 900,
+        finalize_ms: 40,
+        retry_overhead_ms: 10,
+      }),
+    );
+
+    expect(attribution.mixedUpstreamMs).toBe(800);
+    expect(attribution.categories[3]?.ms).toBeNull();
+    expect(attribution.mixedRetryMs).toBe(10);
+    expect(attribution.accountedMs).toBe(950);
+    expect(attribution.unattributedMs).toBe(50);
+  });
+
+  it('does not classify renewal duration as proxy latency', () => {
+    const attribution = computeLatencyAttribution(
+      ev({
+        source_kind: 'renewal',
+        duration_ms: 500,
+      }),
+    );
+
+    expect(attribution.categories.every(({ ms }) => ms == null)).toBe(true);
+    expect(attribution.mixedUpstreamMs).toBeNull();
+    expect(attribution.mixedRetryMs).toBeNull();
+    expect(attribution.accountedMs).toBe(0);
+    expect(attribution.unattributedMs).toBe(500);
+    expect(attribution.timelineTotalMs).toBe(500);
+  });
+
+  it('keeps accounting equal to category and mixed contributions', () => {
+    const events = [
+      ev({ duration_ms: 100 }),
+      ev({
+        duration_ms: 100,
+        request_body_wait_ms: 0,
+        response_body_process_ms: 5,
+      }),
+      ev({
+        duration_ms: 100,
+        dns_ms: 10,
+        connect_ms: 20,
+        upstream_ttfb_ms: 50,
+        retry_overhead_ms: 7,
+      }),
+    ];
+
+    for (const event of events) {
+      const attribution = computeLatencyAttribution(event);
+      const contributionTotal =
+        attribution.categories.reduce(
+          (total, category) => total + (category.ms ?? 0),
+          0,
+        ) +
+        (attribution.mixedUpstreamMs ?? 0) +
+        (attribution.mixedRetryMs ?? 0);
+      expect(attribution.accountedMs).toBe(contributionTotal);
+      expect(attribution.unattributedMs).toBe(
+        Math.max(0, attribution.timelineTotalMs - contributionTotal),
+      );
+    }
   });
 });

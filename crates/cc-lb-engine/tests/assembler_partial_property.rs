@@ -306,6 +306,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             request_body_bytes: None,
             finalize_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: Some(profile.token_base() + 10),
         },
     }

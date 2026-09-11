@@ -1,0 +1,9 @@
+ALTER TABLE request_events_v1 ADD COLUMN list_request_body_first_chunk_ms REAL NULL;
+ALTER TABLE request_events_v1 ADD COLUMN list_request_body_receive_ms REAL NULL;
+ALTER TABLE request_events_v1 ADD COLUMN list_request_body_wait_ms REAL NULL;
+ALTER TABLE request_events_v1 ADD COLUMN list_request_body_process_ms REAL NULL;
+ALTER TABLE request_events_v1 ADD COLUMN list_request_body_chunk_count INTEGER NULL;
+ALTER TABLE request_events_v1 ADD COLUMN list_response_body_wait_ms REAL NULL;
+ALTER TABLE request_events_v1 ADD COLUMN list_response_body_process_ms REAL NULL;
+ALTER TABLE request_events_v1 ADD COLUMN list_response_body_downstream_poll_gap_ms REAL NULL;
+ALTER TABLE request_events_v1 ADD COLUMN list_retry_overhead_ms REAL NULL;

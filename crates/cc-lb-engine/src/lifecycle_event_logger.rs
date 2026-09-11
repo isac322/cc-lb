@@ -1,8 +1,9 @@
 //! Lifecycle-event metrics subscriber.
 //!
 //! Counts every `LifecycleEvent` and keeps a bounded, event-id keyed timing
-//! aggregate until the terminal event arrives. Terminal metrics use only
-//! low-cardinality labels and observe parent stages once.
+//! aggregate until the terminal event arrives. Terminal metrics observe parent
+//! stages once, including disjoint retry overhead, and expose fixed-vocabulary
+//! diagnostic I/O stages without adding overlapping children to accounting.
 //!
 //! ## Shutdown protocol
 //!
@@ -14,7 +15,7 @@ use std::{
     sync::Arc,
 };
 
-use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
+use cc_lb_lifecycle::{LifecycleEvent, RequestIoTimings, TerminationReason};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -83,6 +84,7 @@ struct RequestTiming {
     source_kind: SourceKind,
     request_body_read_ms: Option<u64>,
     request_body_bytes: Option<u64>,
+    io_timings: RequestIoTimings,
     proxy_setup_ms: Option<u64>,
     shape_ms: Option<u64>,
     sign_ms: Option<u64>,
@@ -110,6 +112,7 @@ impl RequestTiming {
             self.upstream_ttfb_ms,
             response_body_ms,
             self.finalize_ms,
+            retry_overhead_ms_for_accounting(self.io_timings.retry_overhead_ms),
         ]
         .into_iter()
         .flatten()
@@ -125,6 +128,12 @@ impl RequestTiming {
             && response_body_ms.is_some()
             && self.finalize_ms.is_some()
     }
+}
+
+fn retry_overhead_ms_for_accounting(retry_overhead_ms: Option<f64>) -> Option<u64> {
+    retry_overhead_ms
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value as u64)
 }
 
 struct ActiveRequestTiming {
@@ -206,6 +215,7 @@ impl RequestTimingAggregator {
                 proxy_setup_ms,
                 upstream_body_ms,
                 finalize_ms,
+                io_timings,
                 ..
             } => {
                 let Some(active) = self.active.remove(event_id.as_str()) else {
@@ -219,6 +229,7 @@ impl RequestTimingAggregator {
                 timing.proxy_setup_ms = *proxy_setup_ms;
                 timing.upstream_body_ms = *upstream_body_ms;
                 timing.finalize_ms = *finalize_ms;
+                timing.io_timings = *io_timings;
                 emit_terminal_metrics(
                     &timing,
                     RequestOutcome::from_terminal(reason, *client_status),
@@ -290,6 +301,54 @@ fn emit_terminal_metrics(timing: &RequestTiming, outcome: RequestOutcome, durati
         response_body_ms,
     );
     record_optional_stage(source_kind, outcome_label, "finalize", timing.finalize_ms);
+    record_optional_precise_stage(
+        source_kind,
+        outcome_label,
+        "request_body_first_chunk_marker",
+        timing.io_timings.request_body_first_chunk_ms,
+    );
+    record_optional_precise_stage(
+        source_kind,
+        outcome_label,
+        "request_body_receive_marker",
+        timing.io_timings.request_body_receive_ms,
+    );
+    record_optional_precise_stage(
+        source_kind,
+        outcome_label,
+        "request_body_wait_mixed",
+        timing.io_timings.request_body_wait_ms,
+    );
+    record_optional_precise_stage(
+        source_kind,
+        outcome_label,
+        "request_body_process",
+        timing.io_timings.request_body_process_ms,
+    );
+    record_optional_precise_stage(
+        source_kind,
+        outcome_label,
+        "response_body_wait_mixed",
+        timing.io_timings.response_body_wait_ms,
+    );
+    record_optional_precise_stage(
+        source_kind,
+        outcome_label,
+        "response_body_process",
+        timing.io_timings.response_body_process_ms,
+    );
+    record_optional_precise_stage(
+        source_kind,
+        outcome_label,
+        "downstream_poll_gap_mixed",
+        timing.io_timings.response_body_downstream_poll_gap_ms,
+    );
+    record_optional_precise_stage(
+        source_kind,
+        outcome_label,
+        "retry_overhead_mixed",
+        timing.io_timings.retry_overhead_ms,
+    );
 
     if timing.source_kind != SourceKind::Proxy
         || !timing.has_complete_proxy_timing(response_body_ms)
@@ -324,6 +383,23 @@ fn record_optional_stage(
     if let Some(duration_ms) = duration_ms {
         record_stage(source_kind, outcome, stage, duration_ms);
     }
+}
+fn record_optional_precise_stage(
+    source_kind: &'static str,
+    outcome: &'static str,
+    stage: &'static str,
+    duration_ms: Option<f64>,
+) {
+    let Some(duration_ms) = duration_ms.filter(|value| value.is_finite() && *value >= 0.0) else {
+        return;
+    };
+    metrics::histogram!(
+        "cc_lb_request_stage_duration_seconds",
+        "source_kind" => source_kind,
+        "stage" => stage,
+        "outcome" => outcome
+    )
+    .record(duration_ms / 1_000.0);
 }
 
 fn record_stage(
@@ -428,6 +504,7 @@ mod tests {
         proxy_setup_ms: Option<u64>,
         upstream_body_ms: Option<u64>,
         finalize_ms: Option<u64>,
+        io_timings: RequestIoTimings,
     }
 
     fn sample_event(request_id: &str) -> LifecycleEvent {
@@ -492,6 +569,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: timing.proxy_setup_ms,
             setup_timings: Default::default(),
+            io_timings: timing.io_timings,
             upstream_body_ms: timing.upstream_body_ms,
             first_body_chunk_ms: None,
             finalize_ms: timing.finalize_ms,
@@ -520,6 +598,7 @@ mod tests {
                     proxy_setup_ms: Some(4),
                     upstream_body_ms: Some(8),
                     finalize_ms: Some(9),
+                    io_timings: RequestIoTimings::default(),
                 },
             ),
         ]
@@ -710,6 +789,7 @@ mod tests {
                 proxy_setup_ms: Some(4),
                 upstream_body_ms: Some(8),
                 finalize_ms: Some(9),
+                io_timings: RequestIoTimings::default(),
             },
         );
         let (timings, samples) = capture_metrics([
@@ -773,6 +853,97 @@ mod tests {
             "an 8ms residual must remain within budget"
         );
     }
+    #[test]
+    fn io_children_stay_excluded_while_retry_parent_closes_residual() {
+        let event_id = "io-timing-stages";
+        let mut io_timings = RequestIoTimings {
+            request_body_first_chunk_ms: Some(0.125),
+            request_body_receive_ms: Some(2.5),
+            request_body_wait_ms: Some(7.75),
+            request_body_process_ms: Some(0.0),
+            request_body_chunk_count: Some(0),
+            response_body_wait_ms: Some(18.25),
+            response_body_process_ms: Some(1.5),
+            response_body_downstream_poll_gap_ms: Some(4.125),
+            retry_overhead_ms: None,
+        };
+        let parent_timing = RequestTiming {
+            request_body_read_ms: Some(3),
+            proxy_setup_ms: Some(4),
+            shape_ms: Some(5),
+            sign_ms: Some(6),
+            upstream_ttfb_ms: Some(7),
+            upstream_body_ms: Some(8),
+            finalize_ms: Some(9),
+            io_timings,
+            ..RequestTiming::default()
+        };
+        assert_eq!(parent_timing.proxy_accounted_ms(Some(8)), 42);
+
+        io_timings.retry_overhead_ms = Some(8.625);
+        let retry_timing = RequestTiming {
+            io_timings,
+            ..parent_timing
+        };
+        assert_eq!(retry_timing.proxy_accounted_ms(Some(8)), 50);
+
+        let (_, samples) = capture_metrics([
+            started(event_id, Some("proxy")),
+            upstream_started(event_id, Some(5), Some(6), Some(7)),
+            stream_completed(event_id, 8),
+            terminated(
+                event_id,
+                TerminationReason::Success,
+                200,
+                TerminalTiming {
+                    duration_ms: 50,
+                    request_body_read_ms: Some(3),
+                    request_body_bytes: Some(1_024),
+                    proxy_setup_ms: Some(4),
+                    upstream_body_ms: Some(8),
+                    finalize_ms: Some(9),
+                    io_timings,
+                },
+            ),
+        ]);
+
+        let stage_samples = named(&samples, "cc_lb_request_stage_duration_seconds");
+        assert_eq!(stage_samples.len(), 15);
+        let expected = [
+            ("request_body_first_chunk_marker", 0.125),
+            ("request_body_receive_marker", 2.5),
+            ("request_body_wait_mixed", 7.75),
+            ("request_body_process", 0.0),
+            ("response_body_wait_mixed", 18.25),
+            ("response_body_process", 1.5),
+            ("downstream_poll_gap_mixed", 4.125),
+            ("retry_overhead_mixed", 8.625),
+        ];
+        for (stage, expected_ms) in expected {
+            let matching = stage_samples
+                .iter()
+                .copied()
+                .filter(|sample| sample.labels.get("stage").map(String::as_str) == Some(stage))
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "{stage} must be observed exactly once");
+            assert_labels(
+                matching[0],
+                &[
+                    ("source_kind", "proxy"),
+                    ("stage", stage),
+                    ("outcome", "success"),
+                ],
+            );
+            assert_eq!(
+                matching[0].value,
+                MetricValue::Histogram(vec![expected_ms / 1_000.0])
+            );
+        }
+
+        let unaccounted = named(&samples, "cc_lb_request_unaccounted_duration_seconds");
+        assert_eq!(unaccounted.len(), 1);
+        assert_histogram(unaccounted[0], &[0]);
+    }
 
     #[test]
     fn client_cancelled_499_uses_terminal_partial_body_and_fixed_outcome() {
@@ -792,6 +963,7 @@ mod tests {
                     proxy_setup_ms: Some(4),
                     upstream_body_ms: Some(25),
                     finalize_ms: Some(9),
+                    io_timings: RequestIoTimings::default(),
                 },
             ),
         ]);
@@ -832,6 +1004,7 @@ mod tests {
                     proxy_setup_ms: Some(4),
                     upstream_body_ms: Some(8),
                     finalize_ms: Some(9),
+                    io_timings: RequestIoTimings::default(),
                 },
             ),
         ]);

@@ -1,12 +1,15 @@
-use std::collections::{BTreeSet, HashSet};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeSet, HashSet},
+    str::FromStr,
+    sync::Arc,
+};
 
 use cc_lb_storage_api::{
     BackendKind, MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventKeyLastUsedQuery,
     RequestEventKeyUsageQuery, RequestEventListQuery, RequestEventStore, RequestEventStreamFilters,
     RequestEventUpstream, StatusClass,
 };
-use sqlx::Row;
+use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -832,4 +835,160 @@ async fn request_setup_timings_roundtrip_through_sqlite_payload() {
     assert_eq!(listed.cache_serialize_ms, Some(1.0));
     assert_eq!(listed.cache_tokenize_ms, None);
     assert_eq!(listed.prepare_signer_ms, Some(2.0));
+}
+
+#[tokio::test]
+async fn request_io_timing_list_fields_preserve_legacy_nulls_and_fractional_values() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir
+            .path()
+            .join("request-io-timing-list-fields.sqlite")
+            .display()
+    );
+    let options = SqliteConnectOptions::from_str(&database_url)
+        .expect("sqlite connect options")
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let mut connection = SqliteConnection::connect_with(&options)
+        .await
+        .expect("connect sqlite database");
+    let migrator = sqlx::migrate!("./migrations");
+    migrator
+        .run_direct(Some(81), &mut connection, false)
+        .await
+        .expect("apply migrations through version 81");
+
+    sqlx::query(
+        "INSERT INTO request_events_v1 \
+            (request_id, ts, event_type, payload, event_id, cache_breakpoints, \
+             list_ts_ms, list_event_key, list_status, list_duration_ms) \
+         VALUES (?, ?, 'request_completed', ?, ?, '[]', ?, ?, 200, 10)",
+    )
+    .bind("legacy-request")
+    .bind(1_i64)
+    .bind(r#"{"ts":1,"request_id":"legacy-request","status":200,"duration_ms":10}"#)
+    .bind("legacy-event")
+    .bind(1_000_i64)
+    .bind("legacy-event")
+    .execute(&mut connection)
+    .await
+    .expect("insert pre-migration request event");
+
+    migrator
+        .run_direct(Some(82), &mut connection, false)
+        .await
+        .expect("apply request IO timing list migration");
+
+    let legacy = sqlx::query(
+        "SELECT list_request_body_first_chunk_ms, list_request_body_receive_ms, \
+                list_request_body_wait_ms, list_request_body_process_ms, \
+                list_request_body_chunk_count, list_response_body_wait_ms, \
+                list_response_body_process_ms, \
+                list_response_body_downstream_poll_gap_ms, list_retry_overhead_ms \
+         FROM request_events_v1 WHERE event_id = ?",
+    )
+    .bind("legacy-event")
+    .fetch_one(&mut connection)
+    .await
+    .expect("read migrated legacy timing columns");
+    assert_eq!(
+        legacy.get::<Option<f64>, _>("list_request_body_first_chunk_ms"),
+        None
+    );
+    assert_eq!(
+        legacy.get::<Option<f64>, _>("list_request_body_receive_ms"),
+        None
+    );
+    assert_eq!(
+        legacy.get::<Option<f64>, _>("list_request_body_wait_ms"),
+        None
+    );
+    assert_eq!(
+        legacy.get::<Option<f64>, _>("list_request_body_process_ms"),
+        None
+    );
+    assert_eq!(
+        legacy.get::<Option<i64>, _>("list_request_body_chunk_count"),
+        None
+    );
+    assert_eq!(
+        legacy.get::<Option<f64>, _>("list_response_body_wait_ms"),
+        None
+    );
+    assert_eq!(
+        legacy.get::<Option<f64>, _>("list_response_body_process_ms"),
+        None
+    );
+    assert_eq!(
+        legacy.get::<Option<f64>, _>("list_response_body_downstream_poll_gap_ms"),
+        None
+    );
+    assert_eq!(legacy.get::<Option<f64>, _>("list_retry_overhead_ms"), None);
+    drop(connection);
+
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open migrated sqlite");
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .expect("initialize migrated sqlite");
+    storage
+        .append_request_event(&RequestEvent {
+            ts: 2,
+            ts_ms: Some(2_000),
+            request_id: "current-request".to_owned(),
+            event_id: Some("current-event".to_owned()),
+            status: 200,
+            duration_ms: 10,
+            request_body_first_chunk_ms: Some(0.125),
+            request_body_receive_ms: Some(1.375),
+            request_body_wait_ms: Some(2.625),
+            request_body_process_ms: Some(0.875),
+            request_body_chunk_count: Some(3),
+            response_body_wait_ms: Some(3.125),
+            response_body_process_ms: Some(0.625),
+            response_body_downstream_poll_gap_ms: Some(4.875),
+            retry_overhead_ms: Some(5.5),
+            ..RequestEvent::default()
+        })
+        .await
+        .expect("append current request IO timings");
+
+    let page = storage
+        .list_request_events(&RequestEventListQuery {
+            since_unix_secs: 0,
+            until_unix_secs: u64::MAX,
+            limit: 2,
+            ..RequestEventListQuery::default()
+        })
+        .await
+        .expect("list current and legacy request IO timings");
+    assert_eq!(page.len(), 2);
+    let current = &page[0];
+    assert_eq!(current.event_id.as_deref(), Some("current-event"));
+    assert_eq!(current.request_body_first_chunk_ms, Some(0.125));
+    assert_eq!(current.request_body_receive_ms, Some(1.375));
+    assert_eq!(current.request_body_wait_ms, Some(2.625));
+    assert_eq!(current.request_body_process_ms, Some(0.875));
+    assert_eq!(current.request_body_chunk_count, Some(3));
+    assert_eq!(current.response_body_wait_ms, Some(3.125));
+    assert_eq!(current.response_body_process_ms, Some(0.625));
+    assert_eq!(current.response_body_downstream_poll_gap_ms, Some(4.875));
+    assert_eq!(current.retry_overhead_ms, Some(5.5));
+
+    let legacy = &page[1];
+    assert_eq!(legacy.event_id.as_deref(), Some("legacy-event"));
+    assert_eq!(legacy.request_body_first_chunk_ms, None);
+    assert_eq!(legacy.request_body_receive_ms, None);
+    assert_eq!(legacy.request_body_wait_ms, None);
+    assert_eq!(legacy.request_body_process_ms, None);
+    assert_eq!(legacy.request_body_chunk_count, None);
+    assert_eq!(legacy.response_body_wait_ms, None);
+    assert_eq!(legacy.response_body_process_ms, None);
+    assert_eq!(legacy.response_body_downstream_poll_gap_ms, None);
+    assert_eq!(legacy.retry_overhead_ms, None);
 }

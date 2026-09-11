@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use http::StatusCode;
 use tracing::Span;
 
+use crate::body_io_timing::BodyIoTiming;
 use crate::terminal_observer::{
     LifecycleContext, StreamErrorClassification, StreamTerminationCause, StreamTerminationOutcome,
     error_codes,
@@ -12,11 +13,13 @@ const CLIENT_CLOSED_STATUS: u16 = 499;
 
 pub(crate) struct DownstreamStreamDropGuard {
     observer: Option<LifecycleContext>,
+    timing_observer: Option<LifecycleContext>,
     span: Span,
     initial_upstream_status: StatusCode,
     pending_terminal: Option<(StreamTerminationOutcome, StreamTerminationCause)>,
     finalized: bool,
     relay_start: Instant,
+    body_io_timing: BodyIoTiming,
 }
 
 impl DownstreamStreamDropGuard {
@@ -26,8 +29,10 @@ impl DownstreamStreamDropGuard {
         initial_upstream_status: StatusCode,
         initial_upstream_error: Option<StreamTerminationCause>,
         relay_start: Instant,
+        body_io_timing: BodyIoTiming,
     ) -> Self {
         Self {
+            timing_observer: observer.clone(),
             observer,
             initial_upstream_status,
             span,
@@ -35,6 +40,7 @@ impl DownstreamStreamDropGuard {
                 .map(|cause| (StreamTerminationOutcome::UpstreamError, cause)),
             finalized: false,
             relay_start,
+            body_io_timing,
         }
     }
 
@@ -82,10 +88,17 @@ impl DownstreamStreamDropGuard {
         }
     }
 
+    fn record_body_io_timings(&self) {
+        if let Some(observer) = self.timing_observer.as_ref() {
+            observer.set_io_timings(self.body_io_timing.snapshot());
+        }
+    }
+
     pub(crate) fn finish(&mut self, response_body_ms: u64, finalize_ms: u64) {
         if self.finalized {
             return;
         }
+        self.record_body_io_timings();
         self.record_response_timings(response_body_ms, finalize_ms);
         match self.pending_terminal {
             Some((outcome, cause)) => self.record_terminal(outcome, cause),
@@ -140,6 +153,7 @@ impl Drop for DownstreamStreamDropGuard {
         if self.finalized {
             return;
         }
+        self.record_body_io_timings();
         let cancellation_at = Instant::now();
         let response_body_ms =
             duration_to_ms(cancellation_at.saturating_duration_since(self.relay_start));
@@ -194,6 +208,7 @@ mod tests {
     use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt as _};
     use tracing_subscriber::{Layer, Registry};
 
+    use crate::body_io_timing::BodyIoPhase;
     use crate::clock::{ClockHandle, SystemClock};
     use crate::event_bus::InMemoryBus;
 
@@ -303,6 +318,7 @@ mod tests {
                 initial_upstream_status,
                 None,
                 Instant::now(),
+                BodyIoTiming::default(),
             );
             exercise(&mut guard);
             drop(guard);
@@ -398,6 +414,7 @@ mod tests {
             StatusCode::BAD_GATEWAY,
             None,
             relay_start,
+            BodyIoTiming::default(),
         );
         guard.mark_upstream_error(StreamTerminationCause::H2Reset, None);
 
@@ -504,12 +521,15 @@ mod tests {
             .checked_sub(Duration::from_millis(25))
             .expect("relay start before cancellation");
         let (span, span_timings) = response_stream_span();
+        let body_io_timing = BodyIoTiming::default();
+        body_io_timing.transition(Some(BodyIoPhase::Process));
         let guard = DownstreamStreamDropGuard::armed(
             Some(observer),
             span,
             StatusCode::OK,
             None,
             relay_start,
+            body_io_timing,
         );
 
         drop(guard);
@@ -522,6 +542,7 @@ mod tests {
             proxy_setup_ms,
             upstream_body_ms,
             finalize_ms,
+            io_timings,
             ..
         } = rx.recv().await.expect("terminal event delivered")
         else {
@@ -537,6 +558,9 @@ mod tests {
         assert_eq!(proxy_setup_ms, Some(17));
         assert!(upstream_body_ms.is_some_and(|elapsed| elapsed >= 25));
         assert!(finalize_ms.is_some());
+        assert!(io_timings.response_body_process_ms.is_some());
+        assert_eq!(io_timings.response_body_wait_ms, None);
+        assert_eq!(io_timings.response_body_downstream_poll_gap_ms, None);
         let span_timings = span_timings.lock().expect("response timing values lock");
         assert_eq!(
             recorded_once(&span_timings, "http.response.status_code"),
@@ -580,6 +604,7 @@ mod tests {
             StatusCode::OK,
             None,
             relay_start,
+            BodyIoTiming::default(),
         );
 
         drop(guard);
@@ -640,12 +665,15 @@ mod tests {
             bus as Arc<dyn RequestEventBus>,
             &clock,
         );
+        let body_io_timing = BodyIoTiming::default();
+        body_io_timing.transition(Some(BodyIoPhase::Wait));
         let mut guard = DownstreamStreamDropGuard::armed(
             Some(observer.clone()),
             Span::none(),
             StatusCode::OK,
             None,
             Instant::now(),
+            body_io_timing,
         );
         guard.detach_lifecycle_observer();
         drop(guard);
@@ -655,6 +683,7 @@ mod tests {
         let LifecycleEvent::RequestTerminated {
             reason,
             client_status,
+            io_timings,
             ..
         } = rx.recv().await.expect("terminal event delivered")
         else {
@@ -662,5 +691,8 @@ mod tests {
         };
         assert_eq!(reason, TerminationReason::Success);
         assert_eq!(client_status, StatusCode::OK.as_u16());
+        assert!(io_timings.response_body_wait_ms.is_some());
+        assert_eq!(io_timings.response_body_process_ms, None);
+        assert_eq!(io_timings.response_body_downstream_poll_gap_ms, None);
     }
 }

@@ -1,4 +1,5 @@
 import { cleanup, render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RequestEvent } from '../../../lib/api';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
@@ -453,75 +454,480 @@ describe('LatencyTimeline', () => {
     cleanup();
   });
 
-  it('renders group rows for a streaming event', () => {
-    const event = ev({
-      duration_ms: 4520,
-      auth_ms: 4,
-      route_ms: 2,
-      limit_reserve_ms: 3,
-      shape_ms: 10,
-      sign_ms: 3,
-      bulkhead_wait_ms: 2,
-      upstream_ttfb_ms: 780,
-      stream_message_start_ms: 5,
-      stream_content_block_start_ms: 40,
-      stream_first_content_delta_ms: 55,
-      stream_last_content_delta_ms: 3600,
-      stream_message_stop_ms: 3650,
-      stream_last_chunk_ms: 3700,
-      stream_total_ms: 3720,
-      sse_event_count: 138,
-      content_delta_count: 128,
-      ping_count: 6,
-      inter_token_avg_ms: 28,
-      observability_post_ms: 6,
-      limit_reconcile_ms: 4,
+  it('renders four measured-category cards and accounts mixed time once', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          duration_ms: 300,
+          request_body_read_ms: 30,
+          request_body_first_chunk_ms: 15,
+          request_body_receive_ms: 20,
+          request_body_wait_ms: 20,
+          request_body_process_ms: 5,
+          request_body_chunk_count: 3,
+          request_body_bytes: 100,
+          proxy_setup_ms: 10,
+          shape_ms: 2,
+          sign_ms: 1,
+          bulkhead_wait_ms: 7,
+          dns_ms: 3,
+          connect_ms: 4,
+          upstream_ttfb_ms: 50,
+          upstream_body_ms: 100,
+          response_body_wait_ms: 60,
+          response_body_process_ms: 10,
+          response_body_downstream_poll_gap_ms: 15,
+          retry_overhead_ms: 40,
+          finalize_ms: 8,
+        })}
+      />,
+    );
+
+    const summary = screen.getByRole('list', {
+      name: 'Latency category summary',
     });
-    render(<LatencyTimeline event={event} />);
-    expect(screen.getByText('Internal pre')).toBeTruthy();
-    expect(screen.getByText('Wait')).toBeTruthy();
-    expect(screen.getByText('Upstream')).toBeTruthy();
-    expect(screen.getByText('Body')).toBeTruthy();
-    expect(screen.getByText('Internal post')).toBeTruthy();
-    expect(screen.getByText('SSE markers')).toBeTruthy();
-    expect(screen.queryByText('Observability post')).toBeNull();
-    const stageDetails = screen
+    const cards = within(summary).getAllByRole('listitem');
+    expect(cards).toHaveLength(4);
+    expect(cards.map((card) => card.getAttribute('data-testid'))).toEqual([
+      'latency-category-downstream_network',
+      'latency-category-cc_lb',
+      'latency-category-upstream_network',
+      'latency-category-upstream_processing',
+    ]);
+    expect(
+      screen
+        .getByTestId('latency-category-downstream_network')
+        .getAttribute('data-category-ms'),
+    ).toBe('35');
+    expect(
+      screen
+        .getByTestId('latency-category-cc_lb')
+        .getAttribute('data-category-ms'),
+    ).toBe('43');
+    expect(
+      screen
+        .getByTestId('latency-category-upstream_network')
+        .getAttribute('data-category-ms'),
+    ).toBe('7');
+    expect(
+      screen
+        .getByTestId('latency-category-upstream_processing')
+        .getAttribute('data-category-ms'),
+    ).toBe('unmeasured');
+
+    const mixed = screen.getByTestId('latency-mixed-upstream');
+    expect(mixed.getAttribute('data-mixed-upstream-ms')).toBe('96');
+    expect(
+      screen
+        .getByTestId('latency-mixed-retry')
+        .getAttribute('data-mixed-retry-ms'),
+    ).toBe('40');
+    expect(
+      screen
+        .getByTestId('latency-timeline-region')
+        .getAttribute('data-accounted-ms'),
+    ).toBe('221');
+  });
+
+  it('keeps every ingress and response split visible without adding diagnostics to chronology', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          duration_ms: 200,
+          request_body_read_ms: 40,
+          request_body_first_chunk_ms: 12.5,
+          request_body_receive_ms: 27.5,
+          request_body_wait_ms: 30,
+          request_body_process_ms: 0.0004,
+          request_body_chunk_count: 4,
+          request_body_bytes: 2048,
+          upstream_ttfb_ms: 20,
+          upstream_body_ms: 100,
+          response_body_wait_ms: 70,
+          response_body_process_ms: 20,
+          response_body_downstream_poll_gap_ms: 10,
+          body_chunk_count: 8,
+        })}
+      />,
+    );
+
+    const expectedMeasured = [
+      'request-parent',
+      'request-first-chunk',
+      'request-receive',
+      'request-wait',
+      'request-process',
+      'request-chunks',
+      'request-bytes',
+      'response-parent',
+      'response-wait',
+      'response-process',
+      'response-poll-gap',
+      'response-chunks',
+    ];
+    for (const key of expectedMeasured) {
+      expect(
+        screen
+          .getByTestId(`latency-diagnostic-${key}`)
+          .getAttribute('data-measured'),
+      ).toBe('true');
+    }
+    expect(
+      screen.getByTestId('latency-diagnostic-request-first-chunk').textContent,
+    ).toContain('12.5 ms');
+    expect(
+      screen.getByTestId('latency-diagnostic-request-receive').textContent,
+    ).toContain('27.5 ms');
+    expect(
+      screen.getByTestId('latency-diagnostic-request-process').textContent,
+    ).toContain('<0.001 ms');
+    expect(
+      screen.getByTestId('latency-diagnostic-request-chunks').textContent,
+    ).toContain('4');
+    expect(
+      screen.getByTestId('latency-diagnostic-request-bytes').textContent,
+    ).toContain('2.0 KB');
+    expect(
+      screen.getByTestId('latency-diagnostic-response-poll-gap').textContent,
+    ).toContain('10 ms');
+
+    const stages = buildStageDetails(
+      ev({
+        duration_ms: 200,
+        request_body_read_ms: 40,
+        request_body_first_chunk_ms: 12.5,
+        request_body_receive_ms: 27.5,
+        request_body_wait_ms: 30,
+        request_body_process_ms: 10,
+        upstream_body_ms: 100,
+        response_body_wait_ms: 70,
+        response_body_process_ms: 20,
+        response_body_downstream_poll_gap_ms: 10,
+      }),
+    );
+    expect(stages.map((stage) => stage.key)).toEqual([
+      'request_body_read',
+      'body_collect',
+    ]);
+  });
+
+  it('keeps legacy response parents mixed and provider processing unmeasured', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          duration_ms: 100,
+          upstream_body_ms: 40,
+        })}
+      />,
+    );
+
+    expect(
+      screen
+        .getByTestId('latency-mixed-upstream')
+        .getAttribute('data-mixed-upstream-ms'),
+    ).toBe('40');
+    expect(
+      screen
+        .getByTestId('latency-category-upstream_processing')
+        .getAttribute('data-category-ms'),
+    ).toBe('unmeasured');
+    expect(
+      screen
+        .getByTestId('latency-diagnostic-response-wait')
+        .getAttribute('data-measured'),
+    ).toBe('false');
+    expect(
+      screen.getByTestId('latency-diagnostic-response-parent').textContent,
+    ).toContain('40 ms');
+  });
+
+  it('transitions partial known values to final splits without treating missing fields as zero', () => {
+    const partial = {
+      event_id: 'evt-partial',
+      request_id: 'req-partial',
+      ts: 1,
+      ts_ms: 1000,
+      last_update_ms: 1100,
+      elapsed_ms: 100,
+      stream: false,
+      source_kind: 'proxy',
+      request_body_first_chunk_ms: 10,
+      request_body_wait_ms: 25,
+      request_body_process_ms: 0,
+      request_body_chunk_count: 2,
+      _phase: 'partial',
+    } satisfies RequestEventWithPhase;
+    const { rerender } = render(<LatencyTimeline event={partial} isPartial />);
+
+    expect(
+      screen
+        .getByTestId('latency-category-downstream_network')
+        .getAttribute('data-category-ms'),
+    ).toBe('25');
+    expect(
+      screen
+        .getByTestId('latency-category-cc_lb')
+        .getAttribute('data-category-ms'),
+    ).toBe('0');
+    expect(
+      screen.getByTestId('latency-diagnostic-response-wait').textContent,
+    ).toContain('In progress / not measured');
+
+    rerender(
+      <LatencyTimeline
+        event={ev({
+          duration_ms: 160,
+          request_body_read_ms: 35,
+          request_body_first_chunk_ms: 10,
+          request_body_receive_ms: 25,
+          request_body_wait_ms: 25,
+          request_body_process_ms: 10,
+          request_body_chunk_count: 2,
+          upstream_body_ms: 100,
+          response_body_wait_ms: 80,
+          response_body_process_ms: 10,
+          response_body_downstream_poll_gap_ms: 10,
+        })}
+      />,
+    );
+
+    expect(
+      screen
+        .getByTestId('latency-diagnostic-response-wait')
+        .getAttribute('data-measured'),
+    ).toBe('true');
+    expect(
+      screen.getByTestId('latency-diagnostic-response-wait').textContent,
+    ).toContain('80 ms');
+    expect(
+      screen
+        .getByTestId('latency-category-downstream_network')
+        .getAttribute('data-category-ms'),
+    ).toBe('35');
+  });
+
+  it('surfaces inconsistent parent/child accounting without hiding raw values', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          duration_ms: 20,
+          request_body_read_ms: 5,
+          request_body_wait_ms: 10,
+          request_body_process_ms: 5,
+        })}
+      />,
+    );
+
+    const timeline = screen.getByTestId('latency-timeline-region');
+    expect(timeline.getAttribute('data-accounting-warning')).toBe('true');
+    expect(screen.getByRole('alert')).toBeTruthy();
+    expect(
+      screen.getByTestId('latency-diagnostic-request-wait').textContent,
+    ).toContain('10 ms');
+    expect(
+      screen.getByTestId('latency-diagnostic-request-process').textContent,
+    ).toContain('5 ms');
+  });
+
+  it('supports keyboard selection and exposes the same actual category in stage details', async () => {
+    const user = userEvent.setup();
+    render(
+      <LatencyTimeline
+        event={ev({
+          duration_ms: 100,
+          auth_ms: 10,
+        })}
+      />,
+    );
+
+    const segment = screen.getByTestId('latency-segment-auth');
+    segment.focus();
+    await user.keyboard('{Enter}');
+    expect(segment.getAttribute('aria-pressed')).toBe('true');
+
+    const summary = screen.getByText(/^Stage details \(\d+\)$/);
+    expect(summary.tagName).toBe('SUMMARY');
+    summary.focus();
+    expect(document.activeElement).toBe(summary);
+    const details = summary.closest('details') as HTMLDetailsElement;
+    await user.click(summary);
+    expect(details.open).toBe(true);
+    const authDetail = within(details).getByRole('button', {
+      name: /Auth.*cc-lb processing.*10 ms/,
+    });
+    authDetail.focus();
+    await user.keyboard(' ');
+    expect(authDetail.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('labels chronological stages with their actual attribution category', async () => {
+    const user = userEvent.setup();
+    render(
+      <LatencyTimeline
+        event={ev({
+          duration_ms: 100,
+          bulkhead_wait_ms: 5,
+          dns_ms: 3,
+          connect_ms: 7,
+          upstream_ttfb_ms: 30,
+        })}
+      />,
+    );
+    await user.click(screen.getByText(/^Stage details \(\d+\)$/));
+    const details = screen
       .getByText(/^Stage details \(\d+\)$/)
       .closest('details');
-    expect(stageDetails).not.toBeNull();
+    expect(details).not.toBeNull();
     expect(
-      within(stageDetails!).getByRole('button', {
-        name: /Limit reconcile.*Internal post.*4 ms/,
+      within(details!).getByRole('button', {
+        name: /Bulkhead wait.*cc-lb processing.*5 ms/,
+      }),
+    ).toBeTruthy();
+    expect(
+      within(details!).getByRole('button', {
+        name: /DNS.*Upstream network.*3 ms/,
+      }),
+    ).toBeTruthy();
+    expect(
+      within(details!).getByRole('button', {
+        name: /Upstream wait.*Combined upstream wait.*15 ms/,
       }),
     ).toBeTruthy();
   });
 
-  it('keeps zero and fractional setup details without overlapping tiny segments', () => {
+  it('keeps retry before the final attempt and shifts SSE origin exactly once', () => {
     const event = ev({
-      duration_ms: 1000,
-      proxy_setup_ms: 20,
-      auth_ms: 2,
-      route_ms: 1,
-      limit_reserve_ms: 1,
-      json_parse_ms: 0,
-      cache_structure_ms: 0.125,
-      prepare_signer_ms: 3,
+      duration_ms: 200,
+      proxy_setup_ms: 10,
+      retry_overhead_ms: 25,
+      shape_ms: 2,
+      sign_ms: 1,
+      upstream_ttfb_ms: 50,
+      stream_first_content_delta_ms: 5,
     });
-    render(<LatencyTimeline event={event} />);
-
-    expect(screen.getByText('0.125 ms')).toBeTruthy();
-    expect(screen.getByText('0 ms')).toBeTruthy();
-    expect(screen.queryByTestId('latency-segment-json_parse_ms')).toBeNull();
-    expect(
-      screen.queryByTestId('latency-segment-cache_structure_ms'),
-    ).toBeNull();
-    expect(
-      screen.getByTestId('latency-segment-prepare_signer_ms'),
-    ).toBeTruthy();
-    expect(screen.getByText('20 ms · 2%')).toBeTruthy();
+    const stages = buildStageDetails(event);
+    expect(stages.map((stage) => stage.key)).toEqual([
+      'setup_overhead',
+      'retry_overhead',
+      'shape',
+      'sign',
+      'upstream_wait',
+    ]);
+    const first = buildSseMarkers(event).find(
+      (marker) => marker.key === 'first_delta',
+    );
+    expect(first?.absMs).toBe(10 + 25 + 2 + 1 + 50 + 5);
   });
 
-  it('keeps the latency region height reserved while detail hydrates', () => {
+  it('does not shift SSE markers when overlapping I/O diagnostics change', () => {
+    const parent = {
+      duration_ms: 200,
+      request_body_read_ms: 20,
+      proxy_setup_ms: 10,
+      upstream_ttfb_ms: 50,
+      stream_first_content_delta_ms: 5,
+    };
+    const withoutChildren = buildSseMarkers(ev(parent));
+    const withChildren = buildSseMarkers(
+      ev({
+        ...parent,
+        request_body_first_chunk_ms: 19,
+        request_body_receive_ms: 1,
+        request_body_wait_ms: 18,
+        request_body_process_ms: 2,
+        response_body_wait_ms: 100,
+        response_body_process_ms: 10,
+        response_body_downstream_poll_gap_ms: 30,
+      }),
+    );
+    expect(withChildren).toEqual(withoutChildren);
+  });
+
+  it('retains cancellation measurements and keeps renewal outside proxy categories', () => {
+    const { rerender } = render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          status: 499,
+          duration_ms: 100,
+          upstream_body_ms: 60,
+          response_body_wait_ms: 40,
+          response_body_process_ms: 10,
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByTestId('latency-diagnostic-response-parent').textContent,
+    ).toContain('Partial response parent');
+    expect(screen.getByText('Partial stream (client cancelled)')).toBeTruthy();
+
+    rerender(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'renewal',
+          duration_ms: 50,
+        })}
+      />,
+    );
+    expect(screen.getByText('Scheduler renewal cycle')).toBeTruthy();
+    expect(
+      screen.queryByRole('list', { name: 'Latency category summary' }),
+    ).toBeNull();
+    expect(screen.queryByTestId('latency-mixed-upstream')).toBeNull();
+  });
+
+  it('preserves terminal error measurements instead of inventing completed response time', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          status: 502,
+          duration_ms: 30,
+          request_body_read_ms: 5,
+          request_body_wait_ms: 4,
+          request_body_process_ms: 1,
+          retry_overhead_ms: 3,
+        })}
+      />,
+    );
+
+    expect(
+      screen
+        .getByTestId('latency-category-downstream_network')
+        .getAttribute('data-category-ms'),
+    ).toBe('4');
+    expect(
+      screen
+        .getByTestId('latency-category-cc_lb')
+        .getAttribute('data-category-ms'),
+    ).toBe('1');
+    expect(
+      screen
+        .getByTestId('latency-mixed-retry')
+        .getAttribute('data-mixed-retry-ms'),
+    ).toBe('3');
+    expect(
+      screen
+        .getByTestId('latency-diagnostic-response-parent')
+        .getAttribute('data-measured'),
+    ).toBe('false');
+  });
+
+  it('keeps four unmeasured cards visible on the no-data path', () => {
+    render(<LatencyTimeline event={ev({ duration_ms: 0 })} />);
+    expect(
+      within(
+        screen.getByRole('list', { name: 'Latency category summary' }),
+      ).getAllByRole('listitem'),
+    ).toHaveLength(4);
+    expect(screen.getByText('No latency data recorded.')).toBeTruthy();
+  });
+
+  it('reserves the redesigned region while detail hydrates', () => {
     const event = ev({
       duration_ms: 500,
       auth_ms: 4,
@@ -531,265 +937,17 @@ describe('LatencyTimeline', () => {
     const { rerender } = render(
       <LatencyTimeline event={event} isLoading={true} />,
     );
-
     const pendingRegion = screen.getByTestId('latency-timeline-region');
     expect(pendingRegion.className).toContain('min-h-80');
-    expect(pendingRegion.getAttribute('aria-busy')).toBe('true');
-    expect(pendingRegion.querySelectorAll('.skeleton').length).toBeGreaterThan(
-      0,
-    );
+    expect(
+      pendingRegion.querySelectorAll('.skeleton').length,
+    ).toBeGreaterThanOrEqual(5);
 
     rerender(<LatencyTimeline event={event} />);
-
-    const hydratedRegion = screen.getByTestId('latency-timeline-region');
-    expect(hydratedRegion).toBe(pendingRegion);
-    expect(hydratedRegion.className).toContain('min-h-80');
-    expect(hydratedRegion.getAttribute('aria-busy')).toBeNull();
-    expect(screen.getByText('Internal pre')).toBeTruthy();
-  });
-
-  it('omits the SSE lane for non-stream events', () => {
-    const event = ev({
-      duration_ms: 500,
-      auth_ms: 4,
-      upstream_ttfb_ms: 200,
-      upstream_body_ms: 250,
-    });
-    render(<LatencyTimeline event={event} />);
-    expect(screen.queryByText('SSE markers')).toBeNull();
-  });
-
-  it('renders request ingress metadata before proxy stages and Finalize after Body', () => {
-    render(
-      <LatencyTimeline
-        event={ev({
-          source_kind: 'proxy',
-          duration_ms: 100,
-          request_body_read_ms: 5,
-          request_body_bytes: 854336,
-          proxy_setup_ms: 10,
-          upstream_ttfb_ms: 20,
-          upstream_body_ms: 55,
-          finalize_ms: 10,
-          limit_reconcile_ms: 3,
-        })}
-      />,
-    );
-
+    expect(screen.getByTestId('latency-timeline-region')).toBe(pendingRegion);
+    expect(pendingRegion.getAttribute('aria-busy')).toBeNull();
     expect(
-      screen
-        .getByTestId('latency-segment-request_body_read')
-        .getAttribute('aria-label'),
-    ).toBe('Request body read 5 ms, Ingress body: 834.3 KB');
-    const stageDetails = screen
-      .getByText(/^Stage details \(\d+\)$/)
-      .closest('details');
-    expect(stageDetails).not.toBeNull();
-    expect(
-      within(stageDetails!).getByRole('button', {
-        name: /Request body read.*Ingress body: 834\.3 KB.*5 ms/,
-      }),
+      screen.getByRole('heading', { name: 'Chronological request path' }),
     ).toBeTruthy();
-    const groupRows = screen.getByTestId(
-      'latency-timeline-region',
-    ).firstElementChild;
-    expect(groupRows).not.toBeNull();
-    expect(
-      Array.from(
-        groupRows!.children,
-        (row) => row.firstElementChild?.firstElementChild?.textContent,
-      ),
-    ).toEqual(['Internal pre', 'Upstream', 'Body', 'Finalize']);
-    expect(
-      within(stageDetails!).getByRole('button', {
-        name: /Finalize.*Finalize.*10 ms/,
-      }),
-    ).toBeTruthy();
-
-    const internalPreRow = groupRows!.children.item(0) as HTMLElement;
-    const requestBodySegment = within(internalPreRow).getByTestId(
-      'latency-segment-request_body_read',
-    );
-    const setupSegment = within(internalPreRow).getByTestId(
-      'latency-segment-setup_overhead',
-    );
-    expect(
-      requestBodySegment.compareDocumentPosition(setupSegment) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).not.toBe(0);
-
-    const requestBodyDetail = within(stageDetails!).getByRole('button', {
-      name: /Request body read.*Ingress body: 834\.3 KB.*5 ms/,
-    });
-    const setupDetail = within(stageDetails!).getByRole('button', {
-      name: /Setup overhead.*Internal pre.*10 ms/,
-    });
-    expect(
-      requestBodyDetail.compareDocumentPosition(setupDetail) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).not.toBe(0);
-    expect(screen.queryByText('Internal post')).toBeNull();
-    expect(
-      within(stageDetails!).getByRole('button', {
-        name: /Finalize[\s\S]*Limit reconcile: 3 ms[\s\S]*Other finalize: 7 ms[\s\S]*10 ms/,
-      }),
-    ).toBeTruthy();
-  });
-  it('keeps mixed ingress rows on the legacy Internal post path', () => {
-    render(
-      <LatencyTimeline
-        event={ev({
-          source_kind: 'proxy',
-          duration_ms: 100,
-          request_body_read_ms: 20,
-          limit_reconcile_ms: 10,
-        })}
-      />,
-    );
-
-    expect(screen.getByText('Internal post')).toBeTruthy();
-    expect(screen.queryByText('Finalize')).toBeNull();
-    const stageDetails = screen
-      .getByText(/^Stage details \(\d+\)$/)
-      .closest('details');
-    expect(stageDetails).not.toBeNull();
-    expect(
-      within(stageDetails!).getByRole('button', {
-        name: /Limit reconcile.*Internal post.*10 ms/,
-      }),
-    ).toBeTruthy();
-  });
-
-  it('renders a cancelled 499 as Partial stream instead of a completed body', () => {
-    render(
-      <LatencyTimeline
-        event={ev({
-          source_kind: 'proxy',
-          status: 499,
-          duration_ms: 700,
-          upstream_body_ms: 640,
-          stream_total_ms: 690,
-          finalize_ms: 60,
-        })}
-      />,
-    );
-
-    expect(screen.getByText('Partial stream (client cancelled)')).toBeTruthy();
-    expect(screen.queryByText('Stream relay')).toBeNull();
-    expect(screen.queryByText('Body collect')).toBeNull();
-  });
-
-  it('keeps a positive residual above the budget visible', () => {
-    render(
-      <LatencyTimeline
-        event={ev({
-          source_kind: 'proxy',
-          duration_ms: 100,
-          request_body_read_ms: 10,
-          proxy_setup_ms: 10,
-          upstream_ttfb_ms: 20,
-          upstream_body_ms: 30,
-          finalize_ms: 10,
-        })}
-      />,
-    );
-
-    const timeline = screen.getByTestId('latency-timeline-region');
-    expect(timeline.getAttribute('data-raw-residual-ms')).toBe('20');
-    expect(
-      within(timeline).getByRole('button', { name: 'Unaccounted 20 ms' }),
-    ).toBeTruthy();
-    expect(
-      within(timeline)
-        .getAllByText('Unaccounted')
-        .some((label) => label.closest('details') === null),
-    ).toBe(true);
-  });
-
-  it('renders only Renewal cycle for final renewal source rows', () => {
-    render(
-      <LatencyTimeline
-        event={ev({
-          source_kind: 'renewal',
-          duration_ms: 500,
-        })}
-      />,
-    );
-
-    expect(screen.getByText('Renewal cycle')).toBeTruthy();
-    expect(screen.queryByText('Internal pre')).toBeNull();
-    expect(screen.queryByText('Body')).toBeNull();
-    expect(screen.queryByText('Finalize')).toBeNull();
-    expect(screen.queryByText('Unaccounted')).toBeNull();
-  });
-
-  it('renders partial renewal rows with proxy groups instead of an empty Renewal group', () => {
-    const partialRenewal = {
-      event_id: 'evt-partial-renewal',
-      request_id: 'req-partial-renewal',
-      ts: 1,
-      ts_ms: 1000,
-      last_update_ms: 1100,
-      elapsed_ms: 100,
-      stream: false,
-      source_kind: 'renewal',
-      cache_structure_ms: 25,
-      _phase: 'partial',
-    } satisfies RequestEventWithPhase;
-
-    render(<LatencyTimeline event={partialRenewal} isPartial />);
-
-    expect(screen.getByText('Internal pre')).toBeTruthy();
-    expect(screen.getByText('Cache structure')).toBeTruthy();
-    expect(
-      screen.getByTestId('latency-segment-cache_structure_ms'),
-    ).toBeTruthy();
-    expect(screen.queryByText('Renewal')).toBeNull();
-    expect(screen.queryByText('Renewal cycle')).toBeNull();
-    expect(screen.queryByText('No latency data recorded.')).toBeNull();
-    expect(screen.queryByText('Unaccounted')).toBeNull();
-  });
-
-  it('renders a measured zero Renewal cycle instead of the missing-data hint', () => {
-    render(
-      <LatencyTimeline
-        event={ev({
-          source_kind: 'renewal',
-          duration_ms: 0,
-        })}
-      />,
-    );
-
-    expect(screen.queryByText('No latency data recorded.')).toBeNull();
-    expect(screen.getByText('Renewal cycle')).toBeTruthy();
-    const stageDetails = screen
-      .getByText(/^Stage details \(\d+\)$/)
-      .closest('details');
-    expect(stageDetails).not.toBeNull();
-    expect(
-      within(stageDetails!).getByRole('button', {
-        name: /Renewal cycle.*Renewal.*0 ms/,
-      }),
-    ).toBeTruthy();
-  });
-
-  it('keeps a missing Renewal duration on the no-data path', () => {
-    render(
-      <LatencyTimeline
-        event={ev({
-          source_kind: 'renewal',
-          duration_ms: undefined,
-        })}
-      />,
-    );
-
-    expect(screen.getByText('No latency data recorded.')).toBeTruthy();
-    expect(screen.queryByText('Renewal cycle')).toBeNull();
-  });
-
-  it('shows a hint when there is no latency data', () => {
-    const event = ev({ duration_ms: 0 });
-    render(<LatencyTimeline event={event} />);
-    expect(screen.getByText('No latency data recorded.')).toBeTruthy();
   });
 });

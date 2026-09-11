@@ -332,6 +332,15 @@ fn request_event(index: u64) -> RequestEvent {
         model: Some("claude-sonnet-4-5".to_owned()),
         status: 200,
         duration_ms: 10,
+        request_body_first_chunk_ms: None,
+        request_body_receive_ms: None,
+        request_body_wait_ms: None,
+        request_body_process_ms: None,
+        request_body_chunk_count: None,
+        response_body_wait_ms: None,
+        response_body_process_ms: None,
+        response_body_downstream_poll_gap_ms: None,
+        retry_overhead_ms: None,
         ..Default::default()
     }
 }

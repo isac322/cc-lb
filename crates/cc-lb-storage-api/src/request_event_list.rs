@@ -39,6 +39,16 @@ pub struct RequestEventListItem {
     pub upstream_error_message: Option<String>,
     pub duration_ms: u64,
     pub request_body_read_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_first_chunk_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_receive_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_wait_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_process_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_chunk_count: Option<u64>,
     pub request_body_bytes: Option<u64>,
     pub auth_ms: Option<u64>,
     pub route_ms: Option<u64>,
@@ -62,6 +72,14 @@ pub struct RequestEventListItem {
     pub sign_ms: Option<u64>,
     pub upstream_ttfb_ms: Option<u64>,
     pub upstream_body_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_wait_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_process_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_downstream_poll_gap_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_overhead_ms: Option<f64>,
     pub finalize_ms: Option<u64>,
     pub stream_first_content_delta_ms: Option<u64>,
     pub stream_last_content_delta_ms: Option<u64>,
@@ -188,4 +206,128 @@ pub struct RequestEventHistogramBucket {
     pub bucket_start_unix_secs: u64,
     pub total_count: u64,
     pub error_count: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RequestEventListItem;
+
+    fn empty_list_item() -> RequestEventListItem {
+        RequestEventListItem {
+            ts: 0,
+            ts_ms: None,
+            request_id: String::new(),
+            event_id: None,
+            source_kind: None,
+            principal_id: None,
+            upstream: None,
+            upstream_id: None,
+            upstream_name: None,
+            thread_id: None,
+            observed_session_id: None,
+            request_kind: None,
+            claude_agent_id: None,
+            claude_parent_agent_id: None,
+            parent_session_id: None,
+            client_app: None,
+            session_id_source: None,
+            model: None,
+            reasoning_effort: None,
+            thinking_budget_tokens: None,
+            thinking_tokens: None,
+            service_tier: None,
+            status: 0,
+            error_code: None,
+            upstream_error_type: None,
+            upstream_error_message: None,
+            duration_ms: 0,
+            request_body_read_ms: None,
+            request_body_first_chunk_ms: None,
+            request_body_receive_ms: None,
+            request_body_wait_ms: None,
+            request_body_process_ms: None,
+            request_body_chunk_count: None,
+            request_body_bytes: None,
+            auth_ms: None,
+            route_ms: None,
+            limit_reserve_ms: None,
+            json_parse_ms: None,
+            cache_structure_ms: None,
+            cache_token_key_ms: None,
+            cache_count_lookup_ms: None,
+            cache_tokenizer_queue_ms: None,
+            cache_serialize_ms: None,
+            cache_tokenize_ms: None,
+            prepare_signer_ms: None,
+            bulkhead_wait_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            shape_ms: None,
+            sign_ms: None,
+            upstream_ttfb_ms: None,
+            upstream_body_ms: None,
+            response_body_wait_ms: None,
+            response_body_process_ms: None,
+            response_body_downstream_poll_gap_ms: None,
+            retry_overhead_ms: None,
+            finalize_ms: None,
+            stream_first_content_delta_ms: None,
+            stream_last_content_delta_ms: None,
+            inter_token_avg_ms: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_creation_input_tokens_5m: None,
+            cache_creation_input_tokens_1h: None,
+            cache_read_input_tokens: None,
+            cost_usd_micros: None,
+            cost_input_micros: None,
+            cost_output_micros: None,
+            cost_cache_creation_5m_micros: None,
+            cost_cache_creation_1h_micros: None,
+            cost_cache_read_micros: None,
+        }
+    }
+
+    #[test]
+    fn request_event_list_item_preserves_measured_zero_and_omits_missing_io_timings() {
+        let measured = RequestEventListItem {
+            request_body_first_chunk_ms: Some(0.0),
+            request_body_receive_ms: Some(1.25),
+            request_body_wait_ms: Some(1.0),
+            request_body_process_ms: Some(0.25),
+            request_body_chunk_count: Some(0),
+            response_body_wait_ms: Some(2.5),
+            response_body_process_ms: Some(0.5),
+            response_body_downstream_poll_gap_ms: Some(0.0),
+            retry_overhead_ms: Some(0.0),
+            ..empty_list_item()
+        };
+        let measured_json =
+            serde_json::to_value(measured).expect("serialize measured list I/O timings");
+        assert_eq!(measured_json["request_body_first_chunk_ms"], 0.0);
+        assert_eq!(measured_json["request_body_chunk_count"], 0);
+        assert_eq!(measured_json["response_body_downstream_poll_gap_ms"], 0.0);
+        assert_eq!(measured_json["retry_overhead_ms"], 0.0);
+
+        let missing_json =
+            serde_json::to_value(empty_list_item()).expect("serialize missing list I/O timings");
+        for field in [
+            "request_body_first_chunk_ms",
+            "request_body_receive_ms",
+            "request_body_wait_ms",
+            "request_body_process_ms",
+            "request_body_chunk_count",
+            "response_body_wait_ms",
+            "response_body_process_ms",
+            "response_body_downstream_poll_gap_ms",
+            "retry_overhead_ms",
+        ] {
+            assert!(missing_json.get(field).is_none(), "{field} must be omitted");
+        }
+    }
 }

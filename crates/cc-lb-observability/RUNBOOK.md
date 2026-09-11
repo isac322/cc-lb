@@ -165,6 +165,94 @@ When `RoutingUpstreamFunneling` fires:
 
 False positives: sustained low traffic that clears the `> 2 req/s` floor after the alert has already latched. If confirmed low-volume, no action; alert will self-clear.
 
+## Metric: cc_lb_request_stage_duration_seconds
+
+- **Type**: Histogram
+- **Labels**: `source_kind`, `stage`, `outcome`
+- **Label Cardinality Bounds**: Fixed. The lifecycle event logger maps inputs to a closed vocabulary and does not add request IDs, principals, models, or other unbounded dimensions.
+
+### Label vocabulary
+
+- `source_kind` ∈ `{proxy, renewal, unknown}`
+- `outcome` ∈ `{success, client_cancelled, error, timeout}`
+- Parent `stage` ∈ `{request_body_read, proxy_setup, shape, sign, upstream_ttfb, response_body, finalize, renewal_cycle}`
+- Diagnostic I/O `stage` ∈ `{request_body_first_chunk_marker, request_body_receive_marker, request_body_wait_mixed, request_body_process, response_body_wait_mixed, response_body_process, downstream_poll_gap_mixed, retry_overhead_mixed}`
+
+The logger emits only stages available in its bounded per-request aggregate when the terminal lifecycle event arrives. Renewal events emit `renewal_cycle` and do not emit zero-valued proxy stages. A measured fractional or zero-valued I/O stage remains observable. `request_body_chunk_count` remains request-event data; it is not emitted as a duration histogram.
+
+### Boundaries and interpretation
+
+The parent stages preserve request chronology:
+
+- `request_body_read` covers handler-side request-body collection.
+- `proxy_setup`, `shape`, and `sign` cover the local pre-dispatch parent intervals.
+- `upstream_ttfb` is a parent that includes bulkhead wait, DNS, TCP/TLS connect, and the remaining combined header wait.
+- `response_body` selects one parent: completed `stream_total_ms`, buffered `upstream_body_ms`, or partial `upstream_body_ms` for `client_cancelled`.
+- `finalize` covers the final local parent interval.
+- `retry_overhead_mixed` covers the earlier attempt path only when a retry starts. The final attempt's stage values are reset, so parent accounting includes retry overhead once.
+
+The diagnostic I/O stages have narrower meanings:
+
+- `request_body_first_chunk_marker` and `request_body_receive_marker` are overlapping markers. Do not add them to the request-body parent or to its wait/process split.
+- `request_body_wait_mixed` combines client pacing, downstream transit, and runtime scheduling after handler entry. It is not RTT.
+- `request_body_process` is elapsed local frame handling, copying, and validation, not CPU time.
+- `response_body_wait_mixed` combines provider generation, upstream transit, and runtime scheduling. It is not a pure provider-processing metric.
+- `response_body_process` is local relay or buffered-body work contained in the response-body parent.
+- `downstream_poll_gap_mixed` is the streamed consumer/backpressure/scheduler gap between a yielded item and the next downstream poll. It is not a TCP acknowledgement, wire delivery, or RTT. Buffered non-stream delivery after finalization is unobserved.
+
+DNS and TCP/TLS connect values are independently available in request-event data and the four-category Logs UI. Header wait and response-frame wait remain combined upstream observations; do not derive a pure provider-processing duration from this histogram.
+
+### Queries
+
+Rate by fixed stage and outcome:
+
+```promql
+sum by (stage, outcome) (
+  rate(cc_lb_request_stage_duration_seconds_count{source_kind="proxy"}[5m])
+)
+```
+
+Average duration for one non-overlapping parent stage:
+
+```promql
+sum(rate(cc_lb_request_stage_duration_seconds_sum{
+  source_kind="proxy",
+  stage="upstream_ttfb"
+}[5m]))
+/
+sum(rate(cc_lb_request_stage_duration_seconds_count{
+  source_kind="proxy",
+  stage="upstream_ttfb"
+}[5m]))
+```
+
+Inspect downstream consumer/scheduler gaps without calling them network RTT:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le) (
+    rate(cc_lb_request_stage_duration_seconds_bucket{
+      source_kind="proxy",
+      stage="downstream_poll_gap_mixed"
+    }[5m])
+  )
+)
+```
+
+### Aggregation warning
+
+Do not sum all `stage` series or add their quantiles. Markers and child stages overlap parent intervals, and Prometheus histogram buckets do not preserve per-request correlation. For parent accounting, use the non-overlapping parent stages plus `retry_overhead_mixed` once. For diagnosis, query one child or marker at a time and compare distributions rather than constructing a synthetic critical path.
+
+The per-request Logs UI applies a separate four-category attribution:
+
+- **Downstream network**: observed request-frame waits and streamed downstream poll gaps, with client/transit/backpressure/scheduler caveats.
+- **cc-lb processing**: measured setup, shaping, signing, bulkhead waiting, local body work, and finalization.
+- **Upstream network**: observed DNS plus combined TCP/TLS connect only.
+- **Upstream processing**: not independently measured.
+
+The UI shows header and response-frame waits as `Combined upstream wait`, keeps retry overhead separate, and leaves legacy or unsplit remainder unattributed. A missing value means not measured; a present zero means measured zero.
+
 ## Troubleshooting
 
 ### When hit-rate suddenly drops

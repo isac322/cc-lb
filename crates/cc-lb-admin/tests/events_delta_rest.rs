@@ -41,6 +41,18 @@ async fn events_delta_returns_rows_next_cursor_and_exhaustion() {
     assert_eq!(first_page["events"][0]["cache_serialize_ms"], 0.75);
     assert_eq!(first_page["events"][0]["cache_tokenize_ms"], 0.0);
     assert_eq!(first_page["events"][0]["prepare_signer_ms"], 1.25);
+    assert_eq!(first_page["events"][0]["request_body_first_chunk_ms"], 0.25);
+    assert!(first_page["events"][0]["request_body_receive_ms"].is_null());
+    assert_eq!(first_page["events"][0]["request_body_wait_ms"], 0.0);
+    assert_eq!(first_page["events"][0]["request_body_process_ms"], 0.5);
+    assert_eq!(first_page["events"][0]["request_body_chunk_count"], 0);
+    assert_eq!(first_page["events"][0]["response_body_wait_ms"], 0.75);
+    assert_eq!(first_page["events"][0]["response_body_process_ms"], 0.0);
+    assert_eq!(
+        first_page["events"][0]["response_body_downstream_poll_gap_ms"],
+        1.25
+    );
+    assert_eq!(first_page["events"][0]["retry_overhead_ms"], 1.5);
     assert_eq!(first_page["exhausted"], false);
 
     let (status, _, second_page, _) = authed_json(
@@ -75,6 +87,15 @@ fn request_event(index: u64) -> RequestEvent {
         cache_serialize_ms: Some(0.75),
         cache_tokenize_ms: Some(0.0),
         prepare_signer_ms: Some(1.25),
+        request_body_first_chunk_ms: Some(0.25),
+        request_body_receive_ms: None,
+        request_body_wait_ms: Some(0.0),
+        request_body_process_ms: Some(0.5),
+        request_body_chunk_count: Some(0),
+        response_body_wait_ms: Some(0.75),
+        response_body_process_ms: Some(0.0),
+        response_body_downstream_poll_gap_ms: Some(1.25),
+        retry_overhead_ms: Some(1.5),
         ..Default::default()
     }
 }

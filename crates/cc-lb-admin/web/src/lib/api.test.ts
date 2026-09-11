@@ -155,7 +155,7 @@ describe('RequestEventPartialSchema', () => {
     expect(result.success).toBe(false);
   });
 
-  it('preserves fractional, zero, missing, and nullable setup timings', () => {
+  it('preserves fractional, zero, missing, and nullable request timings', () => {
     const result = RequestEventPartialSchema.safeParse({
       ...baseFixture,
       json_parse_ms: 0.125,
@@ -165,26 +165,59 @@ describe('RequestEventPartialSchema', () => {
       cache_tokenizer_queue_ms: 0.25,
       cache_serialize_ms: 2.75,
       prepare_signer_ms: 4.5,
+      request_body_first_chunk_ms: 0.375,
+      request_body_receive_ms: null,
+      request_body_wait_ms: 0,
+      request_body_process_ms: 1.25,
+      request_body_chunk_count: 0,
+      response_body_wait_ms: 3.5,
+      response_body_process_ms: 0,
+      retry_overhead_ms: 6.75,
     });
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.cache_structure_ms).toBe(0);
       expect(result.data.cache_tokenize_ms).toBeUndefined();
       expect(result.data.cache_token_key_ms).toBeNull();
+      expect(result.data.request_body_first_chunk_ms).toBe(0.375);
+      expect(result.data.request_body_receive_ms).toBeNull();
+      expect(result.data.request_body_wait_ms).toBe(0);
+      expect(result.data.request_body_chunk_count).toBe(0);
+      expect(result.data.response_body_process_ms).toBe(0);
+      expect(result.data.response_body_downstream_poll_gap_ms).toBeUndefined();
     }
   });
 
-  it('rejects negative setup timings', () => {
-    const result = RequestEventPartialSchema.safeParse({
-      ...baseFixture,
-      cache_tokenize_ms: -0.1,
-    });
-    expect(result.success).toBe(false);
+  it('rejects invalid request timing values', () => {
+    expect(
+      RequestEventPartialSchema.safeParse({
+        ...baseFixture,
+        request_body_wait_ms: -0.1,
+      }).success,
+    ).toBe(false);
+    expect(
+      RequestEventPartialSchema.safeParse({
+        ...baseFixture,
+        request_body_chunk_count: 1.5,
+      }).success,
+    ).toBe(false);
+    expect(
+      RequestEventPartialSchema.safeParse({
+        ...baseFixture,
+        request_body_chunk_count: -1,
+      }).success,
+    ).toBe(false);
+    expect(
+      RequestEventPartialSchema.safeParse({
+        ...baseFixture,
+        response_body_wait_ms: Number.POSITIVE_INFINITY,
+      }).success,
+    ).toBe(false);
   });
 });
 
 describe('FinalRequestEventUpdateSchema', () => {
-  it('validates setup timings on final SSE rows', () => {
+  it('validates request timings on final SSE rows', () => {
     const result = FinalRequestEventUpdateSchema.safeParse({
       event: {
         request_id: 'r',
@@ -192,19 +225,31 @@ describe('FinalRequestEventUpdateSchema', () => {
         duration_ms: 10,
         json_parse_ms: 0.125,
         cache_tokenize_ms: 0,
+        request_body_first_chunk_ms: 0.25,
+        request_body_wait_ms: 0,
+        request_body_chunk_count: 2,
+        response_body_process_ms: null,
+        retry_overhead_ms: 1.75,
       },
       cursor: 1,
     });
     expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.event.request_body_first_chunk_ms).toBe(0.25);
+      expect(result.data.event.request_body_wait_ms).toBe(0);
+      expect(result.data.event.request_body_chunk_count).toBe(2);
+      expect(result.data.event.response_body_process_ms).toBeNull();
+      expect(result.data.event.retry_overhead_ms).toBe(1.75);
+    }
   });
 
-  it('rejects non-finite final setup timings', () => {
+  it('rejects invalid final request timings', () => {
     const result = FinalRequestEventUpdateSchema.safeParse({
       event: {
         request_id: 'r',
         status: 200,
         duration_ms: 10,
-        json_parse_ms: Number.POSITIVE_INFINITY,
+        response_body_downstream_poll_gap_ms: Number.POSITIVE_INFINITY,
       },
       cursor: 1,
     });

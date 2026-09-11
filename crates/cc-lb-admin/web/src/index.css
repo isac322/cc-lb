@@ -33,6 +33,12 @@
     --color-border-row: rgba(255, 255, 255, 0.04);
     --color-text: #ededed;
     --color-text-muted: #9ca3af;
+    --latency-downstream-text: #67e8f9;
+    --latency-proxy-text: #a5b4fc;
+    --latency-upstream-text: #fcd34d;
+    --latency-provider-text: #6ee7b7;
+    --latency-retry-text: #fdba74;
+    --latency-marker-stop-text: #f0abfc;
     --color-text-faint: #6b7280;
     --color-accent: #00d4ff;
     --color-accent-dim: rgba(0, 212, 255, 0.12);
@@ -69,6 +75,12 @@
     --color-border-row: rgba(0, 0, 0, 0.05);
     --color-text: #0a0a0a;
     --color-text-muted: #4b5563;
+    --latency-downstream-text: #0e7490;
+    --latency-proxy-text: #4338ca;
+    --latency-upstream-text: #92400e;
+    --latency-provider-text: #047857;
+    --latency-retry-text: #9a3412;
+    --latency-marker-stop-text: #a21caf;
     --color-text-faint: #6b7280;
     --color-accent: #0086d4;
     --color-accent-dim: rgba(0, 134, 212, 0.10);
@@ -106,6 +118,12 @@
       --color-border-row: rgba(0, 0, 0, 0.05);
       --color-text: #0a0a0a;
       --color-text-muted: #4b5563;
+      --latency-downstream-text: #0e7490;
+      --latency-proxy-text: #4338ca;
+      --latency-upstream-text: #92400e;
+      --latency-provider-text: #047857;
+      --latency-retry-text: #9a3412;
+      --latency-marker-stop-text: #a21caf;
       --color-text-faint: #6b7280;
       --color-accent: #0086d4;
       --color-accent-dim: rgba(0, 134, 212, 0.10);
