@@ -150,24 +150,29 @@ impl PostgresConnectionProxy {
 
         let (command_tx, mut command_rx) = mpsc::channel(4);
         let task = tokio::spawn(async move {
-            let mut available = true;
+            let mut listener = Some(listener);
             let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
                     command = command_rx.recv() => {
                         match command {
                             Some(PostgresProxyCommand::SetAvailable {
-                                available: next,
+                                available,
                                 acknowledged,
                             }) => {
-                                available = next;
-                                if !available {
+                                if available {
+                                    if listener.is_none() {
+                                        listener = Some(TcpListener::bind(proxy_addr).await?);
+                                    }
+                                } else {
+                                    listener.take();
                                     connections.abort_all();
                                     while connections.join_next().await.is_some() {}
                                 }
                                 let _ = acknowledged.send(());
                             }
                             Some(PostgresProxyCommand::Shutdown { acknowledged }) => {
+                                listener.take();
                                 connections.abort_all();
                                 while connections.join_next().await.is_some() {}
                                 let _ = acknowledged.send(());
@@ -176,15 +181,18 @@ impl PostgresConnectionProxy {
                             None => return Ok(()),
                         }
                     }
-                    accepted = listener.accept() => {
-                        let (mut client, _) = accepted?;
-                        if available {
-                            connections.spawn(async move {
-                                let mut server = TcpStream::connect(target).await?;
-                                tokio::io::copy_bidirectional(&mut client, &mut server).await?;
-                                Ok::<(), std::io::Error>(())
-                            });
+                    accepted = async {
+                        match listener.as_ref() {
+                            Some(listener) => listener.accept().await,
+                            None => std::future::pending().await,
                         }
+                    } => {
+                        let (mut client, _) = accepted?;
+                        connections.spawn(async move {
+                            let mut server = TcpStream::connect(target).await?;
+                            tokio::io::copy_bidirectional(&mut client, &mut server).await?;
+                            Ok::<(), std::io::Error>(())
+                        });
                     }
                     _ = connections.join_next(), if !connections.is_empty() => {}
                 }
