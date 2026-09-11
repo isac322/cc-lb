@@ -208,7 +208,7 @@ fn t2__moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
     assert_eq!(owner_score.lookback_distance, Some(1));
     assert_eq!(
         owner_score.token_estimate_source.as_deref(),
-        Some("local_tiktoken_v1")
+        Some("serialized_prefix_bytes_v1")
     );
 
     let output = SubscriptionPreferenceFilter::new()
