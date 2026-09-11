@@ -149,6 +149,7 @@ fn invalid_pg_pool(database_url: &str) -> TestResult<PgPool> {
         .password("invalid-pg-listener-password");
     Ok(PgPoolOptions::new()
         .max_connections(1)
+        .acquire_timeout(Duration::from_secs(1))
         .connect_lazy_with(options))
 }
 
