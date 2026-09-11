@@ -356,8 +356,6 @@ jobs:
 
   tx:
     runs-on: cc-lb-2
-    container:
-      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-fe7ac6d6df4f@sha256:c2f09887524d6616d0b97be3316822b47466f5633409f743d6e1bab277deefb4
     services:
       postgres:
         image: postgres:18
@@ -379,22 +377,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
-      # The ARC container hook cannot serialize the nested rust-toolchain
-      # action's live TLS request on this runner. Install through one shell step
-      # so the hook receives only the command exit status.
-      - name: Install pinned Rust toolchain and wasm targets
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
-              https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
-            export PATH="$HOME/.cargo/bin:$PATH"
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          fi
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
-          rustup target add --toolchain 1.98.1 wasm32-wasip1 wasm32-unknown-unknown
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: wasm32-wasip1,wasm32-unknown-unknown
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"
