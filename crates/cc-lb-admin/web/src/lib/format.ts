@@ -58,17 +58,13 @@ export function fmtMs(v: number | null | undefined): string {
   return `${EN_US_NUMBER.format(Math.round(v))} ms`;
 }
 
-export function fmtIoMs(v: number | null | undefined): string {
+export function fmtSetupMs(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v) || v < 0) return DASH;
   if (v > Number.MAX_SAFE_INTEGER) return DASH;
   if (v === 0) return '0 ms';
   if (v < 0.001) return '<0.001 ms';
-  return `${EN_US_NUMBER.format(Number(v.toFixed(3)))} ms`;
-}
-
-export function fmtSetupMs(v: number | null | undefined): string {
-  if (v != null && v >= 1) return fmtMs(v);
-  return fmtIoMs(v);
+  if (v < 1) return `${EN_US_NUMBER.format(Number(v.toFixed(3)))} ms`;
+  return fmtMs(v);
 }
 
 export function fmtN(v: number | null | undefined): string {

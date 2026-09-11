@@ -121,7 +121,7 @@ describe('RequestEventDrawer', () => {
     );
 
     const partialTimeline = screen.getByTestId('latency-timeline-region');
-    expect(partialTimeline.textContent).toContain('10 ms');
+    expect(screen.getByText('Internal pre')).toBeDefined();
     expect(partialTimeline.textContent).toContain('Upstream');
 
     const finalSlimEvent = {
@@ -144,7 +144,7 @@ describe('RequestEventDrawer', () => {
     const pendingTimeline = screen.getByTestId('latency-timeline-region');
     expect(pendingTimeline).toBe(partialTimeline);
     expect(pendingTimeline.querySelectorAll('.skeleton')).toHaveLength(0);
-    expect(pendingTimeline.textContent).toContain('10 ms');
+    expect(screen.getByText('Internal pre')).toBeDefined();
     expect(pendingTimeline.textContent).toContain('Upstream');
 
     await waitFor(() => expect(resolveDetail).toBeDefined());
@@ -258,9 +258,7 @@ describe('RequestEventDrawer', () => {
         onClose={() => {}}
       />,
     );
-    expect(screen.getByTestId('latency-timeline-region').textContent).toContain(
-      '20 ms',
-    );
+    expect(screen.getByText('Internal pre')).toBeDefined();
 
     const newEvent = {
       event_id: 'evt_new',
@@ -282,7 +280,7 @@ describe('RequestEventDrawer', () => {
     const latency = screen.getByTestId('latency-timeline-region');
     expect(latency.getAttribute('aria-busy')).toBe('true');
     expect(latency.querySelectorAll('.skeleton').length).toBeGreaterThan(0);
-    expect(latency.textContent).not.toContain('20 ms');
+    expect(screen.queryByText('Internal pre')).toBeNull();
   });
 
   it('renders known upstream failure details immediately while detail is pending', () => {

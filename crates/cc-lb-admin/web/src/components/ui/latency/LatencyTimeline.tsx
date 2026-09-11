@@ -1,41 +1,21 @@
 import { Popover as BasePopover } from '@base-ui/react/popover';
 import {
-  ArrowDownToLine,
-  Cpu,
-  Network,
-  RefreshCw,
-  Server,
-  Split,
-  TriangleAlert,
-} from 'lucide-react';
-import {
   type ReactElement,
   type ReactNode,
   useCallback,
   useMemo,
   useState,
 } from 'react';
-import {
-  fmtBytes,
-  fmtIoMs,
-  fmtMs,
-  fmtN,
-  fmtSetupMs,
-} from '../../../lib/format';
+import { fmtBytes, fmtMs, fmtN, fmtSetupMs } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Skeleton } from '../primitives';
 import {
   CACHE_SETUP_TIMING_STAGES,
-  computeLatencyAttribution,
   computeStageGroups,
   deriveOtherSetup,
   deriveProxyTimelineDuration,
   deriveSetupOverhead,
   hasSetupTimingBreakdown,
-  LATENCY_CATEGORY_META,
-  type LatencyAttribution,
-  type LatencyCategory,
-  type LatencyCategoryValue,
   responseBodyDuration,
 } from './computeStageGroups';
 
@@ -46,40 +26,40 @@ import {
 type StageGroup =
   | 'renewal'
   | 'internal_pre'
-  | 'retry'
   | 'wait'
   | 'upstream'
   | 'body'
   | 'internal_post';
 
-const GROUP_META: Record<StageGroup, { label: string; text: string }> = {
+const GROUP_META: Record<
+  StageGroup,
+  { label: string; text: string; hue: number; sat: number }
+> = {
   renewal: {
-    label: 'Scheduler renewal',
-    text: 'text-[color:var(--latency-downstream-text)]',
+    label: 'Renewal',
+    text: 'text-cyan-300',
+    hue: 185,
+    sat: 70,
   },
   internal_pre: {
-    label: 'Ingress and cc-lb setup',
-    text: 'text-[color:var(--latency-proxy-text)]',
+    label: 'Internal pre',
+    text: 'text-sky-300',
+    hue: 200,
+    sat: 82,
   },
-  retry: {
-    label: 'Mixed retry path',
-    text: 'text-[color:var(--latency-retry-text)]',
-  },
-  wait: {
-    label: 'Bulkhead queue and DNS',
-    text: 'text-[color:var(--latency-upstream-text)]',
-  },
+  wait: { label: 'Wait', text: 'text-amber-300', hue: 40, sat: 88 },
   upstream: {
-    label: 'Upstream attempt',
-    text: 'text-[color:var(--latency-upstream-text)]',
+    label: 'Upstream',
+    text: 'text-violet-300',
+    hue: 265,
+    sat: 65,
   },
-  body: {
-    label: 'Response body parent',
-    text: 'text-text-muted',
-  },
+  body: { label: 'Body', text: 'text-emerald-300', hue: 155, sat: 60 },
   internal_post: {
-    label: 'cc-lb finalize',
-    text: 'text-[color:var(--latency-proxy-text)]',
+    label: 'Internal post',
+    text: 'text-slate-300',
+    hue: 215,
+    sat: 15,
   },
 };
 
@@ -91,7 +71,6 @@ function getGroupLabel(group: StageGroup, hasFinalizeTiming: boolean): string {
 
 const PROXY_GROUP_ORDER: StageGroup[] = [
   'internal_pre',
-  'retry',
   'wait',
   'upstream',
   'body',
@@ -104,7 +83,7 @@ const UNACCOUNTED_BG =
 
 const STAGE_DESCRIPTIONS: Record<string, string> = {
   request_body_read:
-    'Parent interval for collecting the client request body. New rows split observed frame wait from local handling below; legacy rows remain unattributed rather than being called network time.',
+    'Time for the server to receive the complete client request body. JSON parsing starts afterward and is excluded.',
   auth: 'Bearer-token validation, principal lookup, and request-context assembly before routing.',
   route:
     'Match the request path against configured upstream routes and pick a candidate list.',
@@ -129,26 +108,24 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
     'Build upstream credentials, including lookup, decrypt, and lazy OAuth refresh.',
   other_setup:
     'Remaining proxy setup time after auth, route, limit reserve, and measured setup stages.',
-  retry_overhead:
-    'Wall-clock time from the earlier attempt start until the final retry starts. It mixes cc-lb and upstream work, is counted once, and does not overlap the final-attempt stages.',
   shape:
     'Run the shape plugin: dialect adaptation + Anthropic-format shaping of the outbound body.',
   sign: 'Sign the outbound request (OAuth refresh if the credential needs one).',
   bulkhead_wait:
-    'Time queued inside cc-lb for an upstream concurrency slot. This is local waiting, not network time.',
-  dns: 'Observed DNS resolution for the upstream host. It is absent when not measured or skipped on connection reuse.',
+    'Time spent queued in the bulkhead waiting for an upstream concurrency slot.',
+  dns: 'DNS resolution for the upstream host (skipped when the connection is reused).',
   connect:
-    'Observed TCP connect + TLS handshake. It is absent when a warm pooled connection is reused.',
+    'TCP connect + TLS handshake. Skipped entirely when the warm pool returns a live connection.',
   upstream_wait:
-    'Header wait remaining after bulkhead, DNS, and connect. It combines upstream network, provider work, and runtime scheduling; it is not pure provider processing or RTT.',
+    'upstream_ttfb − (bulkhead_wait + dns + connect). Approximates provider-side processing + network RTT.',
   stream_relay:
-    'Parent response-body interval. New rows split upstream frame wait, local relay work, and downstream consumer poll gaps below; any remainder stays unattributed.',
+    'Complete SSE response body relay from response headers through the last downstream chunk.',
   partial_stream:
-    'Partial parent response-body interval retained through cancellation. Split child measurements remain visible without implying completion.',
+    'Partial response body relay from response headers until client cancellation was observed.',
   body_collect:
-    'Parent non-stream response-body collection interval. Legacy rows mix upstream wait and local collection work.',
+    'Non-stream response body download from response headers until the complete body was collected.',
   finalize:
-    'Mandatory cc-lb accounting and finalization after the response body completed or cancellation was observed, ending immediately before the terminal event is published.',
+    'Mandatory accounting and finalization after the response body completed or cancellation was observed, ending immediately before the terminal event is published.',
   limit_reconcile:
     'Legacy timing for reconciling actual token usage against the reserved budget.',
   renewal_cycle:
@@ -182,98 +159,18 @@ interface Stage {
   detail?: string;
 }
 
-type StageCategory =
-  | LatencyCategory
-  | 'mixed_upstream'
-  | 'mixed_retry'
-  | 'parent_interval'
-  | 'renewal';
-
 interface StageDetail extends Stage {
   index: number;
   groupCount: number;
   fill: string;
-  category: StageCategory;
-}
-
-const STAGE_CATEGORY_META: Record<
-  StageCategory,
-  { label: string; textClass: string; hue: number; sat: number }
-> = {
-  downstream_network: {
-    label: LATENCY_CATEGORY_META.downstream_network.label,
-    textClass: LATENCY_CATEGORY_META.downstream_network.textClass,
-    hue: 188,
-    sat: 82,
-  },
-  cc_lb: {
-    label: LATENCY_CATEGORY_META.cc_lb.label,
-    textClass: LATENCY_CATEGORY_META.cc_lb.textClass,
-    hue: 238,
-    sat: 82,
-  },
-  upstream_network: {
-    label: LATENCY_CATEGORY_META.upstream_network.label,
-    textClass: LATENCY_CATEGORY_META.upstream_network.textClass,
-    hue: 42,
-    sat: 88,
-  },
-  upstream_processing: {
-    label: LATENCY_CATEGORY_META.upstream_processing.label,
-    textClass: LATENCY_CATEGORY_META.upstream_processing.textClass,
-    hue: 158,
-    sat: 64,
-  },
-  mixed_upstream: {
-    label: 'Combined upstream wait',
-    textClass: 'text-[color:var(--latency-upstream-text)]',
-    hue: 86,
-    sat: 60,
-  },
-  mixed_retry: {
-    label: 'Mixed retry path',
-    textClass: 'text-[color:var(--latency-retry-text)]',
-    hue: 24,
-    sat: 88,
-  },
-  parent_interval: {
-    label: 'Parent interval · mixed / unattributed',
-    textClass: 'text-text-muted',
-    hue: 215,
-    sat: 18,
-  },
-  renewal: {
-    label: 'Scheduler renewal · not proxy-attributed',
-    textClass: 'text-[color:var(--latency-downstream-text)]',
-    hue: 185,
-    sat: 70,
-  },
-};
-
-function classifyStage(
-  stage: Stage,
-  event: RequestEventWithPhase,
-): StageCategory {
-  if (event.source_kind === 'renewal') return 'renewal';
-  if (stage.key === 'request_body_read') return 'parent_interval';
-  if (stage.key === 'retry_overhead') return 'mixed_retry';
-  if (stage.key === 'dns' || stage.key === 'connect') return 'upstream_network';
-  if (stage.key === 'upstream_wait') return 'mixed_upstream';
-  if (
-    stage.key === 'stream_relay' ||
-    stage.key === 'partial_stream' ||
-    stage.key === 'body_collect'
-  )
-    return 'parent_interval';
-  return 'cc_lb';
 }
 
 function stageShadeHsl(
-  category: StageCategory,
+  group: StageGroup,
   index: number,
   count: number,
 ): string {
-  const { hue, sat } = STAGE_CATEGORY_META[category];
+  const { hue, sat } = GROUP_META[group];
   const lightness =
     count <= 1 ? 55 : Math.round(38 + (index / (count - 1)) * 38);
   return `hsl(${hue}deg ${sat}% ${lightness}%)`;
@@ -370,12 +267,6 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
         deriveSetupOverhead(e),
       );
     }
-    pushRecorded(
-      'retry_overhead',
-      'Earlier attempt before retry',
-      'retry',
-      e.retry_overhead_ms,
-    );
     push('shape', 'Shape', 'internal_pre', e.shape_ms);
     push('sign', 'Sign', 'internal_pre', e.sign_ms);
     push('bulkhead_wait', 'Bulkhead wait', 'wait', e.bulkhead_wait_ms);
@@ -446,24 +337,20 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
     }
   }
 
-  const categorized = raw.map((stage) => ({
-    ...stage,
-    category: classifyStage(stage, e),
-  }));
-  const perGroupCount: Partial<Record<StageGroup, number>> = {};
-  for (const stage of categorized) {
-    perGroupCount[stage.group] = (perGroupCount[stage.group] ?? 0) + 1;
+  const perGroupCount = new Map<StageGroup, number>();
+  for (const s of raw) {
+    perGroupCount.set(s.group, (perGroupCount.get(s.group) ?? 0) + 1);
   }
-  const seen: Partial<Record<StageGroup, number>> = {};
-  return categorized.map((stage) => {
-    const groupCount = perGroupCount[stage.group] ?? 1;
-    const index = seen[stage.group] ?? 0;
-    seen[stage.group] = index + 1;
+  const seen = new Map<StageGroup, number>();
+  return raw.map((s) => {
+    const groupCount = perGroupCount.get(s.group) ?? 1;
+    const index = seen.get(s.group) ?? 0;
+    seen.set(s.group, index + 1);
     return {
-      ...stage,
+      ...s,
       index,
       groupCount,
-      fill: stageShadeHsl(stage.category, index, groupCount),
+      fill: stageShadeHsl(s.group, index, groupCount),
     };
   });
 }
@@ -486,7 +373,6 @@ export function buildSseMarkers(e: RequestEventWithPhase): SseMarker[] {
     (e.route_ms ?? 0) +
     (e.limit_reserve_ms ?? 0) +
     deriveSetupOverhead(e) +
-    (e.retry_overhead_ms ?? 0) +
     (e.shape_ms ?? 0) +
     (e.sign_ms ?? 0) +
     (e.upstream_ttfb_ms ?? 0);
@@ -502,38 +388,38 @@ export function buildSseMarkers(e: RequestEventWithPhase): SseMarker[] {
       key: 'message_start',
       label: 'Message start',
       ms: e._phase === 'final' ? e.stream_message_start_ms : undefined,
-      color: 'text-[color:var(--latency-downstream-text)]',
+      color: 'text-cyan-300',
     },
     {
       key: 'content_block_start',
       label: 'Content block start',
       ms: e._phase === 'final' ? e.stream_content_block_start_ms : undefined,
-      color: 'text-[color:var(--latency-downstream-text)]',
+      color: 'text-sky-300',
     },
     {
       key: 'first_delta',
       label: 'First content delta (TTFT)',
       ms: e._phase === 'final' ? e.stream_first_content_delta_ms : undefined,
-      color: 'text-[color:var(--latency-upstream-text)]',
+      color: 'text-amber-300',
       starred: true,
     },
     {
       key: 'last_delta',
       label: 'Last content delta',
       ms: e._phase === 'final' ? e.stream_last_content_delta_ms : undefined,
-      color: 'text-[color:var(--latency-provider-text)]',
+      color: 'text-emerald-300',
     },
     {
       key: 'message_stop',
       label: 'Message stop',
       ms: e._phase === 'final' ? e.stream_message_stop_ms : undefined,
-      color: 'text-[color:var(--latency-marker-stop-text)]',
+      color: 'text-fuchsia-300',
     },
     {
       key: 'last_chunk',
       label: 'Last chunk',
       ms: e._phase === 'final' ? e.stream_last_chunk_ms : undefined,
-      color: 'text-text-muted',
+      color: 'text-slate-300',
     },
   ];
 
@@ -648,7 +534,7 @@ function InfoPopover({
           align="center"
           className="z-[60]"
         >
-          <BasePopover.Popup className="z-[60] max-w-[min(280px,calc(100vw-24px))] break-words rounded-md border border-subtle-strong bg-bg-sub px-2.5 py-1.5 text-[11px] text-text shadow-lg">
+          <BasePopover.Popup className="z-[60] px-2.5 py-1.5 text-[11px] rounded-md bg-bg-sub border border-subtle-strong text-text shadow-lg max-w-[280px]">
             {content}
           </BasePopover.Popup>
         </BasePopover.Positioner>
@@ -678,19 +564,10 @@ function StageInfo({
 
   return (
     <div className="flex flex-col gap-1.5 min-w-[240px]">
-      <div
-        className={cx(
-          'text-[10px] uppercase tracking-wider',
-          STAGE_CATEGORY_META[stage.category].textClass,
-        )}
-      >
-        {STAGE_CATEGORY_META[stage.category].label}
+      <div className="text-[10px] uppercase tracking-wider text-text-faint">
+        {groupLabel}
+        {overview.length > 1 ? ` · ${overview.length} stages` : ''}
       </div>
-      {overview.length > 1 ? (
-        <div className="text-[9px] text-text-faint">
-          Chronological lane: {groupLabel} · {overview.length} parent stages
-        </div>
-      ) : null}
       {multi ? (
         <>
           <div className="flex h-3 rounded-sm overflow-hidden bg-overlay-5 border border-subtle/60">
@@ -851,14 +728,11 @@ function SegmentButton({
   const isActive = active.isActive(stage.key);
   const isSticky = active.isSticky(stage.key);
 
-  const leftPct = clampPct((startMs / total) * 100);
-  const endPct = clampPct(((startMs + stage.ms) / total) * 100);
-  const widthPct = Math.max(0, endPct - leftPct);
   const style: React.CSSProperties = {
     backgroundColor: stage.fill,
-    width: `${widthPct}%`,
-    left: `${leftPct}%`,
-    minWidth: widthPct > 0 ? '2px' : undefined,
+    width: `${(stage.ms / total) * 100}%`,
+    left: `${(startMs / total) * 100}%`,
+    minWidth: '2px',
   };
 
   return (
@@ -877,7 +751,6 @@ function SegmentButton({
         {...active.bind(stage.key)}
         data-testid={`latency-segment-${stage.key}`}
         aria-label={`${stage.label} ${formatStageMs(stage)}${stage.detail ? `, ${stage.detail}` : ''}`}
-        aria-pressed={isSticky}
         className={cx(
           'absolute top-0 h-full rounded-sm outline-none transition-all cursor-pointer',
           isActive
@@ -974,7 +847,6 @@ function MarkerDot({
           type="button"
           {...active.bind(marker.key)}
           aria-label={`${marker.label} ${fmtMs(marker.absMs)}`}
-          aria-pressed={isSticky}
           className={cx(
             'absolute -translate-x-1/2 -translate-y-1/2 h-5 w-5 flex items-center justify-center outline-none cursor-pointer transition-transform',
             isActive ? 'scale-[1.4] z-10' : 'hover:scale-125',
@@ -1244,11 +1116,13 @@ function StageDetailsList({
   total,
   unaccounted,
   active,
+  hasFinalizeTiming,
 }: {
   stages: StageDetail[];
   total: number;
   unaccounted: number;
   active: ActiveKeyApi;
+  hasFinalizeTiming: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const count = stages.length + (unaccounted > 0 ? 1 : 0);
@@ -1287,7 +1161,7 @@ function StageDetailsList({
             ms={s.ms}
             setupTiming={s.setupTiming}
             total={total}
-            hint={STAGE_CATEGORY_META[s.category].label}
+            hint={getGroupLabel(s.group, hasFinalizeTiming)}
             description={STAGE_DESCRIPTIONS[s.key]}
             detail={s.detail}
           />
@@ -1350,7 +1224,6 @@ function SseDetailsList({
             <button
               type="button"
               {...active.bind(m.key)}
-              aria-pressed={isSticky}
               className={cx(
                 'flex items-center gap-2 text-[10px] w-full px-1.5 py-1 rounded transition text-left cursor-pointer',
                 isActive
@@ -1420,9 +1293,8 @@ function DetailRow({
     <button
       type="button"
       {...active.bind(stateKey)}
-      aria-pressed={isSticky}
       className={cx(
-        'grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-2 gap-y-0.5 rounded px-1.5 py-1 text-left text-[10px] transition cursor-pointer',
+        'flex items-center gap-2 text-[10px] w-full px-1.5 py-1 rounded transition text-left cursor-pointer',
         isActive
           ? 'bg-overlay-10 text-text'
           : 'text-text-muted hover:bg-overlay-5',
@@ -1433,21 +1305,18 @@ function DetailRow({
             : '',
       )}
     >
-      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
-        {leading}
-        <span className="min-w-0 break-words">{label}</span>
-        {hint ? (
-          <span className="break-words text-text-faint">· {hint}</span>
-        ) : null}
-      </span>
-      <span className="whitespace-nowrap tabular-nums text-right">
-        {setupTiming ? fmtSetupMs(ms) : fmtMs(ms)} · {pct(ms, total)}%
-      </span>
+      {leading}
+      <span className="flex-1 truncate">{label}</span>
+      {hint ? <span className="text-text-faint shrink-0">· {hint}</span> : null}
       {detail ? (
-        <span className="col-span-2 min-w-0 break-words pl-4 text-text-faint">
-          {detail}
-        </span>
+        <span className="text-text-faint shrink-0">· {detail}</span>
       ) : null}
+      <span className="tabular-nums shrink-0 w-16 text-right">
+        {setupTiming ? fmtSetupMs(ms) : fmtMs(ms)}
+      </span>
+      <span className="tabular-nums shrink-0 w-8 text-right text-text-faint">
+        {pct(ms, total)}%
+      </span>
     </button>
   );
   if (!description) return button;
@@ -1476,515 +1345,6 @@ function DetailRow({
     >
       {button}
     </InfoPopover>
-  );
-}
-
-// -----------------------------------------------------------------------------
-// Attribution summary and I/O diagnostics
-// -----------------------------------------------------------------------------
-
-function CategoryIcon({
-  category,
-  className,
-}: {
-  category: LatencyCategory;
-  className?: string;
-}) {
-  const props = { 'aria-hidden': true, className: cx('h-4 w-4', className) };
-  switch (category) {
-    case 'downstream_network':
-      return <ArrowDownToLine {...props} />;
-    case 'cc_lb':
-      return <Cpu {...props} />;
-    case 'upstream_network':
-      return <Network {...props} />;
-    case 'upstream_processing':
-      return <Server {...props} />;
-  }
-}
-
-function CategoryCard({
-  value,
-  total,
-}: {
-  value: LatencyCategoryValue;
-  total: number;
-}) {
-  const meta = LATENCY_CATEGORY_META[value.key];
-  const measured = value.ms != null;
-  const measuredPct = measured ? pct(value.ms ?? 0, total) : null;
-  const status =
-    value.key === 'upstream_processing' && !measured
-      ? 'Not independently measured'
-      : measured
-        ? `${measuredPct}% of request`
-        : 'Not measured';
-
-  return (
-    <article
-      role="listitem"
-      data-testid={`latency-category-${value.key}`}
-      data-category-ms={value.ms ?? 'unmeasured'}
-      className={cx(
-        'min-w-0 rounded-lg border p-3',
-        'flex flex-col gap-2 overflow-hidden',
-        meta.surfaceClass,
-      )}
-      aria-label={`${meta.label}: ${measured ? fmtMs(value.ms ?? 0) : status}`}
-    >
-      <div className="flex min-w-0 items-start gap-2">
-        <span
-          className={cx(
-            'flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-current/20 bg-overlay-5',
-            meta.textClass,
-          )}
-        >
-          <CategoryIcon category={value.key} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <h3
-            className={cx(
-              'break-words text-[11px] font-semibold leading-tight',
-              meta.textClass,
-            )}
-          >
-            {meta.label}
-          </h3>
-          <div className="mt-1 text-lg font-semibold tabular-nums text-text">
-            {measured ? fmtMs(value.ms ?? 0) : '—'}
-          </div>
-        </div>
-      </div>
-      <div
-        className="h-1.5 overflow-hidden rounded-full bg-overlay-10"
-        aria-hidden
-      >
-        {measured ? (
-          <div
-            className="h-full rounded-full"
-            style={{
-              backgroundColor: meta.fill,
-              width: `${clampPct(((value.ms ?? 0) / Math.max(total, 1)) * 100)}%`,
-            }}
-          />
-        ) : null}
-      </div>
-      <div className={cx('text-[10px] font-medium', meta.textClass)}>
-        {status}
-      </div>
-      <p className="break-words text-[10px] leading-snug text-text-muted">
-        {value.note}
-      </p>
-    </article>
-  );
-}
-
-function LatencyAttributionSummary({
-  attribution,
-}: {
-  attribution: LatencyAttribution;
-}) {
-  return (
-    <section aria-labelledby="latency-attribution-title" className="space-y-2">
-      <div className="flex flex-wrap items-end justify-between gap-1">
-        <div>
-          <h2
-            id="latency-attribution-title"
-            className="text-xs font-semibold text-text"
-          >
-            Measured latency attribution
-          </h2>
-          <p className="text-[10px] leading-snug text-text-faint">
-            Measured portions only. Shared waits and unknown time are excluded
-            from the four cards.
-          </p>
-        </div>
-        <span className="text-[10px] tabular-nums text-text-muted">
-          request {fmtMs(attribution.timelineTotalMs)}
-        </span>
-      </div>
-      <div
-        role="list"
-        aria-label="Latency category summary"
-        className="grid min-w-0 grid-cols-1 gap-2 min-[420px]:grid-cols-2"
-      >
-        {attribution.categories.map((value) => (
-          <CategoryCard
-            key={value.key}
-            value={value}
-            total={attribution.timelineTotalMs}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function MixedAttributionPanel({
-  attribution,
-}: {
-  attribution: LatencyAttribution;
-}) {
-  const mixed = attribution.mixedUpstreamMs;
-  const retry = attribution.mixedRetryMs;
-  return (
-    <section
-      data-testid="latency-mixed-upstream"
-      data-mixed-upstream-ms={mixed ?? 'unmeasured'}
-      aria-labelledby="latency-mixed-upstream-title"
-      className="min-w-0 overflow-hidden rounded-lg border border-amber-500/35 bg-amber-500/5"
-    >
-      <div className="flex min-w-0 items-start gap-2 p-3">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-amber-500/30 bg-amber-500/10 text-[color:var(--latency-upstream-text)]">
-          <Split aria-hidden className="h-4 w-4" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-            <h2
-              id="latency-mixed-upstream-title"
-              className="text-xs font-semibold text-text"
-            >
-              Combined upstream wait
-            </h2>
-            <span className="text-sm font-semibold tabular-nums text-text">
-              {mixed == null ? 'Not measured' : fmtMs(mixed)}
-            </span>
-          </div>
-          <p className="mt-1 break-words text-[10px] leading-snug text-text-muted">
-            Header and response-frame waits combine upstream network, provider
-            work, and runtime scheduling. They span both upstream concepts,
-            belong to neither card alone, and are counted once.
-          </p>
-        </div>
-      </div>
-      <div
-        className="mx-3 mb-3 h-3 overflow-hidden rounded-sm border border-amber-500/25 bg-overlay-5"
-        aria-hidden
-      >
-        {mixed != null ? (
-          <div
-            className="h-full min-w-px"
-            style={{
-              width: `${clampPct(
-                (mixed / Math.max(attribution.timelineTotalMs, 1)) * 100,
-              )}%`,
-              backgroundImage:
-                'repeating-linear-gradient(135deg, rgba(245,158,11,.78) 0 7px, rgba(16,185,129,.78) 7px 14px)',
-            }}
-          />
-        ) : null}
-      </div>
-      {retry != null ? (
-        <div
-          data-testid="latency-mixed-retry"
-          data-mixed-retry-ms={retry}
-          className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-amber-500/20 px-3 py-2 text-[10px]"
-        >
-          <RefreshCw
-            aria-hidden
-            className="h-3.5 w-3.5 shrink-0 text-[color:var(--latency-retry-text)]"
-          />
-          <span className="font-medium text-text">Earlier retry path</span>
-          <span className="tabular-nums text-text">{fmtMs(retry)}</span>
-          <span className="min-w-0 text-text-muted">
-            mixed cc-lb + upstream before the final attempt; counted once
-          </span>
-        </div>
-      ) : null}
-      {attribution.unattributedMs > 0 ? (
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-subtle px-3 py-2 text-[10px]">
-          <span
-            aria-hidden
-            className={cx(UNACCOUNTED_BG, 'h-2.5 w-2.5 shrink-0 rounded-sm')}
-          />
-          <span className="font-medium text-text">Unattributed remainder</span>
-          <span className="tabular-nums text-text">
-            {fmtMs(attribution.unattributedMs)}
-          </span>
-          <span className="min-w-0 text-text-muted">
-            includes legacy unsplit parents and other uninstrumented gaps
-          </span>
-        </div>
-      ) : null}
-      {attribution.accountingWarning ? (
-        <div
-          role="alert"
-          className="flex items-start gap-2 border-t border-[color:var(--color-warn)]/30 bg-[color:var(--color-warn)]/10 px-3 py-2 text-[10px] text-[color:var(--color-warn)]"
-        >
-          <TriangleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>
-            Recorded child intervals exceed a parent or the request total.
-            Values remain visible; visual widths are clamped.
-          </span>
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-type DiagnosticFormat = 'ms' | 'count' | 'bytes';
-
-interface DiagnosticItem {
-  key: string;
-  label: string;
-  value: number | null | undefined;
-  format: DiagnosticFormat;
-  category: StageCategory;
-  detail: string;
-}
-
-function formatDiagnosticValue(
-  value: number,
-  format: DiagnosticFormat,
-): string {
-  if (format === 'count') return fmtN(value);
-  if (format === 'bytes') return fmtBytes(value);
-  return fmtIoMs(value);
-}
-
-function DiagnosticList({
-  title,
-  items,
-  isPartial,
-}: {
-  title: string;
-  items: DiagnosticItem[];
-  isPartial: boolean;
-}) {
-  return (
-    <section className="min-w-0 rounded-lg border border-subtle bg-overlay-2 p-2.5">
-      <h3 className="mb-1.5 text-[11px] font-semibold text-text">{title}</h3>
-      <div role="list" className="space-y-1">
-        {items.map((item) => {
-          const measured = item.value != null;
-          const category = STAGE_CATEGORY_META[item.category];
-          return (
-            <div
-              key={item.key}
-              role="listitem"
-              data-testid={`latency-diagnostic-${item.key}`}
-              data-measured={measured}
-              className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-2 rounded-md px-1.5 py-1 hover:bg-overlay-5"
-            >
-              <div className="min-w-0">
-                <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
-                  <span className="font-medium text-[10px] text-text">
-                    {item.label}
-                  </span>
-                  <span
-                    className={cx('break-words text-[9px]', category.textClass)}
-                  >
-                    {category.label}
-                  </span>
-                </div>
-                <p className="break-words text-[9px] leading-snug text-text-faint">
-                  {item.detail}
-                </p>
-              </div>
-              <span className="self-start whitespace-nowrap text-[10px] tabular-nums text-text-muted">
-                {measured
-                  ? formatDiagnosticValue(item.value ?? 0, item.format)
-                  : isPartial
-                    ? 'In progress / not measured'
-                    : 'Not measured'}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function IoDiagnostics({ event }: { event: RequestEventWithPhase }) {
-  if (event.source_kind === 'renewal') return null;
-  const responseParent =
-    event._phase === 'final'
-      ? event.status === 499
-        ? event.upstream_body_ms
-        : (event.stream_total_ms ?? event.upstream_body_ms)
-      : undefined;
-  const hasAny =
-    event.request_body_read_ms != null ||
-    event.request_body_bytes != null ||
-    event.request_body_first_chunk_ms != null ||
-    event.request_body_receive_ms != null ||
-    event.request_body_wait_ms != null ||
-    event.request_body_process_ms != null ||
-    event.request_body_chunk_count != null ||
-    responseParent != null ||
-    event.response_body_wait_ms != null ||
-    event.response_body_process_ms != null ||
-    event.response_body_downstream_poll_gap_ms != null;
-  if (!hasAny) return null;
-
-  const ingress: DiagnosticItem[] = [
-    {
-      key: 'request-parent',
-      label: 'Request body parent',
-      value: event.request_body_read_ms,
-      format: 'ms',
-      category: 'parent_interval',
-      detail: 'Collection start to completion; children below stay inside it.',
-    },
-    {
-      key: 'request-first-chunk',
-      label: 'First non-empty chunk',
-      value: event.request_body_first_chunk_ms,
-      format: 'ms',
-      category: 'parent_interval',
-      detail: 'Overlapping marker from collection start; diagnostic only.',
-    },
-    {
-      key: 'request-receive',
-      label: 'Receive interval',
-      value: event.request_body_receive_ms,
-      format: 'ms',
-      category: 'parent_interval',
-      detail: 'Overlapping first-to-last collection interval; diagnostic only.',
-    },
-    {
-      key: 'request-wait',
-      label: 'Observed frame wait',
-      value: event.request_body_wait_ms,
-      format: 'ms',
-      category: 'downstream_network',
-      detail: 'Client, transit, and runtime scheduling wait; not RTT.',
-    },
-    {
-      key: 'request-process',
-      label: 'Local frame handling',
-      value: event.request_body_process_ms,
-      format: 'ms',
-      category: 'cc_lb',
-      detail: 'Elapsed synchronous copy and validation work; not CPU time.',
-    },
-    {
-      key: 'request-chunks',
-      label: 'Non-empty DATA frames',
-      value: event.request_body_chunk_count,
-      format: 'count',
-      category: 'parent_interval',
-      detail: 'Zero is distinct from a missing measurement.',
-    },
-    {
-      key: 'request-bytes',
-      label: 'Request body size',
-      value: event.request_body_bytes,
-      format: 'bytes',
-      category: 'parent_interval',
-      detail:
-        'Bytes collected by the handler; pre-handler upload is not visible.',
-    },
-  ];
-  const response: DiagnosticItem[] = [
-    {
-      key: 'response-parent',
-      label:
-        event.status === 499
-          ? 'Partial response parent'
-          : 'Response body parent',
-      value: responseParent,
-      format: 'ms',
-      category: 'parent_interval',
-      detail:
-        'Parent interval; split children and any remainder are not added again.',
-    },
-    {
-      key: 'response-wait',
-      label: 'Upstream frame wait',
-      value: event.response_body_wait_ms,
-      format: 'ms',
-      category: 'mixed_upstream',
-      detail: 'Provider generation, transit, and runtime scheduling combined.',
-    },
-    {
-      key: 'response-process',
-      label: 'Local relay work',
-      value: event.response_body_process_ms,
-      format: 'ms',
-      category: 'cc_lb',
-      detail: 'Measured local work already contained in the response parent.',
-    },
-    {
-      key: 'response-poll-gap',
-      label: 'Downstream consumer poll gaps',
-      value: event.response_body_downstream_poll_gap_ms,
-      format: 'ms',
-      category: 'downstream_network',
-      detail:
-        'Consumer, backpressure, and scheduling observation; not ACK or RTT.',
-    },
-    {
-      key: 'response-chunks',
-      label: 'Raw HTTP body chunks',
-      value: event._phase === 'final' ? event.body_chunk_count : undefined,
-      format: 'count',
-      category: 'parent_interval',
-      detail: 'Low-level response frames relayed or collected.',
-    },
-  ];
-
-  return (
-    <section aria-labelledby="latency-io-title" className="space-y-2">
-      <div>
-        <h2 id="latency-io-title" className="text-xs font-semibold text-text">
-          Request and response I/O diagnostics
-        </h2>
-        <p className="text-[10px] leading-snug text-text-faint">
-          Parent intervals preserve chronology. Overlapping markers and split
-          children are shown for diagnosis, not summed beside their parents.
-        </p>
-      </div>
-      <div className="grid min-w-0 grid-cols-1 gap-2 lg:grid-cols-2">
-        <DiagnosticList
-          title="Request ingress"
-          items={ingress}
-          isPartial={event._phase === 'partial'}
-        />
-        <DiagnosticList
-          title="Response relay"
-          items={response}
-          isPartial={event._phase === 'partial'}
-        />
-      </div>
-    </section>
-  );
-}
-
-function RenewalSummary({ event }: { event: RequestEventWithPhase }) {
-  const duration =
-    event._phase === 'final' && event.duration_ms != null
-      ? event.duration_ms
-      : event._phase === 'partial'
-        ? event.elapsed_ms
-        : null;
-  return (
-    <section className="rounded-lg border border-cyan-500/25 bg-cyan-500/10 p-3">
-      <div className="flex items-start gap-2">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-cyan-500/25 text-[color:var(--latency-downstream-text)]">
-          <RefreshCw aria-hidden className="h-4 w-4" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="text-xs font-semibold text-text">
-              Scheduler renewal cycle
-            </h2>
-            <span className="text-sm font-semibold tabular-nums text-text">
-              {duration == null
-                ? event._phase === 'partial'
-                  ? 'In progress'
-                  : 'Not measured'
-                : fmtMs(duration)}
-            </span>
-          </div>
-          <p className="mt-1 text-[10px] leading-snug text-text-muted">
-            This lifecycle work is not a proxy request and is not assigned to
-            downstream, cc-lb, or upstream latency categories.
-          </p>
-        </div>
-      </div>
-    </section>
   );
 }
 
@@ -2018,13 +1378,12 @@ export function LatencyTimeline({
   isLoading?: boolean;
 }) {
   const total = deriveProxyTimelineDuration(event);
-  const attribution = computeLatencyAttribution(event);
   const stages = useMemo(() => buildStageDetails(event), [event]);
   const groups = computeStageGroups(event);
   const markers = useMemo(() => buildSseMarkers(event), [event]);
   const hasFinalizeTiming = event.finalize_ms != null;
-  const isRenewal = event.source_kind === 'renewal';
-  const isFinalRenewal = event._phase === 'final' && isRenewal;
+  const isFinalRenewal =
+    event._phase === 'final' && event.source_kind === 'renewal';
   const groupOrder = isFinalRenewal ? RENEWAL_GROUP_ORDER : PROXY_GROUP_ORDER;
   const hasMeasuredRenewalCycle =
     isFinalRenewal && event.duration_ms != null && event.duration_ms >= 0;
@@ -2047,60 +1406,47 @@ export function LatencyTimeline({
         className={LATENCY_LAYOUT_CLASS}
         data-testid="latency-timeline-region"
       >
-        <div
-          className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2"
-          aria-hidden="true"
-        >
-          {(isRenewal ? [0] : [0, 1, 2, 3]).map((key) => (
-            <Skeleton key={key} className="h-32 w-full rounded-lg" />
-          ))}
-        </div>
-        {!isRenewal ? (
-          <Skeleton aria-hidden="true" className="h-28 w-full rounded-lg" />
-        ) : null}
         <div className="space-y-2" aria-hidden="true">
           {groupOrder.map((group) => (
             <div key={group}>
-              <div className="mb-0.5 flex items-center justify-between">
-                <Skeleton className="h-2.5 w-24" />
+              <div className="flex items-center justify-between mb-0.5">
+                <Skeleton className="h-2.5 w-16" />
                 <Skeleton className="h-2.5 w-20" />
               </div>
               <Skeleton className="h-4 w-full" />
             </div>
           ))}
         </div>
+        <div aria-hidden="true">
+          <div className="flex items-center justify-between mb-1">
+            <Skeleton className="h-2.5 w-20" />
+            <Skeleton className="h-2.5 w-16" />
+          </div>
+          <Skeleton className="h-6 w-full" />
+          <Skeleton className="mt-1 h-3 w-full" />
+          <div className="mt-2 flex gap-3">
+            <Skeleton className="h-2.5 w-12" />
+            <Skeleton className="h-2.5 w-14" />
+            <Skeleton className="h-2.5 w-12" />
+          </div>
+        </div>
+        <div className="border-t border-subtle pt-1.5" aria-hidden="true">
+          <Skeleton className="h-5 w-32" />
+        </div>
+        <div className="border-t border-subtle pt-1.5" aria-hidden="true">
+          <Skeleton className="h-5 w-40" />
+        </div>
       </div>
     );
   }
 
-  const hasMeasuredAttribution =
-    attribution.categories.some((category) => category.ms != null) ||
-    attribution.mixedUpstreamMs != null ||
-    attribution.mixedRetryMs != null;
-  const noRecordedTimeline =
-    total <= 0 &&
-    !hasMeasuredRenewalCycle &&
-    stages.length === 0 &&
-    !attribution.hasIoTimings &&
-    !hasMeasuredAttribution;
-  if (noRecordedTimeline) {
+  if (total <= 0 && !hasMeasuredRenewalCycle) {
     return (
       <div
-        className={LATENCY_LAYOUT_CLASS}
+        className="min-h-80 text-text-faint text-xs"
         data-testid="latency-timeline-region"
-        data-accounted-ms={attribution.accountedMs}
       >
-        {isRenewal ? (
-          <RenewalSummary event={event} />
-        ) : (
-          <>
-            <LatencyAttributionSummary attribution={attribution} />
-            <MixedAttributionPanel attribution={attribution} />
-          </>
-        )}
-        <div className="rounded-lg border border-dashed border-subtle p-3 text-xs text-text-faint">
-          No latency data recorded.
-        </div>
+        No latency data recorded.
       </div>
     );
   }
@@ -2112,95 +1458,63 @@ export function LatencyTimeline({
     <div
       className={LATENCY_LAYOUT_CLASS}
       data-testid="latency-timeline-region"
-      data-accounted-ms={attribution.accountedMs}
-      data-chronology-accounted-ms={groups.accounted}
+      data-accounted-ms={groups.accounted}
       data-raw-residual-ms={groups.rawResidual}
-      data-accounting-warning={attribution.accountingWarning}
     >
-      {isRenewal ? (
-        <RenewalSummary event={event} />
-      ) : (
-        <>
-          <LatencyAttributionSummary attribution={attribution} />
-          <MixedAttributionPanel attribution={attribution} />
-          <IoDiagnostics event={event} />
-        </>
-      )}
-      <section aria-labelledby="latency-chronology-title" className="space-y-2">
-        <div>
-          <h2
-            id="latency-chronology-title"
-            className="text-xs font-semibold text-text"
-          >
-            Chronological request path
-          </h2>
-          <p className="text-[10px] leading-snug text-text-faint">
-            Parent stages stay on the request axis. Diagnostic children above do
-            not move bars or SSE markers. The axis residual excludes known
-            parents; the attribution remainder can include parents that cannot
-            be assigned to a physical category.
-          </p>
-        </div>
-        <div className="space-y-2">
-          {groupOrder.map((g) => {
-            const items = positioned.positioned.filter((p) => p.group === g);
-            if (items.length === 0) return null;
-            const groupSum = items.reduce((a, s) => a + s.ms, 0);
-            const groupTotal =
-              g === 'internal_pre' && event._phase === 'final'
-                ? groups.internalPre
-                : groupSum;
-            const interactiveItems = items.filter(
-              (item) =>
-                item.ms > 0 && (!item.setupTiming || item.ms / total >= 0.001),
-            );
-            const anyActive = items.some((it) => active.isActive(it.key));
-            const groupItems = stages.filter((s) => s.group === g);
-            const groupLabel = isRenewal
-              ? 'Scheduler renewal work'
-              : getGroupLabel(g, hasFinalizeTiming);
-            return (
-              <div key={g}>
-                <div className="mb-0.5 flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[10px]">
-                  <span
-                    className={cx(
-                      'min-w-0 break-words',
-                      GROUP_META[g].text,
-                      anyActive ? 'font-medium' : '',
-                    )}
-                  >
-                    {groupLabel}
-                  </span>
-                  <span className="shrink-0 whitespace-nowrap tabular-nums text-text-muted">
-                    {fmtMs(groupTotal)} · {pct(groupTotal, total)}%
-                  </span>
-                </div>
-                <div className="relative h-4 w-full rounded-sm bg-overlay-5">
-                  {interactiveItems.map((it) => (
-                    <SegmentButton
-                      key={it.key}
-                      stage={it}
-                      startMs={it.startMs}
-                      total={total}
-                      active={active}
-                      overview={groupItems}
-                      groupLabel={groupLabel}
-                    />
-                  ))}
-                </div>
+      <div className="space-y-2">
+        {groupOrder.map((g) => {
+          const items = positioned.positioned.filter((p) => p.group === g);
+          if (items.length === 0) return null;
+          const groupSum = items.reduce((a, s) => a + s.ms, 0);
+          const groupTotal =
+            g === 'internal_pre' ? groups.internalPre : groupSum;
+          const interactiveItems = items.filter(
+            (item) =>
+              item.ms > 0 && (!item.setupTiming || item.ms / total >= 0.001),
+          );
+          const anyActive = items.some((it) => active.isActive(it.key));
+          const groupItems = stages.filter((s) => s.group === g);
+          const groupLabel = getGroupLabel(g, hasFinalizeTiming);
+          return (
+            <div key={g}>
+              <div className="flex items-center justify-between text-[10px] mb-0.5">
+                <span
+                  className={cx(
+                    GROUP_META[g].text,
+                    anyActive ? 'font-medium' : '',
+                  )}
+                >
+                  {groupLabel}
+                </span>
+                <span className="text-text-muted tabular-nums">
+                  {fmtMs(groupTotal)} · {pct(groupTotal, total)}%
+                </span>
               </div>
-            );
-          })}
-          {unaccounted > 0 && (
-            <UnaccountedRow
-              ms={unaccounted}
-              startMs={positioned.unaccountedStartMs}
-              total={total}
-              active={active}
-            />
-          )}
-        </div>
-      </section>
+              <div className="relative h-4 w-full rounded-sm bg-overlay-5">
+                {interactiveItems.map((it) => (
+                  <SegmentButton
+                    key={it.key}
+                    stage={it}
+                    startMs={it.startMs}
+                    total={total}
+                    active={active}
+                    overview={groupItems}
+                    groupLabel={groupLabel}
+                  />
+                ))}
+              </div>
+            </div>
+          );
+        })}
+        {unaccounted > 0 && (
+          <UnaccountedRow
+            ms={unaccounted}
+            startMs={positioned.unaccountedStartMs}
+            total={total}
+            active={active}
+          />
+        )}
+      </div>
 
       {showStreamLane && (
         <SseLane
@@ -2216,6 +1530,7 @@ export function LatencyTimeline({
         total={total}
         unaccounted={unaccounted}
         active={active}
+        hasFinalizeTiming={hasFinalizeTiming}
       />
       {showStreamLane && <SseDetailsList markers={markers} active={active} />}
     </div>

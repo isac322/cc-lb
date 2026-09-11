@@ -11,37 +11,38 @@ import { LatencyCell } from './LatencyCell';
 
 function renderCell(
   event: RequestEventWithPhase,
-  openBy: 'hover' | 'focus' = 'focus',
+  openBy: 'hover' | 'focus' = 'hover',
 ) {
-  const rendered = render(
+  render(
     <table>
       <tbody>
         <tr>
-          <LatencyCell event={event} isPartial={event._phase === 'partial'} />
+          <LatencyCell event={event} />
         </tr>
       </tbody>
     </table>,
   );
-  const trigger = screen.getByRole('button', { name: /^Latency / });
-  if (openBy === 'hover') {
+  const trigger = screen.getByRole('button', {
+    name: /Latency .* show breakdown/,
+  });
+  if (openBy === 'focus') {
+    fireEvent.focus(trigger);
+  } else {
     fireEvent.pointerEnter(trigger);
     act(() => vi.advanceTimersByTime(200));
-  } else {
-    fireEvent.focus(trigger);
   }
-  return { ...rendered, trigger };
+  return trigger;
 }
 
 const baseEvent = {
   ts: 1,
   request_id: 'req-latency',
   status: 200,
-  duration_ms: 120,
+  duration_ms: 100,
   _phase: 'final',
-  source_kind: 'proxy',
 } satisfies RequestEventWithPhase;
 
-describe('LatencyCell latency attribution', () => {
+describe('LatencyCell timing breakdown', () => {
   beforeEach(() => vi.useFakeTimers());
 
   afterEach(() => {
@@ -49,226 +50,7 @@ describe('LatencyCell latency attribution', () => {
     vi.useRealTimers();
   });
 
-  it('makes the four shared categories visible in the compact cell and popover', () => {
-    const { trigger } = renderCell({
-      ...baseEvent,
-      proxy_setup_ms: 10,
-      shape_ms: 2,
-      sign_ms: 1,
-      bulkhead_wait_ms: 3,
-      dns_ms: 2,
-      connect_ms: 3,
-      upstream_ttfb_ms: 50,
-      request_body_wait_ms: 12,
-      request_body_process_ms: 1,
-      response_body_wait_ms: 20,
-      response_body_process_ms: 2,
-      response_body_downstream_poll_gap_ms: 5,
-      finalize_ms: 4,
-    });
-
-    expect(
-      screen.getByRole('list', {
-        name: 'Compact latency category legend',
-      }),
-    ).toBeDefined();
-    for (const category of [
-      'downstream_network',
-      'cc_lb',
-      'upstream_network',
-      'upstream_processing',
-    ]) {
-      expect(
-        document.querySelector(`[data-latency-category="${category}"]`),
-      ).not.toBeNull();
-    }
-
-    const accessibleName = trigger.getAttribute('aria-label') ?? '';
-    expect(accessibleName).toContain('Downstream network');
-    expect(accessibleName).toContain('cc-lb processing');
-    expect(accessibleName).toContain('Upstream network');
-    expect(accessibleName).toContain(
-      'Upstream processing Not independently measured',
-    );
-    expect(accessibleName).toContain('Combined upstream wait');
-    expect(
-      screen.getByRole('img', { name: /^Latency distribution:/ }),
-    ).toBeDefined();
-    expect(
-      screen.getByRole('list', { name: 'Latency category legend' }),
-    ).toBeDefined();
-  });
-
-  it('keeps shared upstream wait hatched and provider time unknown', () => {
-    renderCell({
-      ...baseEvent,
-      duration_ms: 100,
-      bulkhead_wait_ms: 5,
-      dns_ms: 5,
-      connect_ms: 10,
-      upstream_ttfb_ms: 60,
-      response_body_wait_ms: 20,
-    });
-
-    const mixed = document.querySelector(
-      '[data-latency-mixed="upstream-wait"]',
-    );
-    expect(mixed?.textContent).toContain('Combined upstream wait');
-    expect(mixed?.textContent).toContain('60 ms');
-    expect(
-      mixed?.querySelector('[class*="repeating-linear-gradient"]'),
-    ).not.toBeNull();
-    expect(mixed?.textContent).toContain(
-      'not assigned to either upstream card',
-    );
-
-    const provider = document.querySelector(
-      '[data-latency-category="upstream_processing"]',
-    );
-    expect(provider?.textContent).toContain('Not independently measured');
-    expect(provider?.textContent).not.toContain('60 ms');
-  });
-
-  it('keeps legacy response-body time combined instead of calling it provider time', () => {
-    renderCell({
-      ...baseEvent,
-      duration_ms: 100,
-      upstream_body_ms: 60,
-    });
-
-    const mixed = document.querySelector(
-      '[data-latency-mixed="upstream-wait"]',
-    );
-    expect(mixed?.textContent).toContain(
-      'Legacy response-body time combines upstream wait, local relay work, and downstream consumption',
-    );
-    expect(mixed?.textContent).toContain('60 ms');
-    expect(
-      document.querySelector('[data-latency-category="upstream_processing"]')
-        ?.textContent,
-    ).toContain('Not independently measured');
-  });
-
-  it('separates first DATA delay, receive remainder, wait, local work, frames, and bytes', () => {
-    renderCell({
-      ...baseEvent,
-      request_body_read_ms: 30,
-      request_body_first_chunk_ms: 0,
-      request_body_receive_ms: 12.5,
-      request_body_wait_ms: 8,
-      request_body_process_ms: 0.0004,
-      request_body_chunk_count: 0,
-      request_body_bytes: 0,
-    });
-
-    expect(screen.getByText('Ingress observations')).toBeDefined();
-    expect(screen.getByText('Body start → first DATA')).toBeDefined();
-    expect(screen.getByText('First DATA → body complete')).toBeDefined();
-    expect(screen.getByText('Waiting for body frames')).toBeDefined();
-    expect(screen.getByText('Local body handling')).toBeDefined();
-    expect(screen.getByText('Non-empty DATA frames')).toBeDefined();
-    expect(screen.getByText('Ingress body')).toBeDefined();
-    expect(screen.getByText('Request body parent interval')).toBeDefined();
-    expect(screen.getAllByText('0 ms').length).toBeGreaterThan(0);
-    expect(screen.getByText('12.5 ms')).toBeDefined();
-    expect(screen.getByText('<0.001 ms')).toBeDefined();
-    expect(screen.getByText('0 B')).toBeDefined();
-    expect(screen.getByText(/overlapping diagnostic markers/)).toBeDefined();
-  });
-
-  it('qualifies downstream poll gaps without presenting them as RTT', () => {
-    renderCell({
-      ...baseEvent,
-      duration_ms: 90,
-      upstream_body_ms: 70,
-      response_body_wait_ms: 30,
-      response_body_process_ms: 4,
-      response_body_downstream_poll_gap_ms: 20,
-    });
-
-    expect(screen.getByText('Response observations')).toBeDefined();
-    expect(screen.getByText('Waiting for response frames')).toBeDefined();
-    expect(screen.getByText('Local response relay')).toBeDefined();
-    expect(screen.getByText('Next downstream consumer poll')).toBeDefined();
-    expect(screen.getByText(/not a wire ACK or RTT/)).toBeDefined();
-    expect(screen.getByText(/Parent response intervals overlap/)).toBeDefined();
-  });
-
-  it('preserves measured zero and does not turn missing categories into zero', () => {
-    renderCell({
-      ...baseEvent,
-      duration_ms: 0,
-      request_body_wait_ms: 0,
-      request_body_process_ms: 0,
-      dns_ms: 0,
-      connect_ms: 0,
-      response_body_wait_ms: 0,
-      response_body_process_ms: 0,
-      response_body_downstream_poll_gap_ms: 0,
-      finalize_ms: 0,
-    });
-
-    expect(
-      document.querySelector('[data-latency-category="downstream_network"]')
-        ?.textContent,
-    ).toContain('0 ms');
-    expect(
-      document.querySelector('[data-latency-category="cc_lb"]')?.textContent,
-    ).toContain('0 ms');
-    expect(
-      document.querySelector('[data-latency-category="upstream_network"]')
-        ?.textContent,
-    ).toContain('0 ms');
-    expect(
-      document.querySelector('[data-latency-category="upstream_processing"]')
-        ?.textContent,
-    ).toContain('Not independently measured');
-
-    cleanup();
-    renderCell(baseEvent);
-    expect(
-      document.querySelector('[data-latency-category="downstream_network"]')
-        ?.textContent,
-    ).toContain('Not measured');
-    expect(
-      document.querySelector('[data-latency-category="upstream_network"]')
-        ?.textContent,
-    ).toContain('Not measured');
-    expect(screen.queryByText('Ingress observations')).toBeNull();
-  });
-
-  it('shows completed measurements and an in-progress indicator on partial rows', () => {
-    const { trigger } = renderCell({
-      event_id: 'evt-partial',
-      request_id: 'req-partial',
-      ts: 1,
-      ts_ms: 1000,
-      last_update_ms: 1012,
-      elapsed_ms: 12,
-      stream: false,
-      request_body_wait_ms: 0,
-      request_body_process_ms: 0.25,
-      json_parse_ms: 0,
-      stream_total_ms: 5,
-      _phase: 'partial',
-    });
-
-    expect(trigger.getAttribute('aria-label')).toContain('Latency 12 ms');
-    expect(
-      screen.getByLabelText('Latency measurement in progress'),
-    ).toBeDefined();
-    expect(screen.getByText('Waiting for body frames')).toBeDefined();
-    expect(screen.getByText('JSON parse')).toBeDefined();
-    expect(screen.getAllByText('0 ms').length).toBeGreaterThan(0);
-    expect(screen.getByText('0.25 ms')).toBeDefined();
-    expect(
-      screen.getByText('Stream relay parent interval').parentElement
-        ?.textContent,
-    ).toContain('In progress');
-    expect(screen.queryByText('Other setup')).toBeNull();
-  });
-
-  it('retains setup detail, including sub-millisecond zero values and legacy fallback', () => {
+  it('shows all measured setup labels, measured zero, and Other setup', () => {
     renderCell({
       ...baseEvent,
       proxy_setup_ms: 20,
@@ -276,19 +58,64 @@ describe('LatencyCell latency attribution', () => {
       route_ms: 1,
       limit_reserve_ms: 1,
       json_parse_ms: 0.125,
+      cache_tokenizer_queue_ms: 0.25,
+      cache_structure_ms: 0.5,
+      cache_serialize_ms: 1,
+      cache_token_key_ms: 1.5,
+      cache_count_lookup_ms: 2,
       cache_tokenize_ms: 0,
       prepare_signer_ms: 3,
       shape_ms: 1,
       sign_ms: 1,
     });
 
-    expect(screen.getByText('cc-lb observations')).toBeDefined();
-    expect(screen.getByText('JSON parse')).toBeDefined();
-    expect(screen.getByText('Other setup')).toBeDefined();
+    const chronology = [
+      'JSON parse',
+      'Tokenizer queue',
+      'Cache structure',
+      'Cache serialize',
+      'Cache token key',
+      'Cache count lookup',
+      'Cache tokenize',
+      'Auth',
+      'Route',
+      'Limit reserve',
+      'Prepare signer',
+      'Other setup',
+      'Shape',
+      'Sign',
+    ];
+    for (const label of chronology) {
+      expect(screen.getByText(label)).toBeDefined();
+    }
+    const popoverText =
+      screen.getByText('Latency').parentElement?.textContent ?? '';
+    const positions = chronology.map((label) => popoverText.indexOf(label));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(screen.queryByText('Setup overhead')).toBeNull();
     expect(screen.getByText('0.125 ms')).toBeDefined();
     expect(screen.getAllByText('0 ms').length).toBeGreaterThan(0);
+  });
 
-    cleanup();
+  it('uses a native button and opens the popover on keyboard focus', () => {
+    const trigger = renderCell(
+      {
+        ...baseEvent,
+        proxy_setup_ms: 20,
+        json_parse_ms: 0.125,
+      },
+      'focus',
+    );
+
+    expect(trigger.getAttribute('aria-label')).toMatch(
+      /^Latency 100 ms, show breakdown$/,
+    );
+    expect(screen.getByText('Latency')).toBeDefined();
+    expect(screen.getByText('JSON parse')).toBeDefined();
+  });
+
+  it('keeps the single Setup overhead fallback for legacy rows', () => {
     renderCell({
       ...baseEvent,
       proxy_setup_ms: 20,
@@ -296,129 +123,248 @@ describe('LatencyCell latency attribution', () => {
       route_ms: 1,
       limit_reserve_ms: 1,
     });
+
     expect(screen.getByText('Setup overhead')).toBeDefined();
+    expect(screen.queryByText('JSON parse')).toBeNull();
     expect(screen.queryByText('Other setup')).toBeNull();
   });
 
-  it('formats only finite numeric limit reconcile values and preserves zero', () => {
+  it('shows completed setup timing values on partial rows', () => {
     renderCell({
-      ...baseEvent,
-      finalize_ms: undefined,
-      limit_reconcile_ms: 0,
-    });
-
-    expect(
-      screen.getByText('Limit reconcile (internal post)').parentElement
-        ?.textContent,
-    ).toContain('0 ms');
-    expect(screen.queryByText('Finalize')).toBeNull();
-
-    const partialEvent = {
-      event_id: 'evt-partial-reconcile',
-      request_id: 'req-partial-reconcile',
+      event_id: 'evt-partial',
+      request_id: 'req-partial',
       ts: 1,
       ts_ms: 1000,
-      elapsed_ms: 12,
+      last_update_ms: 1001,
+      elapsed_ms: 1,
+      stream: false,
+      json_parse_ms: 0,
+      cache_structure_ms: 0.25,
       _phase: 'partial',
-    } satisfies RequestEventWithPhase;
-
-    cleanup();
-    renderCell({
-      ...partialEvent,
-      limit_reconcile_ms: '0',
     });
-    expect(screen.queryByText('Limit reconcile (internal post)')).toBeNull();
 
-    cleanup();
-    renderCell({
-      ...partialEvent,
-      limit_reconcile_ms: Number.POSITIVE_INFINITY,
-    });
-    expect(screen.queryByText('Limit reconcile (internal post)')).toBeNull();
-
-    cleanup();
-    renderCell({
-      ...partialEvent,
-      limit_reconcile_ms: null,
-    });
-    expect(screen.queryByText('Limit reconcile (internal post)')).toBeNull();
-
-    cleanup();
-    renderCell(partialEvent);
-    expect(screen.queryByText('Limit reconcile (internal post)')).toBeNull();
+    expect(screen.getByText('JSON parse')).toBeDefined();
+    expect(screen.getByText('Cache structure')).toBeDefined();
+    expect(screen.queryByText('Other setup')).toBeNull();
   });
 
-  it('keeps cancelled response measurements and retry overhead explicit', () => {
+  it('shows request ingress first, exact body bytes, and Finalize for a new proxy row', () => {
+    const trigger = renderCell(
+      {
+        ...baseEvent,
+        source_kind: 'proxy',
+        request_body_read_ms: 10,
+        request_body_bytes: 854336,
+        proxy_setup_ms: 20,
+        upstream_ttfb_ms: 20,
+        upstream_body_ms: 40,
+        finalize_ms: 10,
+      },
+      'focus',
+    );
+
+    expect(trigger.getAttribute('aria-label')).toBe(
+      'Latency 100 ms, Proxy request body read 10 ms, Ingress body 834.3 KB, Finalize 10 ms, show breakdown',
+    );
+
+    expect(screen.getByText('Ingress body: 834.3 KB')).toBeDefined();
+    const chronology = [
+      'Request body read',
+      'Internal pre',
+      'Upstream',
+      'Body',
+      'Finalize',
+    ];
+    const popoverText =
+      screen.getByText('Latency').parentElement?.textContent ?? '';
+    const positions = chronology.map((label) => popoverText.indexOf(label));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(screen.queryByText('Internal post')).toBeNull();
+    expect(
+      screen.getByRole('img', {
+        name: /Request body read 10 ms.*Ingress body 834\.3 KB.*Finalize 10 ms/,
+      }),
+    ).toBeDefined();
+    expect(screen.queryByText('Unaccounted')).toBeNull();
+  });
+
+  it('shows one stream relay label for a completed stream', () => {
     renderCell({
       ...baseEvent,
-      status: 499,
-      duration_ms: 700,
-      upstream_body_ms: 640,
-      stream_total_ms: 690,
-      response_body_wait_ms: 500,
-      response_body_process_ms: 20,
-      response_body_downstream_poll_gap_ms: 120,
-      retry_overhead_ms: 15,
-      finalize_ms: 60,
+      source_kind: 'proxy',
+      duration_ms: 1000,
+      request_body_read_ms: 100,
+      proxy_setup_ms: 100,
+      upstream_ttfb_ms: 100,
+      stream_total_ms: 600,
+      upstream_body_ms: 600,
+      finalize_ms: 100,
     });
+
+    expect(screen.getByText('Stream relay')).toBeDefined();
+    expect(screen.queryByText('Body collect')).toBeNull();
+    expect(
+      screen.getByRole('img', { name: /Stream relay 600 ms/ }),
+    ).toBeDefined();
+    expect(screen.queryByText('Partial stream (client cancelled)')).toBeNull();
+  });
+
+  it('identifies the preserved response body time on a cancelled 499', () => {
+    const trigger = renderCell(
+      {
+        ...baseEvent,
+        source_kind: 'proxy',
+        status: 499,
+        duration_ms: 700,
+        upstream_body_ms: 640,
+        stream_total_ms: 690,
+        finalize_ms: 60,
+      },
+      'focus',
+    );
+
+    expect(trigger.getAttribute('aria-label')).toBe(
+      'Latency 700 ms, Partial stream (client cancelled) 640 ms, Finalize 60 ms, show breakdown',
+    );
 
     expect(screen.getByText('Partial stream (client cancelled)')).toBeDefined();
     expect(screen.getAllByText('640 ms').length).toBeGreaterThan(0);
-    expect(
-      document.querySelector('[data-latency-mixed="retry"]')?.textContent,
-    ).toContain('15 ms');
-    expect(screen.getByText('Finalize')).toBeDefined();
-    expect(
-      screen.getByText(/Measured child intervals exceed a parent interval/),
-    ).toBeDefined();
-
-    cleanup();
-    renderCell({
-      ...baseEvent,
-      status: 499,
-      duration_ms: 70,
-      stream_total_ms: 60,
-    });
-    expect(
-      screen.getByText('Partial stream (client cancelled)').parentElement
-        ?.textContent,
-    ).toContain('Not measured');
-    expect(
-      document.querySelector('[data-latency-mixed="upstream-wait"]')
-        ?.textContent,
-    ).not.toContain('Legacy response-body time');
-  });
-
-  it('opens from hover and keyboard focus through the native button', () => {
-    const { trigger } = renderCell(baseEvent, 'hover');
-    expect(trigger.tagName).toBe('BUTTON');
-    expect(screen.getByText('Latency attribution')).toBeDefined();
-
-    cleanup();
-    const focused = renderCell(baseEvent, 'focus').trigger;
-    expect(focused.tagName).toBe('BUTTON');
-    expect(screen.getByText('Latency attribution')).toBeDefined();
-  });
-
-  it('renders renewal as one cycle without proxy attribution', () => {
-    const { trigger } = renderCell({
-      ...baseEvent,
-      source_kind: 'renewal',
-      duration_ms: 500,
-    });
-
-    expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 500 ms. Renewal cycle 500 ms. Show breakdown',
-    );
-    expect(screen.getByText('Renewal cycle')).toBeDefined();
-    expect(
-      screen.getByText(/not a proxy request and is not split/),
-    ).toBeDefined();
-    expect(document.querySelector('[data-latency-category]')).toBeNull();
+    expect(screen.queryByText('Stream relay')).toBeNull();
     expect(
       screen.getByRole('img', {
-        name: 'Latency distribution: Renewal cycle 500 ms',
+        name: /Partial stream \(client cancelled\) 640 ms/,
       }),
     ).toBeDefined();
+  });
+
+  it('renders renewal as one source-specific cycle without proxy residuals', () => {
+    const trigger = renderCell(
+      {
+        ...baseEvent,
+        source_kind: 'renewal',
+        duration_ms: 500,
+      },
+      'focus',
+    );
+
+    expect(trigger.getAttribute('aria-label')).toBe(
+      'Latency 500 ms, Renewal cycle 500 ms, show breakdown',
+    );
+
+    expect(screen.getByText('Renewal cycle')).toBeDefined();
+    expect(screen.queryByText('Request body read')).toBeNull();
+    expect(screen.queryByText('Internal pre')).toBeNull();
+    expect(screen.queryByText('Body')).toBeNull();
+    expect(screen.queryByText('Finalize')).toBeNull();
+    expect(screen.queryByText('Unaccounted')).toBeNull();
+    expect(
+      screen.getByRole('img', {
+        name: /^Latency stages: Renewal cycle 500 ms$/,
+      }),
+    ).toBeDefined();
+  });
+
+  it('keeps an over-budget positive residual visible in the popover and sparkline', () => {
+    renderCell({
+      ...baseEvent,
+      source_kind: 'proxy',
+      request_body_read_ms: 10,
+      proxy_setup_ms: 10,
+      upstream_ttfb_ms: 20,
+      upstream_body_ms: 30,
+      finalize_ms: 10,
+    });
+
+    expect(screen.getByText('Unaccounted')).toBeDefined();
+    expect(
+      screen.getByRole('img', { name: /Unaccounted 20 ms/ }),
+    ).toBeDefined();
+  });
+  it('shows Limit reconcile as a Finalize detail without adding it again', () => {
+    renderCell({
+      ...baseEvent,
+      source_kind: 'proxy',
+      finalize_ms: 20,
+      limit_reconcile_ms: 5,
+    });
+
+    expect(screen.getByText('Finalize')).toBeDefined();
+    expect(screen.getByText('Limit reconcile')).toBeDefined();
+    expect(screen.getAllByText('20 ms')).toHaveLength(1);
+    expect(screen.getByText('Other finalize')).toBeDefined();
+    expect(screen.getAllByText('15 ms')).toHaveLength(1);
+    expect(screen.getAllByText('5 ms')).toHaveLength(1);
+  });
+
+  it('shows measured zero for new stages', () => {
+    renderCell({
+      ...baseEvent,
+      source_kind: 'proxy',
+      request_body_read_ms: 0,
+      finalize_ms: 0,
+    });
+
+    expect(screen.getByText('Request body read')).toBeDefined();
+    expect(screen.getByText('Finalize')).toBeDefined();
+    expect(screen.getAllByText('0 ms').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('renders a mixed row without promoting a Finalize child to a parent', () => {
+    const trigger = renderCell(
+      {
+        ...baseEvent,
+        source_kind: 'proxy',
+        request_body_read_ms: 20,
+        finalize_ms: undefined,
+        limit_reconcile_ms: 10,
+      },
+      'focus',
+    );
+
+    expect(trigger.getAttribute('aria-label')).toBe(
+      'Latency 100 ms, Proxy request body read 20 ms, Internal post 10 ms, show breakdown',
+    );
+    expect(screen.getByText('Request body read')).toBeDefined();
+    expect(screen.queryByText('Finalize')).toBeNull();
+    expect(screen.getByText('Internal post')).toBeDefined();
+    expect(screen.getByText('Limit reconcile')).toBeDefined();
+    expect(
+      screen.getByRole('img', {
+        name: /Internal post 10 ms.*Unaccounted 70 ms/,
+      }),
+    ).toBeDefined();
+  });
+
+  it('keeps a measured-zero Limit reconcile audible as Internal post', () => {
+    const trigger = renderCell(
+      {
+        ...baseEvent,
+        source_kind: 'proxy',
+        request_body_read_ms: 20,
+        finalize_ms: undefined,
+        limit_reconcile_ms: 0,
+      },
+      'focus',
+    );
+
+    expect(trigger.getAttribute('aria-label')).toBe(
+      'Latency 100 ms, Proxy request body read 20 ms, Internal post 0 ms, show breakdown',
+    );
+    expect(screen.getByText('Internal post')).toBeDefined();
+    expect(screen.getByText('Limit reconcile')).toBeDefined();
+    expect(screen.getAllByText('0 ms').length).toBeGreaterThan(0);
+  });
+
+  it('does not invent new stages for missing or null fields', () => {
+    renderCell({
+      ...baseEvent,
+      source_kind: 'proxy',
+      request_body_read_ms: null,
+      finalize_ms: null,
+    });
+
+    expect(screen.queryByText('Request body read')).toBeNull();
+    expect(screen.queryByText('Finalize')).toBeNull();
   });
 });

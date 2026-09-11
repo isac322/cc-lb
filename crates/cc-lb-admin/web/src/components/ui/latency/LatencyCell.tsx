@@ -1,107 +1,86 @@
-import {
-  Cog,
-  Laptop,
-  LoaderCircle,
-  type LucideIcon,
-  Network,
-  Server,
-  TriangleAlert,
-} from 'lucide-react';
 import type React from 'react';
-import {
-  fmtBytes,
-  fmtIoMs,
-  fmtMs,
-  fmtMsCompact,
-  fmtSetupMs,
-  formatCount,
-} from '../../../lib/format';
+import { fmtBytes, fmtMs, fmtMsCompact, fmtSetupMs } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Hint } from '../primitives';
 import { Sparkline } from '../Sparkline';
 import {
   CACHE_SETUP_TIMING_STAGES,
-  computeLatencyAttribution,
+  computeStageGroups,
   deriveOtherSetup,
+  deriveProxyTimelineDuration,
   deriveSetupOverhead,
   hasSetupTimingBreakdown,
-  LATENCY_CATEGORY_META,
-  type LatencyCategory,
   responseBodyDuration,
 } from './computeStageGroups';
 
-const CATEGORY_ICONS: Record<LatencyCategory, LucideIcon> = {
-  downstream_network: Laptop,
-  cc_lb: Cog,
-  upstream_network: Network,
-  upstream_processing: Server,
-};
-
-const CATEGORY_SHORT_LABELS: Record<LatencyCategory, string> = {
-  downstream_network: 'DN',
-  cc_lb: 'LB',
-  upstream_network: 'UN',
-  upstream_processing: 'UP',
-};
-
-const MIXED_UPSTREAM_PATTERN =
-  'bg-[repeating-linear-gradient(135deg,_#f59e0b_0_4px,_#10b981_4px_8px)]';
-const MIXED_RETRY_PATTERN =
-  'bg-[repeating-linear-gradient(135deg,_#6366f1_0_4px,_#f59e0b_4px_8px)]';
-const UNATTRIBUTED_PATTERN =
-  'bg-slate-500/35 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.12)_4px_8px)]';
-
-function pctOf(value: number | null, denom: number): string {
-  if (value == null || denom <= 0) return '—';
-  return `${Math.round((Math.max(0, value) / denom) * 100)}%`;
+function pctOf(value: number | null | undefined, denom: number): number {
+  if (denom <= 0 || value == null || value <= 0) return 0;
+  return Math.round((value / denom) * 100);
 }
 
-function categoryValueLabel(
-  key: LatencyCategory,
-  value: number | null,
-  isPartial: boolean,
-): string {
-  if (value != null) return fmtMs(value);
-  if (key === 'upstream_processing') return 'Not independently measured';
-  return isPartial ? 'In progress' : 'Not measured';
-}
-
-function DetailRow({
-  label,
-  value,
-  note,
-}: {
-  label: string;
-  value: React.ReactNode;
-  note?: string;
-}) {
-  return (
-    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 py-0.5 text-[10px]">
-      <span className="min-w-0 text-text-faint">{label}</span>
-      <span className="tabular-nums text-right text-text-muted">{value}</span>
-      {note ? (
-        <span className="col-span-2 text-[9px] leading-3 text-text-faint">
-          {note}
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
-function ObservationGroup({
+function Section({
   title,
-  children,
+  color,
+  total,
+  duration,
+  items,
+  pill,
+  showZero,
 }: {
   title: string;
-  children: React.ReactNode;
+  color: string;
+  total: number;
+  duration: number;
+  items: {
+    label: string;
+    value: number | null | undefined;
+    showZero?: boolean;
+    setupTiming?: boolean;
+  }[];
+  pill?: React.ReactNode;
+  showZero?: boolean;
 }) {
+  const visibleItems = items.filter(
+    (item) => item.value != null && (item.value > 0 || item.showZero === true),
+  );
+  if (total <= 0 && visibleItems.length === 0 && showZero !== true) return null;
+
   return (
-    <section className="min-w-0 rounded-sm border border-subtle bg-overlay-1 px-2 py-1.5">
-      <h4 className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-text-faint">
-        {title}
-      </h4>
-      {children}
-    </section>
+    <div className="mb-2 last:mb-0">
+      <div className="flex items-center gap-2 text-[11px] mb-1">
+        <span className={cx('h-2 w-2 rounded-full shrink-0', color)} />
+        <span className="text-text-muted flex-1 font-medium flex items-center gap-2">
+          {title}
+          {pill}
+        </span>
+        <span className="tabular-nums text-text w-16 text-right">
+          {fmtMs(total)}
+        </span>
+        <span className="tabular-nums text-text-faint w-9 text-right">
+          {pctOf(total, duration)}%
+        </span>
+      </div>
+      {visibleItems.length > 0 && (
+        <div className="flex flex-col gap-0.5 pl-4">
+          {visibleItems.map((item) => (
+            <div
+              key={item.label}
+              className="flex items-center gap-2 text-[10px]"
+            >
+              <span className="text-text-faint flex-1 truncate">
+                {item.label}
+              </span>
+              <span className="tabular-nums text-text-muted w-16 text-right">
+                {item.setupTiming ? fmtSetupMs(item.value) : fmtMs(item.value)}
+              </span>
+              <span className="tabular-nums text-text-faint w-9 text-right">
+                {pctOf(item.value, duration)}%
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -112,29 +91,30 @@ export function LatencyCell({
   event: RequestEventWithPhase;
   isPartial?: boolean;
 }) {
-  const partial = isPartial === true || e._phase === 'partial';
+  const groups = computeStageGroups(e);
   const isRenewal = e.source_kind === 'renewal';
-  const attribution = computeLatencyAttribution(e);
-  const duration = attribution.timelineTotalMs;
-  const { value, unit } = fmtMsCompact(duration);
+  const hasFinalize = e.finalize_ms != null;
+  const requestBodyRead = e.request_body_read_ms ?? 0;
+  const proxyInternalPre = Math.max(0, groups.internalPre - requestBodyRead);
   const bodyDuration = responseBodyDuration(e);
+  const isCancelledPartial = e.status === 499 && e.upstream_body_ms != null;
   const limitReconcileMs =
-    typeof e.limit_reconcile_ms === 'number' &&
-    Number.isFinite(e.limit_reconcile_ms)
-      ? e.limit_reconcile_ms
-      : null;
-  const isCancelledResponse = e._phase === 'final' && e.status === 499;
-  const hasSetupBreakdown = hasSetupTimingBreakdown(e);
+    typeof e.limit_reconcile_ms === 'number' ? e.limit_reconcile_ms : 0;
+  const otherFinalize = Math.max(0, (e.finalize_ms ?? 0) - limitReconcileMs);
+  const duration = isPartial
+    ? deriveProxyTimelineDuration(e)
+    : e._phase === 'final'
+      ? deriveProxyTimelineDuration(e)
+      : 0;
+  const { value, unit } = fmtMsCompact(e._phase === 'final' ? duration : 0);
 
-  const setupItems: {
-    label: string;
-    value: number | null | undefined;
-    setupTiming?: boolean;
-  }[] = hasSetupBreakdown
+  const setup_overhead_ms = deriveSetupOverhead(e);
+  const internalPreItems = hasSetupTimingBreakdown(e)
     ? [
         ...CACHE_SETUP_TIMING_STAGES.map(([field, label]) => ({
           label,
           value: e[field],
+          showZero: true,
           setupTiming: true,
         })),
         { label: 'Auth', value: e.auth_ms },
@@ -143,6 +123,7 @@ export function LatencyCell({
         {
           label: 'Prepare signer',
           value: e.prepare_signer_ms,
+          showZero: true,
           setupTiming: true,
         },
         ...(e._phase === 'final' && e.proxy_setup_ms != null
@@ -150,6 +131,7 @@ export function LatencyCell({
               {
                 label: 'Other setup',
                 value: deriveOtherSetup(e),
+                showZero: true,
                 setupTiming: true,
               },
             ]
@@ -161,464 +143,273 @@ export function LatencyCell({
         { label: 'Auth', value: e.auth_ms },
         { label: 'Route', value: e.route_ms },
         { label: 'Limit reserve', value: e.limit_reserve_ms },
-        {
-          label: 'Setup overhead',
-          value:
-            e._phase === 'final' && e.proxy_setup_ms != null
-              ? deriveSetupOverhead(e)
-              : undefined,
-        },
+        { label: 'Setup overhead', value: setup_overhead_ms },
         { label: 'Shape', value: e.shape_ms },
         { label: 'Sign', value: e.sign_ms },
       ];
-  const visibleSetupItems = setupItems.filter((item) => item.value != null);
-  const hasCcLbObservations =
-    visibleSetupItems.length > 0 ||
-    e.bulkhead_wait_ms != null ||
-    e.finalize_ms != null ||
-    limitReconcileMs != null;
-  const hasIngressObservations =
-    e.request_body_read_ms != null ||
-    e.request_body_first_chunk_ms != null ||
-    e.request_body_receive_ms != null ||
-    e.request_body_wait_ms != null ||
-    e.request_body_process_ms != null ||
-    e.request_body_chunk_count != null ||
-    e.request_body_bytes != null;
-  const hasResponseParentField =
-    e.upstream_body_ms != null || e.stream_total_ms != null;
-  const hasMeasuredResponseParent =
-    e._phase === 'final' &&
-    (e.status === 499 ? e.upstream_body_ms != null : hasResponseParentField);
-  const hasLegacyMixedResponse =
-    attribution.categories
-      .find(({ key }) => key === 'upstream_processing')
-      ?.note.includes('Legacy response-body time') === true;
-  const hasResponseObservations =
-    e.response_body_wait_ms != null ||
-    e.response_body_process_ms != null ||
-    e.response_body_downstream_poll_gap_ms != null ||
-    e.upstream_body_ms != null ||
-    e.stream_total_ms != null ||
-    e.stream_first_content_delta_ms != null ||
-    e.stream_last_content_delta_ms != null ||
-    e.inter_token_avg_ms != null;
 
-  const categorySummary = attribution.categories.map(({ key, ms }) => {
-    const meta = LATENCY_CATEGORY_META[key];
-    return `${meta.label} ${categoryValueLabel(key, ms, partial)}`;
-  });
-  const extraSummary = [
-    `Combined upstream wait ${
-      attribution.mixedUpstreamMs == null
-        ? partial
-          ? 'in progress'
-          : 'not measured'
-        : fmtMs(attribution.mixedUpstreamMs)
-    }`,
-    ...(attribution.mixedRetryMs != null
-      ? [`Retry overhead ${fmtMs(attribution.mixedRetryMs)}`]
-      : []),
-    ...(attribution.unattributedMs > 0
-      ? [`Unattributed ${fmtMs(attribution.unattributedMs)}`]
-      : []),
-  ];
-  const triggerLabel = isRenewal
-    ? `Latency ${fmtMs(duration)}. Renewal cycle ${fmtMs(duration)}. Show breakdown`
-    : `Latency ${fmtMs(duration)}. ${[...categorySummary, ...extraSummary].join(
-        '; ',
-      )}. Show breakdown`;
-  const sparklineLabel = isRenewal
-    ? `Latency distribution: Renewal cycle ${fmtMs(duration)}`
-    : `Latency distribution: ${[...categorySummary, ...extraSummary].join(
-        '; ',
-      )}`;
+  const upstream_wait_ms = Math.max(
+    0,
+    (e.upstream_ttfb_ms ?? 0) -
+      (e.bulkhead_wait_ms ?? 0) -
+      (e.dns_ms ?? 0) -
+      (e.connect_ms ?? 0),
+  );
+  const sparklineStages = isRenewal
+    ? [`Renewal cycle ${fmtMs(duration)}`]
+    : [
+        ...(e.request_body_read_ms != null
+          ? [`Request body read ${fmtMs(requestBodyRead)}`]
+          : []),
+        ...(e.request_body_bytes != null
+          ? [`Ingress body ${fmtBytes(e.request_body_bytes)}`]
+          : []),
+        ...(proxyInternalPre > 0
+          ? [`Internal pre ${fmtMs(proxyInternalPre)}`]
+          : []),
+        ...(groups.wait > 0 ? [`Wait ${fmtMs(groups.wait)}`] : []),
+        ...(groups.upstream > 0 ? [`Upstream ${fmtMs(groups.upstream)}`] : []),
+        ...(groups.body > 0 ||
+        isCancelledPartial ||
+        e.stream_total_ms != null ||
+        e.upstream_body_ms != null
+          ? [
+              `${
+                isCancelledPartial
+                  ? 'Partial stream (client cancelled)'
+                  : e.stream_total_ms != null
+                    ? 'Stream relay'
+                    : 'Body collect'
+              } ${fmtMs(bodyDuration)}`,
+            ]
+          : []),
+        ...(hasFinalize
+          ? [`Finalize ${fmtMs(groups.internalPost)}`]
+          : groups.internalPost > 0 || e.limit_reconcile_ms != null
+            ? [`Internal post ${fmtMs(groups.internalPost)}`]
+            : []),
+        ...(groups.unaccounted > 10
+          ? [`Unaccounted ${fmtMs(groups.unaccounted)}`]
+          : []),
+      ];
+  const sparklineLabel = `Latency stages: ${sparklineStages.join(', ')}`;
+  const triggerStages = isRenewal
+    ? [`Renewal cycle ${fmtMs(duration)}`]
+    : [
+        ...(e.request_body_read_ms != null
+          ? [`Proxy request body read ${fmtMs(requestBodyRead)}`]
+          : []),
+        ...(e.request_body_bytes != null
+          ? [`Ingress body ${fmtBytes(e.request_body_bytes)}`]
+          : []),
+        ...(isCancelledPartial
+          ? [`Partial stream (client cancelled) ${fmtMs(bodyDuration)}`]
+          : []),
+        ...(hasFinalize
+          ? [`Finalize ${fmtMs(groups.internalPost)}`]
+          : e.limit_reconcile_ms != null
+            ? [`Internal post ${fmtMs(groups.internalPost)}`]
+            : []),
+      ];
+  const triggerLabel = `Latency ${value} ${unit}${
+    triggerStages.length > 0 ? `, ${triggerStages.join(', ')}` : ''
+  }, show breakdown`;
 
-  const categoryCards = (
-    <div
-      role="list"
-      className="grid grid-cols-2 gap-1.5"
-      aria-label="Latency categories"
-    >
-      {attribution.categories.map(({ key, ms, note }) => {
-        const meta = LATENCY_CATEGORY_META[key];
-        const Icon = CATEGORY_ICONS[key];
-        const valueLabel = categoryValueLabel(key, ms, partial);
-        return (
-          <section
-            role="listitem"
-            key={key}
-            data-latency-category={key}
-            aria-label={`${meta.label}: ${valueLabel}`}
-            className={cx(
-              'min-w-0 rounded-sm border px-2 py-1.5',
-              meta.surfaceClass,
-            )}
-          >
-            <div
-              className={cx('flex min-w-0 items-start gap-1.5', meta.textClass)}
-            >
-              <Icon className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
-              <h3 className="min-w-0 text-[10px] font-semibold leading-3">
-                {meta.label}
-              </h3>
-            </div>
-            <div className="mt-1 flex items-baseline justify-between gap-2">
-              <span className="text-[11px] font-semibold tabular-nums text-text">
-                {valueLabel}
-              </span>
-              <span className="shrink-0 text-[9px] tabular-nums text-text-faint">
-                {pctOf(ms, attribution.timelineTotalMs)}
-              </span>
-            </div>
-            <p className="mt-1 text-[9px] leading-3 text-text-faint">{note}</p>
-          </section>
-        );
-      })}
+  const proxySections = (
+    <div className="flex flex-col">
+      <Section
+        title="Request body read"
+        color="bg-cyan-400"
+        total={requestBodyRead}
+        duration={duration}
+        items={[]}
+        pill={
+          e.request_body_bytes != null ? (
+            <span className="text-[9px] leading-none text-text-faint">
+              Ingress body: {fmtBytes(e.request_body_bytes)}
+            </span>
+          ) : null
+        }
+        showZero={e.request_body_read_ms != null}
+      />
+
+      <Section
+        title="Internal pre"
+        color="bg-sky-400"
+        total={proxyInternalPre}
+        duration={duration}
+        items={internalPreItems}
+      />
+
+      <Section
+        title="Wait"
+        color="bg-amber-400"
+        total={groups.wait}
+        duration={duration}
+        items={[
+          { label: 'Bulkhead', value: e.bulkhead_wait_ms },
+          { label: 'DNS', value: e.dns_ms },
+        ]}
+      />
+
+      <Section
+        title="Upstream"
+        color="bg-violet-400"
+        total={groups.upstream}
+        duration={duration}
+        pill={
+          e.connection_reused ? (
+            <span className="px-1 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[9px] leading-none">
+              Warm pool
+            </span>
+          ) : null
+        }
+        items={[
+          { label: 'Connect', value: e.connect_ms },
+          { label: 'Wait (TTFB)', value: upstream_wait_ms },
+        ]}
+      />
+
+      <Section
+        title="Body"
+        color="bg-emerald-400"
+        total={groups.body}
+        duration={duration}
+        items={[
+          {
+            label: isCancelledPartial
+              ? 'Partial stream (client cancelled)'
+              : e.stream_total_ms != null
+                ? 'Stream relay'
+                : 'Body collect',
+            value: bodyDuration,
+            showZero: isCancelledPartial,
+          },
+          {
+            label: 'First content delta',
+            value:
+              e._phase === 'final'
+                ? e.stream_first_content_delta_ms
+                : undefined,
+          },
+          {
+            label: 'Last content delta',
+            value:
+              e._phase === 'final' ? e.stream_last_content_delta_ms : undefined,
+          },
+          {
+            label: 'Inter-token avg',
+            value: e._phase === 'final' ? e.inter_token_avg_ms : undefined,
+          },
+        ]}
+      />
+
+      {hasFinalize ? (
+        <Section
+          title="Finalize"
+          color="bg-slate-400"
+          total={groups.internalPost}
+          duration={duration}
+          items={[
+            {
+              label: 'Limit reconcile',
+              value:
+                e._phase === 'final' && e.finalize_ms != null
+                  ? e.limit_reconcile_ms
+                  : undefined,
+            },
+            {
+              label: 'Other finalize',
+              value:
+                e._phase === 'final' && e.finalize_ms != null
+                  ? otherFinalize
+                  : undefined,
+              showZero: true,
+            },
+          ]}
+          showZero
+        />
+      ) : (
+        <Section
+          title="Internal post"
+          color="bg-slate-400"
+          total={groups.internalPost}
+          duration={duration}
+          items={[
+            {
+              label: 'Limit reconcile',
+              value: e._phase === 'final' ? e.limit_reconcile_ms : undefined,
+              showZero: e.limit_reconcile_ms != null,
+            },
+          ]}
+          showZero={e.limit_reconcile_ms != null}
+        />
+      )}
     </div>
   );
 
-  const proxyPopover = (
-    <>
-      {categoryCards}
-
-      <section
-        data-latency-mixed="upstream-wait"
-        className="mt-1.5 overflow-hidden rounded-sm border border-amber-500/35"
-      >
-        <div className="flex min-w-0 items-center gap-2 px-2 py-1.5">
-          <span
-            className={cx(
-              'h-7 w-1.5 shrink-0 rounded-full',
-              MIXED_UPSTREAM_PATTERN,
-            )}
-            aria-hidden="true"
-          />
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-              <h3 className="text-[10px] font-semibold text-text">
-                Combined upstream wait
-              </h3>
-              <span className="text-[11px] font-semibold tabular-nums text-text">
-                {attribution.mixedUpstreamMs == null
-                  ? partial
-                    ? 'In progress'
-                    : 'Not measured'
-                  : fmtMs(attribution.mixedUpstreamMs)}
-              </span>
-            </div>
-            <p className="text-[9px] leading-3 text-text-faint">
-              {hasLegacyMixedResponse
-                ? 'Legacy response-body time combines upstream wait, local relay work, and downstream consumption. It is counted once and not assigned to either upstream card.'
-                : 'Header and response-frame wait can include upstream transit, provider work, and runtime scheduling. It is counted once and not assigned to either upstream card.'}
-            </p>
-          </div>
-        </div>
-      </section>
-
-      {attribution.mixedRetryMs != null ? (
-        <section
-          data-latency-mixed="retry"
-          className="mt-1.5 flex min-w-0 items-center gap-2 rounded-sm border border-subtle px-2 py-1.5"
-        >
-          <span
-            className={cx(
-              'h-6 w-1.5 shrink-0 rounded-full',
-              MIXED_RETRY_PATTERN,
-            )}
-            aria-hidden="true"
-          />
-          <div className="min-w-0 flex-1">
-            <div className="flex items-baseline justify-between gap-3">
-              <span className="text-[10px] font-semibold text-text">
-                Retry overhead
-              </span>
-              <span className="text-[11px] tabular-nums text-text">
-                {fmtMs(attribution.mixedRetryMs)}
-              </span>
-            </div>
-            <p className="text-[9px] leading-3 text-text-faint">
-              Shared cc-lb and upstream time before the final attempt.
-            </p>
-          </div>
-        </section>
-      ) : null}
-
-      <div className="mt-1.5 grid gap-1.5">
-        {hasIngressObservations ? (
-          <ObservationGroup title="Ingress observations">
-            {e.request_body_first_chunk_ms != null ? (
-              <DetailRow
-                label="Body start → first DATA"
-                value={fmtIoMs(e.request_body_first_chunk_ms)}
-              />
-            ) : null}
-            {e.request_body_receive_ms != null ? (
-              <DetailRow
-                label="First DATA → body complete"
-                value={fmtIoMs(e.request_body_receive_ms)}
-              />
-            ) : null}
-            {e.request_body_wait_ms != null ? (
-              <DetailRow
-                label="Waiting for body frames"
-                value={fmtIoMs(e.request_body_wait_ms)}
-              />
-            ) : null}
-            {e.request_body_process_ms != null ? (
-              <DetailRow
-                label="Local body handling"
-                value={fmtIoMs(e.request_body_process_ms)}
-              />
-            ) : null}
-            {e.request_body_chunk_count != null ? (
-              <DetailRow
-                label="Non-empty DATA frames"
-                value={formatCount(e.request_body_chunk_count)}
-              />
-            ) : null}
-            {e.request_body_bytes != null ? (
-              <DetailRow
-                label="Ingress body"
-                value={fmtBytes(e.request_body_bytes)}
-              />
-            ) : null}
-            {e.request_body_read_ms != null ? (
-              <DetailRow
-                label="Request body parent interval"
-                value={fmtMs(e.request_body_read_ms)}
-              />
-            ) : null}
-            {(e.request_body_first_chunk_ms != null ||
-              e.request_body_receive_ms != null) && (
-              <p className="mt-1 text-[9px] leading-3 text-text-faint">
-                First-DATA and receive intervals are overlapping diagnostic
-                markers, not additional category totals.
-              </p>
-            )}
-          </ObservationGroup>
-        ) : null}
-
-        {hasResponseObservations ? (
-          <ObservationGroup title="Response observations">
-            {e.response_body_wait_ms != null ? (
-              <DetailRow
-                label="Waiting for response frames"
-                value={fmtIoMs(e.response_body_wait_ms)}
-              />
-            ) : null}
-            {e.response_body_process_ms != null ? (
-              <DetailRow
-                label="Local response relay"
-                value={fmtIoMs(e.response_body_process_ms)}
-              />
-            ) : null}
-            {e.response_body_downstream_poll_gap_ms != null ? (
-              <DetailRow
-                label="Next downstream consumer poll"
-                value={fmtIoMs(e.response_body_downstream_poll_gap_ms)}
-                note="Observed consumer/backpressure and scheduling gap, not a wire ACK or RTT."
-              />
-            ) : null}
-            {hasResponseParentField ? (
-              <DetailRow
-                label={
-                  isCancelledResponse
-                    ? 'Partial stream (client cancelled)'
-                    : e.stream_total_ms != null
-                      ? 'Stream relay parent interval'
-                      : 'Body collect parent interval'
-                }
-                value={
-                  hasMeasuredResponseParent
-                    ? fmtMs(bodyDuration)
-                    : partial
-                      ? 'In progress'
-                      : 'Not measured'
-                }
-              />
-            ) : null}
-            {e.stream_first_content_delta_ms != null ? (
-              <DetailRow
-                label="First content delta"
-                value={fmtMs(e.stream_first_content_delta_ms)}
-              />
-            ) : null}
-            {e.stream_last_content_delta_ms != null ? (
-              <DetailRow
-                label="Last content delta"
-                value={fmtMs(e.stream_last_content_delta_ms)}
-              />
-            ) : null}
-            {e.inter_token_avg_ms != null ? (
-              <DetailRow
-                label="Inter-token average"
-                value={fmtMs(e.inter_token_avg_ms)}
-              />
-            ) : null}
-            <p className="mt-1 text-[9px] leading-3 text-text-faint">
-              Parent response intervals overlap the observations above and are
-              not added again.
-            </p>
-          </ObservationGroup>
-        ) : null}
-
-        {hasCcLbObservations ? (
-          <ObservationGroup title="cc-lb observations">
-            {visibleSetupItems.map((item) => (
-              <DetailRow
-                key={item.label}
-                label={item.label}
-                value={
-                  item.setupTiming ? fmtSetupMs(item.value) : fmtMs(item.value)
-                }
-              />
-            ))}
-            {e.bulkhead_wait_ms != null ? (
-              <DetailRow
-                label="Bulkhead wait"
-                value={fmtMs(e.bulkhead_wait_ms)}
-              />
-            ) : null}
-            {e.finalize_ms != null ? (
-              <DetailRow label="Finalize" value={fmtMs(e.finalize_ms)} />
-            ) : limitReconcileMs != null ? (
-              <DetailRow
-                label="Limit reconcile (internal post)"
-                value={fmtMs(limitReconcileMs)}
-              />
-            ) : null}
-            {e.finalize_ms != null && limitReconcileMs != null ? (
-              <DetailRow
-                label="Limit reconcile (within finalize)"
-                value={fmtMs(limitReconcileMs)}
-              />
-            ) : null}
-          </ObservationGroup>
-        ) : null}
-      </div>
-
-      <div className="mt-1.5 border-t border-subtle pt-1.5">
-        <div
-          className="mb-1.5 flex flex-wrap gap-x-3 gap-y-1"
-          role="list"
-          aria-label="Latency category legend"
-        >
-          {attribution.categories.map(({ key }) => {
-            const meta = LATENCY_CATEGORY_META[key];
-            const Icon = CATEGORY_ICONS[key];
-            return (
-              <span
-                role="listitem"
-                key={key}
-                className="inline-flex items-center gap-1 text-[9px] text-text-faint"
-              >
-                <Icon
-                  className={cx('size-2.5', meta.textClass)}
-                  aria-hidden="true"
-                />
-                {meta.label}
-              </span>
-            );
-          })}
-        </div>
-        <div className="flex items-center gap-2 text-[10px]">
-          <span
-            className={cx(
-              'h-2 w-2 shrink-0 rounded-full',
-              UNATTRIBUTED_PATTERN,
-            )}
-            aria-hidden="true"
-          />
-          <span className="min-w-0 flex-1 text-text-faint">Unattributed</span>
-          <span className="tabular-nums text-text-muted">
-            {fmtMs(attribution.unattributedMs)}
-          </span>
-        </div>
-        {attribution.accountingWarning ? (
-          <div
-            role="status"
-            className="mt-1 flex items-start gap-1 text-[9px] leading-3 text-amber-500"
-          >
-            <TriangleAlert
-              className="mt-px size-2.5 shrink-0"
-              aria-hidden="true"
-            />
-            Measured child intervals exceed a parent interval; raw measurements
-            are preserved.
-          </div>
-        ) : null}
-      </div>
-    </>
-  );
-
   const popover = (
-    <div className="max-h-[min(34rem,calc(100vh-1rem))] w-[min(22rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] overflow-y-auto font-mono">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-text">
-            Latency attribution
-          </div>
-          <div className="text-[9px] leading-3 text-text-faint">
-            Measured portions only
-          </div>
-        </div>
-        <div className="flex items-center gap-1.5 text-right">
-          {partial ? (
-            <LoaderCircle
-              aria-label="Latency measurement in progress"
-              className="size-3 animate-spin text-text-faint"
-            />
-          ) : null}
-          <span className="text-xs font-semibold tabular-nums text-text">
-            {fmtMs(duration)}
-          </span>
-        </div>
+    <div className="min-w-[240px] font-mono">
+      <div className="text-[10px] uppercase tracking-wider text-text-faint mb-2">
+        Latency
       </div>
 
       {isRenewal ? (
-        <section className="rounded-sm border border-blue-500/30 bg-blue-500/10 px-2 py-2">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-[10px] font-semibold text-text">
-              Renewal cycle
+        <Section
+          title="Renewal cycle"
+          color="bg-blue-400"
+          total={duration}
+          duration={duration}
+          items={[]}
+          showZero
+        />
+      ) : (
+        proxySections
+      )}
+
+      <div className="border-t border-subtle mt-2 pt-1.5 flex flex-col gap-1">
+        <div className="flex items-center gap-2 text-[11px]">
+          <span className="h-2 w-2 shrink-0" />
+          <span className="text-text-faint flex-1">Total</span>
+          <span className="tabular-nums text-text w-14 text-right">
+            {fmtMs(duration)}
+          </span>
+          <span className="tabular-nums text-text-faint w-9 text-right">
+            {duration > 0 ? '100%' : '—'}
+          </span>
+        </div>
+        {!isRenewal && groups.unaccounted > 10 && (
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className="h-2 w-2 shrink-0 bg-slate-700/30 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)] rounded-full" />
+            <span className="text-text-faint flex-1">Unaccounted</span>
+            <span className="tabular-nums text-text-muted w-14 text-right">
+              {fmtMs(groups.unaccounted)}
             </span>
-            <span className="text-[11px] tabular-nums text-text">
-              {fmtMs(duration)}
+            <span className="tabular-nums text-text-faint w-9 text-right">
+              {pctOf(groups.unaccounted, duration)}%
             </span>
           </div>
-          <p className="mt-1 text-[9px] leading-3 text-text-faint">
-            Credential renewal is not a proxy request and is not split into
-            network or processing categories.
-          </p>
-        </section>
-      ) : (
-        proxyPopover
-      )}
+        )}
+      </div>
     </div>
   );
 
   return (
     <td
       className="p-0 text-right whitespace-nowrap"
-      onClick={(event) => event.stopPropagation()}
+      onClick={(ev) => ev.stopPropagation()}
     >
       <Hint label={popover}>
         <button
           type="button"
           aria-label={triggerLabel}
-          className="block w-full cursor-help border-0 bg-transparent px-3 py-2 text-inherit focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-[-2px]"
+          className="w-full px-3 py-2 cursor-help block bg-transparent border-0 text-inherit"
         >
-          <div className="flex items-center justify-end gap-1 tabular-nums leading-tight">
-            {partial ? (
-              <LoaderCircle
-                aria-hidden="true"
-                className="size-2.5 animate-spin text-text-faint"
-              />
-            ) : null}
-            <span className="w-[5ch] shrink-0 text-right text-text">
+          <div className="flex items-baseline justify-end tabular-nums leading-tight">
+            <span className="shrink-0 w-[5ch] text-right text-text">
               {value}
             </span>
-            <span className="w-[2ch] shrink-0 text-left text-text-faint">
+            <span className="shrink-0 w-[2ch] text-left text-text-faint">
               {unit}
             </span>
           </div>
@@ -628,52 +419,25 @@ export function LatencyCell({
                 isRenewal
                   ? [{ value: duration, color: 'bg-blue-400' }]
                   : [
-                      ...attribution.categories.map(({ key, ms }) => ({
-                        value: ms ?? 0,
-                        color: LATENCY_CATEGORY_META[key].fill,
-                      })),
-                      {
-                        value: attribution.mixedUpstreamMs ?? 0,
-                        color: MIXED_UPSTREAM_PATTERN,
-                      },
-                      {
-                        value: attribution.mixedRetryMs ?? 0,
-                        color: MIXED_RETRY_PATTERN,
-                      },
-                      {
-                        value: attribution.unattributedMs,
-                        color: UNATTRIBUTED_PATTERN,
-                      },
+                      { value: requestBodyRead, color: 'bg-cyan-400' },
+                      { value: proxyInternalPre, color: 'bg-sky-400' },
+                      { value: groups.wait, color: 'bg-amber-400' },
+                      { value: groups.upstream, color: 'bg-violet-400' },
+                      { value: groups.body, color: 'bg-emerald-400' },
+                      { value: groups.internalPost, color: 'bg-slate-400' },
+                      ...(groups.unaccounted > 10
+                        ? [
+                            {
+                              value: groups.unaccounted,
+                              color:
+                                'bg-slate-700/30 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)]',
+                            },
+                          ]
+                        : []),
                     ]
               }
             />
           </div>
-          {!isRenewal ? (
-            <div
-              role="list"
-              aria-label="Compact latency category legend"
-              className="mt-1 grid grid-cols-4 gap-0.5"
-            >
-              {attribution.categories.map(({ key }) => {
-                const meta = LATENCY_CATEGORY_META[key];
-                return (
-                  <span
-                    role="listitem"
-                    key={key}
-                    aria-label={meta.label}
-                    title={meta.label}
-                    className={cx(
-                      'rounded-sm px-0.5 text-center text-[8px] font-semibold leading-3',
-                      meta.textClass,
-                      meta.surfaceClass,
-                    )}
-                  >
-                    <span aria-hidden="true">{CATEGORY_SHORT_LABELS[key]}</span>
-                  </span>
-                );
-              })}
-            </div>
-          ) : null}
         </button>
       </Hint>
     </td>
