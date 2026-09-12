@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.4...cc-lb-runtime-wasmtime-v0.1.5) - 2026-09-12
+
+### Other
+
+- reduce redundant build work ([#627](https://github.com/isac322/cc-lb/pull/627))
+
 ## [0.1.4](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.3...cc-lb-runtime-wasmtime-v0.1.4) - 2026-07-15
 
 ### Added
