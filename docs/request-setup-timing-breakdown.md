@@ -100,28 +100,23 @@ request_body_read
 + retry_overhead, when a retry started
 ```
 
-The final attempt's shape, sign, and upstream timings are reset before retry dispatch, while `retry_overhead_ms` accounts for the earlier attempt path once. Request/response child observations and overlapping markers never join this parent sum. If children exceed a parent because of precision, rounding, or inconsistent data, the UI preserves the raw values, warns about accounting, and clamps only visual widths.
+The final attempt's shape, sign, and upstream timings are reset before retry dispatch, while `retry_overhead_ms` accounts for the earlier attempt path once. Request/response child observations and overlapping markers never join this parent sum. Responsibility totals use those child observations only to divide a parent across boundaries; arithmetic remainders and retry aggregates stay unattributed rather than being assigned to a guessed owner.
 
-## Four-category UI attribution
+## Responsibility-based UI attribution
 
-The Logs latency cell and drawer use one shared calculation and always present four category anchors:
+The Logs latency cell and Request Detail Sheet use one shared calculation and present five responsibility groups:
 
-| Category | Included measured values | Important limitation |
+| Group | Included measured values | Important limitation |
 | --- | --- | --- |
-| **Downstream network** | `request_body_wait_ms` plus streamed `response_body_downstream_poll_gap_ms` when present. | These values also include client/consumer pacing, backpressure, and runtime scheduling. Downstream TLS and request headers before handler entry, and buffered response delivery after finalization, are not observed. Do not infer RTT. |
-| **cc-lb processing** | The setup parent (or measured setup children if the parent is absent), `shape_ms`, `sign_ms`, `bulkhead_wait_ms`, request/response local process observations, and the finalize parent (or `limit_reconcile_ms` if finalize is absent). | This is elapsed local work and local waiting, not CPU time. Parent values replace their children when both exist. |
-| **Upstream network** | Recorded `dns_ms` plus `connect_ms`. | `connect_ms` combines TCP and TLS connection work. Header and response-body waits are excluded. |
-| **Upstream processing** | No numeric value is synthesized. | cc-lb has no independent source for pure provider-processing time, so the card states that it is not independently measured. |
+| **Downstream** | `request_body_wait_ms` plus streamed `response_body_downstream_poll_gap_ms` when present. | These observations combine client/consumer pacing, downstream transit, backpressure, and runtime scheduling. They are not network RTT measurements. Downstream TLS and request headers before handler entry, and buffered response delivery after finalization, are not observed. |
+| **cc-lb** | The setup parent (or measured setup children if the parent is absent), `shape_ms`, `sign_ms`, `bulkhead_wait_ms`, request/response local process observations, and the finalize parent (or `limit_reconcile_ms` if finalize is absent). | This is elapsed local work and local waiting, not CPU time. Parent values replace their children when both exist. |
+| **Upstream net** | Recorded `dns_ms` plus `connect_ms`. | `connect_ms` combines TCP and TLS connection work. A reused connection can legitimately show zero with a `Warm pool` marker. |
+| **Upstream wait** | The non-negative header residual `upstream_ttfb_ms - bulkhead_wait_ms - dns_ms - connect_ms`, plus measured `response_body_wait_ms`. | These waits combine provider generation, upstream transit, and runtime scheduling. The available timestamps cannot separate those components. |
+| **Unattributed** | `retry_overhead_ms`, request/response parent remainders, and positive time outside the additive parent accounting. | Retry overhead is one aggregate for completed prior attempts, so its cc-lb, network, and upstream portions cannot be reconstructed. Other residuals have no finer timing witness. |
 
-`Combined upstream wait` is separate from the four cards. It contains the non-negative header residual
+The compact Logs popover keeps the original section layout. The Request Detail Sheet shows the same responsibility totals and distribution above the existing chronological request timeline. The chronology, SSE markers, and detailed stage rows remain separate because responsibility attribution is not a wall-clock sequence.
 
-```text
-upstream_ttfb_ms - bulkhead_wait_ms - dns_ms - connect_ms
-```
-
-plus measured `response_body_wait_ms`. For legacy rows without response children, the selected response-body parent remains explicitly mixed. These waits combine provider work, network transit, and runtime scheduling and are counted once, not split between the upstream cards.
-
-`retry_overhead_ms` appears separately as an earlier mixed retry path. Legacy unsplit ingress, response-parent remainder, and other positive gaps remain `Unattributed`. Renewal lifecycle rows are not classified as proxy latency. Live partial rows show available measurements as available or in progress; missing data is never manufactured as zero.
+Measurement limitations are attached to the relevant group or item as contextual help rather than shown as a permanent warning block. Renewal lifecycle rows remain one `Renewal cycle`; live partial rows show only observations available so far, without labeling elapsed in-flight time as residual latency.
 
 ## Propagation and compatibility
 
