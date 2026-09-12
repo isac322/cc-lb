@@ -194,7 +194,7 @@ const RequestEventRow = memo(function RequestEventRow({
       >
         <RequestOutcomeTableCell outcome={outcome} />
       </td>
-      <LatencyCell event={event} isPartial={isPartial} />
+      <LatencyCell event={event} />
       {showTokens && <TokenCell event={event} isPartial={isPartial} />}
       {showCost && <CostCell event={event} isPartial={isPartial} />}
     </tr>

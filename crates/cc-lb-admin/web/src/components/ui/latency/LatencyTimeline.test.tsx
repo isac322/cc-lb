@@ -1,4 +1,10 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RequestEvent } from '../../../lib/api';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
@@ -496,6 +502,106 @@ describe('LatencyTimeline', () => {
     ).toBeTruthy();
   });
 
+  it('shows the same responsibility totals as the compact popover', async () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          duration_ms: 1000,
+          request_body_read_ms: 100,
+          request_body_wait_ms: 30,
+          request_body_process_ms: 20,
+          proxy_setup_ms: 200,
+          auth_ms: 50,
+          route_ms: 20,
+          limit_reserve_ms: 10,
+          json_parse_ms: 5,
+          cache_tokenizer_queue_ms: 5,
+          cache_structure_ms: 5,
+          cache_serialize_ms: 5,
+          retry_overhead_ms: 75,
+          shape_ms: 25,
+          sign_ms: 10,
+          upstream_ttfb_ms: 300,
+          bulkhead_wait_ms: 10,
+          dns_ms: 20,
+          connect_ms: 30,
+          stream_total_ms: 240,
+          response_body_wait_ms: 100,
+          response_body_process_ms: 20,
+          response_body_downstream_poll_gap_ms: 10,
+          finalize_ms: 50,
+          limit_reconcile_ms: 20,
+        })}
+      />,
+    );
+
+    const timeline = screen.getByTestId('latency-timeline-region');
+    expect(timeline.getAttribute('data-downstream-ms')).toBe('40');
+    expect(timeline.getAttribute('data-cc-lb-ms')).toBe('335');
+    expect(timeline.getAttribute('data-upstream-net-ms')).toBe('50');
+    expect(timeline.getAttribute('data-upstream-wait-ms')).toBe('340');
+    expect(timeline.getAttribute('data-unattributed-ms')).toBe('235');
+    expect(
+      screen.getByRole('region', { name: 'Latency by responsibility' }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole('button', {
+        name: 'Downstream, 40 ms, 4% of total',
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole('button', {
+        name: 'cc-lb, 335 ms, 34% of total',
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole('button', {
+        name: 'Upstream net, 50 ms, 5% of total',
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole('button', {
+        name: 'Upstream wait, 340 ms, 34% of total',
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole('button', {
+        name: 'Unattributed, 235 ms, 24% of total',
+      }),
+    ).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Upstream wait, 340 ms, 34% of total',
+      }),
+    );
+    expect(
+      await screen.findByText(
+        /provider generation, upstream transit, and runtime scheduling/i,
+      ),
+    ).toBeTruthy();
+  });
+
+  it('announces Warm pool when connection timing is absent', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          duration_ms: 100,
+          connection_reused: true,
+          upstream_ttfb_ms: 20,
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByRole('button', {
+        name: 'Upstream net, warm pool, 0 ms, 0% of total',
+      }),
+    ).toBeTruthy();
+  });
+
   it('keeps zero and fractional setup details without overlapping tiny segments', () => {
     const event = ev({
       duration_ms: 1000,
@@ -590,9 +696,7 @@ describe('LatencyTimeline', () => {
         name: /Request body read.*Ingress body: 834\.3 KB.*5 ms/,
       }),
     ).toBeTruthy();
-    const groupRows = screen.getByTestId(
-      'latency-timeline-region',
-    ).firstElementChild;
+    const groupRows = screen.getByTestId('latency-stage-groups');
     expect(groupRows).not.toBeNull();
     expect(
       Array.from(
@@ -716,7 +820,13 @@ describe('LatencyTimeline', () => {
       />,
     );
 
-    expect(screen.getByText('Renewal cycle')).toBeTruthy();
+    expect(screen.getAllByText('Renewal cycle').length).toBeGreaterThan(0);
+    const renewalResponsibility = screen.getByRole('button', {
+      name: 'Renewal cycle, 500 ms, 100% of total',
+    });
+    expect(
+      renewalResponsibility.querySelector('.text-blue-300'),
+    ).not.toBeNull();
     expect(screen.queryByText('Internal pre')).toBeNull();
     expect(screen.queryByText('Body')).toBeNull();
     expect(screen.queryByText('Finalize')).toBeNull();
@@ -761,7 +871,7 @@ describe('LatencyTimeline', () => {
     );
 
     expect(screen.queryByText('No latency data recorded.')).toBeNull();
-    expect(screen.getByText('Renewal cycle')).toBeTruthy();
+    expect(screen.getAllByText('Renewal cycle').length).toBeGreaterThan(0);
     const stageDetails = screen
       .getByText(/^Stage details \(\d+\)$/)
       .closest('details');

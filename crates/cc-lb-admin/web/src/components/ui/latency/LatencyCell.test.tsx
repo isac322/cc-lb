@@ -34,6 +34,14 @@ function renderCell(
   return trigger;
 }
 
+function describedText(element: Element): string {
+  return (element.getAttribute('aria-describedby') ?? '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent ?? '')
+    .join(' ');
+}
+
 const baseEvent = {
   ts: 1,
   request_id: 'req-latency',
@@ -89,13 +97,128 @@ describe('LatencyCell timing breakdown', () => {
       expect(screen.getByText(label)).toBeDefined();
     }
     const popoverText =
-      screen.getByText('Latency').parentElement?.textContent ?? '';
+      screen.getByText('Latency by responsibility').parentElement
+        ?.textContent ?? '';
     const positions = chronology.map((label) => popoverText.indexOf(label));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
     expect(screen.queryByText('Setup overhead')).toBeNull();
     expect(screen.getByText('0.125 ms')).toBeDefined();
     expect(screen.getAllByText('0 ms').length).toBeGreaterThan(0);
+  });
+
+  it('separates responsibility domains and keeps measurement limits contextual', () => {
+    renderCell({
+      ...baseEvent,
+      source_kind: 'proxy',
+      duration_ms: 1000,
+      request_body_read_ms: 100,
+      request_body_wait_ms: 30,
+      request_body_process_ms: 20,
+      proxy_setup_ms: 200,
+      auth_ms: 50,
+      route_ms: 20,
+      limit_reserve_ms: 10,
+      json_parse_ms: 5,
+      cache_tokenizer_queue_ms: 5,
+      cache_structure_ms: 5,
+      cache_serialize_ms: 5,
+      retry_overhead_ms: 75,
+      shape_ms: 25,
+      sign_ms: 10,
+      upstream_ttfb_ms: 300,
+      bulkhead_wait_ms: 10,
+      dns_ms: 20,
+      connect_ms: 30,
+      stream_total_ms: 240,
+      response_body_wait_ms: 100,
+      response_body_process_ms: 20,
+      response_body_downstream_poll_gap_ms: 10,
+      finalize_ms: 50,
+      limit_reconcile_ms: 20,
+    });
+
+    const expected = [
+      ['Downstream latency', /40(?:\.0)? ms.*4%/],
+      ['cc-lb latency', /335(?:\.0)? ms.*34%/],
+      ['Upstream net latency', /50(?:\.0)? ms.*5%/],
+      ['Upstream wait latency', /340(?:\.0)? ms.*34%/],
+      ['Unattributed latency', /235(?:\.0)? ms.*24%/],
+    ] as const;
+    for (const [name, value] of expected) {
+      expect(screen.getByRole('group', { name }).textContent).toMatch(value);
+    }
+
+    expect(
+      describedText(screen.getByRole('group', { name: 'Downstream latency' })),
+    ).toMatch(/not a network RTT measurement/i);
+    expect(
+      describedText(
+        screen.getByRole('group', { name: 'Upstream wait latency' }),
+      ),
+    ).toMatch(/provider generation, upstream transit, and runtime scheduling/i);
+    expect(screen.getByText('Retry overhead').getAttribute('title')).toMatch(
+      /one aggregate across prior attempts/i,
+    );
+    expect(
+      describedText(
+        screen.getByRole('group', { name: 'Unattributed latency' }),
+      ),
+    ).toMatch(
+      /cannot be assigned to one responsibility.*one aggregate across prior attempts.*no finer timing witness/i,
+    );
+    expect(screen.queryByText(/mixed/i)).toBeNull();
+
+    const responsibilitySparkline = screen.getByRole('img', {
+      name: /Downstream 40 ms.*cc-lb 335 ms.*Upstream net 50 ms.*Upstream wait 340 ms.*Unattributed 235 ms/,
+    });
+    expect(
+      Array.from(
+        responsibilitySparkline.querySelectorAll<HTMLElement>('span'),
+        (segment) => segment.style.width,
+      ),
+    ).toEqual(['4%', '33.5%', '5%', '34%', '23.5%']);
+  });
+
+  it('does not double-count setup timings recorded before proxy_setup_ms', () => {
+    renderCell({
+      ...baseEvent,
+      source_kind: 'proxy',
+      duration_ms: 120,
+      proxy_setup_ms: undefined,
+      auth_ms: 5,
+      route_ms: 2,
+      limit_reserve_ms: 1,
+      json_parse_ms: 48,
+    });
+
+    expect(
+      screen.getByRole('group', { name: 'cc-lb latency' }).textContent,
+    ).toMatch(/56(?:\.0)? ms.*47%/);
+    expect(
+      screen.getByRole('group', { name: 'Unattributed latency' }).textContent,
+    ).toMatch(/64(?:\.0)? ms.*53%/);
+  });
+
+  it('does not double-count request-body timings when the parent is absent', () => {
+    renderCell({
+      ...baseEvent,
+      source_kind: 'proxy',
+      duration_ms: 100,
+      request_body_read_ms: null,
+      request_body_wait_ms: 30,
+      request_body_process_ms: 20,
+    });
+
+    expect(
+      screen.getByRole('group', { name: 'Downstream latency' }).textContent,
+    ).toMatch(/30(?:\.0)? ms.*30%/);
+    expect(
+      screen.getByRole('group', { name: 'cc-lb latency' }).textContent,
+    ).toMatch(/20(?:\.0)? ms.*20%/);
+    expect(
+      screen.getByRole('group', { name: 'Unattributed latency' }).textContent,
+    ).toMatch(/50(?:\.0)? ms.*50%/);
   });
 
   it('uses a native button and opens the popover on keyboard focus', () => {
@@ -108,11 +231,27 @@ describe('LatencyCell timing breakdown', () => {
       'focus',
     );
 
-    expect(trigger.getAttribute('aria-label')).toMatch(
-      /^Latency 100 ms, show breakdown$/,
+    expect(trigger.getAttribute('aria-label')).toBe(
+      'Latency 100 ms, cc-lb 20 ms, Unattributed 80 ms, show breakdown',
     );
-    expect(screen.getByText('Latency')).toBeDefined();
+    expect(screen.getByText('Latency by responsibility')).toBeDefined();
     expect(screen.getByText('JSON parse')).toBeDefined();
+  });
+
+  it('keeps the Warm pool indicator visible when DNS and connect are absent', () => {
+    renderCell({
+      ...baseEvent,
+      source_kind: 'proxy',
+      connection_reused: true,
+      upstream_ttfb_ms: 20,
+    });
+
+    const upstreamNet = screen.getByRole('group', {
+      name: 'Upstream net latency',
+    });
+    expect(upstreamNet.textContent).toMatch(/Upstream net.*Warm pool.*0 ms/);
+    expect(screen.queryByText('DNS')).toBeNull();
+    expect(screen.queryByText('Connect (TCP+TLS)')).toBeNull();
   });
 
   it('keeps the single Setup overhead fallback for legacy rows', () => {
@@ -148,7 +287,7 @@ describe('LatencyCell timing breakdown', () => {
     expect(screen.queryByText('Other setup')).toBeNull();
   });
 
-  it('shows request ingress first, exact body bytes, and Finalize for a new proxy row', () => {
+  it('shows ingress metadata and responsibility groups for a proxy row', () => {
     const trigger = renderCell(
       {
         ...baseEvent,
@@ -164,29 +303,26 @@ describe('LatencyCell timing breakdown', () => {
     );
 
     expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 100 ms, Proxy request body read 10 ms, Ingress body 834.3 KB, Finalize 10 ms, show breakdown',
+      'Latency 100 ms, cc-lb 30 ms, Upstream wait 20 ms, Unattributed 50 ms, Ingress body 834.3 KB, show breakdown',
     );
 
     expect(screen.getByText('Ingress body: 834.3 KB')).toBeDefined();
-    const chronology = [
-      'Request body read',
-      'Internal pre',
-      'Upstream',
-      'Body',
-      'Finalize',
-    ];
+    const responsibilityOrder = ['cc-lb', 'Upstream wait', 'Unattributed'];
     const popoverText =
-      screen.getByText('Latency').parentElement?.textContent ?? '';
-    const positions = chronology.map((label) => popoverText.indexOf(label));
+      screen.getByText('Latency by responsibility').parentElement
+        ?.textContent ?? '';
+    const positions = responsibilityOrder.map((label) =>
+      popoverText.indexOf(label),
+    );
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
     expect(screen.queryByText('Internal post')).toBeNull();
     expect(
       screen.getByRole('img', {
-        name: /Request body read 10 ms.*Ingress body 834\.3 KB.*Finalize 10 ms/,
+        name: /cc-lb 30 ms.*Upstream wait 20 ms.*Unattributed 50 ms/,
       }),
     ).toBeDefined();
-    expect(screen.queryByText('Unaccounted')).toBeNull();
+    expect(screen.getByText('Unattributed')).toBeDefined();
   });
 
   it('shows one stream relay label for a completed stream', () => {
@@ -205,7 +341,9 @@ describe('LatencyCell timing breakdown', () => {
     expect(screen.getByText('Stream relay')).toBeDefined();
     expect(screen.queryByText('Body collect')).toBeNull();
     expect(
-      screen.getByRole('img', { name: /Stream relay 600 ms/ }),
+      screen.getByRole('img', {
+        name: /cc-lb 200 ms.*Upstream wait 100 ms.*Unattributed 700 ms/,
+      }),
     ).toBeDefined();
     expect(screen.queryByText('Partial stream (client cancelled)')).toBeNull();
   });
@@ -220,20 +358,25 @@ describe('LatencyCell timing breakdown', () => {
         upstream_body_ms: 640,
         stream_total_ms: 690,
         finalize_ms: 60,
+        response_body_wait_ms: 500,
+        response_body_process_ms: 20,
+        response_body_downstream_poll_gap_ms: 10,
       },
       'focus',
     );
 
     expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 700 ms, Partial stream (client cancelled) 640 ms, Finalize 60 ms, show breakdown',
+      'Latency 700 ms, Downstream 10 ms, cc-lb 80 ms, Upstream wait 500 ms, Unattributed 110 ms, show breakdown',
     );
 
-    expect(screen.getByText('Partial stream (client cancelled)')).toBeDefined();
-    expect(screen.getAllByText('640 ms').length).toBeGreaterThan(0);
+    expect(
+      screen.getByText('Other response body (client cancelled)'),
+    ).toBeDefined();
+    expect(screen.getAllByText('110 ms').length).toBeGreaterThan(0);
     expect(screen.queryByText('Stream relay')).toBeNull();
     expect(
       screen.getByRole('img', {
-        name: /Partial stream \(client cancelled\) 640 ms/,
+        name: /Downstream 10 ms.*cc-lb 80 ms.*Upstream wait 500 ms.*Unattributed 110 ms/,
       }),
     ).toBeDefined();
   });
@@ -260,7 +403,7 @@ describe('LatencyCell timing breakdown', () => {
     expect(screen.queryByText('Unaccounted')).toBeNull();
     expect(
       screen.getByRole('img', {
-        name: /^Latency stages: Renewal cycle 500 ms$/,
+        name: /^Latency by responsibility: Renewal cycle 500 ms$/,
       }),
     ).toBeDefined();
   });
@@ -276,12 +419,17 @@ describe('LatencyCell timing breakdown', () => {
       finalize_ms: 10,
     });
 
-    expect(screen.getByText('Unaccounted')).toBeDefined();
+    expect(screen.getByText('Unattributed')).toBeDefined();
     expect(
-      screen.getByRole('img', { name: /Unaccounted 20 ms/ }),
+      screen.getByText('Other lifecycle time').getAttribute('title'),
+    ).toMatch(/no finer timing witness/i);
+    expect(
+      screen.getByRole('img', {
+        name: /cc-lb 20 ms.*Upstream wait 20 ms.*Unattributed 60 ms/,
+      }),
     ).toBeDefined();
   });
-  it('shows Limit reconcile as a Finalize detail without adding it again', () => {
+  it('shows Limit reconcile within cc-lb without adding it again', () => {
     renderCell({
       ...baseEvent,
       source_kind: 'proxy',
@@ -289,7 +437,7 @@ describe('LatencyCell timing breakdown', () => {
       limit_reconcile_ms: 5,
     });
 
-    expect(screen.getByText('Finalize')).toBeDefined();
+    expect(screen.getByRole('group', { name: 'cc-lb latency' })).toBeDefined();
     expect(screen.getByText('Limit reconcile')).toBeDefined();
     expect(screen.getAllByText('20 ms')).toHaveLength(1);
     expect(screen.getByText('Other finalize')).toBeDefined();
@@ -306,11 +454,14 @@ describe('LatencyCell timing breakdown', () => {
     });
 
     expect(screen.getByText('Request body read')).toBeDefined();
-    expect(screen.getByText('Finalize')).toBeDefined();
+    expect(screen.getByRole('group', { name: 'cc-lb latency' })).toBeDefined();
+    expect(
+      screen.getByRole('group', { name: 'Unattributed latency' }),
+    ).toBeDefined();
     expect(screen.getAllByText('0 ms').length).toBeGreaterThanOrEqual(2);
   });
 
-  it('renders a mixed row without promoting a Finalize child to a parent', () => {
+  it('keeps legacy request-body and post timing in honest responsibility groups', () => {
     const trigger = renderCell(
       {
         ...baseEvent,
@@ -323,20 +474,23 @@ describe('LatencyCell timing breakdown', () => {
     );
 
     expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 100 ms, Proxy request body read 20 ms, Internal post 10 ms, show breakdown',
+      'Latency 100 ms, cc-lb 10 ms, Unattributed 90 ms, show breakdown',
     );
     expect(screen.getByText('Request body read')).toBeDefined();
     expect(screen.queryByText('Finalize')).toBeNull();
-    expect(screen.getByText('Internal post')).toBeDefined();
+    expect(screen.getByRole('group', { name: 'cc-lb latency' })).toBeDefined();
+    expect(
+      screen.getByRole('group', { name: 'Unattributed latency' }),
+    ).toBeDefined();
     expect(screen.getByText('Limit reconcile')).toBeDefined();
     expect(
       screen.getByRole('img', {
-        name: /Internal post 10 ms.*Unaccounted 70 ms/,
+        name: /cc-lb 10 ms.*Unattributed 90 ms/,
       }),
     ).toBeDefined();
   });
 
-  it('keeps a measured-zero Limit reconcile audible as Internal post', () => {
+  it('keeps a measured-zero Limit reconcile audible within cc-lb', () => {
     const trigger = renderCell(
       {
         ...baseEvent,
@@ -349,9 +503,9 @@ describe('LatencyCell timing breakdown', () => {
     );
 
     expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 100 ms, Proxy request body read 20 ms, Internal post 0 ms, show breakdown',
+      'Latency 100 ms, Unattributed 100 ms, show breakdown',
     );
-    expect(screen.getByText('Internal post')).toBeDefined();
+    expect(screen.getByRole('group', { name: 'cc-lb latency' })).toBeDefined();
     expect(screen.getByText('Limit reconcile')).toBeDefined();
     expect(screen.getAllByText('0 ms').length).toBeGreaterThan(0);
   });
