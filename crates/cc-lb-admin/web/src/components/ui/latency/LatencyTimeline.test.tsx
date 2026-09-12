@@ -583,6 +583,45 @@ describe('LatencyTimeline', () => {
     ).toBeTruthy();
   });
 
+  it('keeps every responsibility visible when recorded timings exceed total', () => {
+    render(
+      <LatencyTimeline
+        event={ev({
+          source_kind: 'proxy',
+          duration_ms: 100,
+          request_body_read_ms: 40,
+          proxy_setup_ms: 40,
+          upstream_ttfb_ms: 40,
+          upstream_body_ms: 40,
+          finalize_ms: 40,
+        })}
+      />,
+    );
+
+    const distribution = screen.getByRole('img', {
+      name: 'Responsibility distribution',
+    });
+    const segments = Array.from(
+      distribution.querySelectorAll<HTMLElement>('[data-responsibility]'),
+    );
+    expect(
+      segments.map((segment) => [
+        segment.getAttribute('data-responsibility'),
+        segment.style.width,
+      ]),
+    ).toEqual([
+      ['cc-lb', '40%'],
+      ['upstream-wait', '20%'],
+      ['unattributed', '40%'],
+    ]);
+    expect(
+      segments.reduce(
+        (total, segment) => total + Number.parseFloat(segment.style.width),
+        0,
+      ),
+    ).toBe(100);
+  });
+
   it('announces Warm pool when connection timing is absent', () => {
     render(
       <LatencyTimeline

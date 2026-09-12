@@ -562,6 +562,8 @@ function ResponsibilityOverview({
     event._phase === 'partial'
       ? groups.filter((group) => group.observed || group.valueMs > 0)
       : groups;
+  const barGroups = visibleGroups.filter((group) => group.valueMs > 0);
+  const barTotal = barGroups.reduce((total, group) => total + group.valueMs, 0);
 
   return (
     <section aria-label="Latency by responsibility" className="space-y-1.5">
@@ -576,22 +578,18 @@ function ResponsibilityOverview({
         className="flex h-4 w-full overflow-hidden rounded-sm bg-overlay-5"
         role="img"
       >
-        {visibleGroups
-          .filter((group) => group.valueMs > 0)
-          .map((group) => (
-            <span
-              aria-hidden
-              className={cx('h-full min-w-px', group.color)}
-              data-ms={group.valueMs}
-              data-responsibility={group.key}
-              key={group.key}
-              style={{
-                width: `${clampPct(
-                  (group.valueMs / attribution.totalMs) * 100,
-                )}%`,
-              }}
-            />
-          ))}
+        {barGroups.map((group) => (
+          <span
+            aria-hidden
+            className={cx('h-full min-w-px', group.color)}
+            data-ms={group.valueMs}
+            data-responsibility={group.key}
+            key={group.key}
+            style={{
+              width: `${clampPct((group.valueMs / barTotal) * 100)}%`,
+            }}
+          />
+        ))}
       </div>
       <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
         {visibleGroups.map((group) => (

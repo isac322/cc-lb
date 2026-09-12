@@ -20,6 +20,7 @@ mod body_io_timing;
 pub mod builtin_filters;
 #[cfg(not(loom))]
 mod bulkhead;
+#[cfg(not(loom))]
 pub mod cache_keepalive;
 #[cfg(not(loom))]
 mod circuit_breaker;
