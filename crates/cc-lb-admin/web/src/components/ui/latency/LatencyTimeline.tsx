@@ -563,7 +563,8 @@ function ResponsibilityOverview({
       ? groups.filter((group) => group.observed || group.valueMs > 0)
       : groups;
   const barGroups = visibleGroups.filter((group) => group.valueMs > 0);
-  const barTotal = barGroups.reduce((total, group) => total + group.valueMs, 0);
+  const barSum = barGroups.reduce((total, group) => total + group.valueMs, 0);
+  const barTotal = Math.max(barSum, attribution.totalMs);
 
   return (
     <section aria-label="Latency by responsibility" className="space-y-1.5">

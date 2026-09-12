@@ -622,6 +622,56 @@ describe('LatencyTimeline', () => {
     ).toBe(100);
   });
 
+  it('leaves unobserved elapsed time empty on live partial rows', () => {
+    const partial = {
+      event_id: 'evt-partial-responsibility',
+      request_id: 'req-partial-responsibility',
+      ts: 1,
+      ts_ms: 1000,
+      last_update_ms: 6000,
+      elapsed_ms: 5000,
+      stream: true,
+      request_body_read_ms: 6,
+      request_body_wait_ms: 4,
+      request_body_process_ms: 2,
+      auth_ms: 2,
+      route_ms: 1,
+      upstream_ttfb_ms: 500,
+      _phase: 'partial',
+    } satisfies RequestEventWithPhase;
+    render(<LatencyTimeline event={partial} isPartial />);
+
+    const distribution = screen.getByRole('img', {
+      name: 'Responsibility distribution',
+    });
+    const segments = Array.from(
+      distribution.querySelectorAll<HTMLElement>('[data-responsibility]'),
+    );
+    expect(
+      Object.fromEntries(
+        segments.map((segment) => [
+          segment.getAttribute('data-responsibility'),
+          segment.style.width,
+        ]),
+      ),
+    ).toEqual({
+      downstream: '0.08%',
+      'cc-lb': '0.1%',
+      'upstream-wait': '10%',
+    });
+    expect(
+      segments.reduce(
+        (total, segment) => total + Number.parseFloat(segment.style.width),
+        0,
+      ),
+    ).toBeLessThan(11);
+    expect(
+      screen.getByRole('button', {
+        name: 'Upstream wait, 500 ms, 10% of total',
+      }),
+    ).toBeTruthy();
+  });
+
   it('announces Warm pool when connection timing is absent', () => {
     render(
       <LatencyTimeline
