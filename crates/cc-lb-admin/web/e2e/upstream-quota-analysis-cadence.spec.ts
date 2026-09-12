@@ -4,6 +4,10 @@ const UPSTREAM_ID = 'oauth-cadence';
 const INITIAL_TIME = new Date('2026-06-18T00:00:01.000Z');
 const RANGE_SECS = 7 * 24 * 60 * 60;
 
+const SERIES_PATH = '/admin/v1/subscription-quotas/series';
+const ANALYSIS_PATH = '/admin/v1/subscription-quotas/analysis';
+const CADENCE_BASE_TIME = new Date(INITIAL_TIME.getTime() + 10 * 60_000);
+
 type RequestBounds = {
   sinceUnixSecs: number;
   untilUnixSecs: number;
@@ -14,6 +18,26 @@ function requestBounds(url: URL): RequestBounds {
     sinceUnixSecs: Number(url.searchParams.get('since_unix_secs')),
     untilUnixSecs: Number(url.searchParams.get('until_unix_secs')),
   };
+}
+
+function waitForQuotaResponse(page: Page, pathname: string) {
+  return page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === pathname && response.status() === 200;
+  });
+}
+
+async function advanceClockForResponses(
+  page: Page,
+  ticks: number,
+  paths: readonly string[],
+) {
+  const responsePromises = paths.map((path) =>
+    waitForQuotaResponse(page, path),
+  );
+  await page.clock.runFor(ticks);
+  const responses = await Promise.all(responsePromises);
+  await Promise.all(responses.map((response) => response.finished()));
 }
 
 type AppFixtureOptions = {
@@ -539,64 +563,63 @@ test.describe('Upstream quota analysis browser behavior (mock API)', () => {
     await expect(page.locator('.recharts-responsive-container')).toBeVisible();
     await expect(page.getByText('No data in range')).toHaveCount(0);
 
-    const initialBounds = fixtures.seriesRequests[0];
+    // Let the page load with a naturally progressing clock, then pause at an
+    // exact future instant as Playwright recommends. This removes real runner
+    // speed from both the request baseline and the interval schedule.
+    const baseSeriesResponsePromise = waitForQuotaResponse(page, SERIES_PATH);
+    const baseAnalysisResponsePromise = waitForQuotaResponse(
+      page,
+      ANALYSIS_PATH,
+    );
+    await page.clock.pauseAt(CADENCE_BASE_TIME);
+    const [baseSeriesResponse, baseAnalysisResponse] = await Promise.all([
+      baseSeriesResponsePromise,
+      baseAnalysisResponsePromise,
+    ]);
+    await Promise.all([
+      baseSeriesResponse.finished(),
+      baseAnalysisResponse.finished(),
+    ]);
+
+    const initialBounds = fixtures.seriesRequests.at(-1);
     if (!initialBounds) {
-      throw new Error('initial series request was not observed');
+      throw new Error('baseline series request was not observed');
     }
     expect(initialBounds.untilUnixSecs - initialBounds.sinceUnixSecs).toBe(
       RANGE_SECS,
     );
+    expect(initialBounds.untilUnixSecs).toBe(
+      Math.floor(CADENCE_BASE_TIME.getTime() / 1000),
+    );
     expect(initialBounds.untilUnixSecs % 120).not.toBe(0);
-    expect(fixtures.analysisRequests[0]).toEqual(initialBounds);
+    expect(fixtures.analysisRequests.at(-1)).toEqual(initialBounds);
     const initialAnalysisRequestCount = fixtures.analysisRequests.length;
 
-    // Advance just past one polling boundary at a time and observe its request
-    // before advancing again. Landing exactly on the boundary can leave the
-    // interval callback queued, while jumping 60 seconds can fire two ticks
-    // while the first fetch is still in flight and coalesce the second.
-    await page.clock.runFor(30_001);
+    await advanceClockForResponses(page, 30_001, [SERIES_PATH]);
     const thirtySecondBounds = {
       sinceUnixSecs: initialBounds.sinceUnixSecs + 30,
       untilUnixSecs: initialBounds.untilUnixSecs + 30,
     };
-    await expect
-      .poll(() =>
-        fixtures.seriesRequests.some(
-          (bounds) =>
-            bounds.sinceUnixSecs === thirtySecondBounds.sinceUnixSecs &&
-            bounds.untilUnixSecs === thirtySecondBounds.untilUnixSecs,
-        ),
-      )
-      .toBe(true);
+    expect(fixtures.seriesRequests.at(-1)).toEqual(thirtySecondBounds);
 
-    await page.clock.runFor(30_001);
+    await advanceClockForResponses(page, 30_001, [SERIES_PATH]);
     const sixtySecondBounds = {
       sinceUnixSecs: initialBounds.sinceUnixSecs + 60,
       untilUnixSecs: initialBounds.untilUnixSecs + 60,
     };
-    await expect
-      .poll(() =>
-        fixtures.seriesRequests.some(
-          (bounds) =>
-            bounds.sinceUnixSecs === sixtySecondBounds.sinceUnixSecs &&
-            bounds.untilUnixSecs === sixtySecondBounds.untilUnixSecs,
-        ),
-      )
-      .toBe(true);
+    expect(fixtures.seriesRequests.at(-1)).toEqual(sixtySecondBounds);
     expect(fixtures.analysisRequests).toHaveLength(initialAnalysisRequestCount);
     await expect(page.locator('.recharts-responsive-container')).toBeVisible();
 
     fixtures.showUpdatedAnalysis();
-    await page.clock.runFor(30_001);
-    await expect
-      .poll(() =>
-        fixtures.seriesRequests.some(
-          (bounds) =>
-            bounds.untilUnixSecs === initialBounds.untilUnixSecs + 90,
-        ),
-      )
-      .toBe(true);
-    await page.clock.runFor(30_001);
+    await advanceClockForResponses(page, 30_001, [SERIES_PATH]);
+    expect(fixtures.seriesRequests.at(-1)?.untilUnixSecs).toBe(
+      initialBounds.untilUnixSecs + 90,
+    );
+    await advanceClockForResponses(page, 30_001, [
+      SERIES_PATH,
+      ANALYSIS_PATH,
+    ]);
 
     const oneHundredTwentySecondBounds = {
       sinceUnixSecs: initialBounds.sinceUnixSecs + 120,
@@ -606,16 +629,10 @@ test.describe('Upstream quota analysis browser behavior (mock API)', () => {
       initialBounds.untilUnixSecs % 120,
     );
     expect(oneHundredTwentySecondBounds.untilUnixSecs % 120).not.toBe(0);
-    await expect
-      .poll(() =>
-        fixtures.analysisRequests.some(
-          (bounds) =>
-            bounds.sinceUnixSecs === oneHundredTwentySecondBounds.sinceUnixSecs &&
-            bounds.untilUnixSecs === oneHundredTwentySecondBounds.untilUnixSecs,
-        ),
-      )
-      .toBe(true);
     expect(fixtures.analysisRequests.at(-1)).toEqual(
+      oneHundredTwentySecondBounds,
+    );
+    expect(fixtures.seriesRequests.at(-1)).toEqual(
       oneHundredTwentySecondBounds,
     );
     await expect(page.getByText('Quota deficit')).toBeVisible();
