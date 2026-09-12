@@ -550,11 +550,11 @@ test.describe('Upstream quota analysis browser behavior (mock API)', () => {
     expect(fixtures.analysisRequests[0]).toEqual(initialBounds);
     const initialAnalysisRequestCount = fixtures.analysisRequests.length;
 
-    // Advance one polling interval at a time and observe its request before
-    // advancing again. Jumping 60 seconds at once can fire two interval ticks
-    // while the first fetch is still in flight, so React Query correctly
-    // coalesces the second tick and the test never observes the +60 bounds.
-    await page.clock.runFor(30_000);
+    // Advance just past one polling boundary at a time and observe its request
+    // before advancing again. Landing exactly on the boundary can leave the
+    // interval callback queued, while jumping 60 seconds can fire two ticks
+    // while the first fetch is still in flight and coalesce the second.
+    await page.clock.runFor(30_001);
     const thirtySecondBounds = {
       sinceUnixSecs: initialBounds.sinceUnixSecs + 30,
       untilUnixSecs: initialBounds.untilUnixSecs + 30,
@@ -569,7 +569,7 @@ test.describe('Upstream quota analysis browser behavior (mock API)', () => {
       )
       .toBe(true);
 
-    await page.clock.runFor(30_000);
+    await page.clock.runFor(30_001);
     const sixtySecondBounds = {
       sinceUnixSecs: initialBounds.sinceUnixSecs + 60,
       untilUnixSecs: initialBounds.untilUnixSecs + 60,
@@ -587,7 +587,7 @@ test.describe('Upstream quota analysis browser behavior (mock API)', () => {
     await expect(page.locator('.recharts-responsive-container')).toBeVisible();
 
     fixtures.showUpdatedAnalysis();
-    await page.clock.runFor(30_000);
+    await page.clock.runFor(30_001);
     await expect
       .poll(() =>
         fixtures.seriesRequests.some(
@@ -596,7 +596,7 @@ test.describe('Upstream quota analysis browser behavior (mock API)', () => {
         ),
       )
       .toBe(true);
-    await page.clock.runFor(30_000);
+    await page.clock.runFor(30_001);
 
     const oneHundredTwentySecondBounds = {
       sinceUnixSecs: initialBounds.sinceUnixSecs + 120,
