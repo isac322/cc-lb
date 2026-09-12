@@ -516,19 +516,68 @@ jobs:
         env:
           DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
 
-      - name: Run workspace tests with coverage
+      - name: Prepare cumulative coverage environment
         run: |
-          cargo llvm-cov nextest \
-            --workspace \
-            --exclude cc-lb-loadgen \
-            --exclude cc-lb-stress-suite \
-            --exclude tests-multi-replica \
-            --all-features \
-            --test-threads="${CARGO_BUILD_JOBS}" \
+          cargo clean --target-dir target/llvm-cov-target
+          CARGO_TARGET_DIR=target/llvm-cov-target \
+            cargo llvm-cov show-env --sh > "$RUNNER_TEMP/llvm-cov-env.sh"
+          echo "LLVM_COV_ENV_FILE=$RUNNER_TEMP/llvm-cov-env.sh" >> "$GITHUB_ENV"
+
+      # The ARC container hook can lose a long, memory-heavy command while the
+      # compiler is still running. Each step sources cargo-llvm-cov's exported
+      # instrumentation environment, runs a bounded package slice, and leaves
+      # every object/profile in the shared target directory for the final report.
+      - name: Coverage - core libraries
+        run: >-
+          scripts/run-coverage-slice.sh
+          cc-lb-aead cc-lb-clock cc-lb-config cc-lb-control
+          cc-lb-dialect-anthropic cc-lb-domain cc-lb-lifecycle
+          cc-lb-oauth-protocol cc-lb-observability cc-lb-pdk-wasmtime-macros
+          cc-lb-plugin-wire cc-lb-pricing cc-lb-quota cc-lb-request-log
+          cc-lb-routing cc-lb-signer-anthropic-key
+          cc-lb-signer-anthropic-oauth cc-lb-storage-api cc-lb-testkit
+          cc-lb-upstream
+
+      - name: Coverage - plugins and runtime
+        run: >-
+          scripts/run-coverage-slice.sh
+          cc-lb-pdk-wasmtime cc-lb-plugin-conformance cc-lb-runtime-wasmtime
+          cache-aware-wasmtime fake-anthropic mock-anthropic-oauth-server
+          wasmtime-filter-service-tier wasmtime-observe-noop
+          wasmtime-shape-passthrough
+
+      - name: Coverage - engine
+        run: scripts/run-coverage-slice.sh cc-lb-engine
+
+      - name: Coverage - storage
+        run: >-
+          scripts/run-coverage-slice.sh
+          cc-lb-storage-sqlite cc-lb-storage-postgres
+          cc-lb-storage-conformance
+
+      - name: Coverage - scheduler
+        run: scripts/run-coverage-slice.sh cc-lb-scheduler
+
+      - name: Coverage - admin
+        run: scripts/run-coverage-slice.sh cc-lb-admin
+
+      - name: Coverage - server
+        run: scripts/run-coverage-slice.sh cc-lb-server
+
+      - name: Coverage - workspace test suites
+        run: >-
+          scripts/run-coverage-slice.sh
+          cc-lb-property-tests tests-loom tests-integration
+
+      - name: Generate workspace lcov report
+        run: |
+          # shellcheck disable=SC1090
+          source "$LLVM_COV_ENV_FILE"
+          export CARGO_TARGET_DIR="$CARGO_LLVM_COV_TARGET_DIR"
+          cargo llvm-cov report \
             --lcov \
             --output-path target/coverage.lcov \
             --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-
 
       - name: Check per-package coverage gates
         run: scripts/coverage-gate.sh target/coverage.lcov
