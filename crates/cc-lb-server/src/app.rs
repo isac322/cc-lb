@@ -113,9 +113,116 @@ impl RequestBodyCaps {
     }
 }
 
+#[derive(Debug)]
 enum RequestBodyReadError {
     TooLarge,
     Read(tower::BoxError),
+}
+
+struct RequestBodyTimingGuard {
+    observer: Option<cc_lb_engine::LifecycleContext>,
+    started: Instant,
+    first_chunk_received: Option<Instant>,
+    accumulated_wait: Duration,
+    active_wait_started: Option<Instant>,
+    process_started: Instant,
+    process: Duration,
+    chunk_count: u64,
+    published: bool,
+}
+
+impl RequestBodyTimingGuard {
+    fn new(observer: Option<cc_lb_engine::LifecycleContext>) -> Self {
+        let started = Instant::now();
+        Self {
+            observer,
+            started,
+            first_chunk_received: None,
+            accumulated_wait: Duration::ZERO,
+            active_wait_started: None,
+            process_started: started,
+            process: Duration::ZERO,
+            chunk_count: 0,
+            published: false,
+        }
+    }
+
+    fn begin_wait(&mut self) {
+        debug_assert!(self.active_wait_started.is_none());
+        let started = Instant::now();
+        self.process = self
+            .process
+            .saturating_add(started.saturating_duration_since(self.process_started));
+        self.active_wait_started = Some(started);
+    }
+
+    fn end_wait(&mut self, ended: Instant) {
+        let Some(started) = self.active_wait_started.take() else {
+            debug_assert!(false, "request body wait ended without a start");
+            return;
+        };
+        self.accumulated_wait = self
+            .accumulated_wait
+            .saturating_add(ended.saturating_duration_since(started));
+        self.process_started = ended;
+    }
+
+    fn observe_data(&mut self, received: Instant) {
+        self.first_chunk_received.get_or_insert(received);
+        self.chunk_count = self.chunk_count.saturating_add(1);
+    }
+
+    fn snapshot(&self, ended: Instant) -> cc_lb_lifecycle::RequestIoTimings {
+        let (wait, process) = if let Some(started) = self.active_wait_started {
+            (
+                self.accumulated_wait
+                    .saturating_add(ended.saturating_duration_since(started)),
+                self.process,
+            )
+        } else {
+            (
+                self.accumulated_wait,
+                self.process
+                    .saturating_add(ended.saturating_duration_since(self.process_started)),
+            )
+        };
+        cc_lb_lifecycle::RequestIoTimings {
+            request_body_first_chunk_ms: self
+                .first_chunk_received
+                .map(|received| duration_ms(received.saturating_duration_since(self.started))),
+            request_body_receive_ms: self
+                .first_chunk_received
+                .map(|received| duration_ms(ended.saturating_duration_since(received))),
+            request_body_wait_ms: Some(duration_ms(wait)),
+            request_body_process_ms: Some(duration_ms(process)),
+            request_body_chunk_count: Some(self.chunk_count),
+            ..Default::default()
+        }
+    }
+
+    fn finish(mut self) {
+        let timings = self.snapshot(Instant::now());
+        self.published = true;
+        self.publish(timings);
+    }
+
+    fn publish(&self, timings: cc_lb_lifecycle::RequestIoTimings) {
+        if let Some(observer) = self.observer.as_ref() {
+            observer.set_io_timings(timings);
+        }
+    }
+}
+
+impl Drop for RequestBodyTimingGuard {
+    fn drop(&mut self) {
+        if !self.published {
+            self.publish(self.snapshot(Instant::now()));
+        }
+    }
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
 }
 
 struct PricingLimitCostEstimator {
@@ -2588,6 +2695,10 @@ async fn lifecycle_handler(
 ) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let cap = state.body_caps.for_path(parts.uri.path());
+    let observer = parts
+        .extensions
+        .get::<cc_lb_engine::LifecycleContext>()
+        .cloned();
     let body_read_started = Instant::now();
     let body_read_span = tracing::info_span!(
         "proxy.read_request_body",
@@ -2595,7 +2706,7 @@ async fn lifecycle_handler(
         "http.request.body.size" = tracing::field::Empty,
         outcome = tracing::field::Empty,
     );
-    let body_result = read_request_body(&parts.headers, body, cap)
+    let body_result = read_request_body(&parts.headers, body, cap, observer.clone())
         .instrument(body_read_span.clone())
         .await;
     let body_read_ms = body_read_started
@@ -2610,7 +2721,7 @@ async fn lifecycle_handler(
             body_read_span.record("http.request.body.size", body_bytes);
             body_read_span.record("outcome", "success");
             drop(body_read_span);
-            if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
+            if let Some(observer) = observer.as_ref() {
                 observer.set_request_body_timing(body_read_ms, Some(body_bytes));
             }
             body
@@ -2618,7 +2729,7 @@ async fn lifecycle_handler(
         Err(RequestBodyReadError::TooLarge) => {
             body_read_span.record("outcome", "too_large");
             drop(body_read_span);
-            if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
+            if let Some(observer) = observer.as_ref() {
                 observer.set_request_body_timing(body_read_ms, None);
                 observer.record_body_too_large_rejection(cap as u64);
             }
@@ -2627,7 +2738,7 @@ async fn lifecycle_handler(
         Err(RequestBodyReadError::Read(source)) => {
             body_read_span.record("outcome", "read_error");
             drop(body_read_span);
-            if let Some(observer) = parts.extensions.get::<cc_lb_engine::LifecycleContext>() {
+            if let Some(observer) = observer.as_ref() {
                 observer.set_request_body_timing(body_read_ms, None);
                 observer.record_body_read_failure();
             }
@@ -2651,17 +2762,26 @@ async fn read_request_body(
     headers: &HeaderMap,
     body: Body,
     cap: usize,
+    observer: Option<cc_lb_engine::LifecycleContext>,
 ) -> Result<Bytes, RequestBodyReadError> {
-    if content_length_exceeds_cap(headers, cap) {
+    let mut timings = RequestBodyTimingGuard::new(observer);
+    let content_length_too_large = content_length_exceeds_cap(headers, cap);
+    if content_length_too_large {
+        timings.finish();
         return Err(RequestBodyReadError::TooLarge);
     }
-    collect_limited_body(body, cap).await.map_err(|source| {
-        if source.is::<LengthLimitError>() {
-            RequestBodyReadError::TooLarge
-        } else {
-            RequestBodyReadError::Read(source)
-        }
-    })
+
+    let result = collect_limited_body(body, cap, &mut timings)
+        .await
+        .map_err(|source| {
+            if source.is::<LengthLimitError>() {
+                RequestBodyReadError::TooLarge
+            } else {
+                RequestBodyReadError::Read(source)
+            }
+        });
+    timings.finish();
+    result
 }
 
 fn content_length_exceeds_cap(headers: &HeaderMap, cap: usize) -> bool {
@@ -2672,12 +2792,24 @@ fn content_length_exceeds_cap(headers: &HeaderMap, cap: usize) -> bool {
         .is_some_and(|length| usize::try_from(length).map_or(true, |length| length > cap))
 }
 
-async fn collect_limited_body(body: Body, cap: usize) -> Result<Bytes, tower::BoxError> {
+async fn collect_limited_body(
+    body: Body,
+    cap: usize,
+    timings: &mut RequestBodyTimingGuard,
+) -> Result<Bytes, tower::BoxError> {
     let mut body = Limited::new(body, cap);
     let mut first: Option<Bytes> = None;
     let mut combined: Option<BytesMut> = None;
 
-    while let Some(frame) = body.frame().await {
+    loop {
+        timings.begin_wait();
+        let frame = body.frame().await;
+        let received = Instant::now();
+        timings.end_wait(received);
+        let Some(frame) = frame else {
+            break;
+        };
+
         let frame = frame?;
         let Ok(data) = frame.into_data() else {
             continue;
@@ -2685,6 +2817,8 @@ async fn collect_limited_body(body: Body, cap: usize) -> Result<Bytes, tower::Bo
         if data.is_empty() {
             continue;
         }
+
+        timings.observe_data(received);
         if let Some(buffer) = combined.as_mut() {
             buffer.extend_from_slice(&data);
         } else if let Some(initial) = first.take() {
@@ -2965,9 +3099,13 @@ fn dispatcher(
 mod tests {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
+    use std::io;
+    use std::sync::Arc;
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
+    use cc_lb_lifecycle::LifecycleEvent;
     use futures_util::stream;
     use http_body_util::BodyExt;
     use serde_json::Value;
@@ -3000,6 +3138,120 @@ mod tests {
         panic!("request body must not be polled")
     }
 
+    fn controlled_body() -> (
+        tokio::sync::mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        Body,
+    ) {
+        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (poll_tx, poll_rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream = stream::unfold((chunk_rx, poll_tx), |(mut chunk_rx, poll_tx)| async move {
+            let _ = poll_tx.send(());
+            chunk_rx
+                .recv()
+                .await
+                .map(|chunk| (chunk, (chunk_rx, poll_tx)))
+        });
+        (chunk_tx, poll_rx, Body::from_stream(stream))
+    }
+
+    fn assert_measured(value: Option<f64>, field: &str) -> f64 {
+        let value = value.unwrap_or_else(|| panic!("{field} should be measured"));
+        assert!(value.is_finite(), "{field} should be finite: {value}");
+        assert!(value >= 0.0, "{field} should be nonnegative: {value}");
+        value
+    }
+
+    async fn read_with_timings(
+        headers: HeaderMap,
+        body: Body,
+        cap: usize,
+    ) -> (
+        Result<Bytes, RequestBodyReadError>,
+        cc_lb_lifecycle::RequestIoTimings,
+    ) {
+        let bus = Arc::new(cc_lb_engine::InMemoryBus::new());
+        let LifecycleBusReceiver::InMemory(mut events) = bus.subscribe_lifecycle() else {
+            panic!("expected in-memory lifecycle receiver");
+        };
+        let clock: ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+        let observer = cc_lb_engine::LifecycleContext::new(
+            "measured-ingress".to_owned(),
+            bus as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        let result = read_request_body(&headers, body, cap, Some(observer.clone())).await;
+        drop(observer);
+        let LifecycleEvent::RequestTerminated { io_timings, .. } = events
+            .recv()
+            .await
+            .expect("terminal event should be emitted")
+        else {
+            panic!("expected terminal event");
+        };
+        (result, io_timings)
+    }
+
+    fn assert_ms(actual: Option<f64>, expected: f64, field: &str) {
+        let actual = actual.unwrap_or_else(|| panic!("{field} should be measured"));
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "{field}: expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn timing_snapshot_partitions_completed_elapsed_time_without_overlap() {
+        let ended = Instant::now();
+        let started = ended.checked_sub(Duration::from_millis(30)).unwrap();
+        let first_chunk_received = ended.checked_sub(Duration::from_millis(20));
+        let process_started = ended.checked_sub(Duration::from_millis(6)).unwrap();
+        let timings = RequestBodyTimingGuard {
+            observer: None,
+            started,
+            first_chunk_received,
+            accumulated_wait: Duration::from_millis(12),
+            active_wait_started: None,
+            process_started,
+            process: Duration::from_millis(12),
+            chunk_count: 2,
+            published: false,
+        }
+        .snapshot(ended);
+
+        assert_ms(timings.request_body_first_chunk_ms, 10.0, "first chunk");
+        assert_ms(timings.request_body_receive_ms, 20.0, "receive");
+        assert_ms(timings.request_body_wait_ms, 12.0, "wait");
+        assert_ms(timings.request_body_process_ms, 18.0, "process");
+        assert_eq!(timings.request_body_chunk_count, Some(2));
+    }
+
+    #[test]
+    fn timing_snapshot_counts_an_in_flight_cancelled_await_as_wait_only() {
+        let ended = Instant::now();
+        let started = ended.checked_sub(Duration::from_millis(30)).unwrap();
+        let first_chunk_received = ended.checked_sub(Duration::from_millis(20));
+        let active_wait_started = ended.checked_sub(Duration::from_millis(4));
+        let timings = RequestBodyTimingGuard {
+            observer: None,
+            started,
+            first_chunk_received,
+            accumulated_wait: Duration::from_millis(8),
+            active_wait_started,
+            process_started: active_wait_started.unwrap(),
+            process: Duration::from_millis(18),
+            chunk_count: 1,
+            published: false,
+        }
+        .snapshot(ended);
+
+        assert_ms(timings.request_body_first_chunk_ms, 10.0, "first chunk");
+        assert_ms(timings.request_body_receive_ms, 20.0, "receive");
+        assert_ms(timings.request_body_wait_ms, 12.0, "wait");
+        assert_ms(timings.request_body_process_ms, 18.0, "process");
+        assert_eq!(timings.request_body_chunk_count, Some(1));
+    }
+
     #[tokio::test]
     async fn oversized_content_length_rejects_without_polling_body() {
         // Given
@@ -3008,10 +3260,18 @@ mod tests {
         let body = Body::from_stream(stream::once(panic_when_polled()));
 
         // When
-        let result = read_request_body(&headers, body, 5).await;
+        let (result, io_timings) = read_with_timings(headers, body, 5).await;
 
         // Then
         assert!(matches!(result, Err(RequestBodyReadError::TooLarge)));
+        assert_eq!(io_timings.request_body_first_chunk_ms, None);
+        assert_eq!(io_timings.request_body_receive_ms, None);
+        assert_eq!(io_timings.request_body_wait_ms, Some(0.0));
+        assert_measured(
+            io_timings.request_body_process_ms,
+            "request_body_process_ms",
+        );
+        assert_eq!(io_timings.request_body_chunk_count, Some(0));
     }
 
     #[tokio::test]
@@ -3021,13 +3281,104 @@ mod tests {
         let input_ptr = input.as_ptr();
 
         // When
-        let output = collect_limited_body(Body::from(input.clone()), input.len())
-            .await
-            .expect("body at cap should collect");
+        let (output, io_timings) =
+            read_with_timings(HeaderMap::new(), Body::from(input.clone()), input.len()).await;
+        let output = output.expect("body at cap should collect");
 
         // Then
         assert_eq!(output, input);
         assert_eq!(output.as_ptr(), input_ptr);
+        assert_eq!(io_timings.request_body_chunk_count, Some(1));
+    }
+
+    #[tokio::test]
+    async fn delayed_first_and_subsequent_frames_preserve_bytes_and_split_waits() {
+        // Given
+        let (chunk_tx, mut poll_rx, body) = controlled_body();
+        let read = tokio::spawn(async move {
+            let (output, io_timings) = read_with_timings(HeaderMap::new(), body, 6).await;
+            (output.expect("controlled body should collect"), io_timings)
+        });
+
+        poll_rx
+            .recv()
+            .await
+            .expect("first frame await should begin");
+        assert!(!read.is_finished(), "first frame should remain pending");
+        chunk_tx
+            .send(Ok(Bytes::from_static(b"abc")))
+            .expect("send first frame");
+
+        poll_rx
+            .recv()
+            .await
+            .expect("subsequent frame await should begin");
+        assert!(
+            !read.is_finished(),
+            "subsequent frame should remain pending"
+        );
+        chunk_tx
+            .send(Ok(Bytes::from_static(b"def")))
+            .expect("send subsequent frame");
+        drop(chunk_tx);
+
+        // When
+        let (output, io_timings) = read.await.expect("body reader task should complete");
+
+        // Then
+        assert_eq!(output, Bytes::from_static(b"abcdef"));
+        assert!(
+            assert_measured(
+                io_timings.request_body_first_chunk_ms,
+                "request_body_first_chunk_ms",
+            ) > 0.0
+        );
+        assert!(
+            assert_measured(
+                io_timings.request_body_receive_ms,
+                "request_body_receive_ms",
+            ) > 0.0
+        );
+        assert!(assert_measured(io_timings.request_body_wait_ms, "request_body_wait_ms") > 0.0);
+        assert_measured(
+            io_timings.request_body_process_ms,
+            "request_body_process_ms",
+        );
+        assert_eq!(io_timings.request_body_chunk_count, Some(2));
+    }
+
+    #[tokio::test]
+    async fn empty_data_frames_do_not_start_data_markers_or_increment_count() {
+        let (chunk_tx, mut poll_rx, body) = controlled_body();
+        let read = tokio::spawn(async move { read_with_timings(HeaderMap::new(), body, 6).await });
+        poll_rx
+            .recv()
+            .await
+            .expect("first frame await should begin");
+        chunk_tx
+            .send(Ok(Bytes::new()))
+            .expect("send empty DATA frame");
+        poll_rx
+            .recv()
+            .await
+            .expect("reader should await after empty DATA");
+        assert!(!read.is_finished(), "empty DATA must not finish collection");
+        drop(chunk_tx);
+
+        // When
+        let (output, io_timings) = read.await.expect("body reader task should complete");
+        let output = output.expect("empty body should collect");
+
+        // Then
+        assert!(output.is_empty());
+        assert_eq!(io_timings.request_body_first_chunk_ms, None);
+        assert_eq!(io_timings.request_body_receive_ms, None);
+        assert_measured(io_timings.request_body_wait_ms, "request_body_wait_ms");
+        assert_measured(
+            io_timings.request_body_process_ms,
+            "request_body_process_ms",
+        );
+        assert_eq!(io_timings.request_body_chunk_count, Some(0));
     }
 
     #[tokio::test]
@@ -3039,16 +3390,16 @@ mod tests {
         ]));
 
         // When
-        let output = collect_limited_body(body, 6)
-            .await
-            .expect("body at cap should collect");
+        let (output, io_timings) = read_with_timings(HeaderMap::new(), body, 6).await;
+        let output = output.expect("body at cap should collect");
 
         // Then
         assert_eq!(output, Bytes::from_static(b"abcdef"));
+        assert_eq!(io_timings.request_body_chunk_count, Some(2));
     }
 
     #[tokio::test]
-    async fn multi_frame_body_over_cap_maps_to_too_large() {
+    async fn streamed_cap_error_preserves_completed_ingress_measurements() {
         // Given
         let headers = HeaderMap::new();
         let body = Body::from_stream(stream::iter([
@@ -3057,10 +3408,118 @@ mod tests {
         ]));
 
         // When
-        let result = read_request_body(&headers, body, 5).await;
+        let (result, io_timings) = read_with_timings(headers, body, 5).await;
 
         // Then
         assert!(matches!(result, Err(RequestBodyReadError::TooLarge)));
+        assert_measured(
+            io_timings.request_body_first_chunk_ms,
+            "request_body_first_chunk_ms",
+        );
+        assert_measured(
+            io_timings.request_body_receive_ms,
+            "request_body_receive_ms",
+        );
+        assert_measured(io_timings.request_body_wait_ms, "request_body_wait_ms");
+        assert_measured(
+            io_timings.request_body_process_ms,
+            "request_body_process_ms",
+        );
+        assert_eq!(io_timings.request_body_chunk_count, Some(1));
+    }
+
+    #[tokio::test]
+    async fn transport_error_preserves_completed_ingress_measurements() {
+        // Given
+        let body = Body::from_stream(stream::iter([
+            Ok(Bytes::from_static(b"abc")),
+            Err(io::Error::other("transport failed")),
+        ]));
+
+        // When
+        let (result, io_timings) = read_with_timings(HeaderMap::new(), body, 6).await;
+
+        // Then
+        let Err(RequestBodyReadError::Read(source)) = result else {
+            panic!("transport failure should remain a read error");
+        };
+        assert!(source.to_string().contains("transport failed"));
+        assert_measured(
+            io_timings.request_body_first_chunk_ms,
+            "request_body_first_chunk_ms",
+        );
+        assert_measured(
+            io_timings.request_body_receive_ms,
+            "request_body_receive_ms",
+        );
+        assert_measured(io_timings.request_body_wait_ms, "request_body_wait_ms");
+        assert_measured(
+            io_timings.request_body_process_ms,
+            "request_body_process_ms",
+        );
+        assert_eq!(io_timings.request_body_chunk_count, Some(1));
+    }
+
+    #[tokio::test]
+    async fn cancelled_body_read_publishes_active_wait_before_terminal_finish() {
+        // Given
+        let bus = Arc::new(cc_lb_engine::InMemoryBus::new());
+        let LifecycleBusReceiver::InMemory(mut events) = bus.subscribe_lifecycle() else {
+            panic!("expected in-memory lifecycle receiver");
+        };
+        let clock: ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+        let observer = cc_lb_engine::LifecycleContext::new(
+            "cancelled-ingress".to_owned(),
+            bus as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        let (chunk_tx, mut poll_rx, body) = controlled_body();
+        let read_observer = observer.clone();
+        let read = tokio::spawn(async move {
+            read_request_body(&HeaderMap::new(), body, 6, Some(read_observer)).await
+        });
+        poll_rx
+            .recv()
+            .await
+            .expect("first frame await should begin");
+        chunk_tx
+            .send(Ok(Bytes::from_static(b"abc")))
+            .expect("send first frame");
+        poll_rx
+            .recv()
+            .await
+            .expect("subsequent frame await should begin");
+
+        // When
+        read.abort();
+        let error = read.await.expect_err("body reader should be cancelled");
+        assert!(error.is_cancelled());
+        drop(observer);
+
+        // Then
+        let LifecycleEvent::RequestTerminated { io_timings, .. } = events
+            .recv()
+            .await
+            .expect("terminal event should be emitted")
+        else {
+            panic!("expected terminal event");
+        };
+        assert_measured(
+            io_timings.request_body_first_chunk_ms,
+            "request_body_first_chunk_ms",
+        );
+        assert!(
+            assert_measured(
+                io_timings.request_body_receive_ms,
+                "request_body_receive_ms",
+            ) > 0.0
+        );
+        assert!(assert_measured(io_timings.request_body_wait_ms, "request_body_wait_ms",) > 0.0);
+        assert_measured(
+            io_timings.request_body_process_ms,
+            "request_body_process_ms",
+        );
+        assert_eq!(io_timings.request_body_chunk_count, Some(1));
     }
 
     #[test]

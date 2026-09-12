@@ -1,10 +1,16 @@
 use crate::common;
 
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
+use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_engine::api_keys::limit_engine::LimitEngine;
@@ -13,8 +19,10 @@ use cc_lb_engine::api_keys::principal_view::{
     RouterPipelineCache,
 };
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
+    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
+    LifecycleConfig, UpstreamDispatch,
 };
+use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_routing::{
     FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
 };
@@ -27,7 +35,11 @@ use cc_lb_upstream::{
     DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
     SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
 };
-use http::StatusCode;
+use http::header::CONTENT_TYPE;
+use http::{HeaderValue, Response, StatusCode};
+use http_body::{Body as HttpBody, Frame, SizeHint};
+use http_body_util::BodyExt;
+use tokio::sync::broadcast;
 use url::Url;
 use uuid::Uuid;
 
@@ -146,6 +158,180 @@ async fn signer_build_failure_preserves_request_setup_timings()
     Ok(())
 }
 
+#[tokio::test]
+async fn eof_tail_error_yield_preserves_terminal_timings_on_drop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let incomplete_event = Bytes::from_static(
+        b"event: message_stop\n\
+          data: {\"type\":\"message_stop\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}",
+    );
+
+    let cancelled_bus = TestLifecycleBus::new();
+    let mut cancelled_rx = lifecycle_receiver(&cancelled_bus);
+    let cancelled_exhausted = Arc::new(AtomicBool::new(false));
+    let cancelled_lifecycle = lifecycle_with_terminal_and_upstream_dispatch(
+        TerminalStrategy::FirstPick,
+        Vec::new(),
+        vec![upstream_record(upstream_id(1), "first")],
+        Arc::new(Mutex::new(Vec::new())),
+        false,
+        TestState::default(),
+        Arc::new(TailFrameDispatch {
+            body: incomplete_event.clone(),
+            exhausted: Arc::clone(&cancelled_exhausted),
+        }),
+    )
+    .with_event_bus(cancelled_bus.bus_arc());
+    let cancelled_response = cancelled_lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","stream":true,"messages":[],"max_tokens":16}"#,
+        )))
+        .await?;
+    let mut cancelled_body = cancelled_response.into_body();
+    let original_frame = cancelled_body
+        .frame()
+        .await
+        .expect("original incomplete frame exists")
+        .expect("original incomplete frame succeeds")
+        .into_data()
+        .expect("original incomplete frame is data");
+    assert_eq!(original_frame, incomplete_event);
+    assert!(!cancelled_exhausted.load(Ordering::SeqCst));
+
+    let tail_frame = cancelled_body
+        .frame()
+        .await
+        .expect("EOF tail error frame exists")
+        .expect("EOF tail error frame succeeds")
+        .into_data()
+        .expect("EOF tail error frame is data");
+    assert!(
+        cancelled_exhausted.load(Ordering::SeqCst),
+        "tail error frame must be produced after the upstream body reaches EOS"
+    );
+    assert_tail_error_frame(&tail_frame);
+    drop(cancelled_body);
+
+    let (cancelled_terminal, stream_completed_before_cancel) =
+        wait_for_terminal(&mut cancelled_rx).await;
+    assert!(
+        !stream_completed_before_cancel,
+        "dropping at the EOF tail yield must not emit StreamCompleted"
+    );
+    let LifecycleEvent::RequestTerminated {
+        reason,
+        client_status,
+        upstream_body_ms,
+        finalize_ms,
+        io_timings,
+        ..
+    } = cancelled_terminal
+    else {
+        unreachable!("wait_for_terminal returns RequestTerminated")
+    };
+    assert_eq!(client_status, StatusCode::OK.as_u16());
+    assert_eq!(
+        reason,
+        TerminationReason::ErrorCode("upstream_stream_error".to_owned())
+    );
+    assert!(upstream_body_ms.is_some());
+    assert!(finalize_ms.is_some());
+    assert!(io_timings.response_body_process_ms.is_some());
+
+    let completed_bus = TestLifecycleBus::new();
+    let mut completed_rx = lifecycle_receiver(&completed_bus);
+    let completed_exhausted = Arc::new(AtomicBool::new(false));
+    let completed_lifecycle = lifecycle_with_terminal_and_upstream_dispatch(
+        TerminalStrategy::FirstPick,
+        Vec::new(),
+        vec![upstream_record(upstream_id(2), "second")],
+        Arc::new(Mutex::new(Vec::new())),
+        false,
+        TestState::default(),
+        Arc::new(TailFrameDispatch {
+            body: incomplete_event.clone(),
+            exhausted: Arc::clone(&completed_exhausted),
+        }),
+    )
+    .with_event_bus(completed_bus.bus_arc());
+    let completed_response = completed_lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","stream":true,"messages":[],"max_tokens":16}"#,
+        )))
+        .await?;
+    let completed_body = completed_response
+        .into_body()
+        .collect()
+        .await
+        .expect("completed body collects")
+        .to_bytes();
+    assert!(completed_exhausted.load(Ordering::SeqCst));
+    assert!(completed_body.starts_with(&incomplete_event));
+    assert_tail_error_frame(&completed_body.slice(incomplete_event.len()..));
+
+    let (completed_terminal, stream_completed_before_terminal) =
+        wait_for_terminal(&mut completed_rx).await;
+    assert!(
+        stream_completed_before_terminal,
+        "full tail consumption must emit StreamCompleted before RequestTerminated"
+    );
+    let LifecycleEvent::RequestTerminated {
+        reason,
+        client_status,
+        upstream_body_ms,
+        finalize_ms,
+        ..
+    } = completed_terminal
+    else {
+        unreachable!("wait_for_terminal returns RequestTerminated")
+    };
+    assert_eq!(client_status, StatusCode::OK.as_u16());
+    assert_eq!(
+        reason,
+        TerminationReason::ErrorCode("upstream_stream_error".to_owned())
+    );
+    assert!(upstream_body_ms.is_some());
+    assert!(finalize_ms.is_some());
+    Ok(())
+}
+
+fn assert_tail_error_frame(frame: &Bytes) {
+    let text = std::str::from_utf8(frame).expect("tail error frame is UTF-8");
+    let event = text.lines().find_map(|line| line.strip_prefix("event:"));
+    assert_eq!(event.map(str::trim), Some("error"));
+    let data = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data:"))
+        .expect("tail error event has data");
+    let error: serde_json::Value = serde_json::from_str(data).expect("tail error data is JSON");
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["error"]["type"], "api_error");
+}
+
+fn lifecycle_receiver(test_bus: &TestLifecycleBus) -> broadcast::Receiver<LifecycleEvent> {
+    let LifecycleBusReceiver::InMemory(rx) = test_bus.bus.subscribe_lifecycle() else {
+        panic!("expected in-memory lifecycle receiver");
+    };
+    rx
+}
+
+async fn wait_for_terminal(rx: &mut broadcast::Receiver<LifecycleEvent>) -> (LifecycleEvent, bool) {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let mut stream_completed = false;
+        loop {
+            let event = rx.recv().await.expect("lifecycle event delivered");
+            if matches!(event, LifecycleEvent::StreamCompleted { .. }) {
+                stream_completed = true;
+            }
+            if matches!(event, LifecycleEvent::RequestTerminated { .. }) {
+                break (event, stream_completed);
+            }
+        }
+    })
+    .await
+    .expect("request terminates")
+}
+
 fn assert_request_setup_timings(event: &cc_lb_storage_api::types::RequestEvent) {
     for timing in [event.json_parse_ms, event.prepare_signer_ms] {
         assert!(timing.is_some_and(|value| value.is_finite() && value >= 0.0));
@@ -259,13 +445,33 @@ fn lifecycle_with_terminal_and_signer_failure(
     choices: Arc<Mutex<Vec<String>>>,
     signer_fails: bool,
 ) -> Lifecycle {
-    let principal_view = principal_view(terminal, filters);
     let state = TestState::default();
-    let authn = TestAuthn::with_principal_view(state.clone(), Arc::clone(&principal_view));
     let dispatcher = Arc::new(MockDispatch {
-        state,
+        state: state.clone(),
         mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
     });
+    lifecycle_with_terminal_and_upstream_dispatch(
+        terminal,
+        filters,
+        records,
+        choices,
+        signer_fails,
+        state,
+        dispatcher,
+    )
+}
+
+fn lifecycle_with_terminal_and_upstream_dispatch(
+    terminal: TerminalStrategy,
+    filters: Vec<Arc<dyn FilterPlugin>>,
+    records: Vec<UpstreamRecord>,
+    choices: Arc<Mutex<Vec<String>>>,
+    signer_fails: bool,
+    state: TestState,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+) -> Lifecycle {
+    let principal_view = principal_view(terminal, filters);
+    let authn = TestAuthn::with_principal_view(state, Arc::clone(&principal_view));
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(RecordingSignerFactory {
             choices,
@@ -284,6 +490,54 @@ fn lifecycle_with_terminal_and_signer_failure(
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
     )
+}
+
+struct TailFrameDispatch {
+    body: Bytes,
+    exhausted: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for TailFrameDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let mut response = Response::new(Body::new(TailFrameBody {
+            body: Some(self.body.clone()),
+            exhausted: Arc::clone(&self.exhausted),
+        }));
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+        Ok(response)
+    }
+}
+
+struct TailFrameBody {
+    body: Option<Bytes>,
+    exhausted: Arc<AtomicBool>,
+}
+
+impl HttpBody for TailFrameBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if let Some(body) = self.body.take() {
+            return Poll::Ready(Some(Ok(Frame::data(body))));
+        }
+        self.exhausted.store(true, Ordering::SeqCst);
+        Poll::Ready(None)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        false
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::default()
+    }
 }
 
 fn principal_view(

@@ -50,6 +50,9 @@ async fn events_stream_orders_parse_auth_route_enrichment_before_one_final() {
     assert_eq!(parse["model"], MODEL);
     assert!(parse["principal_id"].is_null());
     assert!(parse["upstream_id"].is_null());
+    assert!(parse["request_body_first_chunk_ms"].is_null());
+    assert!(parse["request_body_wait_ms"].is_null());
+    assert!(parse["request_body_chunk_count"].is_null());
 
     let auth = &updates[1]["payload"];
     assert_eq!(auth["event_id"], EVENT_ID);
@@ -67,11 +70,29 @@ async fn events_stream_orders_parse_auth_route_enrichment_before_one_final() {
 
     let terminated = &updates[3]["payload"];
     assert_eq!(terminated["event_id"], EVENT_ID);
+    assert_eq!(terminated["request_body_first_chunk_ms"], 0.125);
+    assert!(terminated["request_body_receive_ms"].is_null());
+    assert_eq!(terminated["request_body_wait_ms"], 0.0);
+    assert_eq!(terminated["request_body_process_ms"], 0.25);
+    assert_eq!(terminated["request_body_chunk_count"], 0);
+    assert_eq!(terminated["response_body_wait_ms"], 0.5);
+    assert_eq!(terminated["response_body_process_ms"], 0.0);
+    assert_eq!(terminated["response_body_downstream_poll_gap_ms"], 0.75);
+    assert_eq!(terminated["retry_overhead_ms"], 1.25);
 
     let final_event = &updates[4]["payload"]["event"];
     assert_eq!(final_event["event_id"], EVENT_ID);
     assert_eq!(final_event["thread_id"], THREAD_ID);
     assert_eq!(final_event["status"], 200);
+    assert_eq!(final_event["request_body_first_chunk_ms"], 0.125);
+    assert!(final_event["request_body_receive_ms"].is_null());
+    assert_eq!(final_event["request_body_wait_ms"], 0.0);
+    assert_eq!(final_event["request_body_process_ms"], 0.25);
+    assert_eq!(final_event["request_body_chunk_count"], 0);
+    assert_eq!(final_event["response_body_wait_ms"], 0.5);
+    assert_eq!(final_event["response_body_process_ms"], 0.0);
+    assert_eq!(final_event["response_body_downstream_poll_gap_ms"], 0.75);
+    assert_eq!(final_event["retry_overhead_ms"], 1.25);
     let rows = storage
         .query_request_events(0, u64::MAX, 10)
         .await

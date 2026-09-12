@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { RequestEvent } from '../../../lib/api';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import {
+  computeLatencyAttribution,
   computeStageGroups,
   deriveOtherSetup,
   deriveProxyTimelineDuration,
@@ -421,5 +422,115 @@ describe('computeStageGroups', () => {
     expect(explicitNull.internalPost).toBe(10);
     expect(measuredZero.internalPost).toBe(0);
     expect(measuredZero.accounted).toBe(0);
+  });
+});
+
+describe('computeLatencyAttribution', () => {
+  it('splits a completed request into the five responsibility totals', () => {
+    const result = computeLatencyAttribution(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 1000,
+        request_body_read_ms: 100,
+        request_body_wait_ms: 30,
+        request_body_process_ms: 20,
+        proxy_setup_ms: 200,
+        auth_ms: 50,
+        route_ms: 20,
+        limit_reserve_ms: 10,
+        json_parse_ms: 5,
+        cache_tokenizer_queue_ms: 5,
+        cache_structure_ms: 5,
+        cache_serialize_ms: 5,
+        retry_overhead_ms: 75,
+        shape_ms: 25,
+        sign_ms: 10,
+        upstream_ttfb_ms: 300,
+        bulkhead_wait_ms: 10,
+        dns_ms: 20,
+        connect_ms: 30,
+        stream_total_ms: 240,
+        response_body_wait_ms: 100,
+        response_body_process_ms: 20,
+        response_body_downstream_poll_gap_ms: 10,
+        finalize_ms: 50,
+        limit_reconcile_ms: 20,
+      }),
+    );
+
+    expect(
+      Object.fromEntries(
+        result.responsibilities.map((group) => [group.label, group.valueMs]),
+      ),
+    ).toEqual({
+      Downstream: 40,
+      'cc-lb': 335,
+      'Upstream net': 50,
+      'Upstream wait': 340,
+      Unattributed: 235,
+    });
+    expect(
+      result.responsibilities.reduce(
+        (total, group) => total + group.valueMs,
+        0,
+      ),
+    ).toBe(result.totalMs);
+  });
+
+  it('does not double-count timings whose additive parent is absent', () => {
+    const result = computeLatencyAttribution(
+      ev({
+        source_kind: 'proxy',
+        duration_ms: 120,
+        request_body_read_ms: null,
+        request_body_wait_ms: 10,
+        request_body_process_ms: 5,
+        proxy_setup_ms: undefined,
+        auth_ms: 5,
+        route_ms: 2,
+        limit_reserve_ms: 1,
+        json_parse_ms: 48,
+      }),
+    );
+
+    expect(result.downstreamMs).toBe(10);
+    expect(result.ccLbMs).toBe(61);
+    expect(result.unattributedMs).toBe(49);
+    expect(
+      result.downstreamMs +
+        result.ccLbMs +
+        result.upstreamNetMs +
+        result.upstreamWaitMs +
+        result.unattributedMs,
+    ).toBe(result.totalMs);
+  });
+
+  it('suppresses in-flight residuals and keeps final renewal as one cycle', () => {
+    const partial = computeLatencyAttribution({
+      event_id: 'evt-partial-attribution',
+      request_id: 'req-partial-attribution',
+      ts: 1,
+      ts_ms: 1000,
+      last_update_ms: 1500,
+      elapsed_ms: 500,
+      stream: false,
+      auth_ms: 25,
+      _phase: 'partial',
+    });
+    const renewal = computeLatencyAttribution(
+      ev({ source_kind: 'renewal', duration_ms: 500 }),
+    );
+
+    expect(partial.totalMs).toBe(500);
+    expect(partial.ccLbMs).toBe(25);
+    expect(partial.unattributedMs).toBe(0);
+    expect(renewal.responsibilities).toMatchObject([
+      {
+        key: 'renewal',
+        label: 'Renewal cycle',
+        valueMs: 500,
+        observed: true,
+      },
+    ]);
   });
 });

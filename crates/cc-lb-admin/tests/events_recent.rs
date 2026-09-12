@@ -92,7 +92,7 @@ async fn events_recent_filters_by_upstream_id() {
 }
 
 #[tokio::test]
-async fn events_recent_serializes_request_setup_timings_without_losing_zero_or_fraction() {
+async fn events_recent_serializes_request_timings_without_losing_zero_or_fraction() {
     let (_dir, storage) = temp_storage().await;
     let event = RequestEvent {
         ts: TEST_NOW_UNIX_SECS,
@@ -109,6 +109,15 @@ async fn events_recent_serializes_request_setup_timings_without_losing_zero_or_f
         cache_serialize_ms: Some(1.0),
         cache_tokenize_ms: Some(0.0),
         prepare_signer_ms: Some(2.0),
+        request_body_first_chunk_ms: Some(0.125),
+        request_body_receive_ms: None,
+        request_body_wait_ms: Some(0.0),
+        request_body_process_ms: Some(0.25),
+        request_body_chunk_count: Some(0),
+        response_body_wait_ms: Some(0.5),
+        response_body_process_ms: Some(0.0),
+        response_body_downstream_poll_gap_ms: Some(0.75),
+        retry_overhead_ms: Some(1.25),
         ..RequestEvent::default()
     };
     storage.append_request_event(&event).await.unwrap();
@@ -128,6 +137,15 @@ async fn events_recent_serializes_request_setup_timings_without_losing_zero_or_f
     assert_eq!(row["cache_serialize_ms"], 1.0);
     assert_eq!(row["cache_tokenize_ms"], 0.0);
     assert_eq!(row["prepare_signer_ms"], 2.0);
+    assert_eq!(row["request_body_first_chunk_ms"], 0.125);
+    assert!(row["request_body_receive_ms"].is_null());
+    assert_eq!(row["request_body_wait_ms"], 0.0);
+    assert_eq!(row["request_body_process_ms"], 0.25);
+    assert_eq!(row["request_body_chunk_count"], 0);
+    assert_eq!(row["response_body_wait_ms"], 0.5);
+    assert_eq!(row["response_body_process_ms"], 0.0);
+    assert_eq!(row["response_body_downstream_poll_gap_ms"], 0.75);
+    assert_eq!(row["retry_overhead_ms"], 1.25);
 
     let (status, _, detail, _) = authed_json(
         admin,
@@ -145,6 +163,15 @@ async fn events_recent_serializes_request_setup_timings_without_losing_zero_or_f
     assert_eq!(detail["cache_serialize_ms"], 1.0);
     assert_eq!(detail["cache_tokenize_ms"], 0.0);
     assert_eq!(detail["prepare_signer_ms"], 2.0);
+    assert_eq!(detail["request_body_first_chunk_ms"], 0.125);
+    assert!(detail["request_body_receive_ms"].is_null());
+    assert_eq!(detail["request_body_wait_ms"], 0.0);
+    assert_eq!(detail["request_body_process_ms"], 0.25);
+    assert_eq!(detail["request_body_chunk_count"], 0);
+    assert_eq!(detail["response_body_wait_ms"], 0.5);
+    assert_eq!(detail["response_body_process_ms"], 0.0);
+    assert_eq!(detail["response_body_downstream_poll_gap_ms"], 0.75);
+    assert_eq!(detail["retry_overhead_ms"], 1.25);
 }
 
 #[tokio::test]
@@ -398,6 +425,15 @@ fn request_event(
         input_tokens: Some(index),
         output_tokens: Some(0),
         duration_ms: 10,
+        request_body_first_chunk_ms: None,
+        request_body_receive_ms: None,
+        request_body_wait_ms: None,
+        request_body_process_ms: None,
+        request_body_chunk_count: None,
+        response_body_wait_ms: None,
+        response_body_process_ms: None,
+        response_body_downstream_poll_gap_ms: None,
+        retry_overhead_ms: None,
         ..Default::default()
     }
 }
@@ -420,6 +456,15 @@ fn request_event_with_cursor(
         input_tokens: Some(1),
         output_tokens: Some(0),
         duration_ms: 10,
+        request_body_first_chunk_ms: None,
+        request_body_receive_ms: None,
+        request_body_wait_ms: None,
+        request_body_process_ms: None,
+        request_body_chunk_count: None,
+        response_body_wait_ms: None,
+        response_body_process_ms: None,
+        response_body_downstream_poll_gap_ms: None,
+        retry_overhead_ms: None,
         ..Default::default()
     }
 }

@@ -155,6 +155,16 @@ pub struct RequestEvent {
     pub observability_post_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_read_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_first_chunk_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_receive_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_wait_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_process_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_chunk_count: Option<u64>,
     /// Actual ingress request bytes collected before parsing. This is distinct
     /// from the response [`Self::body_bytes`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,6 +180,14 @@ pub struct RequestEvent {
     pub upstream_ttfb_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_body_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_wait_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_process_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_downstream_poll_gap_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_overhead_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalize_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,7 +268,16 @@ mod tests {
         let event = RequestEvent {
             request_body_read_ms: Some(0),
             request_body_bytes: Some(854_336),
+            request_body_first_chunk_ms: Some(0.0),
+            request_body_receive_ms: Some(8.5),
+            request_body_wait_ms: Some(7.25),
+            request_body_process_ms: Some(1.25),
+            request_body_chunk_count: Some(0),
             finalize_ms: Some(7),
+            response_body_wait_ms: Some(12.5),
+            response_body_process_ms: Some(0.75),
+            response_body_downstream_poll_gap_ms: Some(4.0),
+            retry_overhead_ms: None,
             json_parse_ms: Some(0.125),
             cache_structure_ms: Some(0.0),
             cache_token_key_ms: Some(0.03125),
@@ -265,6 +292,11 @@ mod tests {
         let json = serde_json::to_value(&event).expect("serialize request latency fields");
         assert_eq!(json["request_body_read_ms"], 0);
         assert_eq!(json["request_body_bytes"], 854_336);
+        assert_eq!(json["request_body_first_chunk_ms"], 0.0);
+        assert_eq!(json["request_body_chunk_count"], 0);
+        assert_eq!(json["response_body_wait_ms"], 12.5);
+        assert_eq!(json["response_body_process_ms"], 0.75);
+        assert!(json.get("retry_overhead_ms").is_none());
         assert_eq!(json["finalize_ms"], 7);
         assert_eq!(json["json_parse_ms"], 0.125);
         assert_eq!(json["cache_structure_ms"], 0.0);
@@ -277,12 +309,23 @@ mod tests {
 
     #[test]
     fn legacy_request_event_defaults_request_latency_fields_to_missing() {
-        let event: RequestEvent = serde_json::from_str(r#"{"status":200,"duration_ms":1}"#)
-            .expect("deserialize legacy request event");
+        let event: RequestEvent = serde_json::from_str(
+            r#"{"status":200,"duration_ms":1,"request_body_wait_ms":null,"response_body_wait_ms":null}"#,
+        )
+        .expect("deserialize legacy request event");
 
         assert_eq!(event.request_body_read_ms, None);
         assert_eq!(event.request_body_bytes, None);
+        assert_eq!(event.request_body_first_chunk_ms, None);
+        assert_eq!(event.request_body_receive_ms, None);
+        assert_eq!(event.request_body_wait_ms, None);
+        assert_eq!(event.request_body_process_ms, None);
+        assert_eq!(event.request_body_chunk_count, None);
         assert_eq!(event.finalize_ms, None);
+        assert_eq!(event.response_body_wait_ms, None);
+        assert_eq!(event.response_body_process_ms, None);
+        assert_eq!(event.response_body_downstream_poll_gap_ms, None);
+        assert_eq!(event.retry_overhead_ms, None);
         assert_eq!(event.json_parse_ms, None);
         assert_eq!(event.cache_structure_ms, None);
         assert_eq!(event.cache_token_key_ms, None);
@@ -291,6 +334,21 @@ mod tests {
         assert_eq!(event.cache_serialize_ms, None);
         assert_eq!(event.cache_tokenize_ms, None);
         assert_eq!(event.prepare_signer_ms, None);
+
+        let json = serde_json::to_value(&event).expect("serialize missing I/O timings");
+        for field in [
+            "request_body_first_chunk_ms",
+            "request_body_receive_ms",
+            "request_body_wait_ms",
+            "request_body_process_ms",
+            "request_body_chunk_count",
+            "response_body_wait_ms",
+            "response_body_process_ms",
+            "response_body_downstream_poll_gap_ms",
+            "retry_overhead_ms",
+        ] {
+            assert!(json.get(field).is_none(), "{field} must be omitted");
+        }
     }
 
     #[test]

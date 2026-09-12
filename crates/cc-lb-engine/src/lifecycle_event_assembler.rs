@@ -5,7 +5,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cc_lb_control::RequestEventBus;
 use cc_lb_domain::{InternalError, RoutingTrace};
 use cc_lb_lifecycle::{
-    AuthInfo, EventId, LifecycleEvent, ParseInfo, RouteInfo, TerminationReason, UsageSnapshot,
+    AuthInfo, EventId, LifecycleEvent, ParseInfo, RequestIoTimings, RouteInfo, TerminationReason,
+    UsageSnapshot,
 };
 use cc_lb_observability::EngineMetricsHook;
 use cc_lb_request_log::{
@@ -143,6 +144,7 @@ struct Partial {
 
     request_body_read_ms: Option<u64>,
     request_body_bytes: Option<u64>,
+    io_timings: RequestIoTimings,
     limit_reserve_ms: Option<u64>,
     json_parse_ms: Option<f64>,
     cache_structure_ms: Option<f64>,
@@ -353,6 +355,17 @@ impl Partial {
                 .and_then(|route| route.quota_warning_multiplier),
             request_body_read_ms: self.request_body_read_ms,
             request_body_bytes: self.request_body_bytes,
+            request_body_first_chunk_ms: self.io_timings.request_body_first_chunk_ms,
+            request_body_receive_ms: self.io_timings.request_body_receive_ms,
+            request_body_wait_ms: self.io_timings.request_body_wait_ms,
+            request_body_process_ms: self.io_timings.request_body_process_ms,
+            request_body_chunk_count: self.io_timings.request_body_chunk_count,
+            response_body_wait_ms: self.io_timings.response_body_wait_ms,
+            response_body_process_ms: self.io_timings.response_body_process_ms,
+            response_body_downstream_poll_gap_ms: self
+                .io_timings
+                .response_body_downstream_poll_gap_ms,
+            retry_overhead_ms: self.io_timings.retry_overhead_ms,
             auth_ms: self.auth.as_ref().and_then(|auth| auth.auth_ms),
             route_ms,
             limit_reserve_ms: self.limit_reserve_ms,
@@ -721,6 +734,35 @@ fn apply_setup_timings(partial: &mut Partial, timings: &cc_lb_lifecycle::Request
     partial.cache_tokenize_ms = partial.cache_tokenize_ms.or(timings.cache_tokenize_ms);
     partial.prepare_signer_ms = partial.prepare_signer_ms.or(timings.prepare_signer_ms);
 }
+fn merge_io_timings(current: &mut RequestIoTimings, update: RequestIoTimings) {
+    if let Some(value) = update.request_body_first_chunk_ms {
+        current.request_body_first_chunk_ms = Some(value);
+    }
+    if let Some(value) = update.request_body_receive_ms {
+        current.request_body_receive_ms = Some(value);
+    }
+    if let Some(value) = update.request_body_wait_ms {
+        current.request_body_wait_ms = Some(value);
+    }
+    if let Some(value) = update.request_body_process_ms {
+        current.request_body_process_ms = Some(value);
+    }
+    if let Some(value) = update.request_body_chunk_count {
+        current.request_body_chunk_count = Some(value);
+    }
+    if let Some(value) = update.response_body_wait_ms {
+        current.response_body_wait_ms = Some(value);
+    }
+    if let Some(value) = update.response_body_process_ms {
+        current.response_body_process_ms = Some(value);
+    }
+    if let Some(value) = update.response_body_downstream_poll_gap_ms {
+        current.response_body_downstream_poll_gap_ms = Some(value);
+    }
+    if let Some(value) = update.retry_overhead_ms {
+        current.retry_overhead_ms = Some(value);
+    }
+}
 
 async fn handle_event(
     storage: &dyn RequestEventStore,
@@ -747,6 +789,7 @@ async fn handle_event(
         setup_timings,
         upstream_body_ms,
         first_body_chunk_ms,
+        io_timings,
         internal_errors,
         ..
     } = &event
@@ -770,6 +813,7 @@ async fn handle_event(
             partial.upstream_body_ms = *upstream_body_ms;
             partial.first_body_chunk_ms = *first_body_chunk_ms;
             partial.internal_errors = internal_errors.clone();
+            partial.io_timings = *io_timings;
             publish_partial(bus, &partial, PartialTrigger::RequestTerminated, now_ms);
             write_finalized_rows(
                 storage,
@@ -794,6 +838,7 @@ async fn handle_event(
         partial.proxy_setup_ms = partial.proxy_setup_ms.or(*proxy_setup_ms);
         apply_setup_timings(&mut partial, setup_timings);
         partial.upstream_body_ms = partial.upstream_body_ms.or(*upstream_body_ms);
+        merge_io_timings(&mut partial.io_timings, *io_timings);
         if partial.first_body_chunk_ms.is_none() {
             partial.first_body_chunk_ms = *first_body_chunk_ms;
         }
@@ -945,7 +990,18 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.limit_reserve_ms = limit_reserve_ms;
         }
         LifecycleEvent::LimitDecision { .. } => {}
-        LifecycleEvent::UpstreamAttempt { .. } => {}
+        LifecycleEvent::UpstreamAttempt { attempt_num, .. } => {
+            if attempt_num > 1 {
+                partial.upstream_response_status = None;
+                partial.bulkhead_wait_ms = None;
+                partial.dns_ms = None;
+                partial.connect_ms = None;
+                partial.connection_reused = None;
+                partial.shape_ms = None;
+                partial.sign_ms = None;
+                partial.upstream_ttfb_ms = None;
+            }
+        }
         LifecycleEvent::UpstreamResponseStarted {
             status,
             headers: _,
@@ -1232,6 +1288,17 @@ fn finalize_base(
         route_ms,
         request_body_read_ms: partial.request_body_read_ms,
         request_body_bytes: partial.request_body_bytes,
+        request_body_first_chunk_ms: partial.io_timings.request_body_first_chunk_ms,
+        request_body_receive_ms: partial.io_timings.request_body_receive_ms,
+        request_body_wait_ms: partial.io_timings.request_body_wait_ms,
+        request_body_process_ms: partial.io_timings.request_body_process_ms,
+        request_body_chunk_count: partial.io_timings.request_body_chunk_count,
+        response_body_wait_ms: partial.io_timings.response_body_wait_ms,
+        response_body_process_ms: partial.io_timings.response_body_process_ms,
+        response_body_downstream_poll_gap_ms: partial
+            .io_timings
+            .response_body_downstream_poll_gap_ms,
+        retry_overhead_ms: partial.io_timings.retry_overhead_ms,
         limit_reserve_ms: partial.limit_reserve_ms,
         json_parse_ms: partial.json_parse_ms,
         cache_structure_ms: partial.cache_structure_ms,
@@ -1505,6 +1572,17 @@ mod tests {
         partial.request_body_bytes = Some(917_567);
         partial.upstream_body_ms = Some(41);
         partial.finalize_ms = Some(4);
+        partial.io_timings = RequestIoTimings {
+            request_body_first_chunk_ms: Some(0.0),
+            request_body_receive_ms: Some(2.25),
+            request_body_wait_ms: Some(7.5),
+            request_body_process_ms: Some(1.125),
+            request_body_chunk_count: Some(3),
+            response_body_wait_ms: Some(40.5),
+            response_body_process_ms: Some(0.625),
+            response_body_downstream_poll_gap_ms: Some(12.75),
+            retry_overhead_ms: None,
+        };
 
         merge(
             &mut partial,
@@ -1522,6 +1600,15 @@ mod tests {
         assert_eq!(snapshot.request_body_bytes, Some(917_567));
         assert_eq!(snapshot.upstream_body_ms, Some(41));
         assert_eq!(snapshot.finalize_ms, Some(4));
+        assert_eq!(snapshot.request_body_first_chunk_ms, Some(0.0));
+        assert_eq!(snapshot.request_body_receive_ms, Some(2.25));
+        assert_eq!(snapshot.request_body_wait_ms, Some(7.5));
+        assert_eq!(snapshot.request_body_process_ms, Some(1.125));
+        assert_eq!(snapshot.request_body_chunk_count, Some(3));
+        assert_eq!(snapshot.response_body_wait_ms, Some(40.5));
+        assert_eq!(snapshot.response_body_process_ms, Some(0.625));
+        assert_eq!(snapshot.response_body_downstream_poll_gap_ms, Some(12.75));
+        assert_eq!(snapshot.retry_overhead_ms, None);
 
         let event = finalize_base(&partial, &TerminationReason::Dropped, 499, 54, false);
         assert_eq!(event.request_body_read_ms, Some(9));
@@ -1529,6 +1616,15 @@ mod tests {
         assert_eq!(event.upstream_body_ms, Some(41));
         assert_eq!(event.finalize_ms, Some(4));
         assert_eq!(event.stream_total_ms, None);
+        assert_eq!(event.request_body_first_chunk_ms, Some(0.0));
+        assert_eq!(event.request_body_receive_ms, Some(2.25));
+        assert_eq!(event.request_body_wait_ms, Some(7.5));
+        assert_eq!(event.request_body_process_ms, Some(1.125));
+        assert_eq!(event.request_body_chunk_count, Some(3));
+        assert_eq!(event.response_body_wait_ms, Some(40.5));
+        assert_eq!(event.response_body_process_ms, Some(0.625));
+        assert_eq!(event.response_body_downstream_poll_gap_ms, Some(12.75));
+        assert_eq!(event.retry_overhead_ms, None);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1564,6 +1660,7 @@ mod tests {
                 observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
+                io_timings: Default::default(),
                 upstream_body_ms: None,
             },
         )
@@ -1615,6 +1712,17 @@ mod tests {
                     cache_tokenize_ms: Some(6.0),
                     prepare_signer_ms: Some(7.0),
                 },
+                io_timings: RequestIoTimings {
+                    request_body_first_chunk_ms: Some(0.125),
+                    request_body_receive_ms: Some(2.5),
+                    request_body_wait_ms: Some(0.0),
+                    request_body_process_ms: Some(1.25),
+                    request_body_chunk_count: Some(0),
+                    response_body_wait_ms: Some(9.5),
+                    response_body_process_ms: Some(0.0),
+                    response_body_downstream_poll_gap_ms: Some(3.75),
+                    retry_overhead_ms: Some(12.5),
+                },
                 upstream_body_ms: Some(41),
                 first_body_chunk_ms: Some(0),
                 internal_errors: Vec::new(),
@@ -1640,6 +1748,7 @@ mod tests {
                 observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
+                io_timings: Default::default(),
                 upstream_body_ms: None,
                 first_body_chunk_ms: None,
                 internal_errors: Vec::new(),
@@ -1664,6 +1773,15 @@ mod tests {
         assert_eq!(row.cache_count_lookup_ms, Some(3.0));
         assert_eq!(row.cache_tokenizer_queue_ms, Some(4.0));
         assert_eq!(row.cache_serialize_ms, Some(5.0));
+        assert_eq!(row.request_body_first_chunk_ms, Some(0.125));
+        assert_eq!(row.request_body_receive_ms, Some(2.5));
+        assert_eq!(row.request_body_wait_ms, Some(0.0));
+        assert_eq!(row.request_body_process_ms, Some(1.25));
+        assert_eq!(row.request_body_chunk_count, Some(0));
+        assert_eq!(row.response_body_wait_ms, Some(9.5));
+        assert_eq!(row.response_body_process_ms, Some(0.0));
+        assert_eq!(row.response_body_downstream_poll_gap_ms, Some(3.75));
+        assert_eq!(row.retry_overhead_ms, Some(12.5));
         assert_eq!(row.cache_tokenize_ms, Some(6.0));
         assert_eq!(row.prepare_signer_ms, Some(7.0));
         assert_eq!(row.upstream_body_ms, Some(41));
@@ -1711,6 +1829,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -1772,6 +1891,7 @@ mod tests {
                     cache_tokenize_ms: Some(0.0),
                     prepare_signer_ms: Some(1.25),
                 },
+                io_timings: Default::default(),
                 upstream_body_ms: None,
                 first_body_chunk_ms: None,
                 internal_errors: Vec::new(),
@@ -1825,6 +1945,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
@@ -1879,6 +2000,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -1931,6 +2053,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
@@ -1986,6 +2109,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -2019,6 +2143,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -2066,6 +2191,7 @@ mod tests {
             observability_post_ms: Some(2),
             proxy_setup_ms: Some(3),
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: Some(4),
         })
         .await
@@ -2233,6 +2359,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -2432,6 +2559,7 @@ mod tests {
                 observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
+                io_timings: Default::default(),
                 upstream_body_ms: None,
             })
             .await
@@ -2534,6 +2662,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
         })
         .await
@@ -2764,6 +2893,17 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: RequestIoTimings {
+                request_body_first_chunk_ms: Some(0.0),
+                request_body_receive_ms: Some(6.5),
+                request_body_wait_ms: Some(5.75),
+                request_body_process_ms: Some(0.75),
+                request_body_chunk_count: Some(0),
+                response_body_wait_ms: Some(20.25),
+                response_body_process_ms: Some(1.5),
+                response_body_downstream_poll_gap_ms: Some(4.125),
+                retry_overhead_ms: None,
+            },
             upstream_body_ms: Some(12),
         })
         .await
@@ -2823,6 +2963,15 @@ mod tests {
         assert_eq!(terminated.request_body_bytes, Some(128));
         assert_eq!(terminated.finalize_ms, Some(3));
         assert_eq!(terminated.upstream_body_ms, Some(12));
+        assert_eq!(terminated.request_body_first_chunk_ms, Some(0.0));
+        assert_eq!(terminated.request_body_receive_ms, Some(6.5));
+        assert_eq!(terminated.request_body_wait_ms, Some(5.75));
+        assert_eq!(terminated.request_body_process_ms, Some(0.75));
+        assert_eq!(terminated.request_body_chunk_count, Some(0));
+        assert_eq!(terminated.response_body_wait_ms, Some(20.25));
+        assert_eq!(terminated.response_body_process_ms, Some(1.5));
+        assert_eq!(terminated.response_body_downstream_poll_gap_ms, Some(4.125));
+        assert_eq!(terminated.retry_overhead_ms, None);
 
         let finals: Vec<_> = updates
             .iter()
@@ -2838,6 +2987,42 @@ mod tests {
         assert_eq!(finals[0].event.request_body_bytes, Some(128));
         assert_eq!(finals[0].event.finalize_ms, Some(3));
         assert_eq!(finals[0].event.upstream_body_ms, Some(12));
+        assert_eq!(
+            finals[0].event.request_body_first_chunk_ms,
+            terminated.request_body_first_chunk_ms
+        );
+        assert_eq!(
+            finals[0].event.request_body_receive_ms,
+            terminated.request_body_receive_ms
+        );
+        assert_eq!(
+            finals[0].event.request_body_wait_ms,
+            terminated.request_body_wait_ms
+        );
+        assert_eq!(
+            finals[0].event.request_body_process_ms,
+            terminated.request_body_process_ms
+        );
+        assert_eq!(
+            finals[0].event.request_body_chunk_count,
+            terminated.request_body_chunk_count
+        );
+        assert_eq!(
+            finals[0].event.response_body_wait_ms,
+            terminated.response_body_wait_ms
+        );
+        assert_eq!(
+            finals[0].event.response_body_process_ms,
+            terminated.response_body_process_ms
+        );
+        assert_eq!(
+            finals[0].event.response_body_downstream_poll_gap_ms,
+            terminated.response_body_downstream_poll_gap_ms
+        );
+        assert_eq!(
+            finals[0].event.retry_overhead_ms,
+            terminated.retry_overhead_ms
+        );
         assert_eq!(finals[0].event.body_bytes, Some(456));
         assert!(matches!(updates.last(), Some(RequestEventUpdate::Final(_))));
     }
@@ -2900,6 +3085,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
@@ -3019,6 +3205,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
         });
 

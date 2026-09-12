@@ -44,6 +44,15 @@ SELECT \
     list_limit_reserve_ms AS limit_reserve_ms, \
     list_request_body_read_ms AS request_body_read_ms, \
     list_request_body_bytes AS request_body_bytes, \
+    list_request_body_first_chunk_ms AS request_body_first_chunk_ms, \
+    list_request_body_receive_ms AS request_body_receive_ms, \
+    list_request_body_wait_ms AS request_body_wait_ms, \
+    list_request_body_process_ms AS request_body_process_ms, \
+    list_request_body_chunk_count AS request_body_chunk_count, \
+    list_response_body_wait_ms AS response_body_wait_ms, \
+    list_response_body_process_ms AS response_body_process_ms, \
+    list_response_body_downstream_poll_gap_ms AS response_body_downstream_poll_gap_ms, \
+    list_retry_overhead_ms AS retry_overhead_ms, \
     list_json_parse_ms AS json_parse_ms, \
     list_cache_structure_ms AS cache_structure_ms, \
     list_cache_token_key_ms AS cache_token_key_ms, \
@@ -137,6 +146,15 @@ pub(super) struct ListRow {
     pub(super) limit_reserve_ms: Option<i64>,
     pub(super) request_body_read_ms: Option<i64>,
     pub(super) request_body_bytes: Option<i64>,
+    pub(super) request_body_first_chunk_ms: Option<f64>,
+    pub(super) request_body_receive_ms: Option<f64>,
+    pub(super) request_body_wait_ms: Option<f64>,
+    pub(super) request_body_process_ms: Option<f64>,
+    pub(super) request_body_chunk_count: Option<i64>,
+    pub(super) response_body_wait_ms: Option<f64>,
+    pub(super) response_body_process_ms: Option<f64>,
+    pub(super) response_body_downstream_poll_gap_ms: Option<f64>,
+    pub(super) retry_overhead_ms: Option<f64>,
     pub(super) json_parse_ms: Option<f64>,
     pub(super) cache_structure_ms: Option<f64>,
     pub(super) cache_token_key_ms: Option<f64>,

@@ -12,6 +12,15 @@ struct ListPayload {
     duration_ms: Option<i64>,
     request_body_read_ms: Option<i64>,
     request_body_bytes: Option<i64>,
+    request_body_first_chunk_ms: Option<f64>,
+    request_body_receive_ms: Option<f64>,
+    request_body_wait_ms: Option<f64>,
+    request_body_process_ms: Option<f64>,
+    request_body_chunk_count: Option<i64>,
+    response_body_wait_ms: Option<f64>,
+    response_body_process_ms: Option<f64>,
+    response_body_downstream_poll_gap_ms: Option<f64>,
+    retry_overhead_ms: Option<f64>,
     auth_ms: Option<i64>,
     route_ms: Option<i64>,
     limit_reserve_ms: Option<i64>,
@@ -112,6 +121,18 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .request_body_bytes
             .map(|value| i64_to_u64(value, "request event list request_body_bytes"))
             .transpose()?,
+        request_body_first_chunk_ms: payload.request_body_first_chunk_ms,
+        request_body_receive_ms: payload.request_body_receive_ms,
+        request_body_wait_ms: payload.request_body_wait_ms,
+        request_body_process_ms: payload.request_body_process_ms,
+        request_body_chunk_count: payload
+            .request_body_chunk_count
+            .map(|value| i64_to_u64(value, "request event list request_body_chunk_count"))
+            .transpose()?,
+        response_body_wait_ms: payload.response_body_wait_ms,
+        response_body_process_ms: payload.response_body_process_ms,
+        response_body_downstream_poll_gap_ms: payload.response_body_downstream_poll_gap_ms,
+        retry_overhead_ms: payload.retry_overhead_ms,
         auth_ms: payload
             .auth_ms
             .map(|value| i64_to_u64(value, "request event list auth_ms"))

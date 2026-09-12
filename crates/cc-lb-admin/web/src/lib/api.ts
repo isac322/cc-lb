@@ -308,6 +308,13 @@ const requestSetupTimingSchema = z
   .nonnegative()
   .nullable()
   .optional();
+const requestCountTimingSchema = z
+  .number()
+  .finite()
+  .int()
+  .nonnegative()
+  .nullable()
+  .optional();
 const requestSetupTimingFields = {
   json_parse_ms: requestSetupTimingSchema,
   cache_structure_ms: requestSetupTimingSchema,
@@ -322,6 +329,17 @@ const requestLifecycleTimingFields = {
   request_body_read_ms: requestSetupTimingSchema,
   request_body_bytes: requestSetupTimingSchema,
   finalize_ms: requestSetupTimingSchema,
+};
+const requestIoTimingFields = {
+  request_body_first_chunk_ms: requestSetupTimingSchema,
+  request_body_receive_ms: requestSetupTimingSchema,
+  request_body_wait_ms: requestSetupTimingSchema,
+  request_body_process_ms: requestSetupTimingSchema,
+  request_body_chunk_count: requestCountTimingSchema,
+  response_body_wait_ms: requestSetupTimingSchema,
+  response_body_process_ms: requestSetupTimingSchema,
+  response_body_downstream_poll_gap_ms: requestSetupTimingSchema,
+  retry_overhead_ms: requestSetupTimingSchema,
 };
 
 export const RequestEventPartialSchema = z.looseObject({
@@ -379,6 +397,7 @@ export const RequestEventPartialSchema = z.looseObject({
   limit_reserve_ms: z.number().nullable().optional(),
   ...requestSetupTimingFields,
   ...requestLifecycleTimingFields,
+  ...requestIoTimingFields,
   bulkhead_wait_ms: z.number().nullable().optional(),
   dns_ms: z.number().nullable().optional(),
   connect_ms: z.number().nullable().optional(),
@@ -407,6 +426,7 @@ export const FinalRequestEventUpdateSchema = z.object({
     .looseObject({
       ...requestSetupTimingFields,
       ...requestLifecycleTimingFields,
+      ...requestIoTimingFields,
     })
     .transform((event) => event as unknown as RequestEvent),
   cursor: z.number(),
@@ -537,6 +557,15 @@ export interface RequestEvent {
   request_body_read_ms?: number | null;
   request_body_bytes?: number | null;
   finalize_ms?: number | null;
+  request_body_first_chunk_ms?: number | null;
+  request_body_receive_ms?: number | null;
+  request_body_wait_ms?: number | null;
+  request_body_process_ms?: number | null;
+  request_body_chunk_count?: number | null;
+  response_body_wait_ms?: number | null;
+  response_body_process_ms?: number | null;
+  response_body_downstream_poll_gap_ms?: number | null;
+  retry_overhead_ms?: number | null;
   proxy_setup_ms?: number;
   shape_ms?: number;
   sign_ms?: number;

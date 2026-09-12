@@ -48,6 +48,15 @@ pub async fn publish_enriched(bus: &InMemoryBus, storage: &SqliteStorage) {
         duration_ms: 12,
         event_id: Some(EVENT_ID.to_owned()),
         thread_id: Some(THREAD_ID.to_owned()),
+        request_body_first_chunk_ms: Some(0.125),
+        request_body_receive_ms: None,
+        request_body_wait_ms: Some(0.0),
+        request_body_process_ms: Some(0.25),
+        request_body_chunk_count: Some(0),
+        response_body_wait_ms: Some(0.5),
+        response_body_process_ms: Some(0.0),
+        response_body_downstream_poll_gap_ms: Some(0.75),
+        retry_overhead_ms: Some(1.25),
         ..RequestEvent::default()
     };
     storage
@@ -182,17 +191,19 @@ pub async fn read_message_updates_through_final_window(body: &mut Body) -> Vec<V
 
 fn enriched_partials() -> [RequestEventPartial; 4] {
     [
-        partial(None, None, None),
-        partial(Some("principal-admin-contract"), None, None),
+        partial(None, None, None, false),
+        partial(Some("principal-admin-contract"), None, None, false),
         partial(
             Some("principal-admin-contract"),
             Some(UPSTREAM_ID),
             Some(UPSTREAM_NAME),
+            false,
         ),
         partial(
             Some("principal-admin-contract"),
             Some(UPSTREAM_ID),
             Some(UPSTREAM_NAME),
+            true,
         ),
     ]
 }
@@ -201,6 +212,7 @@ fn partial(
     principal_id: Option<&str>,
     upstream_id: Option<Uuid>,
     upstream_name: Option<&str>,
+    include_io_timings: bool,
 ) -> RequestEventPartial {
     RequestEventPartial {
         event_id: EVENT_ID.to_owned(),
@@ -213,6 +225,15 @@ fn partial(
         upstream_name: upstream_name.map(str::to_owned),
         model: Some(MODEL.to_owned()),
         thread_id: Some(THREAD_ID.to_owned()),
+        request_body_first_chunk_ms: include_io_timings.then_some(0.125),
+        request_body_receive_ms: None,
+        request_body_wait_ms: include_io_timings.then_some(0.0),
+        request_body_process_ms: include_io_timings.then_some(0.25),
+        request_body_chunk_count: include_io_timings.then_some(0),
+        response_body_wait_ms: include_io_timings.then_some(0.5),
+        response_body_process_ms: include_io_timings.then_some(0.0),
+        response_body_downstream_poll_gap_ms: include_io_timings.then_some(0.75),
+        retry_overhead_ms: include_io_timings.then_some(1.25),
         ..RequestEventPartial::default()
     }
 }
@@ -239,6 +260,15 @@ fn request_event(fixture: RequestEventFixture) -> RequestEvent {
         upstream_error_message: fixture.upstream_error_message.map(str::to_owned),
         source_kind: fixture.source_kind.map(str::to_owned),
         event_id: Some(format!("event-{}", fixture.request_id)),
+        request_body_first_chunk_ms: None,
+        request_body_receive_ms: None,
+        request_body_wait_ms: None,
+        request_body_process_ms: None,
+        request_body_chunk_count: None,
+        response_body_wait_ms: None,
+        response_body_process_ms: None,
+        response_body_downstream_poll_gap_ms: None,
+        retry_overhead_ms: None,
         ..RequestEvent::default()
     }
 }

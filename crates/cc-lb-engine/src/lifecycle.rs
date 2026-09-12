@@ -53,6 +53,9 @@ use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as Li
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
 use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Scoped};
+use crate::body_io_timing::{
+    BodyIoPhase, BodyIoTiming, BodyIoTimingObserverGuard, TimedResponseStream, timed_body_frame,
+};
 use crate::clock::{Clock, ClockHandle, unix_millis, unix_secs};
 use crate::completion_observer::{
     CompletionObserver, StreamCompletionLog, StreamCompletionObservation, StreamLatency,
@@ -2977,6 +2980,13 @@ impl Lifecycle {
             {
                 attempt_timings.reset_attempt_stages();
                 if let Some(o) = observer.as_ref() {
+                    o.reset_attempt_timings();
+                    o.set_io_timings(cc_lb_lifecycle::RequestIoTimings {
+                        retry_overhead_ms: Some(dispatch_started.elapsed().as_secs_f64() * 1_000.0),
+                        ..Default::default()
+                    });
+                }
+                if let Some(o) = observer.as_ref() {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
                         event_id: o.event_id().to_owned(),
                         attempt_num: 2,
@@ -3271,11 +3281,15 @@ impl Lifecycle {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
         let body_collect_started = Instant::now();
+        let response_body_timing = BodyIoTiming::default();
+        let mut response_body_timing_guard =
+            BodyIoTimingObserverGuard::new(observer.clone(), response_body_timing.clone());
+        response_body_timing.transition(Some(BodyIoPhase::Process));
         let mut first_body_chunk_at: Option<Instant> = None;
         let mut body_buf: Vec<u8> = Vec::new();
         let mut body_chunk_count: u64 = 0;
         let mut body_collect_failed = false;
-        while let Some(frame) = body.frame().await {
+        while let Some(frame) = timed_body_frame(&mut body, &response_body_timing).await {
             match frame {
                 Ok(frame) => {
                     if let Ok(data) = frame.into_data() {
@@ -3292,6 +3306,8 @@ impl Lifecycle {
                 }
             }
         }
+        response_body_timing.stop();
+        response_body_timing_guard.record();
         let finalize_started = Instant::now();
         let body = if body_collect_failed {
             Bytes::new()
@@ -3959,15 +3975,19 @@ impl Lifecycle {
             tracing::Level::INFO
         )
         .then(|| tracing::dispatcher::get_default(|dispatch| dispatch.clone()));
+        let response_body_timing = BodyIoTiming::default();
         let downstream_drop_guard = DownstreamStreamDropGuard::armed(
             observer.clone(),
             stream_span.clone(),
             status,
             upstream_error_status.then_some(StreamTerminationCause::ProviderError),
             relay_start,
+            response_body_timing.clone(),
         );
         let completion_observer = Arc::clone(&self.completion_observer);
         let parse_sse_events = !upstream_error_status || upstream_is_sse;
+        let stream_body_io_timing = response_body_timing.clone();
+        let downstream_poll_timing = response_body_timing;
         let stream = async_stream::stream! {
             let mut downstream_drop_guard = downstream_drop_guard;
             let mut usage_decoder = usage_decoder;
@@ -4008,7 +4028,9 @@ impl Lifecycle {
             let mut parse_sse_events_active = parse_sse_events;
             let mut raw_before_transform_output: Vec<Bytes> = Vec::new();
             let mut deferred_terminal_chunk: Option<Bytes> = None;
-            'upstream: while let Some(frame) = body.frame().await {
+            'upstream: while let Some(frame) =
+                timed_body_frame(&mut body, &stream_body_io_timing).await
+            {
                 match frame {
                     Ok(frame) => {
                         if let Ok(data) = frame.into_data() {
@@ -4820,7 +4842,6 @@ impl Lifecycle {
                     }
                 }
             }
-            downstream_drop_guard.detach_lifecycle_observer();
             match usage_decoder.finish() {
                 Ok(tail) if !tail.is_empty() => {
                     if upstream_error_status {
@@ -5334,6 +5355,8 @@ impl Lifecycle {
                     yield Ok::<Bytes, Infallible>(frame);
                 }
             }
+            downstream_drop_guard.detach_lifecycle_observer();
+            stream_body_io_timing.stop();
             let response_body_completed_at = Instant::now();
             if stream_affinity_error.is_none()
                 && status == StatusCode::OK
@@ -5488,6 +5511,7 @@ impl Lifecycle {
                 }
                 let finalize_ms = duration_to_ms(response_body_completed_at.elapsed());
                 o.set_finalize_ms(finalize_ms);
+                o.set_io_timings(stream_body_io_timing.snapshot());
                 o.finish();
                 finalize_ms
             } else {
@@ -5543,7 +5567,10 @@ impl Lifecycle {
                 yield Ok::<Bytes, Infallible>(chunk);
             }
         };
-        Response::from_parts(parts, Body::from_stream(stream))
+        Response::from_parts(
+            parts,
+            Body::from_stream(TimedResponseStream::new(stream, downstream_poll_timing)),
+        )
     }
 }
 

@@ -37,6 +37,32 @@ pub struct RequestSetupTimings {
     pub prepare_signer_ms: Option<f64>,
 }
 
+/// Optional request/response I/O observations collected across the request
+/// lifecycle. Producers record only finite, nonnegative values. These are
+/// nested under `io_timings` on the terminal lifecycle event; persisted
+/// request-log DTOs expose the individual fields directly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RequestIoTimings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_first_chunk_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_receive_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_wait_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_process_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_chunk_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_wait_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_process_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_downstream_poll_gap_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_overhead_ms: Option<f64>,
+}
+
 /// Fixed vocabulary of events emitted during a single request's lifecycle.
 ///
 /// See the crate-level documentation for the expected sequences.
@@ -153,6 +179,8 @@ pub enum LifecycleEvent {
         proxy_setup_ms: Option<u64>,
         #[serde(default, flatten)]
         setup_timings: RequestSetupTimings,
+        #[serde(default)]
+        io_timings: RequestIoTimings,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         upstream_body_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

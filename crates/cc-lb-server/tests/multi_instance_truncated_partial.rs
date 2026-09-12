@@ -312,6 +312,15 @@ fn small_partial(name: &str) -> RequestEventPartial {
         stream: true,
         principal_id: Some("principal-a".to_owned()),
         model: Some("claude-sonnet-4-5".to_owned()),
+        request_body_first_chunk_ms: None,
+        request_body_receive_ms: None,
+        request_body_wait_ms: None,
+        request_body_process_ms: None,
+        request_body_chunk_count: None,
+        response_body_wait_ms: None,
+        response_body_process_ms: None,
+        response_body_downstream_poll_gap_ms: None,
+        retry_overhead_ms: None,
         ..RequestEventPartial::default()
     }
 }
@@ -321,6 +330,15 @@ fn large_partial(name: &str) -> RequestEventPartial {
         cache_prefix_hash: Some(format!("sha256:{}", "x".repeat(8_192))),
         upstream_name: Some(format!("upstream-{name}")),
         input_tokens: Some(100),
+        request_body_first_chunk_ms: None,
+        request_body_receive_ms: None,
+        request_body_wait_ms: None,
+        request_body_process_ms: None,
+        request_body_chunk_count: None,
+        response_body_wait_ms: None,
+        response_body_process_ms: None,
+        response_body_downstream_poll_gap_ms: None,
+        retry_overhead_ms: None,
         output_tokens: Some(25),
         ..small_partial(name)
     }

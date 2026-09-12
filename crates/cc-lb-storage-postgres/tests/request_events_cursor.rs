@@ -429,6 +429,15 @@ async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<
             auth_ms: Some(42),
             connection_reused: Some(true),
             cost_usd_micros: Some(43),
+            request_body_first_chunk_ms: Some(0.125),
+            request_body_receive_ms: None,
+            request_body_wait_ms: Some(0.0),
+            request_body_process_ms: Some(0.25),
+            request_body_chunk_count: Some(0),
+            response_body_wait_ms: Some(0.5),
+            response_body_process_ms: Some(0.0),
+            response_body_downstream_poll_gap_ms: Some(0.75),
+            retry_overhead_ms: Some(1.25),
             ..Default::default()
         })
         .await?;
@@ -471,7 +480,16 @@ async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<
             && item.duration_ms == 41
             && item.auth_ms == Some(42)
             && item.connection_reused == Some(true)
-            && item.cost_usd_micros == Some(43),
+            && item.cost_usd_micros == Some(43)
+            && item.request_body_first_chunk_ms == Some(0.125)
+            && item.request_body_receive_ms.is_none()
+            && item.request_body_wait_ms == Some(0.0)
+            && item.request_body_process_ms == Some(0.25)
+            && item.request_body_chunk_count == Some(0)
+            && item.response_body_wait_ms == Some(0.5)
+            && item.response_body_process_ms == Some(0.0)
+            && item.response_body_downstream_poll_gap_ms == Some(0.75)
+            && item.retry_overhead_ms == Some(1.25),
         "raw payload list projection changed unexpectedly: {item:?}"
     );
     let detail = storage
@@ -483,9 +501,52 @@ async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<
             && detail.duration_ms == item.duration_ms
             && detail.auth_ms == item.auth_ms
             && detail.connection_reused == item.connection_reused
-            && detail.cost_usd_micros == item.cost_usd_micros,
+            && detail.cost_usd_micros == item.cost_usd_micros
+            && detail.request_body_first_chunk_ms == item.request_body_first_chunk_ms
+            && detail.request_body_receive_ms == item.request_body_receive_ms
+            && detail.request_body_wait_ms == item.request_body_wait_ms
+            && detail.request_body_process_ms == item.request_body_process_ms
+            && detail.request_body_chunk_count == item.request_body_chunk_count
+            && detail.response_body_wait_ms == item.response_body_wait_ms
+            && detail.response_body_process_ms == item.response_body_process_ms
+            && detail.response_body_downstream_poll_gap_ms
+                == item.response_body_downstream_poll_gap_ms
+            && detail.retry_overhead_ms == item.retry_overhead_ms,
         "list/detail payload projection diverged: item={item:?} detail={detail:?}"
     );
+    payload
+        .as_object_mut()
+        .context("request event payload must be an object")?
+        .remove("request_body_chunk_count");
+    sqlx::query("UPDATE request_events_v1 SET payload = $1 WHERE event_id = $2")
+        .bind(serde_json::to_vec(&payload)?)
+        .bind(event_id)
+        .execute(storage.pool())
+        .await?;
+    let page = storage.list_request_events(&query()).await?;
+    ensure!(
+        page.len() == 1
+            && page[0].request_body_chunk_count.is_none()
+            && page[0].request_body_wait_ms == Some(0.0),
+        "missing chunk count was fabricated or zero timing was lost: {page:?}"
+    );
+    payload
+        .as_object_mut()
+        .context("request event payload must be an object")?
+        .insert("request_body_chunk_count".to_owned(), serde_json::json!(-1));
+    sqlx::query("UPDATE request_events_v1 SET payload = $1 WHERE event_id = $2")
+        .bind(serde_json::to_vec(&payload)?)
+        .bind(event_id)
+        .execute(storage.pool())
+        .await?;
+    ensure!(
+        storage.list_request_events(&query()).await.is_err(),
+        "negative request body chunk count unexpectedly decoded"
+    );
+    payload
+        .as_object_mut()
+        .context("request event payload must be an object")?
+        .remove("request_body_chunk_count");
 
     payload
         .as_object_mut()

@@ -53,7 +53,7 @@ fn request_started_source_metadata_defaults_without_legacy_json_fields() {
 }
 
 #[test]
-fn request_terminated_flattens_fractional_setup_timings_and_defaults_legacy_payloads() {
+fn request_terminated_preserves_nested_io_timings_and_defaults_legacy_payloads() {
     let event = LifecycleEvent::RequestTerminated {
         event_id: sample_event_id(),
         reason: TerminationReason::Success,
@@ -70,6 +70,17 @@ fn request_terminated_flattens_fractional_setup_timings_and_defaults_legacy_payl
             cache_tokenize_ms: Some(0.25),
             ..RequestSetupTimings::default()
         },
+        io_timings: RequestIoTimings {
+            request_body_first_chunk_ms: Some(0.0),
+            request_body_receive_ms: Some(1.25),
+            request_body_wait_ms: Some(0.5),
+            request_body_process_ms: Some(0.125),
+            request_body_chunk_count: Some(0),
+            response_body_wait_ms: Some(3.5),
+            response_body_process_ms: Some(0.375),
+            response_body_downstream_poll_gap_ms: Some(2.0),
+            retry_overhead_ms: None,
+        },
         upstream_body_ms: None,
         first_body_chunk_ms: None,
         finalize_ms: None,
@@ -80,6 +91,11 @@ fn request_terminated_flattens_fractional_setup_timings_and_defaults_legacy_payl
     assert_eq!(json["json_parse_ms"], 0.125);
     assert_eq!(json["cache_structure_ms"], 0.0);
     assert!(json.get("setup_timings").is_none());
+    assert_eq!(json["io_timings"]["request_body_first_chunk_ms"], 0.0);
+    assert_eq!(json["io_timings"]["request_body_chunk_count"], 0);
+    assert_eq!(json["io_timings"]["response_body_process_ms"], 0.375);
+    assert!(json["io_timings"].get("retry_overhead_ms").is_none());
+    assert!(json.get("request_body_first_chunk_ms").is_none());
     let restored: LifecycleEvent =
         serde_json::from_value(json).expect("deserialize terminal setup timings");
     assert_eq!(restored, event);
@@ -96,15 +112,29 @@ fn request_terminated_flattens_fractional_setup_timings_and_defaults_legacy_payl
     assert!(matches!(
         restored,
         LifecycleEvent::RequestTerminated {
-            setup_timings: RequestSetupTimings {
-                json_parse_ms: None,
-                cache_structure_ms: None,
-                cache_token_key_ms: None,
-                cache_count_lookup_ms: None,
-                cache_tokenizer_queue_ms: None,
-                cache_serialize_ms: None,
-                cache_tokenize_ms: None,
-                prepare_signer_ms: None,
+            setup_timings,
+            io_timings,
+            ..
+        } if setup_timings == RequestSetupTimings::default()
+            && io_timings == RequestIoTimings::default()
+    ));
+
+    let explicit_null = r#"{
+        "kind":"request_terminated",
+        "event_id":"01978c00-0000-7000-8000-000000000000",
+        "reason":"success",
+        "client_status":200,
+        "duration_ms":1,
+        "io_timings":{"request_body_wait_ms":null}
+    }"#;
+    let restored: LifecycleEvent =
+        serde_json::from_str(explicit_null).expect("deserialize null I/O timing");
+    assert!(matches!(
+        restored,
+        LifecycleEvent::RequestTerminated {
+            io_timings: RequestIoTimings {
+                request_body_wait_ms: None,
+                ..
             },
             ..
         }
@@ -216,6 +246,7 @@ fn kind_labels_cover_every_variant() {
             observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             finalize_ms: None,

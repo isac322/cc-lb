@@ -132,6 +132,16 @@ pub struct RequestEventPartial {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_read_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_first_chunk_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_receive_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_wait_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_process_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_chunk_count: Option<u64>,
     /// Actual ingress request bytes collected before parsing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_bytes: Option<u64>,
@@ -173,6 +183,14 @@ pub struct RequestEventPartial {
     pub upstream_ttfb_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_body_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_wait_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_process_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_downstream_poll_gap_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_overhead_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalize_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,7 +287,9 @@ mod tests {
             "ts_ms":1700000000000,
             "last_update_ms":1700000000010,
             "elapsed_ms":10,
-            "stream":false
+            "stream":false,
+            "request_body_wait_ms":null,
+            "response_body_wait_ms":null
         }"#;
         let partial: RequestEventPartial =
             serde_json::from_str(legacy_partial).expect("deserialize legacy partial");
@@ -278,8 +298,17 @@ mod tests {
         assert_eq!(partial.source_ref_id, None);
         assert_eq!(partial.request_body_read_ms, None);
         assert_eq!(partial.request_body_bytes, None);
+        assert_eq!(partial.request_body_first_chunk_ms, None);
+        assert_eq!(partial.request_body_receive_ms, None);
+        assert_eq!(partial.request_body_wait_ms, None);
+        assert_eq!(partial.request_body_process_ms, None);
+        assert_eq!(partial.request_body_chunk_count, None);
         assert_eq!(partial.upstream_body_ms, None);
         assert_eq!(partial.finalize_ms, None);
+        assert_eq!(partial.response_body_wait_ms, None);
+        assert_eq!(partial.response_body_process_ms, None);
+        assert_eq!(partial.response_body_downstream_poll_gap_ms, None);
+        assert_eq!(partial.retry_overhead_ms, None);
 
         let partial_json = serde_json::to_value(&partial).expect("serialize legacy partial");
         let partial_object = partial_json
@@ -291,6 +320,22 @@ mod tests {
         assert!(!partial_object.contains_key("request_body_bytes"));
         assert!(!partial_object.contains_key("upstream_body_ms"));
         assert!(!partial_object.contains_key("finalize_ms"));
+        for field in [
+            "request_body_first_chunk_ms",
+            "request_body_receive_ms",
+            "request_body_wait_ms",
+            "request_body_process_ms",
+            "request_body_chunk_count",
+            "response_body_wait_ms",
+            "response_body_process_ms",
+            "response_body_downstream_poll_gap_ms",
+            "retry_overhead_ms",
+        ] {
+            assert!(
+                !partial_object.contains_key(field),
+                "{field} must be omitted"
+            );
+        }
     }
 
     #[test]
@@ -299,6 +344,11 @@ mod tests {
             event_id: "event-latency-fields".to_owned(),
             request_id: "req-latency-fields".to_owned(),
             request_body_read_ms: Some(0),
+            request_body_first_chunk_ms: Some(0.0),
+            request_body_receive_ms: Some(7.5),
+            request_body_wait_ms: Some(6.75),
+            request_body_process_ms: Some(0.75),
+            request_body_chunk_count: Some(0),
             request_body_bytes: Some(917_567),
             json_parse_ms: Some(0.125),
             cache_structure_ms: Some(0.0),
@@ -309,6 +359,10 @@ mod tests {
             cache_tokenize_ms: None,
             prepare_signer_ms: Some(2.0),
             upstream_body_ms: Some(11),
+            response_body_wait_ms: Some(10.5),
+            response_body_process_ms: Some(0.625),
+            response_body_downstream_poll_gap_ms: Some(2.25),
+            retry_overhead_ms: None,
             finalize_ms: Some(3),
             ..RequestEventPartial::default()
         };
@@ -316,8 +370,13 @@ mod tests {
         let json = serde_json::to_value(&partial).expect("serialize partial latency fields");
         assert_eq!(json["request_body_read_ms"], 0);
         assert_eq!(json["request_body_bytes"], 917_567);
+        assert_eq!(json["request_body_first_chunk_ms"], 0.0);
+        assert_eq!(json["request_body_chunk_count"], 0);
         assert_eq!(json["cache_structure_ms"], 0.0);
         assert_eq!(json["upstream_body_ms"], 11);
+        assert_eq!(json["response_body_wait_ms"], 10.5);
+        assert_eq!(json["response_body_process_ms"], 0.625);
+        assert!(json.get("retry_overhead_ms").is_none());
         assert_eq!(json["finalize_ms"], 3);
         assert!(json.get("cache_tokenize_ms").is_none());
         let restored: RequestEventPartial =

@@ -80,6 +80,8 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             .await?;
         assert_event_ids(&default_page, &["event-b", "event-a"]);
         assert_list_matches_details(storage.as_ref(), &default_page).await?;
+        assert_current_io_timings(&default_page[0]);
+        assert_legacy_io_timings(&default_page[1]);
 
         let first_page = storage
             .list_request_events(&list_query(filters.clone(), Some("all"), 2, None, None))
@@ -269,6 +271,15 @@ fn request_event(
         auth_ms: Some(5),
         route_ms: Some(6),
         limit_reserve_ms: Some(7),
+        request_body_first_chunk_ms: Some(0.125),
+        request_body_receive_ms: Some(1.375),
+        request_body_wait_ms: Some(2.625),
+        request_body_process_ms: Some(0.875),
+        request_body_chunk_count: Some(3),
+        response_body_wait_ms: Some(3.125),
+        response_body_process_ms: Some(0.625),
+        response_body_downstream_poll_gap_ms: Some(4.875),
+        retry_overhead_ms: Some(5.5),
         json_parse_ms: Some(0.125),
         cache_structure_ms: Some(0.25),
         cache_token_key_ms: Some(0.375),
@@ -333,6 +344,30 @@ fn assert_event_ids(items: &[RequestEventListItem], expected: &[&str]) {
     assert_eq!(actual, expected);
 }
 
+fn assert_current_io_timings(item: &RequestEventListItem) {
+    assert_eq!(item.request_body_first_chunk_ms, Some(0.125));
+    assert_eq!(item.request_body_receive_ms, Some(1.375));
+    assert_eq!(item.request_body_wait_ms, Some(2.625));
+    assert_eq!(item.request_body_process_ms, Some(0.875));
+    assert_eq!(item.request_body_chunk_count, Some(3));
+    assert_eq!(item.response_body_wait_ms, Some(3.125));
+    assert_eq!(item.response_body_process_ms, Some(0.625));
+    assert_eq!(item.response_body_downstream_poll_gap_ms, Some(4.875));
+    assert_eq!(item.retry_overhead_ms, Some(5.5));
+}
+
+fn assert_legacy_io_timings(item: &RequestEventListItem) {
+    assert_eq!(item.request_body_first_chunk_ms, None);
+    assert_eq!(item.request_body_receive_ms, None);
+    assert_eq!(item.request_body_wait_ms, None);
+    assert_eq!(item.request_body_process_ms, None);
+    assert_eq!(item.request_body_chunk_count, None);
+    assert_eq!(item.response_body_wait_ms, None);
+    assert_eq!(item.response_body_process_ms, None);
+    assert_eq!(item.response_body_downstream_poll_gap_ms, None);
+    assert_eq!(item.retry_overhead_ms, None);
+}
+
 async fn assert_list_matches_details<S>(storage: &S, items: &[RequestEventListItem]) -> Result<()>
 where
     S: RequestEventStore + ?Sized,
@@ -383,6 +418,15 @@ fn list_projection(event: &RequestEvent) -> RequestEventListItem {
         duration_ms: event.duration_ms,
         request_body_read_ms: event.request_body_read_ms,
         request_body_bytes: event.request_body_bytes,
+        request_body_first_chunk_ms: event.request_body_first_chunk_ms,
+        request_body_receive_ms: event.request_body_receive_ms,
+        request_body_wait_ms: event.request_body_wait_ms,
+        request_body_process_ms: event.request_body_process_ms,
+        request_body_chunk_count: event.request_body_chunk_count,
+        response_body_wait_ms: event.response_body_wait_ms,
+        response_body_process_ms: event.response_body_process_ms,
+        response_body_downstream_poll_gap_ms: event.response_body_downstream_poll_gap_ms,
+        retry_overhead_ms: event.retry_overhead_ms,
         auth_ms: event.auth_ms,
         route_ms: event.route_ms,
         limit_reserve_ms: event.limit_reserve_ms,
