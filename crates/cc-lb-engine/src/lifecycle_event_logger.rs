@@ -183,6 +183,18 @@ impl RequestTimingAggregator {
                     },
                 );
             }
+            LifecycleEvent::UpstreamAttempt {
+                event_id,
+                attempt_num,
+                ..
+            } if *attempt_num > 1 => {
+                let Some(active) = self.active.get_mut(event_id.as_str()) else {
+                    return;
+                };
+                active.timing.shape_ms = None;
+                active.timing.sign_ms = None;
+                active.timing.upstream_ttfb_ms = None;
+            }
             LifecycleEvent::UpstreamResponseStarted {
                 event_id,
                 shape_ms,
@@ -539,6 +551,14 @@ mod tests {
             shape_ms,
             sign_ms,
             upstream_ttfb_ms,
+        }
+    }
+
+    fn upstream_attempt(event_id: &str, attempt_num: u32) -> LifecycleEvent {
+        LifecycleEvent::UpstreamAttempt {
+            event_id: event_id.to_owned(),
+            attempt_num,
+            upstream_id: uuid::Uuid::nil(),
         }
     }
 
@@ -943,6 +963,50 @@ mod tests {
         let unaccounted = named(&samples, "cc_lb_request_unaccounted_duration_seconds");
         assert_eq!(unaccounted.len(), 1);
         assert_histogram(unaccounted[0], &[0]);
+    }
+    #[test]
+    fn retry_attempt_clears_stale_stage_metrics_before_dispatch_failure() {
+        let event_id = "retry-pre-dispatch-failure";
+        let (_, samples) = capture_metrics([
+            started(event_id, Some("proxy")),
+            upstream_started(event_id, Some(5), Some(6), Some(7)),
+            upstream_attempt(event_id, 2),
+            terminated(
+                event_id,
+                TerminationReason::ErrorCode("upstream_dispatch".to_owned()),
+                500,
+                TerminalTiming {
+                    duration_ms: 50,
+                    request_body_read_ms: Some(3),
+                    request_body_bytes: Some(1_024),
+                    proxy_setup_ms: Some(4),
+                    upstream_body_ms: None,
+                    finalize_ms: None,
+                    io_timings: RequestIoTimings {
+                        retry_overhead_ms: Some(8.625),
+                        ..RequestIoTimings::default()
+                    },
+                },
+            ),
+        ]);
+
+        let stage_samples = named(&samples, "cc_lb_request_stage_duration_seconds");
+        for stage in ["shape", "sign", "upstream_ttfb"] {
+            assert!(
+                stage_samples
+                    .iter()
+                    .all(|sample| sample.labels.get("stage").map(String::as_str) != Some(stage)),
+                "{stage} from the prior attempt must not be emitted"
+            );
+        }
+        let retry = stage_samples
+            .iter()
+            .filter(|sample| {
+                sample.labels.get("stage").map(String::as_str) == Some("retry_overhead_mixed")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].value, MetricValue::Histogram(vec![0.008_625]));
     }
 
     #[test]
