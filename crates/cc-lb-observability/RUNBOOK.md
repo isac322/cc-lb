@@ -244,14 +244,15 @@ histogram_quantile(
 
 Do not sum all `stage` series or add their quantiles. Markers and child stages overlap parent intervals, and Prometheus histogram buckets do not preserve per-request correlation. For parent accounting, use the non-overlapping parent stages plus `retry_overhead_mixed` once. For diagnosis, query one child or marker at a time and compare distributions rather than constructing a synthetic critical path.
 
-The per-request Logs UI applies a separate four-category attribution:
+The per-request Logs UI applies a separate five-group responsibility attribution:
 
-- **Downstream network**: observed request-frame waits and streamed downstream poll gaps, with client/transit/backpressure/scheduler caveats.
-- **cc-lb processing**: measured setup, shaping, signing, bulkhead waiting, local body work, and finalization.
-- **Upstream network**: observed DNS plus combined TCP/TLS connect only.
-- **Upstream processing**: not independently measured.
+- **Downstream**: observed request-frame waits and streamed downstream poll gaps, with client/transit/backpressure/scheduler caveats.
+- **cc-lb**: measured setup, shaping, signing, bulkhead waiting, local body work, and finalization.
+- **Upstream net**: observed DNS plus combined TCP/TLS connect only.
+- **Upstream wait**: the response-header residual plus response-frame waits. These combine provider generation, upstream transit, and runtime scheduling.
+- **Unattributed**: retry aggregates and residual time without a finer ownership witness.
 
-The UI shows header and response-frame waits as `Combined upstream wait`, keeps retry overhead separate, and leaves legacy or unsplit remainder unattributed. A missing value means not measured; a present zero means measured zero.
+The compact Logs popover and Request Detail Sheet share these totals. The Sheet keeps its chronological timeline and SSE markers separate because responsibility attribution is not a wall-clock sequence. A missing value means not measured; a present zero means measured zero.
 
 ## Troubleshooting
 
