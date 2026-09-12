@@ -269,10 +269,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
-          components: clippy
+      # Keep rustup network activity in this workflow step instead of the
+      # nested toolchain action, which is unreliable under the ARC hook.
+      - name: Install pinned Rust toolchain and clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+              https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          rustup default 1.98.1
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"
