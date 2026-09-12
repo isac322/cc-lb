@@ -161,6 +161,15 @@ fn request_event(event_id: &str, reasoning_effort: Option<String>) -> RequestEve
         reasoning_effort,
         status: 200,
         duration_ms: 89,
+        request_body_first_chunk_ms: None,
+        request_body_receive_ms: None,
+        request_body_wait_ms: None,
+        request_body_process_ms: None,
+        request_body_chunk_count: None,
+        response_body_wait_ms: None,
+        response_body_process_ms: None,
+        response_body_downstream_poll_gap_ms: None,
+        retry_overhead_ms: None,
         ..Default::default()
     }
 }

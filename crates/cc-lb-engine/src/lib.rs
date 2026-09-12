@@ -15,6 +15,8 @@ pub mod api_keys {
     pub use cc_lb_control::api_keys::*;
 }
 #[cfg(not(loom))]
+mod body_io_timing;
+#[cfg(not(loom))]
 pub mod builtin_filters;
 #[cfg(not(loom))]
 mod bulkhead;

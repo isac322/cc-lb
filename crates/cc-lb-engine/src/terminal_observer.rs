@@ -32,7 +32,7 @@ use std::time::Instant;
 
 use cc_lb_control::RequestEventBus;
 use cc_lb_domain::InternalError;
-use cc_lb_lifecycle::{LifecycleEvent, RequestSetupTimings, TerminationReason};
+use cc_lb_lifecycle::{LifecycleEvent, RequestIoTimings, RequestSetupTimings, TerminationReason};
 use cc_lb_observability::{RedactionPolicy, truncate_reason};
 use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
@@ -257,6 +257,7 @@ struct TerminalState {
     observability_post_ms: Option<u64>,
     proxy_setup_ms: Option<u64>,
     setup_timings: RequestSetupTimings,
+    io_timings: RequestIoTimings,
     shape_ms: Option<u64>,
     sign_ms: Option<u64>,
     upstream_ttfb_ms: Option<u64>,
@@ -320,6 +321,13 @@ impl LifecycleContext {
         }
     }
 
+    pub(crate) fn reset_attempt_timings(&self) {
+        let mut state = self.lock_state();
+        state.shape_ms = None;
+        state.sign_ms = None;
+        state.upstream_ttfb_ms = None;
+    }
+
     pub(crate) fn set_termination_timings(
         &self,
         limit_reconcile_ms: Option<u64>,
@@ -358,6 +366,15 @@ impl LifecycleContext {
         if let Some(value) = request_body_bytes {
             state.request_body_bytes = Some(value);
         }
+    }
+    /// Merge a completed request/response I/O timing snapshot.
+    ///
+    /// Missing fields never erase observations recorded by another lifecycle
+    /// owner, so ingress, response, and cancellation paths may publish
+    /// independent snapshots before finalization.
+    pub fn set_io_timings(&self, timings: RequestIoTimings) {
+        let mut state = self.lock_state();
+        merge_io_timings(&mut state.io_timings, timings);
     }
 
     pub(crate) fn set_finalize_ms(&self, finalize_ms: u64) {
@@ -475,6 +492,57 @@ impl LifecycleContext {
             .expect("terminal observer state mutex poisoned")
     }
 }
+fn merge_io_timings(current: &mut RequestIoTimings, update: RequestIoTimings) {
+    if let Some(value) = update.request_body_first_chunk_ms {
+        current.request_body_first_chunk_ms = Some(value);
+    }
+    if let Some(value) = update.request_body_receive_ms {
+        current.request_body_receive_ms = Some(value);
+    }
+    if let Some(value) = update.request_body_wait_ms {
+        current.request_body_wait_ms = Some(value);
+    }
+    if let Some(value) = update.request_body_process_ms {
+        current.request_body_process_ms = Some(value);
+    }
+    if let Some(value) = update.request_body_chunk_count {
+        current.request_body_chunk_count = Some(value);
+    }
+    if let Some(value) = update.response_body_wait_ms {
+        current.response_body_wait_ms = Some(value);
+    }
+    if let Some(value) = update.response_body_process_ms {
+        current.response_body_process_ms = Some(value);
+    }
+    if let Some(value) = update.response_body_downstream_poll_gap_ms {
+        current.response_body_downstream_poll_gap_ms = Some(value);
+    }
+    if let Some(value) = update.retry_overhead_ms {
+        current.retry_overhead_ms = Some(value);
+    }
+}
+
+fn retry_overhead_ms_for_accounting(retry_overhead_ms: Option<f64>) -> Option<u64> {
+    retry_overhead_ms
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value as u64)
+}
+
+fn terminal_accounted_ms(state: &TerminalState) -> u64 {
+    [
+        state.request_body_read_ms,
+        state.proxy_setup_ms,
+        state.shape_ms,
+        state.sign_ms,
+        state.upstream_ttfb_ms,
+        state.upstream_body_ms,
+        state.finalize_ms,
+        retry_overhead_ms_for_accounting(state.io_timings.retry_overhead_ms),
+    ]
+    .into_iter()
+    .flatten()
+    .fold(0_u64, u64::saturating_add)
+}
 
 impl Inner {
     fn emit_terminated(&self, fallback_error_code: Option<&'static str>) {
@@ -489,18 +557,9 @@ impl Inner {
             Some(code) => TerminationReason::ErrorCode(code.to_owned()),
         };
         let duration_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let accounted_ms = [
-            state.request_body_read_ms,
-            state.proxy_setup_ms,
-            state.shape_ms,
-            state.sign_ms,
-            state.upstream_ttfb_ms,
-            state.upstream_body_ms,
-            state.finalize_ms,
-        ]
-        .into_iter()
-        .flatten()
-        .fold(0_u64, u64::saturating_add);
+        // I/O child intervals and diagnostic markers overlap their parent stages.
+        // Retry overhead is a disjoint parent interval and is accounted once.
+        let accounted_ms = terminal_accounted_ms(&state);
         let unaccounted_ms = duration_ms.saturating_sub(accounted_ms);
         if let Some(span) = state.request_span.as_ref() {
             if let Some(finalize_ms) = state.finalize_ms {
@@ -520,6 +579,7 @@ impl Inner {
                 observability_post_ms: state.observability_post_ms,
                 proxy_setup_ms: state.proxy_setup_ms,
                 setup_timings: state.setup_timings,
+                io_timings: state.io_timings,
                 upstream_body_ms: state.upstream_body_ms,
                 first_body_chunk_ms: state.first_body_chunk_ms,
                 finalize_ms: state.finalize_ms,
@@ -808,6 +868,22 @@ mod tests {
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.set_io_timings(RequestIoTimings {
+            request_body_first_chunk_ms: Some(0.125),
+            request_body_receive_ms: Some(3.5),
+            request_body_wait_ms: Some(2.25),
+            request_body_process_ms: Some(0.0),
+            request_body_chunk_count: Some(0),
+            ..RequestIoTimings::default()
+        });
+        observer.set_io_timings(RequestIoTimings {
+            response_body_wait_ms: Some(8.75),
+            response_body_process_ms: Some(1.5),
+            response_body_downstream_poll_gap_ms: Some(0.0),
+            retry_overhead_ms: Some(12.625),
+            ..RequestIoTimings::default()
+        });
+        observer.set_io_timings(RequestIoTimings::default());
         observer.set_request_body_timing(7, Some(4_096));
         observer.set_request_body_timing(8, None);
         observer.set_termination_timings(Some(1), Some(2), Some(3), Some(4), Some(5));
@@ -826,6 +902,7 @@ mod tests {
             upstream_body_ms,
             first_body_chunk_ms,
             finalize_ms,
+            io_timings,
             ..
         } = event
         else {
@@ -839,6 +916,20 @@ mod tests {
         assert_eq!(upstream_body_ms, Some(4));
         assert_eq!(first_body_chunk_ms, Some(5));
         assert_eq!(finalize_ms, Some(6));
+        assert_eq!(
+            io_timings,
+            RequestIoTimings {
+                request_body_first_chunk_ms: Some(0.125),
+                request_body_receive_ms: Some(3.5),
+                request_body_wait_ms: Some(2.25),
+                request_body_process_ms: Some(0.0),
+                request_body_chunk_count: Some(0),
+                response_body_wait_ms: Some(8.75),
+                response_body_process_ms: Some(1.5),
+                response_body_downstream_poll_gap_ms: Some(0.0),
+                retry_overhead_ms: Some(12.625),
+            }
+        );
     }
     #[test]
     fn attempt_timings_preserve_present_zero_across_missing_updates() {
@@ -857,6 +948,43 @@ mod tests {
         assert_eq!(state.shape_ms, Some(0));
         assert_eq!(state.sign_ms, Some(2));
         assert_eq!(state.upstream_ttfb_ms, Some(3));
+    }
+
+    #[test]
+    fn retry_parent_is_accounted_once_without_counting_io_children() {
+        let mut state = TerminalState {
+            request_body_read_ms: Some(3),
+            proxy_setup_ms: Some(4),
+            shape_ms: Some(5),
+            sign_ms: Some(6),
+            upstream_ttfb_ms: Some(7),
+            upstream_body_ms: Some(8),
+            finalize_ms: Some(9),
+            ..TerminalState::default()
+        };
+        assert_eq!(terminal_accounted_ms(&state), 42);
+
+        state.io_timings = RequestIoTimings {
+            request_body_first_chunk_ms: Some(100.0),
+            request_body_receive_ms: Some(100.0),
+            request_body_wait_ms: Some(100.0),
+            request_body_process_ms: Some(100.0),
+            request_body_chunk_count: Some(1),
+            response_body_wait_ms: Some(100.0),
+            response_body_process_ms: Some(100.0),
+            response_body_downstream_poll_gap_ms: Some(100.0),
+            retry_overhead_ms: None,
+        };
+        assert_eq!(terminal_accounted_ms(&state), 42);
+
+        state.io_timings.retry_overhead_ms = Some(8.625);
+        assert_eq!(terminal_accounted_ms(&state), 50);
+        state.io_timings.retry_overhead_ms = Some(-1.0);
+        assert_eq!(terminal_accounted_ms(&state), 42);
+        state.io_timings.retry_overhead_ms = Some(f64::INFINITY);
+        assert_eq!(terminal_accounted_ms(&state), 42);
+        state.io_timings.retry_overhead_ms = Some(f64::MAX);
+        assert_eq!(terminal_accounted_ms(&state), u64::MAX);
     }
 
     #[tokio::test]

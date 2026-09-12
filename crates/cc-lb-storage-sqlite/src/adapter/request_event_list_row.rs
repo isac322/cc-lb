@@ -78,6 +78,18 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .request_body_bytes
             .map(|value| i64_to_u64(value, "request event list request_body_bytes"))
             .transpose()?,
+        request_body_first_chunk_ms: row.request_body_first_chunk_ms,
+        request_body_receive_ms: row.request_body_receive_ms,
+        request_body_wait_ms: row.request_body_wait_ms,
+        request_body_process_ms: row.request_body_process_ms,
+        request_body_chunk_count: row
+            .request_body_chunk_count
+            .map(|value| i64_to_u64(value, "request event list request_body_chunk_count"))
+            .transpose()?,
+        response_body_wait_ms: row.response_body_wait_ms,
+        response_body_process_ms: row.response_body_process_ms,
+        response_body_downstream_poll_gap_ms: row.response_body_downstream_poll_gap_ms,
+        retry_overhead_ms: row.retry_overhead_ms,
         json_parse_ms: row.json_parse_ms,
         cache_structure_ms: row.cache_structure_ms,
         cache_token_key_ms: row.cache_token_key_ms,

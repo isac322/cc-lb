@@ -11,11 +11,13 @@ import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Skeleton } from '../primitives';
 import {
   CACHE_SETUP_TIMING_STAGES,
+  computeLatencyAttribution,
   computeStageGroups,
   deriveOtherSetup,
-  deriveProxyTimelineDuration,
   deriveSetupOverhead,
   hasSetupTimingBreakdown,
+  type LatencyAttribution,
+  latencyResponsibilityDescription,
   responseBodyDuration,
 } from './computeStageGroups';
 
@@ -540,6 +542,121 @@ function InfoPopover({
         </BasePopover.Positioner>
       </BasePopover.Portal>
     </BasePopover.Root>
+  );
+}
+
+function ResponsibilityOverview({
+  attribution,
+  event,
+}: {
+  attribution: LatencyAttribution;
+  event: RequestEventWithPhase;
+}) {
+  const groups = attribution.isFinalRenewal
+    ? attribution.responsibilities
+    : attribution.responsibilities.filter(
+        (group) =>
+          group.key !== 'unattributed' || group.observed || group.valueMs > 0,
+      );
+  const visibleGroups =
+    event._phase === 'partial'
+      ? groups.filter((group) => group.observed || group.valueMs > 0)
+      : groups;
+  const barGroups = visibleGroups.filter((group) => group.valueMs > 0);
+  const barSum = barGroups.reduce((total, group) => total + group.valueMs, 0);
+  const barTotal = Math.max(barSum, attribution.totalMs);
+
+  return (
+    <section aria-label="Latency by responsibility" className="space-y-1.5">
+      <div className="flex items-center justify-between text-[10px]">
+        <span className="uppercase tracking-wider text-text-faint">
+          Responsibility
+        </span>
+        <span className="text-text-faint">share of total</span>
+      </div>
+      <div
+        aria-label="Responsibility distribution"
+        className="flex h-4 w-full overflow-hidden rounded-sm bg-overlay-5"
+        role="img"
+      >
+        {barGroups.map((group) => (
+          <span
+            aria-hidden
+            className={cx('h-full min-w-px', group.color)}
+            data-ms={group.valueMs}
+            data-responsibility={group.key}
+            key={group.key}
+            style={{
+              width: `${clampPct((group.valueMs / barTotal) * 100)}%`,
+            }}
+          />
+        ))}
+      </div>
+      <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+        {visibleGroups.map((group) => (
+          <InfoPopover
+            content={
+              <div className="flex min-w-[220px] flex-col gap-1">
+                <div className="text-text font-medium">{group.label}</div>
+                <div className="text-text-muted tabular-nums">
+                  {group.observed ? fmtMs(group.valueMs) : 'Not recorded'}
+                  {group.observed
+                    ? ` · ${pct(group.valueMs, attribution.totalMs)}%`
+                    : ''}
+                </div>
+                <div className="text-text-faint leading-snug">
+                  {latencyResponsibilityDescription(group.key, attribution)}
+                </div>
+              </div>
+            }
+            key={group.key}
+          >
+            <button
+              aria-label={`${group.label}${
+                group.key === 'upstream-net' && event.connection_reused === true
+                  ? ', warm pool'
+                  : ''
+              }, ${group.observed ? fmtMs(group.valueMs) : 'not recorded'}, ${
+                group.observed
+                  ? `${pct(group.valueMs, attribution.totalMs)}% of total`
+                  : 'no timing recorded'
+              }`}
+              className="flex min-w-0 items-center gap-2 rounded px-1.5 py-1 text-left text-[10px] transition hover:bg-overlay-5 focus-visible:outline-2 focus-visible:outline-accent"
+              data-ms={group.observed ? group.valueMs : undefined}
+              data-responsibility={group.key}
+              type="button"
+            >
+              <span
+                aria-hidden
+                className={cx('h-2 w-2 shrink-0 rounded-sm', group.color)}
+              />
+              <span
+                className={cx(
+                  'min-w-0 flex-1 truncate border-b border-dashed border-text-faint/50',
+                  group.textColor,
+                )}
+              >
+                {group.label}
+                {group.key === 'upstream-net' &&
+                event.connection_reused === true ? (
+                  <span className="ml-1 rounded bg-emerald-500/20 px-1 py-0.5 text-[9px] leading-none text-emerald-400">
+                    Warm pool
+                  </span>
+                ) : null}
+              </span>
+              <span className="shrink-0 tabular-nums text-text-muted">
+                {group.observed ? fmtMs(group.valueMs) : '—'}
+              </span>
+              <span className="w-8 shrink-0 text-right tabular-nums text-text-faint">
+                {group.observed
+                  ? `${pct(group.valueMs, attribution.totalMs)}%`
+                  : '—'}
+              </span>
+            </button>
+          </InfoPopover>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -1377,7 +1494,8 @@ export function LatencyTimeline({
   isPartial?: boolean;
   isLoading?: boolean;
 }) {
-  const total = deriveProxyTimelineDuration(event);
+  const attribution = useMemo(() => computeLatencyAttribution(event), [event]);
+  const total = attribution.totalMs;
   const stages = useMemo(() => buildStageDetails(event), [event]);
   const groups = computeStageGroups(event);
   const markers = useMemo(() => buildSseMarkers(event), [event]);
@@ -1460,61 +1578,75 @@ export function LatencyTimeline({
       data-testid="latency-timeline-region"
       data-accounted-ms={groups.accounted}
       data-raw-residual-ms={groups.rawResidual}
+      data-downstream-ms={attribution.downstreamMs}
+      data-cc-lb-ms={attribution.ccLbMs}
+      data-upstream-net-ms={attribution.upstreamNetMs}
+      data-upstream-wait-ms={attribution.upstreamWaitMs}
+      data-unattributed-ms={attribution.unattributedMs}
     >
-      <div className="space-y-2">
-        {groupOrder.map((g) => {
-          const items = positioned.positioned.filter((p) => p.group === g);
-          if (items.length === 0) return null;
-          const groupSum = items.reduce((a, s) => a + s.ms, 0);
-          const groupTotal =
-            g === 'internal_pre' ? groups.internalPre : groupSum;
-          const interactiveItems = items.filter(
-            (item) =>
-              item.ms > 0 && (!item.setupTiming || item.ms / total >= 0.001),
-          );
-          const anyActive = items.some((it) => active.isActive(it.key));
-          const groupItems = stages.filter((s) => s.group === g);
-          const groupLabel = getGroupLabel(g, hasFinalizeTiming);
-          return (
-            <div key={g}>
-              <div className="flex items-center justify-between text-[10px] mb-0.5">
-                <span
-                  className={cx(
-                    GROUP_META[g].text,
-                    anyActive ? 'font-medium' : '',
-                  )}
-                >
-                  {groupLabel}
-                </span>
-                <span className="text-text-muted tabular-nums">
-                  {fmtMs(groupTotal)} · {pct(groupTotal, total)}%
-                </span>
+      <ResponsibilityOverview attribution={attribution} event={event} />
+      <section aria-label="Chronological request stages" className="space-y-2">
+        <div className="flex items-center justify-between text-[10px]">
+          <span className="uppercase tracking-wider text-text-faint">
+            Request timeline
+          </span>
+          <span className="text-text-faint">chronological stages</span>
+        </div>
+        <div className="space-y-2" data-testid="latency-stage-groups">
+          {groupOrder.map((g) => {
+            const items = positioned.positioned.filter((p) => p.group === g);
+            if (items.length === 0) return null;
+            const groupSum = items.reduce((a, s) => a + s.ms, 0);
+            const groupTotal =
+              g === 'internal_pre' ? groups.internalPre : groupSum;
+            const interactiveItems = items.filter(
+              (item) =>
+                item.ms > 0 && (!item.setupTiming || item.ms / total >= 0.001),
+            );
+            const anyActive = items.some((it) => active.isActive(it.key));
+            const groupItems = stages.filter((s) => s.group === g);
+            const groupLabel = getGroupLabel(g, hasFinalizeTiming);
+            return (
+              <div key={g}>
+                <div className="flex items-center justify-between text-[10px] mb-0.5">
+                  <span
+                    className={cx(
+                      GROUP_META[g].text,
+                      anyActive ? 'font-medium' : '',
+                    )}
+                  >
+                    {groupLabel}
+                  </span>
+                  <span className="text-text-muted tabular-nums">
+                    {fmtMs(groupTotal)} · {pct(groupTotal, total)}%
+                  </span>
+                </div>
+                <div className="relative h-4 w-full rounded-sm bg-overlay-5">
+                  {interactiveItems.map((it) => (
+                    <SegmentButton
+                      key={it.key}
+                      stage={it}
+                      startMs={it.startMs}
+                      total={total}
+                      active={active}
+                      overview={groupItems}
+                      groupLabel={groupLabel}
+                    />
+                  ))}
+                </div>
               </div>
-              <div className="relative h-4 w-full rounded-sm bg-overlay-5">
-                {interactiveItems.map((it) => (
-                  <SegmentButton
-                    key={it.key}
-                    stage={it}
-                    startMs={it.startMs}
-                    total={total}
-                    active={active}
-                    overview={groupItems}
-                    groupLabel={groupLabel}
-                  />
-                ))}
-              </div>
-            </div>
-          );
-        })}
-        {unaccounted > 0 && (
-          <UnaccountedRow
-            ms={unaccounted}
-            startMs={positioned.unaccountedStartMs}
-            total={total}
-            active={active}
-          />
-        )}
-      </div>
+            );
+          })}
+          {unaccounted > 0 && (
+            <UnaccountedRow
+              ms={unaccounted}
+              startMs={positioned.unaccountedStartMs}
+              total={total}
+              active={active}
+            />
+          )}
+        </div>
+      </section>
 
       {showStreamLane && (
         <SseLane

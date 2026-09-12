@@ -79,6 +79,15 @@ mod tests {
             connection_reused: Some(false),
             limit_reconcile_ms: Some(15),
             observability_post_ms: Some(20),
+            request_body_first_chunk_ms: Some(0.0),
+            request_body_receive_ms: Some(4.5),
+            request_body_wait_ms: Some(4.0),
+            request_body_process_ms: Some(0.5),
+            request_body_chunk_count: Some(0),
+            response_body_wait_ms: Some(9.25),
+            response_body_process_ms: Some(0.75),
+            response_body_downstream_poll_gap_ms: Some(2.0),
+            retry_overhead_ms: None,
             ..RequestEvent::default()
         };
         let json = serde_json::to_string(&event).expect("serializes");
@@ -92,6 +101,15 @@ mod tests {
         assert_eq!(decoded.connection_reused, Some(false));
         assert_eq!(decoded.limit_reconcile_ms, Some(15));
         assert_eq!(decoded.observability_post_ms, Some(20));
+        assert_eq!(decoded.request_body_first_chunk_ms, Some(0.0));
+        assert_eq!(decoded.request_body_receive_ms, Some(4.5));
+        assert_eq!(decoded.request_body_wait_ms, Some(4.0));
+        assert_eq!(decoded.request_body_process_ms, Some(0.5));
+        assert_eq!(decoded.request_body_chunk_count, Some(0));
+        assert_eq!(decoded.response_body_wait_ms, Some(9.25));
+        assert_eq!(decoded.response_body_process_ms, Some(0.75));
+        assert_eq!(decoded.response_body_downstream_poll_gap_ms, Some(2.0));
+        assert_eq!(decoded.retry_overhead_ms, None);
     }
 
     #[test]
@@ -108,6 +126,15 @@ mod tests {
         assert_eq!(decoded.connection_reused, None);
         assert_eq!(decoded.limit_reconcile_ms, None);
         assert_eq!(decoded.observability_post_ms, None);
+        assert_eq!(decoded.request_body_first_chunk_ms, None);
+        assert_eq!(decoded.request_body_receive_ms, None);
+        assert_eq!(decoded.request_body_wait_ms, None);
+        assert_eq!(decoded.request_body_process_ms, None);
+        assert_eq!(decoded.request_body_chunk_count, None);
+        assert_eq!(decoded.response_body_wait_ms, None);
+        assert_eq!(decoded.response_body_process_ms, None);
+        assert_eq!(decoded.response_body_downstream_poll_gap_ms, None);
+        assert_eq!(decoded.retry_overhead_ms, None);
     }
 
     #[test]

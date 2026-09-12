@@ -5,8 +5,18 @@ export interface SparkSegment {
   color: string;
 }
 
-export function Sparkline({ segments }: { segments: SparkSegment[] }) {
-  const total = segments.reduce((a, s) => a + Math.max(0, s.value), 0);
+export function Sparkline({
+  segments,
+  total: explicitTotal,
+}: {
+  segments: SparkSegment[];
+  total?: number;
+}) {
+  const segmentTotal = segments.reduce(
+    (sum, segment) => sum + Math.max(0, segment.value),
+    0,
+  );
+  const total = Math.max(segmentTotal, explicitTotal ?? 0);
   if (total <= 0) {
     return <div className="mt-1 h-1 rounded-full bg-overlay-1" />;
   }
