@@ -804,6 +804,25 @@ describe('RequestEventsTable', () => {
       expect(segments[0]?.style.backgroundColor).toBe('');
     });
 
+    it('leaves explicit unobserved total as empty track space', () => {
+      const { container } = render(
+        <Sparkline
+          segments={[
+            { value: 10, color: 'bg-sky-400' },
+            { value: 20, color: 'bg-violet-400' },
+          ]}
+          total={100}
+        />,
+      );
+
+      expect(
+        Array.from(
+          container.querySelectorAll<HTMLElement>('span'),
+          (segment) => segment.style.width,
+        ),
+      ).toEqual(['10%', '20%']);
+    });
+
     it('renders empty track when total is zero or negative', () => {
       const { container } = render(
         <Sparkline

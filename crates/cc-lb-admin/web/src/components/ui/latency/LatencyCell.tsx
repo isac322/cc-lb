@@ -463,6 +463,7 @@ export function LatencyCell({ event: e }: { event: RequestEventWithPhase }) {
           </div>
           <div role="img" aria-label={sparklineLabel}>
             <Sparkline
+              total={duration}
               segments={
                 isRenewal
                   ? [
