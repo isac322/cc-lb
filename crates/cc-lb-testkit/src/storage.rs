@@ -81,11 +81,9 @@ impl Default for PlanTierState {
 }
 
 pub struct InMemoryStorage {
-    api_key_ciphertexts: Mutex<BTreeMap<(String, String), Vec<u8>>>,
     api_key_usage_buckets:
         Mutex<HashMap<(Uuid, storage_api::ApiKeyUsageBucketKey), storage_api::ApiKeyUsage>>,
     api_key_usage_writers: Mutex<HashMap<Uuid, (u64, Option<Uuid>)>>,
-    anthropic_api_key_ciphertexts: Mutex<HashMap<String, Vec<u8>>>,
     audit_entries: Mutex<Vec<storage_api::AuditEntry>>,
     backend_kind: Mutex<storage_api::BackendKind>,
     cache_keepalive_sessions: Mutex<HashMap<String, storage_api::CacheKeepaliveSessionRecord>>,
@@ -96,7 +94,6 @@ pub struct InMemoryStorage {
     config_history: Mutex<BTreeMap<u64, storage_api::HistoryEntry>>,
     killswitch_enabled: Mutex<bool>,
     meta_values: Mutex<HashMap<String, String>>,
-    oauth_ciphertexts: Mutex<HashMap<(String, String), Vec<u8>>>,
     managed_keys: Mutex<BTreeMap<(String, String), storage_api::StoredApiKeyRecord>>,
     entity_id_cursor: AtomicU64,
     principal_state: Mutex<PrincipalState>,
@@ -418,10 +415,8 @@ impl InMemoryStorage {
 impl Default for InMemoryStorage {
     fn default() -> Self {
         Self {
-            api_key_ciphertexts: Mutex::new(BTreeMap::new()),
             api_key_usage_buckets: Mutex::new(HashMap::new()),
             api_key_usage_writers: Mutex::new(HashMap::new()),
-            anthropic_api_key_ciphertexts: Mutex::new(HashMap::new()),
             audit_entries: Mutex::new(Vec::new()),
             backend_kind: Mutex::new(storage_api::BackendKind::Sqlite),
             cache_keepalive_sessions: Mutex::new(HashMap::new()),
@@ -440,7 +435,6 @@ impl Default for InMemoryStorage {
             }),
             meta_values: Mutex::new(HashMap::new()),
             managed_keys: Mutex::new(BTreeMap::new()),
-            oauth_ciphertexts: Mutex::new(HashMap::new()),
             plugin_blobs: Mutex::new(BTreeMap::from([(
                 storage_api::BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256,
                 Vec::new(),
@@ -922,113 +916,6 @@ fn request_event_list_projection(
         cost_cache_creation_5m_micros: event.cost_cache_creation_5m_micros,
         cost_cache_creation_1h_micros: event.cost_cache_creation_1h_micros,
         cost_cache_read_micros: event.cost_cache_read_micros,
-    }
-}
-
-#[async_trait]
-impl storage_api::OAuthCredentialStore for InMemoryStorage {
-    async fn put_oauth_ciphertext(
-        &self,
-        principal_id: &str,
-        provider: &str,
-        ciphertext: &[u8],
-    ) -> storage_api::StorageResult<()> {
-        lock_or_storage_error(&self.oauth_ciphertexts)?.insert(
-            (principal_id.to_owned(), provider.to_owned()),
-            ciphertext.to_vec(),
-        );
-        Ok(())
-    }
-
-    async fn get_oauth_ciphertext(
-        &self,
-        principal_id: &str,
-        provider: &str,
-    ) -> storage_api::StorageResult<Option<Vec<u8>>> {
-        Ok(lock_or_storage_error(&self.oauth_ciphertexts)?
-            .get(&(principal_id.to_owned(), provider.to_owned()))
-            .cloned())
-    }
-
-    async fn delete_oauth(
-        &self,
-        principal_id: &str,
-        provider: &str,
-    ) -> storage_api::StorageResult<bool> {
-        Ok(lock_or_storage_error(&self.oauth_ciphertexts)?
-            .remove(&(principal_id.to_owned(), provider.to_owned()))
-            .is_some())
-    }
-
-    async fn put_anthropic_api_key_ciphertext(
-        &self,
-        storage_key: &str,
-        ciphertext: &[u8],
-    ) -> storage_api::StorageResult<()> {
-        lock_or_storage_error(&self.anthropic_api_key_ciphertexts)?
-            .insert(storage_key.to_owned(), ciphertext.to_vec());
-        Ok(())
-    }
-
-    async fn get_anthropic_api_key_ciphertext(
-        &self,
-        storage_key: &str,
-    ) -> storage_api::StorageResult<Option<Vec<u8>>> {
-        Ok(lock_or_storage_error(&self.anthropic_api_key_ciphertexts)?
-            .get(storage_key)
-            .cloned())
-    }
-}
-
-#[async_trait]
-impl storage_api::ApiKeyStore for InMemoryStorage {
-    async fn put_api_key_ciphertext(
-        &self,
-        principal_id: &str,
-        key_id: &str,
-        ciphertext: &[u8],
-    ) -> storage_api::StorageResult<()> {
-        lock_or_storage_error(&self.api_key_ciphertexts)?.insert(
-            (principal_id.to_owned(), key_id.to_owned()),
-            ciphertext.to_vec(),
-        );
-        Ok(())
-    }
-
-    async fn get_api_key_ciphertext(
-        &self,
-        principal_id: &str,
-        key_id: &str,
-    ) -> storage_api::StorageResult<Option<Vec<u8>>> {
-        Ok(lock_or_storage_error(&self.api_key_ciphertexts)?
-            .get(&(principal_id.to_owned(), key_id.to_owned()))
-            .cloned())
-    }
-
-    async fn list_api_key_ciphertexts(
-        &self,
-        principal_id: &str,
-    ) -> storage_api::StorageResult<Vec<(String, Vec<u8>)>> {
-        Ok(lock_or_storage_error(&self.api_key_ciphertexts)?
-            .iter()
-            .filter(|((stored_principal_id, _), _)| stored_principal_id == principal_id)
-            .map(|((_, key_id), ciphertext)| (key_id.clone(), ciphertext.clone()))
-            .collect())
-    }
-
-    async fn revoke_api_key(
-        &self,
-        principal_id: &str,
-        key_id: &str,
-        revoked_ciphertext: &[u8],
-    ) -> storage_api::StorageResult<bool> {
-        let mut ciphertexts = lock_or_storage_error(&self.api_key_ciphertexts)?;
-        let Some(ciphertext) = ciphertexts.get_mut(&(principal_id.to_owned(), key_id.to_owned()))
-        else {
-            return Ok(false);
-        };
-        *ciphertext = revoked_ciphertext.to_vec();
-        Ok(true)
     }
 }
 

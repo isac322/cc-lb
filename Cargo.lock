@@ -1362,7 +1362,7 @@ dependencies = [
  "axum",
  "bytes",
  "cc-lb-domain",
-
+ "cc-lb-testkit",
  "cc-lb-upstream",
  "fake-anthropic",
  "http",
@@ -1384,7 +1384,6 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-oauth-protocol",
  "cc-lb-storage-api",
- "cc-lb-testkit",
  "cc-lb-upstream",
  "dashmap",
  "http",
