@@ -838,7 +838,7 @@ async fn t3__request_setup_timings_roundtrip_through_sqlite_payload() {
 }
 
 #[tokio::test]
-async fn request_io_timing_list_fields_preserve_legacy_nulls_and_fractional_values() {
+async fn t3__request_io_timing_list_fields_preserve_legacy_nulls_and_fractional_values() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -929,7 +929,7 @@ async fn request_io_timing_list_fields_preserve_legacy_nulls_and_fractional_valu
     drop(connection);
 
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open migrated sqlite");
     storage
