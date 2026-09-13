@@ -688,9 +688,10 @@ impl storage_api::RequestEventStore for InMemoryStorage {
     ) -> storage_api::StorageResult<Vec<(u64, storage_api::RequestEvent)>> {
         Ok(lock_or_storage_error(&self.request_events)?
             .iter()
-            .filter(|(cursor, _)| *cursor > after && *cursor <= until)
+            .filter(|(cursor, event)| {
+                *cursor > after && *cursor <= until && request_event_matches_filters(event, filters)
+            })
             .take(limit.min(500))
-            .filter(|(_, event)| request_event_matches_filters(event, filters))
             .cloned()
             .collect())
     }
@@ -4396,6 +4397,44 @@ mod tests {
                 .is_empty()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn request_event_cursor_filters_before_limit() {
+        let storage = InMemoryStorage::default();
+        for (request_id, principal_id) in [
+            ("non-match", "principal-b"),
+            ("first-match", "principal-a"),
+            ("second-match", "principal-a"),
+        ] {
+            storage_api::RequestEventStore::append_request_event(
+                &storage,
+                &storage_api::RequestEvent {
+                    request_id: request_id.to_owned(),
+                    principal_id: Some(principal_id.to_owned()),
+                    ..storage_api::RequestEvent::default()
+                },
+            )
+            .await
+            .expect("append request event");
+        }
+
+        let rows = storage_api::RequestEventStore::query_request_events_between_cursors(
+            &storage,
+            0,
+            u64::MAX,
+            1,
+            &storage_api::RequestEventStreamFilters {
+                principal_id: Some("principal-a".to_owned()),
+                ..storage_api::RequestEventStreamFilters::default()
+            },
+        )
+        .await
+        .expect("query filtered request events");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, 2);
+        assert_eq!(rows[0].1.request_id, "first-match");
     }
 
     #[tokio::test]
