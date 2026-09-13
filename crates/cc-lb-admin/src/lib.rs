@@ -1,6 +1,5 @@
 pub mod auth;
 pub mod cache_keepalive_view;
-pub mod credentials;
 pub mod dashboard;
 pub mod dashboard_routes;
 pub mod events;

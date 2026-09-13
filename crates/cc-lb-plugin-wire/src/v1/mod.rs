@@ -6,8 +6,8 @@
 //! Wire types for the three hooks the wasmtime runtime ships:
 //! filter (Phase 1), shape (Phase 2), observe
 //! (Phase 2). Signer extension is intentionally not exposed across
-//! the plugin boundary — host-side built-in `AnthropicKeySigner` /
-//! `AnthropicOAuthSigner` handle credential signing in-process.
+//! the plugin boundary — host-side built-in Anthropic API-key and OAuth
+//! signers handle credential signing in-process.
 //!
 //! rkyv derives `Archive` + `Serialize` + `Deserialize` for every wire type.
 //! The host calls `rkyv::access::<ArchivedFilterRequest, rkyv::rancor::Error>`

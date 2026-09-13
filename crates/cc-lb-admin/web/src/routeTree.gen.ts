@@ -11,7 +11,6 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuditRouteImport } from './routes/audit'
-import { Route as CredentialsRouteImport } from './routes/credentials'
 import { Route as LogsRouteImport } from './routes/logs'
 import { Route as PluginsRouteImport } from './routes/plugins'
 import { Route as PrincipalsRouteImport } from './routes/principals'
@@ -27,11 +26,6 @@ const IndexRoute = IndexRouteImport.update({
 const AuditRoute = AuditRouteImport.update({
   id: '/audit',
   path: '/audit',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CredentialsRoute = CredentialsRouteImport.update({
-  id: '/credentials',
-  path: '/credentials',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LogsRoute = LogsRouteImport.update({
@@ -68,7 +62,6 @@ const UpstreamsRoute = UpstreamsRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/audit': typeof AuditRoute
-  '/credentials': typeof CredentialsRoute
   '/logs': typeof LogsRoute
   '/plugins': typeof PluginsRoute
   '/principals': typeof PrincipalsRoute
@@ -79,7 +72,6 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/audit': typeof AuditRoute
-  '/credentials': typeof CredentialsRoute
   '/logs': typeof LogsRoute
   '/plugins': typeof PluginsRoute
   '/principals': typeof PrincipalsRoute
@@ -91,7 +83,6 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/audit': typeof AuditRoute
-  '/credentials': typeof CredentialsRoute
   '/logs': typeof LogsRoute
   '/plugins': typeof PluginsRoute
   '/principals': typeof PrincipalsRoute
@@ -104,7 +95,6 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/audit'
-    | '/credentials'
     | '/logs'
     | '/plugins'
     | '/principals'
@@ -115,7 +105,6 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/audit'
-    | '/credentials'
     | '/logs'
     | '/plugins'
     | '/principals'
@@ -126,7 +115,6 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/audit'
-    | '/credentials'
     | '/logs'
     | '/plugins'
     | '/principals'
@@ -138,7 +126,6 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AuditRoute: typeof AuditRoute
-  CredentialsRoute: typeof CredentialsRoute
   LogsRoute: typeof LogsRoute
   PluginsRoute: typeof PluginsRoute
   PrincipalsRoute: typeof PrincipalsRoute
@@ -161,13 +148,6 @@ declare module '@tanstack/react-router' {
       path: '/audit'
       fullPath: '/audit'
       preLoaderRoute: typeof AuditRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/credentials': {
-      id: '/credentials'
-      path: '/credentials'
-      fullPath: '/credentials'
-      preLoaderRoute: typeof CredentialsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/logs': {
@@ -218,7 +198,6 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuditRoute: AuditRoute,
-  CredentialsRoute: CredentialsRoute,
   LogsRoute: LogsRoute,
   PluginsRoute: PluginsRoute,
   PrincipalsRoute: PrincipalsRoute,

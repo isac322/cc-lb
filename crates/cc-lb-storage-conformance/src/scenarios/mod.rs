@@ -1,4 +1,3 @@
-pub mod aead;
 pub mod anthropic_compatibility_kv_store;
 pub mod append_ordering;
 pub mod atomicity;

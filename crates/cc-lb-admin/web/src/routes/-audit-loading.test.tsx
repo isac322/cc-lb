@@ -1,4 +1,3 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   act,
   cleanup,
@@ -8,14 +7,10 @@ import {
   within,
 } from '@testing-library/react';
 import type React from 'react';
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import * as queries from '../lib/queries';
 import { Route as AuditRoute } from './audit';
-import { Route as CredentialsRoute } from './credentials';
 
-const apiMocks = vi.hoisted(() => ({
-  postJson: vi.fn(),
-}));
 const routerMocks = vi.hoisted(() => ({
   navigate: vi.fn(),
 }));
@@ -30,22 +25,12 @@ vi.mock('@tanstack/react-router', async () => {
   };
 });
 
-vi.mock('../lib/api', async () => {
-  const actual = await vi.importActual<Record<string, unknown>>('../lib/api');
-  return {
-    ...actual,
-    postJson: apiMocks.postJson,
-  };
-});
-
 vi.mock('../lib/queries', async () => {
   const actual =
     await vi.importActual<Record<string, unknown>>('../lib/queries');
   return {
     ...actual,
     useAudit: vi.fn(),
-    useCredentials: vi.fn(),
-    useOAuthStatus: vi.fn(),
     usePrincipalNameMap: vi.fn(),
     usePrincipals: vi.fn(),
     useUpstreamNameMap: vi.fn(),
@@ -53,8 +38,6 @@ vi.mock('../lib/queries', async () => {
 });
 
 const AuditComponent = AuditRoute.options.component as React.ComponentType;
-const CredentialsComponent = CredentialsRoute.options
-  .component as React.ComponentType;
 
 function renderAudit(
   search: { principal_id?: string; since?: number; until?: number } = {},
@@ -63,24 +46,12 @@ function renderAudit(
   return render(<AuditComponent />);
 }
 
-function renderCredentials() {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <CredentialsComponent />
-    </QueryClientProvider>,
-  );
-}
-
 beforeEach(() => {
   vi.useFakeTimers({
     toFake: ['Date'],
-    now: new Date('2026-06-18T00:00:01.000Z'),
+    now: new Date('2001-06-18T00:00:01.000Z'),
   });
   vi.clearAllMocks();
-  apiMocks.postJson.mockResolvedValue(undefined);
   vi.mocked(queries.useAudit).mockReturnValue({
     data: undefined,
     isFetching: true,
@@ -203,17 +174,17 @@ test('audit preserves duplicate request-id events across filter result transitio
     [duplicateRequestIds[2], 'credential.delete'],
     [duplicateRequestIds[3], 'principal.set_limit'],
     [duplicateRequestIds[3], 'principal.set_limit'],
-    ['admin-v1-principal-principal-1-1750204804', 'principal.create'],
-    ['admin-v1-principal-principal-1-1750204805', 'principal.archive'],
-    ['admin-v1-principal-principal-1-1750204806', 'principal.restore'],
-    ['admin-v1-principal-principal-1-1750204807', 'principal.rotate_key'],
-    ['admin-v1-principal-principal-1-1750204808', 'principal.delete'],
+    ['example-request-4', 'principal.create'],
+    ['example-request-5', 'principal.archive'],
+    ['example-request-6', 'principal.restore'],
+    ['example-request-7', 'principal.rotate_key'],
+    ['example-request-8', 'principal.delete'],
   ] as const;
   const principalRows = principalSpecs.map(
     ([request_id, admin_action], index) => ({
       request_id,
-      ts_ms: 1_750_204_800_900 - Math.floor(index / 2),
-      principal_id: 'principal-1',
+      ts_ms: 961_286_400_900 - Math.floor(index / 2),
+      principal_id: 'example-principal-1',
       route: '/v1/principals',
       upstream: null,
       status: 200,
@@ -227,9 +198,9 @@ test('audit preserves duplicate request-id events across filter result transitio
     }),
   );
   const otherRows = Array.from({ length: 4 }, (_, index) => ({
-    request_id: `admin-v1-principal-principal-2-${1_750_204_900 + index}`,
-    ts_ms: 1_750_204_801_000 - index,
-    principal_id: 'principal-2',
+    request_id: `example-request-principal-2-${index}`,
+    ts_ms: 961_286_401_000 - index,
+    principal_id: 'example-principal-2',
     route: '/v1/principals',
     upstream: null,
     status: 200,
@@ -378,223 +349,3 @@ test('background audit fetching leaves manual Refresh idle and enabled', () => {
   expect(refresh.hasAttribute('aria-busy')).toBe(false);
   expect(refresh.textContent).toBe('Refresh');
 });
-
-function mockCredentialQueries({
-  loading,
-  populated = false,
-}: {
-  loading: boolean;
-  populated?: boolean;
-}) {
-  vi.mocked(queries.useCredentials).mockReturnValue({
-    data: populated
-      ? {
-          credentials: [
-            {
-              provider: 'anthropic',
-              kind: 'api_key',
-              identity: 'key@example.com',
-              status: 'active',
-              expires_at_unix_secs: null,
-              cred_id: 'key-1',
-            },
-          ],
-          observed: true,
-        }
-      : loading
-        ? undefined
-        : { credentials: [], observed: true },
-    isFetching: loading,
-    isLoading: loading,
-    isPending: loading,
-  } as never);
-  vi.mocked(queries.useOAuthStatus).mockReturnValue({
-    data: populated
-      ? {
-          credentials: [
-            {
-              provider: 'anthropic',
-              kind: 'oauth',
-              identity: 'oauth@example.com',
-              status: 'active',
-              expires_at_unix_secs: 4_102_444_800,
-              refresh_token_present: true,
-              last_updated_unix_secs: 4_102_441_200,
-              principal_id: 'principal-1',
-              scopes: ['messages:write'],
-              cred_id: 'oauth-1',
-            },
-          ],
-          observed: true,
-        }
-      : loading
-        ? undefined
-        : { credentials: [], observed: true },
-    isFetching: loading,
-    isLoading: loading,
-    isPending: loading,
-  } as never);
-}
-describe('credential loading geometry', () => {
-  test('credential loading reserves summary, table, and one full-width OAuth card', () => {
-    mockCredentialQueries({ loading: true });
-
-    renderCredentials();
-
-    const summaryValues = screen.getAllByTestId('credential-summary-value');
-    expect(summaryValues).toHaveLength(4);
-    for (const value of summaryValues) {
-      expect(value.className).toContain('h-8');
-      expect(value.querySelectorAll('.skeleton')).toHaveLength(1);
-      expect(value.textContent).toBe('');
-    }
-
-    const apiKeySlot = screen.getByTestId('api-keys-slot');
-    expect(apiKeySlot.className).toContain('min-h-[186px]');
-    const apiKeyTable = within(apiKeySlot).getByRole(
-      'table',
-    ) as HTMLTableElement;
-    expect(within(apiKeyTable).getAllByRole('columnheader')).toHaveLength(5);
-    const apiKeyRows: HTMLTableRowElement[] = Array.from(
-      apiKeyTable.tBodies[0]?.rows ?? [],
-    );
-    for (const row of apiKeyRows) {
-      const cells: HTMLTableCellElement[] = Array.from(row.cells);
-      expect(cells).toHaveLength(5);
-      expect(cells.every((cell) => cell.colSpan === 1)).toBe(true);
-    }
-    const apiKeyWidths = ['w-28', 'w-64', 'w-28', 'w-36', 'w-52'];
-    apiKeyWidths.forEach((width, index) => {
-      expect(apiKeyRows[0]?.cells[index]?.className).toContain(width);
-    });
-
-    const oauthGrid = screen.getByTestId('oauth-grid');
-    expect(oauthGrid.className).toContain('md:grid-cols-2');
-    const oauthCard = screen.getByTestId('oauth-card-slot');
-    expect(screen.getAllByTestId('oauth-card-slot')).toHaveLength(1);
-    expect(oauthCard.className).toContain('min-h-[258px]');
-    expect(oauthCard.className).toContain('md:col-span-2');
-    expect(oauthCard.querySelector('.skeleton')).not.toBeNull();
-  });
-
-  test('credential empty state retains the table and OAuth geometry slots', () => {
-    mockCredentialQueries({ loading: false });
-    renderCredentials();
-
-    const summaryValues = screen.getAllByTestId('credential-summary-value');
-    expect(summaryValues.map((value) => value.textContent)).toEqual([
-      '0',
-      '0',
-      '0',
-      '0',
-    ]);
-    expect(screen.getByTestId('api-keys-slot').className).toContain(
-      'min-h-[186px]',
-    );
-    expect(screen.getByText('No API keys')).toBeDefined();
-
-    const oauthGrid = screen.getByTestId('oauth-grid');
-    expect(oauthGrid.className).toContain('md:grid-cols-2');
-    const oauthCard = screen.getByTestId('oauth-card-slot');
-    expect(oauthCard.className).toContain('min-h-[258px]');
-    expect(oauthCard.className).toContain('md:col-span-2');
-    expect(screen.getByText('No OAuth tokens')).toBeDefined();
-  });
-
-  test('credential loaded state reuses the reserved table and OAuth card geometry', () => {
-    mockCredentialQueries({ loading: false, populated: true });
-    renderCredentials();
-
-    const apiKeySlot = screen.getByTestId('api-keys-slot');
-    expect(apiKeySlot.className).toContain('min-h-[186px]');
-    const apiKeyTable = within(apiKeySlot).getByRole(
-      'table',
-    ) as HTMLTableElement;
-    expect(apiKeyTable.tBodies[0]?.rows).toHaveLength(1);
-    expect(apiKeyTable.tBodies[0]?.rows[0]?.cells).toHaveLength(5);
-
-    const oauthGrid = screen.getByTestId('oauth-grid');
-    expect(oauthGrid.className).toContain('md:grid-cols-2');
-    const oauthCard = screen.getByTestId('oauth-card-slot');
-    expect(oauthCard.className).toContain('min-h-[258px]');
-    expect(oauthCard.className).toContain('md:col-span-2');
-    expect(within(oauthCard).getByText('anthropic')).toBeDefined();
-  });
-});
-
-test.each([
-  {
-    actionLabel: 'Rotate',
-    confirmLabel: 'Confirm rotate',
-    dialogTitle: 'Rotate credential?',
-    pendingLabel: 'Rotating...',
-    progress: 'Rotating anthropic credential — waiting for the server.',
-  },
-  {
-    actionLabel: 'Revoke',
-    confirmLabel: 'Confirm revoke',
-    dialogTitle: 'Revoke credential?',
-    pendingLabel: 'Revoking...',
-    progress: 'Revoking anthropic credential — waiting for the server.',
-  },
-])(
-  'credential $actionLabel keeps its modal target locked while pending',
-  async ({
-    actionLabel,
-    confirmLabel,
-    dialogTitle,
-    pendingLabel,
-    progress,
-  }) => {
-    mockCredentialQueries({ loading: false, populated: true });
-    const { promise } = Promise.withResolvers<unknown>();
-    apiMocks.postJson.mockReturnValue(promise);
-    renderCredentials();
-
-    fireEvent.click(
-      within(screen.getByTestId('api-keys-slot')).getByRole('button', {
-        name: actionLabel,
-      }),
-    );
-
-    const dialog = screen.getByRole('dialog', { name: dialogTitle });
-    expect(within(dialog).getByText('identity: key@example.com')).toBeDefined();
-    const confirm = within(dialog).getByRole('button', {
-      name: confirmLabel,
-    });
-    fireEvent.click(confirm);
-    fireEvent.click(confirm);
-
-    const pending = await within(dialog).findByRole('button', {
-      name: pendingLabel,
-    });
-    expect(apiMocks.postJson).toHaveBeenCalledTimes(1);
-    expect(pending.hasAttribute('disabled')).toBe(true);
-    expect(pending.getAttribute('aria-busy')).toBe('true');
-    expect(pending.querySelector('svg.animate-spin')).not.toBeNull();
-    expect(within(dialog).getByText(progress)).toBeDefined();
-    expect(
-      within(dialog)
-        .getByRole('button', { name: 'Cancel' })
-        .hasAttribute('disabled'),
-    ).toBe(true);
-    expect(
-      within(dialog)
-        .getByRole('button', { name: 'Close dialog' })
-        .hasAttribute('disabled'),
-    ).toBe(true);
-
-    for (const button of [
-      ...screen.getByTestId('api-keys-slot').querySelectorAll('button'),
-      ...screen.getByTestId('oauth-grid').querySelectorAll('button'),
-    ]) {
-      expect(button.hasAttribute('disabled')).toBe(true);
-    }
-
-    fireEvent.click(pending);
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-    fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
-    expect(apiMocks.postJson).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('dialog', { name: dialogTitle })).toBeDefined();
-  },
-);

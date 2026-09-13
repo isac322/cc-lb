@@ -9,15 +9,15 @@ use cc_lb_storage_api::principal::{Limit, LimitKind};
 use cc_lb_storage_api::types::UpstreamKind;
 use cc_lb_storage_api::types::{Limit as TypesLimit, LimitKind as TypesLimitKind};
 use cc_lb_storage_api::{
-    AnthropicApiKeyCredential, ApiKeyRecord, AuditEntry, BackendKind, BucketKind,
-    CacheKeepaliveConfig, CacheKeepaliveConfigSnapshot, CacheKeepaliveEnqueueState,
-    CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus, CacheKeepaliveTerminalReason,
-    CacheTtl, ClassifierConfig, ConfigDraftState, HistoryEntry, HistorySummary, IssuedKey,
-    JudgeResponseFormat, KeyStatus, LlmJudgeConfig, OAuthCredentials, PrincipalCreate,
-    PrincipalKind, PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind,
-    PrincipalLimitState, RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState,
-    RequestEvent, RequestEventUpstream, StorageError, StoredApiKeyRecord, StoredHistoryEntry,
-    UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
+    ApiKeyRecord, AuditEntry, BackendKind, BucketKind, CacheKeepaliveConfig,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord,
+    CacheKeepaliveSessionStatus, CacheKeepaliveTerminalReason, CacheTtl, ClassifierConfig,
+    ConfigDraftState, HistoryEntry, HistorySummary, IssuedKey, JudgeResponseFormat, KeyStatus,
+    LlmJudgeConfig, OAuthCredentials, PrincipalCreate, PrincipalKind, PrincipalKindLite,
+    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RequestCacheBreakpoint,
+    RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventUpstream,
+    StorageError, StoredApiKeyRecord, StoredHistoryEntry, UsageRollup, UsageRollupKey,
+    UsageRollupResolution, UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -267,9 +267,6 @@ backend = 'sqlite'"
         expires_at: 1_716_086_400,
         refresh_token_expires_at_unix_secs: None,
         scopes: vec!["openid".to_owned(), "profile".to_owned()],
-    });
-    assert_json_roundtrip(AnthropicApiKeyCredential {
-        anthropic_api_key: "sk-ant-api03-example".to_owned(),
     });
     assert_json_roundtrip(IssuedKey {
         key_id: "key_123".to_owned(),

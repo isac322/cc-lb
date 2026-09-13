@@ -112,48 +112,6 @@ async fn plugins_status_alias_smoke() {
 }
 
 #[tokio::test]
-async fn credentials_list_smoke() {
-    let server = spawn_admin_server().await;
-    let (status, _, _) = server.client.get("/admin/credentials").await;
-    let _ = status;
-}
-
-#[tokio::test]
-async fn credentials_oauth_status_smoke() {
-    let server = spawn_admin_server().await;
-    let (status, _, _) = server.client.get("/admin/oauth/status").await;
-    let _ = status;
-}
-
-#[tokio::test]
-async fn credentials_rotate_smoke() {
-    let server = spawn_admin_server().await;
-    let principal = Uuid::new_v4();
-    let (status, _, _) = server
-        .client
-        .post_json(
-            &format!("/admin/credentials/{principal}/anthropic/rotate"),
-            json!({}),
-        )
-        .await;
-    let _ = status;
-}
-
-#[tokio::test]
-async fn credentials_revoke_smoke() {
-    let server = spawn_admin_server().await;
-    let principal = Uuid::new_v4();
-    let (status, _, _) = server
-        .client
-        .post_json(
-            &format!("/admin/credentials/{principal}/anthropic/revoke"),
-            json!({}),
-        )
-        .await;
-    let _ = status;
-}
-
-#[tokio::test]
 async fn v1_keys_list_smoke() {
     let server = spawn_admin_server().await;
     let principal = Uuid::new_v4();

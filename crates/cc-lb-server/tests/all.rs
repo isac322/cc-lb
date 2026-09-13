@@ -90,8 +90,6 @@ mod oauth_usage_proxy;
 mod observation_failure_isolation;
 #[path = "per_principal_reload_fault_injection.rs"]
 mod per_principal_reload_fault_injection;
-#[path = "pool_exhaustion.rs"]
-mod pool_exhaustion;
 #[path = "postgres_full_storage_live.rs"]
 mod postgres_full_storage_live;
 #[path = "preflight.rs"]

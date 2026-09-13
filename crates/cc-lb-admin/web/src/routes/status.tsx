@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { AlertTriangle, Power, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Power } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import {
@@ -10,77 +10,26 @@ import {
   CardHeader,
   ConfirmDialog,
   cx,
-  EmptyState,
   PageContainer,
   Section,
   Skeleton,
-  SkeletonRow,
-  StatusBadge,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
-import {
-  useCredentials,
-  useKillswitch,
-  useOAuthStatus,
-  usePrincipalNameMap,
-  useStatus,
-} from '../lib/queries';
+import { useKillswitch, useStatus } from '../lib/queries';
 
 export const Route = createFileRoute('/status')({
   component: StatusPage,
 });
-
-function expiryTone(
-  secs?: number | null,
-): 'ok' | 'warn' | 'danger' | 'neutral' {
-  if (!secs) return 'neutral';
-  const now = Math.floor(Date.now() / 1000);
-  const delta = secs - now;
-  if (delta < 0) return 'danger';
-  if (delta < 60 * 10) return 'warn';
-  return 'ok';
-}
-
-function ExpiryBadge({ secs }: { readonly secs?: number | null }) {
-  return (
-    <Badge tone={expiryTone(secs)}>
-      <RelativeTime compact ts={secs ? secs * 1000 : null} />
-    </Badge>
-  );
-}
 
 const SYSTEM_CARD_CLASS = 'flex min-h-[144px] flex-col';
 const LAST_RELOAD_VALUE_SLOT_CLASS = 'min-w-20';
 const PLUGIN_COUNT_VALUE_SLOT_CLASS = 'min-w-8';
 const KILLSWITCH_STATUS_SLOT_CLASS =
   'inline-flex min-h-[22px] min-w-14 items-center justify-end text-right';
-const OAUTH_CARD_GEOMETRY_CLASS = 'min-h-[230px] sm:min-h-[205px]';
-const OAUTH_CARD_CLASS = cx('flex flex-col', OAUTH_CARD_GEOMETRY_CLASS);
-const OAUTH_GRID_CLASS = cx(
-  'grid grid-cols-1 gap-4 md:grid-cols-2',
-  OAUTH_CARD_GEOMETRY_CLASS,
-);
-const CREDENTIAL_CELL_CLASS_NAMES = [
-  'px-4',
-  'px-4',
-  'px-4',
-  'px-4',
-  'px-4',
-] as const;
-const CREDENTIAL_SKELETON_CLASS_NAMES = [
-  'h-5 w-20',
-  'h-5 w-16',
-  'h-5 w-32',
-  'h-5 w-20',
-  'h-5 w-16',
-] as const;
 
 function StatusPage() {
   const status = useStatus();
-  const creds = useCredentials();
-  const oauth = useOAuthStatus();
   const kill = useKillswitch();
-  const principalNameMap = usePrincipalNameMap();
   const [confirmEngageOpen, setConfirmEngageOpen] = useState(false);
   // One killswitch request may be in flight at a time and it locks both entry
   // points. The mutation's own variables name the requested direction, so the
@@ -254,167 +203,6 @@ function StatusPage() {
               </Button>
             </CardBody>
           </Card>
-        </div>
-      </Section>
-
-      <Section
-        title="Credentials"
-        subtitle="API keys and OAuth tokens observed for upstreams"
-      >
-        <Card>
-          <div
-            data-testid="credentials-table-slot"
-            className="min-h-[191px] overflow-x-auto"
-          >
-            <table className="min-w-[640px] w-full font-mono text-xs">
-              <thead className="table-header sticky top-0 z-10">
-                <tr className="text-[10px] uppercase tracking-wider">
-                  <th className="text-left px-4 py-2">Provider</th>
-                  <th className="text-left px-4 py-2">Kind</th>
-                  <th className="text-left px-4 py-2">Identity</th>
-                  <th className="text-left px-4 py-2">Expires</th>
-                  <th className="text-left px-4 py-2">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {creds.isLoading ? (
-                  <>
-                    <SkeletonRow
-                      cols={5}
-                      cellClassNames={CREDENTIAL_CELL_CLASS_NAMES}
-                      skeletonClassNames={CREDENTIAL_SKELETON_CLASS_NAMES}
-                    />
-                    <SkeletonRow
-                      cols={5}
-                      cellClassNames={CREDENTIAL_CELL_CLASS_NAMES}
-                      skeletonClassNames={CREDENTIAL_SKELETON_CLASS_NAMES}
-                    />
-                    <SkeletonRow
-                      cols={5}
-                      cellClassNames={CREDENTIAL_CELL_CLASS_NAMES}
-                      skeletonClassNames={CREDENTIAL_SKELETON_CLASS_NAMES}
-                    />
-                  </>
-                ) : creds.data?.credentials.length ? (
-                  creds.data.credentials.map((c, i) => (
-                    <tr key={i} className="border-b border-row">
-                      <td className="px-4 py-2">{c.provider}</td>
-                      <td className="px-4 py-2">
-                        <Badge tone="mono">{c.kind}</Badge>
-                      </td>
-                      <td className="px-4 py-2">{c.identity ?? '—'}</td>
-                      <td className="px-4 py-2">
-                        <ExpiryBadge secs={c.expires_at_unix_secs} />
-                      </td>
-                      <td className="px-4 py-2">
-                        <StatusBadge
-                          tone={c.status === 'active' ? 'ok' : 'warn'}
-                          label={c.status}
-                        />
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={5} className="px-4 py-4">
-                      <EmptyState title="No credentials observed" />
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      </Section>
-
-      <Section title="OAuth Tokens" subtitle="Active OAuth flow status">
-        <div data-testid="oauth-grid" className={OAUTH_GRID_CLASS}>
-          {oauth.isLoading ? (
-            <Card
-              className={cx(OAUTH_CARD_CLASS, 'md:col-span-2')}
-              data-testid="oauth-card"
-            >
-              <CardHeader
-                title={<Skeleton className="h-4 w-32" />}
-                subtitle={<Skeleton className="h-4 w-24" />}
-              />
-              <CardBody className="flex-1 space-y-2 text-xs">
-                <Row
-                  label="Expires"
-                  value={<Skeleton className="h-4 w-20" />}
-                />
-                <Row
-                  label="Refresh token"
-                  value={<Skeleton className="h-4 w-16" />}
-                />
-                <Row
-                  label="Last update"
-                  value={<Skeleton className="h-4 w-20" />}
-                />
-                <Row label="Scopes" value={<Skeleton className="h-4 w-28" />} />
-              </CardBody>
-            </Card>
-          ) : oauth.data?.credentials.length ? (
-            oauth.data.credentials.map((o, i) => (
-              <Card
-                key={i}
-                className={cx(
-                  OAUTH_CARD_CLASS,
-                  oauth.data.credentials.length === 1 && 'md:col-span-2',
-                )}
-                data-testid="oauth-card"
-              >
-                <CardHeader
-                  title={o.provider}
-                  subtitle={
-                    o.principal_id
-                      ? (principalNameMap.get(o.principal_id) ?? o.principal_id)
-                      : 'shared'
-                  }
-                  action={<ShieldCheck className="w-4 h-4 text-green-400" />}
-                />
-                <CardBody className="flex-1 space-y-2 text-xs">
-                  <Row
-                    label="Expires"
-                    value={<ExpiryBadge secs={o.expires_at_unix_secs} />}
-                  />
-                  <Row
-                    label="Refresh token"
-                    value={o.refresh_token_present ? 'present' : 'missing'}
-                  />
-                  <Row
-                    label="Last update"
-                    value={
-                      <RelativeTime
-                        ts={
-                          o.last_updated_unix_secs
-                            ? new Date(o.last_updated_unix_secs * 1000)
-                            : null
-                        }
-                      />
-                    }
-                  />
-                  <Row
-                    label="Scopes"
-                    value={
-                      <span className="font-mono">{o.scopes.join(', ')}</span>
-                    }
-                  />
-                </CardBody>
-              </Card>
-            ))
-          ) : (
-            <Card
-              className={cx(OAUTH_CARD_CLASS, 'md:col-span-2')}
-              data-testid="oauth-card"
-            >
-              <CardBody className="flex flex-1 items-center">
-                <div className="w-full">
-                  <EmptyState title="No OAuth tokens" />
-                </div>
-              </CardBody>
-            </Card>
-          )}
         </div>
       </Section>
 

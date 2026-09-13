@@ -687,22 +687,6 @@ export interface KeyListResponse {
   keys: ApiKeyRecord[];
 }
 
-interface CredentialEntry {
-  principal_id: string;
-  provider: string;
-  kind: string;
-  identity: string;
-  associated_principals: string[];
-  has_credentials: boolean;
-  expires_at_unix_secs: number | null;
-  status: string;
-}
-
-export interface CredentialsResponse {
-  credentials: CredentialEntry[];
-  observed: boolean;
-}
-
 export interface ConfigSchemaResponse {
   schema: Record<string, unknown>;
   coverage_checklist: string[];
@@ -748,22 +732,6 @@ interface PluginStatusEntry {
 
 export interface PluginsStatusResponse {
   plugins: PluginStatusEntry[];
-}
-
-interface OAuthCredentialStatus {
-  principal_id: string;
-  provider: string;
-  has_credentials: boolean;
-  expires_at_unix_secs: number | null;
-  refresh_token_present: boolean;
-  last_updated_unix_secs: number | null;
-  status: string;
-  scopes: string[];
-}
-
-export interface OAuthStatusResponse {
-  credentials: OAuthCredentialStatus[];
-  observed: boolean;
 }
 
 export interface UpstreamOAuthStatusResponse {

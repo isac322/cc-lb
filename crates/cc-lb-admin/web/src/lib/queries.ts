@@ -22,7 +22,6 @@ import {
   type ConfigDraftResponse,
   type ConfigHistoryResponse,
   type ConfigSchemaResponse,
-  type CredentialsResponse,
   completeOauthDraft,
   createUpstreamFromOauthDraft,
   type DashboardSummaryResponse,
@@ -35,7 +34,6 @@ import {
   getJson,
   type KeyListResponse,
   type LatestResponse,
-  type OAuthStatusResponse,
   type PluginsStatusResponse,
   type PoolHistoryResponse,
   type PrincipalLimitsResponse,
@@ -344,8 +342,6 @@ export const qk = {
     ['events', filters] as const,
   audit: (filters: Record<string, string | undefined>) =>
     ['audit', filters] as const,
-  credentials: ['credentials'] as const,
-  oauthStatus: ['oauth-status'] as const,
   upstreamOauthStatus: (id: string) => ['upstream-oauth-status', id] as const,
   upstreamSubscriptionMetadata: (id: string) =>
     ['upstream-subscription-metadata', id] as const,
@@ -762,18 +758,6 @@ export function useAudit(filters: Record<string, string | undefined>) {
     queryKey: qk.audit(filters),
     queryFn: () =>
       getJson<AuditQueryResponse>(`/admin/audit?${params.toString()}`),
-  });
-}
-export function useCredentials() {
-  return useQuery({
-    queryKey: qk.credentials,
-    queryFn: () => getJson<CredentialsResponse>('/admin/credentials'),
-  });
-}
-export function useOAuthStatus() {
-  return useQuery({
-    queryKey: qk.oauthStatus,
-    queryFn: () => getJson<OAuthStatusResponse>('/admin/oauth/status'),
   });
 }
 export function useUpstreamOAuthStatus(id: string | null | undefined) {
