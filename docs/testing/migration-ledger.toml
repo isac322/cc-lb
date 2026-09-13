@@ -2061,32 +2061,8 @@ loss = []
 guardian = ""
 asserted = ["events_recent::events_recent_params_table [6 assertion executions]"]
 
-[[move]]
-old = "cc-lb-admin::integration::new_admin_modules_smoke::credentials_list_smoke"
-action = "DELETE"
-new = []
-duplicate_of = "cc-lb-admin::integration::credentials::t2__credentials_list_returns_empty_array_with_no_principals"
-loss = []
-guardian = ""
-asserted = ["credentials::credentials_list_returns_empty_array_with_no_principals [3]"]
 
-[[move]]
-old = "cc-lb-admin::integration::new_admin_modules_smoke::credentials_rotate_smoke"
-action = "DELETE"
-new = []
-duplicate_of = "cc-lb-admin::integration::credentials::t2__rotate_returns_501_not_implemented"
-loss = []
-guardian = ""
-asserted = ["credentials::rotate_returns_501_not_implemented [1]"]
 
-[[move]]
-old = "cc-lb-admin::integration::new_admin_modules_smoke::credentials_revoke_smoke"
-action = "DELETE"
-new = []
-duplicate_of = "cc-lb-admin::integration::credentials::t2__revoke_returns_client_error_for_unknown_principal_provider"
-loss = []
-guardian = ""
-asserted = ["credentials::revoke_returns_client_error_for_unknown_principal_provider [1]"]
 
 [[move]]
 old = "cc-lb-admin::integration::new_admin_modules_smoke::v1_keys_list_smoke"
@@ -4772,13 +4748,6 @@ duplicate_of = ""
 loss = []
 guardian = ""
 
-[[move]]
-old = "cc-lb-signer-anthropic-oauth::integration::refresh_circuit_breaker::circuit_breaker_fails_fast_after_three_failures"
-action = "MOVE"
-new = ["cc-lb-signer-anthropic-oauth::integration::refresh_circuit_breaker::t2__circuit_breaker_fails_fast_after_three_failures"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
 [[move]]
 old = "cc-lb-engine::lifecycle_event_assembler::tests::classification_fields_preserve_partial_and_final_parity"
@@ -4828,13 +4797,6 @@ duplicate_of = ""
 loss = []
 guardian = ""
 
-[[move]]
-old = "cc-lb-signer-anthropic-oauth::integration::single_flight_refresh::concurrent_unauthorized_refreshes_single_flight"
-action = "MOVE"
-new = ["cc-lb-signer-anthropic-oauth::integration::single_flight_refresh::t2__concurrent_unauthorized_refreshes_single_flight"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
 [[move]]
 old = "cc-lb-admin::integration::config_diff::config_diff_route_returns_history_difference"
@@ -4932,29 +4894,8 @@ duplicate_of = ""
 loss = []
 guardian = ""
 
-[[move]]
-old = "cc-lb-admin::integration::credentials::credentials_503_when_storage_missing"
-action = "MOVE"
-new = ["cc-lb-admin::integration::credentials::t2__credentials_503_when_storage_missing"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
-[[move]]
-old = "cc-lb-admin::integration::credentials::credentials_list_filters_out_principals_without_credentials"
-action = "MOVE"
-new = ["cc-lb-admin::integration::credentials::t2__credentials_list_filters_out_principals_without_credentials"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
-[[move]]
-old = "cc-lb-admin::integration::credentials::credentials_list_returns_empty_array_with_no_principals"
-action = "MOVE"
-new = ["cc-lb-admin::integration::credentials::t2__credentials_list_returns_empty_array_with_no_principals"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
 [[move]]
 old = "cc-lb-admin::integration::config_diff::current_config_exposes_upstream_affinity_ttl_path"
@@ -6036,13 +5977,6 @@ duplicate_of = ""
 loss = []
 guardian = ""
 
-[[move]]
-old = "cc-lb-admin::integration::credentials::oauth_status_returns_credentials_array"
-action = "MOVE"
-new = ["cc-lb-admin::integration::credentials::t2__oauth_status_returns_credentials_array"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
 [[move]]
 old = "cc-lb-server::dynamic_view_builder::t2__tests::observation_sink_routes_records_to_store"
@@ -6212,13 +6146,6 @@ duplicate_of = ""
 loss = []
 guardian = ""
 
-[[move]]
-old = "cc-lb-signer-anthropic-oauth::integration::proactive_refresh::proactive_refreshes_before_signing"
-action = "MOVE"
-new = ["cc-lb-signer-anthropic-oauth::integration::proactive_refresh::t2__proactive_refreshes_before_signing"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
 [[move]]
 old = "cc-lb-engine::integration::lifecycle_response_header_passthrough::protocol_response_headers_pass_through_unchanged"
@@ -6292,13 +6219,6 @@ duplicate_of = ""
 loss = []
 guardian = ""
 
-[[move]]
-old = "cc-lb-signer-anthropic-oauth::integration::refresh_failure_returns_fail::refresh_failure_returns_fail"
-action = "MOVE"
-new = ["cc-lb-signer-anthropic-oauth::integration::refresh_failure_returns_fail::t2__refresh_failure_returns_fail"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
 [[move]]
 old = "cc-lb-admin::integration::v1_plugins::registry_delete_stale_if_match_returns_412_with_current_revision"
@@ -6548,13 +6468,6 @@ duplicate_of = ""
 loss = []
 guardian = ""
 
-[[move]]
-old = "cc-lb-admin::integration::credentials::revoke_returns_client_error_for_unknown_principal_provider"
-action = "MOVE"
-new = ["cc-lb-admin::integration::credentials::t2__revoke_returns_client_error_for_unknown_principal_provider"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
 [[move]]
 old = "cc-lb-admin::integration::principal_keys::revoked_key_list_preserves_key_id_last4_and_audit_rows"
@@ -6564,13 +6477,6 @@ duplicate_of = ""
 loss = []
 guardian = ""
 
-[[move]]
-old = "cc-lb-admin::integration::credentials::rotate_returns_501_not_implemented"
-action = "MOVE"
-new = ["cc-lb-admin::integration::credentials::t2__rotate_returns_501_not_implemented"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
 [[move]]
 old = "cc-lb-admin::integration::v1_router_preview::route_preview_returns_admin_port_projection"
@@ -6684,21 +6590,7 @@ duplicate_of = ""
 loss = []
 guardian = ""
 
-[[move]]
-old = "cc-lb-signer-anthropic-key::integration::sign_loads_api_key_from_storage_key::sign_loads_api_key_from_storage_key"
-action = "MOVE"
-new = ["cc-lb-signer-anthropic-key::integration::sign_loads_api_key_from_storage_key::t2__sign_loads_api_key_from_storage_key"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
-[[move]]
-old = "cc-lb-signer-anthropic-oauth::integration::sign_loads_from_storage::sign_loads_from_storage"
-action = "MOVE"
-new = ["cc-lb-signer-anthropic-oauth::integration::sign_loads_from_storage::t2__sign_loads_from_storage"]
-duplicate_of = ""
-loss = []
-guardian = ""
 
 [[move]]
 old = "cc-lb-engine::integration::lifecycle_terminal::signer_build_failure_preserves_request_setup_timings"

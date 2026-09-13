@@ -626,7 +626,7 @@ fn bearer_header_value(token: &str) -> Result<HeaderValue, SignerError> {
 }
 
 #[cfg(test)]
-
+#[allow(non_snake_case)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
