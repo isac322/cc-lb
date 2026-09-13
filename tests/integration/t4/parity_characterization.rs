@@ -753,6 +753,7 @@ fn normalize_audits(
             let mut value = serde_json::to_value(row).expect("AuditEntry serializes");
             assert_eq!(value["ts"], Value::from(FIXED_UNIX_SECS));
             normalize_dynamic_ids(&mut value, "", limited_key_id, Uuid::nil());
+            normalize_monotonic_timings(&mut value);
             value
         })
         .collect()
@@ -807,6 +808,8 @@ fn normalize_monotonic_timings(value: &mut Value) {
         "limit_reconcile_ms",
         "observability_post_ms",
         "duration_ms",
+        "request_body_read_ms",
+        "finalize_ms",
         "proxy_setup_ms",
         "shape_ms",
         "sign_ms",
@@ -851,14 +854,6 @@ fn normalize_monotonic_timings(value: &mut Value) {
                     *field = Value::String("<monotonic-duration>".to_owned());
                 } else {
                     normalize_monotonic_timings(field);
-                }
-            }
-            if fields.contains_key("request_id") && fields.contains_key("status") {
-                for name in FIELDS.iter().copied().filter(|name| *name != "duration_us") {
-                    fields.insert(
-                        name.to_owned(),
-                        Value::String("<monotonic-duration>".to_owned()),
-                    );
                 }
             }
             if fields.contains_key("stage_name") {
