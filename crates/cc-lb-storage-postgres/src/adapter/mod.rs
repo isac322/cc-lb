@@ -7,7 +7,6 @@ use sqlx::PgPool;
 
 pub mod anthropic_compatibility_kv;
 pub mod api_key_usage;
-pub mod api_keys;
 pub mod audit;
 mod cache_keepalive_session_read_row;
 pub mod cache_keepalive_session_reads;
@@ -16,7 +15,6 @@ pub mod config_store;
 pub mod managed_keys;
 pub mod meta;
 pub mod notifier;
-pub mod oauth_credentials;
 pub mod organization_metadata;
 pub mod plan_tiers;
 pub mod plugin_registry;

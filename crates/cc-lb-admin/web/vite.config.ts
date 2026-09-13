@@ -24,8 +24,6 @@ export default defineConfig({
       '/admin/dashboard': { target: ADMIN_TARGET, changeOrigin: true },
       '/admin/usage': { target: ADMIN_TARGET, changeOrigin: true },
       '/admin/audit': { target: ADMIN_TARGET, changeOrigin: true },
-      '/admin/credentials': { target: ADMIN_TARGET, changeOrigin: true },
-      '/admin/oauth': { target: ADMIN_TARGET, changeOrigin: true },
       '/admin/config': { target: ADMIN_TARGET, changeOrigin: true },
       '/admin/status': { target: ADMIN_TARGET, changeOrigin: true },
       '/admin/killswitch': { target: ADMIN_TARGET, changeOrigin: true },

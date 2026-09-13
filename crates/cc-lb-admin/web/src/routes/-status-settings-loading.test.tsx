@@ -18,10 +18,7 @@ const queryMocks = vi.hoisted(() => ({
   useConfigDraft: vi.fn(),
   useConfigHistory: vi.fn(),
   useConfigSchema: vi.fn(),
-  useCredentials: vi.fn(),
   useKillswitch: vi.fn(),
-  useOAuthStatus: vi.fn(),
-  usePrincipalNameMap: vi.fn(),
   useReloadConfig: vi.fn(),
   useSaveDraft: vi.fn(),
   useStatus: vi.fn(),
@@ -139,15 +136,10 @@ beforeEach(() => {
   apiMocks.downloadJson.mockResolvedValue(undefined);
 
   queryMocks.useStatus.mockReturnValue(loadingResult());
-  queryMocks.useCredentials.mockReturnValue(loadingResult());
-  queryMocks.useOAuthStatus.mockReturnValue(loadingResult());
   queryMocks.useConfigCurrent.mockReturnValue(loadingResult());
   queryMocks.useConfigDraft.mockReturnValue(loadingResult());
   queryMocks.useConfigSchema.mockReturnValue(loadingResult());
   queryMocks.useConfigHistory.mockReturnValue(loadingResult());
-  queryMocks.usePrincipalNameMap.mockReturnValue(
-    new Map([['principal-1', 'Primary principal']]),
-  );
 
   queryMocks.useKillswitch.mockReturnValue(mutationResult());
   queryMocks.useApplyConfig.mockReturnValue(mutationResult());
@@ -161,7 +153,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-test('status cold load reserves restart, system, credentials, and OAuth geometry', () => {
+test('status cold load reserves restart and system geometry', () => {
   render(<StatusComponent />);
 
   const restartBody = screen.getByTestId('restart-required-body');
@@ -198,83 +190,16 @@ test('status cold load reserves restart, system, credentials, and OAuth geometry
   ) as HTMLButtonElement;
   expect(killswitchControl.disabled).toBe(true);
   expect(killswitchControl.querySelector('.skeleton')).not.toBeNull();
-
-  const credentialsSlot = screen.getByTestId('credentials-table-slot');
-  expect(credentialsSlot.className).toContain('min-h-[191px]');
-  const credentialRows = credentialsSlot.querySelectorAll('tbody tr');
-  expect(credentialRows).toHaveLength(3);
-  for (const row of credentialRows) {
-    const cells = row.querySelectorAll('td');
-    expect(cells).toHaveLength(5);
-    for (const cell of cells) {
-      expect(cell.className).toContain('px-4');
-      expect(cell.className).toContain('py-2');
-    }
-  }
-
-  const oauthGrid = screen.getByTestId('oauth-grid');
-  expect(oauthGrid.className).toContain('min-h-[230px]');
-  expect(oauthGrid.className).toContain('sm:min-h-[205px]');
-  const oauthCard = screen.getByTestId('oauth-card');
-  expect(screen.getAllByTestId('oauth-card')).toHaveLength(1);
-  expect(oauthCard.className).toContain('min-h-[230px]');
-  expect(oauthCard.className).toContain('sm:min-h-[205px]');
-  expect(oauthCard.className).toContain('md:col-span-2');
-  expect(oauthCard.querySelectorAll('.skeleton').length).toBeGreaterThan(0);
 });
 
-test('status resolved empty and loaded OAuth states retain the reserved card grid', () => {
+test('status resolved state retains restart geometry', () => {
   queryMocks.useStatus.mockReturnValue(loadedResult(loadedStatus));
-  queryMocks.useCredentials.mockReturnValue(
-    loadedResult({ credentials: [], observed: true }),
-  );
-  queryMocks.useOAuthStatus.mockReturnValue(
-    loadedResult({ credentials: [], observed: true }),
-  );
 
-  const { rerender } = render(<StatusComponent />);
+  render(<StatusComponent />);
 
   expect(screen.getByTestId('restart-required-body').className).toContain(
     'min-h-[72px]',
   );
-  expect(screen.getByTestId('credentials-table-slot').className).toContain(
-    'min-h-[191px]',
-  );
-  expect(screen.getByText('No credentials observed')).toBeDefined();
-  expect(screen.getByTestId('oauth-grid').className).toContain('min-h-[230px]');
-  expect(screen.getByTestId('oauth-card').className).toContain('min-h-[230px]');
-  expect(screen.getByTestId('oauth-card').className).toContain(
-    'sm:min-h-[205px]',
-  );
-  expect(screen.getByTestId('oauth-card').className).toContain('md:col-span-2');
-  expect(screen.getByText('No OAuth tokens')).toBeDefined();
-
-  queryMocks.useOAuthStatus.mockReturnValue(
-    loadedResult({
-      observed: true,
-      credentials: [
-        {
-          principal_id: 'principal-1',
-          provider: 'anthropic',
-          has_credentials: true,
-          expires_at_unix_secs: 1_900_000_000,
-          refresh_token_present: true,
-          last_updated_unix_secs: 1_722_340_800,
-          status: 'active',
-          scopes: ['user:inference'],
-        },
-      ],
-    }),
-  );
-  rerender(<StatusComponent />);
-
-  expect(screen.getByTestId('oauth-grid').className).toContain('min-h-[230px]');
-  expect(screen.getByTestId('oauth-card').className).toContain('min-h-[230px]');
-  expect(screen.getByTestId('oauth-card').className).toContain(
-    'sm:min-h-[205px]',
-  );
-  expect(screen.getByTestId('oauth-card').className).toContain('md:col-span-2');
-  expect(screen.getByText('anthropic')).toBeDefined();
 });
 
 test('settings cold load skeletonizes fixed metadata, checklist, and history slots', () => {
@@ -866,12 +791,6 @@ test('killswitch disengage retains its pending action when status changes', () =
   queryMocks.useStatus.mockReturnValue(
     loadedResult({ ...loadedStatus, killswitch: true }),
   );
-  queryMocks.useCredentials.mockReturnValue(
-    loadedResult({ credentials: [], observed: true }),
-  );
-  queryMocks.useOAuthStatus.mockReturnValue(
-    loadedResult({ credentials: [], observed: true }),
-  );
   queryMocks.useKillswitch.mockReturnValue({
     mutate,
     isPending: false,
@@ -906,12 +825,6 @@ test('killswitch engage confirmation stays open and locked until success', () =>
   const mutate = vi.fn();
   queryMocks.useStatus.mockReturnValue(
     loadedResult({ ...loadedStatus, killswitch: false }),
-  );
-  queryMocks.useCredentials.mockReturnValue(
-    loadedResult({ credentials: [], observed: true }),
-  );
-  queryMocks.useOAuthStatus.mockReturnValue(
-    loadedResult({ credentials: [], observed: true }),
   );
   queryMocks.useKillswitch.mockReturnValue({
     mutate,

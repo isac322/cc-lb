@@ -14,11 +14,6 @@ pub struct OAuthCredentials {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnthropicApiKeyCredential {
-    pub anthropic_api_key: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssuedKey {
     pub key_id: String,
     pub plaintext: String,

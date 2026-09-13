@@ -116,7 +116,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 54] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 53] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -126,11 +126,6 @@ const METRIC_DEFINITIONS: [MetricDefinition; 54] = [
         name: "cc_lb_request_duration_seconds",
         kind: MetricKind::Histogram,
         description: "End-to-end proxied request duration in seconds.",
-    },
-    MetricDefinition {
-        name: "cc_lb_oauth_refresh_total",
-        kind: MetricKind::Counter,
-        description: "OAuth credential refresh attempts by principal, provider, and outcome.",
     },
     MetricDefinition {
         name: "cc_lb_quota_active_principals_total",
@@ -398,11 +393,6 @@ pub fn register_metrics() {
         Unit::Seconds,
         "End-to-end proxied request duration in seconds."
     );
-    metrics::describe_counter!(
-        "cc_lb_oauth_refresh_total",
-        Unit::Count,
-        "OAuth credential refresh attempts by principal, provider, and outcome."
-    );
     metrics::describe_gauge!(
         "cc_lb_quota_active_principals_total",
         Unit::Count,
@@ -660,13 +650,6 @@ fn touch_metrics() {
         "model" => "unknown"
     )
     .record(0.0);
-    metrics::counter!(
-        "cc_lb_oauth_refresh_total",
-        "principal" => "unknown",
-        "provider" => "unknown",
-        "outcome" => "unknown"
-    )
-    .increment(0);
     metrics::gauge!("cc_lb_quota_active_principals_total").set(0.0);
     metrics::counter!(
         "cc_lb_quota_rejected_total",

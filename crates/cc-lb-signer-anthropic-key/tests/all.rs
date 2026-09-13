@@ -10,5 +10,3 @@ mod on_unauthorized_returns_fail;
 mod sign_does_not_modify_body;
 #[path = "sign_inserts_header.rs"]
 mod sign_inserts_header;
-#[path = "sign_loads_api_key_from_storage_key.rs"]
-mod sign_loads_api_key_from_storage_key;

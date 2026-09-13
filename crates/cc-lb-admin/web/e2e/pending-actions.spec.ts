@@ -10,18 +10,6 @@ type ApiKeyRecord = {
   last_used_at_unix_secs: number | null;
 };
 
-type CredentialRecord = {
-  principal_id: string;
-  provider: string;
-  kind: string;
-  identity: string;
-  associated_principals: string[];
-  has_credentials: boolean;
-  expires_at_unix_secs: number | null;
-  status: string;
-  cred_id: string;
-};
-
 type Deferred<T> = {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -217,83 +205,6 @@ async function installPrincipalFixtures(page: Page) {
   };
 }
 
-async function installCredentialFixtures(page: Page) {
-  await storeAdminToken(page);
-
-  const principals = [principal(PRINCIPAL_ID, 'pending-actions-fixture')];
-  let credentials: CredentialRecord[] = [
-    {
-      principal_id: PRINCIPAL_ID,
-      provider: 'anthropic',
-      kind: 'api_key',
-      identity: 'key@example.com',
-      associated_principals: [PRINCIPAL_ID],
-      has_credentials: true,
-      expires_at_unix_secs: null,
-      status: 'active',
-      cred_id: 'credential-fixture',
-    },
-  ];
-  const responseGate = deferred<void>();
-  const requestStarted = deferred<void>();
-  const unexpectedRequests: string[] = [];
-  let credentialGetCount = 0;
-  let revokePostCount = 0;
-
-  await page.route('**/admin/**', async (route) => {
-    const request = route.request();
-    const url = new URL(request.url());
-    const { pathname } = url;
-    const method = request.method();
-    const json = (status: number, body: unknown) =>
-      route.fulfill({
-        status,
-        contentType: 'application/json',
-        body: JSON.stringify(body),
-      });
-
-    if (method === 'GET' && pathname === '/admin/health') {
-      return json(200, HEALTH_RESPONSE);
-    }
-    if (method === 'GET' && pathname === '/admin/v1/principals') {
-      return json(200, { principals });
-    }
-    if (method === 'GET' && pathname === '/admin/v1/upstreams') {
-      return json(200, { upstreams: [] });
-    }
-    if (method === 'GET' && pathname === '/admin/credentials') {
-      credentialGetCount += 1;
-      return json(200, { credentials, observed: true });
-    }
-    if (method === 'GET' && pathname === '/admin/oauth/status') {
-      return json(200, { credentials: [], observed: true });
-    }
-    if (
-      method === 'POST' &&
-      pathname ===
-        '/admin/credentials/anthropic/credential-fixture/revoke'
-    ) {
-      revokePostCount += 1;
-      requestStarted.resolve(undefined);
-      await responseGate.promise;
-      credentials = [];
-      return json(200, {});
-    }
-
-    unexpectedRequests.push(`${method} ${pathname}${url.search}`);
-    return json(501, { error: 'unmocked_e2e_request' });
-  });
-
-  return {
-    credentialGetCount: () => credentialGetCount,
-    releaseRevoke: () => responseGate.resolve(undefined),
-    requestStarted: requestStarted.promise,
-    revokePostCount: () => revokePostCount,
-    unexpectedRequests,
-  };
-}
-
-
 test.describe('pending admin actions', () => {
   test('cache keepalive sessions load only after opening the drawer', async ({
     page,
@@ -310,6 +221,7 @@ test.describe('pending admin actions', () => {
     await expect.poll(() => fixtures.keepaliveSessionGetCount()).toBe(1);
     expect(fixtures.unexpectedRequests).toEqual([]);
   });
+
   test('API key issuance submits once, locks dismissal, preserves plaintext, and refreshes the key list', async ({
     page,
   }) => {
@@ -378,47 +290,4 @@ test.describe('pending admin actions', () => {
     expect(fixtures.unexpectedRequests).toEqual([]);
   });
 
-  test('credential revoke locks its modal until the delayed request succeeds', async ({
-    page,
-  }) => {
-    const fixtures = await installCredentialFixtures(page);
-    await page.goto('/credentials');
-
-    const apiKeys = page.getByTestId('api-keys-slot');
-    await expect(apiKeys.getByText('key@example.com', { exact: true })).toBeVisible();
-    const revoke = apiKeys.locator('button', { hasText: 'Revoke' });
-    await revoke.click();
-
-    const dialog = page.getByRole('dialog', { name: 'Revoke credential?' });
-    await expect(dialog).toBeVisible();
-    const confirm = dialog.getByRole('button', { name: 'Confirm revoke' });
-    await confirm.evaluate((button) => {
-      const element = button as HTMLButtonElement;
-      element.click();
-      element.click();
-    });
-    await fixtures.requestStarted;
-
-    const revoking = dialog.getByRole('button', { name: 'Revoking...' });
-    await expect(revoking).toBeVisible();
-    await expect(revoking).toBeDisabled();
-    await expect(revoking).toHaveAttribute('aria-busy', 'true');
-    await expect(
-      dialog.getByRole('status'),
-    ).toHaveText('Revoking anthropic credential — waiting for the server.');
-
-    await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeDisabled();
-    await expect(revoke).toBeDisabled();
-    await revoking.click({ force: true });
-    await dialog.getByRole('button', { name: 'Cancel' }).click({ force: true });
-    await tryModalDismissals(page, dialog);
-    expect(fixtures.revokePostCount()).toBe(1);
-
-    fixtures.releaseRevoke();
-
-    await expect(dialog).toBeHidden();
-    await expect(apiKeys.getByText('No API keys', { exact: true })).toBeVisible();
-    expect(fixtures.credentialGetCount()).toBeGreaterThan(1);
-    expect(fixtures.unexpectedRequests).toEqual([]);
-  });
 });
