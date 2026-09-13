@@ -13,7 +13,6 @@ pub struct TestStorage {
     request_events: Mutex<Vec<storage_api::RequestEvent>>,
     request_event_cursor: AtomicU64,
     config_draft: Mutex<storage_api::ConfigDraftState>,
-    killswitch_enabled: Mutex<bool>,
 }
 
 impl TestStorage {
@@ -251,15 +250,6 @@ impl storage_api::MetaStore for TestStorage {
 
     async fn backend_kind(&self) -> storage_api::StorageResult<storage_api::BackendKind> {
         Ok(storage_api::BackendKind::Sqlite)
-    }
-
-    async fn killswitch_enabled(&self) -> storage_api::StorageResult<bool> {
-        Ok(*lock_or_storage_error(&self.killswitch_enabled)?)
-    }
-
-    async fn set_killswitch_enabled(&self, enabled: bool) -> storage_api::StorageResult<()> {
-        *lock_or_storage_error(&self.killswitch_enabled)? = enabled;
-        Ok(())
     }
 }
 

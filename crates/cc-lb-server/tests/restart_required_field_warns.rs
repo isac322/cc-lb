@@ -3,7 +3,6 @@ use crate::reload_common;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use cc_lb_admin::CurrentConfig;
 use cc_lb_server::reload::ConfigWatcher;
 
 #[test]
@@ -18,7 +17,6 @@ fn restart_required_field_warns() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
-        Arc::new(cc_lb_engine::SystemClock),
     );
     reload_common::write_config(&config_path, 100, proxy_b);
 
@@ -40,7 +38,6 @@ fn upstream_affinity_ttl_reload_warns_with_exact_field_path() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
-        Arc::new(cc_lb_engine::SystemClock),
     );
     std::fs::write(
         &config_path,
@@ -53,12 +50,6 @@ fn upstream_affinity_ttl_reload_warns_with_exact_field_path() {
     });
 
     assert_eq!(watcher.current_config().upstream_affinity.ttl_days, 14);
-    assert!(
-        watcher
-            .restart_required_changes()
-            .iter()
-            .any(|change| change.field == "upstream_affinity.ttl_days")
-    );
     assert!(logs.contains("upstream_affinity.ttl_days"));
     assert!(logs.contains("restart required to apply"));
 }
@@ -88,7 +79,6 @@ fn reload_does_not_warn_per_principal_path_change() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
-        Arc::new(cc_lb_engine::SystemClock),
     );
     reload_common::write_config_with_principal_plugins(
         &config_path,

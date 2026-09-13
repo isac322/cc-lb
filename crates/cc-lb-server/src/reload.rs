@@ -5,12 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use cc_lb_admin::{DynamicViewRebinder, LastReloadStatus, ReloadOutcome};
+use cc_lb_admin::DynamicViewRebinder;
 use cc_lb_config::{
     Config, ConfigError, RestartRequiredField, StorageConfig, WasmtimeAllocationStrategy,
 };
 use cc_lb_engine::DynamicViewHolder;
-use cc_lb_engine::clock::{ClockHandle, unix_secs};
 use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
@@ -31,14 +30,11 @@ pub(crate) fn warn_removed_prompt_cache_switches(fields: &[String]) {
 
 pub struct ConfigWatcher {
     path: PathBuf,
-    process_start_config: Arc<Config>,
     current: ArcSwap<Config>,
     reload_tx: broadcast::Sender<Arc<Config>>,
     reloads_attempted: AtomicUsize,
-    last_reload_status: Arc<ArcSwap<Option<LastReloadStatus>>>,
     dynamic_view: Option<Arc<DynamicViewHolder>>,
     dynamic_view_rebinder: Mutex<Option<Arc<dyn DynamicViewRebinder>>>,
-    clock: ClockHandle,
 }
 
 impl ConfigWatcher {
@@ -46,9 +42,8 @@ impl ConfigWatcher {
         path: impl AsRef<Path>,
         initial_config: Config,
         _runtime: Arc<WasmtimeRuntime>,
-        clock: ClockHandle,
     ) -> Self {
-        Self::new_with_principal_view(path, initial_config, _runtime, None, clock)
+        Self::new_with_principal_view(path, initial_config, _runtime, None)
     }
 
     pub fn new_with_principal_view(
@@ -56,20 +51,15 @@ impl ConfigWatcher {
         initial_config: Config,
         _runtime: Arc<WasmtimeRuntime>,
         dynamic_view: Option<Arc<DynamicViewHolder>>,
-        clock: ClockHandle,
     ) -> Self {
         let (reload_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
-        let process_start_config = Arc::new(initial_config.clone());
         Self {
             path: path.as_ref().to_path_buf(),
-            process_start_config,
             current: ArcSwap::from_pointee(initial_config),
             reload_tx,
             reloads_attempted: AtomicUsize::new(0),
-            last_reload_status: Arc::new(ArcSwap::from(Arc::new(None))),
             dynamic_view,
             dynamic_view_rebinder: Mutex::new(None),
-            clock,
         }
     }
 
@@ -117,12 +107,11 @@ impl ConfigWatcher {
     }
 
     fn reload_from_path(&self, skip_unchanged: bool) -> Result<Arc<Config>, ReloadError> {
-        let config_path = self.config_path_string();
         let (new_config, config_warnings) = match Config::load_with_warnings(&self.path) {
             Ok(loaded) => loaded,
             Err(source) => {
                 self.record_attempt();
-                self.record_failure(source.to_string(), None, None, config_path);
+                self.record_failure(source.to_string());
                 return Err(ReloadError::Config(source));
             }
         };
@@ -152,7 +141,6 @@ impl ConfigWatcher {
         }
         self.current.store(Arc::clone(&new_config));
         metrics::counter!("cc_lb_config_reload_total", "outcome" => "success").increment(1);
-        self.record_success(config_path);
         let _receivers = self.reload_tx.send(Arc::clone(&new_config));
         tracing::info!(path = %self.path.display(), "configuration reload accepted");
         Ok(new_config)
@@ -203,59 +191,20 @@ impl ConfigWatcher {
         self.reloads_attempted.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn record_success(&self, config_path: Option<String>) {
-        self.last_reload_status
-            .store(Arc::new(Some(LastReloadStatus {
-                timestamp_unix_secs: unix_secs(self.clock.now()),
-                outcome: ReloadOutcome::Success,
-                config_path,
-            })));
-    }
-
-    fn record_failure(
-        &self,
-        reason: String,
-        principal: Option<String>,
-        plugin: Option<String>,
-        config_path: Option<String>,
-    ) {
+    fn record_failure(&self, reason: String) {
         metrics::counter!("cc_lb_config_reload_total", "outcome" => "failure").increment(1);
         metrics::counter!("cc_lb_config_reload_failed_total").increment(1);
         tracing::warn!(
             path = %self.path.display(),
             error = %reason,
-            principal = principal.as_deref(),
-            plugin = plugin.as_deref(),
             "configuration reload failed"
         );
-        self.last_reload_status
-            .store(Arc::new(Some(LastReloadStatus {
-                timestamp_unix_secs: unix_secs(self.clock.now()),
-                outcome: ReloadOutcome::Failure {
-                    reason,
-                    principal,
-                    plugin,
-                },
-                config_path,
-            })));
-    }
-
-    fn config_path_string(&self) -> Option<String> {
-        Some(self.path.display().to_string())
     }
 }
 
 impl cc_lb_admin::CurrentConfig for ConfigWatcher {
     fn current_config(&self) -> Arc<Config> {
         ConfigWatcher::current_config(self)
-    }
-
-    fn last_reload_status(&self) -> Option<LastReloadStatus> {
-        self.last_reload_status.load().as_ref().clone()
-    }
-
-    fn restart_required_changes(&self) -> Vec<RestartRequiredField> {
-        summarize_restart_required(&self.process_start_config, &self.current_config())
     }
 
     fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {

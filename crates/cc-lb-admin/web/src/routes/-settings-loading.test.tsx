@@ -10,7 +10,6 @@ import {
 import type React from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { Route as SettingsRoute } from './settings';
-import { Route as StatusRoute } from './status';
 
 const queryMocks = vi.hoisted(() => ({
   useApplyConfig: vi.fn(),
@@ -18,7 +17,6 @@ const queryMocks = vi.hoisted(() => ({
   useConfigDraft: vi.fn(),
   useConfigHistory: vi.fn(),
   useConfigSchema: vi.fn(),
-  useKillswitch: vi.fn(),
   useReloadConfig: vi.fn(),
   useSaveDraft: vi.fn(),
   useStatus: vi.fn(),
@@ -58,7 +56,6 @@ vi.mock('../lib/locale', () => ({
   }),
 }));
 
-const StatusComponent = StatusRoute.options.component as React.ComponentType;
 const SettingsComponent = SettingsRoute.options
   .component as React.ComponentType;
 
@@ -72,19 +69,6 @@ const loadedStatus = {
     target: 'aarch64-unknown-linux-gnu',
   },
   generation: 7,
-  upstreams: [],
-  principals: [],
-  plugin_chain_summary: {
-    principal_count_with_chain: 2,
-    total_entries: 4,
-  },
-  killswitch: false,
-  last_reload_status: {
-    ok: true,
-    applied_revision: 7,
-    applied_at_unix_secs: 1_722_340_800,
-  },
-  restart_required_changes: [],
 };
 
 const loadedDraft = {
@@ -141,7 +125,6 @@ beforeEach(() => {
   queryMocks.useConfigSchema.mockReturnValue(loadingResult());
   queryMocks.useConfigHistory.mockReturnValue(loadingResult());
 
-  queryMocks.useKillswitch.mockReturnValue(mutationResult());
   queryMocks.useApplyConfig.mockReturnValue(mutationResult());
   queryMocks.useReloadConfig.mockReturnValue(mutationResult());
   queryMocks.useSaveDraft.mockReturnValue(mutationResult());
@@ -151,55 +134,6 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
-});
-
-test('status cold load reserves restart and system geometry', () => {
-  render(<StatusComponent />);
-
-  const restartBody = screen.getByTestId('restart-required-body');
-  expect(restartBody.className).toContain('min-h-[72px]');
-  expect(restartBody.querySelectorAll('.skeleton')).toHaveLength(2);
-
-  const systemCards = screen.getAllByTestId('system-card');
-  expect(systemCards).toHaveLength(3);
-  for (const card of systemCards) {
-    expect(card.className).toContain('min-h-[144px]');
-  }
-  expect(
-    screen.getByTestId('system-last-reload-slot').querySelector('.skeleton'),
-  ).not.toBeNull();
-  expect(screen.getByTestId('system-last-reload-slot').className).toContain(
-    'min-w-20',
-  );
-  expect(
-    screen.getByTestId('system-principal-chain-count-slot').className,
-  ).toContain('min-w-8');
-  expect(
-    screen.getByTestId('system-total-chain-count-slot').className,
-  ).toContain('min-w-8');
-  expect(
-    screen
-      .getByTestId('system-killswitch-status-slot')
-      .querySelector('.skeleton'),
-  ).not.toBeNull();
-  expect(
-    screen.getByTestId('system-killswitch-status-slot').className,
-  ).toContain('min-w-14');
-  const killswitchControl = screen.getByTestId(
-    'killswitch-control',
-  ) as HTMLButtonElement;
-  expect(killswitchControl.disabled).toBe(true);
-  expect(killswitchControl.querySelector('.skeleton')).not.toBeNull();
-});
-
-test('status resolved state retains restart geometry', () => {
-  queryMocks.useStatus.mockReturnValue(loadedResult(loadedStatus));
-
-  render(<StatusComponent />);
-
-  expect(screen.getByTestId('restart-required-body').className).toContain(
-    'min-h-[72px]',
-  );
 });
 
 test('settings cold load skeletonizes fixed metadata, checklist, and history slots', () => {
@@ -784,100 +718,4 @@ test('configuration export exposes download progress and blocks duplicate clicks
 
   fireEvent.click(downloading);
   expect(apiMocks.downloadJson).toHaveBeenCalledTimes(1);
-});
-
-test('killswitch disengage retains its pending action when status changes', () => {
-  const mutate = vi.fn();
-  queryMocks.useStatus.mockReturnValue(
-    loadedResult({ ...loadedStatus, killswitch: true }),
-  );
-  queryMocks.useKillswitch.mockReturnValue({
-    mutate,
-    isPending: false,
-    variables: undefined,
-  });
-
-  const view = render(<StatusComponent />);
-  fireEvent.click(screen.getByRole('button', { name: 'Disengage' }));
-  expect(mutate).toHaveBeenCalledTimes(1);
-  expect(mutate.mock.calls[0]?.[0]).toBe(false);
-
-  queryMocks.useStatus.mockReturnValue(
-    loadedResult({ ...loadedStatus, killswitch: false }),
-  );
-  queryMocks.useKillswitch.mockReturnValue({
-    mutate,
-    isPending: true,
-    variables: false,
-  });
-  view.rerender(<StatusComponent />);
-
-  const disengaging = screen.getByRole('button', { name: 'Disengaging...' });
-  expect(disengaging.hasAttribute('disabled')).toBe(true);
-  expect(disengaging.getAttribute('aria-busy')).toBe('true');
-  expect(disengaging.querySelector('svg.animate-spin')).not.toBeNull();
-
-  fireEvent.click(disengaging);
-  expect(mutate).toHaveBeenCalledTimes(1);
-});
-
-test('killswitch engage confirmation stays open and locked until success', () => {
-  const mutate = vi.fn();
-  queryMocks.useStatus.mockReturnValue(
-    loadedResult({ ...loadedStatus, killswitch: false }),
-  );
-  queryMocks.useKillswitch.mockReturnValue({
-    mutate,
-    isPending: false,
-    variables: undefined,
-  });
-
-  const view = render(<StatusComponent />);
-  fireEvent.click(screen.getByRole('button', { name: 'Engage killswitch' }));
-
-  let dialog = screen.getByRole('alertdialog', {
-    name: 'Engage killswitch?',
-  });
-  fireEvent.click(
-    within(dialog).getByRole('button', { name: 'Engage killswitch' }),
-  );
-  expect(mutate).toHaveBeenCalledTimes(1);
-  expect(mutate.mock.calls[0]?.[0]).toBe(true);
-  expect(
-    screen.getByRole('alertdialog', { name: 'Engage killswitch?' }),
-  ).toBeDefined();
-
-  queryMocks.useStatus.mockReturnValue(
-    loadedResult({ ...loadedStatus, killswitch: true }),
-  );
-  queryMocks.useKillswitch.mockReturnValue({
-    mutate,
-    isPending: true,
-    variables: true,
-  });
-  view.rerender(<StatusComponent />);
-
-  dialog = screen.getByRole('alertdialog', { name: 'Engage killswitch?' });
-  const engaging = within(dialog).getByRole('button', {
-    name: 'Engaging...',
-  });
-  expect(engaging.hasAttribute('disabled')).toBe(true);
-  expect(engaging.getAttribute('aria-busy')).toBe('true');
-  expect(engaging.querySelector('svg.animate-spin')).not.toBeNull();
-  expect(
-    within(dialog)
-      .getByRole('button', { name: 'Cancel' })
-      .hasAttribute('disabled'),
-  ).toBe(true);
-  expect(
-    screen.getByTestId('killswitch-control').hasAttribute('disabled'),
-  ).toBe(true);
-
-  fireEvent.click(engaging);
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-  fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
-  expect(mutate).toHaveBeenCalledTimes(1);
-  expect(
-    screen.getByRole('alertdialog', { name: 'Engage killswitch?' }),
-  ).toBeDefined();
 });

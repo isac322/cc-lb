@@ -213,11 +213,6 @@ async function installAppFixtures(
         build: { rust_version: 'mock', profile: 'debug', target: 'mock' },
         generation: 1,
         upstreams: upstreams.map((upstream) => ({ id: upstream.id, name: upstream.name, status: upstream.enabled ? 'active' : 'disabled', last_apply_at_unix_secs: null, last_apply_error: null })),
-        principals: [],
-        plugin_chain_summary: { principal_count_with_chain: 0, total_entries: 0 },
-        killswitch: false,
-        last_reload_status: null,
-        restart_required_changes: [],
       });
     }
     if (pathname === '/admin/usage') {

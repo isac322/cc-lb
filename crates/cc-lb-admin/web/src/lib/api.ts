@@ -717,23 +717,6 @@ export interface ConfigHistoryResponse {
   history: ConfigHistoryItem[];
 }
 
-interface PluginStatusEntry {
-  slot: string;
-  name: string;
-  wasm_path: string;
-  loaded: boolean;
-  disabled: boolean;
-  failure_count: number;
-  last_error: string | null;
-  sse_per_event: boolean | null;
-  batched_events_per_flush: number | null;
-  batched_flush_ms: number | null;
-}
-
-export interface PluginsStatusResponse {
-  plugins: PluginStatusEntry[];
-}
-
 export interface UpstreamOAuthStatusResponse {
   upstream_id: string;
   kind: string;

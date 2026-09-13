@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
-use cc_lb_config::RestartRequiredField;
 use cc_lb_control::ApplyStatus;
 use cc_lb_domain::ReplicaIdentity;
 use cc_lb_storage_api::principal::Limit;
@@ -13,7 +12,7 @@ use cc_lb_storage_api::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{AdminState, LastReloadStatus};
+use crate::AdminState;
 
 const STORE_PAGE_LIMIT: usize = 1000;
 const EXPORT_SCHEMA_VERSION: u64 = 1;
@@ -33,11 +32,6 @@ struct StatusResponse {
     replica_id: Option<String>,
     generation: u64,
     upstreams: Vec<StatusUpstream>,
-    principals: Vec<StatusPrincipal>,
-    plugin_chain_summary: PluginChainSummary,
-    killswitch: bool,
-    last_reload_status: Option<LastReloadStatus>,
-    restart_required_changes: Vec<RestartRequiredField>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,20 +48,6 @@ struct StatusUpstream {
     status: &'static str,
     last_apply_at_unix_secs: u64,
     last_apply_error: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct StatusPrincipal {
-    id: String,
-    name: String,
-    enabled: bool,
-    last_apply_error: Option<String>,
-}
-
-#[derive(Debug, Default, Serialize)]
-struct PluginChainSummary {
-    principal_count_with_chain: usize,
-    total_entries: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,8 +152,6 @@ async fn build_status(state: &AdminState) -> Result<StatusResponse, StatusError>
         .collect::<Vec<_>>();
     upstreams.sort_by(|left, right| left.name.cmp(&right.name));
 
-    let principals = all_principals(storage).await?;
-    let chain_summary = plugin_chain_summary(storage, &principals).await?;
     let replica_identity = state
         .lifecycle
         .as_ref()
@@ -187,11 +165,6 @@ async fn build_status(state: &AdminState) -> Result<StatusResponse, StatusError>
         replica_id: replica_identity.map(replica_id),
         generation: view.generation,
         upstreams,
-        principals: principals.into_iter().map(status_principal).collect(),
-        plugin_chain_summary: chain_summary,
-        killswitch: storage.killswitch_enabled().await?,
-        last_reload_status: state.config.last_reload_status(),
-        restart_required_changes: state.config.restart_required_changes(),
     })
 }
 
@@ -286,30 +259,6 @@ async fn all_registry(storage: &dyn Storage) -> Result<Vec<WasmRegistryEntry>, S
     Ok(all)
 }
 
-async fn plugin_chain_summary(
-    storage: &dyn Storage,
-    principals: &[PrincipalRecord],
-) -> Result<PluginChainSummary, StorageError> {
-    let mut summary = PluginChainSummary::default();
-    for principal in principals {
-        let router = storage
-            .list_chain_for_principal(principal.id, PluginSlotKind::Router)
-            .await?;
-        let hooks = storage
-            .list_chain_for_principal(principal.id, PluginSlotKind::ObservabilityHook)
-            .await?;
-        let shape = storage
-            .list_chain_for_principal(principal.id, PluginSlotKind::Shape)
-            .await?;
-        let count = router.len() + hooks.len() + shape.len();
-        if count > 0 {
-            summary.principal_count_with_chain += 1;
-            summary.total_entries += count;
-        }
-    }
-    Ok(summary)
-}
-
 async fn export_chains(
     storage: &dyn Storage,
     principals: &[PrincipalRecord],
@@ -361,15 +310,6 @@ fn export_chain_entries(
         .collect::<Vec<_>>();
     exported.sort_by_key(|entry| entry.order);
     exported
-}
-
-fn status_principal(record: PrincipalRecord) -> StatusPrincipal {
-    StatusPrincipal {
-        id: record.id.to_string(),
-        name: record.name,
-        enabled: record.enabled,
-        last_apply_error: record.last_apply_error,
-    }
 }
 
 fn export_upstream(record: UpstreamRecord) -> ExportUpstream {
