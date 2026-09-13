@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeSet, HashSet},
     str::FromStr,
-    sync::Arc,
 };
 
 use cc_lb_storage_api::{
