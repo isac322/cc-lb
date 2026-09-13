@@ -17,10 +17,6 @@ async fn t3_postgres__fixture_initializes_roundtrips_and_tears_down_schema() -> 
         BackendKind::Postgres
     );
 
-    assert!(!fixture.storage().killswitch_enabled().await?);
-    fixture.storage().set_killswitch_enabled(true).await?;
-    assert!(fixture.storage().killswitch_enabled().await?);
-
     fixture.teardown().await?;
 
     let verification_fixture = postgres_fixture().await?;

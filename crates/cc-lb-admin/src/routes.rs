@@ -889,16 +889,6 @@ fn audit_write_failed_response(action: &str, error: &StorageError) -> axum::resp
     dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed")
 }
 
-fn emit_admin_audit(
-    state: &AdminState,
-    payload: AuditPayload,
-    route: &str,
-    api_key_id: Option<String>,
-    status: u16,
-) {
-    emit_admin_action(state, &payload.to_string(), route, api_key_id, status);
-}
-
 #[allow(non_snake_case)]
 #[cfg(test)]
 mod tests {

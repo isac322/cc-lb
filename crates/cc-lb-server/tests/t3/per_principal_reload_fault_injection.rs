@@ -25,7 +25,6 @@ fn t3__config_reload_is_storage_driven_and_keeps_runtime_view() {
         initial_config,
         runtime.clone(),
         Some(dynamic_view.clone()),
-        cc_lb_testkit::fixed_clock(1_700_000_000),
     );
     watcher
         .reload_now()
