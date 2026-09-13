@@ -72,16 +72,11 @@ async fn events_recent_smoke() {
 }
 
 #[tokio::test]
-async fn status_handler_smoke() {
+async fn v1_status_handler_smoke() {
     let server = spawn_admin_server().await;
-    let (legacy_status, _, legacy_body) = server.client.get("/admin/status").await;
-    let (v1_status, _, v1_body) = server.client.get("/admin/v1/status").await;
+    let (status, _, _) = server.client.get("/admin/v1/status").await;
 
-    assert_eq!(legacy_status, StatusCode::OK);
-    assert_eq!(v1_status, StatusCode::OK);
-    assert_eq!(legacy_body["version"], v1_body["version"]);
-    assert_eq!(legacy_body["git_sha"], v1_body["git_sha"]);
-    assert_eq!(legacy_body["generation"], v1_body["generation"]);
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]

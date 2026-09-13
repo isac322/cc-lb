@@ -31,13 +31,6 @@ impl MetaStore for PostgresStorage {
         .await
         .map_err(map_sqlx_error)?;
 
-        sqlx::query(
-            "INSERT INTO meta (key, value) VALUES ('killswitch_enabled', 'false')              ON CONFLICT (key) DO NOTHING",
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
         let stored = self.backend_kind().await?;
         if stored != requested {
             return Err(StorageError::BackendKindMismatch {
@@ -82,31 +75,6 @@ impl MetaStore for PostgresStorage {
         })?)
     }
 
-    async fn killswitch_enabled(&self) -> StorageResult<bool> {
-        let value: Option<String> =
-            sqlx::query_scalar("SELECT value FROM meta WHERE key = 'killswitch_enabled'")
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(map_sqlx_error)?;
-
-        value
-            .map(|value| parse_bool(&value, "killswitch_enabled"))
-            .transpose()
-            .map(|value| value.unwrap_or(false))
-    }
-
-    async fn set_killswitch_enabled(&self, enabled: bool) -> StorageResult<()> {
-        sqlx::query(
-            "INSERT INTO meta (key, value) VALUES ('killswitch_enabled', $1)              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-        )
-        .bind(enabled.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        Ok(())
-    }
-
     async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
         sqlx::query_scalar("SELECT value FROM meta WHERE key = $1")
             .bind(key)
@@ -142,14 +110,4 @@ fn parse_contract_version(value: &str) -> StorageResult<u32> {
     value.parse::<u32>().map_err(|_| StorageError::Corrupted {
         message: format!("invalid contract_version meta value {value}"),
     })
-}
-
-fn parse_bool(value: &str, key: &str) -> StorageResult<bool> {
-    match value {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        value => Err(StorageError::Corrupted {
-            message: format!("invalid {key} meta value {value}"),
-        }),
-    }
 }

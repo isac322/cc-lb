@@ -130,7 +130,6 @@ async fn legacy_admin_routes_are_aliased_under_v1() {
         "/admin/v1/dashboard/summary?range=1h",
         "/admin/v1/dashboard/usage?range=1h",
         "/admin/v1/events/recent",
-        "/admin/v1/killswitch",
     ] {
         let (status, _, _) = server.client.get(uri).await;
         assert_ne!(status, StatusCode::NOT_FOUND, "{uri} should be mounted");

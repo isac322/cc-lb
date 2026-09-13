@@ -190,8 +190,6 @@ remove the entry or change its position among other router plugins.
 | Method | Path | Auth | Request Body | Response Body | Error Codes |
 |---|---|---|---|---|---|
 | GET | `/admin/v1/status` | Bearer | None | StatusResponse | `storage_unavailable` |
-
-`/admin/status` is a legacy alias for `/admin/v1/status` and returns the same `StatusResponse` body.
 | GET | `/admin/v1/export` | Bearer | None | ExportResponse | `storage_unavailable` |
 
 ## OAuth Subscription Flow

@@ -48,8 +48,6 @@ mod export_supported_slots;
 mod insert_chain_validates_wire_version;
 #[path = "internal_partials.rs"]
 mod internal_partials;
-#[path = "killswitch_persists.rs"]
-mod killswitch_persists;
 #[path = "new_admin_modules_smoke.rs"]
 mod new_admin_modules_smoke;
 #[path = "oauth_no_authn_fallback.rs"]

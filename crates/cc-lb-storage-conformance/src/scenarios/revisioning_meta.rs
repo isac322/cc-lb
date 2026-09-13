@@ -35,7 +35,6 @@ where
     meta_contract_version(Arc::clone(&backend)).await?;
     meta_backend_kind_stamp(Arc::clone(&backend)).await?;
     meta_backend_kind_mismatch(Arc::clone(&backend)).await?;
-    meta_killswitch_persistence(Arc::clone(&backend)).await?;
 
     Ok(())
 }
@@ -320,29 +319,6 @@ where
     ));
 
     Ok(())
-}
-
-pub async fn meta_killswitch_persistence<B>(backend: Arc<B>) -> Result<()>
-where
-    B: ConformanceBackend,
-{
-    let fixture = backend.create_fixture().await?;
-
-    let storage = backend.open(&fixture).await?;
-    assert!(!MetaStore::killswitch_enabled(&storage).await?);
-    MetaStore::set_killswitch_enabled(&storage, true).await?;
-    drop(storage);
-
-    let reopened = backend.open(&fixture).await?;
-    assert!(MetaStore::killswitch_enabled(&reopened).await?);
-    MetaStore::set_killswitch_enabled(&reopened, false).await?;
-    drop(reopened);
-
-    let reopened = backend.open(&fixture).await?;
-    assert!(!MetaStore::killswitch_enabled(&reopened).await?);
-    drop(reopened);
-
-    backend.teardown(fixture).await
 }
 
 fn history_summary(seed: u64) -> HistorySummary {

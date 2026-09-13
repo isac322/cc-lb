@@ -34,7 +34,6 @@ import {
   getJson,
   type KeyListResponse,
   type LatestResponse,
-  type PluginsStatusResponse,
   type PoolHistoryResponse,
   type PrincipalLimitsResponse,
   patchJson,
@@ -71,7 +70,6 @@ export const POLLING_INTERVALS = {
   QUOTA_POOL_HISTORY_MS: 30_000,
   STATUS_MS: 15_000,
   UPSTREAMS_MS: 30_000,
-  PLUGIN_STATUS_MS: 15_000,
   WARMUP_SUMMARY_MS: 30_000,
   UPSTREAM_SUB_META_MS: 30_000,
   RECENT_EVENTS_MS: 10_000,
@@ -219,28 +217,6 @@ interface StatusResponse {
   build: { rust_version: string; profile: string; target: string };
   generation: number;
   upstreams: StatusUpstream[];
-  principals: {
-    id: string;
-    name: string;
-    enabled: boolean;
-    last_apply_error: string | null;
-  }[];
-  plugin_chain_summary: {
-    principal_count_with_chain: number;
-    total_entries: number;
-  };
-  killswitch: boolean;
-  last_reload_status: {
-    ok: boolean;
-    applied_revision: number;
-    applied_at_unix_secs: number;
-  } | null;
-  restart_required_changes: {
-    field: string;
-    current: string;
-    new: string;
-    reason: string;
-  }[];
 }
 
 interface QuotaQueryIdentity {
@@ -345,7 +321,6 @@ export const qk = {
   upstreamOauthStatus: (id: string) => ['upstream-oauth-status', id] as const,
   upstreamSubscriptionMetadata: (id: string) =>
     ['upstream-subscription-metadata', id] as const,
-  pluginStatus: ['plugins', 'status'] as const,
   configCurrent: ['config', 'current'] as const,
   configSchema: ['config', 'schema'] as const,
   configDraft: ['config', 'draft'] as const,
@@ -807,15 +782,6 @@ export function useTriggerSubscriptionMetadataRefresh() {
       });
     },
   });
-}
-export function usePluginStatus() {
-  return usePolledData(
-    {
-      queryKey: qk.pluginStatus,
-      queryFn: () => getJson<PluginsStatusResponse>('/admin/status'),
-    },
-    POLLING_INTERVALS.PLUGIN_STATUS_MS,
-  );
 }
 export function useConfigCurrent() {
   return useQuery({
@@ -1609,19 +1575,6 @@ export function useUpdateRouterTerminalStrategy() {
       ),
     onSuccess: (_d, vars) =>
       qc.invalidateQueries({ queryKey: ['router-terminal', vars.id] }),
-  });
-}
-export function useKillswitch() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (enable: boolean) =>
-      enable
-        ? postJson<
-            { status: string; killswitch: boolean },
-            Record<string, never>
-          >('/admin/killswitch', {})
-        : deleteJson('/admin/killswitch'),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.status }),
   });
 }
 export function useApplyConfig() {

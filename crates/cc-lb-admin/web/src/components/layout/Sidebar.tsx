@@ -1,6 +1,5 @@
 import { Link } from '@tanstack/react-router';
 import {
-  Activity,
   Blocks,
   FileClock,
   LayoutDashboard,
@@ -18,7 +17,6 @@ const NAV = [
   { path: '/plugins', label: 'Plugins', Icon: Blocks },
   { path: '/logs', label: 'Logs', Icon: ScrollText },
   { path: '/audit', label: 'Audit', Icon: FileClock },
-  { path: '/status', label: 'Status', Icon: Activity },
   { path: '/settings', label: 'Settings', Icon: SettingsIcon },
 ] as const;
 

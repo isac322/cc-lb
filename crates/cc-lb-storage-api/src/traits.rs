@@ -362,10 +362,6 @@ pub trait MetaStore: Send + Sync {
 
     async fn backend_kind(&self) -> StorageResult<BackendKind>;
 
-    async fn killswitch_enabled(&self) -> StorageResult<bool>;
-
-    async fn set_killswitch_enabled(&self, enabled: bool) -> StorageResult<()>;
-
     async fn get_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
         let _ = key;
         Err(StorageError::Fatal {

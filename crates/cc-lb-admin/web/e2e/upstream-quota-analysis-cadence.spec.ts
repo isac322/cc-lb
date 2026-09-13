@@ -160,14 +160,6 @@ async function installAppFixtures(
             last_apply_error: null,
           },
         ],
-        principals: [],
-        plugin_chain_summary: {
-          principal_count_with_chain: 0,
-          total_entries: 0,
-        },
-        killswitch: false,
-        last_reload_status: null,
-        restart_required_changes: [],
       });
     }
     if (pathname === '/admin/usage') {

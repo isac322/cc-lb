@@ -872,7 +872,6 @@ curl -s http://127.0.0.1:8080/v1/messages \
       <tr><td><code>GET /admin/audit?from=&amp;to=&amp;limit=</code></td><td>감사 로그</td></tr>
       <tr><td><code>GET /admin/upstreams</code></td><td>upstream 상태 (breaker/drain)</td></tr>
       <tr><td><code>POST /admin/upstreams/{name}/drain</code></td><td>특정 upstream drain</td></tr>
-      <tr><td><code>POST /admin/killswitch</code> / <code>DELETE</code></td><td>전역 차단 토글</td></tr>
       <tr><td><code>GET /admin/config/current</code></td><td>live config 스냅샷</td></tr>
       <tr><td><code>POST /admin/config/reload</code></td><td>self SIGHUP</td></tr>
       <tr><td><code>GET /</code></td><td>embedded admin UI (HTML)</td></tr>

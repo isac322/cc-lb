@@ -14,7 +14,6 @@ vi.mock('../../lib/queries', async () => {
     useDeletePlugin: vi.fn(),
     usePatchPlugin: vi.fn(),
     usePluginReferences: vi.fn(),
-    useStatus: vi.fn(),
   };
 });
 
@@ -110,16 +109,6 @@ beforeEach(() => {
         isPending: patchIsPending,
       }) as never,
   );
-  vi.mocked(queries.useStatus).mockReturnValue({
-    data: {
-      killswitch: false,
-      plugin_chain_summary: {
-        principal_count_with_chain: 1,
-        total_entries: 1,
-      },
-    },
-    isLoading: false,
-  } as never);
   setReferencesQuery(referencesQuery([]));
 });
 
@@ -146,38 +135,6 @@ describe('PluginDetail loading geometry', () => {
 
     const slot = screen.getByTestId('plugin-used-by-slot');
     expect(slot.querySelectorAll('.skeleton')).toHaveLength(2);
-  });
-
-  test('reserves the Global Usage line while status resolves', () => {
-    vi.mocked(queries.useStatus).mockReturnValue({
-      data: undefined,
-      isLoading: true,
-    } as never);
-
-    const view = render(
-      <PluginDetailOperate plugin={plugin} onDelete={() => {}} />,
-    );
-
-    let slot = screen.getByTestId('plugin-global-usage-slot');
-    expect(slot.className).toContain('min-h-4');
-    expect(slot.querySelectorAll('.skeleton')).toHaveLength(1);
-
-    vi.mocked(queries.useStatus).mockReturnValue({
-      data: {
-        killswitch: false,
-        plugin_chain_summary: {
-          principal_count_with_chain: 1,
-          total_entries: 1,
-        },
-      },
-      isLoading: false,
-    } as never);
-    view.rerender(<PluginDetailOperate plugin={plugin} onDelete={() => {}} />);
-
-    slot = screen.getByTestId('plugin-global-usage-slot');
-    expect(slot.className).toContain('min-h-4');
-    expect(slot.querySelectorAll('.skeleton')).toHaveLength(0);
-    expect(slot.textContent).toContain('1 entries across 1 principals.');
   });
 
   test('locks the label draft and shows save progress while patching', () => {
