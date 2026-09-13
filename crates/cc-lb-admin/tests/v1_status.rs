@@ -8,8 +8,8 @@ use cc_lb_control::{ApplyStatus, DynamicViewBuilder, UpstreamStatusEntry, Upstre
 use cc_lb_domain::ReplicaIdentity;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate,
-    PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
+    PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind,
+    PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
 };
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use serde_json::{Value, json};
@@ -157,23 +157,6 @@ async fn export_round_trips_through_stable_key_ordering() {
     let second = serde_json::to_string(&round_tripped).unwrap();
     assert_eq!(first, second);
     insta::assert_json_snapshot!(body);
-}
-
-#[tokio::test]
-async fn status_endpoint_includes_killswitch_state() {
-    let (_dir, storage) = temp_storage().await;
-    storage.set_killswitch_enabled(true).await.unwrap();
-
-    let (status, _, body, _) = authed_json(
-        app(test_state(Config::default(), Some(storage))),
-        "GET",
-        "/admin/v1/status",
-        None,
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["killswitch"], true);
 }
 
 fn bump_dynamic_generation(state: &cc_lb_admin::AdminState, snapshot: UpstreamStatusSnapshot) {

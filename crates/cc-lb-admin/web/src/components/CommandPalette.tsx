@@ -7,7 +7,6 @@ import {
   CornerDownLeft,
   LayoutDashboard,
   Plus,
-  Power,
   Server,
   Settings,
   Users,
@@ -101,10 +100,6 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 <Command.Item onSelect={() => go('/logs')}>
                   <Box className="w-4 h-4 text-text-faint" />
                   Go to Logs
-                </Command.Item>
-                <Command.Item onSelect={() => go('/status')}>
-                  <Power className="w-4 h-4 text-text-faint" />
-                  Go to Status
                 </Command.Item>
                 <Command.Item onSelect={() => go('/settings')}>
                   <Settings className="w-4 h-4 text-text-faint" />

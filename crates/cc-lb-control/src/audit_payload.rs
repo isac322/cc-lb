@@ -74,8 +74,6 @@ pub enum AuditPayload {
         sha256_hex: String,
         supported_slots: Vec<String>,
     },
-    KillswitchOn,
-    KillswitchOff,
 }
 
 impl fmt::Display for AuditPayload {
@@ -189,8 +187,6 @@ impl fmt::Display for AuditPayload {
                 principal_id,
                 slots_changed.join(",")
             ),
-            AuditPayload::KillswitchOn => write!(f, "killswitch_on"),
-            AuditPayload::KillswitchOff => write!(f, "killswitch_off"),
         }
     }
 }

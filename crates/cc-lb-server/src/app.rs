@@ -77,7 +77,7 @@ use crate::prompt_cache_observation_sink::{
 };
 use crate::reconcile::Reconciler;
 use crate::refresh::{LazyRefreshClaimGuard, LazyRefresher};
-use crate::reload::{ConfigWatcher, summarize_restart_required};
+use crate::reload::ConfigWatcher;
 use crate::replica;
 use crate::signal;
 use crate::state_machine::{ServerState, ServerStateHandle};
@@ -1523,7 +1523,6 @@ async fn build_app_with_storage_inner(
             config.clone(),
             Arc::clone(&runtime),
             Some(dynamic_view.clone()),
-            clock.clone(),
         ));
         watcher.set_dynamic_view_rebinder(admin_rebinder.clone());
         watcher
@@ -2182,7 +2181,6 @@ fn load_cluster_token(config: &Config) -> Result<String, BuildError> {
 }
 
 struct InMemoryCurrentConfig {
-    process_start_config: Arc<Config>,
     current: ArcSwap<Config>,
     draft: Mutex<Option<Config>>,
     dynamic_view: Arc<DynamicViewHolder>,
@@ -2195,9 +2193,7 @@ impl InMemoryCurrentConfig {
         dynamic_view: Arc<DynamicViewHolder>,
         dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,
     ) -> Self {
-        let process_start_config = Arc::new(config.clone());
         Self {
-            process_start_config,
             current: ArcSwap::from_pointee(config),
             draft: Mutex::new(None),
             dynamic_view,
@@ -2209,10 +2205,6 @@ impl InMemoryCurrentConfig {
 impl CurrentConfig for InMemoryCurrentConfig {
     fn current_config(&self) -> Arc<Config> {
         self.current.load_full()
-    }
-
-    fn restart_required_changes(&self) -> Vec<cc_lb_config::RestartRequiredField> {
-        summarize_restart_required(&self.process_start_config, &self.current_config())
     }
 
     fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {

@@ -78,16 +78,8 @@ async fn every_postgres_storage_path_writes_a_row() -> TestResult<()> {
 
     complete_oauth_credentials(&app).await?;
     put_config_draft(&app, &database_url, upstream.addr).await?;
-    toggle_killswitch(&app).await?;
 
     assert_table_count_at_least(&pool, "config_draft_v1", 1).await?;
-    assert_table_count_at_least(&pool, "killswitch_v1", 1).await?;
-    let killswitch_meta: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM meta WHERE key = 'killswitch_enabled' AND value = 'true'",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(killswitch_meta, 1);
 
     drop(app);
     let restarted_pool = postgres_pool(&database_url).await?;
@@ -303,12 +295,6 @@ async fn put_config_draft(
     Ok(())
 }
 
-async fn toggle_killswitch(app: &App) -> TestResult<()> {
-    let response = admin_json(app, "POST", "/admin/killswitch", None).await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    Ok(())
-}
-
 async fn admin_json(
     app: &App,
     method: &str,
@@ -377,11 +363,6 @@ async fn table_count(pool: &PgPool, table: &str) -> TestResult<i64> {
         }
         "config_draft_v1" => {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM config_draft_v1")
-                .fetch_one(pool)
-                .await?
-        }
-        "killswitch_v1" => {
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM killswitch_v1")
                 .fetch_one(pool)
                 .await?
         }

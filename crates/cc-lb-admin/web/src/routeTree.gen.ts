@@ -15,7 +15,6 @@ import { Route as LogsRouteImport } from './routes/logs'
 import { Route as PluginsRouteImport } from './routes/plugins'
 import { Route as PrincipalsRouteImport } from './routes/principals'
 import { Route as SettingsRouteImport } from './routes/settings'
-import { Route as StatusRouteImport } from './routes/status'
 import { Route as UpstreamsRouteImport } from './routes/upstreams'
 
 const IndexRoute = IndexRouteImport.update({
@@ -48,11 +47,6 @@ const SettingsRoute = SettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
-const StatusRoute = StatusRouteImport.update({
-  id: '/status',
-  path: '/status',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const UpstreamsRoute = UpstreamsRouteImport.update({
   id: '/upstreams',
   path: '/upstreams',
@@ -66,7 +60,6 @@ export interface FileRoutesByFullPath {
   '/plugins': typeof PluginsRoute
   '/principals': typeof PrincipalsRoute
   '/settings': typeof SettingsRoute
-  '/status': typeof StatusRoute
   '/upstreams': typeof UpstreamsRoute
 }
 export interface FileRoutesByTo {
@@ -76,7 +69,6 @@ export interface FileRoutesByTo {
   '/plugins': typeof PluginsRoute
   '/principals': typeof PrincipalsRoute
   '/settings': typeof SettingsRoute
-  '/status': typeof StatusRoute
   '/upstreams': typeof UpstreamsRoute
 }
 export interface FileRoutesById {
@@ -87,7 +79,6 @@ export interface FileRoutesById {
   '/plugins': typeof PluginsRoute
   '/principals': typeof PrincipalsRoute
   '/settings': typeof SettingsRoute
-  '/status': typeof StatusRoute
   '/upstreams': typeof UpstreamsRoute
 }
 export interface FileRouteTypes {
@@ -99,7 +90,6 @@ export interface FileRouteTypes {
     | '/plugins'
     | '/principals'
     | '/settings'
-    | '/status'
     | '/upstreams'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -109,7 +99,6 @@ export interface FileRouteTypes {
     | '/plugins'
     | '/principals'
     | '/settings'
-    | '/status'
     | '/upstreams'
   id:
     | '__root__'
@@ -119,7 +108,6 @@ export interface FileRouteTypes {
     | '/plugins'
     | '/principals'
     | '/settings'
-    | '/status'
     | '/upstreams'
   fileRoutesById: FileRoutesById
 }
@@ -130,7 +118,6 @@ export interface RootRouteChildren {
   PluginsRoute: typeof PluginsRoute
   PrincipalsRoute: typeof PrincipalsRoute
   SettingsRoute: typeof SettingsRoute
-  StatusRoute: typeof StatusRoute
   UpstreamsRoute: typeof UpstreamsRoute
 }
 
@@ -178,13 +165,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/status': {
-      id: '/status'
-      path: '/status'
-      fullPath: '/status'
-      preLoaderRoute: typeof StatusRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/upstreams': {
       id: '/upstreams'
       path: '/upstreams'
@@ -202,7 +182,6 @@ const rootRouteChildren: RootRouteChildren = {
   PluginsRoute: PluginsRoute,
   PrincipalsRoute: PrincipalsRoute,
   SettingsRoute: SettingsRoute,
-  StatusRoute: StatusRoute,
   UpstreamsRoute: UpstreamsRoute,
 }
 export const routeTree = rootRouteImport

@@ -77,7 +77,6 @@ vi.mock('../lib/queries', async () => {
     useUploadWasm: vi.fn(),
     useDeletePlugin: vi.fn(),
     useGcPlugins: vi.fn(),
-    usePluginStatus: vi.fn(),
     usePrincipals: vi.fn(),
     usePluginChain: vi.fn(),
     usePluginReferences: vi.fn(),

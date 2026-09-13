@@ -17,7 +17,6 @@ fn invalid_new_config_keeps_old() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
-        Arc::new(cc_lb_engine::SystemClock),
     );
     let before_failed = reload_common::counter_value(&handle, "cc_lb_config_reload_failed_total");
     std::fs::write(&config_path, "[listener\nthis is not valid toml").unwrap();
@@ -67,7 +66,6 @@ fn config_reload_accepts_config_only_change_and_keeps_runtime_view() {
         initial_config,
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
         Some(dynamic_view.clone()),
-        Arc::new(cc_lb_engine::SystemClock),
     );
     reload_common::write_config_with_principal_model(&config_path, 200, proxy_addr, "[");
 
@@ -81,7 +79,7 @@ fn config_reload_accepts_config_only_change_and_keeps_runtime_view() {
 }
 
 #[test]
-fn config_reload_accepts_plugin_unrelated_change_and_records_success() {
+fn config_reload_accepts_plugin_unrelated_change_and_keeps_runtime_view() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("cc-lb.toml");
     let router_path = dir.path().join("router.wasm");
@@ -107,7 +105,6 @@ fn config_reload_accepts_plugin_unrelated_change_and_records_success() {
         initial_config,
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
         Some(dynamic_view.clone()),
-        Arc::new(cc_lb_engine::SystemClock),
     );
     reload_common::write_config_with_principal_plugins(
         &config_path,
@@ -123,15 +120,5 @@ fn config_reload_accepts_plugin_unrelated_change_and_records_success() {
 
     assert_eq!(watcher.current_config().body.messages_cap_bytes, 200);
     assert!(Arc::ptr_eq(&before_view, &dynamic_view.load()));
-    let status = <ConfigWatcher as cc_lb_admin::CurrentConfig>::last_reload_status(&watcher)
-        .expect("successful reload status is recorded");
-    assert_eq!(
-        status.config_path.as_deref(),
-        Some(config_path.to_str().unwrap())
-    );
-    assert!(matches!(
-        status.outcome,
-        cc_lb_admin::ReloadOutcome::Success
-    ));
     assert!(!logs.contains("configuration reload failed"));
 }

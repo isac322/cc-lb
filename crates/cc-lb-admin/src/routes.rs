@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_control::{AuditEntry, AuditPayload};
+use cc_lb_control::AuditEntry;
 use cc_lb_storage_api::{Storage, StorageError};
 use http_body_util::BodyExt;
 use serde::Deserialize;
@@ -45,19 +45,6 @@ pub fn build_router(state: AdminState) -> Router {
         )
         .route("/admin/audit", get(query_audit))
         .route("/admin/v1/audit", get(query_audit))
-        .route("/admin/status", get(crate::v1::status::status))
-        .route(
-            "/admin/killswitch",
-            get(get_killswitch)
-                .post(set_killswitch)
-                .delete(clear_killswitch),
-        )
-        .route(
-            "/admin/v1/killswitch",
-            get(get_killswitch)
-                .post(set_killswitch)
-                .delete(clear_killswitch),
-        )
         .route("/admin/config/current", get(get_config))
         .route("/admin/v1/config/current", get(get_config))
         .route("/admin/config/schema", get(get_config_schema))
@@ -298,53 +285,6 @@ async fn query_audit(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(json!({ "entries": entries })))
-}
-
-async fn get_killswitch(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
-    let Some(storage) = &state.storage else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
-    };
-    let enabled = storage
-        .killswitch_enabled()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "killswitch": enabled })))
-}
-
-async fn set_killswitch(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
-    let Some(storage) = &state.storage else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
-    };
-    storage
-        .set_killswitch_enabled(true)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    emit_admin_audit(
-        &state,
-        AuditPayload::KillswitchOn,
-        "admin_killswitch",
-        None,
-        200,
-    );
-    Ok(Json(json!({ "status": "ok", "killswitch": true })))
-}
-
-async fn clear_killswitch(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
-    let Some(storage) = &state.storage else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
-    };
-    storage
-        .set_killswitch_enabled(false)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    emit_admin_audit(
-        &state,
-        AuditPayload::KillswitchOff,
-        "admin_killswitch",
-        None,
-        200,
-    );
-    Ok(Json(json!({ "status": "ok", "killswitch": false })))
 }
 
 async fn get_config(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
@@ -629,14 +569,4 @@ fn emit_admin_action(
         actor: Some("admin".to_owned()),
         ..AuditEntry::default()
     });
-}
-
-fn emit_admin_audit(
-    state: &AdminState,
-    payload: AuditPayload,
-    route: &str,
-    api_key_id: Option<String>,
-    status: u16,
-) {
-    emit_admin_action(state, &payload.to_string(), route, api_key_id, status);
 }

@@ -3,7 +3,6 @@ use crate::reload_common;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use cc_lb_admin::CurrentConfig;
 use cc_lb_server::reload::ConfigWatcher;
 
 #[test]
@@ -26,7 +25,6 @@ fn config_reload_is_storage_driven_and_keeps_runtime_view() {
         initial_config,
         runtime.clone(),
         Some(dynamic_view.clone()),
-        Arc::new(cc_lb_engine::SystemClock),
     );
     watcher
         .reload_now()
@@ -51,17 +49,6 @@ fn config_reload_is_storage_driven_and_keeps_runtime_view() {
     assert!(loaded_view.get("alice").is_none());
     assert!(loaded_view.get("bob").is_none());
     assert!(loaded_view.get("charlie").is_none());
-    let status = watcher
-        .last_reload_status()
-        .expect("successful reload status is recorded");
-    assert_eq!(
-        status.config_path.as_deref(),
-        Some(config_path.to_str().unwrap())
-    );
-    assert!(matches!(
-        status.outcome,
-        cc_lb_admin::ReloadOutcome::Success
-    ));
     assert_eq!(runtime.slot_count(), pre_reload_slot_count);
 }
 

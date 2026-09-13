@@ -15,7 +15,6 @@ pub mod routes;
 pub mod scheduler;
 pub mod settings;
 mod static_assets;
-pub mod status;
 pub mod subscription_quotas;
 pub mod v1;
 
@@ -26,9 +25,8 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::http::{HeaderMap, StatusCode};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, RestartRequiredField};
+use cc_lb_config::Config;
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
-use serde::Serialize;
 
 use cc_lb_clock::ClockHandle;
 use cc_lb_control::RequestEventBus;
@@ -131,33 +129,8 @@ pub enum ConfigDraftError {
     Invalid(String),
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct LastReloadStatus {
-    pub timestamp_unix_secs: u64,
-    pub outcome: ReloadOutcome,
-    pub config_path: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub enum ReloadOutcome {
-    Success,
-    Failure {
-        reason: String,
-        principal: Option<String>,
-        plugin: Option<String>,
-    },
-}
-
 pub trait CurrentConfig: Send + Sync {
     fn current_config(&self) -> Arc<Config>;
-
-    fn restart_required_changes(&self) -> Vec<RestartRequiredField> {
-        Vec::new()
-    }
-
-    fn last_reload_status(&self) -> Option<LastReloadStatus> {
-        None
-    }
 
     fn put_draft_config(&self, _config: Config) -> Result<(), ConfigDraftError> {
         Err(ConfigDraftError::Unavailable)
