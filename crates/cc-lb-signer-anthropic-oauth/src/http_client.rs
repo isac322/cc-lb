@@ -11,7 +11,6 @@ use thiserror::Error;
 use url::Url;
 
 pub const APPLICATION_JSON: &str = "application/json";
-pub const FORM_URLENCODED: &str = "application/x-www-form-urlencoded";
 
 #[derive(Clone)]
 pub struct OAuthTokenRequest {

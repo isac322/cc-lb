@@ -163,7 +163,7 @@ psql --version >/dev/null 2>&1 || {
   exit 1
 }
 echo "===> step 0: reset dynamic runtime tables in public schema"
-psql "$CI_POSTGRES_URL" -c "TRUNCATE principals_v1, upstream_spec_v1, managed_api_keys_v1, managed_api_key_index_v1, oauth_credentials_v1 RESTART IDENTITY CASCADE" > /dev/null
+psql "$CI_POSTGRES_URL" -c "TRUNCATE principals_v1, upstream_spec_v1, managed_api_keys_v1, managed_api_key_index_v1 RESTART IDENTITY CASCADE" > /dev/null
 psql "$CI_POSTGRES_URL" -c "DELETE FROM meta WHERE key = 'backend_kind'" > /dev/null
 
 echo "===> step 1: spawn fake-anthropic on :$fake_port"

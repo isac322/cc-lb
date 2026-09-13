@@ -12,20 +12,14 @@ use async_trait::async_trait;
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_domain::Upstream;
-use cc_lb_storage_api::{
-    OAuthCredentialStore, OAuthCredentials, StorageError, UpstreamRecord, UpstreamStore,
-};
+use cc_lb_storage_api::{StorageError, UpstreamRecord, UpstreamStore};
 use cc_lb_upstream::{
     ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
     SignerFactory, SigningCapability, UpstreamError,
 };
-use dashmap::DashMap;
 use http::HeaderMap;
 use http::header::{AUTHORIZATION, HeaderValue};
-use oauth2::ClientId;
 use secrecy::{ExposeSecret, SecretString};
-use tokio::sync::Mutex;
-use url::Url;
 use uuid::Uuid;
 
 const OAUTH_EXPIRY_SKEW_SECS: u64 = 30;
@@ -35,9 +29,7 @@ pub use http_client::{
     HyperOAuthHttpClient, OAuthHttpClient, OAuthHttpError, OAuthTokenRequest, OAuthTokenResponse,
 };
 pub use pkce::{PkceHandshake, PkceHandshakeState, complete_pkce_flow, start_pkce_flow};
-pub use refresh::{
-    BREAKER_FAILURE_THRESHOLD, BreakerMap, CircuitBreakerState, REFRESH_BUFFER_SECS, RefreshError,
-};
+pub use refresh::RefreshError;
 pub use single_flight::{RefreshLocks, new_refresh_locks};
 
 #[derive(Debug, thiserror::Error)]
@@ -212,305 +204,6 @@ async fn lazy_refresh_under_single_flight(
     let lock = single_flight::lock_for(refresh_locks, "upstream", &upstream_key);
     let _guard = lock.lock().await;
     refresh_handle.refresh_one(upstream_id).await
-}
-
-#[derive(Clone, Debug)]
-pub struct AnthropicOAuthSharedState {
-    pub http: Arc<dyn OAuthHttpClient>,
-    pub refresh_locks: RefreshLocks,
-    pub breaker_state: BreakerMap,
-}
-
-pub struct AnthropicOAuthSignerHttpParams {
-    pub principal_id: String,
-    pub provider: String,
-    pub storage: Arc<dyn OAuthCredentialStore>,
-    pub aead: Arc<AeadService>,
-    pub token_url: Url,
-    pub client_id: ClientId,
-    pub http: Arc<dyn OAuthHttpClient>,
-    pub clock: ClockHandle,
-}
-
-pub struct AnthropicOAuthSignerSharedParams {
-    pub principal_id: String,
-    pub provider: String,
-    pub storage: Arc<dyn OAuthCredentialStore>,
-    pub aead: Arc<AeadService>,
-    pub token_url: Url,
-    pub client_id: ClientId,
-    pub shared: AnthropicOAuthSharedState,
-    pub clock: ClockHandle,
-}
-
-#[derive(Clone)]
-pub struct AnthropicOAuthSigner {
-    pub principal_id: String,
-    pub provider: String,
-    pub storage: Arc<dyn OAuthCredentialStore>,
-    pub aead: Arc<AeadService>,
-    pub clock: ClockHandle,
-    pub refresh_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
-    pub breaker_state: BreakerMap,
-    pub http: Arc<dyn OAuthHttpClient>,
-    pub token_url: Url,
-    pub client_id: ClientId,
-    pub metrics_principal: String,
-    pub metrics_provider: String,
-    signed_access_token: Arc<Mutex<Option<SecretString>>>,
-}
-
-impl AnthropicOAuthSigner {
-    pub fn new(
-        principal_id: impl Into<String>,
-        provider: impl Into<String>,
-        storage: Arc<dyn OAuthCredentialStore>,
-        aead: Arc<AeadService>,
-        token_url: Url,
-        client_id: ClientId,
-        clock: ClockHandle,
-    ) -> Self {
-        Self::with_http(AnthropicOAuthSignerHttpParams {
-            principal_id: principal_id.into(),
-            provider: provider.into(),
-            storage,
-            aead,
-            token_url,
-            client_id,
-            http: Arc::new(HyperOAuthHttpClient::new()),
-            clock,
-        })
-    }
-
-    pub fn with_http(params: AnthropicOAuthSignerHttpParams) -> Self {
-        Self {
-            metrics_principal: params.principal_id.clone(),
-            metrics_provider: params.provider.clone(),
-            principal_id: params.principal_id,
-            provider: params.provider,
-            storage: params.storage,
-            aead: params.aead,
-            clock: params.clock,
-            refresh_locks: new_refresh_locks(),
-            breaker_state: refresh::new_breaker_map(),
-            http: params.http,
-            token_url: params.token_url,
-            client_id: params.client_id,
-            signed_access_token: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    pub fn with_shared_state(params: AnthropicOAuthSignerSharedParams) -> Self {
-        Self {
-            metrics_principal: params.principal_id.clone(),
-            metrics_provider: params.provider.clone(),
-            principal_id: params.principal_id,
-            provider: params.provider,
-            storage: params.storage,
-            aead: params.aead,
-            clock: params.clock,
-            refresh_locks: params.shared.refresh_locks,
-            breaker_state: params.shared.breaker_state,
-            http: params.shared.http,
-            token_url: params.token_url,
-            client_id: params.client_id,
-            signed_access_token: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    async fn credentials_for_signing(&self) -> Result<OAuthCredentials, SignerError> {
-        let creds = self
-            .load_credentials()
-            .await
-            .map_err(refresh_error_to_signer)?
-            .ok_or_else(|| SignerError::MissingCredentials {
-                reason: "oauth credentials not found".to_owned(),
-            })?;
-
-        if refresh::is_expiring(&creds, unix_secs(self.clock.now())) {
-            return self
-                .refresh_under_single_flight(creds)
-                .await
-                .map_err(refresh_error_to_signer);
-        }
-
-        Ok(creds)
-    }
-
-    async fn refresh_under_single_flight(
-        &self,
-        fallback: OAuthCredentials,
-    ) -> Result<OAuthCredentials, RefreshError> {
-        let lock = single_flight::lock_for(&self.refresh_locks, &self.principal_id, &self.provider);
-        let _guard = lock.lock().await;
-
-        let current = self.load_credentials().await?.unwrap_or(fallback);
-        let now = unix_secs(self.clock.now());
-        if !refresh::is_expiring(&current, now) {
-            return Ok(current);
-        }
-
-        self.refresh_current_credentials(&current, now).await
-    }
-
-    async fn on_unauthorized_refresh(&self) -> Result<OAuthCredentials, RefreshError> {
-        let observed_access_token = self.signed_access_token.lock().await.clone();
-        let lock = single_flight::lock_for(&self.refresh_locks, &self.principal_id, &self.provider);
-        let _guard = lock.lock().await;
-        let current = self
-            .load_credentials()
-            .await?
-            .ok_or(RefreshError::MissingCredentials)?;
-
-        if self.storage_has_newer_usable_token(&current, observed_access_token.as_ref()) {
-            return Ok(current);
-        }
-
-        self.refresh_current_credentials(&current, unix_secs(self.clock.now()))
-            .await
-    }
-
-    fn storage_has_newer_usable_token(
-        &self,
-        current: &OAuthCredentials,
-        observed_access_token: Option<&SecretString>,
-    ) -> bool {
-        if refresh::is_expiring(current, unix_secs(self.clock.now())) {
-            return false;
-        }
-
-        observed_access_token
-            .map(|token| token.expose_secret() != current.access_token)
-            .unwrap_or(true)
-    }
-
-    async fn refresh_current_credentials(
-        &self,
-        current: &OAuthCredentials,
-        now: u64,
-    ) -> Result<OAuthCredentials, RefreshError> {
-        let breaker = refresh::breaker_for(&self.breaker_state, &self.principal_id, &self.provider);
-        if breaker.is_open() {
-            return Err(RefreshError::CircuitOpen);
-        }
-
-        match refresh::refresh_credentials(
-            self.http.as_ref(),
-            &self.token_url,
-            self.client_id.as_str(),
-            current,
-            now,
-        )
-        .await
-        {
-            Ok(new_creds) => {
-                self.store_credentials(new_creds.clone()).await?;
-                breaker.reset();
-                refresh::increment_refresh_metric(
-                    &self.metrics_principal,
-                    &self.metrics_provider,
-                    "success",
-                );
-                Ok(new_creds)
-            }
-            Err(error) => {
-                breaker.record_failure();
-                refresh::increment_refresh_metric(
-                    &self.metrics_principal,
-                    &self.metrics_provider,
-                    "failure",
-                );
-                Err(error)
-            }
-        }
-    }
-
-    async fn load_credentials(&self) -> Result<Option<OAuthCredentials>, RefreshError> {
-        let ciphertext = self
-            .storage
-            .get_oauth_ciphertext(&self.principal_id, &self.provider)
-            .await?;
-        let Some(ciphertext) = ciphertext else {
-            return Ok(None);
-        };
-
-        let aad = oauth_credentials_aad(&self.principal_id, &self.provider);
-        let plaintext = self
-            .aead
-            .decrypt(&ciphertext, &aad)
-            .map_err(storage_aead_error)?;
-        let creds = serde_json::from_slice(&plaintext).map_err(storage_json_error)?;
-        Ok(Some(creds))
-    }
-
-    async fn store_credentials(&self, creds: OAuthCredentials) -> Result<(), RefreshError> {
-        let plaintext = serde_json::to_vec(&creds).map_err(storage_json_error)?;
-        let aad = oauth_credentials_aad(&self.principal_id, &self.provider);
-        let ciphertext = self
-            .aead
-            .encrypt(&plaintext, &aad)
-            .map_err(storage_aead_error)?;
-        self.storage
-            .put_oauth_ciphertext(&self.principal_id, &self.provider, &ciphertext)
-            .await?;
-        Ok(())
-    }
-
-    async fn remember_signed_access_token(&self, access_token: &str) {
-        let mut signed = self.signed_access_token.lock().await;
-        *signed = Some(SecretString::new(access_token.to_owned().into_boxed_str()));
-    }
-}
-
-impl fmt::Debug for AnthropicOAuthSigner {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AnthropicOAuthSigner")
-            .field("principal_id", &self.principal_id)
-            .field("provider", &self.provider)
-            .field("storage", &"Storage")
-            .field("refresh_locks", &"RefreshLocks")
-            .field("breaker_state", &"BreakerMap")
-            .field("http", &self.http)
-            .field("token_url", &self.token_url)
-            .field("client_id", &self.client_id)
-            .field("metrics_principal", &self.metrics_principal)
-            .field("metrics_provider", &self.metrics_provider)
-            .field("signed_access_token", &"[REDACTED]")
-            .finish()
-    }
-}
-
-#[async_trait]
-impl Signer for AnthropicOAuthSigner {
-    async fn sign(
-        &self,
-        mut shaped: ShapedRequest,
-        capability: &mut SigningCapability,
-    ) -> Result<SignedRequest, SignerError> {
-        let creds = self.credentials_for_signing().await?;
-        let access_token = SecretString::new(creds.access_token.into_boxed_str());
-        let header_value = bearer_header_value(access_token.expose_secret())?;
-        let headers = shaped.headers_mut();
-        headers.remove("x-api-key");
-        headers.insert(AUTHORIZATION, header_value);
-        merge_anthropic_beta(headers)?;
-        self.remember_signed_access_token(access_token.expose_secret())
-            .await;
-        Ok(SignedRequest::from_shaped(shaped, capability))
-    }
-
-    async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
-        match self.on_unauthorized_refresh().await {
-            Ok(creds) => {
-                self.remember_signed_access_token(&creds.access_token).await;
-                RetryDecision::Refresh {
-                    new_signer: Arc::new(self.clone()),
-                }
-            }
-            Err(_) => RetryDecision::Fail,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -837,38 +530,6 @@ impl Signer for PersistedAnthropicOAuthSigner {
     }
 }
 
-fn oauth_credentials_aad(principal_id: &str, provider: &str) -> Vec<u8> {
-    format!("oauth:{principal_id}:{provider}").into_bytes()
-}
-
-fn storage_aead_error(source: cc_lb_aead::AeadError) -> RefreshError {
-    RefreshError::Storage {
-        source: StorageError::Aead(source.to_string()),
-    }
-}
-
-fn storage_json_error(source: serde_json::Error) -> RefreshError {
-    RefreshError::Storage {
-        source: StorageError::Serialization(source),
-    }
-}
-
-fn refresh_error_to_signer(error: RefreshError) -> SignerError {
-    match error {
-        RefreshError::MissingCredentials => SignerError::MissingCredentials {
-            reason: "oauth credentials not found".to_owned(),
-        },
-        RefreshError::Storage {
-            source: StorageError::Unavailable { .. },
-        } => SignerError::StorageUnavailable {
-            reason: "storage unavailable".to_owned(),
-        },
-        other => SignerError::SigningFailed {
-            reason: other.to_string(),
-        },
-    }
-}
-
 fn ensure_oauth_upstream_usable(
     record: &UpstreamRecord,
     allow_disabled: bool,
@@ -965,9 +626,7 @@ fn bearer_header_value(token: &str) -> Result<HeaderValue, SignerError> {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -977,8 +636,8 @@ mod tests {
     use cc_lb_clock::TestClock;
     use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
     use cc_lb_storage_api::{
-        OAuthCredentialStore, StorageError, StorageResult, UpstreamCreate, UpstreamRecord,
-        UpstreamRecordId, UpstreamStore, UpstreamUpdate, validate_identifier,
+        StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamRecordId,
+        UpstreamStore, UpstreamUpdate, validate_identifier,
     };
     use cc_lb_upstream::{
         DialectError, DialectShapeContext, ShapedRequestBuilder, UpstreamDialect, shape_request,
@@ -986,7 +645,6 @@ mod tests {
     };
     use http::header::{AUTHORIZATION, USER_AGENT};
     use http::{HeaderMap, HeaderValue, Method, StatusCode};
-    use oauth2::ClientId;
     use tokio::sync::Mutex;
     use url::Url;
 
@@ -995,7 +653,6 @@ mod tests {
     struct MemoryUpstreamStore {
         clock: ClockHandle,
         records: Mutex<Vec<UpstreamRecord>>,
-        oauth: Mutex<HashMap<(String, String), Vec<u8>>>,
     }
 
     impl Default for MemoryUpstreamStore {
@@ -1003,7 +660,6 @@ mod tests {
             Self {
                 clock: Arc::new(TestClock::new_at_secs(1_700_000_000)),
                 records: Mutex::new(Vec::new()),
-                oauth: Mutex::new(HashMap::new()),
             }
         }
     }
@@ -1252,59 +908,6 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl OAuthCredentialStore for MemoryUpstreamStore {
-        async fn put_oauth_ciphertext(
-            &self,
-            principal_id: &str,
-            provider: &str,
-            ciphertext: &[u8],
-        ) -> StorageResult<()> {
-            self.oauth.lock().await.insert(
-                (principal_id.to_owned(), provider.to_owned()),
-                ciphertext.to_vec(),
-            );
-            Ok(())
-        }
-
-        async fn get_oauth_ciphertext(
-            &self,
-            principal_id: &str,
-            provider: &str,
-        ) -> StorageResult<Option<Vec<u8>>> {
-            Ok(self
-                .oauth
-                .lock()
-                .await
-                .get(&(principal_id.to_owned(), provider.to_owned()))
-                .cloned())
-        }
-
-        async fn delete_oauth(&self, principal_id: &str, provider: &str) -> StorageResult<bool> {
-            Ok(self
-                .oauth
-                .lock()
-                .await
-                .remove(&(principal_id.to_owned(), provider.to_owned()))
-                .is_some())
-        }
-
-        async fn put_anthropic_api_key_ciphertext(
-            &self,
-            _storage_key: &str,
-            _ciphertext: &[u8],
-        ) -> StorageResult<()> {
-            Ok(())
-        }
-
-        async fn get_anthropic_api_key_ciphertext(
-            &self,
-            _storage_key: &str,
-        ) -> StorageResult<Option<Vec<u8>>> {
-            Ok(None)
-        }
-    }
-
     #[tokio::test]
     async fn build_missing_returns_missing_credentials() {
         let clock = test_clock();
@@ -1497,48 +1100,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_anthropic_beta_preserves_client_flags_active_signer() {
-        let signer = active_signer().await;
-
-        let signed = sign_request(
-            &signer,
-            shaped_request_with_beta(Some(CLIENT_BETA_FLAGS_WITHOUT_OAUTH)),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(anthropic_beta(&signed), MERGED_CLIENT_BETA_FLAGS);
-    }
-
-    #[tokio::test]
-    async fn merge_anthropic_beta_adds_oauth_when_absent_active_signer() {
-        let signer = active_signer().await;
-
-        let signed = sign_request(&signer, shaped_request_with_beta(None))
-            .await
-            .unwrap();
-
-        assert_eq!(anthropic_beta(&signed), ANTHROPIC_OAUTH_BETA);
-    }
-
-    #[tokio::test]
-    async fn merge_anthropic_beta_no_duplicate_when_oauth_already_present_active_signer() {
-        let signer = active_signer().await;
-
-        let signed = sign_request(
-            &signer,
-            shaped_request_with_beta(Some("claude-code-20250219, oauth-2025-04-20")),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            anthropic_beta(&signed),
-            "claude-code-20250219, oauth-2025-04-20"
-        );
-    }
-
-    #[tokio::test]
     async fn merge_anthropic_beta_preserves_client_flags_persisted_signer() {
         let signer = persisted_signer().await;
 
@@ -1583,22 +1144,6 @@ mod tests {
     const CLIENT_BETA_FLAGS_WITHOUT_OAUTH: &str = "claude-code-20250219, interleaved-thinking-2025-05-14, context-management-2025-06-27, prompt-caching-scope-2026-01-05, effort-2025-11-24, structured-outputs-2025-12-15";
     const MERGED_CLIENT_BETA_FLAGS: &str = "claude-code-20250219, interleaved-thinking-2025-05-14, context-management-2025-06-27, prompt-caching-scope-2026-01-05, effort-2025-11-24, structured-outputs-2025-12-15, oauth-2025-04-20";
 
-    async fn active_signer() -> AnthropicOAuthSigner {
-        let clock = test_clock();
-        let store = Arc::new(MemoryUpstreamStore::default());
-        let service = aead();
-        store_live_credentials(&store, &service, now_secs(clock.as_ref()) + 600).await;
-        AnthropicOAuthSigner::new(
-            "principal",
-            "anthropic_oauth",
-            store,
-            service,
-            Url::parse("https://platform.claude.com/v1/oauth/token").unwrap(),
-            ClientId::new("client-test".to_owned()),
-            clock,
-        )
-    }
-
     async fn persisted_signer() -> Arc<dyn Signer> {
         let clock = test_clock();
         let store = Arc::new(MemoryUpstreamStore::default());
@@ -1618,31 +1163,6 @@ mod tests {
             .build(&Upstream::AnthropicDirect { base_url: None })
             .await
             .unwrap()
-    }
-
-    async fn store_live_credentials(
-        store: &MemoryUpstreamStore,
-        aead: &AeadService,
-        expires_at_unix_secs: u64,
-    ) {
-        let plaintext = serde_json::to_vec(&OAuthCredentials {
-            access_token: "access-token".to_owned(),
-            refresh_token: "refresh-token".to_owned(),
-            expires_at: expires_at_unix_secs,
-            refresh_token_expires_at_unix_secs: None,
-            scopes: vec!["messages".to_owned()],
-        })
-        .unwrap();
-        let ciphertext = aead
-            .encrypt(
-                &plaintext,
-                &oauth_credentials_aad("principal", "anthropic_oauth"),
-            )
-            .unwrap();
-        store
-            .put_oauth_ciphertext("principal", "anthropic_oauth", &ciphertext)
-            .await
-            .unwrap();
     }
 
     fn shaped_request_with_beta(value: Option<&str>) -> ShapedRequest {

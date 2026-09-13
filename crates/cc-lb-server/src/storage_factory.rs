@@ -8,7 +8,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::StorageConfig;
 #[cfg(feature = "sqlite")]
 use cc_lb_storage_api::MetaStore;
-use cc_lb_storage_api::{BackendKind, ManagedKeyStore, PluginBlobRepo, Storage, StorageResult};
+use cc_lb_storage_api::{BackendKind, ManagedKeyStore, PluginBlobRepo, Storage};
 #[cfg(feature = "postgres")]
 const PG_FANOUT_MAX_CONNECTIONS: u32 = 2;
 
@@ -16,28 +16,6 @@ pub struct OpenedStorage {
     pub storage: Arc<dyn Storage>,
     pub managed_key_store: Arc<dyn ManagedKeyStore>,
     pub plugin_blob_repo: Arc<dyn PluginBlobRepo>,
-}
-
-impl OpenedStorage {
-    pub async fn put_anthropic_api_key_ciphertext(
-        &self,
-        storage_key: &str,
-        ciphertext: &[u8],
-    ) -> StorageResult<()> {
-        self.storage
-            .put_anthropic_api_key_ciphertext(storage_key, ciphertext)
-            .await
-    }
-
-    pub async fn get_oauth_ciphertext(
-        &self,
-        principal_id: &str,
-        provider: &str,
-    ) -> StorageResult<Option<Vec<u8>>> {
-        self.storage
-            .get_oauth_ciphertext(principal_id, provider)
-            .await
-    }
 }
 
 #[derive(Debug, thiserror::Error)]

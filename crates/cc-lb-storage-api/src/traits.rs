@@ -291,63 +291,6 @@ pub trait UsageTokenIntervalStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait OAuthCredentialStore: Send + Sync {
-    async fn put_oauth_ciphertext(
-        &self,
-        principal_id: &str,
-        provider: &str,
-        ciphertext: &[u8],
-    ) -> StorageResult<()>;
-
-    async fn get_oauth_ciphertext(
-        &self,
-        principal_id: &str,
-        provider: &str,
-    ) -> StorageResult<Option<Vec<u8>>>;
-
-    async fn delete_oauth(&self, principal_id: &str, provider: &str) -> StorageResult<bool>;
-
-    async fn put_anthropic_api_key_ciphertext(
-        &self,
-        storage_key: &str,
-        ciphertext: &[u8],
-    ) -> StorageResult<()>;
-
-    async fn get_anthropic_api_key_ciphertext(
-        &self,
-        storage_key: &str,
-    ) -> StorageResult<Option<Vec<u8>>>;
-}
-
-#[async_trait]
-pub trait ApiKeyStore: Send + Sync {
-    async fn put_api_key_ciphertext(
-        &self,
-        principal_id: &str,
-        key_id: &str,
-        ciphertext: &[u8],
-    ) -> StorageResult<()>;
-
-    async fn get_api_key_ciphertext(
-        &self,
-        principal_id: &str,
-        key_id: &str,
-    ) -> StorageResult<Option<Vec<u8>>>;
-
-    async fn list_api_key_ciphertexts(
-        &self,
-        principal_id: &str,
-    ) -> StorageResult<Vec<(String, Vec<u8>)>>;
-
-    async fn revoke_api_key(
-        &self,
-        principal_id: &str,
-        key_id: &str,
-        revoked_ciphertext: &[u8],
-    ) -> StorageResult<bool>;
-}
-
-#[async_trait]
 pub trait ManagedKeyStore: Send + Sync {
     async fn issue(
         &self,
@@ -483,8 +426,6 @@ pub trait Storage:
     + UsageRollupStore
     + ApiKeyUsageBucketStore
     + UsageTokenIntervalStore
-    + OAuthCredentialStore
-    + ApiKeyStore
     + PriceCatalogCache
     + ConfigStore
     + MetaStore
@@ -519,8 +460,6 @@ impl<T> Storage for T where
         + UsageRollupStore
         + UsageTokenIntervalStore
         + ApiKeyUsageBucketStore
-        + OAuthCredentialStore
-        + ApiKeyStore
         + PriceCatalogCache
         + ConfigStore
         + MetaStore

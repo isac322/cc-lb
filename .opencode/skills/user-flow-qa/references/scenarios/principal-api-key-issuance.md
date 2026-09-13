@@ -643,34 +643,6 @@ This transition is PASS only when the dialog is protected during the request
 and closes on success. Closing immediately on confirm, allowing dismissal while
 pending, or leaving the successful dialog/row stale is FAIL.
 
-### T3 — Representative credential revoke modal locks until success
-
-The companion destructive-action regression uses the Credentials page because
-it has a full modal with an explicit progress message and multiple row actions.
-It is real-browser UI/API-contract coverage with isolated in-page HTTP fixtures;
-T2 remains the real SQLite-backed revoke proof.
-
-In `crates/cc-lb-admin/web/e2e/pending-actions.spec.ts`, run the case
-`credential revoke locks its modal until the delayed request succeeds`:
-
-1. The fixture returns one active API-key credential from
-   `GET /admin/credentials`.
-2. Open `/credentials`, select that row's Revoke action, and invoke
-   `Confirm revoke` twice in one JavaScript task.
-3. The intercepted revoke handler must record the request, resolve an explicit
-   request-started promise, and await an explicit release promise.
-4. While held, prove exactly one revoke POST, `Revoking...` disabled with
-   `aria-busy="true"`, visible
-   `Revoking anthropic credential — waiting for the server.` progress, disabled
-   Rotate/Revoke row actions, disabled Cancel/X, and a modal that survives
-   Escape and backdrop clicks.
-5. Resolve the response promise. Only the successful response may close the
-   modal. The invalidated credentials GET must render the refreshed empty
-   `No API keys` state.
-
-The test must not use sleeps, retries, timeout-based settling, or an
-optimistically closed modal. Its route-started and route-release promises are
-the deterministic synchronization points.
 
 ## 4. Automated coverage map
 
@@ -682,7 +654,6 @@ the deterministic synchronization points.
 | Issue/revoke API and persisted record shape | `crates/cc-lb-admin/tests/principal_keys.rs` — `revoked_key_list_preserves_key_id_last4_and_audit_rows` | Real admin routes issue and revoke a key, revoked listing preserves key ID/last four, and audit actions persist. | Duplicate browser submission and protected one-time plaintext UX. |
 | Plaintext/key-ID generation boundary | `crates/cc-lb-control/src/api_keys/secret.rs` tests, including `generate_new_parses_same_key_id` and redacted Display/Debug tests | Generated plaintext parses to the issued key ID, has a four-character suffix, and secret wrappers do not print plaintext. | Browser-only one-time presentation and user acknowledgement. |
 | Delayed issue browser regression | `crates/cc-lb-admin/web/e2e/pending-actions.spec.ts` — `API key issuance submits once, locks dismissal, preserves plaintext, and refreshes the key list` | Real Chromium sends two DOM clicks in one task, records exactly one POST, holds an intercepted response on an explicit promise, proves `Issuing...`/input/Cancel/X/Escape/backdrop protection, then releases the response and proves one-time plaintext, Done-only dismissal, and refreshed `key-new` UI. | This scenario adds real isolated SQLite and direct API/storage correlation. |
-| Representative destructive browser regression | `crates/cc-lb-admin/web/e2e/pending-actions.spec.ts` — `credential revoke locks its modal until the delayed request succeeds` | Real Chromium double-confirms revoke, records one POST, holds it on an explicit promise, proves `Revoking...`, `aria-busy`, progress text, row/Cancel/X/Escape/backdrop locks, then releases success and proves modal close plus refreshed empty credentials UI. | Fixture-backed UI/API contract; T2 supplies the real SQLite-backed revoke proof. |
 
 The automated browser test must delay by retaining the intercepted route response
 and releasing it from an explicit promise/event. A timeout, `sleep`, retry, or
@@ -708,10 +679,7 @@ Record all of the following from the same isolated run:
    and a screenshot/DOM snapshot of the locked revoke alert dialog.
 7. Screenshot after success showing the dialog closed and the active row gone,
    plus revoked-list API JSON.
-8. E2E trace/screenshots for T3 showing the Credentials modal's `Revoking...`
-   and progress state while its route promise is held, followed by the closed
-   modal and refreshed `No API keys` state after release.
-9. Browser console output showing no uncaught errors, and final teardown proof
+8. Browser console output showing no uncaught errors, and final teardown proof
    showing all disposable listeners gone.
 
 For each screenshot record path, viewport, browser session, operation, and
@@ -728,7 +696,6 @@ component tests.
 | P4 revoked key record |  |  |  | Same row revoked and verification material zeroed |  |
 | T1 repeated issue click burst |  |  |  | Exactly one POST, one row, one plaintext, one refreshed UI row |  |
 | T2 delayed revoke |  |  |  | Locked/progress while held; close and refresh only on success |  |
-| T3 credential revoke modal | N/A | Intercepted POST/GET |  | Exactly one POST; locked progress; close and empty-state refresh only on success |  |
 | Teardown/isolation | PASS only if disposable DB removed | N/A | Browser closed | No QA listener or shared/prod mutation remains |  |
 
 Use **PASS**, **FAIL**, **VERIFIED**, or **BLOCKED**. A T1 PASS requires all four

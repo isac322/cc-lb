@@ -3,7 +3,6 @@ import {
   Activity,
   Blocks,
   FileClock,
-  KeyRound,
   LayoutDashboard,
   ScrollText,
   Server,
@@ -19,7 +18,6 @@ const NAV = [
   { path: '/plugins', label: 'Plugins', Icon: Blocks },
   { path: '/logs', label: 'Logs', Icon: ScrollText },
   { path: '/audit', label: 'Audit', Icon: FileClock },
-  { path: '/credentials', label: 'Credentials', Icon: KeyRound },
   { path: '/status', label: 'Status', Icon: Activity },
   { path: '/settings', label: 'Settings', Icon: SettingsIcon },
 ] as const;

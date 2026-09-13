@@ -111,19 +111,10 @@ pub fn build_router(state: AdminState) -> Router {
             "/admin/v1/events/stream",
             get(crate::events_routes::handle_events_stream),
         )
-        .route(
-            "/admin/v1/credentials",
-            get(crate::credentials::list_credentials),
-        )
-        .route(
-            "/admin/v1/oauth/status",
-            get(crate::credentials::list_oauth_status),
-        )
         .merge(crate::dashboard_routes::router())
         .merge(crate::events_routes::router())
         .merge(crate::events_detail_route::router())
         .merge(crate::subscription_quotas::router())
-        .merge(crate::credentials::router())
         .merge(crate::scheduler::router())
         .merge(crate::v1::plugins::router())
         .merge(crate::v1::plugins_wasm::router())

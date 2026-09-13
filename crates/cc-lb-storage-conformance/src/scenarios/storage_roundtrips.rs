@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
-    AuditStore as _, ConfigDraftState, ConfigStore as _, OAuthCredentialStore as _,
-    RequestEventStore as _,
+    AuditStore as _, ConfigDraftState, ConfigStore as _, RequestEventStore as _,
     types::{
         AuditEntry, HistoryEntry, HistorySummary, RequestCacheBreakpoint,
         RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventUpstream,
@@ -48,7 +47,6 @@ where
     request_event_store_roundtrip(Arc::clone(&backend)).await?;
     request_event_store_event_id_idempotency(Arc::clone(&backend)).await?;
     config_store_roundtrip(Arc::clone(&backend)).await?;
-    oauth_credential_store_roundtrip(backend).await?;
 
     Ok(())
 }
@@ -250,69 +248,6 @@ where
             std::slice::from_ref(&history),
             "ConfigStore history list readback"
         )?;
-
-        Ok(())
-    }
-    .await;
-    let teardown = fixture.teardown().await;
-    result?;
-    teardown
-}
-
-pub async fn oauth_credential_store_roundtrip<B>(backend: Arc<B>) -> Result<()>
-where
-    B: ConformanceBackend,
-    B::Storage: cc_lb_storage_api::Storage,
-{
-    let mut fixture = ConformanceFixture::new(backend).await?;
-    let result: Result<()> = async {
-        let storage = fixture.storage();
-        let oauth_ciphertext = b"\x00oauth\xffciphertext\x10bytes";
-        storage
-            .put_oauth_ciphertext(
-                "roundtrip-oauth-principal",
-                "anthropic_oauth",
-                oauth_ciphertext,
-            )
-            .await?;
-        let read_back = storage
-            .get_oauth_ciphertext("roundtrip-oauth-principal", "anthropic_oauth")
-            .await?
-            .context("OAuth ciphertext should round-trip")?;
-        ensure!(
-            read_back == oauth_ciphertext,
-            "OAuthCredentialStore must preserve OAuth ciphertext bytes exactly"
-        );
-
-        let api_key_ciphertext = b"\x01anthropic\xfeapi-key\x20ciphertext";
-        storage
-            .put_anthropic_api_key_ciphertext(
-                "anthropic:roundtrip-oauth-principal:default",
-                api_key_ciphertext,
-            )
-            .await?;
-        let read_back = storage
-            .get_anthropic_api_key_ciphertext("anthropic:roundtrip-oauth-principal:default")
-            .await?
-            .context("Anthropic API-key ciphertext should round-trip")?;
-        ensure!(
-            read_back == api_key_ciphertext,
-            "OAuthCredentialStore must preserve Anthropic API-key ciphertext bytes exactly"
-        );
-
-        ensure!(
-            storage
-                .delete_oauth("roundtrip-oauth-principal", "anthropic_oauth")
-                .await?,
-            "delete_oauth should report true for an existing row"
-        );
-        ensure!(
-            storage
-                .get_oauth_ciphertext("roundtrip-oauth-principal", "anthropic_oauth")
-                .await?
-                .is_none(),
-            "deleted OAuth ciphertext should be absent"
-        );
 
         Ok(())
     }

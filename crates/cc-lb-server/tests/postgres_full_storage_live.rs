@@ -80,7 +80,6 @@ async fn every_postgres_storage_path_writes_a_row() -> TestResult<()> {
     put_config_draft(&app, &database_url, upstream.addr).await?;
     toggle_killswitch(&app).await?;
 
-    assert_table_count_at_least(&pool, "oauth_credentials_v1", 1).await?;
     assert_table_count_at_least(&pool, "config_draft_v1", 1).await?;
     assert_table_count_at_least(&pool, "killswitch_v1", 1).await?;
     let killswitch_meta: i64 = sqlx::query_scalar(
@@ -373,11 +372,6 @@ async fn table_count(pool: &PgPool, table: &str) -> TestResult<i64> {
         }
         "request_events_v1" => {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM request_events_v1")
-                .fetch_one(pool)
-                .await?
-        }
-        "oauth_credentials_v1" => {
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM oauth_credentials_v1")
                 .fetch_one(pool)
                 .await?
         }

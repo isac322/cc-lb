@@ -24,8 +24,6 @@ mod config_history;
 mod config_schema;
 #[path = "config_validate.rs"]
 mod config_validate;
-#[path = "credentials.rs"]
-mod credentials;
 #[path = "dashboard_principal_totals_cache.rs"]
 mod dashboard_principal_totals_cache;
 #[path = "dashboard_summary.rs"]
