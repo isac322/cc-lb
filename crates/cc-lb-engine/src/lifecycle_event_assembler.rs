@@ -3227,6 +3227,7 @@ mod tests {
             observability_post_ms: None,
             proxy_setup_ms: Some(2),
             setup_timings: Default::default(),
+            io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
@@ -3295,6 +3296,7 @@ mod tests {
                 observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
+                io_timings: Default::default(),
                 upstream_body_ms: None,
             },
         ] {
