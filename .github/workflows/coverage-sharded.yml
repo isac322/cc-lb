@@ -14,13 +14,16 @@
 #
 # WHY IT IS INACTIVE (workflow_dispatch only — never runs on push/PR)
 #   Sharding only helps when the shard runners land on DIFFERENT physical nodes.
-#   The current runner pool is not yet sized for multi-node sharding, so N shard
-#   jobs would compete for the same capacity. This stays manual-dispatch-only
-#   until the runner pool has multiple nodes and dedicated Postgres services.
+#   Today ARC runs on a SINGLE 4-core node (maxRunners: 3 — see
+#   .deploy/arc-cc-lb-values.yaml), so N shard pods would pile onto that one node
+#   and fight for the same 4 cores: no wall-clock win, plus each shard needs its
+#   own Postgres service and the extra merge round-trip. So this stays
+#   manual-dispatch-only until the cluster actually has multiple nodes.
 #
 # HOW TO ENABLE (after adding nodes to the ARC pool)
-#   1. Scale the runner pool to at least SHARD_TOTAL plus headroom for the
-#      other CI jobs (clippy/e2e/fmt still share the pool).
+#   1. Scale runners: add nodes and raise `maxRunners` in
+#      .deploy/arc-cc-lb-values.yaml to >= SHARD_TOTAL plus headroom for the
+#      other CI jobs (`rust-checks`, `e2e`, and `static-checks` still share the pool).
 #   2. Pick the shard count in ONE place: set `SHARD_TOTAL` below AND make the
 #      `shard:` matrix list exactly 1..SHARD_TOTAL. They MUST match.
 #   3. Flip the trigger: replace the `on: workflow_dispatch` block with the same

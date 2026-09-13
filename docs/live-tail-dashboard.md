@@ -56,7 +56,7 @@ No `$instance` variable ships by default — the single-operator deployment is o
 
 ## Local validation
 
-The repo ships an offline validator at [`scripts/validate-grafana-dashboard.sh`](../scripts/validate-grafana-dashboard.sh). It runs in CI (see [`promtool` job](../.github/workflows/ci.yml)) but you can run it locally too:
+The repo ships an offline validator at [`scripts/validate-grafana-dashboard.sh`](../scripts/validate-grafana-dashboard.sh). It runs in CI as part of [`static-checks`](../.github/workflows/ci.yml), but you can run it locally too:
 
 ```sh
 scripts/validate-grafana-dashboard.sh

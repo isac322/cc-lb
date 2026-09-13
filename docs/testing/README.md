@@ -87,12 +87,13 @@ bash scripts/check-test-tiers.sh
 
 | CI job | 실행 범위 |
 |---|---|
-| `rust-fast` | `--profile fast`와 strict tier lint |
+| `static-checks` | fmt, 저장소 guard, dependency policy, alert/dashboard 정적 검증 |
+| `rust-checks` | SQLite/PostgreSQL clippy, `--profile fast`, strict tier lint |
 | `nextest-cov` | TX를 제외한 workspace 전체, PostgreSQL 포함, package별 coverage gate |
 | `e2e` | process 및 real-client E2E와 `--profile e2e` |
-| `tx` | `--profile tx`, PostgreSQL service 포함 |
+| `tx` | schedule/수동 실행 전용 `--profile tx`, PostgreSQL service 포함 |
 
-`nextest-cov`는 기본 nextest filter를 사용하므로 T1부터 T5까지 실행한다. TX는 기본 filter에서 제외하며 `tx` job에서만 실행한다.
+`nextest-cov`는 기본 nextest filter를 사용하므로 T1부터 T5까지 실행한다. `rust-checks`는 clippy와 빠른 T1/T2 피드백이 같은 checkout, toolchain, cache, build artifact를 공유하게 한다. TX는 기본 filter와 PR 필수 job에서 제외하며 nightly schedule 또는 `workflow_dispatch`에서 실행한다.
 
 ## 새 테스트를 추가할 때
 

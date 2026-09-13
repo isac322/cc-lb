@@ -362,15 +362,26 @@ impl App {
     }
 
     pub async fn start(self) -> Result<(), BuildError> {
+        self.server_state.wait_for_ready().await;
         let proxy_addr = self.proxy_addr;
         let admin_addr = self.admin_addr;
         let proxy_listener = TcpListener::bind(proxy_addr).await?;
         let admin_listener = TcpListener::bind(admin_addr).await?;
-        self.start_with_listeners(proxy_listener, admin_listener)
+        self.serve_with_listeners(proxy_listener, admin_listener)
             .await
     }
 
     pub async fn start_with_listeners(
+        self,
+        proxy_listener: TcpListener,
+        admin_listener: TcpListener,
+    ) -> Result<(), BuildError> {
+        self.server_state.wait_for_ready().await;
+        self.serve_with_listeners(proxy_listener, admin_listener)
+            .await
+    }
+
+    async fn serve_with_listeners(
         self,
         proxy_listener: TcpListener,
         admin_listener: TcpListener,
@@ -400,9 +411,8 @@ impl App {
             signals,
             drain_controller: _,
             tls_state,
-            server_state,
+            server_state: _,
         } = self;
-        server_state.wait_for_ready().await;
 
         let (admin_stop_tx, admin_shutdown) = watch::channel(false);
         let admin = tokio::spawn(async move {
