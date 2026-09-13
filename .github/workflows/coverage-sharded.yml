@@ -23,7 +23,7 @@
 # HOW TO ENABLE (after adding nodes to the ARC pool)
 #   1. Scale runners: add nodes and raise `maxRunners` in
 #      .deploy/arc-cc-lb-values.yaml to >= SHARD_TOTAL plus headroom for the
-#      other CI jobs (clippy/e2e/fmt still share the pool).
+#      other CI jobs (`rust-checks`, `e2e`, and `static-checks` still share the pool).
 #   2. Pick the shard count in ONE place: set `SHARD_TOTAL` below AND make the
 #      `shard:` matrix list exactly 1..SHARD_TOTAL. They MUST match.
 #   3. Flip the trigger: replace the `on: workflow_dispatch` block with the same

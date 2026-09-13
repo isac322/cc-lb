@@ -29,8 +29,9 @@ env:
   CC_LB_ADMIN_SKIP_SPA: "1"
 
 jobs:
-  fmt:
-    runs-on: cc-lb-500m
+  static-checks:
+    name: static checks
+    runs-on: cc-lb-1
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
@@ -38,17 +39,46 @@ jobs:
         with:
           toolchain: 1.98.1
           components: rustfmt
-      - name: Ensure ripgrep is available
-        run: rg --version
-      - run: cargo fmt --check
+      - name: Ensure required tools are available
+        run: |
+          set -euo pipefail
+          rg --version
+          if ! command -v promtool >/dev/null 2>&1; then
+            curl -sSL -o /tmp/prometheus.tar.gz \
+              https://github.com/prometheus/prometheus/releases/download/v3.13.2/prometheus-3.13.2.linux-arm64.tar.gz
+            tar -xzf /tmp/prometheus.tar.gz -C /tmp/
+            sudo mv /tmp/prometheus-3.13.2.linux-arm64/promtool /usr/local/bin/promtool
+          fi
+          promtool --version
+      - name: Check Rust formatting
+        run: cargo fmt --check
       - name: Audit-redaction lint
         run: bash scripts/lint-audit-redaction.sh
       - name: Integration-test consolidation guard
         run: bash scripts/check-integration-test-consolidation.sh
       - name: Workspace scaffold guard
         run: python3 scripts/check-workspace-scaffold.py
-      # The tier lint runs in rust-fast, where cargo-nextest and the workspace
-      # test build are already required.
+      - name: Install cargo-deny
+        run: |
+          set -euo pipefail
+          ver=0.20.2
+          archive="cargo-deny-${ver}-aarch64-unknown-linux-musl.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${ver}/${archive}" \
+            --output "/tmp/${archive}"
+          echo "995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d  /tmp/${archive}" | sha256sum --check
+          tar -tzf "/tmp/${archive}"
+          tar -xzf "/tmp/${archive}" -C /tmp
+          bin=$(find /tmp -type f -name cargo-deny -print -quit)
+          test -n "$bin"
+          sudo install -m 0755 "$bin" /usr/local/bin/cargo-deny
+          cargo deny --version
+      - name: Check dependency policy
+        run: cargo deny check
+      - name: Check alert rule syntax
+        run: promtool check rules deploy/alerts/*.yml
+      - name: Validate Grafana dashboards
+        run: scripts/validate-grafana-dashboard.sh
 
   guard-crate-versions:
     name: guard crate versions
@@ -257,14 +287,11 @@ jobs:
           .github/workflows/release-server.yml
           .github/workflows/release-plz.yml
 
-  clippy:
+  rust-checks:
+    name: Rust checks
     runs-on: cc-lb-4
-    strategy:
-      matrix:
-        features: [sqlite, postgres]
     env:
-      # Clippy never runs fixture-backed WASM tests, so bypass that build-time
-      # prerequisite. The workflow-level env already skips the admin SPA.
+      # These checks never run fixture-backed WASM tests.
       CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
     steps:
       - uses: actions/checkout@v7
@@ -286,7 +313,17 @@ jobs:
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"
-      - run: cargo clippy --workspace --all-targets --no-default-features --features ${{ matrix.features }} -- -D warnings
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Clippy - SQLite features
+        run: cargo clippy --workspace --all-targets --no-default-features --features sqlite -- -D warnings
+      - name: Clippy - PostgreSQL features
+        run: cargo clippy --workspace --all-targets --no-default-features --features postgres -- -D warnings
+      - name: Run fast Rust tests
+        run: cargo nextest run --workspace --exclude cc-lb-loadgen --exclude cc-lb-stress-suite --exclude tests-multi-replica --all-features --profile fast
+      - name: Test-tier lint
+        run: bash scripts/check-test-tiers.sh
       - name: Show sccache stats
         if: always()
         run: |
@@ -296,75 +333,11 @@ jobs:
             sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
           fi
 
-
-  cargo-deny:
-    runs-on: cc-lb-1
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
-      - name: Install cargo-deny
-        run: |
-          set -euo pipefail
-          ver=0.20.2
-          archive="cargo-deny-${ver}-aarch64-unknown-linux-musl.tar.gz"
-          curl --fail --silent --show-error --location \
-            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${ver}/${archive}" \
-            --output "/tmp/${archive}"
-          echo "995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d  /tmp/${archive}" | sha256sum --check
-          tar -tzf "/tmp/${archive}"
-          tar -xzf "/tmp/${archive}" -C /tmp
-          bin=$(find /tmp -type f -name cargo-deny -print -quit)
-          test -n "$bin"
-          sudo install -m 0755 "$bin" /usr/local/bin/cargo-deny
-          cargo deny --version
-      - run: cargo deny check
-
-  promtool:
-    runs-on: cc-lb-500m
-    steps:
-      - uses: actions/checkout@v7
-      - name: Ensure promtool is available
-        run: |
-          set -euo pipefail
-          if command -v promtool >/dev/null 2>&1; then
-            promtool --version
-            exit 0
-          fi
-          curl -sSL -o /tmp/prometheus.tar.gz \
-            https://github.com/prometheus/prometheus/releases/download/v3.13.2/prometheus-3.13.2.linux-arm64.tar.gz
-          tar -xzf /tmp/prometheus.tar.gz -C /tmp/
-          sudo mv /tmp/prometheus-3.13.2.linux-arm64/promtool /usr/local/bin/promtool
-          promtool --version
-      - name: Check alert rule syntax
-        run: promtool check rules deploy/alerts/*.yml
-      - name: Validate Grafana dashboards
-        run: scripts/validate-grafana-dashboard.sh
-
-  rust-fast:
-    runs-on: cc-lb-4
-    env:
-      CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
-      - uses: ./.github/actions/setup-rust-cache
-        with:
-          stable-build-metadata: "true"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-      - name: Run fast Rust tests
-        run: cargo nextest run --workspace --exclude cc-lb-loadgen --exclude cc-lb-stress-suite --exclude tests-multi-replica --all-features --profile fast
-      - name: Test-tier lint
-        run: bash scripts/check-test-tiers.sh
-
   tx:
+    # TX covers performance, latency, loom, and other non-functional claims.
+    # Keep it available nightly and on demand without charging every PR for a
+    # separate 20-minute toolchain, Postgres, and workspace build.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: cc-lb-2
     container:
       image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-fe7ac6d6df4f@sha256:c2f09887524d6616d0b97be3316822b47466f5633409f743d6e1bab277deefb4
