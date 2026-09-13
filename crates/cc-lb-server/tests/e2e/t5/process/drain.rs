@@ -183,7 +183,13 @@ async fn wait_for_proxy_refusal(child: &mut ChildProcess, addr: SocketAddr, time
         child.assert_running("wait for proxy listener shutdown while draining");
         match TcpStream::connect(addr).await {
             Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => return,
-            Err(error) => panic!("unexpected proxy listener shutdown error: {error}"),
+            // A connection accepted while the listener closes can reset before
+            // the next connect observes the terminal refusal state.
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            Err(error) => panic!(
+                "unexpected proxy listener shutdown error ({:?}): {error}",
+                error.kind()
+            ),
             Ok(stream) => drop(stream),
         }
         assert!(
