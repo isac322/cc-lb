@@ -49,6 +49,7 @@ added_tests = [
   "cc-lb-config::integration::string_parity::t3__environment_override_precedence_has_file_and_string_parity",
   "cc-lb-config::integration::string_parity::t3__cli_override_precedence_has_file_and_string_parity",
   "cc-lb-config::integration::string_parity::t3__missing_file_still_reports_the_exact_toml_file_provider",
+  "cc-lb-testkit::storage::tests::request_event_cursor_filters_before_limit",
 ]
 
 [[move]]
