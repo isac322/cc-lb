@@ -161,7 +161,6 @@ async fn t2__export_round_trips_through_stable_key_ordering() {
     insta::assert_json_snapshot!(body);
 }
 
-
 fn bump_dynamic_generation(state: &cc_lb_admin::AdminState, snapshot: UpstreamStatusSnapshot) {
     let current = state.dynamic_view.load();
     let next = DynamicViewBuilder::from_view(&current)

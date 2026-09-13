@@ -23,7 +23,6 @@ async fn t3__sighup_reloads_body_defaults() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
-        cc_lb_testkit::fixed_clock(1_700_000_000),
     ));
     let app = cc_lb_admin::router(AdminState {
         storage: None,

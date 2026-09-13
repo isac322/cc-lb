@@ -92,7 +92,6 @@ pub struct InMemoryStorage {
     cache_keepalive_turns: Mutex<Vec<storage_api::CacheKeepaliveTurnRecord>>,
     config_draft: Mutex<storage_api::ConfigDraftState>,
     config_history: Mutex<BTreeMap<u64, storage_api::HistoryEntry>>,
-    killswitch_enabled: Mutex<bool>,
     meta_values: Mutex<HashMap<String, String>>,
     managed_keys: Mutex<BTreeMap<(String, String), storage_api::StoredApiKeyRecord>>,
     entity_id_cursor: AtomicU64,
@@ -424,7 +423,6 @@ impl Default for InMemoryStorage {
             cache_keepalive_turns: Mutex::new(Vec::new()),
             config_draft: Mutex::new(storage_api::ConfigDraftState::default()),
             config_history: Mutex::new(BTreeMap::new()),
-            killswitch_enabled: Mutex::new(false),
             entity_id_cursor: AtomicU64::new(0),
             principal_state: Mutex::new(PrincipalState {
                 registry_entries: HashMap::from([(
@@ -1176,15 +1174,6 @@ impl storage_api::MetaStore for InMemoryStorage {
 
     async fn backend_kind(&self) -> storage_api::StorageResult<storage_api::BackendKind> {
         Ok(*lock_or_storage_error(&self.backend_kind)?)
-    }
-
-    async fn killswitch_enabled(&self) -> storage_api::StorageResult<bool> {
-        Ok(*lock_or_storage_error(&self.killswitch_enabled)?)
-    }
-
-    async fn set_killswitch_enabled(&self, enabled: bool) -> storage_api::StorageResult<()> {
-        *lock_or_storage_error(&self.killswitch_enabled)? = enabled;
-        Ok(())
     }
 
     async fn get_meta_value(&self, key: &str) -> storage_api::StorageResult<Option<String>> {

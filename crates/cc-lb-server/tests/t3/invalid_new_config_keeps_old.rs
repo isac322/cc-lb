@@ -18,7 +18,6 @@ fn t3__invalid_new_config_keeps_old() {
         &config_path,
         reload_common::load_config(&config_path),
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
-        cc_lb_testkit::fixed_clock(1_700_000_000),
     );
     let before_counters = reload_common::reload_failure_counters(&metrics);
     std::fs::write(&config_path, "[listener\nthis is not valid toml").unwrap();
@@ -63,7 +62,6 @@ fn t3__config_reload_accepts_config_only_change_and_keeps_runtime_view() {
         initial_config,
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
         Some(dynamic_view.clone()),
-        cc_lb_testkit::fixed_clock(1_700_000_000),
     );
     reload_common::write_config_with_principal_model(&config_path, 200, proxy_addr, "[");
 
@@ -103,7 +101,6 @@ fn t3__config_reload_accepts_plugin_unrelated_change_and_keeps_runtime_view() {
         initial_config,
         Arc::new(cc_lb_runtime_wasmtime::WasmtimeRuntime::with_defaults().expect("engine build")),
         Some(dynamic_view.clone()),
-        cc_lb_testkit::fixed_clock(1_700_000_000),
     );
     reload_common::write_config_with_principal_plugins(
         &config_path,

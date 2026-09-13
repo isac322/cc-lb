@@ -6858,22 +6858,6 @@ loss = []
 guardian = ""
 
 [[move]]
-old = "cc-lb-admin::integration::v1_status::status_endpoint_includes_killswitch_state"
-action = "MOVE"
-new = ["cc-lb-admin::integration::v1_status::t2__status_endpoint_includes_killswitch_state"]
-duplicate_of = ""
-loss = []
-guardian = ""
-
-[[move]]
-old = "cc-lb-admin::integration::new_admin_modules_smoke::status_handler_smoke"
-action = "MOVE"
-new = ["cc-lb-admin::integration::new_admin_modules_smoke::t2__status_handler_smoke"]
-duplicate_of = ""
-loss = []
-guardian = ""
-
-[[move]]
 old = "cc-lb-admin::integration::v1_status::status_reflects_in_memory_dynamic_view_generation_and_replica_id"
 action = "MOVE"
 new = ["cc-lb-admin::integration::v1_status::t2__status_reflects_in_memory_dynamic_view_generation_and_replica_id"]
