@@ -113,29 +113,24 @@ async fn t2__unauthorized_refresh_retries_once_then_stops() {
     assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 2);
     assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
 
-    let (responses, retry_overhead_ms) = tokio::time::timeout(Duration::from_secs(1), async {
-        let mut responses = Vec::new();
-        loop {
-            match lifecycle_events
-                .recv()
-                .await
-                .expect("lifecycle event channel remains open")
-            {
-                LifecycleEvent::UpstreamResponseStarted {
-                    status,
-                    bulkhead_wait_ms,
-                    upstream_ttfb_ms,
-                    ..
-                } => responses.push((status, bulkhead_wait_ms, upstream_ttfb_ms)),
-                LifecycleEvent::RequestTerminated { io_timings, .. } => {
-                    break (responses, io_timings.retry_overhead_ms);
-                }
-                _ => {}
+    let mut responses = Vec::new();
+    let retry_overhead_ms = loop {
+        match lifecycle_events
+            .try_recv()
+            .expect("terminal lifecycle event is queued after response collection")
+        {
+            LifecycleEvent::UpstreamResponseStarted {
+                status,
+                bulkhead_wait_ms,
+                upstream_ttfb_ms,
+                ..
+            } => responses.push((status, bulkhead_wait_ms, upstream_ttfb_ms)),
+            LifecycleEvent::RequestTerminated { io_timings, .. } => {
+                break io_timings.retry_overhead_ms;
             }
+            _ => {}
         }
-    })
-    .await
-    .expect("terminal lifecycle event arrives");
+    };
 
     assert_eq!(
         responses.len(),
@@ -172,7 +167,7 @@ async fn t2__unauthorized_refresh_retries_once_then_stops() {
 }
 
 #[tokio::test]
-async fn unauthorized_refresh_second_attempt_dispatch_error_clears_stale_stage_timings() {
+async fn t2__unauthorized_refresh_second_attempt_dispatch_error_clears_stale_stage_timings() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let test_bus = TestLifecycleBus::new();
@@ -215,34 +210,28 @@ async fn unauthorized_refresh_second_attempt_dispatch_error_clears_stale_stage_t
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
 
-    let (first_attempt_ttfb, terminal_event) =
-        tokio::time::timeout(Duration::from_secs(1), async {
-            let mut first_ttfb = None;
-            loop {
-                match lifecycle_events
-                    .recv()
-                    .await
-                    .expect("lifecycle event channel remains open")
-                {
-                    LifecycleEvent::UpstreamResponseStarted {
-                        upstream_ttfb_ms, ..
-                    } if first_ttfb.is_none() => {
-                        first_ttfb = upstream_ttfb_ms;
-                    }
-                    LifecycleEvent::RequestTerminated {
-                        client_status,
-                        upstream_body_ms,
-                        io_timings,
-                        ..
-                    } => {
-                        break (first_ttfb, (client_status, upstream_body_ms, io_timings));
-                    }
-                    _ => {}
-                }
+    let mut first_attempt_ttfb = None;
+    let terminal_event = loop {
+        match lifecycle_events
+            .try_recv()
+            .expect("terminal lifecycle event is queued after response collection")
+        {
+            LifecycleEvent::UpstreamResponseStarted {
+                upstream_ttfb_ms, ..
+            } if first_attempt_ttfb.is_none() => {
+                first_attempt_ttfb = upstream_ttfb_ms;
             }
-        })
-        .await
-        .expect("terminal lifecycle event arrives");
+            LifecycleEvent::RequestTerminated {
+                client_status,
+                upstream_body_ms,
+                io_timings,
+                ..
+            } => {
+                break (client_status, upstream_body_ms, io_timings);
+            }
+            _ => {}
+        }
+    };
 
     assert!(first_attempt_ttfb.is_some());
     let (client_status, upstream_body_ms, io_timings) = terminal_event;

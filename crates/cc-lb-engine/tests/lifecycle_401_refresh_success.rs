@@ -93,29 +93,24 @@ async fn t2__unauthorized_refresh_retries_once_then_succeeds() {
     assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 2);
     assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
 
-    let (responses, retry_overhead_ms) = tokio::time::timeout(Duration::from_secs(1), async {
-        let mut responses = Vec::new();
-        loop {
-            match lifecycle_events
-                .recv()
-                .await
-                .expect("lifecycle event channel remains open")
-            {
-                LifecycleEvent::UpstreamResponseStarted {
-                    status,
-                    bulkhead_wait_ms,
-                    upstream_ttfb_ms,
-                    ..
-                } => responses.push((status, bulkhead_wait_ms, upstream_ttfb_ms)),
-                LifecycleEvent::RequestTerminated { io_timings, .. } => {
-                    break (responses, io_timings.retry_overhead_ms);
-                }
-                _ => {}
+    let mut responses = Vec::new();
+    let retry_overhead_ms = loop {
+        match lifecycle_events
+            .try_recv()
+            .expect("terminal lifecycle event is queued after response collection")
+        {
+            LifecycleEvent::UpstreamResponseStarted {
+                status,
+                bulkhead_wait_ms,
+                upstream_ttfb_ms,
+                ..
+            } => responses.push((status, bulkhead_wait_ms, upstream_ttfb_ms)),
+            LifecycleEvent::RequestTerminated { io_timings, .. } => {
+                break io_timings.retry_overhead_ms;
             }
+            _ => {}
         }
-    })
-    .await
-    .expect("terminal lifecycle event arrives");
+    };
 
     assert_eq!(
         responses.len(),

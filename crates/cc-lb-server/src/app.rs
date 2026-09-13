@@ -3534,7 +3534,7 @@ mod tests {
         let LifecycleBusReceiver::InMemory(mut events) = bus.subscribe_lifecycle() else {
             panic!("expected in-memory lifecycle receiver");
         };
-        let clock: ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
         let observer = cc_lb_engine::LifecycleContext::new(
             "cancelled-ingress".to_owned(),
             bus as Arc<dyn RequestEventBus>,
