@@ -3,12 +3,10 @@
 #[path = "../../cc-lb-storage-conformance/src/postgres_fixture.rs"]
 mod postgres_fixture;
 
-#[path = "audit.rs"]
-mod t3_postgres__audit;
-#[path = "migration_0037_warmup.rs"]
-mod t3_postgres__migration_0037_warmup;
 #[path = "api_key_usage.rs"]
 mod t3_postgres__api_key_usage;
+#[path = "audit.rs"]
+mod t3_postgres__audit;
 #[path = "cache_keepalive_session_reads.rs"]
 mod t3_postgres__cache_keepalive_session_reads;
 #[path = "cache_keepalive_sessions.rs"]
@@ -17,6 +15,8 @@ mod t3_postgres__cache_keepalive_sessions;
 mod t3_postgres__crash_recovery;
 #[path = "managed_keys_adapter.rs"]
 mod t3_postgres__managed_keys_adapter;
+#[path = "migration_0037_warmup.rs"]
+mod t3_postgres__migration_0037_warmup;
 #[path = "migration_0040_wasm_registry_wire_version.rs"]
 mod t3_postgres__migration_0040_wasm_registry_wire_version;
 #[path = "plan_tier_concurrency.rs"]

@@ -60,8 +60,7 @@ async fn t2__put_router_terminal_strategy_persists_and_audits() {
     assert!(entries.iter().any(|entry| {
         entry.route == expected_route
             && entry.admin_action.as_deref().is_some_and(|action| {
-                action.contains("principal_update")
-                    && action.contains("router_terminal_strategy")
+                action.contains("principal_update") && action.contains("router_terminal_strategy")
             })
     }));
 }
