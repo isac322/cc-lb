@@ -41,6 +41,15 @@ pub trait AuditStore: Send + Sync {
         limit: usize,
     ) -> StorageResult<Vec<AuditEntry>>;
 
+    async fn query_audit_by_actor(
+        &self,
+        authority: &str,
+        subject: &str,
+        since: u64,
+        until: u64,
+        limit: usize,
+    ) -> StorageResult<Vec<AuditEntry>>;
+
     async fn prune_audit(&self, older_than: u64) -> StorageResult<u64>;
 
     async fn prune_audit_before(

@@ -84,6 +84,7 @@ use crate::state_machine::{ServerState, ServerStateHandle};
 use crate::storage_factory;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 use crate::tls::{ReloadableListener, TlsState};
+use cc_lb_admin::auth::{AdminAuthenticator, build_providers};
 use cc_lb_admin::{
     AdminPorts, AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder,
     WarmupDialectDispatchError, WarmupDialectDispatchErrorKind, WarmupDialectDispatchOutcome,
@@ -318,6 +319,8 @@ pub enum BuildError {
     StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
     #[error(transparent)]
     SchedulerFactory(#[from] crate::scheduler_factory::SchedulerFactoryError),
+    #[error("admin authentication configuration failed: {message}")]
+    AdminAuth { message: String },
     #[cfg(feature = "postgres")]
     #[error("storage connection failed: {message}")]
     StorageConnect { message: String },
@@ -507,7 +510,7 @@ pub async fn run_serve(
         config.observability.user_prompt_redaction,
     ));
     let guard = init_observability(&mut config)?;
-    crate::reload::warn_removed_prompt_cache_switches(&config_warnings);
+    crate::reload::warn_config_warnings(&config_warnings);
     let app = match build_app_with_path_inner(
         config,
         Some(config_path),
@@ -1811,17 +1814,24 @@ async fn build_app_with_storage_inner(
                 clock: clock.clone(),
             }) as Arc<dyn WarmupDialectDispatcher>
         }),
-        audit_sink: audit_sink.clone(),
         dynamic_view: dynamic_view.clone(),
         config: admin_config,
         scheduler: Some(cc_lb_scheduler::admin::SchedulerAdminHandle::new(
             scheduler_lazy_handle.clone(),
         )),
-        admin_token: config
-            .admin
-            .token
-            .clone()
-            .or_else(|| std::env::var(&config.admin.token_env).ok()),
+        admin_auth: Arc::new(AdminAuthenticator::new(
+            build_providers(
+                &config.admin.auth,
+                config
+                    .admin
+                    .token
+                    .clone()
+                    .or_else(|| std::env::var(&config.admin.token_env).ok()),
+            )
+            .map_err(|error| BuildError::AdminAuth {
+                message: error.to_string(),
+            })?,
+        )),
         start_time,
         event_bus: Some(event_bus.clone()),
         storage_tail: storage_tail_tx,
@@ -2448,7 +2458,6 @@ fn admin_router(
     server_state: Arc<ServerStateHandle>,
     internal_partials_state: Option<cc_lb_admin::internal_partials::InternalPartialsState>,
 ) -> Router {
-    let _ = admin_state.admin_token.clone();
     let mut admin_router =
         cc_lb_admin::router(admin_state).merge(server_state_router(server_state));
     if let Some(state) = internal_partials_state {

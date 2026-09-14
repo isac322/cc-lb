@@ -3,7 +3,7 @@ use std::fmt;
 use serde::Serialize;
 use uuid::Uuid;
 
-use cc_lb_storage_api::AuditEntry;
+use cc_lb_storage_api::{AuditActorFields, AuditEntry};
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -193,8 +193,20 @@ impl fmt::Display for AuditPayload {
 
 impl From<AuditPayload> for AuditEntry {
     fn from(payload: AuditPayload) -> Self {
+        let AuditActorFields {
+            actor,
+            authority,
+            subject,
+            kind,
+            email,
+        } = AuditActorFields::system("control");
         AuditEntry {
             admin_action: Some(payload.to_string()),
+            actor: Some(actor),
+            actor_authority: Some(authority),
+            actor_subject: Some(subject),
+            actor_kind: Some(kind),
+            actor_email: email,
             ..Default::default()
         }
     }

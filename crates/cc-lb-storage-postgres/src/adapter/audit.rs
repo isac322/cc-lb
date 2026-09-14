@@ -31,6 +31,10 @@ struct AuditInsertRow<'a> {
     limit_violation: Option<&'a str>,
     admin_action: Option<&'a str>,
     actor: Option<&'a str>,
+    actor_authority: Option<&'a str>,
+    actor_subject: Option<&'a str>,
+    actor_kind: Option<&'a str>,
+    actor_email: Option<&'a str>,
     kind: Option<&'a str>,
     payload: Option<Vec<u8>>,
 }
@@ -41,7 +45,7 @@ impl AuditStore for PostgresStorage {
         let payload = entry.payload.as_ref().map(serde_json::to_vec).transpose()?;
 
         sqlx::query(
-            "INSERT INTO audit_log_v1 (ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, kind, payload) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
+            "INSERT INTO audit_log_v1 (ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
         )
         .bind(unix_secs_to_datetime(entry.ts, "audit ts")?)
         .bind(&entry.request_id)
@@ -64,6 +68,10 @@ impl AuditStore for PostgresStorage {
         .bind(entry.limit_violation.as_deref())
         .bind(entry.admin_action.as_deref())
         .bind(entry.actor.as_deref())
+        .bind(entry.actor_authority.as_deref())
+        .bind(entry.actor_subject.as_deref())
+        .bind(entry.actor_kind.as_deref())
+        .bind(entry.actor_email.as_deref())
         .bind(entry.kind.as_deref())
         .bind(payload)
         .execute(&self.pool)
@@ -84,7 +92,7 @@ impl AuditStore for PostgresStorage {
             .collect::<StorageResult<Vec<_>>>()?;
 
         let mut query_builder = QueryBuilder::<Postgres>::new(
-            "INSERT INTO audit_log_v1 (ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, kind, payload) ",
+            "INSERT INTO audit_log_v1 (ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload) ",
         );
         query_builder.push_values(rows.iter(), |mut values, row| {
             values
@@ -104,6 +112,10 @@ impl AuditStore for PostgresStorage {
                 .push_bind(row.limit_violation)
                 .push_bind(row.admin_action)
                 .push_bind(row.actor)
+                .push_bind(row.actor_authority)
+                .push_bind(row.actor_subject)
+                .push_bind(row.actor_kind)
+                .push_bind(row.actor_email)
                 .push_bind(row.kind)
                 .push_bind(row.payload.as_deref());
         });
@@ -133,11 +145,42 @@ impl AuditStore for PostgresStorage {
         let until = unix_secs_to_datetime_upper(until, "audit until")?;
 
         let rows = sqlx::query(
-            "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND ($3::text IS NULL OR principal_id = $3) ORDER BY seq ASC LIMIT $4",
+            "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND ($3::text IS NULL OR principal_id = $3) ORDER BY seq ASC LIMIT $4",
         )
         .bind(since)
         .bind(until)
         .bind(principal_id)
+        .bind(u64_to_i64(limit as u64, "audit limit")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.into_iter().map(row_to_audit_entry).collect()
+    }
+
+    async fn query_audit_by_actor(
+        &self,
+        authority: &str,
+        subject: &str,
+        since: u64,
+        until: u64,
+        limit: usize,
+    ) -> StorageResult<Vec<AuditEntry>> {
+        if limit == 0 || until < since {
+            return Ok(Vec::new());
+        }
+        let Some(since) = unix_secs_to_datetime_lower(since, "audit since")? else {
+            return Ok(Vec::new());
+        };
+        let until = unix_secs_to_datetime_upper(until, "audit until")?;
+
+        let rows = sqlx::query(
+            "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND actor_authority = $3 AND actor_subject = $4 ORDER BY seq ASC LIMIT $5",
+        )
+        .bind(since)
+        .bind(until)
+        .bind(authority)
+        .bind(subject)
         .bind(u64_to_i64(limit as u64, "audit limit")?)
         .fetch_all(&self.pool)
         .await
@@ -199,6 +242,10 @@ fn audit_insert_row(entry: &AuditEntry) -> StorageResult<AuditInsertRow<'_>> {
         limit_violation: entry.limit_violation.as_deref(),
         admin_action: entry.admin_action.as_deref(),
         actor: entry.actor.as_deref(),
+        actor_authority: entry.actor_authority.as_deref(),
+        actor_subject: entry.actor_subject.as_deref(),
+        actor_kind: entry.actor_kind.as_deref(),
+        actor_email: entry.actor_email.as_deref(),
         kind: entry.kind.as_deref(),
         payload: entry.payload.as_ref().map(serde_json::to_vec).transpose()?,
     })
@@ -247,6 +294,10 @@ fn row_to_audit_entry(row: PgRow) -> StorageResult<AuditEntry> {
         limit_violation: row.try_get("limit_violation").map_err(map_sqlx_error)?,
         admin_action: row.try_get("admin_action").map_err(map_sqlx_error)?,
         actor: row.try_get("actor").map_err(map_sqlx_error)?,
+        actor_authority: row.try_get("actor_authority").map_err(map_sqlx_error)?,
+        actor_subject: row.try_get("actor_subject").map_err(map_sqlx_error)?,
+        actor_kind: row.try_get("actor_kind").map_err(map_sqlx_error)?,
+        actor_email: row.try_get("actor_email").map_err(map_sqlx_error)?,
         kind: row.try_get("kind").map_err(map_sqlx_error)?,
         payload,
     })

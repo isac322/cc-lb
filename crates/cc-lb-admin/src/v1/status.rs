@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Extension, Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get,
+};
 use cc_lb_control::ApplyStatus;
 use cc_lb_domain::ReplicaIdentity;
 use cc_lb_storage_api::principal::Limit;
@@ -12,7 +14,11 @@ use cc_lb_storage_api::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::AdminState;
+use crate::{
+    AdminState,
+    audit::{AdminAuditEvent, record_admin_audit},
+    auth::{AdminAction, AdminIdentity, authorize},
+};
 
 const STORE_PAGE_LIMIT: usize = 1000;
 const EXPORT_SCHEMA_VERSION: u64 = 1;
@@ -123,9 +129,42 @@ pub(crate) async fn status(State(state): State<AdminState>) -> axum::response::R
     }
 }
 
-async fn export(State(state): State<AdminState>) -> axum::response::Response {
+async fn export(
+    State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
+) -> axum::response::Response {
+    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "forbidden" }))).into_response();
+    }
+
     match build_export(&state, cc_lb_clock::unix_secs(state.clock.now())).await {
-        Ok(response) => Json(response).into_response(),
+        Ok(response) => {
+            let action = "config_export";
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/export",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: Some(json!({})),
+                },
+            )
+            .await
+            {
+                tracing::error!(error = %error, action, "admin audit write failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "audit_write_failed" })),
+                )
+                    .into_response();
+            }
+            Json(response).into_response()
+        }
         Err(error) => status_error_response(error),
     }
 }

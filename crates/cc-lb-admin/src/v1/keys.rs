@@ -1,20 +1,25 @@
+use std::future::Future;
+
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_control::AuditEntry;
 use cc_lb_control::api_keys::key_store::CreateParams;
 use cc_lb_control::api_keys::secret;
-use cc_lb_storage_api::RequestEventKeyLastUsedQuery;
 use cc_lb_storage_api::types::{KeyStatus, PrincipalKindLite, UpstreamKind};
+use cc_lb_storage_api::{RequestEventKeyLastUsedQuery, StorageError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::add_dynamic_rebind_headers;
-use crate::AdminState;
+use crate::audit::{AdminAuditEvent, record_admin_audit};
+use crate::{
+    AdminState,
+    auth::{AdminAction, AdminIdentity, authorize},
+};
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -45,6 +50,17 @@ enum ListKeysStatus {
     Disabled,
     Revoked,
     All,
+}
+
+impl ListKeysStatus {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+            Self::Revoked => "revoked",
+            Self::All => "all",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -79,6 +95,7 @@ struct RevokeKeyResponse {
 
 async fn issue_key(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Path(id): Path<String>,
     Json(body): Json<IssueKeyRequest>,
 ) -> axum::response::Response {
@@ -103,7 +120,35 @@ async fn issue_key(
         Ok((record, plaintext)) => {
             let (key_id, _) = secret::parse(plaintext.expose())
                 .expect("plaintext key format is guaranteed by KeyStore::create");
-            emit_key_audit(&state, &id, &key_id, "principal_key_issue", 201);
+            let route = format!("/admin/v1/principals/{id}/keys");
+            if record_issue_audit_or_revoke(
+                key_store.as_ref(),
+                &id,
+                &key_id,
+                record_admin_audit(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: "principal_key_issue",
+                        route: &route,
+                        target_principal_id: Some(&id),
+                        target_upstream: None,
+                        api_key_id: Some(&key_id),
+                        status: StatusCode::CREATED.as_u16(),
+                        payload: Some(json!({ "plaintext_exposed": true })),
+                    },
+                ),
+            )
+            .await
+            .is_err()
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "audit_write_failed" })),
+                )
+                    .into_response();
+            }
             let response = IssueKeyResponse {
                 principal_id: id,
                 key_id,
@@ -125,11 +170,42 @@ async fn issue_key(
     }
 }
 
+async fn record_issue_audit_or_revoke(
+    key_store: &cc_lb_control::api_keys::key_store::KeyStore,
+    principal_id: &str,
+    key_id: &str,
+    audit_write: impl Future<Output = Result<(), StorageError>>,
+) -> Result<(), StorageError> {
+    let Err(audit_error) = audit_write.await else {
+        return Ok(());
+    };
+
+    match key_store.revoke(principal_id, key_id).await {
+        Ok(()) => tracing::error!(
+            error = %audit_error,
+            action = "principal_key_issue",
+            "admin audit write failed; issued key revoked"
+        ),
+        Err(rollback_error) => tracing::error!(
+            audit_error = %audit_error,
+            rollback_error = %rollback_error,
+            action = "principal_key_issue",
+            "admin audit write and issued key rollback failed"
+        ),
+    }
+
+    Err(audit_error)
+}
+
 async fn list_keys(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Path(id): Path<String>,
     Query(query): Query<ListKeysQuery>,
 ) -> axum::response::Response {
+    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "forbidden" }))).into_response();
+    }
     let Some(key_store) = state.key_store.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -189,6 +265,40 @@ async fn list_keys(
                     last_used_at_unix_secs,
                 });
             }
+            let route = format!("/admin/v1/principals/{id}/keys");
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: "principal_keys_list",
+                    route: &route,
+                    target_principal_id: Some(&id),
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: Some(json!({
+                        "principal_id": &id,
+                        "status": query
+                            .status
+                            .as_ref()
+                            .map_or("active", ListKeysStatus::as_str),
+                    })),
+                },
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %error,
+                    action = "principal_keys_list",
+                    "admin audit write failed"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "audit_write_failed" })),
+                )
+                    .into_response();
+            }
             Json(KeyListResponse { keys }).into_response()
         }
         Err(e) => {
@@ -213,6 +323,7 @@ fn matches_status(status: KeyStatus, requested: Option<&ListKeysStatus>) -> bool
 
 async fn revoke_key(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Path((id, key_id)): Path<(String, String)>,
 ) -> axum::response::Response {
     let Some(key_store) = state.key_store.clone() else {
@@ -226,7 +337,34 @@ async fn revoke_key(
     match key_store.revoke(&id, &key_id).await {
         Ok(_) => {
             let now = cc_lb_clock::unix_secs(state.clock.now());
-            emit_key_audit(&state, &id, &key_id, "principal_key_revoke", 200);
+            let route = format!("/admin/v1/principals/{id}/keys/{key_id}/revoke");
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: "principal_key_revoke",
+                    route: &route,
+                    target_principal_id: Some(&id),
+                    target_upstream: None,
+                    api_key_id: Some(&key_id),
+                    status: StatusCode::OK.as_u16(),
+                    payload: None,
+                },
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %error,
+                    action = "principal_key_revoke",
+                    "admin audit write failed"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "audit_write_failed" })),
+                )
+                    .into_response();
+            }
             let response = RevokeKeyResponse {
                 key_id,
                 revoked_at_unix_secs: now,
@@ -246,26 +384,123 @@ async fn revoke_key(
     }
 }
 
-fn emit_key_audit(state: &AdminState, principal_id: &str, key_id: &str, action: &str, status: u16) {
-    let Some(audit_sink) = &state.audit_sink else {
-        return;
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+    use cc_lb_storage_api::types::{KeyStatus, PrincipalKindLite, UpstreamKind};
+    use cc_lb_storage_api::{
+        AuditEntry, AuditStore, BackendKind, MetaStore, StorageError, StorageResult,
     };
-    let ts = cc_lb_clock::unix_secs(state.clock.now());
-    let _ = audit_sink.try_enqueue(AuditEntry {
-        ts,
-        request_id: format!("admin-v1-key-{key_id}-{ts}"),
-        principal_id: principal_id.to_owned(),
-        route: "admin_v1_principal_keys".to_owned(),
-        upstream: "admin".to_owned(),
-        status,
-        input_tokens: Some(0),
-        output_tokens: Some(0),
-        duration_ms: 0,
-        api_key_id: Some(key_id.to_owned()),
-        admin_action: Some(format!(
-            "{action}(principal_id={principal_id}, key_id={key_id})"
-        )),
-        actor: Some("admin".to_owned()),
-        ..AuditEntry::default()
-    });
+
+    use super::{record_issue_audit_or_revoke, secret};
+
+    struct FailingAppendAuditStore {
+        inner: Arc<dyn AuditStore>,
+    }
+
+    #[async_trait]
+    impl AuditStore for FailingAppendAuditStore {
+        async fn append_audit(&self, _entry: &AuditEntry) -> StorageResult<()> {
+            Err(StorageError::Unavailable {
+                message: "injected audit append failure".to_owned(),
+            })
+        }
+
+        async fn query_audit(
+            &self,
+            principal_id: Option<&str>,
+            since: u64,
+            until: u64,
+            limit: usize,
+        ) -> StorageResult<Vec<AuditEntry>> {
+            self.inner
+                .query_audit(principal_id, since, until, limit)
+                .await
+        }
+
+        async fn query_audit_by_actor(
+            &self,
+            authority: &str,
+            subject: &str,
+            since: u64,
+            until: u64,
+            limit: usize,
+        ) -> StorageResult<Vec<AuditEntry>> {
+            self.inner
+                .query_audit_by_actor(authority, subject, since, until, limit)
+                .await
+        }
+
+        async fn prune_audit(&self, older_than: u64) -> StorageResult<u64> {
+            self.inner.prune_audit(older_than).await
+        }
+
+        async fn prune_audit_before(
+            &self,
+            cutoff_ts_x_1m: u64,
+            batch_size: usize,
+        ) -> StorageResult<u64> {
+            self.inner
+                .prune_audit_before(cutoff_ts_x_1m, batch_size)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_append_failure_revokes_just_issued_key() {
+        let dir = tempfile::tempdir().expect("storage dir");
+        let database_url = format!("sqlite://{}", dir.path().join("keys.sqlite").display());
+        let storage =
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+                .await
+                .expect("storage opens");
+        storage
+            .initialize(BackendKind::Sqlite)
+            .await
+            .expect("storage initializes");
+        let storage = Arc::new(storage);
+        let key_store = KeyStore::new(storage.clone());
+        let (issued, plaintext) = key_store
+            .create(
+                "principal-1",
+                CreateParams {
+                    upstream_kind: UpstreamKind::AnthropicKey,
+                    label: "audit rollback".to_owned(),
+                    description: None,
+                    expires_at_unix_secs: None,
+                    limit_overrides: Vec::new(),
+                    principal_kind: PrincipalKindLite::Machine,
+                },
+            )
+            .await
+            .expect("key issuance succeeds");
+        let (key_id, _) =
+            secret::parse(plaintext.expose()).expect("issued plaintext has a valid key id");
+        assert_eq!(issued.status, KeyStatus::Active);
+
+        let inner: Arc<dyn AuditStore> = storage;
+        let failing_audit = FailingAppendAuditStore { inner };
+        let audit_entry = AuditEntry::default();
+        let result = record_issue_audit_or_revoke(
+            &key_store,
+            "principal-1",
+            &key_id,
+            failing_audit.append_audit(&audit_entry),
+        )
+        .await;
+
+        assert!(matches!(result, Err(StorageError::Unavailable { .. })));
+        let stored = key_store
+            .get("principal-1", &key_id)
+            .await
+            .expect("key lookup succeeds")
+            .expect("issued key remains as a revoked record");
+        assert_eq!(stored.status, KeyStatus::Revoked);
+        assert_eq!(stored.index_hash, [0; 32]);
+        assert_eq!(stored.verify_hash, [0; 32]);
+        assert_eq!(stored.secret_salt, [0; 16]);
+    }
 }

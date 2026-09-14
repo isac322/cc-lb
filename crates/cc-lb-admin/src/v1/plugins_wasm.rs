@@ -5,13 +5,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Multipart, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::extract::{DefaultBodyLimit, Extension, Multipart, Request, State};
+use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use cc_lb_control::{AuditEntry, AuditPayload};
+use cc_lb_control::AuditPayload;
 use cc_lb_plugin_wire::schema::HookKind;
 use cc_lb_runtime_wasmtime::{ModuleInspection, WasmtimeRuntime, WasmtimeRuntimeError};
 use cc_lb_storage_api::{
@@ -28,7 +28,11 @@ use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
 use super::wasm_cache::{data_dir, wasm_cache_path};
-use crate::AdminState;
+use crate::{
+    AdminState,
+    audit::{AdminAuditEvent, record_admin_audit},
+    auth::AdminIdentity,
+};
 
 const WASM_MAGIC: &[u8; 4] = b"\0asm";
 const MIN_WASM_BYTES: usize = 8;
@@ -92,10 +96,11 @@ pub fn router() -> Router<AdminState> {
 
 async fn upload_rate_limit(
     State(limiter): State<UploadRateLimitState>,
+    Extension(identity): Extension<AdminIdentity>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let admin_id = admin_id_from_headers(request.headers());
+    let admin_id = admin_id(&identity);
     let now = Instant::now();
     let mut buckets = limiter.buckets.lock().await;
     let bucket = buckets.entry(admin_id).or_default();
@@ -120,11 +125,35 @@ async fn upload_rate_limit(
 
 async fn upload_wasm(
     State(state): State<AdminState>,
-    headers: HeaderMap,
+    Extension(identity): Extension<AdminIdentity>,
     multipart: Multipart,
 ) -> Response {
-    match upload_wasm_inner(&state, &headers, multipart).await {
+    match upload_wasm_inner(&state, &identity, multipart).await {
         Ok((status, response)) => {
+            let payload = AuditPayload::PluginRegistryUpload {
+                sha256: response.sha256_hex.clone(),
+                size_bytes: response.size_bytes,
+                original_filename: response.original_filename.clone(),
+            };
+            let action = payload.to_string();
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: &action,
+                    route: "/admin/v1/plugins/wasm",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: status.as_u16(),
+                    payload: None,
+                },
+            )
+            .await
+            {
+                return audit_write_failed(error, &action);
+            }
             let mut builder = Response::builder().status(status);
             if status == StatusCode::CREATED {
                 builder = builder.header(
@@ -144,7 +173,25 @@ async fn upload_wasm(
         }
         Err(error) => {
             let status = error.status().as_u16();
-            enqueue_upload_attempt_audit(&state, status);
+            let action = "plugin_registry_upload_attempt";
+            if let Err(audit_error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/plugins/wasm",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status,
+                    payload: None,
+                },
+            )
+            .await
+            {
+                return audit_write_failed(audit_error, action);
+            }
             (*error).into_response()
         }
     }
@@ -152,7 +199,7 @@ async fn upload_wasm(
 
 async fn upload_wasm_inner(
     state: &AdminState,
-    headers: &HeaderMap,
+    identity: &AdminIdentity,
     multipart: Multipart,
 ) -> Result<(StatusCode, UploadResponse), Box<Response>> {
     let storage = state.storage.as_deref().ok_or_else(|| {
@@ -238,7 +285,7 @@ async fn upload_wasm_inner(
         Some(entry) if !entry.supported_slots.is_empty() => entry.supported_slots.clone(),
         _ => declared_slots,
     };
-    let admin_id = admin_id_from_headers(headers);
+    let admin_id = admin_id(identity);
     let uploaded_at_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
     let blob = WasmBlob {
         sha256,
@@ -346,7 +393,7 @@ async fn upload_wasm_inner(
     if let Some(old_sha256_hex) = old_sha256_hex {
         remove_cache_file(state, &old_sha256_hex).await;
     }
-    enqueue_upload_audit(state, &sha256_hex, bytes.len() as u64, &original_filename);
+
     Ok((
         status,
         UploadResponse {
@@ -823,64 +870,20 @@ fn json_error(status: StatusCode, error: &str, reason: impl Into<String>) -> Res
         .into_response()
 }
 
-fn enqueue_upload_audit(
-    state: &AdminState,
-    sha256: &str,
-    size_bytes: u64,
-    original_filename: &str,
-) {
-    let Some(audit_sink) = &state.audit_sink else {
-        return;
-    };
-    let payload = AuditPayload::PluginRegistryUpload {
-        sha256: sha256.to_owned(),
-        size_bytes,
-        original_filename: original_filename.to_owned(),
-    };
-    let mut entry: AuditEntry = payload.into();
-    entry.ts = cc_lb_clock::unix_secs(state.clock.now());
-    entry.request_id = format!("admin-plugin-registry-upload-{sha256}-{}", entry.ts);
-    entry.principal_id = "admin".to_owned();
-    entry.route = "/admin/v1/plugins/wasm".to_owned();
-    entry.status = 201;
-    entry.actor = Some("admin".to_owned());
-    let _ = audit_sink.try_enqueue(entry);
+fn audit_write_failed(error: StorageError, action: &str) -> Response {
+    tracing::error!(%error, action, "admin audit write failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "audit_write_failed" })),
+    )
+        .into_response()
 }
 
-fn enqueue_upload_attempt_audit(state: &AdminState, status: u16) {
-    let Some(audit_sink) = &state.audit_sink else {
-        return;
-    };
-    let ts = cc_lb_clock::unix_secs(state.clock.now());
-    let _ = audit_sink.try_enqueue(AuditEntry {
-        ts,
-        request_id: format!("admin-plugin-registry-upload-attempt-{ts}"),
-        principal_id: "admin".to_owned(),
-        route: "/admin/v1/plugins/wasm".to_owned(),
-        upstream: "admin".to_owned(),
-        status,
-        input_tokens: Some(0),
-        output_tokens: Some(0),
-        duration_ms: 0,
-        admin_action: Some("plugin_registry_upload_attempt".to_owned()),
-        actor: Some("admin".to_owned()),
-        ..AuditEntry::default()
-    });
-}
-
-fn admin_id_from_headers(headers: &HeaderMap) -> Uuid {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .unwrap_or("anonymous-admin");
-    // The current admin auth surface is a bearer-token singleton rather than a
-    // request extension carrying a DB principal, so the per-admin rate bucket is
-    // keyed by a stable UUID derived from the authenticated bearer credential.
-    let digest = Sha256::digest(token.as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    Uuid::from_bytes(bytes)
+fn admin_id(identity: &AdminIdentity) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("{}/{}", identity.authority, identity.subject).as_bytes(),
+    )
 }
 
 fn hex_sha256(sha256: [u8; 32]) -> String {

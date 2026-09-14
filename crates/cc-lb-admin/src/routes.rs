@@ -1,13 +1,13 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderValue, Response, StatusCode, header},
     middleware,
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_control::AuditEntry;
+
 use cc_lb_storage_api::{Storage, StorageError};
 use http_body_util::BodyExt;
 use serde::Deserialize;
@@ -15,7 +15,8 @@ use serde_json::{Value, json};
 
 use crate::{
     AdminState,
-    auth::require_admin_auth,
+    audit::{AdminAuditEvent, record_admin_audit},
+    auth::{AdminAction, AdminIdentity, authorize, require_admin_auth},
     principals::{principal_key_usage, principal_limits, principal_usage},
     static_assets::{serve_asset, serve_index},
 };
@@ -171,8 +172,10 @@ fn validation_field_from_message(message: &str) -> Option<String> {
 
 async fn get_api_key(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Path((principal_id, key_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, StatusCode> {
+    authorize(&identity, AdminAction::SensitiveRead).map_err(|_| StatusCode::FORBIDDEN)?;
     let key_store = state
         .key_store
         .as_ref()
@@ -194,50 +197,102 @@ async fn get_api_key(
 
 async fn disable_api_key(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Path((principal_id, key_id)): Path<(String, String)>,
-) -> Result<Json<Value>, StatusCode> {
-    mutate_api_key(&state, &principal_id, &key_id, false).await
+) -> axum::response::Response {
+    mutate_api_key(&state, &identity, &principal_id, &key_id, false).await
 }
 
 async fn enable_api_key(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Path((principal_id, key_id)): Path<(String, String)>,
-) -> Result<Json<Value>, StatusCode> {
-    mutate_api_key(&state, &principal_id, &key_id, true).await
+) -> axum::response::Response {
+    mutate_api_key(&state, &identity, &principal_id, &key_id, true).await
 }
 
 async fn revoke_api_key(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Path((principal_id, key_id)): Path<(String, String)>,
-) -> Result<Json<Value>, StatusCode> {
-    let key_store = state
-        .key_store
-        .as_ref()
-        .ok_or(StatusCode::NOT_IMPLEMENTED)?;
-    key_store
-        .revoke(&principal_id, &key_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "status": "ok" })))
+) -> axum::response::Response {
+    let Some(key_store) = state.key_store.as_ref() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
+    };
+    if key_store.revoke(&principal_id, &key_id).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let action = "principal_key_revoke";
+    let route = format!("/admin/principals/{principal_id}/keys/{key_id}/revoke");
+    if let Err(error) = record_admin_audit(
+        &state,
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action,
+            route: &route,
+            target_principal_id: Some(&principal_id),
+            target_upstream: None,
+            api_key_id: Some(&key_id),
+            status: StatusCode::OK.as_u16(),
+            payload: None,
+        },
+    )
+    .await
+    {
+        return audit_write_failed_response(action, &error);
+    }
+
+    Json(json!({ "status": "ok" })).into_response()
 }
 
 async fn mutate_api_key(
     state: &AdminState,
+    identity: &AdminIdentity,
     principal_id: &str,
     key_id: &str,
     enable: bool,
-) -> Result<Json<Value>, StatusCode> {
-    let key_store = state
-        .key_store
-        .as_ref()
-        .ok_or(StatusCode::NOT_IMPLEMENTED)?;
+) -> axum::response::Response {
+    let Some(key_store) = state.key_store.as_ref() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
+    };
     let result = if enable {
         key_store.enable(principal_id, key_id).await
     } else {
         key_store.disable(principal_id, key_id).await
     };
-    result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "status": "ok" })))
+    if result.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let operation = if enable { "enable" } else { "disable" };
+    let action = if enable {
+        "principal_key_enable"
+    } else {
+        "principal_key_disable"
+    };
+    let route = format!("/admin/principals/{principal_id}/keys/{key_id}/{operation}");
+    if let Err(error) = record_admin_audit(
+        state,
+        AdminAuditEvent {
+            identity: Some(identity),
+            system_component: None,
+            action,
+            route: &route,
+            target_principal_id: Some(principal_id),
+            target_upstream: None,
+            api_key_id: Some(key_id),
+            status: StatusCode::OK.as_u16(),
+            payload: None,
+        },
+    )
+    .await
+    {
+        return audit_write_failed_response(action, &error);
+    }
+
+    Json(json!({ "status": "ok" })).into_response()
 }
 
 async fn health(State(state): State<AdminState>) -> Json<Value> {
@@ -260,14 +315,42 @@ struct AuditQuery {
     after: Option<u64>,
     until: Option<u64>,
     limit: Option<usize>,
+    actor_authority: Option<String>,
+    actor_subject: Option<String>,
 }
 
 async fn query_audit(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Query(query): Query<AuditQuery>,
-) -> Result<Json<Value>, StatusCode> {
+) -> axum::response::Response {
+    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
+        return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
+    }
+    if query.actor_authority.is_some() != query.actor_subject.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "validation_failed",
+                "field": "actor_subject",
+                "message": "actor_authority and actor_subject must be provided together",
+            })),
+        )
+            .into_response();
+    }
+    if query.principal_id.is_some() && query.actor_authority.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "validation_failed",
+                "field": "principal_id",
+                "message": "principal_id cannot be combined with actor identity filters",
+            })),
+        )
+            .into_response();
+    }
     let Some(storage) = &state.storage else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
+        return StatusCode::NOT_IMPLEMENTED.into_response();
     };
 
     let since = query.since.unwrap_or(0).max(
@@ -279,33 +362,94 @@ async fn query_audit(
     let until = query.until.unwrap_or(u64::MAX);
     let limit = query.limit.unwrap_or(100).min(1000);
 
-    let entries = storage
-        .query_audit(query.principal_id.as_deref(), since, until, limit)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let result = match (
+        query.actor_authority.as_deref(),
+        query.actor_subject.as_deref(),
+    ) {
+        (Some(authority), Some(subject)) => {
+            storage
+                .query_audit_by_actor(authority, subject, since, until, limit)
+                .await
+        }
+        (None, None) => {
+            storage
+                .query_audit(query.principal_id.as_deref(), since, until, limit)
+                .await
+        }
+        _ => unreachable!("actor query fields were validated above"),
+    };
+    let entries = match result {
+        Ok(entries) => entries,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
 
-    Ok(Json(json!({ "entries": entries })))
+    let action = "audit_query";
+    if let Err(error) = record_admin_audit(
+        &state,
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action,
+            route: "/admin/v1/audit",
+            target_principal_id: None,
+            target_upstream: None,
+            api_key_id: None,
+            status: StatusCode::OK.as_u16(),
+            payload: Some(json!({
+                "principal_id": query.principal_id,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "actor_subject": query.actor_subject,
+            })),
+        },
+    )
+    .await
+    {
+        return audit_write_failed_response(action, &error);
+    }
+
+    Json(json!({ "entries": entries })).into_response()
 }
 
-async fn get_config(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
+async fn get_config(
+    State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
+) -> axum::response::Response {
+    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
+        return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
+    }
     let config = state.config.current_config();
-    let mut config_json =
-        serde_json::to_value(&*config).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if let Some(storage) = config_json.get_mut("storage")
-        && let Some(obj) = storage.as_object_mut()
+    let mut config_json = match serde_json::to_value(&*config) {
+        Ok(config_json) => config_json,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    crate::settings::mask_secret_like_values(&mut config_json);
+    let action = "config_read";
+    if let Err(error) = record_admin_audit(
+        &state,
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action,
+            route: "/admin/v1/config/current",
+            target_principal_id: None,
+            target_upstream: None,
+            api_key_id: None,
+            status: StatusCode::OK.as_u16(),
+            payload: None,
+        },
+    )
+    .await
     {
-        obj.insert("oauth_aead_key_env".to_string(), json!("[REDACTED]"));
+        return audit_write_failed_response(action, &error);
     }
-    if let Some(admin) = config_json.get_mut("admin")
-        && let Some(obj) = admin.as_object_mut()
-    {
-        obj.insert("token_env".to_string(), json!("[REDACTED]"));
-    }
-    Ok(Json(config_json))
+    Json(config_json).into_response()
 }
 
 async fn put_config_draft(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Json(request): Json<crate::settings::PutConfigDraftRequest>,
 ) -> axum::response::Response {
     let storage = match config_storage(&state) {
@@ -317,9 +461,27 @@ async fn put_config_draft(
         .await
     {
         Ok(response) => {
-            emit_admin_action(&state, "config_draft_put", "admin_config_draft", None, 200);
             if let Ok(config) = serde_json::from_value::<cc_lb_config::Config>(draft_value) {
                 let _ = state.config.put_draft_config(config);
+            }
+            let action = "config_draft_put";
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/draft",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: 200,
+                    payload: None,
+                },
+            )
+            .await
+            {
+                return audit_write_failed_response(action, &error);
             }
             Json(response).into_response()
         }
@@ -327,16 +489,31 @@ async fn put_config_draft(
     }
 }
 
-async fn apply_config_draft(State(state): State<AdminState>) -> axum::response::Response {
+async fn apply_config_draft(
+    State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
+) -> axum::response::Response {
     match state.config.apply_draft_config() {
         Ok(_config) => {
-            emit_admin_action(
+            let action = "config_apply";
+            if let Err(error) = record_admin_audit(
                 &state,
-                "config_apply_runtime",
-                "admin_config_apply",
-                None,
-                200,
-            );
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/apply",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: 200,
+                    payload: None,
+                },
+            )
+            .await
+            {
+                return audit_write_failed_response(action, &error);
+            }
             Json(json!({
                 "status": "applied",
             }))
@@ -366,19 +543,47 @@ async fn get_config_schema() -> axum::response::Response {
     }
 }
 
-async fn get_config_draft(State(state): State<AdminState>) -> axum::response::Response {
+async fn get_config_draft(
+    State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
+) -> axum::response::Response {
+    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
+        return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
+    }
     let storage = match config_storage(&state) {
         Ok(storage) => storage,
         Err(error) => return settings_error_response(error, false),
     };
     match crate::settings::get_draft(storage, &*state.clock).await {
-        Ok(response) => Json(response).into_response(),
+        Ok(response) => {
+            let action = "config_draft_read";
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/draft",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: None,
+                },
+            )
+            .await
+            {
+                return audit_write_failed_response(action, &error);
+            }
+            Json(response).into_response()
+        }
         Err(error) => settings_error_response(error, false),
     }
 }
 
 async fn validate_config_draft(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Json(request): Json<crate::settings::ValidateConfigDraftRequest>,
 ) -> axum::response::Response {
     let storage = match config_storage(&state) {
@@ -396,13 +601,25 @@ async fn validate_config_draft(
     match crate::settings::validate_draft(storage, request).await {
         Ok(response) => {
             let status = if response.valid { 200 } else { 400 };
-            emit_admin_action(
+            let action = "config_draft_validate";
+            if let Err(error) = record_admin_audit(
                 &state,
-                "config_draft_validate",
-                "admin_config_draft",
-                None,
-                status,
-            );
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/draft/validate",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status,
+                    payload: None,
+                },
+            )
+            .await
+            {
+                return audit_write_failed_response(action, &error);
+            }
             Json(response).into_response()
         }
         Err(error) => settings_error_response(error, false),
@@ -416,14 +633,40 @@ struct ConfigHistoryQuery {
 
 async fn get_config_history(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Query(query): Query<ConfigHistoryQuery>,
 ) -> axum::response::Response {
+    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
+        return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
+    }
     let storage = match config_storage(&state) {
         Ok(storage) => storage,
         Err(error) => return settings_error_response(error, false),
     };
-    match crate::settings::list_history(storage, query.limit.unwrap_or(20)).await {
-        Ok(response) => Json(response).into_response(),
+    let limit = query.limit.unwrap_or(20);
+    match crate::settings::list_history(storage, limit).await {
+        Ok(response) => {
+            let action = "config_history_read";
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/history",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: Some(json!({ "limit": limit })),
+                },
+            )
+            .await
+            {
+                return audit_write_failed_response(action, &error);
+            }
+            Json(response).into_response()
+        }
         Err(error) => settings_error_response(error, false),
     }
 }
@@ -436,14 +679,42 @@ struct ConfigDiffQuery {
 
 async fn get_config_diff(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Query(query): Query<ConfigDiffQuery>,
 ) -> axum::response::Response {
+    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
+        return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
+    }
     let storage = match config_storage(&state) {
         Ok(storage) => storage,
         Err(error) => return settings_error_response(error, false),
     };
     match crate::settings::diff_history(storage, query.from_revision, query.to_revision).await {
-        Ok(response) => Json(response).into_response(),
+        Ok(response) => {
+            let action = "config_diff_read";
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/diff",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: Some(json!({
+                        "from_revision": query.from_revision,
+                        "to_revision": query.to_revision,
+                    })),
+                },
+            )
+            .await
+            {
+                return audit_write_failed_response(action, &error);
+            }
+            Json(response).into_response()
+        }
         Err(error) => settings_error_response(error, false),
     }
 }
@@ -530,43 +801,61 @@ fn dashboard_error(status: StatusCode, error: &str) -> axum::response::Response 
     (status, Json(json!({ "error": error }))).into_response()
 }
 
-async fn reload_config(State(_state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
+async fn reload_config(
+    State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
+) -> axum::response::Response {
+    let action = "config_reload_signal";
+    if let Err(error) = record_admin_audit(
+        &state,
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action,
+            route: "/admin/v1/config/reload",
+            target_principal_id: None,
+            target_upstream: None,
+            api_key_id: None,
+            status: StatusCode::OK.as_u16(),
+            payload: None,
+        },
+    )
+    .await
+    {
+        return audit_write_failed_response(action, &error);
+    }
+
     #[cfg(unix)]
     {
-        if let Err(e) =
+        if let Err(error) =
             nix::sys::signal::kill(nix::unistd::Pid::this(), nix::sys::signal::Signal::SIGHUP)
         {
-            tracing::error!("failed to send SIGHUP: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            tracing::error!(%error, "failed to send SIGHUP");
+            if let Err(audit_error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/reload",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: 500,
+                    payload: None,
+                },
+            )
+            .await
+            {
+                return audit_write_failed_response(action, &audit_error);
+            }
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
-    Ok(Json(json!({ "status": "ok", "reloading": true })))
+    Json(json!({ "status": "ok", "reloading": true })).into_response()
 }
 
-fn emit_admin_action(
-    state: &AdminState,
-    action: &str,
-    route: &str,
-    api_key_id: Option<String>,
-    status: u16,
-) {
-    let Some(audit_sink) = &state.audit_sink else {
-        return;
-    };
-    let ts = cc_lb_clock::unix_secs(state.clock.now());
-    let _ = audit_sink.try_enqueue(AuditEntry {
-        ts,
-        request_id: format!("{route}-{ts}"),
-        principal_id: "admin".to_owned(),
-        route: route.to_owned(),
-        upstream: "admin".to_owned(),
-        status,
-        input_tokens: Some(0),
-        output_tokens: Some(0),
-        duration_ms: 0,
-        api_key_id,
-        admin_action: Some(action.to_owned()),
-        actor: Some("admin".to_owned()),
-        ..AuditEntry::default()
-    });
+fn audit_write_failed_response(action: &str, error: &StorageError) -> axum::response::Response {
+    tracing::error!(%error, action, "admin audit write failed");
+    dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed")
 }

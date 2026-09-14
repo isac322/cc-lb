@@ -142,3 +142,41 @@ upstream_kind = "anthropic_key"
 
     assert!(config.downstream_auth.none_mode.is_some());
 }
+
+#[test]
+fn admin_auth_cloudflare_access_requires_audience() {
+    let (_dir, path) = crate::common::temp_config(
+        r#"
+[[admin.auth.providers]]
+kind = "cloudflare_access"
+id = "cf"
+team_domain = "https://team.cloudflareaccess.com"
+audiences = []
+"#,
+    );
+
+    let error = Config::load(&path).unwrap_err().to_string();
+
+    assert!(
+        error.contains("admin.auth.providers[0].audiences"),
+        "{error}"
+    );
+}
+
+#[test]
+fn admin_auth_cloudflare_access_requires_valid_header_name() {
+    let (_dir, path) = crate::common::temp_config(
+        r#"
+[[admin.auth.providers]]
+kind = "cloudflare_access"
+id = "cf"
+team_domain = "https://team.cloudflareaccess.com"
+audiences = ["admin"]
+header = "Cf Access Jwt"
+"#,
+    );
+
+    let error = Config::load(&path).unwrap_err().to_string();
+
+    assert!(error.contains("admin.auth.providers[0].header"), "{error}");
+}

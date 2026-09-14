@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod auth;
 pub mod cache_keepalive_view;
 pub mod dashboard;
@@ -31,7 +32,7 @@ use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_clock::ClockHandle;
 use cc_lb_control::RequestEventBus;
 use cc_lb_control::{
-    AuditWriterSink, DynamicView, DynamicViewHolder, MetadataHookHandle,
+    DynamicView, DynamicViewHolder, MetadataHookHandle,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
 use cc_lb_domain::ReplicaIdentity;
@@ -108,11 +109,10 @@ pub struct AdminState {
     pub runtime: Option<Arc<WasmtimeRuntime>>,
     pub data_dir: Option<PathBuf>,
     pub warmup_dialect_dispatcher: Option<Arc<dyn WarmupDialectDispatcher>>,
-    pub audit_sink: Option<Arc<AuditWriterSink>>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub config: Arc<dyn CurrentConfig>,
     pub scheduler: Option<cc_lb_scheduler::admin::SchedulerAdminHandle>,
-    pub admin_token: Option<String>,
+    pub admin_auth: Arc<auth::AdminAuthenticator>,
     pub start_time: std::time::Instant,
     pub event_bus: Option<Arc<dyn RequestEventBus>>,
     pub storage_tail: tokio::sync::broadcast::Sender<events::StorageTailUpdate>,

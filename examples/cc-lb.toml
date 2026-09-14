@@ -47,7 +47,9 @@ default_requests_per_window = 1000
 default_input_tokens = 1000000
 default_output_tokens = 1000000
 
-# Admin auth is not enforced by the T25 stub; T26 replaces the admin implementation.
+# New deployments configure the provider registry with
+# CC_LB_ADMIN_AUTH_PROVIDERS_JSON. This legacy block remains temporarily so an
+# existing deployment upgrades without a pre-upgrade configuration change.
 [admin]
 token_env = "CC_LB_ADMIN_TOKEN"
 

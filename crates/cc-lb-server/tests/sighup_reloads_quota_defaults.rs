@@ -33,13 +33,18 @@ async fn sighup_reloads_body_defaults() {
             Arc::new(cc_lb_engine::SystemClock),
         ),
         lifecycle: None,
-        audit_sink: None,
         dynamic_view: reload_common::dynamic_view_holder(
             &cc_lb_admin::CurrentConfig::current_config((watcher.clone()).as_ref()),
         ),
         config: watcher.clone(),
         scheduler: None,
-        admin_token: Some("test-token".to_string()),
+        admin_auth: Arc::new(cc_lb_admin::auth::AdminAuthenticator::new(
+            cc_lb_admin::auth::build_providers(
+                &cc_lb_config::AdminAuthConfig::default(),
+                Some("test-token".to_owned()),
+            )
+            .expect("test admin auth builds"),
+        )),
         lazy_refresher: None,
         runtime: None,
         data_dir: None,

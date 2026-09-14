@@ -3,7 +3,6 @@
 use crate::admin_test_common;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     body::Body,
@@ -11,7 +10,6 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
-use cc_lb_control::AuditWriterSink;
 use cc_lb_storage_api::AuditStore;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::BodyExt;
@@ -24,7 +22,7 @@ struct TestResponse {
     body: Option<Value>,
 }
 
-fn test_state(storage: Arc<Storage>, audit_sink: Option<AuditWriterSink>) -> AdminState {
+fn test_state(storage: Arc<Storage>) -> AdminState {
     let config = Config::default();
     AdminState {
         storage: Some(storage.clone()),
@@ -32,11 +30,10 @@ fn test_state(storage: Arc<Storage>, audit_sink: Option<AuditWriterSink>) -> Adm
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
-        audit_sink: audit_sink.map(Arc::new),
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),
         scheduler: None,
-        admin_token: Some("test-token".to_owned()),
+        admin_auth: crate::admin_test_common::static_token_auth("test-token"),
         lazy_refresher: None,
         runtime: None,
         data_dir: None,
@@ -112,7 +109,7 @@ fn body(response: &TestResponse) -> &Value {
 #[tokio::test]
 async fn create_returns_201_with_body_and_location_header() {
     let (_dir, storage) = new_store().await;
-    let app = router(test_state(storage, None));
+    let app = router(test_state(storage));
 
     let response = create(app, "primary").await;
 
@@ -133,7 +130,7 @@ async fn create_returns_201_with_body_and_location_header() {
 #[tokio::test]
 async fn create_with_invalid_name_returns_structured_bad_request() {
     let (_dir, storage) = new_store().await;
-    let app = router(test_state(storage, None));
+    let app = router(test_state(storage));
 
     let response = request(
         app,
@@ -161,7 +158,7 @@ async fn create_with_invalid_name_returns_structured_bad_request() {
 #[tokio::test]
 async fn get_after_create_returns_etag_with_revision() {
     let (_dir, storage) = new_store().await;
-    let app = router(test_state(storage, None));
+    let app = router(test_state(storage));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();
 
@@ -175,7 +172,7 @@ async fn get_after_create_returns_etag_with_revision() {
 #[tokio::test]
 async fn list_paginates_with_x_total_count() {
     let (_dir, storage) = new_store().await;
-    let app = router(test_state(storage, None));
+    let app = router(test_state(storage));
     create(app.clone(), "u-a").await;
     create(app.clone(), "u-b").await;
     create(app.clone(), "u-c").await;
@@ -210,7 +207,7 @@ async fn list_paginates_with_x_total_count() {
 #[tokio::test]
 async fn update_with_correct_if_match_returns_200_and_bumps_revision() {
     let (_dir, storage) = new_store().await;
-    let app = router(test_state(storage, None));
+    let app = router(test_state(storage));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();
 
@@ -231,7 +228,7 @@ async fn update_with_correct_if_match_returns_200_and_bumps_revision() {
 #[tokio::test]
 async fn patch_flips_enabled_and_warmup_enabled_atomically() {
     let (_dir, storage) = new_store().await;
-    let app = router(test_state(storage, None));
+    let app = router(test_state(storage));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();
     assert_eq!(body(&created)["enabled"], true);
@@ -254,7 +251,7 @@ async fn patch_flips_enabled_and_warmup_enabled_atomically() {
 #[tokio::test]
 async fn update_with_stale_if_match_returns_409_with_current_revision() {
     let (_dir, storage) = new_store().await;
-    let app = router(test_state(storage, None));
+    let app = router(test_state(storage));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();
 
@@ -275,7 +272,7 @@ async fn update_with_stale_if_match_returns_409_with_current_revision() {
 #[tokio::test]
 async fn update_without_if_match_returns_428_precondition_required() {
     let (_dir, storage) = new_store().await;
-    let app = router(test_state(storage, None));
+    let app = router(test_state(storage));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();
 
@@ -295,8 +292,7 @@ async fn update_without_if_match_returns_428_precondition_required() {
 #[tokio::test]
 async fn enable_disable_emits_audit_and_persists_state() {
     let (_dir, storage) = new_store().await;
-    let (audit_sink, audit_writer) = cc_lb_control::spawn_audit_writer(storage.clone(), 64);
-    let app = router(test_state(storage.clone(), Some(audit_sink)));
+    let app = router(test_state(storage.clone()));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();
 
@@ -324,52 +320,29 @@ async fn enable_disable_emits_audit_and_persists_state() {
     assert_eq!(body(&enabled)["enabled"], true);
     assert_eq!(body(&enabled)["spec_revision"], 3);
 
-    // Poll the audit log instead of relying on a fixed sleep. The audit sink
-    // batches writes to its background writer; on slower CI runners the 250 ms
-    // window we used to assume was sometimes too short and the second of the
-    // two expected entries (`upstream_enable`) had not been flushed yet,
-    // producing a flaky assertion. Poll for both actions with a generous
-    // deadline before reporting failure.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let entries = storage
-            .query_audit(Some("admin"), 0, u64::MAX, 10)
-            .await
-            .unwrap();
-        let has_disable = entries.iter().any(|entry| {
-            entry
+    let entries = storage.query_audit(None, 0, u64::MAX, 10).await.unwrap();
+    let disable_route = format!("/admin/v1/upstreams/{id}/disable");
+    let enable_route = format!("/admin/v1/upstreams/{id}/enable");
+    assert!(entries.iter().any(|entry| {
+        entry.route == disable_route
+            && entry
                 .admin_action
                 .as_deref()
                 .is_some_and(|action| action.starts_with("upstream_disable"))
-        });
-        let has_enable = entries.iter().any(|entry| {
-            entry
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry.route == enable_route
+            && entry
                 .admin_action
                 .as_deref()
                 .is_some_and(|action| action.starts_with("upstream_enable"))
-        });
-        if has_disable && has_enable {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            assert!(
-                has_disable,
-                "upstream_disable audit entry not observed within 5s"
-            );
-            assert!(
-                has_enable,
-                "upstream_enable audit entry not observed within 5s"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    audit_writer.abort();
+    }));
 }
 
 #[tokio::test]
 async fn delete_soft_deletes_upstream() {
     let (_dir, storage) = new_store().await;
-    let app = router(test_state(storage, None));
+    let app = router(test_state(storage));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();
 
@@ -401,7 +374,7 @@ async fn delete_soft_deletes_upstream() {
 #[tokio::test]
 async fn recreate_after_delete_returns_created_then_name_conflict() {
     let (_dir, storage) = new_store().await;
-    let app = router(test_state(storage, None));
+    let app = router(test_state(storage));
     let first = create(app.clone(), "primary").await;
     assert_eq!(first.status, StatusCode::CREATED);
     let first_id = body(&first)["id"].as_str().unwrap().to_owned();
@@ -456,7 +429,7 @@ async fn recreate_after_delete_returns_created_then_name_conflict() {
 #[tokio::test]
 async fn concurrent_same_name_create_has_one_winner() {
     let (_dir, storage) = new_store().await;
-    let app = router(test_state(storage, None));
+    let app = router(test_state(storage));
     let (left, right) = tokio::join!(
         create(app.clone(), "concurrent-name"),
         create(app, "concurrent-name")

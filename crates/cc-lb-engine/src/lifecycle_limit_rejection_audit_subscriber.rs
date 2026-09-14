@@ -132,6 +132,10 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
         limit_violation: Some(violation),
         admin_action: None,
         actor: Some("system".to_owned()),
+        actor_authority: None,
+        actor_subject: None,
+        actor_kind: None,
+        actor_email: None,
         kind: None,
         payload: None,
     };
@@ -191,6 +195,19 @@ mod tests {
         ) -> StorageResult<Vec<StoredAuditEntry>> {
             Err(StorageError::Fatal {
                 message: "query_audit is not used by subscriber tests".to_owned(),
+            })
+        }
+
+        async fn query_audit_by_actor(
+            &self,
+            _authority: &str,
+            _subject: &str,
+            _since: u64,
+            _until: u64,
+            _limit: usize,
+        ) -> StorageResult<Vec<StoredAuditEntry>> {
+            Err(StorageError::Fatal {
+                message: "query_audit_by_actor is not used by subscriber tests".to_owned(),
             })
         }
 
