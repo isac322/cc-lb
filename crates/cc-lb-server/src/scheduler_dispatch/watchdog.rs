@@ -117,7 +117,7 @@ mod tests {
 
     fn registered_oauth_upstream() -> UpstreamRecord {
         UpstreamRecord {
-            id: Uuid::new_v4(),
+            id: Uuid::from_u128(1),
             name: "oauth-upstream".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,

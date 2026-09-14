@@ -5,11 +5,6 @@ use std::sync::{Arc, Mutex};
 
 use cc_lb_control::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
 
-#[cfg(feature = "sqlite")]
-use crate::state_stores::AnthropicCompatEtagsStore as SqliteAnthropicCompatEtagsStore;
-#[cfg(feature = "postgres")]
-use crate::state_stores::AnthropicCompatEtagsStore;
-
 use super::test_support::RecordingCompatibilityKv;
 use super::*;
 
@@ -248,76 +243,82 @@ async fn t2__unchanged_hash_skips_value_write() -> Result<()> {
 }
 
 #[cfg(feature = "sqlite")]
-async fn sqlite_etags() -> Result<SqliteAnthropicCompatEtagsStore<sqlx::Sqlite>> {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
+mod t3__sqlite {
+    use super::*;
+    use crate::state_stores::AnthropicCompatEtagsStore;
+
+    async fn etags() -> Result<AnthropicCompatEtagsStore<sqlx::Sqlite>> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/0002_idempotency_tables.sql"
+        ))
+        .execute(&pool)
         .await?;
-    sqlx::raw_sql(include_str!(
-        "../../../migrations/sqlite/0002_idempotency_tables.sql"
-    ))
-    .execute(&pool)
-    .await?;
-    Ok(SqliteAnthropicCompatEtagsStore::new(pool))
-}
+        Ok(AnthropicCompatEtagsStore::new(pool))
+    }
 
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn t3__sqlite_etag_deduplicates_not_modified() -> Result<()> {
-    exercise_etag_deduplicates_not_modified(sqlite_etags().await?).await
-}
+    #[tokio::test]
+    async fn etag_deduplicates_not_modified() -> Result<()> {
+        exercise_etag_deduplicates_not_modified(etags().await?).await
+    }
 
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn t3__sqlite_unchanged_hash_skips_value_write() -> Result<()> {
-    exercise_unchanged_hash_skips_value_write(sqlite_etags().await?).await
+    #[tokio::test]
+    async fn unchanged_hash_skips_value_write() -> Result<()> {
+        exercise_unchanged_hash_skips_value_write(etags().await?).await
+    }
 }
 
 #[cfg(feature = "postgres")]
-async fn postgres_etags() -> anyhow::Result<(
-    cc_lb_storage_conformance::PostgresFixture,
-    sqlx::PgPool,
-    AnthropicCompatEtagsStore<sqlx::Postgres>,
-)> {
+mod t3_postgres__postgres {
     use std::str::FromStr as _;
 
     use sqlx::Executor as _;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-    let fixture = cc_lb_storage_conformance::postgres_fixture().await?;
-    let search_path = format!("{},public", fixture.schema_name());
-    let options = PgConnectOptions::from_str(fixture.database_url())?
-        .options([("search_path", search_path.as_str())]);
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(options)
+    use super::*;
+    use crate::state_stores::AnthropicCompatEtagsStore;
+
+    async fn etags() -> anyhow::Result<(
+        cc_lb_storage_conformance::PostgresFixture,
+        sqlx::PgPool,
+        AnthropicCompatEtagsStore<sqlx::Postgres>,
+    )> {
+        let fixture = cc_lb_storage_conformance::postgres_fixture().await?;
+        let search_path = format!("{},public", fixture.schema_name());
+        let options = PgConnectOptions::from_str(fixture.database_url())?
+            .options([("search_path", search_path.as_str())]);
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect_with(options)
+            .await?;
+        pool.execute(include_str!(
+            "../../../migrations/postgres/0002_idempotency_tables.sql"
+        ))
         .await?;
-    pool.execute(include_str!(
-        "../../../migrations/postgres/0002_idempotency_tables.sql"
-    ))
-    .await?;
-    let etags = AnthropicCompatEtagsStore::new(pool.clone());
-    Ok((fixture, pool, etags))
-}
+        let etags = AnthropicCompatEtagsStore::new(pool.clone());
+        Ok((fixture, pool, etags))
+    }
 
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn t3_postgres__etag_deduplicates_not_modified() -> anyhow::Result<()> {
-    let (fixture, pool, etags) = postgres_etags().await?;
-    let outcome = exercise_etag_deduplicates_not_modified(etags).await;
-    pool.close().await;
-    fixture.teardown().await?;
-    outcome?;
-    Ok(())
-}
+    #[tokio::test]
+    async fn etag_deduplicates_not_modified() -> anyhow::Result<()> {
+        let (fixture, pool, etags) = etags().await?;
+        let outcome = exercise_etag_deduplicates_not_modified(etags).await;
+        pool.close().await;
+        fixture.teardown().await?;
+        outcome?;
+        Ok(())
+    }
 
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn t3_postgres__unchanged_hash_skips_value_write() -> anyhow::Result<()> {
-    let (fixture, pool, etags) = postgres_etags().await?;
-    let outcome = exercise_unchanged_hash_skips_value_write(etags).await;
-    pool.close().await;
-    fixture.teardown().await?;
-    outcome?;
-    Ok(())
+    #[tokio::test]
+    async fn unchanged_hash_skips_value_write() -> anyhow::Result<()> {
+        let (fixture, pool, etags) = etags().await?;
+        let outcome = exercise_unchanged_hash_skips_value_write(etags).await;
+        pool.close().await;
+        fixture.teardown().await?;
+        outcome?;
+        Ok(())
+    }
 }

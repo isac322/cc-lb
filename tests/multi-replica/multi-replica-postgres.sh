@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -27,6 +28,7 @@ EVIDENCE_DIR = ROOT_DIR / "target/test-evidence/multi-replica"
 COMPOSE_FILE = SCRIPT_DIR / "docker-compose.yml"
 COMPOSE_PROJECT = os.environ.get("COMPOSE_PROJECT", f"task37-{os.getpid()}")
 POSTGRES_URL = os.environ.get("CC_LB_MULTI_REPLICA_POSTGRES_URL", "")
+POSTGRES_MODE = os.environ.get("CC_LB_MULTI_REPLICA_POSTGRES_MODE", "compose")
 SERVER_BIN = os.environ.get("CC_LB_MULTI_REPLICA_SERVER_BIN", "")
 FAKE_ANTHROPIC_BIN = os.environ.get("CC_LB_MULTI_REPLICA_FAKE_ANTHROPIC_BIN", "")
 ADMIN_TOKEN = "00000000-0000-4000-8000-000000000037"
@@ -173,14 +175,15 @@ class Harness:
         self.fake = None
         self.replica_a = None
         self.replica_b = None
-        self.compose_started = False
+        self.compose_cleanup_required = False
+        self.compose_env = None
         self.cleanup_errors = []
         self.postgres = None
 
     async def run(self):
         self.validate_prerequisites()
         self.postgres = parse_postgres_url(POSTGRES_URL)
-        ensure_ports_free(
+        process_ports = [
             PROXY_A_PORT,
             ADMIN_A_PORT,
             METRICS_A_PORT,
@@ -188,8 +191,10 @@ class Harness:
             ADMIN_B_PORT,
             METRICS_B_PORT,
             FAKE_PORT,
-            self.postgres["port"],
-        )
+        ]
+        if self.compose_managed:
+            process_ports.append(self.postgres["port"])
+        ensure_ports_free(*process_ports)
         self.tmp_dir = Path(tempfile.mkdtemp(prefix="cc-lb-multi-replica."))
         (self.tmp_dir / "A-data").mkdir()
         (self.tmp_dir / "B-data").mkdir()
@@ -208,30 +213,7 @@ class Harness:
             self.tmp_dir / "B-data",
         )
 
-        compose_env = os.environ.copy()
-        compose_env.update(
-            {
-                "CC_LB_MULTI_REPLICA_POSTGRES_PORT": str(self.postgres["port"]),
-                "CC_LB_MULTI_REPLICA_POSTGRES_USER": self.postgres["user"],
-                "CC_LB_MULTI_REPLICA_POSTGRES_PASSWORD": self.postgres["password"],
-                "CC_LB_MULTI_REPLICA_POSTGRES_DB": self.postgres["database"],
-            }
-        )
-        await run_command(
-            *compose_command(
-                "up",
-                "-d",
-                "--wait",
-                "--wait-timeout",
-                str(POSTGRES_WAIT_TIMEOUT),
-                "postgres",
-            ),
-            env=compose_env,
-            timeout=POSTGRES_WAIT_TIMEOUT + 15,
-        )
-        self.compose_started = True
-        print("SYNC postgres: docker compose reported service healthy", flush=True)
-        await self.psql_exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        await self.prepare_postgres()
 
         self.fake = await ManagedProcess.start(
             "fake-anthropic",
@@ -253,13 +235,12 @@ class Harness:
         )
 
         principal_checkpoint = self.replica_b.checkpoint()
-        principal_status = await self.create_principal()
-        if principal_status == 201:
-            await self.wait_for_rebind(
-                self.replica_b,
-                principal_checkpoint,
-                "principal propagation to replica B",
-            )
+        principal_id = await self.create_principal()
+        await self.wait_for_rebind(
+            self.replica_b,
+            principal_checkpoint,
+            "principal propagation to replica B",
+        )
 
         upstream_checkpoint = self.replica_b.checkpoint()
         upstream_id = await self.create_oauth_upstream()
@@ -279,7 +260,7 @@ class Harness:
                 await self.proxy_request(PROXY_B_PORT, f"round-robin-{index}-B")
 
         await self.stop_replica_a_for_failover()
-        await self.assert_audit_entries_landed()
+        await self.assert_audit_entries_landed(principal_id, upstream_id)
 
         for index in range(1, 6):
             await self.proxy_request(PROXY_B_PORT, f"B-after-A-kill-{index}")
@@ -299,9 +280,51 @@ class Harness:
             flush=True,
         )
 
+    @property
+    def compose_managed(self):
+        return POSTGRES_MODE == "compose"
+
+    async def prepare_postgres(self):
+        if self.compose_managed:
+            self.compose_env = os.environ.copy()
+            self.compose_env.update(
+                {
+                    "CC_LB_MULTI_REPLICA_POSTGRES_PORT": str(self.postgres["port"]),
+                    "CC_LB_MULTI_REPLICA_POSTGRES_USER": self.postgres["user"],
+                    "CC_LB_MULTI_REPLICA_POSTGRES_PASSWORD": self.postgres["password"],
+                    "CC_LB_MULTI_REPLICA_POSTGRES_DB": self.postgres["database"],
+                }
+            )
+            self.compose_cleanup_required = True
+            await run_command(
+                *compose_command(
+                    "up",
+                    "-d",
+                    "--wait",
+                    "--wait-timeout",
+                    str(POSTGRES_WAIT_TIMEOUT),
+                    "postgres",
+                ),
+                env=self.compose_env,
+                timeout=POSTGRES_WAIT_TIMEOUT + 15,
+            )
+            print("SYNC postgres: docker compose reported service healthy", flush=True)
+        else:
+            probe = await self.psql_scalar("SELECT 1;")
+            if probe != "1":
+                raise HarnessFailure(
+                    f"external postgres readiness probe returned {probe!r}, expected '1'"
+                )
+            print("SYNC postgres: external service accepted a one-shot query", flush=True)
+        await self.psql_exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+
     def validate_prerequisites(self):
         if not POSTGRES_URL:
             raise HarnessFailure("CC_LB_MULTI_REPLICA_POSTGRES_URL is required")
+        if POSTGRES_MODE not in {"compose", "external"}:
+            raise HarnessFailure(
+                "CC_LB_MULTI_REPLICA_POSTGRES_MODE must be 'compose' or 'external'"
+            )
         if not SERVER_BIN or not os.access(SERVER_BIN, os.X_OK):
             raise HarnessFailure(
                 "CC_LB_MULTI_REPLICA_SERVER_BIN must name an executable cc-lb binary"
@@ -310,10 +333,13 @@ class Harness:
             raise HarnessFailure(
                 "CC_LB_MULTI_REPLICA_FAKE_ANTHROPIC_BIN must name an executable fake-anthropic binary"
             )
-        if shutil.which("docker") is None:
-            raise HarnessFailure("docker command not found")
-        if not COMPOSE_FILE.is_file():
-            raise HarnessFailure(f"missing compose file: {COMPOSE_FILE}")
+        if self.compose_managed:
+            if shutil.which("docker") is None:
+                raise HarnessFailure("docker command not found for compose postgres mode")
+            if not COMPOSE_FILE.is_file():
+                raise HarnessFailure(f"missing compose file: {COMPOSE_FILE}")
+        elif shutil.which("psql") is None:
+            raise HarnessFailure("psql command not found for external postgres mode")
 
     async def start_replica(self, name):
         if self.tmp_dir is None:
@@ -385,12 +411,19 @@ class Harness:
             headers=admin_headers(json_body=True),
         )
         write_bytes(output, response)
-        if status not in (201, 409):
+        if status != 201:
             raise HarnessFailure(
-                f"create principal expected HTTP 201 or 409, got {status}; "
+                f"create principal expected HTTP 201 on a fresh schema, got {status}; "
                 f"response={response.decode(errors='replace')}"
             )
-        return status
+        payload = json.loads(response)
+        principal_id = payload.get("id")
+        if not principal_id:
+            raise HarnessFailure(
+                "create principal response omitted id; "
+                f"response={response.decode(errors='replace')}"
+            )
+        return principal_id
 
     async def create_oauth_upstream(self):
         output = self.tmp_dir / "upstream-create.json"
@@ -518,22 +551,155 @@ class Harness:
         )
         self.replica_a = None
 
-    async def assert_audit_entries_landed(self):
-        count_text = await self.psql_scalar(
-            "SELECT count(*) FROM audit_log_v1 "
-            "WHERE route IN "
-            "('admin_v1_upstreams','admin_v1_upstream_oauth','admin_v1_principals');"
+    async def assert_audit_entries_landed(self, principal_id, upstream_id):
+        counts_text = await self.psql_scalar(
+            "SELECT concat_ws(',', "
+            "count(*) FILTER (WHERE route = '/admin/v1/principals' "
+            f"AND principal_id = '{principal_id}' "
+            f"AND admin_action = 'principal_create(id={principal_id}, kind=machine)' "
+            "AND upstream = 'admin' AND status = 201), "
+            "count(*) FILTER (WHERE route = '/admin/v1/upstreams' "
+            "AND principal_id = '' "
+            f"AND admin_action = 'upstream_create(id={upstream_id}, kind=anthropic_oauth)' "
+            f"AND upstream = '{UPSTREAM_NAME}' AND status = 201), "
+            f"count(*) FILTER (WHERE route = '/admin/v1/upstreams/{upstream_id}/oauth/complete' "
+            "AND principal_id = '' "
+            rf"AND admin_action ~ '^upstream_oauth_complete\(id={upstream_id}, name={UPSTREAM_NAME}, expires=[0-9]+, fingerprint=[0-9a-f]+\)$' "
+            f"AND upstream = '{UPSTREAM_NAME}' AND status = 200)) "
+            "FROM audit_log_v1 "
+            "WHERE actor = 'static-token/legacy' "
+            "AND actor_authority = 'static-token' "
+            "AND actor_subject = 'legacy' "
+            "AND actor_kind = 'break_glass';"
         )
-        count = int(count_text or "0")
-        if count < 3:
+        labels = (
+            "principal_create",
+            "upstream_create",
+            "upstream_oauth_complete",
+        )
+        count_values = counts_text.split(",")
+        if len(count_values) != len(labels):
             raise HarnessFailure(
-                f"expected at least 3 admin audit entries, got {count}"
+                f"unexpected admin audit count result: {counts_text!r}"
             )
-        print(f"audit entries visible in postgres: {count}", flush=True)
+        counts = {
+            label: int(value)
+            for label, value in zip(labels, count_values)
+        }
+        missing = [label for label, count in counts.items() if count < 1]
+        if missing:
+            raise HarnessFailure(
+                "expected principal create, upstream create, and OAuth completion "
+                f"audit entries; missing={missing}, counts={counts}"
+            )
+        print(f"admin audit mutations visible in postgres: {counts}", flush=True)
 
-    async def psql_exec(self, sql):
-        await run_command(
-            *compose_command(
+        query = urllib.parse.urlencode(
+            {
+                "actor_authority": "static-token",
+                "actor_subject": "legacy",
+                "limit": 1000,
+            }
+        )
+        status, response, _ = await http_request(
+            "GET",
+            f"http://127.0.0.1:{ADMIN_B_PORT}/admin/v1/audit?{query}",
+            headers=admin_headers(),
+        )
+        write_bytes(self.tmp_dir / "audit-replica-b.json", response)
+        assert_status(status, 200, "replica B audit query", response)
+        payload = json.loads(response)
+        entries = payload.get("entries")
+        if not isinstance(entries, list):
+            raise HarnessFailure(
+                "replica B audit query response omitted entries list; "
+                f"response={response.decode(errors='replace')}"
+            )
+
+        expected_mutations = (
+            {
+                "label": "principal_create",
+                "route": "/admin/v1/principals",
+                "action": f"principal_create(id={principal_id}, kind=machine)",
+                "principal_id": principal_id,
+                "upstream": "admin",
+                "status": 201,
+            },
+            {
+                "label": "upstream_create",
+                "route": "/admin/v1/upstreams",
+                "action": (
+                    f"upstream_create(id={upstream_id}, kind=anthropic_oauth)"
+                ),
+                "principal_id": "",
+                "upstream": UPSTREAM_NAME,
+                "status": 201,
+            },
+            {
+                "label": "upstream_oauth_complete",
+                "route": (
+                    f"/admin/v1/upstreams/{upstream_id}/oauth/complete"
+                ),
+                "action_pattern": re.compile(
+                    "^upstream_oauth_complete"
+                    rf"\(id={re.escape(upstream_id)}, "
+                    rf"name={re.escape(UPSTREAM_NAME)}, "
+                    r"expires=[0-9]+, fingerprint=[0-9a-f]+\)$"
+                ),
+                "principal_id": "",
+                "upstream": UPSTREAM_NAME,
+                "status": 200,
+            },
+        )
+        expected_actor = {
+            "actor": "static-token/legacy",
+            "actor_authority": "static-token",
+            "actor_subject": "legacy",
+            "actor_kind": "break_glass",
+        }
+
+        missing_api_entries = []
+        for expected in expected_mutations:
+            matched = False
+            for entry in entries:
+                action = entry.get("admin_action")
+                action_matches = (
+                    action == expected["action"]
+                    if "action" in expected
+                    else isinstance(action, str)
+                    and expected["action_pattern"].fullmatch(action) is not None
+                )
+                if (
+                    action_matches
+                    and entry.get("route") == expected["route"]
+                    and entry.get("principal_id") == expected["principal_id"]
+                    and entry.get("upstream") == expected["upstream"]
+                    and entry.get("status") == expected["status"]
+                    and all(
+                        entry.get(field) == value
+                        for field, value in expected_actor.items()
+                    )
+                ):
+                    matched = True
+                    break
+            if not matched:
+                missing_api_entries.append(expected["label"])
+
+        if missing_api_entries:
+            raise HarnessFailure(
+                "replica B audit query did not expose expected admin mutations "
+                "after replica A stopped; "
+                f"missing={missing_api_entries}, entries={json.dumps(entries, indent=2)}"
+            )
+        print(
+            "admin audit mutations readable through replica B after replica A stopped: "
+            + ", ".join(expected["label"] for expected in expected_mutations),
+            flush=True,
+        )
+
+    def psql_command(self, *args):
+        if self.compose_managed:
+            return compose_command(
                 "exec",
                 "-T",
                 "postgres",
@@ -542,28 +708,39 @@ class Harness:
                 self.postgres["user"],
                 "-d",
                 self.postgres["database"],
-                "-v",
-                "ON_ERROR_STOP=1",
-                "-c",
-                sql,
-            ),
+                *args,
+            )
+        return (
+            "psql",
+            "-h",
+            self.postgres["host"],
+            "-p",
+            str(self.postgres["port"]),
+            "-U",
+            self.postgres["user"],
+            "-d",
+            self.postgres["database"],
+            *args,
+        )
+
+    def psql_env(self):
+        if self.compose_managed:
+            return self.compose_env
+        env = os.environ.copy()
+        env["PGPASSWORD"] = self.postgres["password"]
+        return env
+
+    async def psql_exec(self, sql):
+        await run_command(
+            *self.psql_command("-v", "ON_ERROR_STOP=1", "-c", sql),
+            env=self.psql_env(),
             timeout=COMMAND_TIMEOUT,
         )
 
     async def psql_scalar(self, sql):
         stdout = await run_command(
-            *compose_command(
-                "exec",
-                "-T",
-                "postgres",
-                "psql",
-                "-U",
-                self.postgres["user"],
-                "-d",
-                self.postgres["database"],
-                "-Atc",
-                sql,
-            ),
+            *self.psql_command("-v", "ON_ERROR_STOP=1", "-Atc", sql),
+            env=self.psql_env(),
             timeout=COMMAND_TIMEOUT,
         )
         return "".join(stdout.split())
@@ -598,14 +775,15 @@ class Harness:
                 await process.terminate(require_graceful=False)
             except Exception as exc:
                 self.cleanup_errors.append(f"failed to stop {process.name}: {exc}")
-        try:
-            await run_command(
-                *compose_command("down", "-v", "--remove-orphans"),
-                timeout=COMMAND_TIMEOUT,
-                check=False,
-            )
-        except Exception as exc:
-            self.cleanup_errors.append(f"docker compose cleanup failed: {exc}")
+        if self.compose_cleanup_required:
+            try:
+                await run_command(
+                    *compose_command("down", "-v", "--remove-orphans"),
+                    env=self.compose_env,
+                    timeout=COMMAND_TIMEOUT,
+                )
+            except Exception as exc:
+                self.cleanup_errors.append(f"docker compose cleanup failed: {exc}")
         if self.tmp_dir is not None:
             shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
@@ -636,6 +814,7 @@ def parse_postgres_url(raw):
         )
     return {
         "port": parsed.port,
+        "host": parsed.hostname,
         "user": urllib.parse.unquote(parsed.username),
         "password": urllib.parse.unquote(parsed.password),
         "database": urllib.parse.unquote(database),

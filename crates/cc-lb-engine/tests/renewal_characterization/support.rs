@@ -14,45 +14,31 @@ use cc_lb_engine::{
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest,
-    CacheKeepaliveSessionRecord, CacheKeepaliveSessionStore, CacheTtl, MetaStore, UpstreamStore,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord,
+    CacheKeepaliveSessionStore, CacheTtl, RequestEventStore, UpstreamStore,
 };
+use cc_lb_testkit::InMemoryStorage;
 use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, UpstreamError,
 };
 use http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
-use tempfile::TempDir;
 use url::Url;
 use uuid::Uuid;
 
 pub(super) struct RenewalFixture {
-    _temp_dir: TempDir,
     pub(super) clock: Arc<TestClock>,
     pub(super) dispatcher: AnthropicKeepaliveDispatcher,
     pub(super) http: Arc<RecordingRenewalHttp>,
     pub(super) snapshot: RequestSnapshot,
-    pub(super) storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+    pub(super) storage: Arc<InMemoryStorage>,
     pub(super) upstream_id: Uuid,
 }
 
 impl RenewalFixture {
     pub(super) async fn new(cache_read_input_tokens: u64) -> Self {
-        let temp_dir = tempfile::tempdir().expect("temporary directory");
         let clock = Arc::new(TestClock::new_at_secs(1_000));
-        let database_url = format!(
-            "sqlite://{}",
-            temp_dir.path().join("renewal.sqlite").display()
-        );
-        let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
-                .await
-                .expect("open sqlite storage"),
-        );
-        storage
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("initialize sqlite storage");
+        let storage = Arc::new(InMemoryStorage::with_clock(clock.clone()));
         let upstream = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
@@ -100,7 +86,6 @@ impl RenewalFixture {
         .expect("capture renewal snapshot");
 
         Self {
-            _temp_dir: temp_dir,
             clock,
             dispatcher,
             http,
@@ -138,10 +123,14 @@ impl RenewalFixture {
     }
 
     pub(super) async fn request_event_count(&self) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM request_events_v1")
-            .fetch_one(self.storage.pool())
-            .await
-            .expect("count request event rows")
+        i64::try_from(
+            self.storage
+                .query_request_events(0, u64::MAX, usize::MAX)
+                .await
+                .expect("query request events")
+                .len(),
+        )
+        .expect("request event count fits i64")
     }
 }
 

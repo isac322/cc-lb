@@ -89,7 +89,7 @@ fn origin_mismatch_plugin() -> Vec<u8> {
 }
 
 #[test]
-fn shape_origin_mismatch_is_rejected_by_selected_upstream_policy() {
+fn t3__shape_origin_mismatch_is_rejected_by_selected_upstream_policy() {
     // Given
     let runtime = Arc::new(
         WasmtimeRuntime::new(HotEngineConfig {

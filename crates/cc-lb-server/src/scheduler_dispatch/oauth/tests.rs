@@ -34,7 +34,7 @@ fn usage_poll_excludes_non_oauth_upstream() {
 
 fn registered_oauth_upstream() -> UpstreamRecord {
     UpstreamRecord {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::from_u128(1),
         name: "oauth-upstream".to_owned(),
         kind: UpstreamKind::AnthropicOauth,
         base_url: None,

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Guard against silently dropped integration-test source files.
 #
-# Crates with `autotests = false` compile one `tests/all.rs` binary. This guard
-# follows that file's Rust module/path references recursively and fails when a
-# source file below `tests/` is unreachable. Trybuild fixture paths referenced
-# by reachable tests are accepted as coverage roots too.
+# Crates with `autotests = false` compile only the explicit `[[test]].path`
+# targets from Cargo.toml. This guard follows every target's Rust module/path
+# references recursively and fails when a sibling test source is unreachable.
+# Trybuild fixture paths referenced by reachable tests are accepted too.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,6 +52,26 @@ def referenced_files(source: pathlib.Path, crate_root: pathlib.Path) -> set[path
     return found
 
 
+def consolidated_sources(
+    crate_root: pathlib.Path, test_roots: list[pathlib.Path]
+) -> set[pathlib.Path]:
+    sources: set[pathlib.Path] = set()
+    source_trees = {crate_root / "tests"}
+    source_trees.update(test_root.parent for test_root in test_roots)
+    for source_tree in source_trees:
+        if not source_tree.is_dir():
+            continue
+        for source in source_tree.rglob("*.rs"):
+            if source_tree == crate_root:
+                relative = source.relative_to(crate_root)
+                if relative.parts[0] in {"benches", "examples", "src", "target"}:
+                    continue
+                if relative == pathlib.Path("build.rs"):
+                    continue
+            sources.add(source.resolve())
+    return sources
+
+
 manifests = sorted({*root.glob("crates/**/Cargo.toml"), *root.glob("tests/**/Cargo.toml")})
 for manifest in manifests:
     try:
@@ -63,19 +83,32 @@ for manifest in manifests:
         continue
 
     crate_root = manifest.parent
-    tests_dir = crate_root / "tests"
-    all_rs = tests_dir / "all.rs"
-    if not tests_dir.is_dir():
-        continue
-    if not all_rs.is_file():
-        failures.append(
-            f"ERROR: {manifest.relative_to(root)} sets autotests=false but has no {all_rs.relative_to(root)}"
-        )
+    test_roots = [
+        (crate_root / target["path"]).resolve()
+        for target in cargo_toml.get("test", [])
+        if isinstance(target, dict) and isinstance(target.get("path"), str)
+    ]
+    if not test_roots:
+        tests_dir = crate_root / "tests"
+        if tests_dir.is_dir() and any(tests_dir.rglob("*.rs")):
+            failures.append(
+                f"ERROR: {manifest.relative_to(root)} sets autotests=false and has test sources "
+                "but no explicit [[test]].path"
+            )
         continue
 
-    all_sources = {path.resolve() for path in tests_dir.rglob("*.rs")}
+    missing_roots = [test_root for test_root in test_roots if not test_root.is_file()]
+    for test_root in missing_roots:
+        failures.append(
+            f"ERROR: {manifest.relative_to(root)} declares missing test path "
+            f"{test_root.relative_to(root)}"
+        )
+    if missing_roots:
+        continue
+
+    all_sources = consolidated_sources(crate_root, test_roots)
     reachable: set[pathlib.Path] = set()
-    pending = [all_rs.resolve()]
+    pending = list(test_roots)
     while pending:
         source = pending.pop()
         if source in reachable or source not in all_sources or not source.is_file():
@@ -83,16 +116,17 @@ for manifest in manifests:
         reachable.add(source)
         pending.extend(referenced_files(source, crate_root) - reachable)
 
+    roots = ", ".join(str(path.relative_to(root)) for path in test_roots)
     for source in sorted(all_sources - reachable):
         failures.append(
-            f"ERROR: {source.relative_to(root)} is not reachable from {all_rs.relative_to(root)} "
-            "(autotests=false would drop it)"
+            f"ERROR: {source.relative_to(root)} is not reachable from declared test root(s) "
+            f"{roots} (autotests=false would drop it)"
         )
 
 if failures:
     print("\n".join(failures), file=sys.stderr)
     print("\nIntegration-test consolidation guard FAILED.", file=sys.stderr)
-    print("Wire every source into tests/all.rs or a reachable child module.", file=sys.stderr)
+    print("Wire every source into a declared [[test]].path root or a reachable child module.", file=sys.stderr)
     raise SystemExit(1)
 
 print("Integration-test consolidation guard OK: all consolidated test sources are reachable.")

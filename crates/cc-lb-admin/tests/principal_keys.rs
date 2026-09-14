@@ -8,6 +8,8 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
+use cc_lb_control::api_keys::key_store::KeyStore;
+use cc_lb_storage_api::types::KeyStatus;
 use cc_lb_storage_api::{AuditStore, RequestEvent, RequestEventStore};
 use serde_json::json;
 use tower::ServiceExt;
@@ -248,6 +250,59 @@ async fn t3__principal_key_usage_uses_persisted_request_events() {
     assert_eq!(observed["input_tokens"], 60);
     assert_eq!(observed["output_tokens"], 40);
     assert_eq!(observed["cost_usd_micros"], 50);
+}
+
+#[tokio::test]
+async fn t3__audit_append_failure_revokes_just_issued_key() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
+    let (_, _, principal) = server
+        .client
+        .post_json(
+            "/admin/v1/principals",
+            json!({
+                "name": "audit-rollback",
+                "kind": "machine",
+                "allowed_models": [],
+                "default_limits": []
+            }),
+        )
+        .await;
+    let principal_id = principal["id"].as_str().unwrap();
+    admin_test_common::set_dynamic_principal(&server.dynamic_view, principal_id);
+
+    sqlx::query(
+        "CREATE TRIGGER fail_principal_key_issue_audit \
+         BEFORE INSERT ON audit_log_v1 \
+         WHEN NEW.admin_action = 'principal_key_issue' \
+         BEGIN \
+             SELECT RAISE(ABORT, 'injected principal key issue audit failure'); \
+         END",
+    )
+    .execute(server.storage.pool())
+    .await
+    .expect("audit failure trigger installs");
+
+    let (status, _, body) = server
+        .client
+        .post_json(
+            &format!("/admin/v1/principals/{principal_id}/keys"),
+            json!({ "label": "audit rollback" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, json!({ "error": "audit_write_failed" }));
+
+    let key_store = KeyStore::new(server.storage.clone());
+    let keys = key_store
+        .list_by_principal(principal_id)
+        .await
+        .expect("key lookup succeeds");
+    assert_eq!(keys.len(), 1);
+    let stored = &keys[0];
+    assert_eq!(stored.status, KeyStatus::Revoked);
+    assert_eq!(stored.index_hash, [0; 32]);
+    assert_eq!(stored.verify_hash, [0; 32]);
+    assert_eq!(stored.secret_salt, [0; 16]);
 }
 
 async fn wait_for_audit_action(

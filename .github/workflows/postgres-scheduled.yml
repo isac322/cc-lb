@@ -132,11 +132,19 @@ jobs:
       - name: Run multi-replica Postgres E2E
         run: cargo nextest run -p tests-multi-replica --profile e2e
         env:
-          CC_LB_MULTI_REPLICA_POSTGRES_URL: postgres://cc_lb:cc_lb@localhost:55432/cc_lb
+          CC_LB_MULTI_REPLICA_POSTGRES_MODE: external
+          CC_LB_MULTI_REPLICA_POSTGRES_URL: ${{ env.CI_POSTGRES_URL }}
           CC_LB_MULTI_REPLICA_SERVER_BIN: ${{ github.workspace }}/target/debug/cc-lb
           CC_LB_MULTI_REPLICA_FAKE_ANTHROPIC_BIN: ${{ github.workspace }}/target/debug/fake-anthropic
 
+      - name: Restore Postgres schema before smoke
+        if: always() && !cancelled()
+        run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
+        env:
+          DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
+
       - name: E2E smoke - cc-lb binary against postgres backend
+        if: always() && !cancelled()
         run: ./tests/real-client/postgres-smoke.sh
 
       - name: Show sccache stats

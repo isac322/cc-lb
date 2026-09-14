@@ -456,6 +456,7 @@ fn parse_upstream_kind(
 #[allow(non_snake_case)]
 mod t2__tests {
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
     use cc_lb_storage_api::{
@@ -463,6 +464,8 @@ mod t2__tests {
         WasmRegistryEntryInput,
     };
     use cc_lb_testkit::{InMemoryStorage as Storage, fixed_clock};
+    const TEST_ADMIN_ID: Uuid = Uuid::from_u128(1);
+    static NEXT_TEST_DATA_DIR: AtomicU64 = AtomicU64::new(0);
 
     #[tokio::test]
     async fn t2__bootstrap_seeds_principals_from_toml() {
@@ -645,10 +648,10 @@ plugins = ["missing-plugin"]
 
     impl TestDataDir {
         fn new() -> Self {
+            let sequence = NEXT_TEST_DATA_DIR.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "cc-lb-bootstrap-test-{}-{}",
+                "cc-lb-bootstrap-test-{}-{sequence}",
                 std::process::id(),
-                Uuid::new_v4()
             ));
             fs::create_dir(&path).expect("create bootstrap test data dir");
             Self { path }
@@ -705,7 +708,7 @@ plugins = ["missing-plugin"]
                     original_filename: format!("{name}.wasm"),
                     label: None,
                     uploaded_at_unix_secs: 1_800_000_000,
-                    uploaded_by_admin_id: Uuid::new_v4(),
+                    uploaded_by_admin_id: TEST_ADMIN_ID,
                     description: format!("{name} description"),
                     usage: "test fixture".to_owned(),
                     hook_metadata: Default::default(),

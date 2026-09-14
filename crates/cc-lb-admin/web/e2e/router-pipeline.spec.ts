@@ -6,6 +6,7 @@ import type {
   PluginEntry,
   Principal,
 } from '../src/lib/queries';
+import { fulfillAuthenticatedSession } from './support/auth-session';
 
 const evidenceDir = path.join(process.cwd(), '../../../.omo/evidence');
 
@@ -120,6 +121,7 @@ async function installRouterFixtures(page: Page) {
   });
 
   await page.route('**/admin/**', async (route) => {
+    if (await fulfillAuthenticatedSession(route)) return;
     const request = route.request();
     const url = new URL(request.url());
     const { pathname } = url;

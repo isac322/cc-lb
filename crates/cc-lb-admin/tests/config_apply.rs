@@ -10,8 +10,7 @@ use axum::http::StatusCode;
 #[tokio::test]
 async fn t2__config_apply_audit_records_static_token_actor_identity() {
     let (_, storage) = temp_storage().await;
-    let dir = tempfile::tempdir().expect("config apply temp dir");
-    let config_path = dir.path().join("cc-lb.toml");
+    let config_path = std::path::PathBuf::new();
     let reloader = Arc::new(TestReloader::new(config_path.clone(), minimal_config()));
     let app = app(apply_state(storage, config_path, reloader).await);
 

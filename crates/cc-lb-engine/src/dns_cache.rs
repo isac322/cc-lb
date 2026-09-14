@@ -122,51 +122,6 @@ where
 }
 
 #[derive(Clone)]
-struct PositiveDnsCache {
-    entries: Arc<DashMap<String, CachedDnsResolution>>,
-    ttl_floor: Duration,
-}
-
-#[derive(Clone)]
-struct CachedDnsResolution {
-    ips: Arc<[IpAddr]>,
-    valid_until: Instant,
-}
-
-impl PositiveDnsCache {
-    fn new(ttl_floor: Duration) -> Self {
-        Self {
-            entries: Arc::new(DashMap::new()),
-            ttl_floor,
-        }
-    }
-
-    fn get(&self, host: &str, now: Instant) -> Option<Arc<[IpAddr]>> {
-        self.entries
-            .get(host)
-            .and_then(|entry| (entry.valid_until >= now).then(|| Arc::clone(&entry.ips)))
-    }
-
-    fn insert(&self, host: String, ips: Arc<[IpAddr]>, resolved_at: Instant) {
-        self.entries.insert(
-            host,
-            CachedDnsResolution {
-                ips,
-                valid_until: resolved_at + self.ttl_floor,
-            },
-        );
-    }
-}
-
-fn socket_addrs(ips: &[IpAddr]) -> std::vec::IntoIter<SocketAddr> {
-    ips.iter()
-        .copied()
-        .map(|ip| SocketAddr::new(ip, 0))
-        .collect::<Vec<_>>()
-        .into_iter()
-}
-
-#[derive(Clone)]
 pub struct CachingDnsConnector {
     inner: HttpConnector<MetricDnsResolver>,
 }
@@ -202,7 +157,6 @@ impl Service<Uri> for CachingDnsConnector {
 #[derive(Clone)]
 pub struct MetricDnsResolver {
     resolver: Arc<dyn DnsResolver>,
-    positive_cache: PositiveDnsCache,
     metric_cache: Arc<DashMap<String, Instant>>,
     metric_ttl: Duration,
 }
@@ -211,7 +165,6 @@ impl MetricDnsResolver {
     fn new(resolver: Arc<dyn DnsResolver>, config: &DnsResolverConfig) -> Self {
         Self {
             resolver,
-            positive_cache: PositiveDnsCache::new(config.cache_ttl_floor),
             metric_cache: Arc::new(DashMap::new()),
             metric_ttl: config.cache_ttl_ceiling,
         }
@@ -230,20 +183,12 @@ impl Service<Name> for MetricDnsResolver {
     fn call(&mut self, name: Name) -> Self::Future {
         let host = name.as_str().to_owned();
         let resolver = Arc::clone(&self.resolver);
-        let positive_cache = self.positive_cache.clone();
         let metric_cache = Arc::clone(&self.metric_cache);
         let metric_ttl = self.metric_ttl;
         let start = Instant::now();
 
         Box::pin(async move {
             let now = Instant::now();
-            if let Some(ips) = positive_cache.get(&host, now) {
-                crate::request_timing::record_dns(start.elapsed());
-                emit_dns_metric("hit");
-                metric_cache.insert(host, Instant::now() + metric_ttl);
-                return Ok(socket_addrs(&ips));
-            }
-
             let was_hit = metric_cache
                 .get(&host)
                 .map(|entry| *entry.value() > now)
@@ -254,13 +199,12 @@ impl Service<Name> for MetricDnsResolver {
                 Ok(ips) => {
                     crate::request_timing::record_dns(start.elapsed());
                     emit_dns_metric(if was_hit { "hit" } else { "miss" });
-                    let resolved_at = Instant::now();
-                    metric_cache.insert(host.clone(), resolved_at + metric_ttl);
-                    let ips = Arc::<[IpAddr]>::from(ips);
-                    if !ips.is_empty() {
-                        positive_cache.insert(host, Arc::clone(&ips), resolved_at);
-                    }
-                    Ok(socket_addrs(&ips))
+                    metric_cache.insert(host, Instant::now() + metric_ttl);
+                    Ok(ips
+                        .into_iter()
+                        .map(|ip| SocketAddr::new(ip, 0))
+                        .collect::<Vec<_>>()
+                        .into_iter())
                 }
                 Err(err) => {
                     emit_dns_metric("error");
@@ -281,7 +225,7 @@ fn register_dns_metrics() {
         metrics::describe_counter!(
             "cc_lb_dns_resolve_total",
             Unit::Count,
-            "DNS resolution outcomes for the caching connector. hit includes positive results reused by the local TTL-floor cache; hickory remains authoritative beyond that floor."
+            "DNS resolution outcomes for the caching connector. hit and miss are heuristic classifications based on time since the previous successful resolution; hickory remains authoritative for caching and correctness."
         );
     });
 }
@@ -385,7 +329,7 @@ mod t2__cache_hit_metric {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cache_hit_metric() {
+    async fn resolver_results_are_not_re_cached_by_the_metrics_layer() {
         let recorder = CountingRecorder::default();
         let _recorder_guard = metrics::set_default_local_recorder(&recorder);
         let config = DnsResolverConfig {
@@ -406,13 +350,19 @@ mod t2__cache_hit_metric {
         assert_eq!(first, vec![SocketAddr::new(first_ip, 0)]);
 
         tokio::time::advance(config.cache_ttl_floor).await;
-        let cached: Vec<SocketAddr> = service
+        let refreshed: Vec<SocketAddr> = service
             .call("api.anthropic.com".parse().expect("DNS name"))
             .await
-            .expect("cached resolution")
+            .expect("refreshed resolution")
             .collect();
-        assert_eq!(cached, first);
-        assert_eq!(resolver.calls(), vec!["api.anthropic.com".to_owned()]);
+        assert_eq!(refreshed, vec![SocketAddr::new(refreshed_ip, 0)]);
+        assert_eq!(
+            resolver.calls(),
+            vec![
+                "api.anthropic.com".to_owned(),
+                "api.anthropic.com".to_owned(),
+            ]
+        );
 
         let (dns_miss, dns_hit) = {
             let counts = recorder.counts.lock().expect("recorder counts");
@@ -429,21 +379,6 @@ mod t2__cache_hit_metric {
         };
         assert_eq!(dns_miss, 1);
         assert_eq!(dns_hit, 1);
-
-        tokio::time::advance(Duration::from_nanos(1)).await;
-        let refreshed: Vec<SocketAddr> = service
-            .call("api.anthropic.com".parse().expect("DNS name"))
-            .await
-            .expect("post-floor resolution")
-            .collect();
-        assert_eq!(refreshed, vec![SocketAddr::new(refreshed_ip, 0)]);
-        assert_eq!(
-            resolver.calls(),
-            vec![
-                "api.anthropic.com".to_owned(),
-                "api.anthropic.com".to_owned(),
-            ]
-        );
     }
 }
 

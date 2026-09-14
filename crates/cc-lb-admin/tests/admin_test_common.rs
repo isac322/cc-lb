@@ -21,7 +21,6 @@ use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
-use tokio::sync::watch;
 use tower::ServiceExt;
 
 pub fn limit_engine() -> Arc<LimitEngine> {
@@ -99,14 +98,12 @@ pub struct SpawnedAdminServer<S = InMemoryStorage> {
     pub storage: Arc<S>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub client: AdminClient,
-    pub audit_flushed: watch::Receiver<u64>,
 }
 
 #[derive(Clone)]
 pub struct AdminClient {
     app: Router,
     token: String,
-    audit_flushed: watch::Sender<u64>,
 }
 
 pub fn static_token_auth(token: &str) -> Arc<cc_lb_admin::auth::AdminAuthenticator> {
@@ -169,7 +166,6 @@ async fn spawn_admin_server_with_storage_and_auth<S>(
 where
     S: Storage + ManagedKeyStore + 'static,
 {
-    let (audit_flushed_tx, audit_flushed) = watch::channel(0u64);
     let config = Config::default();
     let dynamic_view = dynamic_view_holder(&config);
     let state = cc_lb_admin::AdminState {
@@ -199,9 +195,7 @@ where
         client: AdminClient {
             app: cc_lb_admin::router(state),
             token: "test-token".to_owned(),
-            audit_flushed: audit_flushed_tx,
         },
-        audit_flushed,
     }
 }
 
@@ -284,7 +278,6 @@ impl AdminClient {
         } else {
             serde_json::from_slice(&bytes).expect("response is json")
         };
-        self.audit_flushed.send_modify(|count| *count += 1);
         (status, headers, value)
     }
 
@@ -318,7 +311,6 @@ impl AdminClient {
         } else {
             serde_json::from_slice(&bytes).expect("response is json")
         };
-        self.audit_flushed.send_modify(|count| *count += 1);
         (status, headers, value)
     }
 
@@ -372,7 +364,6 @@ impl AdminClient {
             .await
             .expect("body collects")
             .to_bytes();
-        self.audit_flushed.send_modify(|count| *count += 1);
         (status, headers, body)
     }
 

@@ -64,9 +64,10 @@ async fn run_postgres_race_inner(scheduler_url: &str, runtime_url: &str) -> Test
         .await?;
     apalis_postgres::PostgresStorage::setup(&pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
+    let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
     let storage = Arc::new(cc_lb_storage_postgres::PostgresStorage::new(
         storage_pool.clone(),
-        Arc::new(cc_lb_clock::SystemClock),
+        clock.clone(),
     ));
     storage.initialize(BackendKind::Postgres).await?;
 
@@ -106,7 +107,7 @@ async fn run_postgres_race_inner(scheduler_url: &str, runtime_url: &str) -> Test
             stores: stores_from_storage(storage.clone()),
             aead,
             oauth_cfg,
-            clock: Arc::new(cc_lb_clock::SystemClock),
+            clock,
         },
         replica_id: Uuid::from_u128(2),
         metadata_hook: None,

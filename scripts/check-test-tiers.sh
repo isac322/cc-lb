@@ -44,11 +44,14 @@ rg --files \
   -g 'crates/*/src/**/*.rs' \
   -g 'crates/*/tests/**/*.rs' \
   -g 'tests/**/*.rs' \
+  -g 'fuzz/**/*.rs' \
+  -g '**/benches/**/*.rs' \
   | LC_ALL=C sort -u >"$source_files"
 
 python3 - "$mode" "$nextest_json" "$source_files" "$metadata_json" <<'PY'
 from __future__ import annotations
 
+import csv
 import collections
 import datetime as dt
 import json
@@ -115,9 +118,16 @@ def load_nextest(path: str) -> list[str]:
     return sorted(names)
 
 
+def tier_markers(segments: list[str]) -> list[str]:
+    return [
+        tier
+        for tier in VALID_TIERS
+        if any(segment.startswith(tier) for segment in segments)
+    ]
+
+
 def tier_from_name(name: str) -> str:
-    segments = name.split("::")
-    found = [tier for tier in VALID_TIERS if any(seg.startswith(tier) for seg in segments)]
+    found = tier_markers(name.split("::"))
     return found[0] if len(found) == 1 else ""
 
 
@@ -190,6 +200,111 @@ def matching_brace(text: str, start: int) -> int | None:
                 return index + 1
         index += 1
     return None
+
+def rust_code_mask(text: str) -> str:
+    chars = list(text)
+    index = 0
+    while index < len(text):
+        start = index
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            end = len(text) if end == -1 else end
+        elif text.startswith("/*", index):
+            depth = 1
+            end = index + 2
+            while end < len(text) and depth:
+                if text.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif text.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+        else:
+            raw = re.match(r'(?:b)?r(#{0,16})"', text[index:])
+            if raw:
+                terminator = '"' + raw.group(1)
+                found = text.find(terminator, index + raw.end())
+                end = len(text) if found == -1 else found + len(terminator)
+            elif text[index] == '"':
+                end = index + 1
+                while end < len(text):
+                    if text[end] == "\\":
+                        end += 2
+                    elif text[end] == '"':
+                        end += 1
+                        break
+                    else:
+                        end += 1
+            else:
+                char_literal = re.match(r"'(?:\\.|[^\\'])'", text[index:])
+                if not char_literal:
+                    index += 1
+                    continue
+                end = index + char_literal.end()
+        for masked in range(start, end):
+            if chars[masked] != "\n":
+                chars[masked] = " "
+        index = end
+    return "".join(chars)
+
+
+def braced_modules(text: str) -> list[tuple[str, int, int, int]]:
+    masked = rust_code_mask(text)
+    modules: list[tuple[str, int, int, int]] = []
+    pattern = re.compile(
+        r"\b(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+"
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*\{"
+    )
+    for match in pattern.finditer(masked):
+        brace = match.end() - 1
+        end = matching_brace(text, brace)
+        if end is not None:
+            modules.append((match.group(1), match.start(), brace, end))
+    return modules
+
+
+def module_segments_at(
+    modules: list[tuple[str, int, int, int]], offset: int
+) -> list[str]:
+    containing = [
+        (brace, name)
+        for name, _start, brace, end in modules
+        if brace < offset < end
+    ]
+    return [name for _brace, name in sorted(containing)]
+
+
+def cfg_test_braced_modules(text: str) -> list[tuple[int, int]]:
+    masked = rust_code_mask(text)
+    cfg_test = re.compile(r"#\s*\[cfg\([^]]*\btest\b[^]]*\)\]")
+    decorated_module = re.compile(
+        r"(?:\s|#\s*\[[^]]*\])*"
+        r"(?:pub(?:\s*\([^)]*\))?\s+)?"
+        r"mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{"
+    )
+    ranges: set[tuple[int, int]] = set()
+    for match in cfg_test.finditer(masked):
+        module = decorated_module.match(masked, match.end())
+        if not module:
+            continue
+        brace = module.end() - 1
+        end = matching_brace(text, brace)
+        if end is not None:
+            ranges.add((match.start(), end))
+    return sorted(ranges)
+
+
+def mask_ranges(text: str, ranges: list[tuple[int, int]]) -> str:
+    if not ranges:
+        return text
+    chars = list(text)
+    for start, end in ranges:
+        for index in range(start, end):
+            if chars[index] != "\n":
+                chars[index] = " "
+    return "".join(chars)
 
 
 def extract_test_blocks(text: str):
@@ -280,7 +395,14 @@ def check_fast_context(block: str, path: str, base_line: int, allowed: set[str],
 
 COMMON = [
     ("ignore", r"#\s*\[ignore\b", "#[ignore] is forbidden"),
-    ("silent-skip", r"(?i:eprintln!\(\s*\"skip)|return\s+Ok\(\(\)\)\s*;?\s*//[^\n]*skip|Result\s*<\s*Option\s*<|let\s+Some\([^)]*\)\s*=.*?else\s*\{\s*return\s+Ok\(", "silent test skip"),
+    (
+        "silent-skip",
+        r"(?i:eprintln!\(\s*\"skip)"
+        r"|return\s+Ok\(\(\)\)\s*;?\s*//[^\n]*skip"
+        r"|(?:async\s+)?fn\s+\w+\s*\([^)]*\)\s*->\s*[^{;]*Option\s*<[^>{;]*Fixture\b"
+        r"|let\s+Some\([^)]*\)\s*=.*?else\s*\{\s*return\s+Ok\(\(\)\)",
+        "silent test skip",
+    ),
     ("retry", r"SERVER_START_ATTEMPTS|\battempts?\s*<\s*[A-Za-z0-9_]|\bfor\s+_\s+in\s+0\.\.\d+\s*\{[^}]*(?:\bsleep\b|\btry_again\b|\bretry\b)|\bloop\s*\{[^}]*\bsleep\b", "retry-until-green pattern"),
     ("port-handoff", r"reserve_addr|free_addr|TcpListener::bind\([^)]*:0[^)]*\)[^;]*\.local_addr\(\)[^;]*;\s*drop", "port handoff race"),
     ("env", r"(?:std::)?env::(?:set_var|remove_var)|std::env::var", "ambient environment access"),
@@ -304,92 +426,332 @@ T3 = [
     ("real-clock", r"SystemClock", "real clock injected into T3 adapter"),
     ("retry", r"emit_until_received|startup_delay", "retry/delay in T3 protocol test"),
 ]
-T4 = [("subprocess", r"process::Command|CARGO_BIN_EXE|spawn_test_server", "subprocess in T4")]
+T4 = [
+    ("subprocess", r"process::Command|CARGO_BIN_EXE|spawn_test_server", "subprocess in T4"),
+]
+
+def directory_tier(rel: str) -> str:
+    if "/tests/" not in f"/{rel}" and not rel.startswith("tests/"):
+        return ""
+    match = re.search(r"/(t2|t3|t4|t5)/", f"/{rel}")
+    return f"{match.group(1)}__" if match else ""
+
+
+def path_tier_claim(rel: str) -> str:
+    if (
+        rel.startswith(("tests/load/", "tests/loom/", "tests/stress-suite/", "fuzz/"))
+        or rel.startswith("benches/")
+        or "/benches/" in rel
+    ):
+        return "tx__"
+    return directory_tier(rel)
+
+
+def is_test_source(rel: str) -> bool:
+    return (
+        "/tests/" in f"/{rel}"
+        or rel.endswith("_tests.rs")
+        or rel.endswith("/tests.rs")
+        or rel.startswith("crates/cc-lb-testkit/src/")
+        or path_tier_claim(rel) == "tx__"
+    )
+
+# Fixture crates are production dependencies of higher-tier tests despite their
+# location under tests/. Their #[test] blocks and cfg(test) helpers are still
+# checked against their own tier claims below.
+def is_fixture_production_source(rel: str) -> bool:
+    return bool(re.fullmatch(r"tests/fixtures/[^/]+/src/.+\.rs", rel))
+
+
+def patterns_for_tier(tier: str):
+    patterns = [
+        pattern
+        for pattern in COMMON
+        if not (tier == "tx__" and pattern[0] == "elapsed-assert")
+    ]
+    if tier in {"", "t2__"}:
+        patterns += FAST
+    elif tier in {"t3__", "t3_postgres__"}:
+        patterns += T3
+    elif tier == "t4__":
+        patterns += T4
+    return patterns
+
+
+def resolve_external_module(
+    rel: str,
+    module_name: str,
+    explicit_path: str | None,
+    enclosing_modules: list[str],
+    source_set: set[str],
+) -> str | None:
+    parent = ROOT / rel
+    is_integration_root = bool(
+        re.fullmatch(r"crates/[^/]+/tests/[^/]+\.rs", rel)
+        or re.fullmatch(r"tests/[^/]+\.rs", rel)
+    )
+    is_binary_root = bool(re.fullmatch(r"crates/[^/]+/src/bin/[^/]+\.rs", rel))
+    root_style = parent.name in {"lib.rs", "main.rs", "mod.rs"} or is_integration_root or is_binary_root
+    module_base = parent.parent if root_style else parent.parent / parent.stem
+    module_base = module_base.joinpath(*enclosing_modules)
+
+    candidates: list[pathlib.Path] = []
+    if explicit_path:
+        candidates.extend((parent.parent / explicit_path, module_base / explicit_path))
+    else:
+        candidates.extend(
+            (
+                module_base / f"{module_name}.rs",
+                module_base / module_name / "mod.rs",
+            )
+        )
+    for candidate in candidates:
+        try:
+            candidate_rel = candidate.resolve().relative_to(ROOT.resolve()).as_posix()
+        except ValueError:
+            continue
+        if candidate_rel in source_set:
+            return candidate_rel
+    return None
+
 
 nextest_names = load_nextest(NEXTEST_PATH)
 findings: list[Finding] = []
 for name in nextest_names:
-    tiers = [tier for tier in VALID_TIERS if any(seg.startswith(tier) for seg in name.split("::"))]
+    tiers = tier_markers(name.split("::"))
     if len(tiers) > 1:
         findings.append(Finding("no-seam", "<nextest>", 0, f"multiple tier segments: {name}"))
 
 source_paths = [line for line in pathlib.Path(SOURCE_LIST).read_text().splitlines() if line]
-for rel in source_paths:
-    path = ROOT / rel
-    try:
-        text = path.read_text()
-    except UnicodeDecodeError:
-        continue
-    if path.suffix == ".rs":
-        blocks = list(extract_test_blocks(text))
-        directory_match = re.search(r"/(t2|t3|t4|t5)/", f"/{rel}") if "/tests/" in f"/{rel}" or rel.startswith("tests/") else None
-        for fn_name, block, offset in blocks:
-            tier = tier_from_name(fn_name)
-            if not tier:
-                tier = f"{directory_match.group(1)}__" if directory_match else ""
-            base_line = line_number(text, offset)
-            allowed = exceptions_for(block, rel, base_line, findings)
-            patterns = [pattern for pattern in COMMON if not (tier == "tx__" and pattern[0] == "elapsed-assert")]
-            if tier in {"", "t2__"}:
-                patterns += FAST
-            elif tier in {"t3__", "t3_postgres__"}:
-                patterns += T3
-            elif tier == "t4__":
-                patterns += T4
-            check_patterns(block, rel, base_line, patterns, allowed, findings)
-            if tier in {"", "t2__"}:
-                check_fast_context(block, rel, base_line, allowed, findings)
+source_set = set(source_paths)
+source_texts = {
+    rel: (ROOT / rel).read_text(errors="replace")
+    for rel in source_paths
+    if rel.endswith(".rs")
+}
+source_modules = {rel: braced_modules(text) for rel, text in source_texts.items()}
+test_records: dict[str, list[tuple[str, str, int, str, list[str]]]] = collections.defaultdict(list)
 
-            if directory_match:
-                expected = directory_match.group(1) + "__"
-                if not fn_name.startswith(expected) and not (expected == "t3__" and fn_name.startswith("t3_postgres__")):
-                    findings.append(Finding("no-seam", rel, base_line, f"{rel} requires {expected} test prefix"))
-        # Standalone test/helper modules receive common rules across the file.
-        if "/tests/" in f"/{rel}" or rel.endswith("_tests.rs") or rel.endswith("/tests.rs"):
-            allowed = exceptions_for(text, rel, 1, findings)
-            check_patterns(text, rel, 1, [pattern for pattern in COMMON if pattern[0] != "elapsed-assert"], allowed, findings)
+for rel, text in source_texts.items():
+    path_claim = path_tier_claim(rel)
+    for fn_name, block, offset in extract_test_blocks(text):
+        segments = module_segments_at(source_modules[rel], offset) + [fn_name]
+        markers = tier_markers(segments)
+        if len(markers) > 1:
+            findings.append(
+                Finding(
+                    "no-seam",
+                    rel,
+                    line_number(text, offset),
+                    f"multiple tier segments in source test: {'::'.join(segments)}",
+                )
+            )
+        tier = markers[0] if len(markers) == 1 else path_claim
+        test_records[rel].append((fn_name, block, offset, tier, segments))
+
+module_edges: list[tuple[str, str, int, tuple[str, ...]]] = []
+external_module = re.compile(
+    r"(?P<attrs>(?:\s*#\s*\[[^]]*\]\s*)*)"
+    r"(?:pub(?:\s*\([^)]*\))?\s+)?"
+    r"mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;"
+)
+path_attr = re.compile(r'#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]')
+for rel, text in source_texts.items():
+    masked = rust_code_mask(text)
+    for declaration in external_module.finditer(masked):
+        module_name = declaration.group("name")
+        attrs = text[declaration.start("attrs"):declaration.end("attrs")]
+        explicit = path_attr.search(attrs)
+        enclosing = module_segments_at(source_modules[rel], declaration.start())
+        child = resolve_external_module(
+            rel,
+            module_name,
+            explicit.group(1) if explicit else None,
+            enclosing,
+            source_set,
+        )
+        if child is None:
+            continue
+        markers = tier_markers(enclosing + [module_name])
+        if len(markers) > 1:
+            findings.append(
+                Finding(
+                    "no-seam",
+                    rel,
+                    line_number(text, declaration.start()),
+                    f"multiple tier segments in module path: {'::'.join(enclosing + [module_name])}",
+                )
+            )
+        module_edges.append(
+            (rel, child, declaration.start(), tuple(markers if len(markers) == 1 else ()))
+        )
+
+module_contexts: dict[str, set[str]] = collections.defaultdict(set)
+context_changed = True
+while context_changed:
+    context_changed = False
+    for parent, child, _offset, hinted in module_edges:
+        before = len(module_contexts[child])
+        if hinted:
+            module_contexts[child].update(hinted)
+        else:
+            module_contexts[child].update(module_contexts[parent])
+        context_changed |= before != len(module_contexts[child])
+
+# Tests in an external tier-marked module inherit that module segment even
+# though the segment is not written again in the child source file.
+normalized_records: dict[
+    str, list[tuple[str, str, int, str, list[str]]]
+] = collections.defaultdict(list)
+file_tiers = collections.defaultdict(set)
+for rel, records in test_records.items():
+    path_claim = path_tier_claim(rel)
+    if path_claim:
+        file_tiers[rel].add(path_claim)
+    if rel.startswith("crates/cc-lb-testkit/src/"):
+        file_tiers[rel].add("t2__")
+    inherited = module_contexts[rel]
+    for fn_name, block, offset, tier, segments in records:
+        if not tier and len(inherited) == 1:
+            tier = next(iter(inherited))
+        normalized_records[rel].append((fn_name, block, offset, tier, segments))
+        file_tiers[rel].add(tier)
+test_records = normalized_records
+
+# Support-only files have no test record from which to receive their fixed
+# classification, so retain explicit path/testkit claims as association seeds.
+for rel in source_texts:
+    path_claim = path_tier_claim(rel)
+    if path_claim:
+        file_tiers[rel].add(path_claim)
+    if rel.startswith("crates/cc-lb-testkit/src/"):
+        file_tiers[rel].add("t2__")
+
+# A helper inherits only from the module that includes it. Tier-marked children
+# keep their direct claim; unmarked children receive the parent's complete
+# inherited context. Child claims never flow back to a neutral parent or across
+# to sibling modules.
+changed = True
+while changed:
+    changed = False
+    for parent, child, _offset, hinted in module_edges:
+        child_before = len(file_tiers[child])
+        if hinted:
+            file_tiers[child].update(hinted)
+        else:
+            file_tiers[child].update(file_tiers[parent])
+        changed |= child_before != len(file_tiers[child])
+
+for rel, text in source_texts.items():
+    records = test_records[rel]
+    for fn_name, block, offset, tier, segments in records:
+        base_line = line_number(text, offset)
+        allowed = exceptions_for(block, rel, base_line, findings)
+        check_patterns(block, rel, base_line, patterns_for_tier(tier), allowed, findings)
+        if tier in {"", "t2__"}:
+            check_fast_context(block, rel, base_line, allowed, findings)
+
+        expected = directory_tier(rel)
+        markers = set(tier_markers(segments))
+        markers.update(module_contexts[rel])
+        expected_present = expected in markers or (
+            expected == "t3__" and "t3_postgres__" in markers
+        )
+        if expected and not expected_present:
+            findings.append(Finding("no-seam", rel, base_line, f"{rel} requires {expected} test prefix"))
+
+    test_ranges = [(offset, offset + len(block)) for _name, block, offset, _tier, _segments in records]
+    if is_test_source(rel):
+        helper_text = mask_ranges(text, test_ranges)
+        if is_fixture_production_source(rel):
+            production_helper_text = mask_ranges(helper_text, cfg_test_braced_modules(helper_text))
+            allowed = exceptions_for(production_helper_text, rel, 1, findings)
+            check_patterns(production_helper_text, rel, 1, COMMON, allowed, findings)
+        else:
+            tiers = sorted(file_tiers[rel])
+            allowed = exceptions_for(helper_text, rel, 1, findings)
+            patterns = patterns_for_tier(tiers[0]) if len(tiers) == 1 else COMMON
+            check_patterns(helper_text, rel, 1, patterns, allowed, findings)
+            continue
+
+    for module_start, module_end in cfg_test_braced_modules(text):
+        module_tiers = {
+            tier
+            for _name, _block, offset, tier, _segments in records
+            if module_start <= offset < module_end
+        }
+        if not module_tiers:
+            continue
+        module_text = text[module_start:module_end]
+        local_test_ranges = [
+            (max(0, start - module_start), min(module_end, end) - module_start)
+            for start, end in test_ranges
+            if module_start <= start < module_end
+        ]
+        helper_text = mask_ranges(module_text, local_test_ranges)
+        base_line = line_number(text, module_start)
+        allowed = exceptions_for(helper_text, rel, base_line, findings)
+        patterns = (
+            patterns_for_tier(next(iter(module_tiers)))
+            if len(module_tiers) == 1
+            else COMMON
+        )
+        check_patterns(helper_text, rel, base_line, patterns, allowed, findings)
+
 
 def without_cfg_test_modules(text: str) -> str:
-    ranges: list[tuple[int, int]] = []
-    cfg_test = re.compile(r"#\s*\[cfg\([^]]*\btest\b[^]]*\)\]")
-    for match in cfg_test.finditer(text):
-        module = re.search(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{", text[match.end():])
-        if not module:
-            continue
-        brace = match.end() + module.end() - 1
-        end = matching_brace(text, brace)
-        if end is not None:
-            ranges.append((match.start(), end))
-    if not ranges:
-        return text
-    chars = list(text)
-    for start, end in ranges:
-        for index in range(start, end):
-            if chars[index] != "\n":
-                chars[index] = " "
-    return "".join(chars)
+    return mask_ranges(text, cfg_test_braced_modules(text))
 
 
 # Production source rules.
 production_patterns = [
-    ("real-clock", re.compile(r"SystemTime::now\("), {"crates/cc-lb-clock/src/lib.rs"}),
-    ("rand", re.compile(r"rand::(?:make_rng|thread_rng)\("), {
-        "crates/cc-lb-engine/src/lifecycle.rs",
-        "crates/cc-lb-server/src/app.rs",
-        "crates/cc-lb-server/src/bootstrap.rs",
-        "crates/cc-lb-server/src/chaos.rs",
-        "crates/cc-lb-server/src/reconcile.rs",
-    }),
-    ("env", re.compile(r"std::env::var"), {"crates/cc-lb-storage-conformance/src/postgres_fixture.rs"}),
+    (
+        "real-clock",
+        re.compile(r"SystemTime::now\("),
+        {
+            "crates/cc-lb-clock/src/lib.rs":
+                "the SystemClock adapter is the production wall-clock boundary",
+            "crates/cc-lb-admin/src/auth/cloudflare_access.rs":
+                "Cloudflare Access JWT expiry validation needs current time at the auth boundary",
+        },
+    ),
+    (
+        "rand",
+        re.compile(r"rand::(?:make_rng|thread_rng)\("),
+        {
+            "crates/cc-lb-engine/src/lifecycle.rs":
+                "Lifecycle owns the production default RNG; tests inject a fixed seed",
+            "crates/cc-lb-server/src/chaos.rs":
+                "the chaos composition boundary samples configured production faults",
+            "crates/cc-lb-server/src/reconcile.rs":
+                "the reconcile composition boundary owns production jitter",
+        },
+    ),
+    (
+        "env",
+        re.compile(r"std::env::var\s*\("),
+        {
+            "crates/cc-lb-storage-conformance/src/postgres_fixture.rs":
+                "the PostgreSQL fixture resolves its explicitly named CI database URL",
+            "crates/cc-lb-server/src/app.rs":
+                "the app composition root resolves configured startup paths and secrets",
+            "crates/cc-lb-server/src/bootstrap.rs":
+                "bootstrap resolves explicitly configured upstream credential variables",
+            "crates/cc-lb-server/src/chaos.rs":
+                "the chaos composition boundary reads its documented fault controls",
+            "crates/cc-lb-admin/src/auth/mod.rs":
+                "static-token auth resolves the provider's explicitly configured token_env",
+        },
+    ),
 ]
 for rel in source_paths:
     if not re.match(r"crates/[^/]+/src/", rel):
         continue
     if rel.endswith("_tests.rs") or rel.endswith("/tests.rs") or "/tests/" in rel:
         continue
-    text = without_cfg_test_modules((ROOT / rel).read_text(errors="replace"))
+    text = without_cfg_test_modules(source_texts[rel])
     for code, pattern, allow_files in production_patterns:
-        if rel in allow_files or (code == "env" and rel.startswith("crates/cc-lb-server/src/")):
+        if rel in allow_files:
             continue
         match = pattern.search(text)
         if match:
@@ -518,6 +880,100 @@ for move in ledger.get("move", []):
 for identity, count in collections.Counter(old_identities).items():
     if count != 1:
         findings.append(Finding("no-seam", str(ledger_path), 0, f"ledger old identity must be unique: {identity!r}"))
+
+# The classification CSV is the committed pre-migration inventory for the
+# cc-lb-server external test binary. Restrict this check to its direct Rust
+# function rows: macro-generated conformance cases and narrative/non-function
+# rows elsewhere in the CSV do not have a stable source identity to compare.
+classification_path = ROOT / "docs/testing/classification.csv"
+classification_prefix = "crates/cc-lb-server/tests/"
+classification_equivalents = {
+    (
+        "cc-lb-server::integration::invalid_new_config_keeps_old::"
+        "config_reload_accepts_plugin_unrelated_change_and_records_success"
+    ): (
+        "cc-lb-server::integration::t3__invalid_new_config_keeps_old::"
+        "t3__config_reload_accepts_plugin_unrelated_change_and_keeps_runtime_view"
+    ),
+}
+classification_ledger_equivalents = {
+    (
+        "cc-lb-server::integration::composite_signer_dispatch::"
+        "router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic_direct"
+    ): (
+        "cc-lb-server::integration::composite_signer_dispatch::"
+        "t2__router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic_direct"
+    ),
+    (
+        "cc-lb-server::integration::dispatch_uses_resolved_upstream_base_url::"
+        "dispatch_uses_resolved_upstream_base_url_not_first_route_dialect"
+    ): (
+        "cc-lb-server::integration::dispatch_uses_resolved_upstream_base_url::"
+        "t2__dispatch_uses_resolved_upstream_base_url_not_first_route_dialect"
+    ),
+}
+
+
+def normalized_test_leaf(name: str) -> str:
+    return re.sub(r"^(?:t2__|t3_postgres__|t3__|t4__|t5__|tx__)", "", name)
+
+
+current_server_leaves = {
+    normalized_test_leaf(fn_name)
+    for rel, records in test_records.items()
+    if rel.startswith("crates/cc-lb-server/")
+    for fn_name, _block, _offset, _tier, _segments in records
+}
+baseline_identities: list[str] = []
+if not classification_path.exists():
+    findings.append(Finding("no-seam", str(classification_path), 0, "classification inventory is missing"))
+else:
+    with classification_path.open(newline="") as classification_file:
+        for row in csv.DictReader(classification_file):
+            source = row.get("file", "")
+            leaf = row.get("fn", "")
+            if not source.startswith(classification_prefix) or not source.endswith(".rs"):
+                continue
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", leaf):
+                findings.append(
+                    Finding(
+                        "no-seam",
+                        str(classification_path),
+                        0,
+                        f"external Rust baseline row is not a function identity: {source!r} {leaf!r}",
+                    )
+                )
+                continue
+            module = source[len(classification_prefix):-3].replace("/", "::")
+            identity = f"cc-lb-server::integration::{module}::{leaf}"
+            baseline_identities.append(identity)
+            if normalized_test_leaf(leaf) in current_server_leaves:
+                continue
+            equivalent = classification_equivalents.get(identity)
+            if equivalent and ledger_ref_resolves(equivalent):
+                continue
+            ledger_identity = classification_ledger_equivalents.get(identity, identity)
+            if ledger_identity in old_identities:
+                continue
+            findings.append(
+                Finding(
+                    "weakened-assertion",
+                    str(ledger_path),
+                    0,
+                    f"removed baseline test identity is missing from ledger old: {identity!r}",
+                )
+            )
+
+for identity, count in collections.Counter(baseline_identities).items():
+    if count != 1:
+        findings.append(
+            Finding(
+                "no-seam",
+                str(classification_path),
+                0,
+                f"classification baseline identity must be unique: {identity!r}",
+            )
+        )
 
 added_tests = meta.get("added_tests", [])
 if not isinstance(added_tests, list):

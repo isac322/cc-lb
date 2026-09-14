@@ -2,11 +2,7 @@ use crate::tls_common;
 
 use std::path::Path;
 
-use cc_lb_server::tls::{TlsError, load_certs, parse_certs_pem};
-
-const CERT_A: &[u8] = include_bytes!("../fixtures/tls/cert-a.pem");
-const CERT_BAD: &[u8] = include_bytes!("../fixtures/tls/cert-bad.pem");
-const KEY_A: &[u8] = include_bytes!("../fixtures/tls/key-a.pem");
+use cc_lb_server::tls::{TlsError, load_certs};
 
 #[derive(Debug, PartialEq, Eq)]
 enum TlsErrorCategory {
@@ -44,38 +40,24 @@ fn t3__load_certs_ok() {
 }
 
 #[test]
-fn t3__byte_and_path_loads_have_observable_parity() {
-    let byte_config = parse_certs_pem(CERT_A, KEY_A).unwrap();
-    let path_config = load_certs(
-        &tls_common::fixture("cert-a.pem"),
-        &tls_common::fixture("key-a.pem"),
-    )
-    .unwrap();
-    assert_eq!(byte_config.alpn_protocols, path_config.alpn_protocols);
-
-    let byte_bad_cert =
-        parse_certs_pem(CERT_BAD, KEY_A).expect_err("invalid certificate bytes must fail");
-    let path_bad_cert = load_certs(
+fn t3__load_certs_reports_certificate_and_key_validation_errors() {
+    let bad_certificate = load_certs(
         &tls_common::fixture("cert-bad.pem"),
         &tls_common::fixture("key-a.pem"),
     )
     .expect_err("invalid certificate file must fail");
     assert_eq!(
-        error_category(&byte_bad_cert),
-        error_category(&path_bad_cert)
+        error_category(&bad_certificate),
+        TlsErrorCategory::BuildConfig
     );
 
-    let byte_missing_key =
-        parse_certs_pem(CERT_A, CERT_A).expect_err("certificate-only key bytes must fail");
-    let path_missing_key = load_certs(
-        &tls_common::fixture("cert-a.pem"),
-        &tls_common::fixture("cert-a.pem"),
-    )
-    .expect_err("certificate-only key file must fail");
-    assert_eq!(
-        error_category(&byte_missing_key),
-        error_category(&path_missing_key)
-    );
+    let certificate_as_key = tls_common::fixture("cert-a.pem");
+    let missing_private_key = load_certs(&tls_common::fixture("cert-a.pem"), &certificate_as_key)
+        .expect_err("certificate-only key file must fail");
+    match missing_private_key {
+        TlsError::NoPrivateKey { path } => assert_eq!(path, certificate_as_key),
+        other => panic!("expected missing private key error, got {other}"),
+    }
 }
 
 #[test]

@@ -4,6 +4,7 @@ import type {
   DashboardUsageResponse,
   UsageBucket,
 } from '../src/lib/api';
+import { fulfillAuthenticatedSession } from './support/auth-session';
 
 const POLL_INTERVAL_MS = 5_000;
 const POLL_UPDATE_TIMEOUT_MS = 2 * POLL_INTERVAL_MS + 1_000;
@@ -222,6 +223,7 @@ async function installOverviewFixtures(
   });
 
   await page.route('**/admin/**', async (route) => {
+    if (await fulfillAuthenticatedSession(route)) return;
     const request = route.request();
     const url = new URL(request.url());
     const { pathname } = url;

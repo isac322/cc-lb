@@ -239,7 +239,7 @@ async fn seed_registry(
                 original_filename: format!("{name}.wasm"),
                 label: Some("fixture".to_owned()),
                 uploaded_at_unix_secs: 1_800_000_000,
-                uploaded_by_admin_id: Uuid::new_v4(),
+                uploaded_by_admin_id: Uuid::from_u128(seed as u128),
                 description: format!("{name} description"),
                 usage: "test fixture".to_owned(),
                 hook_metadata: Default::default(),

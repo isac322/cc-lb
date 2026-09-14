@@ -22,7 +22,6 @@ serde_json.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
-cc-lb-testkit = { path = "../cc-lb-testkit" }
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
 http-body-util.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

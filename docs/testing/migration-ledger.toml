@@ -4,7 +4,7 @@
 [meta]
 migration_open = false
 baseline_test_count = 2287
-final_test_count = 2345
+final_test_count = 2347
 added_tests = [
   "tests-integration::integration::t4::parity_characterization::t4__parity_characterization_golden",
   "cc-lb-engine::bulkhead::tests::t2__dispatcher::signed_request_is_delivered_exactly_and_response_is_mapped",
@@ -46,10 +46,15 @@ added_tests = [
   "cc-lb-config::integration::string_parity::t3__removed_switch_warnings_have_file_and_string_parity",
   "cc-lb-config::integration::string_parity::t3__legacy_storage_migration_has_file_and_string_parity",
   "cc-lb-config::integration::string_parity::t3__invalid_raw_toml_has_file_and_string_error_parity",
-  "cc-lb-config::integration::string_parity::t3__environment_override_precedence_has_file_and_string_parity",
-  "cc-lb-config::integration::string_parity::t3__cli_override_precedence_has_file_and_string_parity",
   "cc-lb-config::integration::string_parity::t3__missing_file_still_reports_the_exact_toml_file_provider",
   "cc-lb-testkit::storage::tests::request_event_cursor_filters_before_limit",
+  "cc-lb-config::tests::config_environment_provider_strips_prefix_nests_and_coerces_numbers",
+  "cc-lb-config::tests::injected_runtime_env_lookup_preserves_exact_missing_empty_and_non_unicode_semantics",
+  "cc-lb-config::integration::string_parity::t3__cli_override_precedence_has_file_and_string_parity",
+  "cc-lb-engine::integration::t3__dns_connector::ttl_ceiling_refreshes_dns_before_connector_failover",
+  "cc-lb-storage-postgres::integration::t3_postgres__plugin_registry::migration_0117_drops_legacy_blobs_without_changing_plugin_blob_repo",
+  "cc-lb-server::reconcile::tests::equal_seeds_produce_equal_jitter_sequences",
+  "cc-lb-server::reconcile::tests::jitter_stays_within_inclusive_bounds",
 ]
 
 [[move]]
@@ -472,7 +477,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::postgres_noop_skips_snapshot_and_cache_persistence"
 action = "MOVE"
-new = ["cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t3_postgres__noop_skips_snapshot_and_cache_persistence"]
+new = ["cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t3_postgres__postgres::noop_skips_snapshot_and_cache_persistence"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -480,7 +485,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::postgres_changed_catalog_persists_and_updates_fingerprint"
 action = "MOVE"
-new = ["cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t3_postgres__changed_catalog_persists_and_updates_fingerprint"]
+new = ["cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t3_postgres__postgres::changed_catalog_persists_and_updates_fingerprint"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -504,7 +509,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-scheduler::jobs::compat::tests::jobs_compat_etag_deduplicates_not_modified_postgres"
 action = "MOVE"
-new = ["cc-lb-scheduler::jobs::compat::tests::t3_postgres__etag_deduplicates_not_modified"]
+new = ["cc-lb-scheduler::jobs::compat::tests::t3_postgres__postgres::etag_deduplicates_not_modified"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -512,7 +517,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-scheduler::jobs::compat::tests::jobs_compat_unchanged_hash_skips_value_write_postgres"
 action = "MOVE"
-new = ["cc-lb-scheduler::jobs::compat::tests::t3_postgres__unchanged_hash_skips_value_write"]
+new = ["cc-lb-scheduler::jobs::compat::tests::t3_postgres__postgres::unchanged_hash_skips_value_write"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -544,7 +549,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-scheduler::jobs::compat::tests::jobs_compat_etag_deduplicates_not_modified_sqlite"
 action = "SPLIT"
-new = ["cc-lb-scheduler::jobs::compat::tests::t2__etag_deduplicates_not_modified", "cc-lb-scheduler::jobs::compat::tests::t3__sqlite_etag_deduplicates_not_modified"]
+new = ["cc-lb-scheduler::jobs::compat::tests::t2__etag_deduplicates_not_modified", "cc-lb-scheduler::jobs::compat::tests::t3__sqlite::etag_deduplicates_not_modified"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -552,7 +557,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-scheduler::jobs::compat::tests::jobs_compat_unchanged_hash_skips_value_write_sqlite"
 action = "SPLIT"
-new = ["cc-lb-scheduler::jobs::compat::tests::t2__unchanged_hash_skips_value_write", "cc-lb-scheduler::jobs::compat::tests::t3__sqlite_unchanged_hash_skips_value_write"]
+new = ["cc-lb-scheduler::jobs::compat::tests::t2__unchanged_hash_skips_value_write", "cc-lb-scheduler::jobs::compat::tests::t3__sqlite::unchanged_hash_skips_value_write"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -560,7 +565,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::sqlite_noop_skips_snapshot_and_cache_persistence"
 action = "SPLIT"
-new = ["cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t2__noop_skips_snapshot_and_cache_persistence", "cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t3__sqlite_noop_skips_snapshot_and_cache_persistence"]
+new = ["cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t2__noop_skips_snapshot_and_cache_persistence", "cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t3__sqlite::noop_skips_snapshot_and_cache_persistence"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -568,7 +573,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::sqlite_changed_catalog_persists_and_updates_fingerprint"
 action = "SPLIT"
-new = ["cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t2__changed_catalog_persists_and_updates_fingerprint", "cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t3__sqlite_changed_catalog_persists_and_updates_fingerprint"]
+new = ["cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t2__changed_catalog_persists_and_updates_fingerprint", "cc-lb-scheduler::integration::price_catalog::jobs::price_catalog::t3__sqlite::changed_catalog_persists_and_updates_fingerprint"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -1957,7 +1962,7 @@ asserted = ["Fresh storage/app per row; status, empty array/count, limit, and in
 [[move]]
 old = "cc-lb-admin::insert_chain_rejects_unsupported_slot_from_registry_metadata"
 action = "MERGE"
-new = ["cc-lb-admin::integration::insert_chain_validates_wire_version::insert_chain_slot_validation_table"]
+new = ["cc-lb-admin::integration::insert_chain_validates_wire_version::t2__insert_chain_slot_validation_table"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -1966,7 +1971,7 @@ asserted = ["Fresh storage, principal, registry/builtin target, and app per row;
 [[move]]
 old = "cc-lb-admin::insert_chain_accepts_registry_entry"
 action = "MERGE"
-new = ["cc-lb-admin::integration::insert_chain_validates_wire_version::insert_chain_slot_validation_table"]
+new = ["cc-lb-admin::integration::insert_chain_validates_wire_version::t2__insert_chain_slot_validation_table"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -1975,7 +1980,7 @@ asserted = ["Fresh storage, principal, registry/builtin target, and app per row;
 [[move]]
 old = "cc-lb-admin::insert_chain_accepts_unspecified_metadata"
 action = "MERGE"
-new = ["cc-lb-admin::integration::insert_chain_validates_wire_version::insert_chain_slot_validation_table"]
+new = ["cc-lb-admin::integration::insert_chain_validates_wire_version::t2__insert_chain_slot_validation_table"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -1984,7 +1989,7 @@ asserted = ["Fresh storage, principal, registry/builtin target, and app per row;
 [[move]]
 old = "cc-lb-admin::insert_chain_accepts_builtin_subscription_preference"
 action = "MERGE"
-new = ["cc-lb-admin::integration::insert_chain_validates_wire_version::insert_chain_slot_validation_table"]
+new = ["cc-lb-admin::integration::insert_chain_validates_wire_version::t2__insert_chain_slot_validation_table"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -3391,15 +3396,16 @@ guardian = ""
 [[move]]
 old = "cc-lb-engine::integration::cache_hit_metric::cache_hit_metric"
 action = "MOVE"
-new = ["cc-lb-engine::dns_cache::t2__cache_hit_metric::cache_hit_metric"]
+new = ["cc-lb-engine::dns_cache::t2__cache_hit_metric::resolver_results_are_not_re_cached_by_the_metrics_layer"]
 duplicate_of = ""
 loss = []
 guardian = ""
+asserted = ["the metrics layer records one miss and one hit while forwarding both resolver results without extending DNS cache lifetime"]
 
 [[move]]
 old = "cc-lb-engine::dns_cache::tests::caching_dns_connector_accepts_https_uri"
 action = "MOVE"
-new = ["cc-lb-engine::integration::t3__dns_connector::t3__caching_dns_connector_accepts_https_uri"]
+new = ["cc-lb-engine::integration::t3__dns_connector::caching_dns_connector_accepts_https_uri"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -3478,19 +3484,21 @@ guardian = ""
 
 [[move]]
 old = "cc-lb-server::scheduler_dispatch::tests::default_upstream_affinity_purge_physically_removes_stale_null_expiry_rows"
-action = "MOVE"
-new = ["cc-lb-server::scheduler_dispatch::tests::t3__default_upstream_affinity_purge_physically_removes_stale_null_expiry_rows"]
+action = "SPLIT"
+new = ["cc-lb-server::scheduler_dispatch::tests::t2__default_upstream_affinity_purge_wires_current_retention", "cc-lb-storage-sqlite::integration::t3__upstream_affinity::t3__upstream_affinity_purge_is_bounded_and_preserves_concurrent_rebind"]
 duplicate_of = ""
 loss = []
 guardian = ""
+asserted = ["dispatch returns Done and forwards the fixed current time plus default configured TTL", "SQLite purge removes retention-expired NULL-expiry bindings while preserving active and concurrently rebound bindings"]
 
 [[move]]
 old = "cc-lb-server::scheduler_dispatch::tests::upstream_affinity_purge_uses_the_captured_configured_retention"
-action = "MOVE"
-new = ["cc-lb-server::scheduler_dispatch::tests::t3__upstream_affinity_purge_uses_the_captured_configured_retention"]
+action = "SPLIT"
+new = ["cc-lb-server::scheduler_dispatch::tests::t2__upstream_affinity_purge_uses_the_captured_configured_retention", "cc-lb-storage-sqlite::integration::t3__upstream_affinity::t3__upstream_affinity_purge_is_bounded_and_preserves_concurrent_rebind"]
 duplicate_of = ""
 loss = []
 guardian = ""
+asserted = ["dispatch returns Done and forwards the captured one-day TTL at the fixed current time", "SQLite purge applies the retention cutoff while preserving active bindings"]
 
 [[move]]
 old = "cc-lb-server::scheduler_dispatch::tests::cache_keepalive_running_turn_does_not_redispatch"
@@ -3698,12 +3706,12 @@ asserted = ["malformed TOML structure produces identical ConfigError variants ac
 
 [[move]]
 old = "cc-lb-config::integration::string_parity::environment_override_precedence_has_file_and_string_parity"
-action = "MOVE"
-new = ["cc-lb-config::integration::string_parity::t3__environment_override_precedence_has_file_and_string_parity"]
+action = "MERGE"
+new = ["cc-lb-config::tests::config_environment_provider_strips_prefix_nests_and_coerces_numbers"]
 duplicate_of = ""
 loss = []
 guardian = ""
-asserted = ["environment variable overrides take equal precedence over both file and string configuration"]
+asserted = ["environment layer has identical precedence for injected file and direct string sources"]
 
 [[move]]
 old = "cc-lb-config::integration::string_parity::cli_override_precedence_has_file_and_string_parity"
@@ -3712,7 +3720,7 @@ new = ["cc-lb-config::integration::string_parity::t3__cli_override_precedence_ha
 duplicate_of = ""
 loss = []
 guardian = ""
-asserted = ["CLI overrides take highest precedence across both file and string configuration paths"]
+asserted = ["CLI overrides remain highest precedence for both source paths"]
 
 [[move]]
 old = "cc-lb-plugin-conformance::tests::run_sends_priority_service_tier_to_filter"
@@ -4392,7 +4400,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-engine::integration::latency_stages_emit::bulkhead_contention_records_wait_ms"
 action = "MOVE"
-new = ["cc-lb-engine::integration::latency_stages_emit::t2__bulkhead_contention_records_wait_ms"]
+new = ["cc-lb-engine::integration::latency_stages_emit::t3__bulkhead_contention_records_wait_ms"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -4777,7 +4785,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-engine::integration::latency_stages_emit::cold_request_populates_all_connection_stages_ip_upstream"
 action = "MOVE"
-new = ["cc-lb-engine::integration::latency_stages_emit::t2__cold_request_populates_all_connection_stages_ip_upstream"]
+new = ["cc-lb-engine::integration::latency_stages_emit::t3__cold_request_populates_all_connection_stages_ip_upstream"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -4785,7 +4793,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-engine::integration::latency_stages_emit::cold_request_with_hostname_populates_dns_ms"
 action = "MOVE"
-new = ["cc-lb-engine::integration::latency_stages_emit::t2__cold_request_with_hostname_populates_dns_ms"]
+new = ["cc-lb-engine::integration::latency_stages_emit::t3__cold_request_with_hostname_populates_dns_ms"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -6287,8 +6295,8 @@ guardian = ""
 
 [[move]]
 old = "cc-lb-engine::integration::renewal_accounting_e2e::renewal_duplicate_dispatch_blocked_by_claim"
-action = "MOVE"
-new = ["cc-lb-engine::integration::renewal_accounting_e2e::t2__renewal_duplicate_dispatch_blocked_by_claim"]
+action = "SPLIT"
+new = ["cc-lb-engine::integration::renewal_accounting_e2e::t2__renewal_duplicate_dispatch_blocked_by_claim", "cc-lb-engine::integration::renewal_accounting_e2e::postgres::t3_postgres__renewal_storage_paths_require_live_dsn"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -6628,7 +6636,7 @@ guardian = ""
 [[move]]
 old = "fake-anthropic::integration::slow_mode::slow_mode_rate_limits_first_sse_frame"
 action = "MOVE"
-new = ["fake-anthropic::integration::slow_mode::t2__slow_mode_rate_limits_first_sse_frame"]
+new = ["fake-anthropic::integration::slow_mode::t3__slow_mode_rate_limits_first_sse_frame"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -7516,7 +7524,7 @@ guardian = ""
 [[move]]
 old = "cc-lb-engine::integration::latency_stages_emit::warm_pool_request_skips_connection_stages"
 action = "MOVE"
-new = ["cc-lb-engine::integration::latency_stages_emit::t2__warm_pool_request_skips_connection_stages"]
+new = ["cc-lb-engine::integration::latency_stages_emit::t3__warm_pool_request_skips_connection_stages"]
 duplicate_of = ""
 loss = []
 guardian = ""
@@ -7560,3 +7568,646 @@ new = ["cc-lb-control::api_keys::builtin_authn::tests::t2__xapikey_wins_over_aut
 duplicate_of = ""
 loss = []
 guardian = ""
+
+[[move]]
+old = "cc-lb-admin::v1::keys::tests::audit_append_failure_revokes_just_issued_key"
+action = "MOVE"
+new = ["cc-lb-admin::integration::principal_keys::t3__audit_append_failure_revokes_just_issued_key"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["an injected principal-key audit append failure returns audit_write_failed and leaves exactly one revoked key with all verification material zeroed"]
+
+[[move]]
+old = "cc-lb-engine::integration::cache_ttl_floor_respected::cache_ttl_floor_respected"
+action = "MOVE"
+new = ["cc-lb-engine::integration::cache_ttl_floor_respected::cache_ttl_bounds_are_forwarded_to_hickory"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["the configured positive minimum TTL is forwarded exactly to Hickory", "the configured positive maximum TTL is forwarded exactly to Hickory"]
+
+[[move]]
+old = "cc-lb-server::integration::tls_parse::parse_certs_pem_builds_server_config_from_bytes"
+action = "MOVE"
+new = ["cc-lb-server::tls::tests::parse_certs_pem_builds_server_config_from_bytes"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["in-memory certificate and private-key PEM build a server config with exact h2 and http/1.1 ALPN ordering"]
+
+[[move]]
+old = "cc-lb-server::integration::tls_parse::parse_certs_pem_rejects_invalid_certificate"
+action = "MOVE"
+new = ["cc-lb-server::tls::tests::parse_certs_pem_rejects_invalid_certificate"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["invalid in-memory certificate PEM returns TlsError::BuildConfig"]
+
+[[move]]
+old = "cc-lb-server::integration::tls_parse::parse_certs_pem_rejects_missing_private_key"
+action = "MOVE"
+new = ["cc-lb-server::tls::tests::parse_certs_pem_rejects_missing_private_key"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["certificate-only key PEM returns TlsError::NoPrivateKey with the exact private in-memory key path"]
+
+[[move]]
+old = "cc-lb-server::integration::t3__load_certs_path::t3__byte_and_path_loads_have_observable_parity"
+action = "SPLIT"
+new = ["cc-lb-server::tls::tests::parse_certs_pem_builds_server_config_from_bytes", "cc-lb-server::tls::tests::parse_certs_pem_rejects_invalid_certificate", "cc-lb-server::tls::tests::parse_certs_pem_rejects_missing_private_key", "cc-lb-server::integration::t3__load_certs_path::t3__load_certs_ok", "cc-lb-server::integration::t3__load_certs_path::t3__load_certs_reports_certificate_and_key_validation_errors"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["byte and path loaders both preserve exact h2 and http/1.1 ALPN ordering", "byte and path loaders both reject the invalid certificate as TlsError::BuildConfig", "byte and path loaders both reject certificate-only key material as TlsError::NoPrivateKey while preserving their respective source paths"]
+
+[[move]]
+old = "cc-lb-storage-postgres::integration::audit::query_audit_by_actor_filters_before_limit"
+action = "MOVE"
+new = ["cc-lb-storage-postgres::integration::audit::t3_postgres__query_audit_by_actor_filters_before_limit"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["PostgreSQL actor filtering occurs before limit and returns only the matching authority and subject rows"]
+
+
+[[move]]
+old = "cc-lb-config::integration::load_env_override::double_underscore_env_names_map_to_nested_config_fields"
+action = "MERGE"
+new = ["cc-lb-config::tests::config_environment_provider_strips_prefix_nests_and_coerces_numbers"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["CC_LB nested environment keys map `__` to nested fields", "environment values override TOML values", "ttl_days retains exact ttl_secs conversion"]
+
+[[move]]
+old = "cc-lb-config::integration::load_env_override::admin_auth_provider_json_env_overrides_toml_providers"
+action = "MERGE"
+new = ["cc-lb-config::tests::injected_admin_auth_provider_lookup_preserves_override_and_error_semantics"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["admin-auth provider JSON replaces TOML providers with the exact Cloudflare provider fields"]
+
+[[move]]
+old = "cc-lb-config::integration::load_env_override::invalid_admin_auth_provider_json_does_not_fall_back_to_legacy_token"
+action = "MERGE"
+new = ["cc-lb-config::tests::injected_admin_auth_provider_lookup_preserves_override_and_error_semantics"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["invalid provider JSON reports the named environment variable and never looks up the legacy token"]
+
+[[move]]
+old = "cc-lb-config::integration::load_env_override::legacy_admin_token_is_automatically_migrated_in_memory"
+action = "MOVE"
+new = ["cc-lb-config::tests::injected_runtime_env_lookup_preserves_exact_missing_empty_and_non_unicode_semantics"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["exact non-empty legacy token is retained and emits the precise in-memory migration warning"]
+
+[[move]]
+old = "cc-lb-server::integration::t2__dynamic_view_rebind::t2__principals_delete_rebuild_removes_deleted_and_increments_generation"
+action = "MOVE"
+new = ["cc-lb-server::dynamic_view_builder::t2__tests::principals_delete_rebuild_removes_deleted_and_increments_generation"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__dynamic_view_rebind::t2__corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active"
+action = "MOVE"
+new = ["cc-lb-server::dynamic_view_builder::t2__tests::corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__dynamic_view_rebind::t2__plan_info_uses_catalog_ratio_and_reconciles_history"
+action = "MOVE"
+new = ["cc-lb-server::dynamic_view_builder::t2__tests::plan_info_uses_catalog_ratio_and_reconciles_history"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::wasm_host_adversarial_policy::shape_origin_mismatch_is_rejected_by_selected_upstream_policy"
+action = "MOVE"
+new = ["cc-lb-server::integration::wasm_host_adversarial_policy::t3__shape_origin_mismatch_is_rejected_by_selected_upstream_policy"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-admin::integration::auth_required::authentication_rejection_reports_provider_neutral_auth_mode"
+action = "MOVE"
+new = ["cc-lb-admin::integration::auth_required::t2__authentication_rejection_reports_provider_neutral_auth_mode"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-admin::integration::auth_required::ambiguous_credentials_rejected"
+action = "MOVE"
+new = ["cc-lb-admin::integration::auth_required::t2__ambiguous_credentials_rejected"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-admin::integration::auth_required::new_provider_plugs_into_audit_without_handler_changes"
+action = "MOVE"
+new = ["cc-lb-admin::integration::auth_required::t2__new_provider_plugs_into_audit_without_handler_changes"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-admin::integration::cloudflare_access_auth::cloudflare_access_maps_identities_and_rejects_invalid_claims"
+action = "MOVE"
+new = ["cc-lb-admin::integration::cloudflare_access_auth::t3__cloudflare_access_maps_identities_and_rejects_invalid_claims"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-admin::integration::cloudflare_access_auth::missing_cloudflare_header_is_recorded_as_auth_rejected"
+action = "MOVE"
+new = ["cc-lb-admin::integration::cloudflare_access_auth::t3__missing_cloudflare_header_is_recorded_as_auth_rejected"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-scheduler::integration::oauth_usage_poll::t3__sqlite_record_attempt_appends_successive_statuses_and_increments_count"
+action = "MOVE"
+new = ["cc-lb-scheduler::integration::oauth_usage_poll::t3__sqlite::record_attempt_appends_successive_statuses_and_increments_count"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-scheduler::integration::oauth_usage_poll::t3__sqlite_record_attempt_does_not_let_older_tick_overwrite_newer_state"
+action = "MOVE"
+new = ["cc-lb-scheduler::integration::oauth_usage_poll::t3__sqlite::record_attempt_does_not_let_older_tick_overwrite_newer_state"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-scheduler::integration::oauth_usage_poll::t3__sqlite_record_attempt_increments_count_under_concurrent_writers"
+action = "MOVE"
+new = ["cc-lb-scheduler::integration::oauth_usage_poll::t3__sqlite::record_attempt_increments_count_under_concurrent_writers"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-runtime-wasmtime::integration::pool_saturation::pool_saturated_variant_is_part_of_error_surface"
+action = "MOVE"
+new = ["cc-lb-runtime-wasmtime::integration::pool_saturation::t3__pool_saturated_variant_is_part_of_error_surface"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::composite_signer_dispatch::t2__router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic_direct"
+action = "MOVE"
+new = ["cc-lb-server::dynamic_view_builder::t2__tests::t2__router_choice_dispatches_to_matching_oauth_upstream_not_first_upstream"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::dispatch_uses_resolved_upstream_base_url::t2__dispatch_uses_resolved_upstream_base_url_not_first_route_dialect"
+action = "MOVE"
+new = ["cc-lb-server::dynamic_view_builder::t2__tests::t2__dispatch_uses_resolved_upstream_base_url_not_reported_route_dialect"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__notify_listener::t2__single_notify_triggers_single_rebuild"
+action = "MOVE"
+new = ["cc-lb-server::notify_listener::t2__notify_listener::t2__single_notify_triggers_single_rebuild"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__notify_listener::t2__burst_of_10_notifies_in_100ms_triggers_1_rebuild"
+action = "MOVE"
+new = ["cc-lb-server::notify_listener::t2__notify_listener::t2__burst_of_10_notifies_in_100ms_triggers_1_rebuild"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__notify_listener::t2__cancel_during_rebuild_graceful"
+action = "MOVE"
+new = ["cc-lb-server::notify_listener::t2__notify_listener::t2__cancel_during_rebuild_graceful"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__notify_listener::t2__rebuild_failure_does_not_swap_view"
+action = "MOVE"
+new = ["cc-lb-server::notify_listener::t2__notify_listener::t2__rebuild_failure_does_not_swap_view"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__reconciliation::t2__unchanged_tick_emits_unchanged_metric_and_does_not_rebuild"
+action = "MOVE"
+new = ["cc-lb-server::reconcile::t2__reconciliation::t2__unchanged_tick_emits_unchanged_metric_and_does_not_rebuild"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__reconciliation::t2__notify_dropped_then_reconcile_catches_up_within_one_tick"
+action = "MOVE"
+new = ["cc-lb-server::reconcile::t2__reconciliation::t2__notify_dropped_then_reconcile_catches_up_within_one_tick"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__reconciliation::t2__reconciler_rebuilds_after_registry_entry_insert"
+action = "MOVE"
+new = ["cc-lb-server::reconcile::t2__reconciliation::t2__reconciler_rebuilds_after_registry_entry_insert"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__reconciliation::t2__reconciler_rebuilds_after_registry_entry_delete"
+action = "MOVE"
+new = ["cc-lb-server::reconcile::t2__reconciliation::t2__reconciler_rebuilds_after_registry_entry_delete"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__reconciliation::t2__reconciler_rebuilds_after_registry_entry_update"
+action = "MOVE"
+new = ["cc-lb-server::reconcile::t2__reconciliation::t2__reconciler_rebuilds_after_registry_entry_update"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::t2__reconciliation::t2__cancel_during_tick_is_graceful"
+action = "MOVE"
+new = ["cc-lb-server::reconcile::t2__reconciliation::t2__cancel_during_tick_is_graceful"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+
+[[move]]
+old = "cc-lb-server::integration::admin_separate_listener::admin_separate_listener"
+action = "MOVE"
+new = ["tests-integration::integration::t4::representatives::t4__admin_crud_on_separate_listener"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::backend_kind_mismatch_fatal::backend_kind_mismatch_sqlite_stamped_as_postgres"
+action = "MERGE"
+new = ["cc-lb-server::integration::t5__process::boot::t5__process_boot_fatal_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["fatal startup case preserves the exact exit code and stderr contract"]
+
+[[move]]
+old = "cc-lb-server::integration::bad_postgres_url_fatal::bad_postgres_url_fatal"
+action = "MERGE"
+new = ["cc-lb-server::integration::t5__process::boot::t5__process_boot_fatal_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["fatal startup case preserves the exact exit code and stderr contract"]
+
+[[move]]
+old = "cc-lb-server::integration::cache_keepalive_server_wiring::spawned_proxy_handles_cache_control_request_with_temp_sqlite"
+action = "MOVE"
+new = ["cc-lb-server::integration::t2__cache_keepalive_server_wiring::t2__router_handles_cache_control_request"]
+duplicate_of = ""
+loss = ["subprocess and SQLite composition are represented by the T4 happy-path guardian"]
+guardian = "proxy-messages-nonstream/happy"
+
+[[move]]
+old = "cc-lb-server::integration::cache_keepalive_server_wiring::spawned_proxy_handles_no_cache_control_request_with_temp_sqlite"
+action = "MOVE"
+new = ["cc-lb-server::integration::t2__cache_keepalive_server_wiring::t2__router_handles_no_cache_control_request"]
+duplicate_of = ""
+loss = ["subprocess and SQLite composition are represented by the T4 happy-path guardian"]
+guardian = "proxy-messages-nonstream/happy"
+
+[[move]]
+old = "cc-lb-server::integration::claude_fable_5_proxy_path::fable_non_streaming_request_returns_exact_model_through_proxy"
+action = "MERGE"
+new = ["cc-lb-engine::integration::lifecycle_filter_pipeline::t2__request_model_reaches_filters_without_prompt_cache_shadow", "tests-integration::integration::t4::representatives::t4__proxy_nonstream_happy"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["the canonical Fable model reaches the lifecycle filter unchanged and the real non-stream proxy boundary returns a successful message"]
+
+[[move]]
+old = "cc-lb-server::integration::claude_fable_5_proxy_path::fable_streaming_request_returns_exact_model_in_message_start_through_proxy"
+action = "MERGE"
+new = ["cc-lb-engine::integration::lifecycle_filter_pipeline::t2__request_model_reaches_filters_without_prompt_cache_shadow", "tests-integration::integration::t4::representatives::t4__proxy_stream_happy"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["the canonical Fable model reaches the lifecycle filter unchanged and the real stream boundary preserves message_start model framing"]
+
+[[move]]
+old = "cc-lb-server::integration::doctor_command::list_abandoned_chain_entries_empty_storage_outputs_empty_report"
+action = "MOVE"
+new = ["cc-lb-server::integration::t5__process::boot::t5__process_cli_doctor_runs"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::doctor_command::list_abandoned_chain_entries_reports_empty_supported_slots"
+action = "MOVE"
+new = ["cc-lb-server::doctor::tests::report_lists_empty_supported_slots_in_sorted_slot_and_order"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::doctor_command::list_abandoned_chain_entries_omits_healthy_chain_entries"
+action = "MOVE"
+new = ["cc-lb-server::doctor::tests::report_omits_healthy_chain_entries"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::drain_rejects_new::drain_rejects_new"
+action = "DELETE"
+new = []
+duplicate_of = "process-drain/signal-drain"
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::drop_pct_50::drop_pct_50"
+action = "DELETE"
+new = []
+duplicate_of = "cc-lb-server::chaos::tests::drop_percentage_boundaries_preserve_guard_behavior"
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::healthz_always_200::healthz_always_200"
+action = "DELETE"
+new = []
+duplicate_of = "process-boot/happy"
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::latency_injection::latency_injection"
+action = "MERGE"
+new = ["cc-lb-server::chaos::tests::equal_seeds_produce_equal_shared_sequences", "tests-integration::integration::t4::representatives::t4__proxy_nonstream_timeout_before_headers"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["seeded chaos sampling is deterministic and the socket-level delayed-response terminal path is covered without an elapsed-time assertion"]
+
+[[move]]
+old = "cc-lb-server::integration::missing_aead_key_fatal::missing_aead_key_fatal"
+action = "MERGE"
+new = ["cc-lb-server::integration::t5__process::boot::t5__process_boot_fatal_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["missing configured AEAD key exits with code 2 and exact stderr"]
+
+[[move]]
+old = "cc-lb-server::integration::multi_route_dispatch::multi_route_dispatch"
+action = "MOVE"
+new = ["cc-lb-server::integration::t2__multi_route_dispatch::t2__proxy_router_routes_table_oneshot"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::prompt_cache_live_qa::thinking_presence_breaks_message_prefix_but_not_the_tools_prefix"
+action = "MERGE"
+new = ["cc-lb-engine::integration::prompt_cache_routing_component::t2__request_level_invalidators_match_stable_tools_prefix_not_invalidated_message"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["thinking presence invalidates the message prefix while preserving the tools prefix"]
+
+[[move]]
+old = "cc-lb-server::integration::prompt_cache_live_qa::tool_choice_change_breaks_message_prefix_but_not_the_tools_prefix"
+action = "MERGE"
+new = ["cc-lb-engine::integration::prompt_cache_routing_component::t2__request_level_invalidators_match_stable_tools_prefix_not_invalidated_message"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["tool_choice invalidates the message prefix while preserving the tools prefix"]
+
+[[move]]
+old = "cc-lb-server::integration::proxy_body_limits::oversized_content_length_returns_413_before_the_client_sends_a_body"
+action = "MOVE"
+new = ["cc-lb-server::integration::t2__proxy_body_limits::t2__oversized_content_length_returns_413_without_polling_the_body"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::proxy_body_limits::chunked_body_over_cap_returns_413_before_the_client_finishes_streaming"
+action = "MOVE"
+new = ["cc-lb-server::integration::t2__proxy_body_limits::t2__streaming_body_over_cap_returns_413"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::proxy_body_limits::body_exactly_at_messages_cap_reaches_the_real_upstream"
+action = "MOVE"
+new = ["cc-lb-server::integration::t2__proxy_body_limits::t2__body_exactly_at_messages_cap_reaches_upstream_dispatch"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::live_qa_1_default_boot_happy_path_writes_row_and_reconciles"
+action = "MOVE"
+new = ["cc-lb-server::integration::t5__process::boot::t5__process_boot_default_config"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::live_qa_2_oauth_usage_does_not_produce_request_event_row"
+action = "MERGE"
+new = ["cc-lb-server::integration::t2__rfc_0002_terminal_mapping::t2__rfc_0002_terminal_mapping_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["OAuth usage bypass leaves the request-event count unchanged"]
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row"
+action = "MERGE"
+new = ["cc-lb-server::integration::t2__rfc_0002_terminal_mapping::t2__rfc_0002_terminal_mapping_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["404 and 405 fallbacks leave the request-event count unchanged"]
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::live_qa_6b_assembler_populates_cost_cache_usage_fields"
+action = "MERGE"
+new = ["cc-lb-server::integration::t2__rfc_0002_terminal_mapping::t2__rfc_0002_terminal_mapping_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["non-stream terminal rows retain cost, cache, and usage fields"]
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::live_qa_6c_assembler_populates_stream_fields"
+action = "MERGE"
+new = ["cc-lb-server::integration::t2__rfc_0002_terminal_mapping::t2__rfc_0002_terminal_mapping_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["stream terminal rows retain chunk and SSE fields"]
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::lqa_1a_proxy_path_non_stream_returns_message_and_assembler_row"
+action = "MERGE"
+new = ["cc-lb-server::integration::t2__rfc_0002_terminal_mapping::t2__rfc_0002_terminal_mapping_table", "tests-integration::integration::t4::representatives::t4__proxy_nonstream_happy"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["component assertions preserve the terminal row and the T4 representative preserves the real non-stream boundary"]
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::lqa_1b_proxy_path_streaming_returns_sse_and_stream_payload_fields"
+action = "MERGE"
+new = ["cc-lb-server::integration::t2__rfc_0002_terminal_mapping::t2__rfc_0002_terminal_mapping_table", "tests-integration::integration::t4::representatives::t4__proxy_stream_happy"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["component assertions preserve stream payload fields and the T4 representative preserves real SSE framing"]
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::lqa_2b_lifecycle_metrics_increment_for_happy_non_stream"
+action = "MERGE"
+new = ["cc-lb-server::integration::t2__rfc_0002_terminal_mapping::t2__rfc_0002_terminal_mapping_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["happy non-stream lifecycle counters increment"]
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::lqa_3a_bus_drop_counters_do_not_increment_under_burst"
+action = "MERGE"
+new = ["cc-lb-server::integration::t2__rfc_0002_terminal_mapping::t2__rfc_0002_terminal_mapping_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["terminal event delivery does not increment the drop counter"]
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::lqa_6b_non_stream_and_stream_rows_have_cache_and_cost_fields"
+action = "MERGE"
+new = ["cc-lb-server::integration::t2__rfc_0002_terminal_mapping::t2__rfc_0002_terminal_mapping_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["both terminal modes retain cache and cost fields"]
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::lqa_6c_upstream_rate_limit_error_records_provider_error_metric"
+action = "MERGE"
+new = ["cc-lb-server::integration::t2__rfc_0002_terminal_mapping::t2__rfc_0002_terminal_mapping_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["429 records provider-error metrics and rate-limit state"]
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::lqa_6f_invalid_json_records_400_and_stops_before_routing"
+action = "MERGE"
+new = ["cc-lb-server::integration::t2__rfc_0002_terminal_mapping::t2__rfc_0002_terminal_mapping_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["invalid JSON records 400 and does not dispatch upstream"]
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::lqa_4a_admin_sse_stream_emits_final_request_event_update"
+action = "MOVE"
+new = ["tests-integration::integration::t4::representatives::t4__admin_sse_emits_final_request_event_update"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::rfc_0002_fix_live_qa::lqa_6e_admin_sse_keeps_up_with_fifty_final_frames_without_lag"
+action = "MERGE"
+new = ["tests-integration::integration::t4::representatives::t4__admin_sse_emits_final_request_event_update"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["the admin SSE stream delivers the matching final request-event update over the real listener"]
+
+[[move]]
+old = "cc-lb-server::integration::rst_after_bytes::rst_after_bytes"
+action = "MOVE"
+new = ["tests-integration::integration::t4::representatives::t4__proxy_stream_upstream_rst_mid_stream"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::server_starts_and_responds::server_starts_and_responds"
+action = "DELETE"
+new = []
+duplicate_of = "process-boot/happy"
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::truncate_mid_stream::truncate_mid_stream"
+action = "MOVE"
+new = ["tests-integration::integration::t4::representatives::t4__proxy_stream_malformed_chunk_maps_to_upstream_stream_error"]
+duplicate_of = ""
+loss = []
+guardian = ""
+
+[[move]]
+old = "cc-lb-server::integration::validate_fail_missing_tls::validate_fail_missing_tls"
+action = "MERGE"
+new = ["cc-lb-server::integration::t5__process::boot::t5__process_boot_fatal_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["missing TLS paths produce exit code 2 and the exact validation field error"]
+
+[[move]]
+old = "cc-lb-server::integration::validate_ok_config::validate_ok_config"
+action = "MERGE"
+new = ["cc-lb-server::integration::t5__process::boot::t5__process_boot_fatal_table"]
+duplicate_of = ""
+loss = []
+guardian = ""
+asserted = ["valid configuration produces exit code 0 and validation/preflight success output"]

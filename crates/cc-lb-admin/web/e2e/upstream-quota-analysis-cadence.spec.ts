@@ -1,4 +1,5 @@
 import { expect, type Page, test } from '@playwright/test';
+import { fulfillAuthenticatedSession } from './support/auth-session';
 
 const UPSTREAM_ID = 'oauth-cadence';
 const INITIAL_TIME = new Date('2026-06-18T00:00:01.000Z');
@@ -101,6 +102,7 @@ async function installAppFixtures(
   };
 
   await page.route('**/admin/**', async (route) => {
+    if (await fulfillAuthenticatedSession(route)) return;
     const request = route.request();
     const url = new URL(request.url());
     const { pathname } = url;
