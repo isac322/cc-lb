@@ -9,9 +9,7 @@ use std::thread::JoinHandle as ThreadJoinHandle;
 
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
-    UpstreamStore,
-    principal::Limit,
-    types::{PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
+    UpstreamStore, principal::Limit,
 };
 
 use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
@@ -119,7 +117,7 @@ pub struct TestServer {
     pub admin_addr: SocketAddr,
     pub metrics_addr: SocketAddr,
     pub sqlite_path: PathBuf,
-    pub managed_key: Option<ManagedTestKey>,
+    pub managed_key: ManagedTestKey,
     pub _fake: JoinHandle<Result<(), std::io::Error>>,
     pub _config_dir: TempDir,
     pub _process: TestProcess,
@@ -145,7 +143,6 @@ pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer
     spawn_test_server_with_options(
         extra_toml,
         AppConfig::default(),
-        AuthConfig::NoneMode,
         Vec::new(),
         TestTopology::Single,
     )
@@ -156,14 +153,7 @@ pub async fn spawn_test_server_with_fake_config(
     extra_toml: &str,
     fake_config: AppConfig,
 ) -> TestServer {
-    spawn_test_server_with_options(
-        extra_toml,
-        fake_config,
-        AuthConfig::NoneMode,
-        Vec::new(),
-        TestTopology::Single,
-    )
-    .await
+    spawn_test_server_with_options(extra_toml, fake_config, Vec::new(), TestTopology::Single).await
 }
 
 pub async fn spawn_test_server_with_two_upstreams(
@@ -173,14 +163,13 @@ pub async fn spawn_test_server_with_two_upstreams(
     spawn_test_server_with_options(
         extra_toml,
         fake_config,
-        AuthConfig::NoneMode,
         Vec::new(),
         TestTopology::SubscriptionPreferencePair,
     )
     .await
 }
 
-pub async fn spawn_test_server_with_apikey_mode(
+pub async fn spawn_test_server_with_principal_limits(
     extra_toml: &str,
     principal_limits: Vec<Limit>,
     fake_config: AppConfig,
@@ -188,16 +177,10 @@ pub async fn spawn_test_server_with_apikey_mode(
     spawn_test_server_with_options(
         extra_toml,
         fake_config,
-        AuthConfig::ApiKey,
         principal_limits,
         TestTopology::Single,
     )
     .await
-}
-
-enum AuthConfig {
-    NoneMode,
-    ApiKey,
 }
 
 #[derive(Clone, Copy)]
@@ -227,7 +210,7 @@ struct SpawnedTestServer {
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
     sqlite_path: PathBuf,
-    managed_key: Option<ManagedTestKey>,
+    managed_key: ManagedTestKey,
     config_dir: TempDir,
     process: TestProcess,
 }
@@ -242,7 +225,6 @@ const SERVER_START_ATTEMPTS: usize = 4;
 async fn spawn_test_server_with_options(
     extra_toml: &str,
     fake_config: AppConfig,
-    auth_config: AuthConfig,
     principal_limits: Vec<Limit>,
     topology: TestTopology,
 ) -> TestServer {
@@ -256,14 +238,8 @@ async fn spawn_test_server_with_options(
         );
 
     for attempt in 1..=SERVER_START_ATTEMPTS {
-        match spawn_test_server_attempt(
-            extra_toml,
-            fake_addr,
-            &auth_config,
-            principal_limits.clone(),
-            topology,
-        )
-        .await
+        match spawn_test_server_attempt(extra_toml, fake_addr, principal_limits.clone(), topology)
+            .await
         {
             Ok(spawned) => {
                 return TestServer {
@@ -293,7 +269,6 @@ async fn spawn_test_server_with_options(
 async fn spawn_test_server_attempt(
     extra_toml: &str,
     fake_addr: SocketAddr,
-    auth_config: &AuthConfig,
     principal_limits: Vec<Limit>,
     topology: TestTopology,
 ) -> Result<SpawnedTestServer, StartupFailure> {
@@ -312,23 +287,15 @@ async fn spawn_test_server_attempt(
         admin_addr,
         metrics_addr,
         extra_toml,
-        auth_config,
         topology.messages_cap_bytes(),
     );
-    let managed_key = seed_storage(
-        &sqlite_path,
-        fake_addr,
-        auth_config,
-        principal_limits,
-        topology,
-    )
-    .await;
+    let managed_key = seed_storage(&sqlite_path, fake_addr, principal_limits, topology).await;
 
     drop((proxy_listener, admin_listener, metrics_listener));
 
     let mut process = TestProcess::spawn(&config_path);
 
-    wait_for_proxy_ready_or_exit(&mut process, proxy_addr, managed_key.as_ref()).await?;
+    wait_for_proxy_ready_or_exit(&mut process, proxy_addr, &managed_key).await?;
     wait_for_status_or_exit(&mut process, admin_addr, "/admin/health", 200).await?;
 
     Ok(SpawnedTestServer {
@@ -357,15 +324,7 @@ fn write_config(
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
 ) {
-    write_config_with_extra(
-        path,
-        proxy_addr,
-        admin_addr,
-        metrics_addr,
-        "",
-        &AuthConfig::NoneMode,
-        256,
-    )
+    write_config_with_extra(path, proxy_addr, admin_addr, metrics_addr, "", 256)
 }
 
 fn write_config_with_extra(
@@ -374,7 +333,6 @@ fn write_config_with_extra(
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
     extra_toml: &str,
-    auth_config: &AuthConfig,
     messages_cap_bytes: u64,
 ) {
     let storage_path = path.with_file_name("cc-lb.sqlite");
@@ -382,28 +340,11 @@ fn write_config_with_extra(
     let storage_path = storage_path.display();
     let data_dir = data_dir.display();
     // Extra TOML goes at the top so bare top-level keys attach to the root
-    // table instead of the last-declared section (which would happen if
-    // extra_toml were appended after e.g. `[egress]`).
+    // table instead of whichever section is declared last below.
     let extra_prefix = if extra_toml.is_empty() {
         String::new()
     } else {
         format!("{}\n\n", extra_toml.trim())
-    };
-    let downstream_auth = match auth_config {
-        AuthConfig::NoneMode => {
-            r#"[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
-"#
-        }
-        AuthConfig::ApiKey => {
-            r#"[downstream_auth]
-mode = "api_key"
-"#
-        }
     };
     let config = format!(
         r#"{extra_prefix}
@@ -417,16 +358,11 @@ messages_cap_bytes = {messages_cap_bytes}
 files_cap_bytes = 1048576
 
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
 [runtime]
 data_dir = "{data_dir}"
-
-{downstream_auth}
 
 [storage]
 kind = "sqlite"
@@ -440,8 +376,9 @@ tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = false
 
-
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "test"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 [circuit_breaker]
@@ -449,15 +386,10 @@ failures_to_open = 5
 window_secs = 10
 half_open_after_secs = 30
 
+
 [bulkhead]
 max_conns_per_upstream = 50
 semaphore_per_upstream = 100
-
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]
 "#
     );
     std::fs::write(path, config).expect("write config");
@@ -466,10 +398,9 @@ cache_ttl_ceiling_secs = 300
 async fn seed_storage(
     storage_path: &Path,
     upstream_addr: SocketAddr,
-    auth_config: &AuthConfig,
     principal_limits: Vec<Limit>,
     topology: TestTopology,
-) -> Option<ManagedTestKey> {
+) -> ManagedTestKey {
     let database_url = format!("sqlite://{}", storage_path.display());
     let storage = std::sync::Arc::new(
         open_sqlite(
@@ -516,31 +447,24 @@ async fn seed_storage(
     )
     .await
     .expect("seed principal");
-    match auth_config {
-        AuthConfig::NoneMode => None,
-        AuthConfig::ApiKey => {
-            let key_store = KeyStore::new(storage.clone());
-            let (_record, plaintext) = key_store
-                .create(
-                    "api-key",
-                    CreateParams {
-                        upstream_kind: ManagedUpstreamKind::AnthropicKey,
-                        label: "live-qa".to_owned(),
-                        description: None,
-                        expires_at_unix_secs: None,
-                        limit_overrides: Vec::new(),
-                        principal_kind: PrincipalKindLite::Machine,
-                    },
-                )
-                .await
-                .expect("seed managed key");
-            let (key_id, _) = cc_lb_engine::api_keys::secret::parse(plaintext.expose())
-                .expect("generated key parses");
-            Some(ManagedTestKey {
-                key_id,
-                plaintext: plaintext.expose().to_owned(),
-            })
-        }
+    let key_store = KeyStore::new(storage.clone());
+    let (_record, plaintext) = key_store
+        .create(
+            "api-key",
+            CreateParams {
+                label: "live-qa".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("seed managed key");
+    let (key_id, _) =
+        cc_lb_engine::api_keys::secret::parse(plaintext.expose()).expect("generated key parses");
+    ManagedTestKey {
+        key_id,
+        plaintext: plaintext.expose().to_owned(),
     }
 }
 
@@ -552,28 +476,14 @@ fn ready_timeout(default: std::time::Duration) -> std::time::Duration {
         .unwrap_or(default)
 }
 
-pub async fn wait_for_status(addr: SocketAddr, path: &str, status: u16) {
-    wait_for_status_with_request(
-        addr,
-        path,
-        status,
-        &format!(
-            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nx-api-key: sk-ant-test\r\nConnection: close\r\n\r\n"
-        ),
-    )
-    .await;
-}
-
-async fn wait_for_proxy_ready(addr: SocketAddr, managed_key: Option<&ManagedTestKey>) {
-    let api_key = managed_key
-        .map(|key| key.plaintext.as_str())
-        .unwrap_or("sk-ant-test");
+async fn wait_for_proxy_ready(addr: SocketAddr, managed_key: &ManagedTestKey) {
     wait_for_status_with_request(
         addr,
         "/v1/models",
         200,
         &format!(
-            "GET /v1/models HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {api_key}\r\nConnection: close\r\n\r\n"
+            "GET /v1/models HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {}\r\nConnection: close\r\n\r\n",
+            managed_key.plaintext
         ),
     )
     .await;
@@ -582,18 +492,16 @@ async fn wait_for_proxy_ready(addr: SocketAddr, managed_key: Option<&ManagedTest
 async fn wait_for_proxy_ready_or_exit(
     process: &mut TestProcess,
     addr: SocketAddr,
-    managed_key: Option<&ManagedTestKey>,
+    managed_key: &ManagedTestKey,
 ) -> Result<(), StartupFailure> {
-    let api_key = managed_key
-        .map(|key| key.plaintext.as_str())
-        .unwrap_or("sk-ant-test");
     wait_for_status_with_request_or_exit(
         process,
         addr,
         "/v1/models",
         200,
         &format!(
-            "GET /v1/models HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {api_key}\r\nConnection: close\r\n\r\n"
+            "GET /v1/models HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {}\r\nConnection: close\r\n\r\n",
+            managed_key.plaintext
         ),
     )
     .await
@@ -610,9 +518,7 @@ async fn wait_for_status_or_exit(
         addr,
         path,
         status,
-        &format!(
-            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nx-api-key: sk-ant-test\r\nConnection: close\r\n\r\n"
-        ),
+        &format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
     )
     .await
 }
@@ -700,45 +606,40 @@ pub struct RawResponse {
 pub async fn http_get(addr: SocketAddr, path: &str) -> std::io::Result<RawResponse> {
     raw_http(
         addr,
+        &format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .await
+}
+
+pub async fn proxy_get(
+    addr: SocketAddr,
+    path: &str,
+    api_key: &str,
+) -> std::io::Result<RawResponse> {
+    raw_http(
+        addr,
         &format!(
-            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nx-api-key: sk-ant-test\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {api_key}\r\nConnection: close\r\n\r\n"
         ),
     )
     .await
 }
 
-pub async fn http_delete(addr: SocketAddr, path: &str) -> std::io::Result<RawResponse> {
+pub async fn http_delete(
+    addr: SocketAddr,
+    path: &str,
+    api_key: &str,
+) -> std::io::Result<RawResponse> {
     raw_http(
         addr,
         &format!(
-            "DELETE {path} HTTP/1.1\r\nHost: {addr}\r\nx-api-key: sk-ant-test\r\nConnection: close\r\n\r\n"
+            "DELETE {path} HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {api_key}\r\nConnection: close\r\n\r\n"
         ),
     )
     .await
 }
 
 pub async fn http_post(
-    addr: SocketAddr,
-    path: &str,
-    body: &str,
-    extra_headers: &[(&str, &str)],
-) -> std::io::Result<RawResponse> {
-    let mut request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nx-api-key: sk-ant-test\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n",
-        body.len()
-    );
-    for (name, value) in extra_headers {
-        request.push_str(name);
-        request.push_str(": ");
-        request.push_str(value);
-        request.push_str("\r\n");
-    }
-    request.push_str("\r\n");
-    request.push_str(body);
-    raw_http(addr, &request).await
-}
-
-pub async fn http_post_with_api_key(
     addr: SocketAddr,
     path: &str,
     api_key: &str,

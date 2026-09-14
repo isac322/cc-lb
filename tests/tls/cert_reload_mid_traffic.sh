@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 EVIDENCE_PATH=${CC_LB_TLS_EVIDENCE:-"$ROOT_DIR/.omo/evidence/task-47-cert-reload.log"}
-API_KEY='sk-ant-test'
+API_KEY=''
 ADMIN_TOKEN='admin-token'
 FAKE_PID=''
 PROXY_PID=''
@@ -144,6 +144,13 @@ seed_runtime() {
     cat "$TMP_DIR/admin-upstream.json" >&2 || true
     fail "create upstream expected HTTP 201 or 409, got $upstream_code"
   fi
+  principal_id=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['id'])" "$TMP_DIR/admin-principal.json")
+  curl -sS -o "$TMP_DIR/admin-key.json" -X POST \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'content-type: application/json' \
+    --data '{"label":"tls-reload"}' \
+    "http://127.0.0.1:$admin_port/admin/v1/principals/$principal_id/keys"
+  API_KEY=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plaintext_key'])" "$TMP_DIR/admin-key.json")
   log "runtime_seeded=true"
 }
 
@@ -204,29 +211,25 @@ messages_cap_bytes = 33554432
 files_cap_bytes = 104857600
 
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
-
 
 [storage]
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
+kind = "sqlite"
+path = "$TMP_DIR/cc-lb.sqlite"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
 
 [observability]
 tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = false
 
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "tls-test"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 [circuit_breaker]
@@ -238,11 +241,6 @@ half_open_after_secs = 30
 max_conns_per_upstream = 100
 semaphore_per_upstream = 200
 
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]
 TOML
 }
 

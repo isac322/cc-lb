@@ -330,20 +330,23 @@ function SettingsPage() {
           <Card data-testid="admin-token-card">
             <CardHeader
               title="Admin Token"
-              subtitle="The admin bearer token is loaded from the environment when cc-lb starts."
+              subtitle="The active static-token provider reads its bearer token from the environment when cc-lb starts."
             />
             <CardBody>
               <p
                 data-testid="admin-token-guidance"
                 className="text-sm text-text-muted"
               >
-                Update the environment variable named by{' '}
-                <code className="font-mono text-text">admin.token_env</code>{' '}
-                (default:{' '}
-                <code className="font-mono text-text">CC_LB_ADMIN_TOKEN</code>)
-                in your service&apos;s secret manager, then restart the cc-lb
-                process. The token is loaded only at startup and cannot be
-                rotated from this dashboard.
+                Update the secret named by the active{' '}
+                <code className="font-mono text-text">static_token</code>{' '}
+                provider&apos;s{' '}
+                <code className="font-mono text-text">token_env</code>, then
+                restart the cc-lb process. Admin authentication providers are
+                configured under{' '}
+                <code className="font-mono text-text">
+                  admin.auth.providers
+                </code>{' '}
+                and cannot be rotated from this dashboard.
               </p>
             </CardBody>
           </Card>
@@ -919,8 +922,6 @@ const RESTART_MATRIX: { field: string; reason: string }[] = [
   },
   { field: 'listener.tls.cert_path', reason: 'Listener TLS certificate' },
   { field: 'listener.tls.key_path', reason: 'Listener TLS key' },
-  { field: 'tls.cert_path', reason: 'TLS certificate' },
-  { field: 'tls.key_path', reason: 'TLS key' },
   { field: 'storage.path', reason: 'Storage backend' },
   { field: 'storage.url', reason: 'Storage backend' },
   { field: 'storage.pool', reason: 'Storage pool' },

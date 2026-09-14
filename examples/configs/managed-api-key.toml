@@ -1,3 +1,5 @@
+request_event_retention_days = 90
+
 [listener]
 proxy_addr = "0.0.0.0:8080"
 admin_addr = "127.0.0.1:9090"
@@ -6,20 +8,15 @@ metrics_addr = "127.0.0.1:9091"
 [storage]
 kind = "sqlite"
 path = "/var/lib/cc-lb/store.sqlite"
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
 
-# Prefer CC_LB_ADMIN_AUTH_PROVIDERS_JSON for new deployments. This legacy
-# token reference is automatically migrated in memory during the rollout.
-[admin]
+[aead]
+key_env = "CC_LB_MASTER_KEY"
+
+[[admin.auth.providers]]
+kind = "static_token"
+id = "local"
 token_env = "CC_LB_ADMIN_TOKEN"
 
-[downstream_auth]
-mode = "api_key"
-
-[api_keys]
-usage_retention_days = 90
-
-[api_keys.price_catalog]
+[price_catalog]
 url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
-refresh_interval = "1h"
 cache_path = "/var/lib/cc-lb/litellm.json"

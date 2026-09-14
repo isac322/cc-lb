@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DownstreamAuthMode, PostgresPoolConfig, StorageConfig};
+use cc_lb_config::{AdminAuthProviderConfig, Config, PostgresPoolConfig, StorageConfig};
 use cc_lb_engine::{ClockHandle, SystemClock};
 use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
 use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, RequestEvent, RequestEventStore};
@@ -19,7 +19,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
 
-const ADMIN_TOKEN: &str = "test-token";
+const ADMIN_TOKEN: &str = env!("CARGO_PKG_NAME");
 const CLUSTER_TOKEN_ENV: &str = "CI_POSTGRES_URL";
 const STORAGE_TAIL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
 
@@ -143,9 +143,10 @@ fn test_config(database_url: &str, label: &str) -> Config {
         url: database_url.to_owned(),
         pool: PostgresPoolConfig::default(),
     };
-    config.admin.token = Some(ADMIN_TOKEN.to_owned());
-    config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
-    config.downstream_auth.none_mode = None;
+    config.admin.auth.providers = vec![AdminAuthProviderConfig::StaticToken {
+        id: "test".to_owned(),
+        token_env: crate::common::TEST_NONEMPTY_ENV.to_owned(),
+    }];
     config.event_bus.storage_tail_poll_interval_ms = 10;
     config.cluster.instance_url = Some(format!("http://{label}.example.test"));
     config.cluster.token_env = CLUSTER_TOKEN_ENV.to_owned();

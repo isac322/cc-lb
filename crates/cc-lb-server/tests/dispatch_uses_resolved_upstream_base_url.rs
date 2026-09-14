@@ -19,10 +19,9 @@ use std::time::UNIX_EPOCH;
 use async_trait::async_trait;
 use axum::body::Bytes;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens};
-use cc_lb_config::{
-    AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
-};
+use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_engine::{
     Body, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
     UpstreamDispatch,
@@ -106,6 +105,19 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     )
     .await
     .expect("principal created");
+    let key_store = Arc::new(KeyStore::new(storage.clone()));
+    let (_key_record, key_secret) = key_store
+        .create(
+            "test-principal",
+            CreateParams {
+                label: "resolved-upstream-base-url".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("managed key created");
 
     let stores = Arc::new(Stores {
         upstreams: Arc::new(NameSortedUpstreamStore {
@@ -158,12 +170,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
 
     let lifecycle = Lifecycle::new_with_dynamic_view(
         Arc::new(BuiltinAuthn::new(
-            DownstreamAuthMode::None,
-            Some(NoneModeConfig {
-                principal_id: "test-principal".to_owned(),
-                upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-            }),
-            None,
+            key_store,
             Arc::new(cc_lb_engine::SystemClock),
         )),
         holder,
@@ -173,7 +180,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     );
 
     let response = lifecycle
-        .handle(message_request())
+        .handle(message_request(key_secret.expose()))
         .await
         .expect("lifecycle response");
     let status = response.status();
@@ -345,11 +352,11 @@ impl UpstreamStore for NameSortedUpstreamStore {
     }
 }
 
-fn message_request() -> Request<Bytes> {
+fn message_request(api_key: &str) -> Request<Bytes> {
     Request::builder()
         .method(Method::POST)
         .uri("/v1/messages")
-        .header("x-api-key", "sk-ant-downstream")
+        .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
         .body(Bytes::from_static(

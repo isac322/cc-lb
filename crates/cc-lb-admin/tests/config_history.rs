@@ -40,7 +40,12 @@ fn test_state() -> AdminState {
 #[tokio::test]
 async fn config_history_route_returns_applied_history() {
     let (_dir, storage) = config_admin_common::temp_storage().await;
-    let config = Config::default();
+    let mut config = Config {
+        request_event_retention_days: 45,
+        ..Config::default()
+    };
+    config.price_catalog.url = "https://catalog.example/history.json".to_owned();
+    config.price_catalog.cache_path = "/tmp/history-catalog.json".into();
     storage
         .append_config_history(
             7,

@@ -20,7 +20,7 @@ The `Reserved` state holds the optional quota reservation. It's held across inte
 
 Background cache-keepalive (renewal) traffic is moved onto this same rail. This ensures renewal traffic is billed, quota-checked, and logged exactly like normal traffic. We rejected any 'renew but don't account' half-state. The per-principal `cache_keepalive.enabled` configuration remains the only off-switch. No new config flag or kill-switch was added.
 
-To prevent data loss under saturation, renewal accounting is a durable exactly-once design. It doesn't rely on the best-effort, drop-on-full event bus. The bus is observability-only. Cost computation in the renewal finalizer runs inline using the same pricing path as the subscriber (`virtual_cost_micros_full` with model, token, and `upstream_kind` fields). It writes the final `RequestEvent` and projections via the awaited `append_request_event_with_projections` method. The event ID is deterministic: `renewal:{session_key_hash}:{generation}`. Only after the durable write and direct `reconcile_by_id` succeed does the finalizer call `forget()`.
+To prevent data loss under saturation, renewal accounting is a durable exactly-once design. It doesn't rely on the best-effort, drop-on-full event bus. The bus is observability-only. Cost computation in the renewal finalizer runs inline using the same pricing path as the subscriber, with the selected database upstream supplying its kind. It writes the final `RequestEvent` and projections via the awaited `append_request_event_with_projections` method. The event ID is deterministic: `renewal_event_id(session_id, turn_id)`, so a replay can idempotently converge on the same row.
 
 ### Per-Turn Claim CAS and At-Most-Once Crash Recovery
 

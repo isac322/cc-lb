@@ -1809,7 +1809,7 @@ mod tests {
             result: Ok(AuthInfo {
                 principal_id: "p1".into(),
                 key_id: Some("k1".into()),
-                principal_kind: Some("api_key".into()),
+                principal_kind: Some("machine".into()),
                 auth_ms: None,
             }),
         })
@@ -2784,7 +2784,7 @@ mod tests {
             result: Ok(AuthInfo {
                 principal_id: "principal-live-1".to_owned(),
                 key_id: Some("key-live-1".to_owned()),
-                principal_kind: Some("api_key".to_owned()),
+                principal_kind: Some("machine".to_owned()),
                 auth_ms: Some(5),
             }),
         })
@@ -2951,7 +2951,7 @@ mod tests {
             Some("principal-live-1")
         );
         assert_eq!(authenticated.key_id.as_deref(), Some("key-live-1"));
-        assert_eq!(authenticated.principal_kind.as_deref(), Some("api_key"));
+        assert_eq!(authenticated.principal_kind.as_deref(), Some("machine"));
         assert_eq!(authenticated.upstream_name, None);
 
         let routed = partials[3];

@@ -32,14 +32,17 @@ impl Drop for EnvGuard {
 #[test]
 fn missing_tls_files_fail_with_field_path() {
     let (_dir, path) = crate::common::temp_config(
-        r#"[tls]
+        r#"[listener.tls]
 cert_path = "/definitely/missing/cert.pem"
 "#,
     );
 
     let error = Config::load(&path).unwrap_err().to_string();
 
-    assert!(error.contains("tls.cert_path: file not found"), "{error}");
+    assert!(
+        error.contains("listener.tls.cert_path: file not found"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -51,9 +54,12 @@ fn encrypted_storage_retains_master_key_env_name() {
         &config_path,
         format!(
             r#"[storage]
-storage_path = "{}"
-oauth_aead_key_env = "CC_LB_TEST_MASTER_KEY_INVALID"
-"#,
+kind = "sqlite"
+path = "{}"
+
+[aead]
+key_env = "CC_LB_TEST_MASTER_KEY_INVALID"
+            "#,
             crate::common::toml_path(&dir.path().join("credentials.sqlite"))
         ),
     )
@@ -103,25 +109,6 @@ ttl_days = 4294967296
     .to_string();
 
     assert!(error.contains("ttl_days"), "{error}");
-}
-
-#[test]
-fn none_mode_loads_without_upstream_credential_ref() {
-    let (_dir, path) = crate::common::temp_config(
-        r#"[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "anon"
-upstream_kind = "anthropic_key"
-
-[api_keys]
-"#,
-    );
-
-    let config = Config::load(&path).unwrap();
-
-    assert!(config.downstream_auth.none_mode.is_some());
 }
 
 #[test]

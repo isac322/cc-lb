@@ -31,20 +31,13 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let (config, warnings) =
-        Config::load_with_overrides_and_warnings(&args.config, overrides(&args))?;
-    print_warnings(&warnings);
+    let config = Config::load_with_overrides(&args.config, overrides(&args))?;
 
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer_pretty(&mut handle, &config)?;
     writeln!(handle)?;
     Ok(())
-}
-fn print_warnings(warnings: &[String]) {
-    for warning in warnings {
-        eprintln!("warning: {}", cc_lb_config::config_warning_message(warning));
-    }
 }
 
 fn overrides(args: &Args) -> ConfigOverrides {

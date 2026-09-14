@@ -86,6 +86,7 @@ pub async fn run(options: Options) -> Result<()> {
         .metrics_output
         .context("--metrics-output is required")?;
     let proxy_url = options.proxy_url;
+    let api_key = options.api_key;
     let body_path = options.body_path;
     let stream_body_path = options
         .stream_body_path
@@ -104,8 +105,8 @@ pub async fn run(options: Options) -> Result<()> {
         .with_context(|| format!("read non-stream body {}", body_path.display()))?;
     let stream_body = fs::read(&stream_body_path)
         .with_context(|| format!("read stream body {}", stream_body_path.display()))?;
-    let non_stream_request = Arc::new(build_request(&target, &non_stream_body, false));
-    let stream_request = Arc::new(build_request(&target, &stream_body, true));
+    let non_stream_request = Arc::new(build_request(&target, &non_stream_body, false, &api_key));
+    let stream_request = Arc::new(build_request(&target, &stream_body, true, &api_key));
     let deadline = Instant::now() + Duration::from_secs(duration_secs);
     let started_at_unix_ms = unix_ms();
     let rss_pid = options.rss_pid;

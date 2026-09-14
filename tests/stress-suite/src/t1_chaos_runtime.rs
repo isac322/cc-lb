@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::multi_replica_auth::json_field;
 use crate::multi_replica_http::{request, wait_for_healthy, wait_for_tcp};
 use crate::supervisor_process::SupervisedChild;
 use crate::t1_chaos::{Ports, ServerPorts};
@@ -70,7 +71,7 @@ fn exercise_instance(
             proxy.readiness_diagnostic()
         )
     })?;
-    seed_runtime(ports.admin, fake_port)?;
+    let api_key = seed_runtime(ports.admin, fake_port)?;
     let started = Instant::now();
     let response = request(
         address(ports.proxy),
@@ -79,6 +80,7 @@ fn exercise_instance(
         &[
             ("Content-Type", "application/json"),
             ("anthropic-version", "2023-06-01"),
+            ("x-api-key", &api_key),
         ],
         MESSAGES_BODY,
     )?;
@@ -126,8 +128,7 @@ fn spawn_proxy(
         .arg("--data-dir")
         .arg(runtime)
         .env("CC_LB_MASTER_KEY", MASTER_KEY)
-        .env("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN)
-        .env("CC_LB_BOOTSTRAP_ADMIN_TOKEN", ADMIN_TOKEN);
+        .env("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN);
     for name in [
         "CC_LB_CHAOS_LATENCY_MS",
         "CC_LB_CHAOS_DROP_PCT",
@@ -142,7 +143,7 @@ fn spawn_proxy(
     SupervisedChild::spawn(command)
 }
 
-fn seed_runtime(admin_port: u16, fake_port: u16) -> Result<(), String> {
+fn seed_runtime(admin_port: u16, fake_port: u16) -> Result<String, String> {
     let headers = [
         ("Authorization", "Bearer stress-t1-admin"),
         ("Content-Type", "application/json"),
@@ -171,7 +172,17 @@ fn seed_runtime(admin_port: u16, fake_port: u16) -> Result<(), String> {
     if upstream.status != 201 {
         return Err(format!("create T1 upstream returned {}", upstream.status));
     }
-    Ok(())
+    let key = request(
+        address(admin_port),
+        "POST",
+        "/admin/v1/principals/t1-principal/keys",
+        &headers,
+        r#"{"label":"t1-chaos"}"#,
+    )?;
+    if key.status != 201 {
+        return Err(format!("issue T1 managed key returned {}", key.status));
+    }
+    json_field(&key.body, "plaintext_key")
 }
 
 fn cargo_command(workspace: &Path) -> Command {
@@ -192,21 +203,12 @@ messages_cap_bytes = 33554432
 files_cap_bytes = 104857600
 
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
 [runtime]
 data_dir = "{data_dir}"
 
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "t1-principal"
-upstream_kind = "anthropic_key"
 
 [storage]
 kind = "sqlite"
@@ -215,10 +217,11 @@ path = "{data_dir}/cc-lb.sqlite"
 [aead]
 key_env = "CC_LB_MASTER_KEY"
 
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "stress-t1-admin"
 token_env = "CC_LB_ADMIN_TOKEN"
 
-[egress]
 "#,
         proxy = ports.proxy,
         admin = ports.admin,

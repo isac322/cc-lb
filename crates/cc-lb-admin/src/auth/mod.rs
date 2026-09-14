@@ -136,17 +136,7 @@ pub enum AdminAuthBuildError {
 
 pub fn build_providers(
     config: &AdminAuthConfig,
-    legacy_token: Option<String>,
 ) -> Result<Vec<Arc<dyn AdminAuthProvider>>, AdminAuthBuildError> {
-    if config.providers.is_empty() {
-        return Ok(legacy_token
-            .map(|token| {
-                Arc::new(StaticTokenProvider::new("legacy", token)) as Arc<dyn AdminAuthProvider>
-            })
-            .into_iter()
-            .collect());
-    }
-
     config
         .providers
         .iter()

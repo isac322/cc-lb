@@ -4,18 +4,9 @@ use std::path::Path;
 
 use thiserror::Error;
 
-mod legacy;
 mod wasmtime;
 
-pub use legacy::{
-    migrate_legacy_storage_toml, removed_prompt_cache_env_switches, removed_prompt_cache_switches,
-    validate_raw_toml,
-};
-
-use crate::{
-    AdminAuthProviderConfig, Config, ConfigError, DEFAULT_SQLITE_PATH, DownstreamAuthMode,
-    StorageConfig,
-};
+use crate::{AdminAuthProviderConfig, Config, ConfigError, DEFAULT_SQLITE_PATH, StorageConfig};
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{field}: {message}")]
@@ -34,7 +25,6 @@ impl ValidationError {
 }
 
 pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
-    validate_downstream_auth(config)?;
     validate_admin_auth(config)?;
     validate_tls(config)?;
     validate_storage(config)?;
@@ -157,23 +147,6 @@ fn validate_tls(config: &Config) -> Result<(), ValidationError> {
     if let Some(tls) = &config.listener.tls {
         validate_tls_section("listener.tls", tls)?;
     }
-    if let Some(tls) = &config.tls {
-        validate_tls_section("tls", tls)?;
-    }
-    Ok(())
-}
-
-fn validate_downstream_auth(config: &Config) -> Result<(), ValidationError> {
-    let none_mode_is_some = config.downstream_auth.none_mode.is_some();
-    let should_have_none_mode = matches!(config.downstream_auth.mode, DownstreamAuthMode::None);
-
-    if none_mode_is_some != should_have_none_mode {
-        return Err(ValidationError::new(
-            "downstream_auth.none_mode",
-            "downstream_auth.none_mode must be set iff mode=none",
-        ));
-    }
-
     Ok(())
 }
 

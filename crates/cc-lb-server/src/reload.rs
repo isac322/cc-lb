@@ -19,12 +19,6 @@ use tokio::task::JoinHandle;
 const DEBOUNCE: Duration = Duration::from_millis(500);
 const BROADCAST_CAPACITY: usize = 16;
 
-pub(crate) fn warn_config_warnings(warnings: &[String]) {
-    for warning in warnings {
-        tracing::warn!(warning, "{}", cc_lb_config::config_warning_message(warning));
-    }
-}
-
 pub struct ConfigWatcher {
     path: PathBuf,
     current: ArcSwap<Config>,
@@ -104,7 +98,7 @@ impl ConfigWatcher {
     }
 
     fn reload_from_path(&self, skip_unchanged: bool) -> Result<Arc<Config>, ReloadError> {
-        let (new_config, config_warnings) = match Config::load_with_warnings(&self.path) {
+        let new_config = match Config::load(&self.path) {
             Ok(loaded) => loaded,
             Err(source) => {
                 self.record_attempt();
@@ -112,7 +106,6 @@ impl ConfigWatcher {
                 return Err(ReloadError::Config(source));
             }
         };
-        warn_config_warnings(&config_warnings);
 
         let current_config = self.current_config();
         if skip_unchanged && *current_config == new_config {
@@ -285,30 +278,6 @@ pub fn summarize_restart_required(
         ),
         "listener TLS key changes require a process restart",
     );
-    push_changed(
-        &mut changes,
-        "tls.cert_path",
-        path_option_string(current.tls.as_ref().and_then(|tls| tls.cert_path.as_ref())),
-        path_option_string(
-            new_config
-                .tls
-                .as_ref()
-                .and_then(|tls| tls.cert_path.as_ref()),
-        ),
-        "TLS certificate changes require a process restart",
-    );
-    push_changed(
-        &mut changes,
-        "tls.key_path",
-        path_option_string(current.tls.as_ref().and_then(|tls| tls.key_path.as_ref())),
-        path_option_string(
-            new_config
-                .tls
-                .as_ref()
-                .and_then(|tls| tls.key_path.as_ref()),
-        ),
-        "TLS key changes require a process restart",
-    );
     summarize_storage_restart_required(&mut changes, &current.storage, &new_config.storage);
     push_changed(
         &mut changes,
@@ -333,7 +302,6 @@ pub fn summarize_restart_required(
     );
     summarize_wasmtime_restart_required(&mut changes, current, new_config);
     summarize_oauth_restart_required(&mut changes, current, new_config);
-    summarize_lifecycle_subscriber_restart_required(&mut changes, current, new_config);
     changes
 }
 
@@ -386,80 +354,6 @@ fn summarize_wasmtime_restart_required(
         option_u32_string(new_config.pool_total_core_instances),
         "wasmtime engine pool changes require a process restart",
     );
-}
-
-fn summarize_lifecycle_subscriber_restart_required(
-    changes: &mut Vec<RestartRequiredField>,
-    current: &Config,
-    new_config: &Config,
-) {
-    const REASON: &str =
-        "lifecycle subscriber wiring is bound at startup; toggling requires a process restart";
-
-    let entries: &[(&str, bool, bool)] = &[
-        (
-            "lifecycle_hook_adapter.enabled",
-            current.lifecycle_hook_adapter.enabled,
-            new_config.lifecycle_hook_adapter.enabled,
-        ),
-        (
-            "lifecycle_pricing_subscriber.enabled",
-            current.lifecycle_pricing_subscriber.enabled,
-            new_config.lifecycle_pricing_subscriber.enabled,
-        ),
-        (
-            "lifecycle_cache_observation_subscriber.enabled",
-            current.lifecycle_cache_observation_subscriber.enabled,
-            new_config.lifecycle_cache_observation_subscriber.enabled,
-        ),
-        (
-            "lifecycle_rate_limit_header_subscriber.enabled",
-            current.lifecycle_rate_limit_header_subscriber.enabled,
-            new_config.lifecycle_rate_limit_header_subscriber.enabled,
-        ),
-        (
-            "lifecycle_subscription_quota_subscriber.enabled",
-            current.lifecycle_subscription_quota_subscriber.enabled,
-            new_config.lifecycle_subscription_quota_subscriber.enabled,
-        ),
-        (
-            "lifecycle_limit_rejection_audit_subscriber.enabled",
-            current.lifecycle_limit_rejection_audit_subscriber.enabled,
-            new_config
-                .lifecycle_limit_rejection_audit_subscriber
-                .enabled,
-        ),
-        (
-            "lifecycle_api_key_metrics_subscriber.enabled",
-            current.lifecycle_api_key_metrics_subscriber.enabled,
-            new_config.lifecycle_api_key_metrics_subscriber.enabled,
-        ),
-        (
-            "lifecycle_cache_hit_miss_subscriber.enabled",
-            current.lifecycle_cache_hit_miss_subscriber.enabled,
-            new_config.lifecycle_cache_hit_miss_subscriber.enabled,
-        ),
-        (
-            "lifecycle_routing_tier_subscriber.enabled",
-            current.lifecycle_routing_tier_subscriber.enabled,
-            new_config.lifecycle_routing_tier_subscriber.enabled,
-        ),
-        (
-            "lifecycle_limit_reconcile_subscriber.enabled",
-            current.lifecycle_limit_reconcile_subscriber.enabled,
-            new_config.lifecycle_limit_reconcile_subscriber.enabled,
-        ),
-    ];
-
-    for (field, current_value, new_value) in entries {
-        push_changed(
-            changes,
-            field,
-            current_value.to_string(),
-            new_value.to_string(),
-            REASON,
-        );
-    }
 }
 
 fn summarize_storage_restart_required(

@@ -4,7 +4,7 @@ use crate::common;
 async fn handshake_self_signed_proxy_tls_only() {
     let app = common::start_tls_app(1_048_576).await;
 
-    let proxy = common::tls_get(app.proxy_addr, &app.cert_path, "/v1/models")
+    let proxy = common::tls_get(app.proxy_addr, &app.cert_path, "/v1/models", &app.api_key)
         .await
         .expect("proxy TLS request");
     assert_eq!(proxy.status, 200);

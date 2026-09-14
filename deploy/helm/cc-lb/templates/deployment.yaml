@@ -78,18 +78,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "cc-lb.secretName" . }}
                   key: {{ .Values.secrets.keys.masterKey }}
-            - name: {{ .Values.config.admin.tokenEnv }}
+            - name: {{ .Values.config.admin.staticTokenEnv }}
               valueFrom:
                 secretKeyRef:
                   name: {{ include "cc-lb.secretName" . }}
                   key: {{ .Values.secrets.keys.adminToken }}
-                  optional: true
-            - name: CC_LB_BOOTSTRAP_ADMIN_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "cc-lb.secretName" . }}
-                  key: {{ .Values.secrets.keys.bootstrapAdminToken }}
-                  optional: true
             {{- if and (not $isSqlite) .Values.config.storage.postgres.urlSecret.name }}
             - name: CC_LB_STORAGE__URL
               valueFrom:

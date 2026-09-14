@@ -23,16 +23,14 @@ impl OpenedScheduler {
 
     pub async fn spawn(
         &self,
-        config: cc_lb_config::Config,
         ctx: cc_lb_scheduler::worker::SchedulerCtx,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerFactoryError> {
-        self.backend
-            .spawn(config, ctx, cancel)
-            .await
-            .map_err(|error| SchedulerFactoryError::StartupFailed {
+        self.backend.spawn(ctx, cancel).await.map_err(|error| {
+            SchedulerFactoryError::StartupFailed {
                 message: error.to_string(),
-            })
+            }
+        })
     }
 }
 

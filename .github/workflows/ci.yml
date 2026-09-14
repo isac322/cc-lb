@@ -230,7 +230,9 @@ jobs:
           python3 scripts/chart_metadata.py stamp \
             --chart "$chart_dir/Chart.yaml" \
             --revision "$SOURCE_SHA"
-          helm lint "$chart_dir" --set secrets.masterKey=ci-lint-placeholder
+          helm lint "$chart_dir" \
+            --set secrets.masterKey=ci-lint-placeholder \
+            --set secrets.adminToken=ci-admin-placeholder
           helm package "$chart_dir" \
             --version "$VERSION" \
             --app-version "$VERSION" \

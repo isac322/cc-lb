@@ -194,7 +194,7 @@ where
         let storage = fixture.storage();
         let draft = ConfigDraftState {
             draft: Some(json!({
-                "timeouts": { "idle_secs": 30 },
+                "timeouts": { "upstream_total_secs": 30 },
                 "body": { "messages_cap_bytes": 1048576 }
             })),
             saved_at_unix_secs: Some(1_800_400_000),
@@ -218,7 +218,7 @@ where
 
         let history = HistoryEntry {
             revision,
-            config_toml: "[timeouts]\nidle_secs = 30\n".to_owned(),
+            config_toml: "[timeouts]\nupstream_total_secs = 30\n".to_owned(),
             applied_at_unix_secs: 1_800_400_010,
             summary: HistorySummary { tls_enabled: true },
         };

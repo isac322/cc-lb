@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_clock::SystemClock;
-use cc_lb_config::{Config, RecurringJobConfig};
+use cc_lb_config::{RecurringJobConfig, SchedulerConfig};
 use cc_lb_scheduler::migrations::apply_post_setup_migrations;
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{CRON_QUEUE, SchedulerBackend, SchedulerCtx, SqliteSchedulerBackend};
@@ -27,9 +27,8 @@ async fn sqlite_cron_producer_runs_after_partial_idempotency_index()
     let cancel = CancellationToken::new();
     let handles = backend
         .spawn(
-            fast_singleton_config(),
             SchedulerCtx::new(
-                Default::default(),
+                fast_singleton_config(),
                 Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
                 Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
                 Arc::new(SystemClock),
@@ -66,16 +65,16 @@ async fn sqlite_test_db() -> Result<SqliteTestDb, Box<dyn std::error::Error>> {
     Ok(SqliteTestDb { pool, _dir: dir })
 }
 
-fn fast_singleton_config() -> Config {
-    let mut config = Config::default();
-    for job in config.scheduler.recurring_jobs.values_mut() {
+fn fast_singleton_config() -> SchedulerConfig {
+    let mut config = SchedulerConfig::default();
+    for job in config.recurring_jobs.values_mut() {
         job.enabled = false;
     }
-    config.scheduler.recurring_jobs.insert(
+    config.recurring_jobs.insert(
         "usage_prune".to_owned(),
         RecurringJobConfig {
             enabled: true,
-            interval_secs: 1,
+            interval_secs: 2,
             jitter_secs: 0,
         },
     );

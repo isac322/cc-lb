@@ -86,6 +86,6 @@ async fn config_apply_audit_records_static_token_actor_identity() {
         .find(|entry| entry["admin_action"] == "config_apply")
         .expect("config apply audit entry");
     assert_eq!(entry["actor_authority"], "static-token");
-    assert_eq!(entry["actor_subject"], "legacy");
+    assert_eq!(entry["actor_subject"], "test-static-token");
     assert_eq!(entry["actor_kind"], "break_glass");
 }

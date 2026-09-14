@@ -121,7 +121,7 @@ async fn saving_new_draft_invalidates_last_validated_revision() {
     assert_eq!(json["revision"], 2);
     assert_eq!(json["last_validated_revision"], serde_json::Value::Null);
     assert_eq!(json["last_validation_error"], serde_json::Value::Null);
-    assert_eq!(json["draft"]["timeouts"]["idle_secs"], 200);
+    assert_eq!(json["draft"]["timeouts"]["upstream_total_secs"], 200);
 }
 
 #[tokio::test]
@@ -164,6 +164,126 @@ async fn validate_rejects_database_owned_top_level_keys() {
         assert!(error.contains("unknown field"));
         assert!(error.contains(key));
     }
+}
+
+#[tokio::test]
+async fn validate_accepts_top_level_retention_and_price_catalog() {
+    let (_dir, storage) = temp_storage().await;
+    let app = app(test_state(
+        config_admin_common::minimal_config(),
+        Some(storage),
+    ));
+    let mut draft = config_value(123);
+    draft["request_event_retention_days"] = json!(45);
+    draft["price_catalog"]["url"] = json!("https://catalog.example/prices.json");
+    draft["price_catalog"]["cache_path"] = json!("/tmp/catalog.json");
+
+    let (_, _, saved, _) = authed_json(
+        app.clone(),
+        "PUT",
+        "/admin/config/draft",
+        Some(put_body(draft, 0)),
+    )
+    .await;
+    let (status, _, validated, _) = authed_json(
+        app,
+        "POST",
+        "/admin/config/draft/validate",
+        Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(validated["valid"], true);
+}
+
+#[tokio::test]
+async fn validate_rejects_removed_config_wrappers_and_price_refresh_interval() {
+    for removed in ["api_keys", "downstream_auth", "tls"] {
+        let (_dir, storage) = temp_storage().await;
+        let app = app(test_state(
+            config_admin_common::minimal_config(),
+            Some(storage),
+        ));
+        let mut draft = config_value(123);
+        draft[removed] = json!({});
+
+        let (_, _, saved, _) = authed_json(
+            app.clone(),
+            "PUT",
+            "/admin/config/draft",
+            Some(put_body(draft, 0)),
+        )
+        .await;
+        let (_, _, validated, _) = authed_json(
+            app,
+            "POST",
+            "/admin/config/draft/validate",
+            Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
+        )
+        .await;
+
+        assert_eq!(validated["valid"], false);
+        assert!(validated["error"].as_str().unwrap().contains(removed));
+    }
+
+    for removed in ["token_env", "token"] {
+        let (_dir, storage) = temp_storage().await;
+        let app = app(test_state(
+            config_admin_common::minimal_config(),
+            Some(storage),
+        ));
+        let mut draft = config_value(123);
+        draft["admin"][removed] = json!("REMOVED_ADMIN_TOKEN_FIELD");
+
+        let (_, _, saved, _) = authed_json(
+            app.clone(),
+            "PUT",
+            "/admin/config/draft",
+            Some(put_body(draft, 0)),
+        )
+        .await;
+        let (_, _, validated, _) = authed_json(
+            app,
+            "POST",
+            "/admin/config/draft/validate",
+            Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
+        )
+        .await;
+
+        assert_eq!(validated["valid"], false);
+        assert!(validated["error"].as_str().unwrap().contains(removed));
+    }
+
+    let (_dir, storage) = temp_storage().await;
+    let app = app(test_state(
+        config_admin_common::minimal_config(),
+        Some(storage),
+    ));
+    let mut draft = config_value(123);
+    draft["price_catalog"]["refresh_interval"] = json!("1h");
+    let (_, _, saved, _) = authed_json(
+        app.clone(),
+        "PUT",
+        "/admin/config/draft",
+        Some(put_body(draft, 0)),
+    )
+    .await;
+    let (_, _, validated, _) = authed_json(
+        app,
+        "POST",
+        "/admin/config/draft/validate",
+        Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
+    )
+    .await;
+
+    assert_eq!(validated["valid"], false);
+    assert!(
+        validated["error"]
+            .as_str()
+            .unwrap()
+            .contains("refresh_interval")
+    );
 }
 
 #[tokio::test]

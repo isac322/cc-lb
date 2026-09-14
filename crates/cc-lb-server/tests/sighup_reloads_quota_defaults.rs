@@ -12,6 +12,8 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
 
+const ADMIN_TOKEN: &str = env!("CARGO_PKG_NAME");
+
 #[tokio::test]
 async fn sighup_reloads_body_defaults() {
     let dir = tempfile::tempdir().unwrap();
@@ -39,10 +41,12 @@ async fn sighup_reloads_body_defaults() {
         config: watcher.clone(),
         scheduler: None,
         admin_auth: Arc::new(cc_lb_admin::auth::AdminAuthenticator::new(
-            cc_lb_admin::auth::build_providers(
-                &cc_lb_config::AdminAuthConfig::default(),
-                Some("test-token".to_owned()),
-            )
+            cc_lb_admin::auth::build_providers(&cc_lb_config::AdminAuthConfig {
+                providers: vec![cc_lb_config::AdminAuthProviderConfig::StaticToken {
+                    id: "test".to_owned(),
+                    token_env: crate::common::TEST_NONEMPTY_ENV.to_owned(),
+                }],
+            })
             .expect("test admin auth builds"),
         )),
         lazy_refresher: None,
@@ -101,7 +105,7 @@ async fn admin_config(app: axum::Router) -> serde_json::Value {
             Request::builder()
                 .method("GET")
                 .uri("/admin/config/current")
-                .header("Authorization", "Bearer test-token")
+                .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )

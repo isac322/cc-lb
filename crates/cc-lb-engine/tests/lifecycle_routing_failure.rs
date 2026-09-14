@@ -13,6 +13,7 @@ use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleCo
 use cc_lb_routing::{
     FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
 };
+use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -23,7 +24,7 @@ use uuid::Uuid;
 
 use common::{
     DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestState, collect_body,
-    messages_request,
+    managed_key_id, messages_request,
 };
 
 #[tokio::test]
@@ -77,7 +78,8 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
         Some("route_no_upstream_after_filter")
     );
     assert_eq!(event.principal_id.as_deref(), Some("principal-test"));
-    assert_eq!(event.key_id.as_deref(), Some("none-mode"));
+    assert_eq!(event.key_id.as_deref(), Some(managed_key_id()));
+    assert_eq!(event.principal_kind.as_deref(), Some("admin"));
     assert_eq!(event.model.as_deref(), Some("claude-test"));
     let trace = event.routing_trace.as_ref().expect("routing trace logged");
     assert_eq!(trace.stages.len(), 1);
@@ -168,11 +170,24 @@ fn principal_view(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<PrincipalView> {
             DialectCache::Inherit,
         ),
     );
-    Arc::new(PrincipalView::for_tests(
-        "principal-test",
-        true,
-        vec!["*".to_owned()],
-        Vec::new(),
+    Arc::new(PrincipalView::from_db(
+        &[PrincipalRecord {
+            id: Uuid::from_u128(0xA11D),
+            name: "principal-test".to_owned(),
+            kind: StoragePrincipalKind::Admin,
+            allowed_models: vec!["*".to_owned()],
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::new(),
+            enabled: true,
+            last_apply_error: None,
+            last_apply_at_unix_secs: None,
+            deleted_at_unix_secs: None,
+            revision: 1,
+            created_at_unix_secs: 0,
+            updated_at_unix_secs: 0,
+            router_terminal_strategy: TerminalStrategy::FirstPick,
+            cache_keepalive: None,
+        }],
         chains,
     ))
 }

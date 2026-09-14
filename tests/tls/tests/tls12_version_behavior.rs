@@ -8,6 +8,7 @@ async fn tls12_only_client_is_accepted_by_current_ring_tls12_policy() {
         app.proxy_addr,
         &app.cert_path,
         "/v1/models",
+        &app.api_key,
         &[&rustls::version::TLS12],
     )
     .await

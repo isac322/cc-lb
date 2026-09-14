@@ -77,7 +77,6 @@ impl LiteLlmLoader {
         catalog: Arc<PriceCatalog>,
         storage: Arc<dyn PriceCatalogCache>,
         url: String,
-        _refresh_interval: Duration,
         cache_path: PathBuf,
         clock: ClockHandle,
     ) -> Self {

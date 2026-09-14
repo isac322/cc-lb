@@ -33,6 +33,7 @@ pub struct RunningTlsApp {
     pub metrics_addr: SocketAddr,
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
+    pub api_key: String,
     pub cert_a_fingerprint: String,
     pub cert_b_fingerprint: String,
     pub cert_a_path: PathBuf,
@@ -119,7 +120,7 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
 
     wait_while_server_running(
         &mut server,
-        wait_tls_status(proxy_addr, &cert_path, "/healthz", 200),
+        wait_tls_status(proxy_addr, &cert_path, "/healthz", 200, None),
     )
     .await;
     wait_while_server_running(
@@ -127,10 +128,10 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         wait_plain_status(admin_addr, "/admin/health", 200),
     )
     .await;
-    seed_runtime(admin_addr, upstream_addr).await;
+    let api_key = seed_runtime(admin_addr, upstream_addr).await;
     wait_while_server_running(
         &mut server,
-        wait_tls_status(proxy_addr, &cert_path, "/v1/models", 200),
+        wait_tls_status(proxy_addr, &cert_path, "/v1/models", 200, Some(&api_key)),
     )
     .await;
 
@@ -139,6 +140,7 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         admin_addr,
         metrics_addr,
         cert_path,
+        api_key,
         key_path,
         cert_a_fingerprint: fingerprint_for_cert(&fixture("cert-a.pem")),
         cert_b_fingerprint: fingerprint_for_cert(&fixture("cert-b.pem")),
@@ -204,11 +206,12 @@ async fn wait_while_server_running<T>(
 pub async fn wait_for_reloaded_cert(
     addr: SocketAddr,
     trust_cert: &Path,
+    api_key: &str,
     expected_fingerprint: &str,
 ) -> TlsResponse {
     let deadline = Instant::now() + ready_timeout(Duration::from_secs(15));
     loop {
-        let last = match tls_get(addr, trust_cert, "/v1/models").await {
+        let last = match tls_get(addr, trust_cert, "/v1/models", api_key).await {
             Ok(response)
                 if response.status == 200 && response.peer_fingerprint == expected_fingerprint =>
             {
@@ -229,10 +232,18 @@ pub async fn wait_for_reloaded_cert(
     }
 }
 
-pub async fn wait_tls_status(addr: SocketAddr, trust_cert: &Path, path: &str, status: u16) {
+pub async fn wait_tls_status(
+    addr: SocketAddr,
+    trust_cert: &Path,
+    path: &str,
+    status: u16,
+    api_key: Option<&str>,
+) {
     let deadline = Instant::now() + ready_timeout(Duration::from_secs(30));
     loop {
-        let last = match tls_get(addr, trust_cert, path).await {
+        let last = match tls_get_request(addr, trust_cert, path, api_key, rustls::DEFAULT_VERSIONS)
+            .await
+        {
             Ok(response) if response.status == status => return,
             Ok(response) => format!("status={} body={}", response.status, response.body),
             Err(error) => error,
@@ -265,19 +276,34 @@ pub async fn tls_get(
     addr: SocketAddr,
     trust_cert: &Path,
     path: &str,
+    api_key: &str,
 ) -> Result<TlsResponse, String> {
-    tls_get_with_versions(addr, trust_cert, path, rustls::DEFAULT_VERSIONS).await
+    tls_get_with_versions(addr, trust_cert, path, api_key, rustls::DEFAULT_VERSIONS).await
 }
 
 pub async fn tls_get_with_versions(
     addr: SocketAddr,
     trust_cert: &Path,
     path: &str,
+    api_key: &str,
+    versions: &[&'static SupportedProtocolVersion],
+) -> Result<TlsResponse, String> {
+    tls_get_request(addr, trust_cert, path, Some(api_key), versions).await
+}
+
+async fn tls_get_request(
+    addr: SocketAddr,
+    trust_cert: &Path,
+    path: &str,
+    api_key: Option<&str>,
     versions: &[&'static SupportedProtocolVersion],
 ) -> Result<TlsResponse, String> {
     let mut stream = tls_connect(addr, trust_cert, versions).await?;
+    let api_key_header = api_key
+        .map(|key| format!("x-api-key: {key}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: localhost\r\nx-api-key: sk-ant-test\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\n{api_key_header}Connection: close\r\n\r\n"
     );
     let peer_fingerprint = peer_fingerprint(&stream);
     let protocol_version = stream.get_ref().1.protocol_version();
@@ -302,10 +328,11 @@ pub async fn tls_get_with_versions(
 pub async fn start_streaming_post(
     addr: SocketAddr,
     trust_cert: &Path,
+    api_key: &str,
 ) -> Result<StreamingTlsResponse, String> {
     let mut stream = tls_connect(addr, trust_cert, rustls::DEFAULT_VERSIONS).await?;
     let request = format!(
-        "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nx-api-key: sk-ant-test\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\naccept: text/event-stream\r\nx-fake-mode: slow\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nx-api-key: {api_key}\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\naccept: text/event-stream\r\nx-fake-mode: slow\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
         STREAM_BODY.len(),
         STREAM_BODY
     );
@@ -546,7 +573,7 @@ async fn plain_post_json(
     })
 }
 
-async fn seed_runtime(admin_addr: SocketAddr, upstream_addr: SocketAddr) {
+async fn seed_runtime(admin_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
     let principal = plain_post_json(
         admin_addr,
         "/admin/v1/principals",
@@ -573,6 +600,20 @@ async fn seed_runtime(admin_addr: SocketAddr, upstream_addr: SocketAddr) {
         upstream.status,
         upstream.body
     );
+
+    let key = plain_post_json(
+        admin_addr,
+        "/admin/v1/principals/api-key/keys",
+        r#"{"label":"tls-tests"}"#,
+    )
+    .await
+    .expect("seed managed key");
+    assert_eq!(
+        key.status, 201,
+        "seed managed key status={} body={}",
+        key.status, key.body
+    );
+    json_string_field(&key.body, "plaintext_key").expect("managed key response plaintext_key")
 }
 
 fn status_code(text: &str) -> u16 {
@@ -593,6 +634,14 @@ fn reserve_addr() -> (SocketAddr, std::net::TcpListener) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve free addr");
     let addr = listener.local_addr().expect("reserved addr");
     (addr, listener)
+}
+
+fn json_string_field(body: &str, field: &str) -> Option<String> {
+    let field = format!("\"{field}\"");
+    let value = body.split_once(&field)?.1.trim_start();
+    let value = value.strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    let end = value.find('"')?;
+    Some(value[..end].to_owned())
 }
 
 fn free_addr() -> SocketAddr {
@@ -628,12 +677,6 @@ cert_path = "{}"
 key_path = "{}"
 reload_on_sighup = true
 
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
 
 
 [storage]
@@ -643,7 +686,9 @@ path = "{storage_path}"
 [aead]
 key_env = "CC_LB_MASTER_KEY"
 
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "tls-tests"
 token_env = "CC_LB_ADMIN_TOKEN"
 "#,
         cert_path.display(),

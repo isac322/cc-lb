@@ -6,7 +6,6 @@ use cc_lb_domain::{
 };
 use cc_lb_request_log::{CostBreakdown, RequestCacheLookbackPrefix, RequestEventUpdate};
 use cc_lb_storage_api::principal::{Limit, LimitKind};
-use cc_lb_storage_api::types::UpstreamKind;
 use cc_lb_storage_api::types::{Limit as TypesLimit, LimitKind as TypesLimitKind};
 use cc_lb_storage_api::{
     ApiKeyRecord, AuditEntry, BackendKind, BucketKind, CacheKeepaliveConfig,
@@ -191,7 +190,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
 
     assert_json_roundtrip(ConfigDraftState {
         draft: Some(json!({
-            "timeouts": { "idle_secs": 30 },
+            "timeouts": { "upstream_total_secs": 30 },
             "body": { "messages_cap_bytes": 1048576 }
         })),
         revision: 7,
@@ -204,7 +203,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
     assert_json_roundtrip(summary.clone());
     assert_json_roundtrip(HistoryEntry {
         revision: 8,
-        config_toml: "[timeouts]\nidle_secs = 30".to_owned(),
+        config_toml: "[timeouts]\nupstream_total_secs = 30".to_owned(),
         applied_at_unix_secs: 1_716_000_005,
         summary: summary.clone(),
     });
@@ -277,7 +276,6 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         key_hash_b64: "YWJjMTIz".to_owned(),
         verify_hash: [1; 32],
         secret_salt: [2; 16],
-        upstream_kind: UpstreamKind::AnthropicKey,
         limit_overrides: vec![TypesLimit {
             kind: TypesLimitKind::Requests,
             window_secs: 60,
@@ -287,7 +285,6 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         expires_at_unix_secs: Some(1_800_000_000),
         last_4: "c123".to_owned(),
         description: Some("default key".to_owned()),
-        principal_kind: PrincipalKindLite::Machine,
         index_hash: [3; 32],
     });
 

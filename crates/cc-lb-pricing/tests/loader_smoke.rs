@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, LiteLlmLoader, LoaderError, PriceCatalog};
 use cc_lb_storage_api::{
@@ -108,7 +107,6 @@ async fn refresh_once_fetches_installs_and_persists() -> Result<(), Box<dyn std:
         catalog.clone(),
         storage.clone(),
         format!("{}/prices", server.uri()),
-        Duration::from_secs(60 * 60),
         dir.path().join("litellm-cache.json"),
         Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
     );
@@ -148,7 +146,6 @@ async fn install_latest_local_reads_disk_cache_after_refresh_failure()
         catalog.clone(),
         storage,
         format!("{}/prices", server.uri()),
-        Duration::from_secs(60 * 60),
         cache_path,
         Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
     );
@@ -186,7 +183,6 @@ async fn install_latest_local_returns_false_without_cache_after_refresh_failure(
         catalog.clone(),
         storage,
         format!("{}/prices", server.uri()),
-        Duration::from_secs(60 * 60),
         dir.path().join("missing-cache.json"),
         Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
     );
@@ -226,7 +222,6 @@ async fn install_latest_local_does_not_fetch_or_replace_payload_when_unchanged()
         Arc::clone(&catalog),
         Arc::new(LocalPollStorage::Unchanged),
         "http://unused.invalid/prices".to_owned(),
-        Duration::from_secs(60 * 60),
         cache_path,
         Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
     );
@@ -264,7 +259,6 @@ async fn install_latest_local_retains_snapshot_and_skips_disk_fallback_on_storag
         Arc::clone(&catalog),
         Arc::new(LocalPollStorage::Error),
         "http://unused.invalid/prices".to_owned(),
-        Duration::from_secs(60 * 60),
         cache_path,
         Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
     );
@@ -305,7 +299,6 @@ async fn install_latest_local_propagates_corruption_without_installing_payload()
         Arc::clone(&catalog),
         Arc::new(LocalPollStorage::Corrupted),
         "http://unused.invalid/prices".to_owned(),
-        Duration::from_secs(60 * 60),
         cache_path,
         Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
     );

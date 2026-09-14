@@ -109,8 +109,8 @@ config:
       poolToml: ""
 
   admin:
-    # -- Env var name the server reads the admin API token from.
-    tokenEnv: CC_LB_ADMIN_TOKEN
+    # -- Env var referenced by the chart's static-token admin auth provider.
+    staticTokenEnv: CC_LB_ADMIN_TOKEN
 
   aead:
     # -- Env var name the server reads the 32-byte (64 hex) master key from.
@@ -121,6 +121,9 @@ config:
   # from the pod IP at runtime; only the shared token comes from a Secret.
   cluster:
     tokenEnv: CC_LB_CLUSTER_TOKEN
+
+  # -- Days to retain request events in the database.
+  requestEventRetentionDays: 90
 
   priceCatalog:
     # -- Writable cache path for the LiteLLM price catalog (on the data volume).
@@ -143,10 +146,9 @@ secrets:
   # Inline values (used only when existingSecret is empty; chart creates a Secret).
   # -- REQUIRED master key (64 hex chars) unless existingSecret is set.
   masterKey: ""
-  # -- Optional admin API token.
+  # -- REQUIRED token for the chart's static-token admin auth provider unless
+  # an existing Secret supplies it.
   adminToken: ""
-  # -- Optional bootstrap admin token (seeds the "admin" principal on first start).
-  bootstrapAdminToken: ""
   # -- Shared cross-replica fanout token. REQUIRED for the postgres backend
   # unless existingSecret provides it. Generate with: `openssl rand -hex 32`.
   clusterToken: ""
@@ -154,7 +156,6 @@ secrets:
   keys:
     masterKey: CC_LB_MASTER_KEY
     adminToken: CC_LB_ADMIN_TOKEN
-    bootstrapAdminToken: CC_LB_BOOTSTRAP_ADMIN_TOKEN
     clusterToken: CC_LB_CLUSTER_TOKEN
 
 # -- Additional environment variables (raw EnvVar list).

@@ -72,13 +72,6 @@ metrics_addr = "127.0.0.1:19091"
 [body]
 messages_cap_bytes = {messages_cap_bytes}
 files_cap_bytes = 1048576
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "alice"
-upstream_kind = "anthropic_key"
 "#
     );
     std::fs::write(path, config).unwrap();

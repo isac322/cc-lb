@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_storage_api::{
     StorageError,
-    types::{KeyStatus, StoredApiKeyRecord, UpstreamKind},
+    types::{KeyStatus, StoredApiKeyRecord},
 };
 
 use crate::api_keys::{
@@ -15,9 +14,7 @@ use cc_lb_clock::{ClockHandle, unix_secs};
 
 #[derive(Clone)]
 pub struct BuiltinAuthn {
-    mode: DownstreamAuthMode,
-    none_mode: Option<NoneModeConfig>,
-    key_store: Option<Arc<KeyStore>>,
+    key_store: Arc<KeyStore>,
     clock: ClockHandle,
 }
 
@@ -25,7 +22,6 @@ pub struct BuiltinAuthn {
 pub struct AuthnSuccess {
     pub principal_id: String,
     pub key_id: String,
-    pub upstream_kind: UpstreamKind,
     pub record: StoredApiKeyRecord,
     pub last_4: String,
     pub api_key: Option<String>,
@@ -72,18 +68,8 @@ impl BuiltinAuthError {
 }
 
 impl BuiltinAuthn {
-    pub fn new(
-        mode: DownstreamAuthMode,
-        none_mode: Option<NoneModeConfig>,
-        key_store: Option<Arc<KeyStore>>,
-        clock: ClockHandle,
-    ) -> Self {
-        Self {
-            mode,
-            none_mode,
-            key_store,
-            clock,
-        }
+    pub fn new(key_store: Arc<KeyStore>, clock: ClockHandle) -> Self {
+        Self { key_store, clock }
     }
 
     pub async fn authenticate(
@@ -95,10 +81,8 @@ impl BuiltinAuthn {
         let (parsed_key_id, secret_bytes) =
             secret::parse(input).map_err(|_| BuiltinAuthError::InvalidFormat)?;
         let index_hash = secret::compute_index_hash(&secret_bytes);
-        let Some(key_store) = &self.key_store else {
-            return Err(BuiltinAuthError::NotFound);
-        };
-        let (principal_id, key_id_storage, record) = key_store
+        let (principal_id, key_id_storage, record) = self
+            .key_store
             .lookup_by_index_hash(&index_hash)
             .await
             .map_err(map_lookup_error)?
@@ -128,44 +112,13 @@ impl BuiltinAuthn {
             return Err(BuiltinAuthError::PrincipalDisabled);
         }
 
+        let last_4 = record.last_4.clone();
         Ok(AuthnSuccess {
             principal_id,
             key_id: key_id_storage,
-            upstream_kind: record.upstream_kind,
-            record: record.clone(),
-            last_4: record.last_4.clone(),
-            api_key: Some(input.to_owned()),
-        })
-    }
-
-    pub async fn authenticate_none_mode(&self, headers: &http::HeaderMap) -> Option<AuthnSuccess> {
-        if self.mode != DownstreamAuthMode::None {
-            return None;
-        }
-
-        let none_mode = self.none_mode.as_ref()?;
-        let record = StoredApiKeyRecord {
-            status: KeyStatus::Active,
-            upstream_kind: map_none_mode_upstream_kind(none_mode.upstream_kind.clone()),
-            verify_hash: [0; 32],
-            secret_salt: [0; 16],
-            last_4: String::new(),
-            ..Default::default()
-        };
-
-        let api_key = headers
-            .get("x-api-key")
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_owned());
-
-        Some(AuthnSuccess {
-            principal_id: none_mode.principal_id.clone(),
-            key_id: "none-mode".to_owned(),
-            upstream_kind: record.upstream_kind,
             record,
-            last_4: String::new(),
-            api_key,
+            last_4,
+            api_key: Some(input.to_owned()),
         })
     }
 }
@@ -201,13 +154,6 @@ fn map_lookup_error(error: KeyStoreError) -> BuiltinAuthError {
     }
 }
 
-pub fn map_none_mode_upstream_kind(kind: NoneModeUpstreamKind) -> UpstreamKind {
-    match kind {
-        NoneModeUpstreamKind::AnthropicKey => UpstreamKind::AnthropicKey,
-        NoneModeUpstreamKind::AnthropicOAuth => UpstreamKind::AnthropicOAuth,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -217,7 +163,7 @@ mod tests {
     use async_trait::async_trait;
     use cc_lb_storage_api::{
         ManagedKeyStore, StorageResult,
-        types::{ApiKeyMutation, IssueParams, PrincipalKindLite},
+        types::{ApiKeyMutation, IssueParams},
     };
     use http::{HeaderMap, HeaderValue};
 
@@ -227,14 +173,11 @@ mod tests {
     async fn authenticates_valid_key() {
         let generated = secret::generate_new();
         let record = active_record(&generated);
-        let (authn, store) = api_key_authn(
-            LookupAction::Return(Box::new(Some((
-                "principal-1".to_owned(),
-                generated.key_id.clone(),
-                record.clone(),
-            )))),
-            true,
-        );
+        let (authn, store) = api_key_authn(LookupAction::Return(Box::new(Some((
+            "principal-1".to_owned(),
+            generated.key_id.clone(),
+            record.clone(),
+        )))));
 
         let success = authn
             .authenticate(
@@ -246,7 +189,6 @@ mod tests {
 
         assert_eq!(success.principal_id, "principal-1");
         assert_eq!(success.key_id, generated.key_id);
-        assert_eq!(success.upstream_kind, UpstreamKind::AnthropicKey);
         assert_eq!(success.last_4, generated.last_4);
         assert_eq!(
             success.api_key.as_deref(),
@@ -262,14 +204,11 @@ mod tests {
     async fn bearer_happy_path() {
         let generated = secret::generate_new();
         let record = active_record(&generated);
-        let (authn, store) = api_key_authn(
-            LookupAction::Return(Box::new(Some((
-                "principal-1".to_owned(),
-                generated.key_id.clone(),
-                record.clone(),
-            )))),
-            true,
-        );
+        let (authn, store) = api_key_authn(LookupAction::Return(Box::new(Some((
+            "principal-1".to_owned(),
+            generated.key_id.clone(),
+            record.clone(),
+        )))));
         let bearer = format!("Bearer {}", generated.plaintext.expose());
 
         let success = authn
@@ -292,14 +231,11 @@ mod tests {
     async fn bearer_lowercase_scheme() {
         let generated = secret::generate_new();
         let record = active_record(&generated);
-        let (authn, _store) = api_key_authn(
-            LookupAction::Return(Box::new(Some((
-                "principal-1".to_owned(),
-                generated.key_id.clone(),
-                record,
-            )))),
-            true,
-        );
+        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(Some((
+            "principal-1".to_owned(),
+            generated.key_id.clone(),
+            record,
+        )))));
         let bearer = format!("bearer {}", generated.plaintext.expose());
 
         let success = authn
@@ -316,7 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn bearer_invalid_format() {
-        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)), true);
+        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)));
 
         let error = authn_error(
             authn
@@ -334,14 +270,11 @@ mod tests {
     async fn xapikey_wins_over_authorization() {
         let generated = secret::generate_new();
         let record = active_record(&generated);
-        let (authn, _store) = api_key_authn(
-            LookupAction::Return(Box::new(Some((
-                "principal-1".to_owned(),
-                generated.key_id.clone(),
-                record,
-            )))),
-            true,
-        );
+        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(Some((
+            "principal-1".to_owned(),
+            generated.key_id.clone(),
+            record,
+        )))));
 
         let success = authn
             .authenticate(
@@ -363,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn neither_header_returns_missing() {
-        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)), true);
+        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)));
 
         let error = authn_error(
             authn
@@ -377,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn storage_unavailable_returns_503() {
         let generated = secret::generate_new();
-        let (authn, _store) = api_key_authn(LookupAction::Unavailable, true);
+        let (authn, _store) = api_key_authn(LookupAction::Unavailable);
 
         let error = authn_error(
             authn
@@ -395,7 +328,7 @@ mod tests {
     #[tokio::test]
     async fn storage_transient_returns_503() {
         let generated = secret::generate_new();
-        let (authn, _store) = api_key_authn(LookupAction::Transient, true);
+        let (authn, _store) = api_key_authn(LookupAction::Transient);
 
         let error = authn_error(
             authn
@@ -413,7 +346,7 @@ mod tests {
     #[tokio::test]
     async fn missing_lookup_stays_401_not_found() {
         let generated = secret::generate_new();
-        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)), true);
+        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)));
 
         let error = authn_error(
             authn
@@ -428,32 +361,6 @@ mod tests {
         assert_eq!(error.http_status(), 401);
     }
 
-    #[tokio::test]
-    async fn authenticate_none_mode_is_async() {
-        let store = Arc::new(StubManagedKeyStore::new(LookupAction::Return(Box::new(
-            None,
-        ))));
-        let authn = BuiltinAuthn::new(
-            DownstreamAuthMode::None,
-            Some(NoneModeConfig {
-                principal_id: "principal-none".to_owned(),
-                upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
-            }),
-            Some(Arc::new(KeyStore::new(store))),
-            Arc::new(cc_lb_clock::SystemClock),
-        );
-
-        let success = authn
-            .authenticate_none_mode(&headers("passthrough-key"))
-            .await
-            .expect("none mode authenticates without storage lookup");
-
-        assert_eq!(success.principal_id, "principal-none");
-        assert_eq!(success.key_id, "none-mode");
-        assert_eq!(success.upstream_kind, UpstreamKind::AnthropicOAuth);
-        assert_eq!(success.api_key.as_deref(), Some("passthrough-key"));
-    }
-
     fn authn_error(result: Result<AuthnSuccess, BuiltinAuthError>) -> BuiltinAuthError {
         match result {
             Ok(_) => panic!("authentication unexpectedly succeeded"),
@@ -461,15 +368,10 @@ mod tests {
         }
     }
 
-    fn api_key_authn(
-        lookup: LookupAction,
-        _principal_enabled: bool,
-    ) -> (BuiltinAuthn, Arc<StubManagedKeyStore>) {
+    fn api_key_authn(lookup: LookupAction) -> (BuiltinAuthn, Arc<StubManagedKeyStore>) {
         let store = Arc::new(StubManagedKeyStore::new(lookup));
         let authn = BuiltinAuthn::new(
-            DownstreamAuthMode::ApiKey,
-            None,
-            Some(Arc::new(KeyStore::new(store.clone()))),
+            Arc::new(KeyStore::new(store.clone())),
             Arc::new(cc_lb_clock::SystemClock),
         );
         (authn, store)
@@ -518,11 +420,9 @@ mod tests {
             key_hash_b64: generated.key_id.clone(),
             verify_hash: generated.verify_hash,
             secret_salt: generated.secret_salt,
-            upstream_kind: UpstreamKind::AnthropicKey,
             status: KeyStatus::Active,
             expires_at_unix_secs: Some(4_102_444_800),
             last_4: generated.last_4.clone(),
-            principal_kind: PrincipalKindLite::Machine,
             index_hash: generated.index_hash,
             ..StoredApiKeyRecord::default()
         }

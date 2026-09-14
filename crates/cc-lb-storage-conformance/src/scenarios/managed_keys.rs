@@ -6,9 +6,7 @@ use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     ManagedKeyStore, StorageError,
-    types::{
-        ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind, PrincipalKindLite, UpstreamKind,
-    },
+    types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind},
 };
 use futures::future::try_join_all;
 
@@ -373,11 +371,6 @@ fn issue_params(seed: u8) -> IssueParams {
     IssueParams {
         label: format!("managed-key-{seed}"),
         description: Some(format!("description-{seed}")),
-        upstream_kind: if seed.is_multiple_of(2) {
-            UpstreamKind::AnthropicOAuth
-        } else {
-            UpstreamKind::AnthropicKey
-        },
         expires_at_unix_secs: Some(1_900_000_000 + u64::from(seed)),
         limit_overrides: vec![
             Limit {
@@ -394,11 +387,6 @@ fn issue_params(seed: u8) -> IssueParams {
         secret_salt: [seed; 16],
         verify_hash: [seed.wrapping_add(1); 32],
         last_4: format!("{seed:04}"),
-        principal_kind: if seed.is_multiple_of(2) {
-            PrincipalKindLite::Human
-        } else {
-            PrincipalKindLite::Machine
-        },
         index_hash: [seed.wrapping_add(2); 32],
     }
 }
@@ -414,13 +402,11 @@ fn expected_record(
         key_hash_b64: base64_url_no_pad(&params.verify_hash),
         verify_hash: params.verify_hash,
         secret_salt: params.secret_salt,
-        upstream_kind: params.upstream_kind,
         limit_overrides: params.limit_overrides.clone(),
         status: KeyStatus::Active,
         expires_at_unix_secs: params.expires_at_unix_secs,
         last_4: params.last_4.clone(),
         description: params.description.clone(),
-        principal_kind: params.principal_kind,
         index_hash: params.index_hash,
     }
 }

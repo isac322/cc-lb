@@ -10,22 +10,23 @@ metrics_addr = "127.0.0.1:9091"
 # key_path = "./certs/server.key"
 # reload_on_sighup = true
 
-# Lifecycle body caps. The lifecycle enforces these after hop-by-hop stripping.
+# Active request body caps.
 [body]
 messages_cap_bytes = 33554432
 files_cap_bytes = 104857600
 
-# Request timeout knobs used by the server and lifecycle composition.
+# End-to-end upstream and graceful-drain timeouts.
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 600
 drain_secs = 60
 
-# Smoke upstream. Start fake-anthropic on port 9080 before running cc-lb.
+# SQLite stores principals, upstreams, and managed API keys.
 [storage]
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
+kind = "sqlite"
+path = "./data/cc-lb.sqlite"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
 
 # Retain learned upstream affinity bindings for 90 days from their last successful binding.
 [upstream_affinity]
@@ -40,10 +41,11 @@ log_redaction = true
 user_prompt_redaction = false
 # otlp_endpoint = "http://127.0.0.1:4317"
 
-# New deployments configure the provider registry with
-# CC_LB_ADMIN_AUTH_PROVIDERS_JSON. This legacy block remains temporarily so an
-# existing deployment upgrades without a pre-upgrade configuration change.
-[admin]
+# Configure the admin provider registry explicitly. The token itself remains
+# in the environment named by this static-token provider.
+[[admin.auth.providers]]
+kind = "static_token"
+id = "local"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 # Circuit breaker settings applied per upstream host.
@@ -56,11 +58,3 @@ half_open_after_secs = 30
 [bulkhead]
 max_conns_per_upstream = 50
 semaphore_per_upstream = 100
-
-# DNS cache bounds used by the default dispatcher path.
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-# Optional egress allow-list placeholder for later policy tasks.
-[egress]

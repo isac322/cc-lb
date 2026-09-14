@@ -6,6 +6,7 @@ async fn metrics_endpoint_reachable() {
     let _ = common::http_post(
         server.proxy_addr,
         "/v1/messages",
+        &server.managed_key.plaintext,
         r#"{"model":"claude-3-5-sonnet-20241022","messages":[],"max_tokens":1}"#,
         &[],
     )

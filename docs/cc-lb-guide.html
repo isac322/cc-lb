@@ -320,21 +320,12 @@ messages_cap_bytes = 33554432
 files_cap_bytes    = 104857600
 
 [timeouts]
-request_header_secs     = 10
-request_body_chunk_secs = 30
-idle_secs               = 300
 upstream_total_secs     = 600
 drain_secs              = 60
 
 [runtime]
 data_dir = "./data"
 
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
 
 [storage]
 kind = "sqlite"
@@ -348,7 +339,9 @@ tracing_level         = "info"
 log_redaction         = true
 user_prompt_redaction = false
 
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "quickstart"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 [circuit_breaker]
@@ -359,12 +352,8 @@ half_open_after_secs = 30
 [bulkhead]
 max_conns_per_upstream  = 50
 semaphore_per_upstream  = 100
+</code></pre><button class="copy">복사</button></div>
 
-[dns]
-cache_ttl_floor_secs   = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]</code></pre><button class="copy">복사</button></div>
         <div class="callout tip">
           <span class="label">팁</span>
           <a href="#config-builder">인터랙티브 Config 빌더</a>에서 옵션 골라 자동 생성할 수도 있습니다.
@@ -372,10 +361,11 @@ cache_ttl_ceiling_secs = 300
       </li>
 
       <li>
-        <h3>환경변수 (마스터키 + admin 토큰)</h3>
-        <p><code>[aead]</code>의 <code>key_env</code>가 가리키는 변수와 <code>[admin]</code>의 <code>token_env</code>를 설정합니다. Quick start는 <code>./data/cc-lb.sqlite</code>를 사용하고, upstream/principal은 서버가 뜬 뒤 admin v1 API로 생성합니다.</p>
+        <h3>환경변수 (마스터키 + admin provider 토큰 + upstream credential)</h3>
+        <p><code>[aead]</code>의 <code>key_env</code>와 <code>[[admin.auth.providers]]</code>의 <code>token_env</code>가 가리키는 secret을 설정합니다. Quick start는 <code>./data/cc-lb.sqlite</code>를 사용하고, upstream/principal/API key는 서버가 뜬 뒤 admin v1 API로 생성합니다.</p>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>export CC_LB_MASTER_KEY=$(openssl rand -hex 32)   # 64자 hex 필수
-export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)</code></pre><button class="copy">복사</button></div>
+export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)
+export ANTHROPIC_UPSTREAM_API_KEY=sk-ant-api03-...</code></pre><button class="copy">복사</button></div>
       </li>
 
       <li>
@@ -392,13 +382,13 @@ export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)</code></pre><button class="copy
       </li>
 
       <li>
-        <h3>Admin v1 API로 upstream/principal 생성</h3>
-        <p>정적 <code>quickstart.toml</code>에는 런타임 엔티티를 넣지 않습니다. 서버가 뜬 뒤 admin v1 API로 생성합니다.</p>
+        <h3>Admin v1 API로 upstream/principal/managed key 생성</h3>
+        <p>DB upstream이 provider kind와 credential 위치를 소유하고, DB principal이 client identity를 소유합니다.</p>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># upstream creation: POST /admin/v1/upstreams
 curl -s -X POST http://127.0.0.1:9090/admin/v1/upstreams \
   -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
   -H &quot;content-type: application/json&quot; \
-  -d &#39;{&quot;name&quot;:&quot;anthropic&quot;,&quot;kind&quot;:&quot;custom&quot;,&quot;base_url&quot;:&quot;https://api.anthropic.com&quot;}&#39;
+  -d &#39;{&quot;name&quot;:&quot;anthropic&quot;,&quot;kind&quot;:&quot;anthropic_api_key&quot;,&quot;base_url&quot;:&quot;https://api.anthropic.com&quot;,&quot;api_key_env&quot;:&quot;ANTHROPIC_UPSTREAM_API_KEY&quot;}&#39;
 
 # principal creation: POST /admin/v1/principals
 principal_id=$(curl -s -X POST http://127.0.0.1:9090/admin/v1/principals \
@@ -406,33 +396,23 @@ principal_id=$(curl -s -X POST http://127.0.0.1:9090/admin/v1/principals \
   -H &quot;content-type: application/json&quot; \
   -d &#39;{&quot;name&quot;:&quot;api-key&quot;,&quot;kind&quot;:&quot;machine&quot;,&quot;allowed_models&quot;:[&quot;*&quot;]}&#39; | jq -r .id)
 
-# plugin chain: POST /admin/v1/principals/{principal_id}/plugin-chain
-# 먼저 /admin/v1/plugins/wasm 에 Wasm을 업로드해서 wasm_registry_id를 얻은 뒤 연결합니다.
-curl -s -X POST &quot;http://127.0.0.1:9090/admin/v1/principals/$principal_id/plugin-chain&quot; \
+# managed API key issuance: POST /admin/v1/principals/{principal_id}/keys
+CC_LB_PROXY_KEY=$(curl -s -X POST &quot;http://127.0.0.1:9090/admin/v1/principals/$principal_id/keys&quot; \
   -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
   -H &quot;content-type: application/json&quot; \
-  -d &#39;{&quot;slot&quot;:&quot;observability_hook&quot;,&quot;wasm_registry_id&quot;:&quot;00000000-0000-0000-0000-000000000000&quot;,&quot;config&quot;:{}}&#39;</code></pre><button class="copy">복사</button></div>
-        <p><code>bootstrap.toml</code>로 초기 시드가 필요하면 <code>data_dir</code> 아래에 아래 형식으로 두면 됩니다. 이 배열-of-tables 형식은 bootstrap seeder에서만 사용합니다.</p>
-        <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>&#91;&#91;upstreams&#93;&#93;
-name = &quot;anthropic&quot;
-kind = &quot;custom&quot;
-base_url = &quot;https://api.anthropic.com&quot;
-
-&#91;&#91;principals&#93;&#93;
-name = &quot;api-key&quot;
-kind = &quot;machine&quot;</code></pre><button class="copy">복사</button></div>
+  -d &#39;{&quot;label&quot;:&quot;quickstart&quot;}&#39; | jq -r .plaintext_key)</code></pre><button class="copy">복사</button></div>
       </li>
 
       <li>
-        <h3>실제 Anthropic 키로 호출 (가장 중요한 단계)</h3>
-        <p>본인 Anthropic 키 (<code>sk-ant-api03-...</code>)를 <code>x-api-key</code>로 그대로 보내면 cc-lb가 그대로 forwarding합니다.</p>
+        <h3>발급한 managed API key로 호출 (가장 중요한 단계)</h3>
+        <p>앞 단계에서 한 번만 표시된 <code>CC_LB_PROXY_KEY</code>를 <code>x-api-key</code>로 보냅니다. cc-lb는 이 키의 DB principal을 인증하고, DB에서 선택한 upstream의 credential로 요청을 전달합니다.</p>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 헬스 체크 먼저
 curl -s http://127.0.0.1:8080/healthz
 # 응답: ok
 
 # 실제 호출 (non-streaming)
 curl -s -X POST http://127.0.0.1:8080/v1/messages \
-  -H &quot;x-api-key: $YOUR_ANTHROPIC_KEY&quot; \
+  -H &quot;x-api-key: $CC_LB_PROXY_KEY&quot; \
   -H &quot;anthropic-version: 2023-06-01&quot; \
   -H &quot;content-type: application/json&quot; \
   -d &#39;{
@@ -443,7 +423,7 @@ curl -s -X POST http://127.0.0.1:8080/v1/messages \
 
 # 실제 호출 (SSE 스트리밍)
 curl -N -X POST http://127.0.0.1:8080/v1/messages \
-  -H &quot;x-api-key: $YOUR_ANTHROPIC_KEY&quot; \
+  -H &quot;x-api-key: $CC_LB_PROXY_KEY&quot; \
   -H &quot;anthropic-version: 2023-06-01&quot; \
   -H &quot;content-type: application/json&quot; \
   -d &#39;{
@@ -477,22 +457,22 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
         <h3>클라이언트 붙이기</h3>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 예: Claude Code
 ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
-  ANTHROPIC_API_KEY=$YOUR_ANTHROPIC_KEY \
+  ANTHROPIC_API_KEY=$CC_LB_PROXY_KEY \
   claude
 
 # 예: OpenCode
 ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
-  ANTHROPIC_API_KEY=$YOUR_ANTHROPIC_KEY \
+  ANTHROPIC_API_KEY=$CC_LB_PROXY_KEY \
   opencode
 
 # 예: pi
 ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
-  ANTHROPIC_API_KEY=$YOUR_ANTHROPIC_KEY \
+  ANTHROPIC_API_KEY=$CC_LB_PROXY_KEY \
   pi
 
 # 예: Senpi (요청 종류 분류, 세션 헤더 없음)
 ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
-  ANTHROPIC_API_KEY=$YOUR_ANTHROPIC_KEY \
+  ANTHROPIC_API_KEY=$CC_LB_PROXY_KEY \
   senpi --provider anthropic --model claude-sonnet-4-5</code></pre><button class="copy">복사</button></div>
         <div class="callout info">
           <span class="label">Senpi 세션 ID</span>
@@ -514,7 +494,7 @@ cat &gt; &quot;$SENPI_CODING_AGENT_DIR/models.json&quot; &lt;&lt;&#39;JSON&#39;
 }
 JSON
 
-ANTHROPIC_API_KEY=$YOUR_ANTHROPIC_KEY \
+ANTHROPIC_API_KEY=$CC_LB_PROXY_KEY \
   senpi --provider anthropic --model claude-sonnet-4-5 \
   --session-id my-senpi-session</code></pre><button class="copy">복사</button></div>
         <p>이 시점부터 모든 호출이 cc-lb를 통과하며 메트릭/감사 로그에 잡힙니다.</p>
@@ -570,17 +550,14 @@ kill -TERM $(pgrep -f &#39;[c]c-lb serve&#39;)</code></pre><button class="copy">
 
     <h4>현실</h4>
     <ul>
-      <li>이게 cc-lb가 가장 잘하는 기본 path입니다. Plugin 불필요. Storage 불필요. <span class="pill ok">즉시 동작</span></li>
-      <li>키는 <code>x-api-key</code> 헤더 그대로 forwarding됩니다. cc-lb는 키 값 자체는 redact해서 로그에 남기고 메트릭에는 노출하지 않습니다.</li>
+      <li>Plugin 없이 DB principal과 DB upstream만으로 동작합니다. <span class="pill ok">즉시 동작</span></li>
+      <li>클라이언트는 principal에 발급된 managed API key를 보냅니다. Principal kind는 해당 DB principal에서, upstream kind는 라우터가 선택한 DB upstream에서 가져옵니다.</li>
     </ul>
 
     <h4>최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[downstream_auth]
-mode = &quot;none&quot;
-
-[downstream_auth.none_mode]
-principal_id = &quot;api-key&quot;
-upstream_kind = &quot;anthropic_key&quot;
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[storage]
+kind = &quot;sqlite&quot;
+path = &quot;./data/cc-lb.sqlite&quot;
 
 [observability]
 tracing_level = &quot;info&quot;
@@ -661,7 +638,7 @@ export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_crede
 
 # 본인이 enroll된 Bedrock 모델 ID로 호출
 curl -s http://127.0.0.1:8080/v1/messages \
-  -H &quot;x-api-key: dummy&quot; \
+  -H &quot;x-api-key: $CC_LB_PROXY_KEY&quot; \
   -H &quot;anthropic-version: 2023-06-01&quot; \
   -d &#39;{
     &quot;model&quot;: &quot;anthropic.claude-sonnet-4-5-20250929-v1:0&quot;,
@@ -746,7 +723,9 @@ path = &quot;/var/lib/cc-lb/cc-lb.sqlite&quot;
 [aead]
 key_env = &quot;CC_LB_MASTER_KEY&quot;
 
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "local"
 token_env = &quot;CC_LB_ADMIN_TOKEN&quot;
 
 # Create an anthropic_oauth upstream with POST /admin/v1/upstreams,
@@ -767,9 +746,9 @@ curl -s -X POST http://127.0.0.1:9090/admin/v1/upstreams/$UPSTREAM_ID/oauth/comp
   -d &#39;{&quot;principal_id&quot;:&quot;me&quot;,&quot;code&quot;:&quot;...&quot;,&quot;code_verifier&quot;:&quot;...&quot;}&#39;</code></pre><button class="copy">복사</button></div>
 
     <h4>확인</h4>
-    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 이제 별도 x-api-key 없이도 (또는 임의 값으로) 호출 가능
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># principal에 발급한 managed API key로 호출
 curl -s http://127.0.0.1:8080/v1/messages \
-  -H &quot;x-api-key: dummy&quot; \
+  -H &quot;x-api-key: $CC_LB_PROXY_KEY&quot; \
   -H &quot;anthropic-version: 2023-06-01&quot; \
   -H &quot;anthropic-beta: oauth-2025-04-20&quot; \
   -d &#39;{&quot;model&quot;:&quot;claude-sonnet-4-5-20250929&quot;,&quot;max_tokens&quot;:16,&quot;messages&quot;:[{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;hi&quot;}]}&#39;
@@ -785,29 +764,10 @@ curl -s http://127.0.0.1:8080/v1/messages \
         <label>Upstream 종류</label>
         <select id="b-upstream">
           <option value="anthropic">Anthropic Direct (가장 흔함)</option>
-          <option value="bedrock">AWS Bedrock Runtime</option>
-          <option value="vertex">GCP Vertex AI</option>
           <option value="custom">Custom (테스트/내부 게이트웨이)</option>
         </select>
       </div>
 
-      <div class="row">
-        <label>인증 방식</label>
-        <select id="b-auth">
-          <option value="api_key">api_key (x-api-key forwarding)</option>
-          <option value="anthropic_oauth">anthropic_oauth (Claude Pro 토큰)</option>
-          <option value="aws_sigv4">aws_sigv4 (Bedrock 전용)</option>
-          <option value="gcp_oauth">gcp_oauth (Vertex 전용)</option>
-        </select>
-      </div>
-
-      <div class="row">
-        <label>Bedrock region</label>
-        <input type="text" id="b-aws-region" value="us-east-1" />
-        <label>Vertex project / region</label>
-        <input type="text" id="b-gcp-project" value="my-project" />
-        <input type="text" id="b-gcp-region" value="us-east5" />
-      </div>
 
       <div class="row">
         <label>Custom base_url</label>
@@ -816,7 +776,7 @@ curl -s http://127.0.0.1:8080/v1/messages \
 
       <div class="row">
         <label class="check"><input type="checkbox" id="b-tls" /> TLS 켜기</label>
-        <label class="check"><input type="checkbox" id="b-storage" /> sqlite 저장소 켜기 (OAuth/Quota 영속화)</label>
+        <label class="check"><input type="checkbox" id="b-storage" /> 영구 sqlite 경로 사용</label>
         <label class="check"><input type="checkbox" id="b-plugin" /> 플러그인 슬롯 비워두기 → 채워두기</label>
       </div>
 
@@ -858,14 +818,13 @@ curl -s http://127.0.0.1:8080/v1/messages \
     <table>
       <tr><th>엔드포인트</th><th>설명</th></tr>
       <tr><td><code>GET /admin/health</code></td><td>비인증 헬스</td></tr>
-      <tr><td><code>GET /admin/principals</code></td><td>principal 목록</td></tr>
-      <tr><td><code>GET /admin/principals/{id}/quota</code></td><td>현재 정책 + 카운터</td></tr>
-      <tr><td><code>POST /admin/principals/{id}/quota/override</code></td><td>런타임 정책 변경 (in-memory)</td></tr>
-      <tr><td><code>GET /admin/audit?from=&amp;to=&amp;limit=</code></td><td>감사 로그</td></tr>
-      <tr><td><code>GET /admin/upstreams</code></td><td>upstream 상태 (breaker/drain)</td></tr>
-      <tr><td><code>POST /admin/upstreams/{name}/drain</code></td><td>특정 upstream drain</td></tr>
-      <tr><td><code>GET /admin/config/current</code></td><td>live config 스냅샷</td></tr>
-      <tr><td><code>POST /admin/config/reload</code></td><td>self SIGHUP</td></tr>
+      <tr><td><code>GET /admin/v1/principals</code></td><td>DB principal 목록</td></tr>
+      <tr><td><code>GET /admin/v1/principals/{id}/limits</code></td><td>principal의 DB 저장 기본 한도</td></tr>
+      <tr><td><code>GET /admin/v1/audit?from=&amp;to=&amp;limit=</code></td><td>감사 로그</td></tr>
+      <tr><td><code>GET /admin/v1/upstreams</code></td><td>DB upstream 목록과 상태</td></tr>
+      <tr><td><code>POST /admin/v1/upstreams/{id}/disable</code></td><td>upstream 비활성화</td></tr>
+      <tr><td><code>GET /admin/v1/config/current</code></td><td>live config 스냅샷</td></tr>
+      <tr><td><code>POST /admin/v1/config/reload</code></td><td>설정 파일 재로드</td></tr>
       <tr><td><code>GET /</code></td><td>embedded admin UI (HTML)</td></tr>
     </table>
 
@@ -925,10 +884,6 @@ WantedBy=multi-user.target</code></pre><button class="copy">복사</button></div
       <p>정상 동작입니다. 빌트인 router는 첫 upstream만 사용합니다. <a href="#uc-multi-key">Use Case ②</a>의 4가지 분산 방법 중 하나 선택하세요.</p>
     </details>
 
-    <details>
-      <summary>Bedrock dialect로 fake fixture 테스트 안 됨</summary>
-      <p><code>bedrock_runtime</code>, <code>vertex</code>, <code>bedrock_mantle</code>, <code>anthropic_direct</code>는 base_url을 hardcode합니다. 로컬 fixture로 테스트하려면 <code>kind = "custom"</code>으로 base_url을 자유 지정해서 fake-anthropic을 띄우는 방식만 가능합니다. 운영에서는 실제 provider로 직행하므로 문제 없음.</p>
-    </details>
 
     <details>
       <summary><code>cargo build</code>가 forbidden dep 충돌로 실패</summary>
@@ -955,7 +910,7 @@ WantedBy=multi-user.target</code></pre><button class="copy">복사</button></div
     <table>
       <tr><th>변수</th><th>의미</th></tr>
       <tr><td><code>CC_LB_MASTER_KEY</code></td><td>32바이트(64hex) AEAD 마스터키. OAuth/quota 저장에 필수.</td></tr>
-      <tr><td><code>CC_LB_ADMIN_TOKEN</code></td><td>Admin REST Bearer 토큰</td></tr>
+      <tr><td><code>CC_LB_ADMIN_TOKEN</code></td><td><code>admin.auth.providers</code>의 static-token provider가 참조하는 Admin REST Bearer 토큰</td></tr>
       <tr><td><code>CC_LB_&lt;SEC&gt;__&lt;FIELD&gt;</code></td><td>모든 TOML 필드 환경변수 오버라이드 (nested는 <code>__</code> 이중 언더스코어)</td></tr>
       <tr><td><code>AWS_PROFILE</code> / 표준 AWS 환경변수</td><td>Bedrock SigV4 credential chain</td></tr>
       <tr><td><code>GOOGLE_APPLICATION_CREDENTIALS</code></td><td>Vertex ADC</td></tr>
@@ -981,12 +936,11 @@ curl -s http://127.0.0.1:9091/metrics | grep ^cc_lb_requests_total
 
 # 모든 upstream의 breaker 상태
 curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
-  http://127.0.0.1:9090/admin/upstreams | jq</code></pre><button class="copy">복사</button></div>
+  http://127.0.0.1:9090/admin/v1/upstreams | jq</code></pre><button class="copy">복사</button></div>
 
     <h2 id="caveats">알려진 한계</h2>
     <ul>
       <li><b>terminal strategy는 단순 선택만 담당</b> — 가중치, 연결 수, 외부 상태 기반 정책은 filter plugin으로 후보를 줄인 뒤 적용해야 합니다. <a href="#uc-multi-key">Use Case ②</a> 참고.</li>
-      <li><b>Anthropic Direct / Bedrock / Vertex dialect의 base_url 무시</b> — production hardcoded URL을 사용합니다. 로컬 e2e fixture는 <code>kind = "custom"</code>으로만 가능.</li>
       <li><b>모델명 자동 변환 없음</b> — Bedrock/Vertex 모델 ID는 본문 <code>model</code>에 provider 형식 그대로 보내야 합니다.</li>
       <li><b>cross-LLM 변환 없음</b> — Anthropic Messages API 형식만 지원. OpenAI/Gemini 형식 변환은 scope 밖.</li>
       <li><b>스트리밍 ↔ 비스트리밍 변환 없음</b> — 요청 그대로 forwarding.</li>
@@ -1095,10 +1049,6 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
 
   // ---------- Config builder ----------
   var bUpstream = document.getElementById('b-upstream');
-  var bAuth = document.getElementById('b-auth');
-  var bAwsRegion = document.getElementById('b-aws-region');
-  var bGcpProject = document.getElementById('b-gcp-project');
-  var bGcpRegion = document.getElementById('b-gcp-region');
   var bCustomUrl = document.getElementById('b-custom-url');
   var bTls = document.getElementById('b-tls');
   var bStorage = document.getElementById('b-storage');
@@ -1108,7 +1058,6 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
 
   function renderBuilder() {
     var up = bUpstream.value;
-    var auth = bAuth.value;
     var toml = '';
     toml += '[listener]\n';
     toml += 'proxy_addr   = "127.0.0.1:8080"\n';
@@ -1126,9 +1075,6 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     toml += 'messages_cap_bytes = 33554432\n';
     toml += 'files_cap_bytes    = 104857600\n\n';
     toml += '[timeouts]\n';
-    toml += 'request_header_secs     = 10\n';
-    toml += 'request_body_chunk_secs = 30\n';
-    toml += 'idle_secs               = 300\n';
     toml += 'upstream_total_secs     = 600\n';
     toml += 'drain_secs              = 60\n\n';
 
@@ -1136,11 +1082,6 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     var upstreamBaseUrl = up === 'custom' ? bCustomUrl.value : 'https://api.anthropic.com';
     toml += '[runtime]\n';
     toml += 'data_dir = "/var/lib/cc-lb"\n\n';
-    toml += '[downstream_auth]\n';
-    toml += 'mode = "none"\n\n';
-    toml += '[downstream_auth.none_mode]\n';
-    toml += 'principal_id = "api-key"\n';
-    toml += 'upstream_kind = "anthropic_key"\n\n';
 
     toml += '[storage]\n';
     toml += 'kind = "sqlite"\n';
@@ -1153,7 +1094,9 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     toml += 'log_redaction         = true\n';
     toml += 'user_prompt_redaction = false\n\n';
 
-    toml += '[admin]\n';
+    toml += '[[admin.auth.providers]]\n';
+    toml += 'kind = "static_token"\n';
+    toml += 'id = "local"\n';
     toml += 'token_env = "CC_LB_ADMIN_TOKEN"\n\n';
 
     toml += '[circuit_breaker]\n';
@@ -1165,11 +1108,6 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     toml += 'max_conns_per_upstream  = 50\n';
     toml += 'semaphore_per_upstream  = 100\n\n';
 
-    toml += '[dns]\n';
-    toml += 'cache_ttl_floor_secs   = 30\n';
-    toml += 'cache_ttl_ceiling_secs = 300\n\n';
-
-    toml += '[egress]\n';
 
     outToml.textContent = toml;
 
@@ -1178,8 +1116,7 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     cmd += '# 1) 환경변수\n';
     cmd += 'export CC_LB_MASTER_KEY=$(openssl rand -hex 32)\n';
     cmd += 'export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)\n';
-    if (up === 'bedrock') cmd += 'export AWS_PROFILE=default\n';
-    if (up === 'vertex') cmd += 'export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_credentials.json\n';
+    cmd += 'export ANTHROPIC_UPSTREAM_API_KEY=sk-ant-api03-...\n';
     cmd += '\n# 2) 위 toml을 cc-lb.toml로 저장 후 validate\n';
     cmd += './target/debug/cc-lb config validate --config cc-lb.toml\n';
     cmd += '\n# 3) 실행\n';
@@ -1192,7 +1129,11 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     cmd += 'curl -s -X POST http://127.0.0.1:9090/admin/v1/upstreams \\\n';
     cmd += '  -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" \\\n';
     cmd += '  -H "content-type: application/json" \\\n';
-    cmd += '  -d \'{"name":"' + upstreamName + '","kind":"custom","base_url":"' + upstreamBaseUrl + '"}\'\n';
+    cmd += '  -d \'{"name":"' + upstreamName + '","kind":"anthropic_api_key","base_url":"' + upstreamBaseUrl + '","api_key_env":"ANTHROPIC_UPSTREAM_API_KEY"}\'\n';
+    cmd += 'CC_LB_PROXY_KEY=$(curl -s -X POST "http://127.0.0.1:9090/admin/v1/principals/$principal_id/keys" \\\n';
+    cmd += '  -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" \\\n';
+    cmd += '  -H "content-type: application/json" \\\n';
+    cmd += '  -d \'{"label":"generated-config"}\' | jq -r .plaintext_key)\n';
     if (bPlugin.checked) {
       cmd += '# Upload Wasm first with POST /admin/v1/plugins/wasm, then replace the placeholder id.\n';
       cmd += 'curl -s -X POST "http://127.0.0.1:9090/admin/v1/principals/$principal_id/plugin-chain" \\\n';
@@ -1200,18 +1141,16 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
       cmd += '  -d \'{"slot":"ObservabilityHook","wasm_registry_id":"00000000-0000-0000-0000-000000000000","config":{}}\'\n';
     }
     cmd += '\n# 5) 호출 (model은 사용 중인 provider에 맞춰 조정)\n';
-    var sampleModel = up === 'bedrock'
-      ? 'anthropic.claude-sonnet-4-5-20250929-v1:0'
-      : 'claude-sonnet-4-5-20250929';
+    var sampleModel = 'claude-sonnet-4-5-20250929';
     cmd += 'curl -s -X POST http://127.0.0.1:8080/v1/messages \\\n';
-    cmd += '  -H "x-api-key: $YOUR_KEY" \\\n';
+    cmd += '  -H "x-api-key: $CC_LB_PROXY_KEY" \\\n';
     cmd += '  -H "anthropic-version: 2023-06-01" \\\n';
     cmd += '  -H "content-type: application/json" \\\n';
     cmd += '  -d \'{"model":"' + sampleModel + '","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}\'\n';
     outCmd.textContent = cmd;
   }
   ['change', 'input'].forEach(function (evt) {
-    [bUpstream, bAuth, bAwsRegion, bGcpProject, bGcpRegion, bCustomUrl, bTls, bStorage, bPlugin].forEach(function (el) {
+    [bUpstream, bCustomUrl, bTls, bStorage, bPlugin].forEach(function (el) {
       el.addEventListener(evt, renderBuilder);
     });
   });

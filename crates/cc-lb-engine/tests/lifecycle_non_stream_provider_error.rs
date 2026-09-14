@@ -243,9 +243,7 @@ async fn observe_429(
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
     let hook = Arc::new(RecordingHook::default());
-    let test_bus = TestLifecycleBus::new()
-        .with_assembler(storage.clone() as Arc<dyn StorageTrait>)
-        .with_hook_adapter(vec![hook.clone()]);
+    let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let BusReceiver::InMemory(mut event_updates) = test_bus.bus.subscribe() else {
         panic!("expected in-memory request-event receiver");
     };

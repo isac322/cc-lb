@@ -7,7 +7,7 @@ PROFILE=smoke
 FAKE_PID=''
 PROXY_PID=''
 TMP_DIR=''
-API_KEY='sk-ant-test'
+API_KEY=''
 ADMIN_TOKEN='admin-token'
 
 usage() {
@@ -169,6 +169,15 @@ seed_runtime() {
     command cat "$TMP_DIR/admin-upstream.json" >&2 || true
     fail "create upstream expected HTTP 201 or 409, got $upstream_code"
   fi
+
+  principal_id=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['id'])" "$TMP_DIR/admin-principal.json")
+  curl -sS -o "$TMP_DIR/admin-key.json" -X POST \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'content-type: application/json' \
+    --data '{"label":"live-tail-load"}' \
+    "http://127.0.0.1:$admin_port/admin/v1/principals/$principal_id/keys"
+  API_KEY=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plaintext_key'])" "$TMP_DIR/admin-key.json")
+  export CC_LB_API_KEY="$API_KEY"
 }
 
 render_config() {
@@ -184,21 +193,13 @@ messages_cap_bytes = 33554432
 files_cap_bytes = 104857600
 
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
 [runtime]
 data_dir = "$TMP_DIR"
 
-[downstream_auth]
-mode = "none"
 
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
 
 [storage]
 kind = "sqlite"
@@ -211,7 +212,7 @@ storage_tail_poll_interval_ms = 250
 [aead]
 key_env = "CC_LB_MASTER_KEY"
 
-[api_keys.price_catalog]
+[price_catalog]
 cache_path = "$TMP_DIR/price-catalog.json"
 
 [observability]
@@ -219,7 +220,9 @@ tracing_level = "warn"
 log_redaction = true
 user_prompt_redaction = false
 
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "load-test"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 [circuit_breaker]
@@ -231,11 +234,6 @@ half_open_after_secs = 30
 max_conns_per_upstream = 1000
 semaphore_per_upstream = 1000
 
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]
 TOML
 }
 

@@ -8,9 +8,6 @@ messages_cap_bytes = 256
 files_cap_bytes = 1048576
 
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
@@ -35,7 +32,9 @@ tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = false
 
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "test"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 [circuit_breaker]
@@ -46,9 +45,3 @@ half_open_after_secs = 30
 [bulkhead]
 max_conns_per_upstream = 50
 semaphore_per_upstream = 100
-
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]

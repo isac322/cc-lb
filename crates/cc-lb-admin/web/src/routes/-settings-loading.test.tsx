@@ -259,7 +259,7 @@ test('settings empty and loaded checklist/history states retain their slots', ()
   expect(within(loadedHistorySlot).getByText('on')).toBeDefined();
 });
 
-test('settings editor loads the saved draft and documents startup token replacement', () => {
+test('settings editor loads the saved draft and documents static-token secret replacement', () => {
   setSettingsLoaded();
   const savedDraft = {
     routing: { strategy: 'saved-draft' },
@@ -290,13 +290,16 @@ test('settings editor loads the saved draft and documents startup token replacem
   expect(adminTokenCard.textContent).not.toContain('Rotate token');
   expect(screen.queryByText('Rotate admin token?')).toBeNull();
   expect(screen.getByTestId('admin-token-guidance').textContent).toContain(
-    'admin.token_env (default: CC_LB_ADMIN_TOKEN)',
+    'static_token',
   );
   expect(screen.getByTestId('admin-token-guidance').textContent).toContain(
-    "service's secret manager, then restart the cc-lb process",
+    'token_env',
   );
   expect(screen.getByTestId('admin-token-guidance').textContent).toContain(
-    'loaded only at startup and cannot be rotated from this dashboard',
+    'configured under admin.auth.providers and cannot be rotated from this dashboard',
+  );
+  expect(screen.getByTestId('admin-token-guidance').textContent).toContain(
+    'restart the cc-lb process',
   );
 });
 

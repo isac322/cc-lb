@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use cc_lb_pricing::{LiteLlmLoader, PriceCatalog, TierRate, UsdPerMillion};
 use cc_lb_storage_api::{BackendKind, MetaStore};
@@ -69,7 +68,6 @@ async fn refresh_discovers_canonical_tiers_and_excludes_non_tier_suffixes()
         Arc::clone(&catalog),
         storage,
         format!("{}/prices", server.uri()),
-        Duration::from_secs(60 * 60),
         dir.path().join("litellm-cache.json"),
         Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
     );
@@ -141,7 +139,6 @@ async fn refresh_applies_component_fallbacks_to_partial_tier_rates()
         Arc::clone(&catalog),
         storage,
         format!("{}/prices", server.uri()),
-        Duration::from_secs(60 * 60),
         dir.path().join("litellm-cache.json"),
         Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
     );

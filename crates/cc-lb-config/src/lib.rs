@@ -18,33 +18,16 @@ use tokio::task::JoinHandle;
 
 pub use types::{
     ADMIN_AUTH_PROVIDERS_JSON_ENV, AdminAuthConfig, AdminAuthProviderConfig, AdminConfig,
-    AnthropicOAuthConfig, ApiKeysConfig, BodyConfig, BulkheadConfig, CircuitBreakerConfig,
-    ClusterConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES,
-    DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH,
-    DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS, DnsConfig, DownstreamAuthConfig, DownstreamAuthMode,
-    EgressConfig, EventBusConfig, ListenerConfig, ListenerOverrides, NoneModeConfig,
-    NoneModeUpstreamKind, ObservabilityConfig, PluginFailurePolicy, PluginWireBounds,
+    AnthropicOAuthConfig, BodyConfig, BulkheadConfig, CircuitBreakerConfig, ClusterConfig, Config,
+    ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES,
+    DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH, DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS,
+    EventBusConfig, ListenerConfig, ListenerOverrides, ObservabilityConfig, PluginWireBounds,
     PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig, RecurringJobConfig,
-    RestartRequiredField, RuntimeConfig, SchedulerConfig, SchedulerIdempotencyConfig,
-    SchedulerPoolConfig, SchedulerRetryClasses, SchedulerRetryConfig, SchedulerStalenessConfig,
-    ShapeOriginPolicy, StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig,
-    UpstreamAffinityConfig, WasmtimeAllocationStrategy, WasmtimeConfig,
+    RestartRequiredField, RuntimeConfig, SchedulerConfig, SchedulerPoolConfig, ShapeOriginPolicy,
+    StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, UpstreamAffinityConfig,
+    WasmtimeAllocationStrategy, WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
-
-pub fn removed_prompt_cache_switch_warning(field: &str) -> String {
-    format!(
-        "removed prompt-cache disable switch `{field}` is ignored; cache-aware routing is always enabled"
-    )
-}
-
-pub fn config_warning_message(warning: &str) -> String {
-    if warning.starts_with("legacy [admin].token_env ") {
-        warning.to_owned()
-    } else {
-        removed_prompt_cache_switch_warning(warning)
-    }
-}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -68,71 +51,26 @@ impl From<figment::Error> for ConfigError {
 
 impl Config {
     pub fn load(toml_path: &Path) -> Result<Self, ConfigError> {
-        Self::load_with_warnings(toml_path).map(|(config, _warnings)| config)
-    }
-
-    pub fn load_with_warnings(toml_path: &Path) -> Result<(Self, Vec<String>), ConfigError> {
-        Self::load_with_overrides_and_warnings(toml_path, ConfigOverrides::default())
+        Self::load_with_overrides(toml_path, ConfigOverrides::default())
     }
 
     pub fn load_with_overrides(
         toml_path: &Path,
         cli_overrides: ConfigOverrides,
     ) -> Result<Self, ConfigError> {
-        Self::load_with_overrides_and_warnings(toml_path, cli_overrides)
-            .map(|(config, _warnings)| config)
-    }
-
-    pub fn load_with_overrides_and_warnings(
-        toml_path: &Path,
-        cli_overrides: ConfigOverrides,
-    ) -> Result<(Self, Vec<String>), ConfigError> {
-        let raw_toml = std::fs::read_to_string(toml_path).ok();
-        let mut warnings = raw_toml
-            .as_deref()
-            .map(validation::removed_prompt_cache_switches)
-            .unwrap_or_default();
-        let migrated_toml = match raw_toml.as_deref() {
-            Some(raw) => {
-                validation::validate_raw_toml(raw)?;
-                Some(validation::migrate_legacy_storage_toml(raw)?)
-            }
-            None => None,
-        };
-        warnings.extend(validation::removed_prompt_cache_env_switches());
-
-        let mut figment = Figment::from(Serialized::defaults(Config::default()));
-        figment = match migrated_toml.as_deref() {
-            Some(migrated) => figment.merge(Toml::string(migrated)),
-            None => figment.merge(Toml::file_exact(toml_path)),
-        };
-        let mut config: Config = figment
+        let mut config: Config = Figment::new()
+            .merge(Toml::file_exact(toml_path))
             .merge(Self::config_env())
             .merge(Serialized::defaults(cli_overrides))
             .extract()?;
 
-        let admin_auth_env_override = config.apply_admin_auth_env_override()?;
-        config.resolve_runtime_values();
+        config.apply_admin_auth_env_override()?;
         config.validate()?;
-        if !admin_auth_env_override
-            && config.admin.auth.providers.is_empty()
-            && config.admin.token.is_some()
-        {
-            warnings.push(format!(
-                "legacy [admin].token_env was automatically migrated in memory to the \
-                 static-token/legacy provider; configure {ADMIN_AUTH_PROVIDERS_JSON_ENV} before \
-                 legacy admin-token compatibility is removed"
-            ));
-        }
-        Ok((config, warnings))
+        Ok(config)
     }
 
     pub fn from_stored_toml(raw_toml: &str) -> Result<Self, ConfigError> {
-        validation::validate_raw_toml(raw_toml)?;
-        let migrated_toml = validation::migrate_legacy_storage_toml(raw_toml)?;
-        Ok(Figment::from(Serialized::defaults(Self::default()))
-            .merge(Toml::string(&migrated_toml))
-            .extract()?)
+        Ok(Figment::from(Toml::string(raw_toml)).extract()?)
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -165,10 +103,10 @@ impl Config {
             .split("__")
     }
 
-    fn apply_admin_auth_env_override(&mut self) -> Result<bool, ConfigError> {
+    fn apply_admin_auth_env_override(&mut self) -> Result<(), ConfigError> {
         let encoded = match env::var(ADMIN_AUTH_PROVIDERS_JSON_ENV) {
             Ok(encoded) => encoded,
-            Err(env::VarError::NotPresent) => return Ok(false),
+            Err(env::VarError::NotPresent) => return Ok(()),
             Err(env::VarError::NotUnicode(_)) => {
                 return Err(ConfigError::InvalidAdminAuthProvidersEnv {
                     env: ADMIN_AUTH_PROVIDERS_JSON_ENV,
@@ -190,16 +128,6 @@ impl Config {
             });
         }
         self.admin.auth.providers = providers;
-        Ok(true)
-    }
-
-    fn resolve_runtime_values(&mut self) {
-        self.admin.token = if self.admin.token_env.trim().is_empty() {
-            None
-        } else {
-            env::var(&self.admin.token_env)
-                .ok()
-                .filter(|token| !token.is_empty())
-        };
+        Ok(())
     }
 }

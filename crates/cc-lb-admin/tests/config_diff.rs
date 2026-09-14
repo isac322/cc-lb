@@ -77,41 +77,31 @@ async fn config_diff_route_returns_history_difference() {
 }
 
 #[tokio::test]
-async fn config_diff_reads_history_with_removed_prompt_cache_switches() {
+async fn config_diff_reads_top_level_retention_and_price_catalog_history() {
     let (_dir, storage) = config_admin_common::temp_storage().await;
-    storage
-        .append_config_history(
-            1,
-            r#"
-[body]
-messages_cap_bytes = 100
-
-[prompt_cache_shadow]
-enabled = true
-
-[lifecycle_prompt_cache_drift_subscriber]
-enabled = true
-
-[lifecycle_prompt_cache_observation_subscriber]
-enabled = true
-"#
-            .to_owned(),
-            1001,
-            HistorySummary { tls_enabled: false },
-        )
-        .await
-        .unwrap();
-    let mut to_config = Config::default();
-    to_config.body.messages_cap_bytes = 200;
-    storage
-        .append_config_history(
-            2,
-            toml::to_string_pretty(&to_config).unwrap(),
-            1002,
-            HistorySummary { tls_enabled: false },
-        )
-        .await
-        .unwrap();
+    let mut from_config = Config {
+        request_event_retention_days: 30,
+        ..Config::default()
+    };
+    from_config.price_catalog.url = "https://catalog.example/old.json".to_owned();
+    from_config.price_catalog.cache_path = "/tmp/catalog-old.json".into();
+    let mut to_config = Config {
+        request_event_retention_days: 60,
+        ..Config::default()
+    };
+    to_config.price_catalog.url = "https://catalog.example/new.json".to_owned();
+    to_config.price_catalog.cache_path = "/tmp/catalog-new.json".into();
+    for (revision, config) in [(1, &from_config), (2, &to_config)] {
+        storage
+            .append_config_history(
+                revision,
+                toml::to_string_pretty(config).unwrap(),
+                1000 + revision,
+                HistorySummary { tls_enabled: false },
+            )
+            .await
+            .unwrap();
+    }
     let app = config_admin_common::app(config_admin_common::test_state(
         Config::default(),
         Some(storage),
@@ -126,8 +116,19 @@ enabled = true
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert!(json["diff"].as_array().unwrap().iter().any(|item| {
-        item["path"] == "body.messages_cap_bytes" && item["from"] == 100 && item["to"] == 200
+    let diff = json["diff"].as_array().unwrap();
+    assert!(diff.iter().any(|item| {
+        item["path"] == "request_event_retention_days" && item["from"] == 30 && item["to"] == 60
+    }));
+    assert!(diff.iter().any(|item| {
+        item["path"] == "price_catalog.url"
+            && item["from"] == "https://catalog.example/old.json"
+            && item["to"] == "https://catalog.example/new.json"
+    }));
+    assert!(diff.iter().any(|item| {
+        item["path"] == "price_catalog.cache_path"
+            && item["from"] == "/tmp/catalog-old.json"
+            && item["to"] == "/tmp/catalog-new.json"
     }));
 }
 
@@ -145,9 +146,34 @@ async fn current_config_exposes_upstream_affinity_ttl_path() {
 }
 
 #[tokio::test]
-async fn current_config_masks_nested_provider_token_env() {
+async fn current_config_exposes_moved_fields_only_at_top_level() {
+    let mut config = Config {
+        request_event_retention_days: 45,
+        ..Config::default()
+    };
+    config.price_catalog.url = "https://catalog.example/prices.json".to_owned();
+    config.price_catalog.cache_path = "/tmp/catalog.json".into();
+    let app = config_admin_common::app(config_admin_common::test_state(config, None));
+
+    let (status, _, json, _) =
+        config_admin_common::authed_json(app, "GET", "/admin/config/current", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["request_event_retention_days"], 45);
+    assert_eq!(
+        json["price_catalog"]["url"],
+        "https://catalog.example/prices.json"
+    );
+    assert_eq!(json["price_catalog"]["cache_path"], "/tmp/catalog.json");
+    assert!(json["price_catalog"].get("refresh_interval").is_none());
+    assert!(json.get("api_keys").is_none());
+    assert!(json.get("downstream_auth").is_none());
+    assert!(json.get("tls").is_none());
+}
+
+#[tokio::test]
+async fn current_config_masks_configured_provider_token_env() {
     let mut config = Config::default();
-    config.admin.token_env = "TOP_LEVEL_ADMIN_TOKEN_ENV".to_owned();
     config
         .admin
         .auth
@@ -162,13 +188,11 @@ async fn current_config_masks_nested_provider_token_env() {
         config_admin_common::authed_json(app, "GET", "/admin/config/current", None).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["admin"]["token_env"], "[REDACTED]");
     assert_eq!(
         json["admin"]["auth"]["providers"][0]["token_env"],
         "[REDACTED]"
     );
     let response_body = json.to_string();
-    assert!(!response_body.contains("TOP_LEVEL_ADMIN_TOKEN_ENV"));
     assert!(!response_body.contains("NESTED_PROVIDER_TOKEN_ENV"));
 }
 

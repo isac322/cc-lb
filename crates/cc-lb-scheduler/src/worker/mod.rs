@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "postgres")]
 use apalis::prelude::TaskSink;
 use cc_lb_clock::{Clock, ClockHandle, unix_millis};
-use cc_lb_config::{Config, SchedulerConfig};
+use cc_lb_config::SchedulerConfig;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -71,16 +71,17 @@ impl SchedulerCtx {
 impl SchedulerBackend {
     pub async fn spawn(
         &self,
-        config: Config,
         ctx: SchedulerCtx,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerError> {
-        let mut handles = self.spawn_consumers(ctx.clone(), cancel.clone())?;
+        let cron_config = ctx.config.clone();
+        let clock = ctx.clock.clone();
+        let mut handles = self.spawn_consumers(ctx, cancel.clone())?;
         handles.push(cron::spawn_cron_producer(
             self.clone(),
-            config,
+            cron_config,
             cancel,
-            ctx.clock,
+            clock,
         ));
         Ok(handles)
     }

@@ -10,7 +10,7 @@ use cc_lb_upstream::UpstreamDialect;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use uuid::Uuid;
 
-use crate::api_keys::types::{Limit, PrincipalType};
+use crate::api_keys::types::Limit;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrincipalStatus {
@@ -67,7 +67,7 @@ pub struct PrincipalView {
 
 pub struct PrincipalSpecCached {
     id: String,
-    principal_type: PrincipalType,
+    principal_kind: DbPrincipalKind,
     allowed_models: GlobSet,
     allowed_models_exact: HashSet<String>,
     allowed_upstreams: Vec<Uuid>,
@@ -164,7 +164,7 @@ impl PrincipalView {
                     .map(Arc::new);
                 let cached = PrincipalSpecCached {
                     id: principal_id.clone(),
-                    principal_type: principal.kind.into(),
+                    principal_kind: principal.kind,
                     allowed_models,
                     allowed_models_exact: exact,
                     allowed_upstreams: principal.allowed_upstreams.clone(),
@@ -239,7 +239,7 @@ impl std::fmt::Debug for PrincipalSpecCached {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PrincipalSpecCached")
             .field("id", &self.id)
-            .field("principal_type", &self.principal_type)
+            .field("principal_kind", &self.principal_kind)
             .field("allowed_models_exact", &self.allowed_models_exact)
             .field("default_limits", &self.default_limits)
             .field("enabled", &self.enabled)
@@ -252,8 +252,8 @@ impl PrincipalSpecCached {
         &self.id
     }
 
-    pub fn principal_type(&self) -> PrincipalType {
-        self.principal_type
+    pub fn principal_kind(&self) -> DbPrincipalKind {
+        self.principal_kind
     }
 
     pub fn allowed_upstreams(&self) -> &[Uuid] {
@@ -292,15 +292,6 @@ impl PrincipalSpecCached {
 
     pub fn cache_keepalive(&self) -> Option<&Arc<CacheKeepaliveConfig>> {
         self.cache_keepalive.as_ref()
-    }
-}
-
-impl From<DbPrincipalKind> for PrincipalType {
-    fn from(value: DbPrincipalKind) -> Self {
-        match value {
-            DbPrincipalKind::Human => Self::Human,
-            DbPrincipalKind::Machine | DbPrincipalKind::Admin => Self::Machine,
-        }
     }
 }
 
@@ -348,7 +339,7 @@ mod tests {
     ) -> PrincipalSpecCached {
         PrincipalSpecCached {
             id: "test".to_owned(),
-            principal_type: PrincipalType::Machine,
+            principal_kind: DbPrincipalKind::Machine,
             allowed_models: GlobSetBuilder::new().build().unwrap(),
             allowed_models_exact: HashSet::new(),
             allowed_upstreams: Vec::new(),

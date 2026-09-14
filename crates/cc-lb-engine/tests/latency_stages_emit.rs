@@ -130,7 +130,7 @@ async fn cold_request_populates_all_connection_stages_ip_upstream() {
     assert!(event.dns_ms.is_none() || event.dns_ms.is_some());
     assert!(
         event.observability_post_ms.is_none(),
-        "RFC-0002 Phase 6f: handler no longer measures observability_post inline; the hook adapter subscriber runs off-thread so this handler-side field is intentionally unpopulated. Got: {:?}",
+        "RFC-0002 Phase 6f: the handler does not persist direct observability-hook time in observability_post_ms. Got: {:?}",
         event.observability_post_ms
     );
     assert!(

@@ -7,6 +7,7 @@ async fn middleware_order() {
     let response = common::http_post(
         server.proxy_addr,
         "/v1/messages",
+        &server.managed_key.plaintext,
         body,
         &[("Connection", "X-Hop-Test"), ("X-Hop-Test", "strip-me")],
     )

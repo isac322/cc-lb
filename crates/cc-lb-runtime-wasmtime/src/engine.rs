@@ -84,9 +84,6 @@ pub struct HotEngineConfig {
     pub memory_reservation_bytes: u64,
     /// `Config::memory_guard_size`.
     pub memory_guard_bytes: u64,
-    /// Runtime policy: what to do on plugin failure. Default preserves
-    /// pre-Sprint-3 pass-through.
-    pub plugin_failure_policy: crate::policy::PluginFailurePolicy,
     /// Runtime policy: whether shape plugins may cross origins.
     /// Default preserves pre-Sprint-3 unrestricted behaviour.
     pub shape_origin_policy: crate::policy::ShapeOriginPolicy,
@@ -113,7 +110,6 @@ impl Default for HotEngineConfig {
             pool_total_core_instances: DEFAULT_POOL_TOTAL_CORE_INSTANCES,
             memory_reservation_bytes: DEFAULT_MEMORY_RESERVATION_BYTES,
             memory_guard_bytes: DEFAULT_MEMORY_GUARD_BYTES,
-            plugin_failure_policy: crate::policy::PluginFailurePolicy::PassThrough,
             shape_origin_policy: crate::policy::ShapeOriginPolicy::Unrestricted,
             wire_bounds: crate::policy::PluginWireBounds::default(),
             cookie_redaction: false,

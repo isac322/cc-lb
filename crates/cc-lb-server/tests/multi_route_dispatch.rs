@@ -6,20 +6,33 @@ async fn multi_route_dispatch() {
     let messages = common::http_post(
         server.proxy_addr,
         "/v1/messages",
+        &server.managed_key.plaintext,
         r#"{"model":"claude-3-5-sonnet-20241022","messages":[],"max_tokens":1}"#,
         &[],
     )
     .await
     .expect("messages route");
-    let models = common::http_get(server.proxy_addr, "/v1/models")
-        .await
-        .expect("models route");
-    let files = common::http_get(server.proxy_addr, "/v1/files")
-        .await
-        .expect("files route");
-    let delete_file = common::http_delete(server.proxy_addr, "/v1/files/file_abc123")
-        .await
-        .expect("delete file route");
+    let models = common::proxy_get(
+        server.proxy_addr,
+        "/v1/models",
+        &server.managed_key.plaintext,
+    )
+    .await
+    .expect("models route");
+    let files = common::proxy_get(
+        server.proxy_addr,
+        "/v1/files",
+        &server.managed_key.plaintext,
+    )
+    .await
+    .expect("files route");
+    let delete_file = common::http_delete(
+        server.proxy_addr,
+        "/v1/files/file_abc123",
+        &server.managed_key.plaintext,
+    )
+    .await
+    .expect("delete file route");
 
     assert_eq!(messages.status, 200);
     assert!(messages.body.contains(r#""type":"message""#));

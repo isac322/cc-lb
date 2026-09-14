@@ -113,7 +113,8 @@ jobs:
             --chart "$RUNNER_TEMP/cc-lb-chart/Chart.yaml" \
             --revision "$SOURCE_SHA"
           helm lint "$RUNNER_TEMP/cc-lb-chart" \
-            --set secrets.masterKey="$LINT_MASTER_KEY"
+            --set secrets.masterKey="$LINT_MASTER_KEY" \
+            --set secrets.adminToken=ci-admin-placeholder
           helm package "$RUNNER_TEMP/cc-lb-chart" \
             --version "$VERSION" \
             --app-version "$VERSION" \

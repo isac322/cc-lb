@@ -19,36 +19,25 @@ const INVALID_DRAFT_TTL_SECS: u64 = 24 * 60 * 60;
 
 pub const COVERAGE_CHECKLIST: &[&str] = &[
     "listener",
-    "tls",
     "body",
     "timeouts",
-    "downstream_auth",
-    "api_keys",
+    "request_event_retention_days",
+    "price_catalog",
     "storage",
     "scheduler",
     "upstream_affinity",
     "aead",
     "observability",
     "admin",
+    "event_bus",
+    "cluster",
     "oauth",
+    "subscription_quota",
     "runtime",
     "circuit_breaker",
     "bulkhead",
-    "dns",
-    "egress",
-    "subscription_quota",
     "prompt_cache_shadow",
     "limit_reservation_ttl",
-    "lifecycle_hook_adapter",
-    "lifecycle_pricing_subscriber",
-    "lifecycle_cache_observation_subscriber",
-    "lifecycle_rate_limit_header_subscriber",
-    "lifecycle_subscription_quota_subscriber",
-    "lifecycle_limit_rejection_audit_subscriber",
-    "lifecycle_api_key_metrics_subscriber",
-    "lifecycle_cache_hit_miss_subscriber",
-    "lifecycle_routing_tier_subscriber",
-    "lifecycle_limit_reconcile_subscriber",
 ];
 
 #[derive(Debug, Error)]
@@ -476,7 +465,7 @@ fn deserialize_and_validate_config(value: Value) -> Result<Config, String> {
 
 fn history_summary(config: &Config) -> HistorySummary {
     HistorySummary {
-        tls_enabled: config.tls.is_some() || config.listener.tls.is_some(),
+        tls_enabled: config.listener.tls.is_some(),
     }
 }
 

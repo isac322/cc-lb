@@ -31,12 +31,10 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
         .create(
             "oauth-principal",
             CreateParams {
-                upstream_kind: ManagedUpstreamKind::AnthropicOAuth,
                 label: "scheduler-restart-oauth-proxy".to_owned(),
                 description: None,
                 expires_at_unix_secs: None,
                 limit_overrides: Vec::new(),
-                principal_kind: PrincipalKindLite::Machine,
             },
         )
         .await
@@ -157,12 +155,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
     .await
     .expect("dynamic view builds");
     let lifecycle = Lifecycle::new_with_dynamic_view(
-        Arc::new(BuiltinAuthn::new(
-            DownstreamAuthMode::ApiKey,
-            None,
-            Some(key_store.clone()),
-            fixture.clock.clone(),
-        )),
+        Arc::new(BuiltinAuthn::new(key_store.clone(), fixture.clock.clone())),
         Arc::new(DynamicViewHolder::new(view)),
         cc_lb_engine::make_default_dispatcher(50),
         LifecycleConfig::default(),

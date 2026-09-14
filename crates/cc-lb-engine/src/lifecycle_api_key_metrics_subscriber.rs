@@ -18,13 +18,6 @@ pub const DEFAULT_API_KEY_METRICS_MAP_CAP: usize = 4096;
 pub const DEFAULT_API_KEY_METRICS_TTL: Duration = Duration::from_secs(300);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
-// Currently the only Upstream variant is AnthropicDirect, whose
-// audit-name is "anthropic_direct" (see lifecycle::audit_upstream_name).
-// The subscriber uses this static value to keep metric-label parity with
-// the inline path. When a second Upstream variant is added, both the
-// inline path and this subscriber must be updated in lock-step.
-const UPSTREAM_AUDIT_NAME: &str = "anthropic_direct";
-
 pub struct ApiKeyMetricsSubscriberHandle {
     shutdown_tx: oneshot::Sender<()>,
     join: JoinHandle<()>,
@@ -66,6 +59,8 @@ struct Partial {
     key_id: Option<String>,
     principal_id: Option<String>,
     model: Option<String>,
+    upstream_name: Option<String>,
+    upstream_kind: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
     cache_creation_input_tokens: u64,
@@ -175,8 +170,10 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::RouteCompleted {
             result: Ok(info), ..
         } => {
-            if let Some(m) = info.model {
-                partial.model = Some(m);
+            partial.upstream_name = Some(info.upstream_name);
+            partial.upstream_kind = info.upstream_kind;
+            if let Some(model) = info.model {
+                partial.model = Some(model);
             }
         }
         LifecycleEvent::UsageObserved { usage, .. } => {
@@ -216,13 +213,15 @@ fn emit_metrics(partial: &Partial, status: u16) {
     };
     let principal_id = partial.principal_id.as_deref().unwrap_or("");
     let model = partial.model.as_deref().unwrap_or("unknown");
+    let upstream_name = partial.upstream_name.as_deref().unwrap_or("unknown");
+    let upstream_kind = partial.upstream_kind.as_deref().unwrap_or("unknown");
 
     metrics::counter!(
         "cclb_api_key_requests_total",
         "key_id" => key_id.to_owned(),
         "principal_id" => principal_id.to_owned(),
         "model" => model.to_owned(),
-        "upstream_kind" => UPSTREAM_AUDIT_NAME,
+        "upstream_kind" => upstream_kind.to_owned(),
         "status" => status.to_string()
     )
     .increment(1);
@@ -251,7 +250,7 @@ fn emit_metrics(partial: &Partial, status: u16) {
     metrics::counter!(
         "cc_lb_tokens_total",
         "principal" => principal_id.to_owned(),
-        "upstream" => UPSTREAM_AUDIT_NAME,
+        "upstream" => upstream_name.to_owned(),
         "model" => model.to_owned(),
         "direction" => "input"
     )
@@ -259,7 +258,7 @@ fn emit_metrics(partial: &Partial, status: u16) {
     metrics::counter!(
         "cc_lb_tokens_total",
         "principal" => principal_id.to_owned(),
-        "upstream" => UPSTREAM_AUDIT_NAME,
+        "upstream" => upstream_name.to_owned(),
         "model" => model.to_owned(),
         "direction" => "output"
     )
@@ -267,7 +266,7 @@ fn emit_metrics(partial: &Partial, status: u16) {
     metrics::counter!(
         "cc_lb_virtual_cost_usd_total",
         "principal" => principal_id.to_owned(),
-        "upstream" => UPSTREAM_AUDIT_NAME,
+        "upstream" => upstream_name.to_owned(),
         "model" => model.to_owned()
     )
     .increment(cost_micros);
@@ -359,7 +358,7 @@ mod tests {
             result: Ok(AuthInfo {
                 principal_id: "principal-a".into(),
                 key_id: Some("key-a".into()),
-                principal_kind: Some("api_key".into()),
+                principal_kind: Some("machine".into()),
                 auth_ms: Some(3),
             }),
         })

@@ -116,7 +116,7 @@ where
             ConfigStore::append_config_history(
                 storage.as_ref(),
                 revision,
-                format!("[timeouts]\nidle_secs = {revision}"),
+                format!("[timeouts]\nupstream_total_secs = {revision}"),
                 1_800_000_000 + revision,
                 history_summary(revision),
             )
@@ -160,7 +160,7 @@ where
         ConfigStore::append_config_history(
             storage.as_ref(),
             7,
-            "[timeouts]\nidle_secs = 70".to_owned(),
+            "[timeouts]\nupstream_total_secs = 70".to_owned(),
             1_800_000_007,
             summary.clone(),
         )
@@ -168,7 +168,7 @@ where
         ConfigStore::append_config_history(
             storage.as_ref(),
             3,
-            "[timeouts]\nidle_secs = 30".to_owned(),
+            "[timeouts]\nupstream_total_secs = 30".to_owned(),
             1_800_000_003,
             history_summary(3),
         )
@@ -178,7 +178,7 @@ where
             .await?
             .expect("revision 7 should be present");
         assert_eq!(entry.revision, 7);
-        assert_eq!(entry.config_toml, "[timeouts]\nidle_secs = 70");
+        assert_eq!(entry.config_toml, "[timeouts]\nupstream_total_secs = 70");
         assert_eq!(entry.applied_at_unix_secs, 1_800_000_007);
         assert_eq!(entry.summary, summary);
         assert!(

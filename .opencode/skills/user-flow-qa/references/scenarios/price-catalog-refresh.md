@@ -52,7 +52,7 @@ The fixture catalog at `$QA_FIXTURE/catalog` starts with `qa-price-model` at `in
 ## 2. Deterministic state mutation, THE ENGINE
 
 - **M1 unchanged refresh:** Re-reading an unchanged catalog leaves fixture revision `1` and the same usage price.
-- **M2 changed catalog:** Replace the catalog with `catalog-v2.json`, whose same model has `input_cost_per_token=0.000002` and `output_cost_per_token=0.000003`. Wait exactly one configured isolated price-catalog refresh interval and confirm the local catalog control reports revision `2`.
+- **M2 changed catalog:** Replace the catalog with `catalog-v2.json`, whose same model has `input_cost_per_token=0.000002` and `output_cost_per_token=0.000003`. Wait for the built-in catalog refresh cadence and confirm the local catalog control reports revision `2`.
 
 ## 3. Part A, Point-in-time cases
 
@@ -79,12 +79,12 @@ The fixture catalog at `$QA_FIXTURE/catalog` starts with `qa-price-model` at `in
 
 ### 4.1 Changed catalog changes only subsequent priced usage (C4.2)
 - **Source and Context:** Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes`.
-- **Fixture mutation:** Replace the catalog with `catalog-v2.json`, whose same model has `input_cost_per_token=0.000002` and `output_cost_per_token=0.000003`. Wait exactly one configured isolated price-catalog refresh interval and confirm the local catalog control reports revision `2`.
+- **Fixture mutation:** Replace the catalog with `catalog-v2.json`, whose same model has `input_cost_per_token=0.000002` and `output_cost_per_token=0.000003`. Allow the built-in catalog refresh worker to run and confirm the local catalog control reports revision `2`.
 - **Live invocation:**
   ```bash
   curl -fsS -X POST "$QA_FIXTURE/catalog" -H 'content-type: application/json' \
     --data-binary "@$QA_ROOT/fixtures/catalog-v2.json" -o "$QA_ROOT/c4-catalog-v2.json"
-  sleep "$QA_PRICE_CATALOG_REFRESH_INTERVAL_SECS"
+  sleep "$QA_PRICE_CATALOG_WAIT_SECS"
   curl -fsS "$QA_FIXTURE/catalog" -o "$QA_ROOT/c4-catalog-after-refresh.json"
   curl --fail-with-body -sS -o "$QA_ROOT/c4-v2-response.json" -w '%{http_code}\n' \
     -X POST "$QA_PROXY/v1/messages" -H "x-api-key: $QA_API_KEY" \

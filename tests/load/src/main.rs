@@ -24,6 +24,7 @@ struct Options {
     mode: String,
     direct_url: String,
     proxy_url: String,
+    api_key: String,
     body_path: PathBuf,
     requests: Option<usize>,
     soak_duration_secs: Option<u64>,
@@ -77,7 +78,14 @@ async fn main() -> Result<()> {
     let streaming = options.mode == "streaming";
 
     if let Some(duration_secs) = options.soak_duration_secs {
-        let stats = run_soak_endpoint(proxy, body, options.concurrency, duration_secs).await?;
+        let stats = run_soak_endpoint(
+            proxy,
+            body,
+            options.concurrency,
+            duration_secs,
+            &options.api_key,
+        )
+        .await?;
         println!(
             "mode=soak duration_secs={} concurrency={} success_count={} failure_count={}",
             duration_secs, options.concurrency, stats.success_count, stats.failure_count
@@ -96,6 +104,7 @@ async fn main() -> Result<()> {
         options.concurrency,
         options.warmup,
         streaming,
+        &options.api_key,
     )
     .await
     .context("run direct fake Anthropic load")?;
@@ -106,6 +115,7 @@ async fn main() -> Result<()> {
         options.concurrency,
         options.warmup,
         streaming,
+        &options.api_key,
     )
     .await
     .context("run cc-lb proxy load")?;
@@ -275,6 +285,7 @@ impl Options {
                 direct_url.ok_or_else(|| anyhow!("--direct-url is required"))?
             },
             proxy_url: proxy_url.ok_or_else(|| anyhow!("--proxy-url is required"))?,
+            api_key: std::env::var("CC_LB_API_KEY").context("CC_LB_API_KEY is required")?,
             body_path: body_path.ok_or_else(|| anyhow!("--body is required"))?,
             requests,
             soak_duration_secs,
@@ -342,7 +353,7 @@ fn parse_bool(value: String, name: &str) -> Result<bool> {
 
 fn print_usage() {
     println!(
-        "usage: cc-lb-loadgen --mode <non-streaming|streaming> --direct-url URL --proxy-url URL --body PATH (--requests N --output PATH | --soak-duration-secs N) --concurrency N"
+        "usage: CC_LB_API_KEY=<managed-key> cc-lb-loadgen --mode <non-streaming|streaming> --direct-url URL --proxy-url URL --body PATH (--requests N --output PATH | --soak-duration-secs N) --concurrency N"
     );
 }
 
@@ -382,8 +393,9 @@ async fn run_endpoint(
     concurrency: usize,
     warmup: usize,
     streaming: bool,
+    api_key: &str,
 ) -> Result<EndpointSummary> {
-    let request = Arc::new(build_request(&target, &body, streaming));
+    let request = Arc::new(build_request(&target, &body, streaming, api_key));
     for _ in 0..warmup {
         single_request(&target, request.clone(), streaming).await?;
     }
@@ -440,8 +452,9 @@ async fn run_soak_endpoint(
     body: Vec<u8>,
     concurrency: usize,
     duration_secs: u64,
+    api_key: &str,
 ) -> Result<SoakStats> {
-    let request = Arc::new(build_request(&target, &body, false));
+    let request = Arc::new(build_request(&target, &body, false, api_key));
     let target = Arc::new(target);
     let deadline = Instant::now() + Duration::from_secs(duration_secs);
     let (sender, mut receiver) = mpsc::channel(concurrency * 2);
@@ -490,14 +503,14 @@ async fn run_soak_endpoint(
     })
 }
 
-fn build_request(target: &HttpTarget, body: &[u8], streaming: bool) -> Vec<u8> {
+fn build_request(target: &HttpTarget, body: &[u8], streaming: bool, api_key: &str) -> Vec<u8> {
     let accept = if streaming {
         "Accept: text/event-stream\r\n"
     } else {
         ""
     };
     let mut request = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nx-api-key: sk-ant-test\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\n{}content-length: {}\r\nConnection: close\r\n\r\n",
+        "POST {} HTTP/1.1\r\nHost: {}\r\nx-api-key: {api_key}\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\n{}content-length: {}\r\nConnection: close\r\n\r\n",
         target.path,
         target.host_header,
         accept,

@@ -5,7 +5,6 @@ pub const LIFECYCLE_BUS_DROPPED_METRIC: &str = "cc_lb_dropped_events_total";
 pub mod lifecycle_bus_channel {
     pub const WRITER: &str = "lifecycle_writer_full";
     pub const ASSEMBLER: &str = "lifecycle_assembler_full";
-    pub const HOOK_ADAPTER: &str = "lifecycle_hook_adapter_full";
     pub const PRICING: &str = "lifecycle_pricing_full";
     pub const LIMIT_RECONCILE: &str = "lifecycle_limit_reconcile_full";
     pub const CACHE_OBS: &str = "lifecycle_cache_obs_full";
