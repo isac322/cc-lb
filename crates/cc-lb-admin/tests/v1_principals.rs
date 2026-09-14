@@ -1,7 +1,5 @@
 use crate::admin_test_common;
 
-use std::time::Duration;
-
 use axum::http::{StatusCode, header};
 use cc_lb_storage_api::{
     AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, WasmBlob,

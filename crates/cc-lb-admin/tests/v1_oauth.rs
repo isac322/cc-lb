@@ -17,7 +17,7 @@ use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AuditEntry, AuditStore, ManagedKeyStore, Storage as StorageTrait, UpstreamCreate, UpstreamStore,
+    AuditEntry, ManagedKeyStore, Storage as StorageTrait, UpstreamCreate, UpstreamStore,
 };
 use cc_lb_testkit::{InMemoryStorage, fixed_uuid};
 use http_body_util::{BodyExt, Empty};
@@ -39,7 +39,6 @@ struct Fixture {
     storage: Arc<dyn StorageTrait>,
     aead: Arc<AeadService>,
     clock: ClockHandle,
-
 }
 
 impl Fixture {
@@ -113,7 +112,6 @@ impl Fixture {
             storage,
             aead,
             clock,
-
         }
     }
 
@@ -779,7 +777,6 @@ async fn json_response(response: axum::response::Response) -> (StatusCode, Value
     let json = serde_json::from_slice(&body).unwrap_or(Value::Null);
     (status, json)
 }
-
 
 fn fingerprint(access_token: &str) -> String {
     let digest = Sha256::digest(access_token.as_bytes());

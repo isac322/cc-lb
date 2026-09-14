@@ -1,4 +1,5 @@
 use crate::config_admin_common;
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -954,7 +955,6 @@ async fn t2__chain_rebalance_emits_chain_audit() {
         1001,
     )
     .await;
-
 
     let (status, _, _) = server
         .client
