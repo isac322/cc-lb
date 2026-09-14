@@ -8,7 +8,7 @@ use cc_lb_server::refresh::LazyRefresher;
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use uuid::Uuid;
 
-use super::common::{POLL_INTERVAL, TestResult, WAIT_TIMEOUT};
+use super::common::{TestResult, WAIT_TIMEOUT};
 use super::fake::FakeAnthropic;
 use super::worker::OAuthWorkerProbe;
 
@@ -43,12 +43,12 @@ where
         return Err(error);
     }
     fake.release_refresh_response();
-    wait_for_metadata_count(&mut metadata_count, 1).await?;
+    wait_for_metadata_enqueue(oauth_probe, 1).await?;
     wait_for_oauth_job_state(oauth_probe, false).await?;
     lazy.refresh_one(upstream_id)
         .await
         .map_err(|error| format!("lazy refresh failed: {error}"))?;
-    wait_for_metadata_count(&mut metadata_count, 2).await?;
+    wait_for_metadata_enqueue(oauth_probe, 2).await?;
 
     let refresh_count = fake.refresh_history_len().await?;
     let upstream_after = read_upstream_generation().await?;
@@ -95,34 +95,17 @@ async fn wait_for_oauth_job_state(
     .into())
 }
 
-async fn wait_for_metadata_count<Count, CountFuture>(
-    count: &mut Count,
-    expected: i64,
-) -> TestResult<()>
-where
-    Count: FnMut() -> CountFuture,
-    CountFuture: Future<Output = TestResult<i64>>,
-{
-    match tokio::time::timeout(WAIT_TIMEOUT, async {
-        let mut poll = tokio::time::interval(POLL_INTERVAL);
-        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            poll.tick().await;
-            let current = count().await?;
-            if current == expected {
-                return Ok(());
-            }
-            if current > expected {
-                return Err(format!(
-                    "metadata refresh enqueued {current} rows, expected {expected}"
-                )
-                .into());
-            }
-        }
-    })
-    .await
+async fn wait_for_metadata_enqueue(probe: &OAuthWorkerProbe, expected: usize) -> TestResult<()> {
+    if probe
+        .wait_for_metadata_enqueued(expected, WAIT_TIMEOUT)
+        .await
     {
-        Ok(result) => result,
-        Err(_) => Err("timed out waiting for MetadataRefreshJob enqueue".into()),
+        return Ok(());
     }
+
+    Err(format!(
+        "timed out waiting for MetadataRefreshJob enqueue count={expected}; last state: {:?}",
+        probe.state()
+    )
+    .into())
 }

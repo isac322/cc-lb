@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+use cc_lb_clock::TestClock;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -23,6 +24,10 @@ pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub const fn now_secs() -> u64 {
     TEST_NOW_UNIX_SECS
+}
+
+pub fn test_clock() -> Arc<TestClock> {
+    Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS))
 }
 
 pub fn near_expiry_secs() -> u64 {
