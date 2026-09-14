@@ -583,7 +583,7 @@ async fn t3__create_from_completed_draft_with_active_name_returns_name_conflict(
 
 #[tokio::test]
 async fn t3__create_from_oauth_draft_audits_human_readable_upstream_name() {
-    let fixture = Fixture::protocol().await;
+    let fixture = Fixture::protocol_sqlite().await;
     let (status, start) = fixture.start_draft().await;
     assert_eq!(status, StatusCode::OK);
     let state_token = start["state_token"].as_str().expect("state token");
