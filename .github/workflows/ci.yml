@@ -45,9 +45,9 @@ jobs:
           rg --version
           if ! command -v promtool >/dev/null 2>&1; then
             curl -sSL -o /tmp/prometheus.tar.gz \
-              https://github.com/prometheus/prometheus/releases/download/v3.13.2/prometheus-3.13.2.linux-arm64.tar.gz
+              https://github.com/prometheus/prometheus/releases/download/v3.14.0/prometheus-3.14.0.linux-arm64.tar.gz
             tar -xzf /tmp/prometheus.tar.gz -C /tmp/
-            sudo mv /tmp/prometheus-3.13.2.linux-arm64/promtool /usr/local/bin/promtool
+            sudo mv /tmp/prometheus-3.14.0.linux-arm64/promtool /usr/local/bin/promtool
           fi
           promtool --version
       - name: Check Rust formatting
@@ -164,7 +164,7 @@ jobs:
 
       - uses: azure/setup-helm@v5.0.1
         with:
-          version: v4.2.4
+          version: v4.3.0
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -180,7 +180,7 @@ jobs:
             "$version" "$(git rev-parse HEAD)" "$(git show -s --format=%ct HEAD)" \
             >> "$GITHUB_OUTPUT"
 
-      # release-plz 0.3.160 supports git-only releases, but its release command
+      # release-plz 0.3.167 supports git-only releases, but its release command
       # still filters out manifest-private packages before applying that mode.
       - name: Expose private server package to release-plz
         run: |
@@ -196,11 +196,11 @@ jobs:
 
 
       - name: Install and dry-run release-plz server release
-        uses: MarcoIeni/release-plz-action@v0.5.136
+        uses: MarcoIeni/release-plz-action@v0.5.137
         with:
           command: release
           config: release-plz-server.toml
-          version: 0.3.160
+          version: 0.3.167
           dry_run: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

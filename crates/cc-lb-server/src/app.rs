@@ -1349,6 +1349,7 @@ async fn build_app_with_storage_inner(
 
                 let listener_bus: Arc<dyn cc_lb_control::RequestEventBus> =
                     Arc::new(in_memory_bus.clone());
+                let _ = rustls::crypto::ring::default_provider().install_default();
                 let http_client = reqwest::Client::builder()
                     .timeout(Duration::from_secs(3))
                     .build()

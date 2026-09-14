@@ -62,6 +62,7 @@ async fn reconnect_after_backend_close(
     let consumer_bus = Arc::new(InMemoryBus::new());
     let mut consumer_rx = consumer_bus.subscribe();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let mut listener_task = PgListener::spawn(
         listener_pool.clone(),
         consumer_bus,
@@ -99,6 +100,7 @@ async fn shutdown_during_reconnect_sleep(
     let (invalid_pool, reset_task) = connection_resetting_pg_pool().await?;
     let consumer_bus = Arc::new(InMemoryBus::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let mut listener_task = PgListener::spawn(
         invalid_pool.clone(),
         consumer_bus,
