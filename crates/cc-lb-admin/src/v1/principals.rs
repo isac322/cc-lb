@@ -1,11 +1,11 @@
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_control::{AuditEntry, AuditPayload};
+use cc_lb_control::AuditPayload;
 use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
@@ -17,7 +17,11 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
-use crate::AdminState;
+use crate::{
+    AdminState,
+    audit::{AdminAuditEvent, record_admin_audit},
+    auth::AdminIdentity,
+};
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
@@ -143,6 +147,7 @@ struct ListResponse {
 
 async fn create_principal(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Json(body): Json<CreatePrincipalBody>,
 ) -> axum::response::Response {
     let Some(storage) = state.storage.as_deref() else {
@@ -164,13 +169,31 @@ async fn create_principal(
 
     match PrincipalStore::create(storage, input, cc_lb_clock::unix_secs(state.clock.now())).await {
         Ok(record) => {
-            emit_audit(
+            let principal_id = record.id.to_string();
+            let payload = AuditPayload::PrincipalCreate {
+                principal_id: principal_id.clone(),
+                principal_kind: principal_kind_name(record.kind).to_owned(),
+            };
+            let action = payload.to_string();
+            if let Err(error) = record_admin_audit(
                 &state,
-                AuditPayload::PrincipalCreate {
-                    principal_id: record.id.to_string(),
-                    principal_kind: principal_kind_name(record.kind).to_owned(),
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: &action,
+                    route: "/admin/v1/principals",
+                    target_principal_id: Some(&principal_id),
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::CREATED.as_u16(),
+                    payload: None,
                 },
-            );
+            )
+            .await
+            {
+                tracing::error!(error = %error, action = %action, "admin audit write failed");
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
+            }
             let location = format!("/admin/v1/principals/{}", record.id);
             let mut headers = HeaderMap::new();
             insert_header(&mut headers, header::LOCATION, &location);
@@ -247,6 +270,7 @@ async fn update_principal(
     State(state): State<AdminState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Extension(identity): Extension<AdminIdentity>,
     Json(body): Json<UpdatePrincipalBody>,
 ) -> axum::response::Response {
     let Some(expected_revision) = if_match_revision(&headers) else {
@@ -258,9 +282,11 @@ async fn update_principal(
         return unsupported_llm_judge_response();
     }
     let fields_changed = update_fields_changed(&body);
+    let route = format!("/admin/v1/principals/{id}");
     update_principal_record(
         state,
         id,
+        route,
         expected_revision,
         PrincipalUpdate {
             name: body.name,
@@ -271,6 +297,7 @@ async fn update_principal(
             cache_keepalive: body.cache_keepalive,
         },
         fields_changed,
+        identity,
     )
     .await
 }
@@ -279,16 +306,18 @@ async fn enable_principal(
     State(state): State<AdminState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Extension(identity): Extension<AdminIdentity>,
 ) -> axum::response::Response {
-    set_enabled(state, id, headers, true).await
+    set_enabled(state, id, headers, true, identity).await
 }
 
 async fn disable_principal(
     State(state): State<AdminState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Extension(identity): Extension<AdminIdentity>,
 ) -> axum::response::Response {
-    set_enabled(state, id, headers, false).await
+    set_enabled(state, id, headers, false, identity).await
 }
 
 async fn set_enabled(
@@ -296,6 +325,7 @@ async fn set_enabled(
     id: String,
     headers: HeaderMap,
     enabled: bool,
+    identity: AdminIdentity,
 ) -> axum::response::Response {
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
@@ -317,13 +347,36 @@ async fn set_enabled(
     .await
     {
         Ok(Some(record)) => {
-            emit_audit(
+            let principal_id = record.id.to_string();
+            let payload = AuditPayload::PrincipalUpdate {
+                principal_id: principal_id.clone(),
+                fields_changed: vec!["enabled"],
+            };
+            let action = payload.to_string();
+            let route = if enabled {
+                format!("/admin/v1/principals/{principal_id}/enable")
+            } else {
+                format!("/admin/v1/principals/{principal_id}/disable")
+            };
+            if let Err(error) = record_admin_audit(
                 &state,
-                AuditPayload::PrincipalUpdate {
-                    principal_id: record.id.to_string(),
-                    fields_changed: vec!["enabled"],
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: &action,
+                    route: &route,
+                    target_principal_id: Some(&principal_id),
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: None,
                 },
-            );
+            )
+            .await
+            {
+                tracing::error!(error = %error, action = %action, "admin audit write failed");
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
+            }
             let mut response = respond_with_etag(record);
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
@@ -337,6 +390,7 @@ async fn delete_principal(
     State(state): State<AdminState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Extension(identity): Extension<AdminIdentity>,
 ) -> axum::response::Response {
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
@@ -357,12 +411,31 @@ async fn delete_principal(
     .await
     {
         Ok(Some(record)) => {
-            emit_audit(
+            let principal_id = record.id.to_string();
+            let payload = AuditPayload::PrincipalDelete {
+                principal_id: principal_id.clone(),
+            };
+            let action = payload.to_string();
+            let route = format!("/admin/v1/principals/{principal_id}");
+            if let Err(error) = record_admin_audit(
                 &state,
-                AuditPayload::PrincipalDelete {
-                    principal_id: record.id.to_string(),
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: &action,
+                    route: &route,
+                    target_principal_id: Some(&principal_id),
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::NO_CONTENT.as_u16(),
+                    payload: None,
                 },
-            );
+            )
+            .await
+            {
+                tracing::error!(error = %error, action = %action, "admin audit write failed");
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
+            }
             let mut response = StatusCode::NO_CONTENT.into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
@@ -375,17 +448,21 @@ async fn delete_principal(
 async fn update_allowed_models(
     State(state): State<AdminState>,
     Path(id): Path<String>,
+    Extension(identity): Extension<AdminIdentity>,
     Json(body): Json<AllowedModelsBody>,
 ) -> axum::response::Response {
+    let route = format!("/admin/v1/principals/{id}/allowed_models");
     update_principal_record(
         state,
         id,
+        route,
         body.expected_revision,
         PrincipalUpdate {
             allowed_models: Some(body.models),
             ..PrincipalUpdate::default()
         },
         vec!["allowed_models"],
+        identity,
     )
     .await
 }
@@ -443,6 +520,7 @@ async fn update_router_terminal(
     State(state): State<AdminState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Extension(identity): Extension<AdminIdentity>,
     Json(body): Json<RouterTerminalBody>,
 ) -> axum::response::Response {
     let Some(expected_revision) = if_match_revision(&headers) else {
@@ -472,13 +550,32 @@ async fn update_router_terminal(
     .await
     {
         Ok(Some(record)) => {
-            emit_audit(
+            let principal_id = record.id.to_string();
+            let payload = AuditPayload::PrincipalUpdate {
+                principal_id: principal_id.clone(),
+                fields_changed: vec!["router_terminal_strategy"],
+            };
+            let action = payload.to_string();
+            let route = format!("/admin/v1/principals/{principal_id}/router-terminal");
+            if let Err(error) = record_admin_audit(
                 &state,
-                AuditPayload::PrincipalUpdate {
-                    principal_id: record.id.to_string(),
-                    fields_changed: vec!["router_terminal_strategy"],
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: &action,
+                    route: &route,
+                    target_principal_id: Some(&principal_id),
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: None,
                 },
-            );
+            )
+            .await
+            {
+                tracing::error!(error = %error, action = %action, "admin audit write failed");
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
+            }
             let mut response = router_terminal_with_etag(record);
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
@@ -491,9 +588,11 @@ async fn update_router_terminal(
 async fn update_principal_record(
     state: AdminState,
     id: String,
+    route: String,
     expected_revision: u64,
     update: PrincipalUpdate,
     fields_changed: Vec<&'static str>,
+    identity: AdminIdentity,
 ) -> axum::response::Response {
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
@@ -512,13 +611,31 @@ async fn update_principal_record(
     .await
     {
         Ok(Some(record)) => {
-            emit_audit(
+            let principal_id = record.id.to_string();
+            let payload = AuditPayload::PrincipalUpdate {
+                principal_id: principal_id.clone(),
+                fields_changed,
+            };
+            let action = payload.to_string();
+            if let Err(error) = record_admin_audit(
                 &state,
-                AuditPayload::PrincipalUpdate {
-                    principal_id: record.id.to_string(),
-                    fields_changed,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: &action,
+                    route: &route,
+                    target_principal_id: Some(&principal_id),
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: None,
                 },
-            );
+            )
+            .await
+            {
+                tracing::error!(error = %error, action = %action, "admin audit write failed");
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
+            }
             let mut response = respond_with_etag(record);
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
@@ -725,33 +842,6 @@ fn unsupported_llm_judge_response() -> axum::response::Response {
         })),
     )
         .into_response()
-}
-
-fn emit_audit(state: &AdminState, payload: AuditPayload) {
-    let Some(audit_sink) = &state.audit_sink else {
-        return;
-    };
-    let principal_id = principal_id_for_audit(&payload);
-    let action = payload.to_string();
-    let ts = cc_lb_clock::unix_secs(state.clock.now());
-    let mut entry: AuditEntry = payload.into();
-    entry.ts = ts;
-    entry.request_id = format!("admin-v1-principal-{principal_id}-{ts}");
-    entry.principal_id = principal_id;
-    entry.route = "admin_v1_principals".to_owned();
-    entry.status = 200;
-    entry.actor = Some("admin".to_owned());
-    entry.admin_action = Some(action);
-    let _ = audit_sink.try_enqueue(entry);
-}
-
-fn principal_id_for_audit(payload: &AuditPayload) -> String {
-    match payload {
-        AuditPayload::PrincipalCreate { principal_id, .. }
-        | AuditPayload::PrincipalUpdate { principal_id, .. }
-        | AuditPayload::PrincipalDelete { principal_id } => principal_id.clone(),
-        _ => String::new(),
-    }
 }
 
 fn principal_kind_name(kind: PrincipalKind) -> &'static str {

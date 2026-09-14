@@ -166,6 +166,63 @@ async fn update_correct_if_match_bumps_revision() {
 }
 
 #[tokio::test]
+async fn update_endpoints_audit_distinct_concrete_routes() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let (_, headers, created) = create_principal(&server.client, "audit-routes").await;
+    let id = created_id(&created);
+    let etag = server.client.header_str(&headers, header::ETAG.as_str());
+    let principal_route = format!("/admin/v1/principals/{id}");
+    let allowed_models_route = format!("{principal_route}/allowed_models");
+
+    let (status, _, updated) = server
+        .client
+        .put_json(
+            &principal_route,
+            json!({ "name": "audit-routes-renamed" }),
+            Some(etag),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, _) = server
+        .client
+        .put_json(
+            &allowed_models_route,
+            json!({
+                "models": ["claude-audit-*"],
+                "expected_revision": updated["revision"]
+            }),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let entries = server
+        .storage
+        .query_audit(Some(&id), 0, u64::MAX, 20)
+        .await
+        .unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry.route == principal_route
+            && entry.admin_action.as_deref().is_some_and(|action| {
+                action.contains("principal_update") && action.contains("name")
+            })
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry.route == allowed_models_route
+            && entry.admin_action.as_deref().is_some_and(|action| {
+                action.contains("principal_update") && action.contains("allowed_models")
+            })
+    }));
+
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.route != "/admin/v1/principals/{id}")
+    );
+}
+
+#[tokio::test]
 async fn allowed_upstreams_round_trips_through_create_patch_and_get() {
     let server = admin_test_common::spawn_admin_server().await;
     let first_upstream = "11111111-1111-1111-1111-111111111111";
@@ -301,29 +358,17 @@ async fn enable_disable_persists_and_audits() {
     assert_eq!(body["enabled"], true);
     assert!(body["revision"].as_u64().unwrap() > 0);
 
-    let mut audit_flushed = server.audit_flushed.clone();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let saw_enabled_audit = loop {
-        let entries = server
-            .storage
-            .query_audit(Some(&id), 0, u64::MAX, 20)
-            .await
-            .unwrap();
-        let seen = entries
+    let entries = server
+        .storage
+        .query_audit(Some(&id), 0, u64::MAX, 20)
+        .await
+        .unwrap();
+    assert!(
+        entries
             .iter()
             .filter_map(|entry| entry.admin_action.as_deref())
-            .any(|action| action.contains("principal_update") && action.contains("enabled"));
-        if seen {
-            break true;
-        }
-        if tokio::time::timeout_at(deadline, audit_flushed.changed())
-            .await
-            .is_err()
-        {
-            break false;
-        }
-    };
-    assert!(saw_enabled_audit);
+            .any(|action| action.contains("principal_update") && action.contains("enabled"))
+    );
 }
 
 #[tokio::test]
@@ -331,6 +376,7 @@ async fn delete_principal_cascades_owned_plugin_chains() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
+    let principal_route = format!("/admin/v1/principals/{id}");
     let etag = server
         .client
         .header_str(&headers, header::ETAG.as_str())
@@ -376,10 +422,7 @@ async fn delete_principal_cascades_owned_plugin_chains() {
         .await
         .unwrap();
 
-    let (status, _, body) = server
-        .client
-        .delete(&format!("/admin/v1/principals/{id}"), &etag)
-        .await;
+    let (status, _, body) = server.client.delete(&principal_route, &etag).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(body, Value::Null);
     assert!(
@@ -391,12 +434,22 @@ async fn delete_principal_cascades_owned_plugin_chains() {
             .is_empty()
     );
 
-    let (status, _, body) = server
-        .client
-        .get(&format!("/admin/v1/principals/{id}"))
-        .await;
+    let (status, _, body) = server.client.get(&principal_route).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "unknown_principal");
+
+    let entries = server
+        .storage
+        .query_audit(Some(&id), 0, u64::MAX, 20)
+        .await
+        .unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry.route == principal_route
+            && entry
+                .admin_action
+                .as_deref()
+                .is_some_and(|action| action.starts_with("principal_delete"))
+    }));
 }
 
 #[tokio::test]

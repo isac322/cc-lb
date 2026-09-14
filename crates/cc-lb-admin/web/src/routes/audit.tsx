@@ -73,6 +73,10 @@ interface AuditEntryLike {
   upstream?: string | null;
   status: number;
   actor?: string | null;
+  actor_authority?: string | null;
+  actor_subject?: string | null;
+  actor_kind?: string | null;
+  actor_email?: string | null;
   admin_action?: string | null;
   kind?: string | null;
   payload?: Record<string, unknown> | null;
@@ -512,6 +516,16 @@ function AuditPage() {
                   }
                 />
                 <Row label="Actor" value={selected.actor ?? '—'} />
+                <Row
+                  label="Actor authority"
+                  value={selected.actor_authority ?? '—'}
+                />
+                <Row
+                  label="Actor subject"
+                  value={selected.actor_subject ?? '—'}
+                />
+                <Row label="Actor kind" value={selected.actor_kind ?? '—'} />
+                <Row label="Actor email" value={selected.actor_email ?? '—'} />
                 <Row label="Route" value={selected.route ?? '—'} />
                 <Row
                   label="Upstream"

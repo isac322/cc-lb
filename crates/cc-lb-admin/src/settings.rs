@@ -5,7 +5,8 @@ use std::path::Path;
 
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
-    AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, Storage, StorageError,
+    AuditActorFields, AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, Storage,
+    StorageError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -296,6 +297,7 @@ pub async fn apply_config(
     config_watcher: Option<&dyn ConfigReloader>,
     request: ApplyConfigRequest,
     applied_at_unix_secs: u64,
+    actor: &AuditActorFields,
 ) -> Result<ApplyConfigResponse, SettingsError> {
     let state = storage.get_config_draft().await?;
     if state.revision != request.expected_revision {
@@ -351,7 +353,7 @@ pub async fn apply_config(
         .append_audit(&AuditEntry {
             ts: applied_at_unix_secs,
             request_id: format!("config_apply_{}", request.expected_revision),
-            principal_id: "admin".to_owned(),
+            principal_id: String::new(),
             route: "config_apply".to_owned(),
             upstream: "admin".to_owned(),
             model: None,
@@ -364,7 +366,11 @@ pub async fn apply_config(
             cost_usd_micros: None,
             limit_violation: None,
             admin_action: Some("config_apply".to_owned()),
-            actor: Some("admin".to_owned()),
+            actor: Some(actor.actor.clone()),
+            actor_authority: Some(actor.authority.clone()),
+            actor_subject: Some(actor.subject.clone()),
+            actor_kind: Some(actor.kind.clone()),
+            actor_email: actor.email.clone(),
             kind: None,
             payload: None,
         })
@@ -617,7 +623,7 @@ fn diff_value(path: &str, value: &Value) -> Value {
     }
 }
 
-fn mask_secret_like_values(value: &mut Value) {
+pub(crate) fn mask_secret_like_values(value: &mut Value) {
     match value {
         Value::Object(object) => {
             for (key, child) in object {

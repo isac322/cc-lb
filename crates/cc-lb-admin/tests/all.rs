@@ -2,10 +2,16 @@
 mod admin_test_common;
 #[path = "admin_warmup_endpoints.rs"]
 mod admin_warmup_endpoints;
+#[path = "audit_actor.rs"]
+mod audit_actor;
+
 #[path = "audit_pagination.rs"]
 mod audit_pagination;
 #[path = "auth_required.rs"]
 mod auth_required;
+#[path = "cloudflare_access_auth.rs"]
+mod cloudflare_access_auth;
+
 #[path = "cache_keepalive_contracts.rs"]
 mod cache_keepalive_contracts;
 #[path = "config_admin_common/mod.rs"]

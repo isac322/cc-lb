@@ -43,11 +43,10 @@ fn test_state() -> AdminState {
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
-        audit_sink: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(Config::default()),
         scheduler: None,
-        admin_token: Some("test-token".to_string()),
+        admin_auth: crate::admin_test_common::static_token_auth("test-token"),
         lazy_refresher: None,
         runtime: None,
         data_dir: None,
@@ -145,7 +144,7 @@ async fn missing_authorization_returns_401() {
 }
 
 #[tokio::test]
-async fn wrong_admin_token_returns_401() {
+async fn wrong_token_returns_401() {
     let (status, _) = send_preview_request(
         Some("wrong-token"),
         Some((

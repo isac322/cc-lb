@@ -44,6 +44,17 @@ impl storage_api::AuditStore for TestStorage {
         Ok(Vec::new())
     }
 
+    async fn query_audit_by_actor(
+        &self,
+        _authority: &str,
+        _subject: &str,
+        _since: u64,
+        _until: u64,
+        _limit: usize,
+    ) -> storage_api::StorageResult<Vec<storage_api::AuditEntry>> {
+        Ok(Vec::new())
+    }
+
     async fn prune_audit(&self, _older_than: u64) -> storage_api::StorageResult<u64> {
         Ok(0)
     }

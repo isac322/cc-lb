@@ -1,6 +1,7 @@
 import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { Command, Menu, X } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
+import { useAuthSessionContext } from '../../lib/authSession';
 import { useHealth } from '../../lib/queries';
 import { ThemeToggle } from '../ThemeToggle';
 import { cx } from '../ui/primitives';
@@ -112,6 +113,14 @@ function Topbar({
   onCommandPalette: () => void;
   connection: 'live' | 'connecting' | 'down';
 }) {
+  const authSession = useAuthSessionContext();
+  const identityLabel =
+    authSession?.email ??
+    authSession?.display_name ??
+    authSession?.subject ??
+    'Unknown administrator';
+  const identityKind = authSession?.kind.replaceAll('_', ' ') ?? 'unknown';
+
   return (
     <header className="h-12 shrink-0 flex items-center justify-between px-3 md:px-5 border-b border-subtle bg-bg sticky top-0 z-30">
       <div className="flex items-center gap-2 min-w-0">
@@ -156,6 +165,18 @@ function Topbar({
         >
           <Command className="w-4 h-4" />
         </button>
+        <div
+          className="flex max-w-24 sm:max-w-48 flex-col items-end leading-tight"
+          data-testid="admin-identity"
+          title={`${identityLabel} (${identityKind})`}
+        >
+          <span className="max-w-full truncate text-xs text-text">
+            {identityLabel}
+          </span>
+          <span className="text-[10px] uppercase tracking-wider text-text-faint">
+            {identityKind}
+          </span>
+        </div>
         <ThemeToggle />
         <div
           aria-label={`Connection: ${connection}`}

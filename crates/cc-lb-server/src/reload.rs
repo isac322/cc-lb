@@ -7,7 +7,8 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use cc_lb_admin::DynamicViewRebinder;
 use cc_lb_config::{
-    Config, ConfigError, RestartRequiredField, StorageConfig, WasmtimeAllocationStrategy,
+    AdminAuthProviderConfig, Config, ConfigError, RestartRequiredField, StorageConfig,
+    WasmtimeAllocationStrategy,
 };
 use cc_lb_engine::DynamicViewHolder;
 use notify::{Event, RecursiveMode, Watcher};
@@ -18,13 +19,9 @@ use tokio::task::JoinHandle;
 const DEBOUNCE: Duration = Duration::from_millis(500);
 const BROADCAST_CAPACITY: usize = 16;
 
-pub(crate) fn warn_removed_prompt_cache_switches(fields: &[String]) {
-    for field in fields {
-        tracing::warn!(
-            field,
-            "{}",
-            cc_lb_config::removed_prompt_cache_switch_warning(field)
-        );
+pub(crate) fn warn_config_warnings(warnings: &[String]) {
+    for warning in warnings {
+        tracing::warn!(warning, "{}", cc_lb_config::config_warning_message(warning));
     }
 }
 
@@ -115,7 +112,7 @@ impl ConfigWatcher {
                 return Err(ReloadError::Config(source));
             }
         };
-        warn_removed_prompt_cache_switches(&config_warnings);
+        warn_config_warnings(&config_warnings);
 
         let current_config = self.current_config();
         if skip_unchanged && *current_config == new_config {
@@ -326,6 +323,13 @@ pub fn summarize_restart_required(
         current.aead.key_env.clone(),
         new_config.aead.key_env.clone(),
         "storage encryption key environment changes require a process restart",
+    );
+    push_changed(
+        &mut changes,
+        "admin.auth.providers",
+        admin_auth_providers_string(&current.admin.auth.providers),
+        admin_auth_providers_string(&new_config.admin.auth.providers),
+        "admin authentication providers are built once at process startup",
     );
     summarize_wasmtime_restart_required(&mut changes, current, new_config);
     summarize_oauth_restart_required(&mut changes, current, new_config);
@@ -587,6 +591,10 @@ fn push_changed(
             reason: reason.to_owned(),
         });
     }
+}
+
+fn admin_auth_providers_string(providers: &[AdminAuthProviderConfig]) -> String {
+    serde_json::to_string(providers).expect("admin authentication provider config serializes")
 }
 
 fn path_option_string(path: Option<&PathBuf>) -> String {

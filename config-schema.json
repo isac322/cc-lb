@@ -6,6 +6,9 @@
     "admin": {
       "$ref": "#/$defs/AdminConfig",
       "default": {
+        "auth": {
+          "providers": []
+        },
         "token_env": "CC_LB_ADMIN_TOKEN"
       }
     },
@@ -337,9 +340,84 @@
     }
   },
   "$defs": {
+    "AdminAuthConfig": {
+      "type": "object",
+      "properties": {
+        "providers": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AdminAuthProviderConfig"
+          }
+        }
+      }
+    },
+    "AdminAuthProviderConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "static_token"
+            },
+            "token_env": {
+              "type": "string",
+              "default": "CC_LB_ADMIN_TOKEN"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "audiences": {
+              "description": "Access application audience tags accepted for the admin surface.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "header": {
+              "type": "string",
+              "default": "cf-access-jwt-assertion"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "cloudflare_access"
+            },
+            "team_domain": {
+              "description": "Access team domain, used as the issuer and JWKS base URL.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "team_domain",
+            "audiences"
+          ]
+        }
+      ]
+    },
     "AdminConfig": {
       "type": "object",
       "properties": {
+        "auth": {
+          "$ref": "#/$defs/AdminAuthConfig",
+          "default": {
+            "providers": []
+          }
+        },
         "token_env": {
           "type": "string",
           "default": "CC_LB_ADMIN_TOKEN"

@@ -2,8 +2,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use cc_lb_config::{
-    AnthropicOAuthConfig, Config, PostgresPoolConfig, StorageConfig, TlsConfig,
-    WasmtimeAllocationStrategy,
+    AdminAuthProviderConfig, AnthropicOAuthConfig, Config, PostgresPoolConfig, StorageConfig,
+    TlsConfig, WasmtimeAllocationStrategy,
 };
 use cc_lb_server::reload::summarize_restart_required;
 use url::Url;
@@ -72,6 +72,42 @@ fn oauth_anthropic_client_id_change_returns_entry() {
 }
 
 #[test]
+fn admin_auth_provider_changes_return_entry_but_unchanged_providers_do_not() {
+    let mut current = Config::default();
+    current.admin.auth.providers = vec![static_token_provider("primary", "PRIMARY_ADMIN_TOKEN")];
+
+    let unchanged = summarize_restart_required(&current, &current);
+    assert!(
+        unchanged
+            .iter()
+            .all(|change| change.field != "admin.auth.providers"),
+        "unchanged providers should not require a restart: {unchanged:?}"
+    );
+
+    let mut new_config = current.clone();
+    new_config.admin.auth.providers.push(static_token_provider(
+        "break-glass",
+        "BREAK_GLASS_ADMIN_TOKEN",
+    ));
+
+    let changes = summarize_restart_required(&current, &new_config);
+    let change = changes
+        .iter()
+        .find(|change| change.field == "admin.auth.providers")
+        .expect("admin auth providers restart entry");
+
+    assert_eq!(
+        change.current,
+        r#"[{"kind":"static_token","id":"primary","token_env":"PRIMARY_ADMIN_TOKEN"}]"#
+    );
+    assert_eq!(
+        change.new,
+        r#"[{"kind":"static_token","id":"primary","token_env":"PRIMARY_ADMIN_TOKEN"},{"kind":"static_token","id":"break-glass","token_env":"BREAK_GLASS_ADMIN_TOKEN"}]"#
+    );
+    assert!(change.reason.contains("built once"));
+}
+
+#[test]
 fn wasmtime_runtime_knob_change_returns_entry() {
     let current = Config::default();
     let mut new_config = current.clone();
@@ -121,6 +157,13 @@ fn anthropic_oauth(client_id: &str) -> AnthropicOAuthConfig {
         token_url: Url::parse("https://example.test/oauth/token").unwrap(),
         redirect_uri: Url::parse("https://example.test/oauth/callback").unwrap(),
         scopes: vec!["messages".to_owned()],
+    }
+}
+
+fn static_token_provider(id: &str, token_env: &str) -> AdminAuthProviderConfig {
+    AdminAuthProviderConfig::StaticToken {
+        id: id.to_owned(),
+        token_env: token_env.to_owned(),
     }
 }
 

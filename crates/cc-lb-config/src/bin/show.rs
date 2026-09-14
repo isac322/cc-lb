@@ -41,12 +41,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(handle)?;
     Ok(())
 }
-fn print_warnings(fields: &[String]) {
-    for field in fields {
-        eprintln!(
-            "warning: {}",
-            cc_lb_config::removed_prompt_cache_switch_warning(field)
-        );
+fn print_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("warning: {}", cc_lb_config::config_warning_message(warning));
     }
 }
 

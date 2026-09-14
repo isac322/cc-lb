@@ -20,11 +20,10 @@ fn test_state() -> AdminState {
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
-        audit_sink: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),
         scheduler: None,
-        admin_token: Some("test-token".to_owned()),
+        admin_auth: crate::admin_test_common::static_token_auth("test-token"),
         lazy_refresher: None,
         runtime: None,
         data_dir: None,
@@ -102,6 +101,77 @@ async fn revoked_key_list_preserves_key_id_last4_and_audit_rows() {
 
     wait_for_audit_action(&server.storage, "principal_key_issue", key_id).await;
     wait_for_audit_action(&server.storage, "principal_key_revoke", key_id).await;
+}
+
+#[tokio::test]
+async fn legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let (_, _, principal) = server
+        .client
+        .post_json(
+            "/admin/v1/principals",
+            json!({
+                "name": "legacy-key-audit",
+                "kind": "machine",
+                "allowed_models": [],
+                "default_limits": []
+            }),
+        )
+        .await;
+    let principal_id = principal["id"].as_str().unwrap();
+    admin_test_common::set_dynamic_principal(&server.dynamic_view, principal_id);
+
+    let (status, _, issued) = server
+        .client
+        .post_json(
+            &format!("/admin/v1/principals/{principal_id}/keys"),
+            json!({ "label": "legacy-audit" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let key_id = issued["key_id"].as_str().unwrap();
+
+    let key_route = format!("/admin/principals/{principal_id}/keys/{key_id}");
+    let (status, _, key) = server.client.get(&key_route).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(key["id"], key_id);
+    assert_eq!(key["principal_id"], principal_id);
+    assert!(key.get("plaintext_key").is_none());
+
+    for (operation, action, expected_key_status) in [
+        ("disable", "principal_key_disable", "disabled"),
+        ("enable", "principal_key_enable", "active"),
+        ("revoke", "principal_key_revoke", "revoked"),
+    ] {
+        let route = format!("{key_route}/{operation}");
+        let (status, _, body) = server.client.post_json(&route, json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "status": "ok" }));
+
+        let (status, _, key) = server.client.get(&key_route).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(key["status"], expected_key_status);
+
+        let entries = server
+            .storage
+            .query_audit(Some(principal_id), 0, u64::MAX, 100)
+            .await
+            .unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| {
+                entry.admin_action.as_deref() == Some(action)
+                    && entry.api_key_id.as_deref() == Some(key_id)
+            })
+            .unwrap_or_else(|| panic!("missing {action} audit for key {key_id}"));
+        assert_eq!(entry.route, route);
+        assert_eq!(entry.principal_id, principal_id);
+        assert_eq!(entry.status, StatusCode::OK.as_u16());
+        assert_eq!(entry.actor_authority.as_deref(), Some("static-token"));
+        assert_eq!(entry.actor_subject.as_deref(), Some("legacy"));
+        assert_eq!(entry.actor_kind.as_deref(), Some("break_glass"));
+        assert!(entry.payload.is_none());
+    }
 }
 
 #[tokio::test]

@@ -7,7 +7,6 @@ use crate::admin_test_common;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     body::Body,
@@ -17,9 +16,8 @@ use cc_lb_admin::{AdminState, router};
 use cc_lb_aead::{AeadEncryptedField, AeadService, OAuthTokenBundle};
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
-use cc_lb_control::spawn_audit_writer;
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{AuditStore, UpstreamCreate, UpstreamStore};
+use cc_lb_storage_api::{AuditEntry, AuditStore, UpstreamCreate, UpstreamStore};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -40,7 +38,6 @@ struct Fixture {
     storage: Arc<Storage>,
     aead: Arc<AeadService>,
     clock: ClockHandle,
-    _audit_task: tokio::task::JoinHandle<()>,
 }
 
 impl Fixture {
@@ -57,7 +54,6 @@ impl Fixture {
         .await;
         let aead = Arc::new(AeadService::from_master_key(MASTER_KEY));
         let config = test_config(oauth_addr);
-        let (audit_sink, audit_task) = spawn_audit_writer(storage.clone(), 64);
         let state = AdminState {
             storage: Some(storage.clone()),
             key_store: Some(admin_test_common::key_store(storage.clone())),
@@ -69,11 +65,10 @@ impl Fixture {
             runtime: None,
             data_dir: None,
             warmup_dialect_dispatcher: None,
-            audit_sink: Some(Arc::new(audit_sink)),
             dynamic_view: admin_test_common::dynamic_view_holder(&config),
             config: Arc::new(config),
             scheduler: None,
-            admin_token: Some("test-token".to_owned()),
+            admin_auth: crate::admin_test_common::static_token_auth("test-token"),
             start_time: std::time::Instant::now(),
             event_bus: None,
             storage_tail: cc_lb_admin::events::storage_tail_channel(),
@@ -86,7 +81,6 @@ impl Fixture {
             storage,
             aead,
             clock,
-            _audit_task: audit_task,
         }
     }
 
@@ -209,6 +203,24 @@ impl Fixture {
             .await
             .expect("seed expired tokens")
     }
+
+    async fn audit_entries(&self, needle: &str) -> Vec<AuditEntry> {
+        let entries = self
+            .storage
+            .query_audit(None, 0, u64::MAX, 100)
+            .await
+            .expect("query audit");
+        assert!(
+            entries.iter().any(|entry| {
+                entry
+                    .admin_action
+                    .as_deref()
+                    .is_some_and(|action| action.contains(needle))
+            }),
+            "missing {needle} audit"
+        );
+        entries
+    }
 }
 
 fn now_unix_secs(clock: &dyn cc_lb_clock::Clock) -> u64 {
@@ -256,34 +268,35 @@ async fn happy_pkce_roundtrip_persists_encrypted_tokens_and_emits_redacted_audit
         fingerprint(&bundle.access_token)
     );
 
-    let audit = audit_actions(&fixture.storage).await;
-    assert!(
-        audit
-            .iter()
-            .any(|entry| entry.contains("upstream_oauth_start"))
-    );
-    assert!(
-        audit
-            .iter()
-            .any(|entry| entry.contains("upstream_oauth_complete"))
-    );
+    let audit = fixture.audit_entries("upstream_oauth_complete").await;
+    let start_route = format!("/admin/v1/upstreams/{}/oauth/start", upstream.id);
+    let complete_route = format!("/admin/v1/upstreams/{}/oauth/complete", upstream.id);
     assert!(audit.iter().any(|entry| {
-        entry.contains(
+        entry.route == start_route
+            && entry.upstream == upstream.name
+            && entry
+                .admin_action
+                .as_deref()
+                .is_some_and(|action| action.contains("upstream_oauth_start"))
+    }));
+    assert!(audit.iter().any(|entry| {
+        entry.route == complete_route
+            && entry.upstream == upstream.name
+            && entry
+                .admin_action
+                .as_deref()
+                .is_some_and(|action| action.contains("upstream_oauth_complete"))
+    }));
+    let serialized_audit = serde_json::to_string(&audit).expect("serialize audit");
+    assert!(
+        serialized_audit.contains(
             complete["access_token_fingerprint"]
                 .as_str()
-                .expect("fingerprint"),
+                .expect("fingerprint")
         )
-    }));
-    assert!(
-        !audit
-            .iter()
-            .any(|entry| entry.contains(&bundle.access_token))
     );
-    assert!(
-        !audit
-            .iter()
-            .any(|entry| entry.contains(&bundle.refresh_token))
-    );
+    assert!(!serialized_audit.contains(&bundle.access_token));
+    assert!(!serialized_audit.contains(&bundle.refresh_token));
 }
 
 #[tokio::test]
@@ -368,7 +381,9 @@ async fn audit_entries_contain_fingerprint_only_no_raw_tokens() {
         .expect("oauth credentials")
         .decrypt(&fixture.aead, upstream.id.as_bytes())
         .expect("decrypt tokens");
-    let serialized_audit = audit_actions(&fixture.storage).await.join("\n");
+    let serialized_audit =
+        serde_json::to_string(&fixture.audit_entries("upstream_oauth_complete").await)
+            .expect("serialize audit");
 
     assert!(
         serialized_audit.contains(
@@ -495,6 +510,34 @@ async fn create_from_completed_draft_with_active_name_returns_name_conflict() {
     assert_eq!(body["error"], "upstream_name_conflict");
     assert_eq!(body["name"], "draft-name-conflict");
     assert_eq!(body["existing_upstream_id"], existing.id.to_string());
+}
+
+#[tokio::test]
+async fn create_from_oauth_draft_audits_human_readable_upstream_name() {
+    let fixture = Fixture::new().await;
+    let (status, start) = fixture.start_draft().await;
+    assert_eq!(status, StatusCode::OK);
+    let state_token = start["state_token"].as_str().expect("state token");
+    let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
+    let (status, _) = fixture.complete_draft(state_token, &code).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let upstream_name = "draft-audit-name";
+    let (status, created) = fixture.create_from_draft(state_token, upstream_name).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["name"], upstream_name);
+
+    let audit = fixture
+        .audit_entries("upstream_create_from_oauth_draft")
+        .await;
+    assert!(audit.iter().any(|entry| {
+        entry.route == "/admin/v1/upstreams/from-oauth-draft"
+            && entry.upstream == upstream_name
+            && entry
+                .admin_action
+                .as_deref()
+                .is_some_and(|action| action == "upstream_create_from_oauth_draft")
+    }));
 }
 
 #[tokio::test]
@@ -664,39 +707,6 @@ async fn json_response(response: axum::response::Response) -> (StatusCode, Value
         .to_bytes();
     let json = serde_json::from_slice(&body).unwrap_or(Value::Null);
     (status, json)
-}
-
-async fn audit_actions(storage: &Storage) -> Vec<String> {
-    // NOTE [Priority-3 footgun]: cc-lb's audit pipeline is a spawned background writer
-    // (spawn_audit_writer + bounded mpsc). The previous flat 250ms sleep was enough for
-    // nextest's plain debug binaries but raced on CI under cargo-llvm-cov instrumented
-    // binaries (slower runtime) - the `upstream_oauth_complete` row was occasionally
-    // not yet flushed when the assertion fired. Both callers of this helper assert
-    // after the oauth_complete handler returned 200, so polling until that entry is
-    // present is the correct readiness gate; the fingerprint is embedded in the same
-    // row, so its assertion in the second caller is satisfied transitively.
-    const BUDGET: Duration = Duration::from_secs(2);
-    const INTERVAL: Duration = Duration::from_millis(25);
-    let deadline = std::time::Instant::now() + BUDGET;
-    loop {
-        let entries: Vec<String> = storage
-            .query_audit(None, 0, u64::MAX, 100)
-            .await
-            .expect("query audit")
-            .into_iter()
-            .filter_map(|entry| entry.admin_action)
-            .collect();
-        if entries
-            .iter()
-            .any(|e| e.contains("upstream_oauth_complete"))
-        {
-            return entries;
-        }
-        if std::time::Instant::now() >= deadline {
-            return entries;
-        }
-        tokio::time::sleep(INTERVAL).await;
-    }
 }
 
 fn fingerprint(access_token: &str) -> String {

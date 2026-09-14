@@ -1,5 +1,7 @@
 #[path = "api_key_usage.rs"]
 mod api_key_usage;
+#[path = "audit.rs"]
+mod audit;
 #[path = "cache_keepalive_session_reads.rs"]
 mod cache_keepalive_session_reads;
 #[path = "name_active_unique_migrations.rs"]
