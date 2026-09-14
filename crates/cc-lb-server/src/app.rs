@@ -971,7 +971,6 @@ async fn build_app_with_storage_inner(
     let storage_for_dynamic = storage.clone();
     let env_token = std::env::var("CC_LB_BOOTSTRAP_ADMIN_TOKEN").ok();
     bootstrap::apply_bootstrap(
-        &config,
         storage.as_ref(),
         storage.as_ref(),
         storage.as_ref(),

@@ -339,6 +339,7 @@
       }
     }
   },
+  "additionalProperties": false,
   "$defs": {
     "AdminAuthConfig": {
       "type": "object",

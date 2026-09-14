@@ -127,7 +127,7 @@ config:
     cachePath: /var/lib/cc-lb/litellm.json
 
   # -- Extra raw TOML appended verbatim to the generated config. Use for
-  # [oauth.*], [quotas], [timeouts], [observability], [circuit_breaker], etc.
+  # [oauth.*], [timeouts], [observability], [circuit_breaker], etc.
   extraToml: ""
 
 # -- RUST_LOG value for the container.

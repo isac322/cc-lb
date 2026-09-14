@@ -106,25 +106,6 @@ ttl_days = 4294967296
 }
 
 #[test]
-fn validation_failures_none_mode_legacy_field() {
-    let (_dir, path) = crate::common::temp_config(
-        r#"[none_mode]
-upstream_credential_ref = "x"
-
-[api_keys]
-"#,
-    );
-
-    let error = Config::load(&path).unwrap_err().to_string();
-
-    assert!(
-        error.contains("none_mode.upstream_credential_ref"),
-        "{error}"
-    );
-    assert!(error.contains("principal.allowed_upstreams"), "{error}");
-}
-
-#[test]
 fn none_mode_loads_without_upstream_credential_ref() {
     let (_dir, path) = crate::common::temp_config(
         r#"[downstream_auth]

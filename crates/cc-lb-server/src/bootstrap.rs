@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-use cc_lb_config::Config;
 use cc_lb_engine::clock::{Clock, unix_secs};
 use cc_lb_storage_api::plugin_registry::{
     PluginChainEntryInput, PluginSlotKind, WasmRegistryEntry,
@@ -115,7 +114,6 @@ pub struct BootstrapPluginEntry {
 }
 
 pub async fn apply_bootstrap(
-    _config: &Config,
     seeder: &dyn PrincipalStore,
     upstream_store: &dyn UpstreamStore,
     plugin_store: &dyn PluginRegistryStore,
@@ -475,17 +473,9 @@ mod tests {
         )
         .unwrap();
 
-        apply_bootstrap(
-            &Config::default(),
-            &storage,
-            &storage,
-            &storage,
-            None,
-            dir.path(),
-            &clock,
-        )
-        .await
-        .unwrap();
+        apply_bootstrap(&storage, &storage, &storage, None, dir.path(), &clock)
+            .await
+            .unwrap();
 
         let principal = PrincipalStore::get_by_name(&storage, "alice")
             .await
@@ -501,17 +491,9 @@ mod tests {
             ),
         )
         .unwrap();
-        apply_bootstrap(
-            &Config::default(),
-            &storage,
-            &storage,
-            &storage,
-            None,
-            dir.path(),
-            &clock,
-        )
-        .await
-        .unwrap();
+        apply_bootstrap(&storage, &storage, &storage, None, dir.path(), &clock)
+            .await
+            .unwrap();
 
         let principals = PrincipalStore::list(&storage, 0, 100, false).await.unwrap();
         assert_eq!(
@@ -540,17 +522,9 @@ plugins = ["audit"]
         )
         .unwrap();
 
-        apply_bootstrap(
-            &Config::default(),
-            &storage,
-            &storage,
-            &storage,
-            None,
-            dir.path(),
-            &clock,
-        )
-        .await
-        .unwrap();
+        apply_bootstrap(&storage, &storage, &storage, None, dir.path(), &clock)
+            .await
+            .unwrap();
 
         let entries = storage
             .list_chain_for_principal(principal.id, PluginSlotKind::Router)
@@ -573,17 +547,9 @@ plugins = ["audit"]
 "#,
         )
         .unwrap();
-        apply_bootstrap(
-            &Config::default(),
-            &storage,
-            &storage,
-            &storage,
-            None,
-            dir.path(),
-            &clock,
-        )
-        .await
-        .unwrap();
+        apply_bootstrap(&storage, &storage, &storage, None, dir.path(), &clock)
+            .await
+            .unwrap();
         let entries = storage
             .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await
@@ -614,17 +580,9 @@ plugins = ["missing-plugin"]
         )
         .unwrap();
 
-        apply_bootstrap(
-            &Config::default(),
-            &storage,
-            &storage,
-            &storage,
-            None,
-            dir.path(),
-            &clock,
-        )
-        .await
-        .unwrap();
+        apply_bootstrap(&storage, &storage, &storage, None, dir.path(), &clock)
+            .await
+            .unwrap();
 
         let entries = storage
             .list_chain_for_principal(principal.id, PluginSlotKind::Router)

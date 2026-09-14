@@ -160,22 +160,12 @@ pub struct ConfigDraftState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySummary {
-    pub upstreams: usize,
-    pub principals: usize,
-    pub plugin_count: usize,
     pub tls_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub revision: u64,
-    pub config_toml: String,
-    pub applied_at_unix_secs: u64,
-    pub summary: HistorySummary,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoredHistoryEntry {
     pub config_toml: String,
     pub applied_at_unix_secs: u64,
     pub summary: HistorySummary,

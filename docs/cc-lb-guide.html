@@ -335,7 +335,6 @@ mode = "none"
 [downstream_auth.none_mode]
 principal_id = "api-key"
 upstream_kind = "anthropic_key"
-upstream_credential_ref = "anthropic"
 
 [storage]
 kind = "sqlite"
@@ -348,12 +347,6 @@ key_env = "CC_LB_MASTER_KEY"
 tracing_level         = "info"
 log_redaction         = true
 user_prompt_redaction = false
-
-[quotas]
-default_window_secs         = 60
-default_requests_per_window = 1000
-default_input_tokens        = 1000000
-default_output_tokens       = 1000000
 
 [admin]
 token_env = "CC_LB_ADMIN_TOKEN"
@@ -588,7 +581,6 @@ mode = &quot;none&quot;
 [downstream_auth.none_mode]
 principal_id = &quot;api-key&quot;
 upstream_kind = &quot;anthropic_key&quot;
-upstream_credential_ref = &quot;anthropic&quot;
 
 [observability]
 tracing_level = &quot;info&quot;
@@ -890,7 +882,6 @@ reload_on_sighup = true</code></pre><button class="copy">복사</button></div>
     <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>vim /etc/cc-lb/prod.toml
 kill -HUP $(pgrep -x cc-lb)
 # 파일 watch + SIGHUP 둘 다 동작 (500ms debounce)
-# 즉시 반영: quota defaults
 # 재시작 필요: breaker / bulkhead / redaction (WARN 로그로 안내)</code></pre><button class="copy">복사</button></div>
 
     <h4>Graceful drain</h4>
@@ -1149,8 +1140,7 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     toml += 'mode = "none"\n\n';
     toml += '[downstream_auth.none_mode]\n';
     toml += 'principal_id = "api-key"\n';
-    toml += 'upstream_kind = "anthropic_key"\n';
-    toml += 'upstream_credential_ref = "' + upstreamName + '"\n\n';
+    toml += 'upstream_kind = "anthropic_key"\n\n';
 
     toml += '[storage]\n';
     toml += 'kind = "sqlite"\n';
@@ -1162,12 +1152,6 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     toml += 'tracing_level         = "info"\n';
     toml += 'log_redaction         = true\n';
     toml += 'user_prompt_redaction = false\n\n';
-
-    toml += '[quotas]\n';
-    toml += 'default_window_secs         = 60\n';
-    toml += 'default_requests_per_window = 1000\n';
-    toml += 'default_input_tokens        = 1000000\n';
-    toml += 'default_output_tokens       = 1000000\n\n';
 
     toml += '[admin]\n';
     toml += 'token_env = "CC_LB_ADMIN_TOKEN"\n\n';

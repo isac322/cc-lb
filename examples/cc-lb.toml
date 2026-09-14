@@ -40,13 +40,6 @@ log_redaction = true
 user_prompt_redaction = false
 # otlp_endpoint = "http://127.0.0.1:4317"
 
-# Default quota policy surfaced to built-in authn and storage-backed quota manager when enabled.
-[quotas]
-default_window_secs = 60
-default_requests_per_window = 1000
-default_input_tokens = 1000000
-default_output_tokens = 1000000
-
 # New deployments configure the provider registry with
 # CC_LB_ADMIN_AUTH_PROVIDERS_JSON. This legacy block remains temporarily so an
 # existing deployment upgrades without a pre-upgrade configuration change.

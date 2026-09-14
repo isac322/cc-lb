@@ -107,7 +107,7 @@ impl Config {
             None => figment.merge(Toml::file_exact(toml_path)),
         };
         let mut config: Config = figment
-            .merge(Env::prefixed("CC_LB_").split("__"))
+            .merge(Self::config_env())
             .merge(Serialized::defaults(cli_overrides))
             .extract()?;
 
@@ -127,6 +127,14 @@ impl Config {
         Ok((config, warnings))
     }
 
+    pub fn from_stored_toml(raw_toml: &str) -> Result<Self, ConfigError> {
+        validation::validate_raw_toml(raw_toml)?;
+        let migrated_toml = validation::migrate_legacy_storage_toml(raw_toml)?;
+        Ok(Figment::from(Serialized::defaults(Self::default()))
+            .merge(Toml::string(&migrated_toml))
+            .extract()?)
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         validation::validate_config(self)
     }
@@ -138,6 +146,23 @@ impl Config {
 
     pub fn json_schema() -> schemars::Schema {
         schemars::schema_for!(Config)
+    }
+
+    fn config_env() -> Env {
+        let roots = Self::json_schema()
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        Env::prefixed("CC_LB_")
+            .filter(move |key| {
+                let root = key.as_str().split("__").next().unwrap_or_default();
+                roots
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(root))
+            })
+            .split("__")
     }
 
     fn apply_admin_auth_env_override(&mut self) -> Result<bool, ConfigError> {

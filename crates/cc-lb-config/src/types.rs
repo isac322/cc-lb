@@ -44,7 +44,7 @@ pub const DEFAULT_PARTIAL_RETENTION_MAX_ENTRIES: usize = 10_000;
 pub const DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS: u32 = 90;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub listener: ListenerConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1695,34 +1695,21 @@ upstream_kind = "anthropic_key"
         );
     }
 
-    fn legacy_removed_message() -> String {
-        let legacy_plugin_section = ["authn", "_", "plugin"].concat();
-        [
-            "v2 removed `plugins.",
-            &legacy_plugin_section,
-            "` / `principals.*.quotas`; use `downstream_auth.mode` + `principals.*.default_limits` (sk-cclb-* API keys)",
-        ]
-        .concat()
-    }
-
     #[test]
-    fn legacy_plugin_rejected() {
-        let legacy_plugin_section = ["authn", "_", "plugin"].concat();
-        let config_toml = format!(
-            "[plugins.{}]\nname = \"legacy\"\n\n[api_keys]\n",
-            legacy_plugin_section
-        );
-        let error = load_config(&config_toml).expect_err("legacy plugin should fail");
+    fn database_owned_top_level_keys_are_rejected() {
+        for key in [
+            "principals",
+            "upstreams",
+            "plugins",
+            "plugin_chains",
+            "quotas",
+        ] {
+            let config_toml = format!("[{key}]\n");
+            let error = load_config(&config_toml).expect_err("database-owned key should fail");
+            let message = error.to_string();
 
-        assert!(error.to_string().contains(&legacy_removed_message()));
-    }
-
-    #[test]
-    fn legacy_principal_quotas_rejected() {
-        let legacy_header = ["[", "principals", ".u1.quotas]"].concat();
-        let config_toml = format!("\n{legacy_header}\ndefault_window_secs = 60\n\n[api_keys]\n");
-        let error = load_config(&config_toml).expect_err("legacy quotas should fail");
-
-        assert!(error.to_string().contains(&legacy_removed_message()));
+            assert!(message.contains("unknown field"), "{message}");
+            assert!(message.contains(key), "{message}");
+        }
     }
 }

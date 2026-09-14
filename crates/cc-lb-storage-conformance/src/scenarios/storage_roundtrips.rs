@@ -194,8 +194,8 @@ where
         let storage = fixture.storage();
         let draft = ConfigDraftState {
             draft: Some(json!({
-                "principals": [{"id": "local", "label": "Local"}],
-                "upstreams": {"primary": {"kind": "anthropic_direct"}}
+                "timeouts": { "idle_secs": 30 },
+                "body": { "messages_cap_bytes": 1048576 }
             })),
             saved_at_unix_secs: Some(1_800_400_000),
             ..ConfigDraftState::default()
@@ -218,14 +218,9 @@ where
 
         let history = HistoryEntry {
             revision,
-            config_toml: "[oauth.anthropic]\nclient_id = \"test-client\"\n".to_owned(),
+            config_toml: "[timeouts]\nidle_secs = 30\n".to_owned(),
             applied_at_unix_secs: 1_800_400_010,
-            summary: HistorySummary {
-                upstreams: 1,
-                principals: 1,
-                plugin_count: 0,
-                tls_enabled: true,
-            },
+            summary: HistorySummary { tls_enabled: true },
         };
         storage
             .append_config_history(

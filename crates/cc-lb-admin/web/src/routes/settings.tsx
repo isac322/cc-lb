@@ -834,20 +834,10 @@ function ConfigDraftSection() {
   );
 }
 
-const HISTORY_CELL_CLASS_NAMES = [
-  'px-4',
-  'px-4',
-  'px-4',
-  'px-4',
-  'px-4',
-  'px-4',
-] as const;
+const HISTORY_CELL_CLASS_NAMES = ['px-4', 'px-4', 'px-4'] as const;
 const HISTORY_SKELETON_CLASS_NAMES = [
   'ml-auto w-8',
   'w-24',
-  'ml-auto w-8',
-  'ml-auto w-8',
-  'ml-auto w-8',
   'mx-auto w-12',
 ] as const;
 const HISTORY_LOADING_ROW_IDS = [0, 1, 2, 3] as const;
@@ -861,14 +851,11 @@ function ConfigHistorySection() {
           data-testid="config-history-slot"
           className="min-h-[173px] overflow-x-auto sm:min-h-[163px]"
         >
-          <table className="min-w-[640px] w-full font-mono text-xs">
+          <table className="min-w-[400px] w-full font-mono text-xs">
             <thead className="table-header sticky top-0 z-10">
               <tr className="text-[10px] uppercase tracking-wider">
                 <th className="text-right px-4 py-2">Rev</th>
                 <th className="text-left px-4 py-2">Applied</th>
-                <th className="text-right px-4 py-2">Upstreams</th>
-                <th className="text-right px-4 py-2">Principals</th>
-                <th className="text-right px-4 py-2">Plugins</th>
                 <th className="text-center px-4 py-2">TLS</th>
               </tr>
             </thead>
@@ -877,7 +864,7 @@ function ConfigHistorySection() {
                 HISTORY_LOADING_ROW_IDS.map((id) => (
                   <SkeletonRow
                     key={id}
-                    cols={6}
+                    cols={3}
                     cellClassNames={HISTORY_CELL_CLASS_NAMES}
                     skeletonClassNames={HISTORY_SKELETON_CLASS_NAMES}
                   />
@@ -891,15 +878,6 @@ function ConfigHistorySection() {
                         ts={new Date(h.applied_at_unix_secs * 1000)}
                       />
                     </td>
-                    <td className="px-4 py-2 text-right tabular-nums">
-                      {h.config_summary.upstreams}
-                    </td>
-                    <td className="px-4 py-2 text-right tabular-nums">
-                      {h.config_summary.principals}
-                    </td>
-                    <td className="px-4 py-2 text-right tabular-nums">
-                      {h.config_summary.plugin_count}
-                    </td>
                     <td className="px-4 py-2 text-center">
                       <StatusBadge
                         tone={h.config_summary.tls_enabled ? 'ok' : 'neutral'}
@@ -911,7 +889,7 @@ function ConfigHistorySection() {
               ) : (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={3}
                     className="px-4 py-12 text-center text-xs text-text-faint"
                   >
                     No history available.
@@ -961,8 +939,8 @@ const RESTART_MATRIX: { field: string; reason: string }[] = [
 function RestartRequiredMatrix() {
   return (
     <Section
-      title="Hot-Reload Behaviour Matrix"
-      subtitle="Which cc-lb.toml fields are hot-reloadable, and which require a process restart."
+      title="Restart-Required Fields"
+      subtitle="cc-lb.toml fields that cannot be applied by hot reload."
     >
       <Card>
         <div className="overflow-x-auto">
@@ -975,17 +953,6 @@ function RestartRequiredMatrix() {
               </tr>
             </thead>
             <tbody>
-              <tr className="border-b border-row bg-[color:var(--color-ok)]/[0.06]">
-                <td className="px-4 py-2">
-                  upstreams · principals · plugin chains
-                </td>
-                <td className="px-4 py-2 text-center">
-                  <StatusBadge tone="ok" label="Yes" />
-                </td>
-                <td className="px-4 py-2 text-text-muted">
-                  Fully dynamic via admin DB; no restart required.
-                </td>
-              </tr>
               {RESTART_MATRIX.map((r) => (
                 <tr key={r.field} className="border-b border-row">
                   <td className="px-4 py-2">{r.field}</td>

@@ -39,7 +39,7 @@ fn test_state() -> AdminState {
 }
 
 #[tokio::test]
-async fn config_apply_current_admin_principals_smoke() {
+async fn config_apply_current_admin_config_smoke() {
     let response = router(test_state())
         .oneshot(
             Request::builder()

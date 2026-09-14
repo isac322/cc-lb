@@ -125,6 +125,48 @@ async fn saving_new_draft_invalidates_last_validated_revision() {
 }
 
 #[tokio::test]
+async fn validate_rejects_database_owned_top_level_keys() {
+    for key in [
+        "principals",
+        "upstreams",
+        "plugins",
+        "plugin_chains",
+        "quotas",
+    ] {
+        let (_dir, storage) = temp_storage().await;
+        let app = app(test_state(
+            config_admin_common::minimal_config(),
+            Some(storage),
+        ));
+        let mut draft = serde_json::Map::new();
+        draft.insert(key.to_owned(), json!({}));
+
+        let (status, _, saved, _) = authed_json(
+            app.clone(),
+            "PUT",
+            "/admin/config/draft",
+            Some(put_body(serde_json::Value::Object(draft), 0)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _, validated, _) = authed_json(
+            app,
+            "POST",
+            "/admin/config/draft/validate",
+            Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(validated["valid"], false);
+        let error = validated["error"].as_str().unwrap();
+        assert!(error.contains("unknown field"));
+        assert!(error.contains(key));
+    }
+}
+
+#[tokio::test]
 async fn get_draft_purges_expired_invalid_draft() {
     let (_dir, storage) = temp_storage().await;
     storage
@@ -141,7 +183,7 @@ async fn get_draft_purges_expired_invalid_draft() {
         .await
         .unwrap();
     storage
-        .set_last_validated_revision(1, Some("unknown top-level config keys: some".to_owned()))
+        .set_last_validated_revision(1, Some("unknown field `some`".to_owned()))
         .await
         .unwrap();
     let app = app(test_state(

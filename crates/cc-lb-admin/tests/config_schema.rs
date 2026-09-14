@@ -14,6 +14,26 @@ async fn authorized_schema_returns_schema_and_checklist() {
 }
 
 #[tokio::test]
+async fn schema_excludes_database_owned_resources() {
+    let app = app(test_state_without_storage());
+    let (_, _, json, _) = authed_json(app, "GET", "/admin/config/schema", None).await;
+    let properties = json["schema"]["properties"].as_object().unwrap();
+
+    for resource in [
+        "principals",
+        "upstreams",
+        "plugins",
+        "plugin_chains",
+        "quotas",
+    ] {
+        assert!(
+            !properties.contains_key(resource),
+            "database-owned resource {resource} must not appear in config schema"
+        );
+    }
+}
+
+#[tokio::test]
 async fn schema_and_coverage_include_upstream_affinity() {
     let app = app(test_state_without_storage());
     let (_, _, json, _) = authed_json(app, "GET", "/admin/config/schema", None).await;

@@ -181,15 +181,15 @@ test('settings cold load skeletonizes fixed metadata, checklist, and history slo
   const historySlot = screen.getByTestId('config-history-slot');
   expect(historySlot.className).toContain('min-h-[173px]');
   expect(historySlot.className).toContain('sm:min-h-[163px]');
-  expect(historySlot.querySelectorAll('thead th')).toHaveLength(6);
+  expect(historySlot.querySelectorAll('thead th')).toHaveLength(3);
   expect(historySlot.querySelector('table')?.className).toContain(
-    'min-w-[640px]',
+    'min-w-[400px]',
   );
   const historyRows = historySlot.querySelectorAll('tbody tr');
   expect(historyRows).toHaveLength(4);
   for (const row of historyRows) {
     const cells = row.querySelectorAll('td');
-    expect(cells).toHaveLength(6);
+    expect(cells).toHaveLength(3);
     for (const cell of cells) {
       expect(cell.className).toContain('px-4');
       expect(cell.className).toContain('py-2');
@@ -213,6 +213,20 @@ test('settings empty and loaded checklist/history states retain their slots', ()
     'sm:min-h-[163px]',
   );
   expect(screen.getByText('No history available.')).toBeDefined();
+  expect(
+    within(screen.getByTestId('config-history-slot'))
+      .getAllByRole('columnheader')
+      .map((header) => header.textContent),
+  ).toEqual(['Rev', 'Applied', 'TLS']);
+  expect(
+    screen.queryByText('upstreams · principals · plugin chains'),
+  ).toBeNull();
+  expect(screen.getByText('Configuration Export')).toBeDefined();
+  expect(
+    screen.getByText(
+      'Download a JSON snapshot of all upstreams, principals, plugins, and chains.',
+    ),
+  ).toBeDefined();
 
   queryMocks.useConfigSchema.mockReturnValue(
     loadedResult({
@@ -227,9 +241,6 @@ test('settings empty and loaded checklist/history states retain their slots', ()
           revision: 7,
           applied_at_unix_secs: 1_722_340_800,
           config_summary: {
-            upstreams: 2,
-            principals: 3,
-            plugin_count: 4,
             tls_enabled: true,
           },
         },
@@ -242,10 +253,10 @@ test('settings empty and loaded checklist/history states retain their slots', ()
     'min-h-[20px]',
   );
   expect(screen.getByText('Coverage checklist (2 fields)')).toBeDefined();
-  expect(screen.getByTestId('config-history-slot').className).toContain(
-    'min-h-[173px]',
-  );
-  expect(screen.getByText('on')).toBeDefined();
+  const loadedHistorySlot = screen.getByTestId('config-history-slot');
+  expect(loadedHistorySlot.className).toContain('min-h-[173px]');
+  expect(loadedHistorySlot.querySelectorAll('tbody td')).toHaveLength(3);
+  expect(within(loadedHistorySlot).getByText('on')).toBeDefined();
 });
 
 test('settings editor loads the saved draft and documents startup token replacement', () => {
