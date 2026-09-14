@@ -502,6 +502,27 @@ impl storage_api::AuditStore for InMemoryStorage {
             .collect())
     }
 
+    async fn query_audit_by_actor(
+        &self,
+        authority: &str,
+        subject: &str,
+        since: u64,
+        until: u64,
+        limit: usize,
+    ) -> storage_api::StorageResult<Vec<storage_api::AuditEntry>> {
+        Ok(lock_or_storage_error(&self.audit_entries)?
+            .iter()
+            .filter(|entry| {
+                entry.ts >= since
+                    && entry.ts <= until
+                    && entry.actor_authority.as_deref() == Some(authority)
+                    && entry.actor_subject.as_deref() == Some(subject)
+            })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
     async fn prune_audit(&self, older_than: u64) -> storage_api::StorageResult<u64> {
         let mut entries = lock_or_storage_error(&self.audit_entries)?;
         let before = entries.len();
