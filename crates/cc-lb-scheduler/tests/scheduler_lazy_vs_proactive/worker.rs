@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use apalis::prelude::Data;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
@@ -46,6 +46,7 @@ pub struct OAuthWorkerProbe {
 
 struct OAuthWorkerProbeInner {
     state: AtomicU8,
+    metadata_enqueued: AtomicUsize,
     notify: tokio::sync::Notify,
 }
 
@@ -54,6 +55,7 @@ pub struct OAuthWorkerProbeState {
     started: bool,
     running: bool,
     finished: bool,
+    metadata_enqueued: usize,
 }
 
 impl OAuthWorkerProbeState {
@@ -71,6 +73,7 @@ impl OAuthWorkerProbe {
         Self {
             inner: Arc::new(OAuthWorkerProbeInner {
                 state: AtomicU8::new(0),
+                metadata_enqueued: AtomicUsize::new(0),
                 notify: tokio::sync::Notify::new(),
             }),
         }
@@ -82,6 +85,7 @@ impl OAuthWorkerProbe {
             started: state & OAUTH_STARTED != 0,
             running: state & OAUTH_RUNNING != 0,
             finished: state & OAUTH_FINISHED != 0,
+            metadata_enqueued: self.inner.metadata_enqueued.load(Ordering::Acquire),
         }
     }
 
@@ -107,6 +111,32 @@ impl OAuthWorkerProbe {
         .is_ok()
     }
 
+    pub async fn wait_for_metadata_enqueued(
+        &self,
+        expected: usize,
+        timeout: std::time::Duration,
+    ) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                if self.state().metadata_enqueued >= expected {
+                    return;
+                }
+
+                let notified = self.inner.notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+
+                if self.state().metadata_enqueued >= expected {
+                    return;
+                }
+
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     fn mark_started(&self) {
         self.inner
             .state
@@ -118,6 +148,11 @@ impl OAuthWorkerProbe {
         self.inner
             .state
             .store(OAUTH_STARTED | OAUTH_FINISHED, Ordering::Release);
+        self.inner.notify.notify_waiters();
+    }
+
+    fn mark_metadata_enqueued(&self) {
+        self.inner.metadata_enqueued.fetch_add(1, Ordering::Release);
         self.inner.notify.notify_waiters();
     }
 }
@@ -159,13 +194,14 @@ where
         let aead = ctx.aead.clone();
         let oauth_cfg = ctx.oauth_cfg.clone();
         let backend = ctx.backend.clone();
+        let enqueue_probe = ctx.probe.clone();
         let result = ctx
             .handler
             .handle(
                 job,
                 now_secs(),
                 move |upstream| refresh_tokens(aead, oauth_cfg, upstream),
-                move |metadata| enqueue_metadata(backend, metadata),
+                move |metadata| enqueue_metadata(backend, metadata, enqueue_probe),
                 |_upstream_id, _expires_at_unix_secs| async { Ok(()) },
             )
             .await;
@@ -174,8 +210,14 @@ where
     })
 }
 
-async fn enqueue_metadata(backend: SchedulerBackend, job: MetadataRefreshJob) -> Result<()> {
-    backend.push_job(AdaptiveJob::MetadataRefresh(job)).await
+async fn enqueue_metadata(
+    backend: SchedulerBackend,
+    job: MetadataRefreshJob,
+    probe: OAuthWorkerProbe,
+) -> Result<()> {
+    backend.push_job(AdaptiveJob::MetadataRefresh(job)).await?;
+    probe.mark_metadata_enqueued();
+    Ok(())
 }
 
 async fn refresh_tokens(

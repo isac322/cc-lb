@@ -5,7 +5,6 @@ use std::time::Duration;
 use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, WorkerBuilder, WorkerError};
 use cc_lb_aead::AeadService;
-use cc_lb_clock::TestClock;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::retry::RetryClass;
@@ -19,8 +18,8 @@ use url::Url;
 use uuid::Uuid;
 
 use super::common::{
-    TEST_NOW_UNIX_SECS, TestResult, create_oauth_upstream, metadata_key_prefix,
-    read_upstream_generation, stores_from_storage,
+    TestResult, create_oauth_upstream, metadata_key_prefix, read_upstream_generation,
+    stores_from_storage, test_clock,
 };
 use super::fake::FakeAnthropic;
 use super::scenario::run_race_scenario;
@@ -29,7 +28,7 @@ use super::worker::{OAuthWorkerProbe, OAuthWorkerState, entity_job_handler};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t3__sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestResult<()> {
     let dir = tempfile::tempdir()?;
-    let clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
+    let clock = test_clock();
     let fake = FakeAnthropic::spawn().await?;
     let storage_url = format!("sqlite://{}", dir.path().join("runtime.sqlite").display());
     let storage = Arc::new(cc_lb_storage_sqlite::open_sqlite(&storage_url, clock.clone()).await?);

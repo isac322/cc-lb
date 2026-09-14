@@ -21,7 +21,7 @@ use url::Url;
 use uuid::Uuid;
 
 use super::common::{
-    TestResult, create_oauth_upstream, read_upstream_generation, stores_from_storage,
+    TestResult, create_oauth_upstream, read_upstream_generation, stores_from_storage, test_clock,
 };
 use super::fake::FakeAnthropic;
 use super::scenario::run_race_scenario;
@@ -64,7 +64,7 @@ async fn run_postgres_race_inner(scheduler_url: &str, runtime_url: &str) -> Test
         .await?;
     apalis_postgres::PostgresStorage::setup(&pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-    let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+    let clock = test_clock();
     let storage = Arc::new(cc_lb_storage_postgres::PostgresStorage::new(
         storage_pool.clone(),
         clock.clone(),
