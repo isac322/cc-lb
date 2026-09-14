@@ -131,10 +131,12 @@ async fn run_truncated_partial_case(expect_delivery: bool) -> TestResult<()> {
     let consumer_bus = Arc::new(InMemoryBus::new());
     let mut consumer_rx = consumer_bus.subscribe();
     let (listener_shutdown_tx, listener_shutdown_rx) = watch::channel(false);
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let http_client = reqwest::Client::new();
     let listener_task = PgListener::spawn_with_channel(
         consumer_pool.clone(),
         consumer_bus,
-        reqwest::Client::new(),
+        http_client,
         SecretString::new(consumer_token.to_owned().into()),
         channel,
         "http://consumer.local".to_owned(),

@@ -26,12 +26,14 @@ pub(crate) struct JwksCache {
 
 impl JwksCache {
     pub(crate) fn new(url: String) -> Self {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("valid JWKS HTTP client configuration");
         Self {
             url,
-            client: reqwest::Client::builder()
-                .timeout(REQUEST_TIMEOUT)
-                .build()
-                .expect("valid JWKS HTTP client configuration"),
+            client,
             keys: ArcSwap::from_pointee(HashMap::new()),
             fetched_at: StdMutex::new(None),
             last_miss_refetch: StdMutex::new(None),

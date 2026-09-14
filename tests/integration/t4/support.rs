@@ -478,6 +478,7 @@ async fn seed_oauth_tokens(
     upstream_id: Uuid,
     fake_addr: SocketAddr,
 ) -> TestResult {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
