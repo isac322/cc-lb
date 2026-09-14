@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use cc_lb_engine::clock::unix_secs;
 use cc_lb_pricing::LiteLlmLoader;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::apalis_housekeeping::{
-    ApalisHousekeepingConfig, ApalisHousekeepingJobHandler,
+    ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler,
 };
 use cc_lb_scheduler::jobs::compat::{
     AnthropicCompatRefreshJob, handle_anthropic_compat_refresh_job_with_core_fetcher,
@@ -11,19 +13,22 @@ use cc_lb_scheduler::jobs::oauth_usage_poll::{
     NETWORK_FAILURE_STATUS, OAuthUsagePollCronJob, OAuthUsagePollObservation,
 };
 use cc_lb_scheduler::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
-use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJobHandler;
+use cc_lb_scheduler::jobs::price_catalog::{PriceCatalogRefreshJob, PriceCatalogRefreshJobHandler};
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJobHandler;
-use cc_lb_scheduler::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJobHandler;
+use cc_lb_scheduler::jobs::upstream_affinity_purge::{
+    UpstreamAffinityPurgeJob, UpstreamAffinityPurgeJobHandler,
+};
 use cc_lb_scheduler::jobs::usage_prune::handle_usage_prune_job;
 use cc_lb_scheduler::jobs::usage_rollup::handle_usage_rollup_job;
 use cc_lb_scheduler::jobs::watchdog::{
-    OAuthRefreshWatchdogJob, WarmupWatchdogJob, WatchdogEntityKind, run_entity_watchdog,
+    OAuthRefreshWatchdogJob, WarmupWatchdogJob, WatchdogEntityKind, WatchdogSeedStats,
+    run_entity_watchdog,
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::state_stores::{
     AnthropicCompatEtagsStore, OAuthUsagePollCursorsStore, PriceCatalogVersionsStore,
 };
-use cc_lb_scheduler::worker::{CronJob, SchedulerBackend};
+use cc_lb_scheduler::worker::{AdaptiveJob, CronJob, SchedulerBackend, SchedulerPushTask};
 use uuid::Uuid;
 
 use super::SchedulerDispatch;
@@ -32,6 +37,204 @@ use crate::scheduler_dispatch::outcomes::{
     upstream_affinity_purge_outcome, usage_prune_outcome, usage_rollup_outcome,
 };
 use crate::scheduler_dispatch::storage::{StorageHandle, storage_scheduler_error};
+
+#[async_trait::async_trait]
+pub(crate) trait SchedulerDispatchBackend: Send + Sync {
+    async fn push_job(&self, job: AdaptiveJob) -> SchedulerResult<()>;
+
+    async fn push_adaptive_task(&self, task: SchedulerPushTask<AdaptiveJob>)
+    -> SchedulerResult<()>;
+
+    async fn purge_upstream_affinity(
+        &self,
+        storage: Arc<dyn cc_lb_storage_api::Storage>,
+        job: UpstreamAffinityPurgeJob,
+        now_unix_secs: u64,
+        ttl_secs: u64,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> SchedulerResult<JobOutcome>;
+
+    async fn run_apalis_housekeeping(
+        &self,
+        job: ApalisHousekeepingJob,
+        config: ApalisHousekeepingConfig,
+        now_unix_secs: u64,
+    ) -> SchedulerResult<JobOutcome>;
+
+    async fn seed_watchdog(
+        &self,
+        kind: WatchdogEntityKind,
+        upstream_ids: Vec<Uuid>,
+        tick_unix_secs: u64,
+        run_at_unix_secs: u64,
+    ) -> SchedulerResult<WatchdogSeedStats>;
+
+    async fn record_oauth_usage_attempt(
+        &self,
+        upstream_id: Uuid,
+        observed_at_unix_secs: u64,
+        status: i32,
+    ) -> SchedulerResult<()>;
+
+    async fn refresh_anthropic_compat(
+        &self,
+        job: AnthropicCompatRefreshJob,
+        storage: Arc<dyn cc_lb_storage_api::Storage>,
+        cancel: tokio_util::sync::CancellationToken,
+        clock: cc_lb_engine::clock::ClockHandle,
+    ) -> SchedulerResult<JobOutcome>;
+
+    async fn refresh_price_catalog(
+        &self,
+        job: PriceCatalogRefreshJob,
+        loader: LiteLlmLoader,
+        now_unix_secs: u64,
+    ) -> SchedulerResult<JobOutcome>;
+}
+
+#[async_trait::async_trait]
+impl SchedulerDispatchBackend for SchedulerBackend {
+    async fn push_job(&self, job: AdaptiveJob) -> SchedulerResult<()> {
+        SchedulerBackend::push_job(self, job).await
+    }
+
+    async fn push_adaptive_task(
+        &self,
+        task: SchedulerPushTask<AdaptiveJob>,
+    ) -> SchedulerResult<()> {
+        SchedulerBackend::push_adaptive_task(self, task).await
+    }
+
+    async fn purge_upstream_affinity(
+        &self,
+        storage: Arc<dyn cc_lb_storage_api::Storage>,
+        job: UpstreamAffinityPurgeJob,
+        now_unix_secs: u64,
+        ttl_secs: u64,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> SchedulerResult<JobOutcome> {
+        upstream_affinity_purge_outcome(
+            UpstreamAffinityPurgeJobHandler::new(StorageHandle::new(storage))
+                .handle(job, now_unix_secs, ttl_secs, &cancel)
+                .await,
+        )
+    }
+
+    async fn run_apalis_housekeeping(
+        &self,
+        job: ApalisHousekeepingJob,
+        config: ApalisHousekeepingConfig,
+        now_unix_secs: u64,
+    ) -> SchedulerResult<JobOutcome> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            SchedulerBackend::Sqlite(sqlite) => apalis_housekeeping_outcome(
+                ApalisHousekeepingJobHandler::new(sqlite.pool().clone(), config)
+                    .handle(job, now_unix_secs)
+                    .await,
+            ),
+            #[cfg(feature = "postgres")]
+            SchedulerBackend::Postgres(postgres) => apalis_housekeeping_outcome(
+                ApalisHousekeepingJobHandler::new(postgres.pool().clone(), config)
+                    .handle(job, now_unix_secs)
+                    .await,
+            ),
+        }
+    }
+
+    async fn seed_watchdog(
+        &self,
+        kind: WatchdogEntityKind,
+        upstream_ids: Vec<Uuid>,
+        tick_unix_secs: u64,
+        run_at_unix_secs: u64,
+    ) -> SchedulerResult<WatchdogSeedStats> {
+        run_entity_watchdog(self, kind, &upstream_ids, tick_unix_secs, run_at_unix_secs).await
+    }
+
+    async fn record_oauth_usage_attempt(
+        &self,
+        upstream_id: Uuid,
+        observed_at_unix_secs: u64,
+        status: i32,
+    ) -> SchedulerResult<()> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            SchedulerBackend::Sqlite(sqlite) => {
+                OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
+                    .record_attempt(upstream_id, observed_at_unix_secs, status)
+                    .await
+            }
+            #[cfg(feature = "postgres")]
+            SchedulerBackend::Postgres(postgres) => {
+                OAuthUsagePollCursorsStore::new(postgres.pool().clone())
+                    .record_attempt(upstream_id, observed_at_unix_secs, status)
+                    .await
+            }
+        }
+    }
+
+    async fn refresh_anthropic_compat(
+        &self,
+        job: AnthropicCompatRefreshJob,
+        storage: Arc<dyn cc_lb_storage_api::Storage>,
+        cancel: tokio_util::sync::CancellationToken,
+        clock: cc_lb_engine::clock::ClockHandle,
+    ) -> SchedulerResult<JobOutcome> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            SchedulerBackend::Sqlite(sqlite) => {
+                handle_anthropic_compat_refresh_job_with_core_fetcher(
+                    job,
+                    &AnthropicCompatEtagsStore::new(sqlite.pool().clone()),
+                    storage.as_ref(),
+                    &cancel,
+                    &*clock,
+                )
+                .await
+            }
+            #[cfg(feature = "postgres")]
+            SchedulerBackend::Postgres(postgres) => {
+                handle_anthropic_compat_refresh_job_with_core_fetcher(
+                    job,
+                    &AnthropicCompatEtagsStore::new(postgres.pool().clone()),
+                    storage.as_ref(),
+                    &cancel,
+                    &*clock,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn refresh_price_catalog(
+        &self,
+        job: PriceCatalogRefreshJob,
+        loader: LiteLlmLoader,
+        now_unix_secs: u64,
+    ) -> SchedulerResult<JobOutcome> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            SchedulerBackend::Sqlite(sqlite) => price_catalog_outcome(
+                PriceCatalogRefreshJobHandler::new(
+                    PriceCatalogVersionsStore::new(sqlite.pool().clone()),
+                    loader,
+                )
+                .handle(job, now_unix_secs)
+                .await,
+            ),
+            #[cfg(feature = "postgres")]
+            SchedulerBackend::Postgres(postgres) => price_catalog_outcome(
+                PriceCatalogRefreshJobHandler::new(
+                    PriceCatalogVersionsStore::new(postgres.pool().clone()),
+                    loader,
+                )
+                .handle(job, now_unix_secs)
+                .await,
+            ),
+        }
+    }
+}
 
 impl SchedulerDispatch {
     pub(super) async fn dispatch_singleton(&self, job: CronJob) -> SchedulerResult<JobOutcome> {
@@ -66,39 +269,27 @@ impl SchedulerDispatch {
                 .handle(job, unix_secs(self.clock.now()))
                 .await,
             ),
-            CronJob::UpstreamAffinityPurge(job) => upstream_affinity_purge_outcome(
-                UpstreamAffinityPurgeJobHandler::new(StorageHandle::new(self.storage.clone()))
-                    .handle(
+            CronJob::UpstreamAffinityPurge(job) => {
+                self.backend
+                    .purge_upstream_affinity(
+                        self.storage.clone(),
                         job,
                         unix_secs(self.clock.now()),
                         self.config.upstream_affinity.ttl_secs(),
-                        &self.cancel,
+                        self.cancel.clone(),
                     )
-                    .await,
-            ),
+                    .await
+            }
             CronJob::PriceCatalogRefresh(job) => self.dispatch_price_catalog(job).await,
-            CronJob::ApalisHousekeeping(job) => match &self.backend {
-                #[cfg(feature = "sqlite")]
-                SchedulerBackend::Sqlite(sqlite) => {
-                    let config =
-                        ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
-                    apalis_housekeeping_outcome(
-                        ApalisHousekeepingJobHandler::new(sqlite.pool().clone(), config)
-                            .handle(job, unix_secs(self.clock.now()))
-                            .await,
+            CronJob::ApalisHousekeeping(job) => {
+                self.backend
+                    .run_apalis_housekeeping(
+                        job,
+                        ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days),
+                        unix_secs(self.clock.now()),
                     )
-                }
-                #[cfg(feature = "postgres")]
-                SchedulerBackend::Postgres(postgres) => {
-                    let config =
-                        ApalisHousekeepingConfig::new(self.config.scheduler.dlq_retention_days);
-                    apalis_housekeeping_outcome(
-                        ApalisHousekeepingJobHandler::new(postgres.pool().clone(), config)
-                            .handle(job, unix_secs(self.clock.now()))
-                            .await,
-                    )
-                }
-            },
+                    .await
+            }
             CronJob::WarmupWatchdog(job) => self.handle_warmup_watchdog(job).await,
             CronJob::OAuthRefreshWatchdog(job) => self.handle_oauth_refresh_watchdog(job).await,
             CronJob::OAuthUsagePoll(job) => self.handle_oauth_usage_poll(job).await,
@@ -172,14 +363,15 @@ pub(crate) async fn handle_pool_quota_snapshot(
 impl SchedulerDispatch {
     async fn handle_warmup_watchdog(&self, job: WarmupWatchdogJob) -> SchedulerResult<JobOutcome> {
         let upstream_ids = self.list_warmup_watchdog_upstream_ids().await?;
-        let stats = run_entity_watchdog(
-            &self.backend,
-            WatchdogEntityKind::Warmup,
-            &upstream_ids,
-            job.tick_unix_secs,
-            unix_secs(self.clock.now()),
-        )
-        .await?;
+        let stats = self
+            .backend
+            .seed_watchdog(
+                WatchdogEntityKind::Warmup,
+                upstream_ids,
+                job.tick_unix_secs,
+                unix_secs(self.clock.now()),
+            )
+            .await?;
         tracing::info!(
             tick_unix_secs = job.tick_unix_secs,
             seeded = stats.seeded,
@@ -193,14 +385,15 @@ impl SchedulerDispatch {
         job: OAuthRefreshWatchdogJob,
     ) -> SchedulerResult<JobOutcome> {
         let upstream_ids = self.list_oauth_watchdog_upstream_ids().await?;
-        let stats = run_entity_watchdog(
-            &self.backend,
-            WatchdogEntityKind::OAuthRefresh,
-            &upstream_ids,
-            job.tick_unix_secs,
-            unix_secs(self.clock.now()),
-        )
-        .await?;
+        let stats = self
+            .backend
+            .seed_watchdog(
+                WatchdogEntityKind::OAuthRefresh,
+                upstream_ids,
+                job.tick_unix_secs,
+                unix_secs(self.clock.now()),
+            )
+            .await?;
         tracing::info!(
             tick_unix_secs = job.tick_unix_secs,
             seeded = stats.seeded,
@@ -274,58 +467,27 @@ impl SchedulerDispatch {
         else {
             return Ok(());
         };
-        match &self.backend {
-            #[cfg(feature = "sqlite")]
-            SchedulerBackend::Sqlite(sqlite) => {
-                OAuthUsagePollCursorsStore::new(sqlite.pool().clone())
-                    .record_attempt(
-                        update.upstream_id,
-                        update.observed_at_unix_secs,
-                        update.status,
-                    )
-                    .await
-            }
-            #[cfg(feature = "postgres")]
-            SchedulerBackend::Postgres(postgres) => {
-                OAuthUsagePollCursorsStore::new(postgres.pool().clone())
-                    .record_attempt(
-                        update.upstream_id,
-                        update.observed_at_unix_secs,
-                        update.status,
-                    )
-                    .await
-            }
-        }
+        self.backend
+            .record_oauth_usage_attempt(
+                update.upstream_id,
+                update.observed_at_unix_secs,
+                update.status,
+            )
+            .await
     }
 
     async fn dispatch_anthropic_compat(
         &self,
         job: AnthropicCompatRefreshJob,
     ) -> SchedulerResult<JobOutcome> {
-        match &self.backend {
-            #[cfg(feature = "sqlite")]
-            SchedulerBackend::Sqlite(sqlite) => {
-                handle_anthropic_compat_refresh_job_with_core_fetcher(
-                    job,
-                    &AnthropicCompatEtagsStore::new(sqlite.pool().clone()),
-                    self.storage.as_ref(),
-                    &self.cancel,
-                    &*self.clock,
-                )
-                .await
-            }
-            #[cfg(feature = "postgres")]
-            SchedulerBackend::Postgres(postgres) => {
-                handle_anthropic_compat_refresh_job_with_core_fetcher(
-                    job,
-                    &AnthropicCompatEtagsStore::new(postgres.pool().clone()),
-                    self.storage.as_ref(),
-                    &self.cancel,
-                    &*self.clock,
-                )
-                .await
-            }
-        }
+        self.backend
+            .refresh_anthropic_compat(
+                job,
+                self.storage.clone(),
+                self.cancel.clone(),
+                self.clock.clone(),
+            )
+            .await
     }
 
     async fn dispatch_price_catalog(
@@ -340,26 +502,9 @@ impl SchedulerDispatch {
             self.config.api_keys.price_catalog.cache_path.clone(),
             self.clock.clone(),
         );
-        match &self.backend {
-            #[cfg(feature = "sqlite")]
-            SchedulerBackend::Sqlite(sqlite) => price_catalog_outcome(
-                PriceCatalogRefreshJobHandler::new(
-                    PriceCatalogVersionsStore::new(sqlite.pool().clone()),
-                    loader,
-                )
-                .handle(job, unix_secs(self.clock.now()))
-                .await,
-            ),
-            #[cfg(feature = "postgres")]
-            SchedulerBackend::Postgres(postgres) => price_catalog_outcome(
-                PriceCatalogRefreshJobHandler::new(
-                    PriceCatalogVersionsStore::new(postgres.pool().clone()),
-                    loader,
-                )
-                .handle(job, unix_secs(self.clock.now()))
-                .await,
-            ),
-        }
+        self.backend
+            .refresh_price_catalog(job, loader, unix_secs(self.clock.now()))
+            .await
     }
 }
 

@@ -11,6 +11,7 @@ use cc_lb_admin::{
     router,
 };
 use cc_lb_config::Config;
+use cc_lb_testkit::fixed_clock;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -20,11 +21,12 @@ fn test_state() -> AdminState {
 
 fn test_state_with_auth(admin_auth: Arc<AdminAuthenticator>) -> AdminState {
     let config = Config::default();
+    let clock = fixed_clock(1_700_000_000);
     AdminState {
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
+        limit_engine: admin_test_common::limit_engine_with_clock(clock.clone()),
         lifecycle: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(Config::default()),
@@ -35,10 +37,10 @@ fn test_state_with_auth(admin_auth: Arc<AdminAuthenticator>) -> AdminState {
         data_dir: None,
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
-        start_time: std::time::Instant::now(),
+        start_time: tokio::time::Instant::now().into_std(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_clock::SystemClock),
+        clock,
     }
 }
 
@@ -182,7 +184,7 @@ impl AdminAuthProvider for FakeVerifiedProvider {
 }
 
 #[tokio::test]
-async fn authentication_rejection_reports_provider_neutral_auth_mode() {
+async fn t2__authentication_rejection_reports_provider_neutral_auth_mode() {
     let static_server = admin_test_common::spawn_admin_server_with_auth(
         admin_test_common::static_token_auth("test-token"),
     )
@@ -217,7 +219,7 @@ async fn authentication_rejection_reports_provider_neutral_auth_mode() {
 }
 
 #[tokio::test]
-async fn ambiguous_credentials_rejected() {
+async fn t2__ambiguous_credentials_rejected() {
     let mut providers = cc_lb_admin::auth::build_providers(
         &cc_lb_config::AdminAuthConfig::default(),
         Some("test-token".to_owned()),
@@ -244,7 +246,7 @@ async fn ambiguous_credentials_rejected() {
 }
 
 #[tokio::test]
-async fn new_provider_plugs_into_audit_without_handler_changes() {
+async fn t2__new_provider_plugs_into_audit_without_handler_changes() {
     let admin_auth = Arc::new(AdminAuthenticator::new(vec![Arc::new(
         FakeVerifiedProvider::from_header(),
     )]));

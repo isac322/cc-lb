@@ -5,13 +5,13 @@ mod fakes;
 
 use super::*;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use ::http::{HeaderMap, HeaderValue, Method};
 use bytes::Bytes;
-use cc_lb_config::{SchedulerConfig, StorageConfig};
+use cc_lb_config::Config;
 use cc_lb_control::RequestEventBus;
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::DynamicViewBuilder;
@@ -22,12 +22,18 @@ use cc_lb_engine::cache_keepalive::{
 };
 use cc_lb_runtime_wasmtime::HotEngineConfig;
 use cc_lb_scheduler::error::Result as SchedulerResult;
+use cc_lb_scheduler::jobs::apalis_housekeeping::{ApalisHousekeepingConfig, ApalisHousekeepingJob};
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
+use cc_lb_scheduler::jobs::compat::AnthropicCompatRefreshJob;
+use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
+use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJob;
+use cc_lb_scheduler::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJob;
+use cc_lb_scheduler::jobs::watchdog::{WatchdogEntityKind, WatchdogSeedStats};
+use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveSessionStore, CacheTtl, ManagedKeyStore, MetaStore, PrincipalStore,
-    UpstreamStore,
+    CacheKeepaliveSessionStore, CacheTtl, ManagedKeyStore, PrincipalStore, UpstreamStore,
 };
 use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use tokio_util::sync::CancellationToken;
@@ -37,6 +43,7 @@ use crate::cache_keepalive_enqueuer::{
     CacheKeepaliveTaskPusher, ServerCacheKeepaliveEnqueuer, ServerCacheKeepaliveEnqueuerDeps,
 };
 use crate::dynamic_view_builder::Stores;
+use crate::scheduler_dispatch::cron::SchedulerDispatchBackend;
 
 pub(super) use fakes::{FailingPusher, RecordingHttp};
 
@@ -59,29 +66,181 @@ pub(super) fn empty_dynamic_view() -> Arc<DynamicViewHolder> {
     ))
 }
 
-struct TestDataDir {
-    path: PathBuf,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum SchedulerBackendCall {
+    PushJob {
+        kind: &'static str,
+    },
+    PushMetadataRefresh {
+        job: MetadataRefreshJob,
+    },
+    PushAdaptive {
+        kind: &'static str,
+        idempotency_key: Option<String>,
+        run_at_unix_secs: Option<u64>,
+        max_attempts: Option<i32>,
+    },
+    PurgeUpstreamAffinity {
+        now_unix_secs: u64,
+        ttl_secs: u64,
+    },
+    ApalisHousekeeping {
+        now_unix_secs: u64,
+        dlq_retention_days: u32,
+    },
+    SeedWatchdog {
+        kind: WatchdogEntityKind,
+        upstream_ids: Vec<Uuid>,
+        tick_unix_secs: u64,
+        run_at_unix_secs: u64,
+    },
+    RecordOAuthUsage {
+        upstream_id: Uuid,
+        observed_at_unix_secs: u64,
+        status: i32,
+    },
+    RefreshAnthropicCompat {
+        key: String,
+    },
+    RefreshPriceCatalog {
+        source: String,
+        now_unix_secs: u64,
+    },
 }
 
-impl TestDataDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "cc-lb-scheduler-dispatch-test-{}-{}",
-            std::process::id(),
-            Uuid::new_v4()
-        ));
-        std::fs::create_dir(&path).expect("create scheduler dispatch test data dir");
-        Self { path }
+#[derive(Clone)]
+struct RecordingSchedulerBackend {
+    calls: Arc<Mutex<Vec<SchedulerBackendCall>>>,
+    upstream_affinity_outcome: JobOutcome,
+}
+
+impl RecordingSchedulerBackend {
+    fn new(upstream_affinity_outcome: JobOutcome) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            upstream_affinity_outcome,
+        }
     }
 
-    fn path(&self) -> &Path {
-        &self.path
+    fn record(&self, call: SchedulerBackendCall) {
+        self.calls
+            .lock()
+            .expect("recording scheduler backend lock")
+            .push(call);
+    }
+
+    fn calls(&self) -> Vec<SchedulerBackendCall> {
+        self.calls
+            .lock()
+            .expect("recording scheduler backend lock")
+            .clone()
     }
 }
 
-impl Drop for TestDataDir {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.path).expect("remove scheduler dispatch test data dir");
+#[async_trait]
+impl SchedulerDispatchBackend for RecordingSchedulerBackend {
+    async fn push_job(&self, job: AdaptiveJob) -> SchedulerResult<()> {
+        let call = match job {
+            AdaptiveJob::MetadataRefresh(job) => SchedulerBackendCall::PushMetadataRefresh { job },
+            job => SchedulerBackendCall::PushJob { kind: job.kind() },
+        };
+        self.record(call);
+        Ok(())
+    }
+
+    async fn push_adaptive_task(
+        &self,
+        task: SchedulerPushTask<AdaptiveJob>,
+    ) -> SchedulerResult<()> {
+        self.record(SchedulerBackendCall::PushAdaptive {
+            kind: task.args.kind(),
+            idempotency_key: task.idempotency_key,
+            run_at_unix_secs: task.run_at_unix_secs,
+            max_attempts: task.max_attempts,
+        });
+        Ok(())
+    }
+
+    async fn purge_upstream_affinity(
+        &self,
+        _storage: Arc<dyn Storage>,
+        _job: UpstreamAffinityPurgeJob,
+        now_unix_secs: u64,
+        ttl_secs: u64,
+        _cancel: CancellationToken,
+    ) -> SchedulerResult<JobOutcome> {
+        self.record(SchedulerBackendCall::PurgeUpstreamAffinity {
+            now_unix_secs,
+            ttl_secs,
+        });
+        Ok(self.upstream_affinity_outcome.clone())
+    }
+
+    async fn run_apalis_housekeeping(
+        &self,
+        _job: ApalisHousekeepingJob,
+        config: ApalisHousekeepingConfig,
+        now_unix_secs: u64,
+    ) -> SchedulerResult<JobOutcome> {
+        self.record(SchedulerBackendCall::ApalisHousekeeping {
+            now_unix_secs,
+            dlq_retention_days: config.dlq_retention_days,
+        });
+        Ok(JobOutcome::Done)
+    }
+
+    async fn seed_watchdog(
+        &self,
+        kind: WatchdogEntityKind,
+        upstream_ids: Vec<Uuid>,
+        tick_unix_secs: u64,
+        run_at_unix_secs: u64,
+    ) -> SchedulerResult<WatchdogSeedStats> {
+        self.record(SchedulerBackendCall::SeedWatchdog {
+            kind,
+            upstream_ids,
+            tick_unix_secs,
+            run_at_unix_secs,
+        });
+        Ok(WatchdogSeedStats { seeded: 0 })
+    }
+
+    async fn record_oauth_usage_attempt(
+        &self,
+        upstream_id: Uuid,
+        observed_at_unix_secs: u64,
+        status: i32,
+    ) -> SchedulerResult<()> {
+        self.record(SchedulerBackendCall::RecordOAuthUsage {
+            upstream_id,
+            observed_at_unix_secs,
+            status,
+        });
+        Ok(())
+    }
+
+    async fn refresh_anthropic_compat(
+        &self,
+        job: AnthropicCompatRefreshJob,
+        _storage: Arc<dyn Storage>,
+        _cancel: CancellationToken,
+        _clock: cc_lb_engine::clock::ClockHandle,
+    ) -> SchedulerResult<JobOutcome> {
+        self.record(SchedulerBackendCall::RefreshAnthropicCompat { key: job.key });
+        Ok(JobOutcome::Noop)
+    }
+
+    async fn refresh_price_catalog(
+        &self,
+        job: PriceCatalogRefreshJob,
+        _loader: cc_lb_pricing::LiteLlmLoader,
+        now_unix_secs: u64,
+    ) -> SchedulerResult<JobOutcome> {
+        self.record(SchedulerBackendCall::RefreshPriceCatalog {
+            source: job.source,
+            now_unix_secs,
+        });
+        Ok(JobOutcome::Noop)
     }
 }
 
@@ -138,8 +297,7 @@ impl CacheKeepaliveTaskPusher for RecordingPusher {
 pub(super) struct Fixture {
     pub(super) storage: Arc<dyn Storage>,
     pub(super) managed_store: Arc<dyn ManagedKeyStore>,
-    sqlite_storage: Option<Arc<cc_lb_storage_sqlite::SqliteStorage>>,
-    pub(super) backend: crate::scheduler_factory::OpenedScheduler,
+    backend: RecordingSchedulerBackend,
     pusher: Arc<RecordingPusher>,
     clock: cc_lb_engine::ClockHandle,
     aead: Arc<AeadService>,
@@ -148,8 +306,6 @@ pub(super) struct Fixture {
     pub(super) signer_calls: Arc<Mutex<Vec<String>>>,
     pub(super) upstream_id: Uuid,
     event_bus: Arc<cc_lb_control::InMemoryBus>,
-    data_dir: PathBuf,
-    _dir: TestDataDir,
 }
 
 impl Fixture {
@@ -162,49 +318,12 @@ impl Fixture {
         let storage = Arc::new(InMemoryStorage::with_clock(clock.clone()));
         let storage_dyn: Arc<dyn Storage> = storage.clone();
         let managed_store: Arc<dyn ManagedKeyStore> = storage;
-        Self::build(
-            TestDataDir::new(),
-            storage_dyn,
-            managed_store,
-            None,
-            upstream_kind,
-            clock,
-        )
-        .await
-    }
-
-    pub(super) async fn new_sqlite() -> Self {
-        let dir = TestDataDir::new();
-        let clock = fixed_clock(1_700_000_000);
-        let sqlite_path = dir.path().join("cc-lb.sqlite");
-        let database_url = format!("sqlite://{}", sqlite_path.display());
-        let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
-                .await
-                .expect("open sqlite"),
-        );
-        storage
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("initialize sqlite");
-        let storage_dyn: Arc<dyn Storage> = storage.clone();
-        let managed_store: Arc<dyn ManagedKeyStore> = storage.clone();
-        Self::build(
-            dir,
-            storage_dyn,
-            managed_store,
-            Some(storage),
-            UpstreamKind::AnthropicOauth,
-            clock,
-        )
-        .await
+        Self::build(storage_dyn, managed_store, upstream_kind, clock).await
     }
 
     async fn build(
-        dir: TestDataDir,
         storage: Arc<dyn Storage>,
         managed_store: Arc<dyn ManagedKeyStore>,
-        sqlite_storage: Option<Arc<cc_lb_storage_sqlite::SqliteStorage>>,
         upstream_kind: UpstreamKind,
         clock: cc_lb_engine::ClockHandle,
     ) -> Self {
@@ -225,15 +344,6 @@ impl Fixture {
         PrincipalStore::create(storage.as_ref(), principal_with_keepalive(), 1)
             .await
             .expect("create principal");
-        let backend = crate::scheduler_factory::open_scheduler_storage(
-            &StorageConfig::Sqlite {
-                path: dir.path().join("scheduler.sqlite"),
-            },
-            &SchedulerConfig::default(),
-            clock.clone(),
-        )
-        .await
-        .expect("open scheduler storage");
         let signer_calls = Arc::new(Mutex::new(Vec::new()));
         let dynamic_view = Arc::new(DynamicViewHolder::new(
             DynamicViewBuilder::new(0)
@@ -251,12 +361,10 @@ impl Fixture {
         ));
         let event_bus = Arc::new(cc_lb_control::InMemoryBus::new());
         let pusher = Arc::new(RecordingPusher::default());
+        let backend = RecordingSchedulerBackend::new(JobOutcome::Done);
         Self {
-            data_dir: dir.path().to_path_buf(),
-            _dir: dir,
             storage,
             managed_store,
-            sqlite_storage,
             backend,
             pusher,
             clock,
@@ -269,11 +377,8 @@ impl Fixture {
         }
     }
 
-    pub(super) fn sqlite_pool(&self) -> &sqlx::SqlitePool {
-        self.sqlite_storage
-            .as_ref()
-            .expect("sqlite policy test uses sqlite storage")
-            .pool()
+    pub(super) fn backend_calls(&self) -> Vec<SchedulerBackendCall> {
+        self.backend.calls()
     }
 
     pub(super) fn encrypt_generation_payload(&self, generation: u64, plaintext: &[u8]) -> Vec<u8> {
@@ -453,7 +558,7 @@ impl Fixture {
             audit: Some(self.storage.clone()),
         });
         SchedulerDispatch::new(SchedulerDispatchDeps {
-            backend: self.backend.backend.clone(),
+            backend: self.backend.clone(),
             cache_keepalive_pusher: pusher,
             config,
             storage: self.storage.clone(),
@@ -463,7 +568,7 @@ impl Fixture {
             runtime: Arc::new(
                 WasmtimeRuntime::new(HotEngineConfig::default()).expect("wasmtime runtime"),
             ),
-            data_dir: self.data_dir.clone(),
+            data_dir: PathBuf::new(),
             lazy_refresher: None,
             subscription_quota_sink: cc_lb_engine::SubscriptionQuotaSink::new().0,
             subscription_quota_cache: Arc::new(SubscriptionQuotaCache::new()),

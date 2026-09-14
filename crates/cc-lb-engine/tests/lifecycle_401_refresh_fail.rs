@@ -3,7 +3,7 @@ use crate::common;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -39,10 +39,7 @@ impl UpstreamDispatch for TimedDispatch {
             .pop_front()
             .expect("attempt timing remains");
         cc_lb_engine::request_timing::record_bulkhead_wait(delay);
-        let deadline = Instant::now() + delay;
-        while Instant::now() < deadline {
-            std::hint::spin_loop();
-        }
+        tokio::time::advance(delay).await;
         self.inner.dispatch(request).await
     }
 }
@@ -70,7 +67,7 @@ impl UpstreamDispatch for FailingSecondAttemptDispatch {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn t2__unauthorized_refresh_retries_once_then_stops() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
@@ -166,7 +163,7 @@ async fn t2__unauthorized_refresh_retries_once_then_stops() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn t2__unauthorized_refresh_second_attempt_dispatch_error_clears_stale_stage_timings() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());

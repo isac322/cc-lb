@@ -105,36 +105,6 @@ impl SchedulerBackend {
         }
     }
 
-    pub async fn list_keepalive_tasks(
-        &self,
-        filter: &Filter,
-    ) -> Result<Vec<SchedulerTaskRow<AdaptiveJob>>, SchedulerError> {
-        match self {
-            #[cfg(feature = "sqlite")]
-            Self::Sqlite(sqlite) => {
-                let storage = sqlite.keepalive_storage();
-                storage
-                    .list_tasks(filter)
-                    .await
-                    .map_err(SchedulerError::Database)?
-                    .into_iter()
-                    .map(sqlite_task_to_row)
-                    .collect()
-            }
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => {
-                let storage = postgres.keepalive_operation_storage();
-                storage
-                    .list_tasks(filter)
-                    .await
-                    .map_err(SchedulerError::Database)?
-                    .into_iter()
-                    .map(postgres_task_to_row)
-                    .collect()
-            }
-        }
-    }
-
     pub async fn list_cron_tasks(
         &self,
         filter: &Filter,

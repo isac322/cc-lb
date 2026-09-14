@@ -1744,6 +1744,7 @@ async fn persist_wasm_upload_heals_missing_blob_on_storage<S: PluginRegistryStor
     );
 
     let (healed, existed) = storage.persist_wasm_upload(wasm, input).await?;
+    restore_blob_fk_if_exposed(storage).await?;
     ensure!(
         existed,
         "re-upload of a zombie registry row reports existed"
@@ -2024,9 +2025,11 @@ async fn delete_blob_row_if_exposed<S: PluginRegistryStore + 'static>(
         if let Some(postgres) = (storage as &dyn std::any::Any)
             .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
         {
-            sqlx::query("ALTER TABLE wasm_registry_v2 DROP CONSTRAINT wasm_registry_v2_sha_fk")
-                .execute(postgres.pool())
-                .await?;
+            sqlx::query(
+                "ALTER TABLE wasm_registry_v2 DROP CONSTRAINT IF EXISTS wasm_registry_v2_sha_fk",
+            )
+            .execute(postgres.pool())
+            .await?;
             let result = sqlx::query("DELETE FROM wasm_blobs_v2 WHERE sha256 = $1")
                 .bind(sha256.as_slice())
                 .execute(postgres.pool())
@@ -2036,6 +2039,24 @@ async fn delete_blob_row_if_exposed<S: PluginRegistryStore + 'static>(
     }
     let _ = (storage, sha256);
     Ok(false)
+}
+async fn restore_blob_fk_if_exposed<S: PluginRegistryStore + 'static>(storage: &S) -> Result<()> {
+    #[cfg(feature = "postgres")]
+    {
+        if let Some(postgres) = (storage as &dyn std::any::Any)
+            .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
+        {
+            sqlx::query(
+                "ALTER TABLE wasm_registry_v2
+                 ADD CONSTRAINT wasm_registry_v2_sha_fk
+                 FOREIGN KEY (sha256) REFERENCES wasm_blobs_v2 (sha256) ON DELETE RESTRICT",
+            )
+            .execute(postgres.pool())
+            .await?;
+        }
+    }
+    let _ = storage;
+    Ok(())
 }
 
 pub async fn validate_identifier_rejects_bad_name<S: PluginRegistryStore>(

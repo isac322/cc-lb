@@ -30,14 +30,14 @@ fn test_state(storage: Arc<InMemoryStorage>) -> AdminState {
         data_dir: None,
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
-        start_time: std::time::Instant::now(),
+        start_time: tokio::time::Instant::now().into_std(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock: fixed_clock(1_700_000_000),
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn t2__test_snapshot_audit_query() {
     let storage = Arc::new(InMemoryStorage::with_clock(fixed_clock(1_700_000_000)));
 

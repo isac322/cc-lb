@@ -7,10 +7,7 @@ use cc_lb_config::{AdminAuthConfig, AdminAuthProviderConfig};
 use ring::rand::SystemRandom;
 use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use serde_json::{Value, json};
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -20,6 +17,9 @@ const ACCESS_HEADER: &str = "cf-access-jwt-assertion";
 const ACCESS_AUDIENCE: &str = "admin-audience";
 const TEST_RSA_N: &str = "w63MnzLXxLyjN_x5_44pkBeNkbY5kg88mwirAa7lzgrYjSRy36qTl8c7rXSMxhh9Qns9RDBNMQRRxcmAdv-zsBtSrwehh30yDBog01zPJ_hB3vKYDL8OW6t830A0FNzyEHWLxwNXKMpO5vaVvyWLWGZcIXLnnuY_0g9fAvvjk1LoAF8W15YuoT7LagXSxwUwBErlScqEjeHETG0cTc7r5764EiFDcVn7QpIU2OKN-B_ackbzoFSQzRJ4DgOaMJCRHoDrsq3F3q-LmaFE2oJ2NuLqwM-kYt7k-P2kXiD2J39fH6IHmnY1cRrHIQp6jtFaGImArK_mtGyAbPF2lCS9JQ";
 const TEST_RSA_E: &str = "AQAB";
+const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
+const TOKEN_VALID_UNTIL_UNIX_SECS: u64 = 4_102_444_800;
+const TOKEN_EXPIRED_AT_UNIX_SECS: u64 = 1;
 const TEST_PRIVATE_KEY_PKCS8_BASE64: &str = concat!(
     "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDDrcyfMtfEvKM3",
     "/Hn/jimQF42RtjmSDzybCKsBruXOCtiNJHLfqpOXxzutdIzGGH1Cez1EME0xBFHF",
@@ -114,7 +114,7 @@ impl JwtFixture {
             "type": if subject.is_empty() { "service_token" } else { "app" },
             "aud": audience,
             "iss": self.issuer.as_str(),
-            "iat": unix_secs(),
+            "iat": TEST_NOW_UNIX_SECS,
             "exp": expires_at,
         });
         if let Some(not_before) = not_before {
@@ -171,18 +171,20 @@ impl JwtFixture {
 }
 
 #[tokio::test]
-async fn cloudflare_access_maps_identities_and_rejects_invalid_claims() {
+async fn t3__cloudflare_access_maps_identities_and_rejects_invalid_claims() {
     let fixture = JwtFixture::new().await;
-    let server =
-        admin_test_common::spawn_admin_server_with_auth(fixture.authenticator(false)).await;
-    let now = unix_secs();
+    let server = admin_test_common::spawn_admin_server_with_clock_and_auth(
+        cc_lb_testkit::fixed_clock(TEST_NOW_UNIX_SECS),
+        fixture.authenticator(false),
+    )
+    .await;
 
     let human_token = fixture.token(
         "user-subject",
         Some("alice@example.com"),
         None,
         json!(ACCESS_AUDIENCE),
-        now + 300,
+        TOKEN_VALID_UNTIL_UNIX_SECS,
     );
     let (status, _, human) = session_with_token(&server.client, &human_token).await;
     assert_eq!(status, axum::http::StatusCode::OK);
@@ -198,12 +200,13 @@ async fn cloudflare_access_maps_identities_and_rejects_invalid_claims() {
         Some("alice@example.com"),
         None,
         json!(["another-audience", ACCESS_AUDIENCE]),
-        now + 300,
+        TOKEN_VALID_UNTIL_UNIX_SECS,
     );
     let (status, _, _) = session_with_token(&server.client, &array_audience_token).await;
     assert_eq!(status, axum::http::StatusCode::OK);
 
-    let trailing_slash_server = admin_test_common::spawn_admin_server_with_auth(
+    let trailing_slash_server = admin_test_common::spawn_admin_server_with_clock_and_auth(
+        cc_lb_testkit::fixed_clock(TEST_NOW_UNIX_SECS),
         fixture.authenticator_with_team_domain(format!("{}/", fixture.issuer), false),
     )
     .await;
@@ -217,7 +220,7 @@ async fn cloudflare_access_maps_identities_and_rejects_invalid_claims() {
         None,
         Some("service-client-id.access"),
         json!(ACCESS_AUDIENCE),
-        now + 300,
+        TOKEN_VALID_UNTIL_UNIX_SECS,
     );
     let (status, _, service) = session_with_token(&server.client, &service_token).await;
     assert_eq!(status, axum::http::StatusCode::OK);
@@ -230,7 +233,7 @@ async fn cloudflare_access_maps_identities_and_rejects_invalid_claims() {
         Some("alice@example.com"),
         None,
         json!("different-audience"),
-        now + 300,
+        TOKEN_VALID_UNTIL_UNIX_SECS,
     );
     let (status, _, _) = session_with_token(&server.client, &wrong_audience).await;
     assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
@@ -240,7 +243,7 @@ async fn cloudflare_access_maps_identities_and_rejects_invalid_claims() {
         Some("alice@example.com"),
         None,
         json!(ACCESS_AUDIENCE),
-        now.saturating_sub(300),
+        TOKEN_EXPIRED_AT_UNIX_SECS,
     );
     let (status, _, _) = session_with_token(&server.client, &expired).await;
     assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
@@ -250,17 +253,21 @@ async fn cloudflare_access_maps_identities_and_rejects_invalid_claims() {
         Some("alice@example.com"),
         None,
         json!(ACCESS_AUDIENCE),
-        now + 300,
-        Some(now + 300),
+        TOKEN_VALID_UNTIL_UNIX_SECS,
+        Some(TOKEN_VALID_UNTIL_UNIX_SECS),
     );
     let (status, _, _) = session_with_token(&server.client, &not_yet_valid).await;
     assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
-async fn missing_cloudflare_header_is_recorded_as_auth_rejected() {
+async fn t3__missing_cloudflare_header_is_recorded_as_auth_rejected() {
     let fixture = JwtFixture::new().await;
-    let server = admin_test_common::spawn_admin_server_with_auth(fixture.authenticator(true)).await;
+    let server = admin_test_common::spawn_admin_server_with_clock_and_auth(
+        cc_lb_testkit::fixed_clock(TEST_NOW_UNIX_SECS),
+        fixture.authenticator(true),
+    )
+    .await;
 
     let (status, _, _) = server
         .client
@@ -292,11 +299,4 @@ async fn session_with_token(
             &[(ACCESS_HEADER, token)],
         )
         .await
-}
-
-fn unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is after Unix epoch")
-        .as_secs()
 }

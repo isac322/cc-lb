@@ -7,7 +7,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn t2__slow_mode_rate_limits_first_sse_frame() {
+async fn t3__slow_mode_rate_limits_first_sse_frame() {
     let response = app(AppConfig {
         slow_mode_bps: 512,
         files_cap_bytes: 104_857_600,

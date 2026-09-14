@@ -2,6 +2,7 @@ import { expect, type Page, test } from '@playwright/test';
 import fs from 'fs';
 import path from 'path';
 import { COPY } from '../src/lib/copy/warmup';
+import { fulfillAuthenticatedSession } from './support/auth-session';
 
 type WarmupPlugin = { wasm_registry_id: string; config: Record<string, unknown> } | null;
 type UpstreamFixture = {
@@ -136,6 +137,7 @@ async function installAppFixtures(
   });
 
   await page.route('**/admin/**', async (route) => {
+    if (await fulfillAuthenticatedSession(route)) return;
     const request = route.request();
     const url = new URL(request.url());
     const pathname = url.pathname;

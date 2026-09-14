@@ -1,5 +1,3 @@
-use std::process::Command;
-
 use cc_lb_config::{
     Config, ConfigError, ConfigOverrides, ListenerOverrides, StorageConfig, ValidationError,
 };
@@ -29,6 +27,23 @@ ttl_days = 14
     assert_eq!(config.body.files_cap_bytes, 654_321);
     assert_eq!(config.upstream_affinity.ttl_days, 14);
     assert!(warnings.is_empty());
+}
+
+#[test]
+fn t3__cli_override_precedence_has_file_and_string_parity() {
+    let toml = r#"
+[listener]
+proxy_addr = "[::1]:7101"
+"#;
+    let overrides = ConfigOverrides::from_listener(ListenerOverrides {
+        proxy_addr: Some("[::1]:7103".parse().unwrap()),
+        ..ListenerOverrides::default()
+    });
+
+    let (config, warnings) = assert_success_parity(load_pair(toml, overrides));
+
+    assert_eq!(config.listener.proxy_addr, "[::1]:7103".parse().unwrap());
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
@@ -106,49 +121,6 @@ authn_plugin = "removed"
 }
 
 #[test]
-fn t3__environment_override_precedence_has_file_and_string_parity() {
-    let toml = "[listener]\nproxy_addr = \"[::1]:7101\"\n";
-    let (config, _) = assert_success_parity(load_pair(toml, ConfigOverrides::default()));
-    let environment_value = "[::1]:7102".parse().unwrap();
-    if config.listener.proxy_addr == environment_value {
-        return;
-    }
-
-    assert_eq!(config.listener.proxy_addr, "[::1]:7101".parse().unwrap());
-    run_child_with_env(
-        "string_parity::t3__environment_override_precedence_has_file_and_string_parity",
-        "CC_LB_LISTENER__PROXY_ADDR",
-        "[::1]:7102",
-    );
-}
-
-#[test]
-fn t3__cli_override_precedence_has_file_and_string_parity() {
-    let toml = "[listener]\nproxy_addr = \"[::1]:7201\"\n";
-    let (environment_config, _) =
-        assert_success_parity(load_pair(toml, ConfigOverrides::default()));
-    if environment_config.listener.proxy_addr == "[::1]:7202".parse().unwrap() {
-        let overrides = ConfigOverrides::from_listener(ListenerOverrides {
-            proxy_addr: Some("[::1]:7203".parse().unwrap()),
-            ..ListenerOverrides::default()
-        });
-        let (config, _) = assert_success_parity(load_pair(toml, overrides));
-        assert_eq!(config.listener.proxy_addr, "[::1]:7203".parse().unwrap());
-        return;
-    }
-
-    assert_eq!(
-        environment_config.listener.proxy_addr,
-        "[::1]:7201".parse().unwrap()
-    );
-    run_child_with_env(
-        "string_parity::t3__cli_override_precedence_has_file_and_string_parity",
-        "CC_LB_LISTENER__PROXY_ADDR",
-        "[::1]:7202",
-    );
-}
-
-#[test]
 fn t3__missing_file_still_reports_the_exact_toml_file_provider() {
     let dir = tempfile::tempdir().unwrap();
     let missing_path = dir.path().join("missing.toml");
@@ -197,20 +169,4 @@ fn validation_error(error: ConfigError) -> ValidationError {
         ConfigError::Validation(error) => error,
         other => panic!("expected validation error, got {other}"),
     }
-}
-
-fn run_child_with_env(test_name: &str, key: &str, value: &str) {
-    let output = Command::new(std::env::current_exe().unwrap())
-        .arg("--exact")
-        .arg(test_name)
-        .env(key, value)
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "child test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
 }

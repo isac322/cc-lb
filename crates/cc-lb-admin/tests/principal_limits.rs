@@ -8,6 +8,7 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
+use cc_lb_testkit::fixed_clock;
 use tower::ServiceExt;
 
 fn test_state() -> AdminState {
@@ -27,14 +28,14 @@ fn test_state() -> AdminState {
         data_dir: None,
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
-        start_time: std::time::Instant::now(),
+        start_time: tokio::time::Instant::now().into_std(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_clock::SystemClock),
+        clock: fixed_clock(1_700_000_000),
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn t2__principal_limits_current_admin_health_smoke() {
     let response = router(test_state())
         .oneshot(

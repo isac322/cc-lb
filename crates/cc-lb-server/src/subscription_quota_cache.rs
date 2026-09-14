@@ -351,7 +351,7 @@ mod tests {
             source: SubscriptionQuotaSource::Api,
             sample_kind,
             observed_at_unix_millis,
-            sample_id: Uuid::new_v4(),
+            sample_id: Uuid::from_u128(1),
             utilization,
             status: utilization.map(|_| SubscriptionQuotaStatus::Allowed),
             resets_at_unix_secs: utilization.map(|_| observed_at_unix_millis / 1_000 + 3_600),

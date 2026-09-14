@@ -12,6 +12,8 @@ use crate::api_keys::{
     secret,
 };
 use cc_lb_clock::{ClockHandle, unix_secs};
+#[cfg(test)]
+use rand::{SeedableRng, rngs::StdRng};
 
 #[derive(Clone)]
 pub struct BuiltinAuthn {
@@ -221,9 +223,10 @@ mod tests {
         types::{ApiKeyMutation, IssueParams, PrincipalKindLite},
     };
     use http::{HeaderMap, HeaderValue};
-    use rand::{SeedableRng, rngs::StdRng};
 
     use super::*;
+    type KeyByIdLookup = Option<StoredApiKeyRecord>;
+    type KeyByIndexHashLookup = Option<(String, String, StoredApiKeyRecord)>;
 
     #[tokio::test]
     async fn t2__authenticates_valid_key() {
@@ -610,7 +613,7 @@ mod tests {
     }
 
     fn generated_key() -> secret::NewKeyOutput {
-        secret::generate_with(&mut StdRng::from_seed([42; 32]))
+        secret::generate_with(&mut <StdRng as SeedableRng>::from_seed([42; 32]))
     }
 
     fn principal_view(enabled: bool) -> PrincipalView {
@@ -698,18 +701,14 @@ mod tests {
             Err(unused_store_method("issue"))
         }
 
-        async fn get(
-            &self,
-            _principal_id: &str,
-            _key_id: &str,
-        ) -> StorageResult<Option<StoredApiKeyRecord>> {
+        async fn get(&self, _principal_id: &str, _key_id: &str) -> StorageResult<KeyByIdLookup> {
             Err(unused_store_method("get"))
         }
 
         async fn lookup_by_index_hash(
             &self,
             index_hash: &[u8; 32],
-        ) -> StorageResult<Option<(String, String, StoredApiKeyRecord)>> {
+        ) -> StorageResult<KeyByIndexHashLookup> {
             *self.seen_index_hash.lock().unwrap() = Some(*index_hash);
             match self
                 .lookup

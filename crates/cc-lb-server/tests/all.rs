@@ -76,16 +76,12 @@ mod t2__builtin_authn_smoke;
 mod t2__cache_keepalive_server_wiring;
 #[path = "t2/drain.rs"]
 mod t2__drain;
-#[path = "t2/dynamic_view_rebind.rs"]
-mod t2__dynamic_view_rebind;
 #[path = "t2/healthz.rs"]
 mod t2__healthz;
 #[path = "t2/middleware_order.rs"]
 mod t2__middleware_order;
 #[path = "t2/multi_route_dispatch.rs"]
 mod t2__multi_route_dispatch;
-#[path = "t2/notify_listener.rs"]
-mod t2__notify_listener;
 #[path = "t2/oauth_usage_proxy.rs"]
 mod t2__oauth_usage_proxy;
 #[path = "t2/proxy_body_limits.rs"]
@@ -96,8 +92,6 @@ mod t2__proxy_error_fallbacks;
 mod t2__readyz_503_during_drain;
 #[path = "t2/readyz_503_when_no_upstream_ready.rs"]
 mod t2__readyz_503_when_no_upstream_ready;
-#[path = "t2/reconciliation.rs"]
-mod t2__reconciliation;
 #[path = "t2/rfc_0002_terminal_mapping.rs"]
 mod t2__rfc_0002_terminal_mapping;
 #[path = "t3/file_watch_debounced.rs"]
@@ -124,8 +118,6 @@ pub(crate) mod t5__process;
 mod thinking_budget_service_tier_e2e;
 #[path = "tls_common.rs"]
 mod tls_common;
-#[path = "tls_parse.rs"]
-mod tls_parse;
 #[path = "ulimit_low_warns.rs"]
 mod ulimit_low_warns;
 #[path = "upstream_probe_warn_only.rs"]

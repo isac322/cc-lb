@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 fn principal_with_cache_keepalive(enabled: bool) -> PrincipalRecord {
     PrincipalRecord {
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(if enabled { 1 } else { 2 }),
         name: if enabled {
             "keepalive-enabled".to_owned()
         } else {

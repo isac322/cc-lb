@@ -101,6 +101,7 @@ jobs:
             --workspace \
             --exclude cc-lb-loadgen \
             --exclude cc-lb-stress-suite \
+            --exclude tests-multi-replica \
             --all-features \
             --archive-file nextest-archive.tar.zst
       - uses: actions/upload-artifact@v7

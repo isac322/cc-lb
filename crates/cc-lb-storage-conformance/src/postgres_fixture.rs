@@ -13,7 +13,8 @@ use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOp
 use uuid::Uuid;
 
 const FIXED_CLOCK_UNIX_SECS: u64 = 1_700_000_000;
-const REQUIRED_URL_ERROR: &str = "CI_POSTGRES_URL is required for t3_postgres__ tests";
+const REQUIRED_URL_ERROR: &str =
+    "CI_POSTGRES_URL is required for PostgreSQL-backed tests (t3_postgres__ and tx__)";
 
 #[allow(
     dead_code,

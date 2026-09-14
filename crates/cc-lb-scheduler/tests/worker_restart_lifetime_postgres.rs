@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
 use apalis::prelude::WorkerError;
-use cc_lb_clock::SystemClock;
+use cc_lb_clock::TestClock;
 use cc_lb_config::SchedulerConfig;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::retry::JobOutcome;
@@ -183,7 +183,7 @@ fn start_worker(
             })
         }),
         Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-        Arc::new(SystemClock),
+        Arc::new(TestClock::new_at_secs(1_800_000_000)),
     );
     let worker = build_adaptive_worker(backend, ctx)?;
     let cancel = CancellationToken::new();

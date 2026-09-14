@@ -11,7 +11,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn insert_chain_slot_validation_table() {
+async fn t2__insert_chain_slot_validation_table() {
     enum Target {
         Registry {
             seed: u8,
@@ -175,7 +175,7 @@ async fn seed_registry_with_wire_version(
                 original_filename: format!("{name}.wasm"),
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
-                uploaded_by_admin_id: Uuid::new_v4(),
+                uploaded_by_admin_id: Uuid::from_u128(seed as u128),
                 description: format!("{name} description"),
                 usage: format!("wire v{wire_version} fixture"),
                 hook_metadata: Default::default(),

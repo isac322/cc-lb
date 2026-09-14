@@ -109,7 +109,7 @@ impl hyper::rt::Executor<HyperTask> for PoolObservingExecutor {
 }
 
 #[tokio::test]
-async fn t2__cold_request_populates_all_connection_stages_ip_upstream() {
+async fn t3__cold_request_populates_all_connection_stages_ip_upstream() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
     let (dispatcher, _pool_return) = instrumented_bulkhead_dispatcher(None, 8, 8);
     let harness = lifecycle_for(&upstream.ip_base_url(), dispatcher).await;
@@ -141,7 +141,7 @@ async fn t2__cold_request_populates_all_connection_stages_ip_upstream() {
 }
 
 #[tokio::test]
-async fn t2__cold_request_with_hostname_populates_dns_ms() {
+async fn t3__cold_request_with_hostname_populates_dns_ms() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
     let resolver = Arc::new(StaticResolver::new("mock-upstream.test"));
     let (dispatcher, _pool_return) = instrumented_bulkhead_dispatcher(Some(resolver), 8, 8);
@@ -159,7 +159,7 @@ async fn t2__cold_request_with_hostname_populates_dns_ms() {
 }
 
 #[tokio::test]
-async fn t2__warm_pool_request_skips_connection_stages() {
+async fn t3__warm_pool_request_skips_connection_stages() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
     let resolver = Arc::new(StaticResolver::new("mock-upstream.test"));
     let (dispatcher, pool_return) = instrumented_bulkhead_dispatcher(Some(resolver), 8, 8);
@@ -189,7 +189,7 @@ async fn t2__warm_pool_request_skips_connection_stages() {
 }
 
 #[tokio::test]
-async fn t2__bulkhead_contention_records_wait_ms() {
+async fn t3__bulkhead_contention_records_wait_ms() {
     let upstream = MockUpstream::start(Duration::from_millis(40)).await;
     let (dispatcher, _pool_return) = instrumented_bulkhead_dispatcher(None, 1, 1);
     let harness = lifecycle_for(&upstream.ip_base_url(), dispatcher).await;

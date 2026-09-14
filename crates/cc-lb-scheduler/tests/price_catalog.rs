@@ -11,10 +11,6 @@ use cc_lb_scheduler::jobs::price_catalog::{
     PriceCatalogRefreshJob, PriceCatalogRefreshJobHandler, PriceCatalogRefreshJobResult,
     PriceCatalogRefreshLoader, PriceCatalogRefreshStatus,
 };
-#[cfg(feature = "sqlite")]
-use cc_lb_scheduler::state_stores::PriceCatalogVersionsStore as SqlitePriceCatalogVersionsStore;
-#[cfg(feature = "postgres")]
-use cc_lb_scheduler::state_stores::PriceCatalogVersionsStore;
 type MaybePriceCatalogVersion = Option<cc_lb_scheduler::state_stores::PriceCatalogVersion>;
 
 mod jobs {
@@ -71,38 +67,71 @@ mod jobs {
         }
 
         #[cfg(feature = "sqlite")]
-        #[tokio::test]
-        async fn t3__sqlite_noop_skips_snapshot_and_cache_persistence() -> Result<()> {
-            run_noop_case(sqlite_price_catalog_versions().await?).await
-        }
+        mod t3__sqlite {
+            use super::*;
+            use cc_lb_scheduler::state_stores::PriceCatalogVersionsStore;
 
-        #[cfg(feature = "sqlite")]
-        #[tokio::test]
-        async fn t3__sqlite_changed_catalog_persists_and_updates_fingerprint() -> Result<()> {
-            run_changed_case(sqlite_price_catalog_versions().await?).await
+            async fn versions() -> Result<PriceCatalogVersionsStore<sqlx::Sqlite>> {
+                let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect("sqlite::memory:")
+                    .await?;
+                sqlx::raw_sql(include_str!(
+                    "../migrations/sqlite/0002_idempotency_tables.sql"
+                ))
+                .execute(&pool)
+                .await?;
+                Ok(PriceCatalogVersionsStore::new(pool))
+            }
+
+            #[tokio::test]
+            async fn noop_skips_snapshot_and_cache_persistence() -> Result<()> {
+                run_noop_case(versions().await?).await
+            }
+
+            #[tokio::test]
+            async fn changed_catalog_persists_and_updates_fingerprint() -> Result<()> {
+                run_changed_case(versions().await?).await
+            }
         }
 
         #[cfg(feature = "postgres")]
-        #[tokio::test]
-        async fn t3_postgres__noop_skips_snapshot_and_cache_persistence() -> anyhow::Result<()> {
-            let (fixture, pool) = postgres_fixture().await?;
-            let result = run_noop_case(PriceCatalogVersionsStore::new(pool.clone())).await;
-            pool.close().await;
-            fixture.teardown().await?;
-            result?;
-            Ok(())
-        }
+        mod t3_postgres__postgres {
+            use super::*;
+            use cc_lb_scheduler::state_stores::PriceCatalogVersionsStore;
 
-        #[cfg(feature = "postgres")]
-        #[tokio::test]
-        async fn t3_postgres__changed_catalog_persists_and_updates_fingerprint()
-        -> anyhow::Result<()> {
-            let (fixture, pool) = postgres_fixture().await?;
-            let result = run_changed_case(PriceCatalogVersionsStore::new(pool.clone())).await;
-            pool.close().await;
-            fixture.teardown().await?;
-            result?;
-            Ok(())
+            async fn fixture()
+            -> anyhow::Result<(cc_lb_storage_conformance::PostgresFixture, sqlx::PgPool)>
+            {
+                let fixture = crate::postgres_fixture().await?;
+                let pool = crate::scheduler_postgres_pool(&fixture).await?;
+                sqlx::raw_sql(include_str!(
+                    "../migrations/postgres/0002_idempotency_tables.sql"
+                ))
+                .execute(&pool)
+                .await?;
+                Ok((fixture, pool))
+            }
+
+            #[tokio::test]
+            async fn noop_skips_snapshot_and_cache_persistence() -> anyhow::Result<()> {
+                let (fixture, pool) = fixture().await?;
+                let result = run_noop_case(PriceCatalogVersionsStore::new(pool.clone())).await;
+                pool.close().await;
+                fixture.teardown().await?;
+                result?;
+                Ok(())
+            }
+
+            #[tokio::test]
+            async fn changed_catalog_persists_and_updates_fingerprint() -> anyhow::Result<()> {
+                let (fixture, pool) = fixture().await?;
+                let result = run_changed_case(PriceCatalogVersionsStore::new(pool.clone())).await;
+                pool.close().await;
+                fixture.teardown().await?;
+                result?;
+                Ok(())
+            }
         }
     }
 }
@@ -305,33 +334,6 @@ impl RecordingCalls {
     fn persisted_fingerprints(&self) -> Vec<String> {
         self.fingerprints.lock().expect("fingerprints lock").clone()
     }
-}
-
-#[cfg(feature = "sqlite")]
-async fn sqlite_price_catalog_versions() -> Result<SqlitePriceCatalogVersionsStore<sqlx::Sqlite>> {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/sqlite/0002_idempotency_tables.sql"
-    ))
-    .execute(&pool)
-    .await?;
-    Ok(SqlitePriceCatalogVersionsStore::new(pool))
-}
-
-#[cfg(feature = "postgres")]
-async fn postgres_fixture()
--> anyhow::Result<(cc_lb_storage_conformance::PostgresFixture, sqlx::PgPool)> {
-    let fixture = crate::postgres_fixture().await?;
-    let pool = crate::scheduler_postgres_pool(&fixture).await?;
-    sqlx::raw_sql(include_str!(
-        "../migrations/postgres/0002_idempotency_tables.sql"
-    ))
-    .execute(&pool)
-    .await?;
-    Ok((fixture, pool))
 }
 
 const SAMPLE_LITELLM_JSON: &str = r#"

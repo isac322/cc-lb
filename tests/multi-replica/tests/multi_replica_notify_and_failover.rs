@@ -1,13 +1,13 @@
-//! Local-only multi-process E2E for Postgres LISTEN/NOTIFY failover.
+//! Multi-process E2E for Postgres LISTEN/NOTIFY failover.
 //!
-//! Requires Docker (via the inherited `DOCKER_HOST` when set), prebuilt
-//! `CC_LB_MULTI_REPLICA_SERVER_BIN` and `CC_LB_MULTI_REPLICA_FAKE_ANTHROPIC_BIN`
-//! executables, fixed localhost ports 8888, 8889, 8001, 8002, 8003, 8004,
-//! 18888, and `CC_LB_MULTI_REPLICA_POSTGRES_URL=postgres://...`.
+//! Requires prebuilt `CC_LB_MULTI_REPLICA_SERVER_BIN` and
+//! `CC_LB_MULTI_REPLICA_FAKE_ANTHROPIC_BIN` executables, fixed localhost ports
+//! 8888, 8889, 8001, 8002, 8003, 8004, and 18888, plus
+//! `CC_LB_MULTI_REPLICA_POSTGRES_URL=postgres://...`.
 //!
-//! The scheduled Postgres workflow selects this test and supplies its required
-//! environment. Missing prerequisites fail loudly rather than turning a
-//! selected T5 test into a silent pass.
+//! `CC_LB_MULTI_REPLICA_POSTGRES_MODE=external` uses an already-running local
+//! Postgres service and host `psql`. The default `compose` mode owns a local
+//! Docker Compose Postgres service. Missing prerequisites fail loudly.
 use std::process::Command;
 
 #[test]

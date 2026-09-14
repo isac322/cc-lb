@@ -681,7 +681,7 @@ where
             session_key_hash,
             TARGET_PRINCIPAL,
             now,
-            reason.display_reason(),
+            "raw fixture display reason",
         ))
         .await?;
     ensure!(

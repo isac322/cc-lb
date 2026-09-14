@@ -120,6 +120,7 @@ mod t2__tests {
     use uuid::Uuid;
 
     const NOW_UNIX_SECS: u64 = 1_800_000_000;
+    const TEST_ADMIN_ID: Uuid = Uuid::from_u128(1);
 
     #[tokio::test]
     async fn report_lists_empty_supported_slots_in_sorted_slot_and_order() {
@@ -281,7 +282,7 @@ mod t2__tests {
                 original_filename: format!("{name}.wasm"),
                 label: None,
                 uploaded_at_unix_secs: NOW_UNIX_SECS,
-                uploaded_by_admin_id: Uuid::new_v4(),
+                uploaded_by_admin_id: TEST_ADMIN_ID,
                 description: format!("{name} description"),
                 usage: "test fixture".to_owned(),
                 hook_metadata: Default::default(),

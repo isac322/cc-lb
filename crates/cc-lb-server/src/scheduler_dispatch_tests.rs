@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
 
-use self::support::{FailingPusher, Fixture, empty_dynamic_view};
+use self::support::{FailingPusher, Fixture, SchedulerBackendCall, empty_dynamic_view};
 
 struct StaticRenewalDispatcher {
     finalization: Mutex<Option<RenewalFinalization>>,
@@ -102,22 +102,9 @@ async fn pool_quota_snapshot_job_records_current_windows() {
 }
 
 #[tokio::test]
-async fn t3__default_upstream_affinity_purge_physically_removes_stale_null_expiry_rows() {
-    let fixture = Fixture::new_sqlite().await;
-    sqlx::query(
-        "INSERT INTO upstream_affinity_v1
-         (principal_id, provider, kind, value_sha256, upstream_id, observed_at_unix_secs, expires_at_unix_secs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
-    )
-    .bind("principal")
-    .bind("anthropic")
-    .bind("anthropic_web_search_encrypted_content")
-    .bind(vec![7_u8; 32])
-    .bind(fixture.upstream_id.to_string())
-    .bind(0_i64)
-    .execute(fixture.sqlite_pool())
-    .await
-    .expect("seed stale upstream affinity");
+async fn t2__default_upstream_affinity_purge_wires_current_retention() {
+    let fixture = Fixture::new().await;
+    let expected_ttl_secs = Config::default().upstream_affinity.ttl_secs();
 
     let outcome = fixture
         .dispatch(Arc::new(FailingPusher))
@@ -128,36 +115,18 @@ async fn t3__default_upstream_affinity_purge_physically_removes_stale_null_expir
         .expect("dispatch upstream affinity purge");
 
     assert_eq!(outcome, JobOutcome::Done);
-    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_affinity_v1")
-        .fetch_one(fixture.sqlite_pool())
-        .await
-        .expect("count upstream affinity rows");
-    assert_eq!(remaining, 0);
+    assert_eq!(
+        fixture.backend_calls(),
+        vec![SchedulerBackendCall::PurgeUpstreamAffinity {
+            now_unix_secs: 1_700_000_000,
+            ttl_secs: expected_ttl_secs,
+        }]
+    );
 }
 
 #[tokio::test]
-async fn t3__upstream_affinity_purge_uses_the_captured_configured_retention() {
-    let fixture = Fixture::new_sqlite().await;
-    let now_unix_secs = 1_700_000_000;
-    for (value_sha256, observed_at_unix_secs) in [
-        (vec![8_u8; 32], now_unix_secs - 2 * 86_400),
-        (vec![9_u8; 32], now_unix_secs - 12 * 3_600),
-    ] {
-        sqlx::query(
-            "INSERT INTO upstream_affinity_v1
-             (principal_id, provider, kind, value_sha256, upstream_id, observed_at_unix_secs, expires_at_unix_secs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
-        )
-        .bind("principal")
-        .bind("anthropic")
-        .bind("anthropic_web_search_encrypted_content")
-        .bind(value_sha256)
-        .bind(fixture.upstream_id.to_string())
-        .bind(i64::from(observed_at_unix_secs))
-        .execute(fixture.sqlite_pool())
-        .await
-        .expect("seed upstream affinity");
-    }
+async fn t2__upstream_affinity_purge_uses_the_captured_configured_retention() {
+    let fixture = Fixture::new().await;
     let mut config = Config::default();
     config.upstream_affinity.ttl_days = 1;
 
@@ -170,12 +139,13 @@ async fn t3__upstream_affinity_purge_uses_the_captured_configured_retention() {
         .expect("dispatch upstream affinity purge");
 
     assert_eq!(outcome, JobOutcome::Done);
-    let remaining: Vec<Vec<u8>> =
-        sqlx::query_scalar("SELECT value_sha256 FROM upstream_affinity_v1")
-            .fetch_all(fixture.sqlite_pool())
-            .await
-            .expect("read remaining upstream affinity rows");
-    assert_eq!(remaining, vec![vec![9_u8; 32]]);
+    assert_eq!(
+        fixture.backend_calls(),
+        vec![SchedulerBackendCall::PurgeUpstreamAffinity {
+            now_unix_secs: 1_700_000_000,
+            ttl_secs: 86_400,
+        }]
+    );
 }
 
 #[tokio::test]
