@@ -158,7 +158,7 @@ jobs:
 
 
       - name: Install and dry-run release-plz server release
-        uses: MarcoIeni/release-plz-action@v0.5.133
+        uses: MarcoIeni/release-plz-action@v0.5.136
         with:
           command: release
           config: release-plz-server.toml
