@@ -14,11 +14,8 @@ use tokio::{runtime::Runtime, sync::Barrier};
 use uuid::Uuid;
 
 #[test]
-fn plan_tier_first_insert_concurrent_upserts_are_idempotent() {
-    let Some(url) = postgres_url() else {
-        eprintln!("skip: CI_POSTGRES_URL or PG_URL not set");
-        return;
-    };
+fn t3_postgres__plan_tier_first_insert_concurrent_upserts_are_idempotent() {
+    let url = crate::postgres_fixture::required_postgres_url();
 
     Runtime::new()
         .expect("tokio runtime")
@@ -39,7 +36,7 @@ async fn run_test(url: &str) -> Result<()> {
 }
 
 async fn concurrent_upstream_first_insert_is_idempotent(fixture: &Fixture) -> Result<()> {
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(0x7001);
     let record = UpstreamPlanTierRecord {
         upstream_id,
         organization_uuid: Some("org-concurrent".to_owned()),
@@ -166,7 +163,7 @@ impl Fixture {
         .await?;
 
         let pool = schema_pool(url, &schema, 4).await?;
-        PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock))
+        PostgresStorage::new(pool.clone(), cc_lb_testkit::fixed_clock(1_700_000_000))
             .initialize(BackendKind::Postgres)
             .await?;
 
@@ -182,7 +179,7 @@ impl Fixture {
         let pool = schema_pool(&self.url, &self.schema, 1).await?;
         Ok(PostgresStorage::new(
             pool,
-            Arc::new(cc_lb_clock::SystemClock),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         ))
     }
 
@@ -204,12 +201,6 @@ async fn schema_pool(url: &str, schema: &str, max_connections: u32) -> Result<Pg
         .max_connections(max_connections)
         .connect_with(PgConnectOptions::from_str(url)?.options([("search_path", schema)]))
         .await?)
-}
-
-fn postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL")
-        .ok()
-        .or_else(|| std::env::var("PG_URL").ok())
 }
 
 fn quote_ident(identifier: &str) -> String {

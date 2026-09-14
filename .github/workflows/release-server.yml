@@ -98,7 +98,7 @@ jobs:
         with:
           toolchain: 1.98.1
 
-      # release-plz 0.3.160 supports git-only releases, but its release command
+      # release-plz 0.3.167 supports git-only releases, but its release command
       # still filters out manifest-private packages before applying that mode.
       - name: Expose private server package to release-plz
         if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
@@ -116,11 +116,11 @@ jobs:
       - name: Run release-plz server release
         id: release-plz
         if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
-        uses: MarcoIeni/release-plz-action@v0.5.136
+        uses: MarcoIeni/release-plz-action@v0.5.137
         with:
           command: release
           config: release-plz-server.toml
-          version: 0.3.160
+          version: 0.3.167
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

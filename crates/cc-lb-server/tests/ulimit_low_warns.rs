@@ -19,7 +19,7 @@ impl Drop for LimitGuard {
 }
 
 #[tokio::test]
-async fn low_ulimit_preflight_still_succeeds() {
+async fn tx__low_ulimit_preflight_still_succeeds() {
     let saved = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE).unwrap();
     let guard = LimitGuard { saved };
 
@@ -31,18 +31,10 @@ async fn low_ulimit_preflight_still_succeeds() {
     )
     .unwrap();
 
-    let _env_guard = preflight_common::EnvGuard::set(
-        "CC_LB_TEST_MASTER_KEY_PREFLIGHT_ULIMIT",
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    );
     let mut config = preflight_common::base_config();
-    preflight_common::use_temp_sqlite(
-        &mut config,
-        "preflight-ulimit",
-        "CC_LB_TEST_MASTER_KEY_PREFLIGHT_ULIMIT",
-    );
-    let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
-    let report = preflight::run(&config, PreflightOptions { skip_bind: true }, clock.clone())
+    preflight_common::use_temp_sqlite(&mut config, "preflight-ulimit");
+    let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
+    let report = preflight::run_offline(&config, PreflightOptions { skip_bind: true }, clock)
         .await
         .unwrap();
 

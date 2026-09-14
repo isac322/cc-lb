@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 #[path = "admin_test_common.rs"]
 mod admin_test_common;
 #[path = "admin_warmup_endpoints.rs"]
@@ -42,6 +44,8 @@ mod disable_enable_key;
 mod e2e_pkce_enrollment;
 #[path = "events_delta_rest.rs"]
 mod events_delta_rest;
+#[path = "events_detail.rs"]
+mod events_detail;
 #[path = "events_recent.rs"]
 mod events_recent;
 #[path = "events_request_log_contracts.rs"]
@@ -58,6 +62,8 @@ mod internal_partials;
 mod new_admin_modules_smoke;
 #[path = "oauth_no_authn_fallback.rs"]
 mod oauth_no_authn_fallback;
+#[path = "plugins_wasm_gc.rs"]
+mod plugins_wasm_gc;
 #[path = "principal_crud.rs"]
 mod principal_crud;
 #[path = "principal_keys.rs"]
@@ -86,6 +92,8 @@ mod status;
 mod subscription_quota_slim_parity;
 #[path = "subscription_quotas.rs"]
 mod subscription_quotas;
+#[path = "t3/plugin_cache_file.rs"]
+mod t3__plugin_cache_file;
 #[path = "upstream_health.rs"]
 mod upstream_health;
 #[path = "v1_oauth.rs"]

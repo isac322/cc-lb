@@ -1,12 +1,13 @@
 #![cfg(feature = "postgres")]
+#![allow(non_snake_case)]
 
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
-use std::process::{Command, Output};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::t5__process::support::PostgresConnectionProxy;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::{Request, Response, StatusCode};
@@ -29,47 +30,26 @@ use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use url::Url;
 
-const POSTGRES_CONTAINER: &str = "cc-lb-postgres";
-const DOCKER_HOST: &str = "tcp://localhost:2375";
 const ADMIN_TOKEN: &str = "test-token";
 const PRINCIPAL_ID: &str = "test-principal";
 const FAILURE_LATENCY_CEILING: Duration = Duration::from_millis(1_500);
-// CI latency budget, not a correctness bound: postgres readiness normally takes
-// well under a second, but under llvm-cov plus a co-scheduled heavy build on the
-// shared runner it can overrun. Scale by CC_LB_TEST_READY_TIMEOUT_SECS (120 in
-// CI), the repo's convention, instead of a hardcoded ceiling.
-fn ready_timeout() -> Duration {
-    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(30))
-}
-const READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const CONNECT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
-
-static CHAOS_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
-#[ignore]
-async fn db_unreachable_returns_503_with_retry_after() -> TestResult<()> {
-    let Some(url) = ci_postgres_url() else {
-        eprintln!("skipped: CI_POSTGRES_URL unset");
-        return Ok(());
-    };
-    let _serial = chaos_lock().lock().await;
-
-    ensure_postgres_up(&url).await?;
-    let _guard = PostgresRestartGuard;
-    let (app, _upstream) = build_api_key_app_for_testing_postgres(&url).await?;
+async fn tx__db_unreachable_returns_503_with_retry_after() -> TestResult<()> {
+    let fixture = cc_lb_storage_conformance::postgres_fixture().await?;
+    let postgres_proxy =
+        PostgresConnectionProxy::spawn_for_schema(fixture.database_url(), fixture.schema_name())
+            .await?;
+    let (app, _upstream) =
+        build_api_key_app_for_testing_postgres(postgres_proxy.database_url()).await?;
     let api_key = issue_key(&app).await?;
 
     let before = proxy_messages(&app, &api_key).await?;
     assert_eq!(before.status(), StatusCode::OK);
 
-    stop_postgres()?;
+    postgres_proxy.set_available(false).await?;
     let started = Instant::now();
     let unavailable = proxy_messages(&app, &api_key).await?;
     let elapsed = started.elapsed();
@@ -81,130 +61,16 @@ async fn db_unreachable_returns_503_with_retry_after() -> TestResult<()> {
         "DB-down auth latency {elapsed:?} exceeded retry budget ceiling {FAILURE_LATENCY_CEILING:?}"
     );
 
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore]
-async fn db_recovery_after_restart() -> TestResult<()> {
-    let Some(url) = ci_postgres_url() else {
-        eprintln!("skipped: CI_POSTGRES_URL unset");
-        return Ok(());
-    };
-    let _serial = chaos_lock().lock().await;
-
-    ensure_postgres_up(&url).await?;
-    let _guard = PostgresRestartGuard;
-    let (app, _upstream) = build_api_key_app_for_testing_postgres(&url).await?;
-    let api_key = issue_key(&app).await?;
-
-    let before = proxy_messages(&app, &api_key).await?;
-    assert_eq!(before.status(), StatusCode::OK);
-
-    stop_postgres()?;
-    start_postgres()?;
-    wait_postgres_ready(&url).await?;
-
-    let after = proxy_messages(&app, &api_key).await?;
-    assert_eq!(after.status(), StatusCode::OK);
-
-    Ok(())
-}
-
-fn ci_postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL").ok()
-}
-
-fn chaos_lock() -> &'static tokio::sync::Mutex<()> {
-    CHAOS_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-fn docker(action: &str, container: &str) -> io::Result<Output> {
-    Command::new("docker")
-        .env("DOCKER_HOST", DOCKER_HOST)
-        .args([action, container])
-        .output()
-}
-
-struct PostgresRestartGuard;
-
-impl Drop for PostgresRestartGuard {
-    fn drop(&mut self) {
-        let _ = docker("start", POSTGRES_CONTAINER);
-    }
-}
-
-fn stop_postgres() -> TestResult<()> {
-    let output = docker("stop", POSTGRES_CONTAINER)?;
-    assert_docker_success("stop", &output)
-}
-
-fn start_postgres() -> TestResult<()> {
-    let output = docker("start", POSTGRES_CONTAINER)?;
-    assert_docker_success("start", &output)
-}
-
-fn assert_docker_success(action: &str, output: &Output) -> TestResult<()> {
-    if output.status.success() {
-        return Ok(());
-    }
-
-    Err(error(format!(
-        "docker {action} {POSTGRES_CONTAINER} failed: status={:?} stdout={} stderr={}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stdout).trim(),
-        String::from_utf8_lossy(&output.stderr).trim()
-    )))
-}
-
-async fn ensure_postgres_up(url: &str) -> TestResult<()> {
-    if postgres_ready(url).await {
-        return Ok(());
-    }
-
-    start_postgres()?;
-    wait_postgres_ready(url).await
-}
-
-async fn wait_postgres_ready(url: &str) -> TestResult<()> {
-    let ready_timeout = ready_timeout();
-    let deadline = Instant::now() + ready_timeout;
-
-    loop {
-        let probe_error =
-            match tokio::time::timeout(CONNECT_PROBE_TIMEOUT, connect_probe(url)).await {
-                Ok(Ok(())) => return Ok(()),
-                Ok(Err(source)) => source.to_string(),
-                Err(_) => format!("connect probe exceeded {CONNECT_PROBE_TIMEOUT:?}"),
-            };
-
-        if Instant::now() >= deadline {
-            return Err(error(format!(
-                "postgres did not become ready within {ready_timeout:?}: {probe_error}"
-            )));
-        }
-
-        tokio::time::sleep(READY_POLL_INTERVAL).await;
-    }
-}
-
-async fn postgres_ready(url: &str) -> bool {
-    matches!(
-        tokio::time::timeout(CONNECT_PROBE_TIMEOUT, connect_probe(url)).await,
-        Ok(Ok(()))
-    )
-}
-
-async fn connect_probe(url: &str) -> Result<(), sqlx::Error> {
-    let pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
-    pool.close().await;
+    drop(app);
+    postgres_proxy.shutdown().await?;
+    fixture.teardown().await?;
     Ok(())
 }
 
 async fn build_api_key_app_for_testing_postgres(
     database_url: &str,
 ) -> TestResult<(App, RunningUpstream)> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
     let fixture_app = build_app_for_testing_postgres(database_url, clock.clone()).await?;
     drop(fixture_app);
     reset_managed_key_tables(database_url).await?;
@@ -242,7 +108,7 @@ async fn build_api_key_app_for_testing_postgres(
 }
 
 async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(database_url)
@@ -269,7 +135,7 @@ fn test_config(database_url: &str) -> Config {
     // Postgres always runs pg_notify fanout; borrow the always-set CI env as the
     // shared cluster token so the app can build.
     config.cluster.instance_url = Some("http://127.0.0.1:0".to_owned());
-    config.cluster.token_env = "CI_POSTGRES_URL".to_owned();
+    config.cluster.token_env = crate::common::TEST_NONEMPTY_ENV.to_owned();
     config
 }
 

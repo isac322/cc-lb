@@ -23,7 +23,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn cache_keepalive_without_scheduler_is_response_noop() {
+async fn t2__cache_keepalive_without_scheduler_is_response_noop() {
     let upstream_body = Bytes::from_static(
         br#"{"type":"message","id":"msg_keepalive_noop","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#,
     );
@@ -61,7 +61,7 @@ async fn cache_keepalive_without_scheduler_is_response_noop() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_enqueue_failure_does_not_change_proxy_response() {
+async fn t2__cache_keepalive_enqueue_failure_does_not_change_proxy_response() {
     let upstream_body = Bytes::from_static(
         br#"{"type":"message","id":"msg_keepalive_enqueue_fail","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":2}}"#,
     );
@@ -160,7 +160,7 @@ impl UpstreamDispatch for FixedSuccessDispatch {
 
 fn principal_with_keepalive() -> PrincipalRecord {
     PrincipalRecord {
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(0x1002),
         name: "principal-test".to_owned(),
         kind: PrincipalKind::Machine,
         allowed_models: vec!["*".to_owned()],

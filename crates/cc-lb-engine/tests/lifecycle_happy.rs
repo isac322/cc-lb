@@ -39,7 +39,7 @@ impl LimitCostEstimator for RecordingLimitCostEstimator {
 }
 
 #[tokio::test]
-async fn happy_sse_relays_incrementally_and_observes_chunks() {
+async fn t2__happy_sse_relays_incrementally_and_observes_chunks() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![
@@ -101,7 +101,7 @@ async fn happy_sse_relays_incrementally_and_observes_chunks() {
 }
 
 #[tokio::test]
-async fn happy_non_streaming_observes_usage_tokens() {
+async fn t2__happy_non_streaming_observes_usage_tokens() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![
@@ -151,14 +151,14 @@ async fn happy_non_streaming_observes_usage_tokens() {
 }
 
 #[tokio::test]
-async fn requested_service_tier_reaches_limit_cost_estimator_before_dispatch() {
+async fn t2__requested_service_tier_reaches_limit_cost_estimator_before_dispatch() {
     // Given a priority request with limit reservation enabled.
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let estimator = Arc::new(RecordingLimitCostEstimator::default());
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     );
     let lifecycle = lifecycle_with(
         TestAuthn::new(state.clone()),

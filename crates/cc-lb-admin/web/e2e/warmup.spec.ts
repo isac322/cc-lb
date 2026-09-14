@@ -2,6 +2,7 @@ import { expect, type Page, test } from '@playwright/test';
 import fs from 'fs';
 import path from 'path';
 import { COPY } from '../src/lib/copy/warmup';
+import { fulfillAuthenticatedSession } from './support/auth-session';
 
 type WarmupPlugin = { wasm_registry_id: string; config: Record<string, unknown> } | null;
 type UpstreamFixture = {
@@ -136,6 +137,7 @@ async function installAppFixtures(
   });
 
   await page.route('**/admin/**', async (route) => {
+    if (await fulfillAuthenticatedSession(route)) return;
     const request = route.request();
     const url = new URL(request.url());
     const pathname = url.pathname;
@@ -252,7 +254,7 @@ async function openUpstreams(page: Page, selectedId = 'oauth-healthy') {
 
 async function confirmFireNow(page: Page) {
   await page.getByTestId('warmup-fire-now').click();
-  await expect(page.getByRole('dialog')).toBeVisible();
+  await expect(page.getByRole('alertdialog')).toBeVisible();
   await page.getByRole('button', { name: 'Fire now' }).click();
 }
 
@@ -279,7 +281,7 @@ test.describe('WarmupCard', () => {
 
     await expect(page.getByTestId('warmup-card')).toBeVisible();
     await expect(page.getByTestId('warmup-switch')).toHaveAttribute('aria-checked', 'true');
-    await expect(page.getByTestId('warmup-last')).toHaveText(/\d+ (minutes?|hours?|days?) ago/);
+    await expect(page.getByTestId('warmup-last')).toHaveText(/^\d+(?:m|h|d| minutes?| hours?| days?) ago$/);
     await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('anthropic-shape-v2');
     await expect(page.getByTestId('warmup-fire-now')).toBeEnabled();
     await page.screenshot({ path: evidencePath('scenario-1-steady-state.png'), fullPage: true });
@@ -396,7 +398,7 @@ test.describe('WarmupCard', () => {
       },
     });
     await openUpstreams(page);
-    await page.getByTestId('warmup-plugin-clear').click();
+    await page.getByTestId('warmup-plugin-select').selectOption('');
     await page.getByRole('button', { name: 'Clear' }).click();
 
     await expect.poll(() => deleteUrl).toBe('/admin/v1/upstreams/oauth-healthy/warmup-dialect-plugin');
@@ -470,7 +472,8 @@ test.describe('WarmupCard', () => {
     await openUpstreams(page);
 
     await expect(page.getByTestId('warmup-plugin-select').locator('option', { hasText: COPY.unknownPluginTemplate.replace('{id}', 'ghost-plugin') })).toHaveCount(1);
-    await expect(page.getByTestId('warmup-plugin-clear')).toBeVisible();
+    await page.getByTestId('warmup-plugin-select').selectOption('');
+    await expect(page.getByRole('alertdialog')).toBeVisible();
     await page.screenshot({ path: evidencePath('scenario-11-unknown-plugin.png'), fullPage: true });
   });
 
@@ -491,7 +494,12 @@ test.describe('WarmupCard', () => {
     await openUpstreams(page);
 
     await page.getByTestId('warmup-card').focus();
-    const expectedOrder = ['warmup-history-button', 'warmup-fire-now', 'warmup-switch', 'warmup-plugin-select', 'warmup-plugin-clear'];
+    const expectedOrder = [
+      'warmup-switch',
+      'warmup-plugin-select',
+      'warmup-fire-now',
+      'warmup-history-button',
+    ];
     const focusOrder: string[] = [];
     for (let index = 0; index < expectedOrder.length; index += 1) {
       await page.keyboard.press('Tab');

@@ -154,55 +154,7 @@ pub mod single_flight {
 
 #[cfg(loom)]
 pub mod api_keys {
-    pub mod types {
-        include!("../../../crates/cc-lb-engine/src/api_keys/types.rs");
-    }
-
     pub mod concurrent_guard {
-        include!("../../../crates/cc-lb-engine/src/api_keys/concurrent_guard.rs");
-    }
-
-    pub mod principal_view {
-        use std::sync::Arc;
-
-        use crate::api_keys::types::Limit;
-
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        pub enum PrincipalStatus {
-            Active,
-            Disabled,
-            Missing,
-        }
-
-        #[derive(Debug)]
-        pub struct PrincipalView {
-            default_limits: Vec<Limit>,
-            status: PrincipalStatus,
-        }
-
-        impl PrincipalView {
-            pub fn loom(default_limits: Vec<Limit>) -> Arc<Self> {
-                Arc::new(Self {
-                    default_limits,
-                    status: PrincipalStatus::Active,
-                })
-            }
-
-            pub fn is_model_allowed(&self, _principal_id: &str, _model: &str) -> bool {
-                true
-            }
-
-            pub fn principal_status(&self, _principal_id: &str) -> PrincipalStatus {
-                self.status
-            }
-
-            pub fn default_limits(&self, _principal_id: &str) -> &[Limit] {
-                &self.default_limits
-            }
-        }
-    }
-
-    pub mod limit_engine {
-        include!("../../../crates/cc-lb-engine/src/api_keys/limit_engine.rs");
+        include!("../../../crates/cc-lb-control/src/api_keys/concurrent_guard.rs");
     }
 }

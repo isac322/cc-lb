@@ -2483,7 +2483,7 @@ mod tests {
             resolution: UsageRollupResolution::Minute,
             bucket_start: 0,
             principal: String::new(),
-            upstream_id: Uuid::new_v4(),
+            upstream_id: Uuid::from_u128(1),
             upstream_name: String::new(),
             model: String::new(),
             request_count: 1,
@@ -2612,7 +2612,7 @@ mod tests {
 
     #[test]
     fn aggregate_window_counts_historical_provider_lots_after_reset() {
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(2);
         let upstream = upstream_record(upstream_id);
         let inputs = [
             AggregateProviderLotInput {
@@ -2668,9 +2668,9 @@ mod tests {
 
     #[test]
     fn pool_quota_upstreams_includes_disabled_oauth_upstreams() {
-        let enabled_oauth_id = Uuid::new_v4();
-        let disabled_oauth_id = Uuid::new_v4();
-        let non_oauth_id = Uuid::new_v4();
+        let enabled_oauth_id = Uuid::from_u128(3);
+        let disabled_oauth_id = Uuid::from_u128(4);
+        let non_oauth_id = Uuid::from_u128(5);
         let mut disabled_oauth = upstream_record(disabled_oauth_id);
         disabled_oauth.enabled = false;
         let mut non_oauth = upstream_record(non_oauth_id);
@@ -2872,66 +2872,97 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_falls_back_to_header_mean_when_capacity_missing() {
-        let lots = vec![
-            lot("u-1", Some(0.10), Some(100_000), None, None),
-            lot("u-2", Some(0.30), Some(100_000), None, None),
-            lot("u-3", None, None, None, None),
-        ];
-        let response = build_aggregate_window_response(
-            SubscriptionQuotaWindow::FiveHour,
-            &lots,
-            0,
-            now_unix_secs_test(),
-        );
-        let utilization = response
-            .utilization
-            .expect("fallback should populate utilization");
-        assert!((utilization - 0.20).abs() < f64::EPSILON);
-        assert_eq!(response.confidence, "plan_weighted");
-        assert_eq!(response.contributing_upstreams, 2);
-        assert!(response.caveats.iter().any(|c| c.contains("plan ratios")));
-    }
+    fn aggregate_window_fallback_table() {
+        struct Case {
+            case: &'static str,
+            lots: fn() -> Vec<AggregateProviderLotResponse>,
+            expected_utilization: Option<f64>,
+            expected_contributing_upstreams: usize,
+            expected_caveat: Option<&'static str>,
+        }
 
-    #[test]
-    fn aggregate_uses_latest_observation_per_upstream_for_fallback() {
-        let lots = vec![
-            lot("u-1", Some(0.40), Some(1_000), None, None),
-            lot("u-1", Some(0.60), Some(2_000), None, None),
-            lot("u-2", Some(0.20), Some(1_500), None, None),
+        let cases = [
+            Case {
+                case: "aggregate_falls_back_to_header_mean_when_capacity_missing",
+                lots: || {
+                    vec![
+                        lot("u-1", Some(0.10), Some(100_000), None, None),
+                        lot("u-2", Some(0.30), Some(100_000), None, None),
+                        lot("u-3", None, None, None, None),
+                    ]
+                },
+                expected_utilization: Some(0.20),
+                expected_contributing_upstreams: 2,
+                expected_caveat: Some("plan ratios"),
+            },
+            Case {
+                case: "aggregate_uses_latest_observation_per_upstream_for_fallback",
+                lots: || {
+                    vec![
+                        lot("u-1", Some(0.40), Some(1_000), None, None),
+                        lot("u-1", Some(0.60), Some(2_000), None, None),
+                        lot("u-2", Some(0.20), Some(1_500), None, None),
+                    ]
+                },
+                expected_utilization: Some(0.40),
+                expected_contributing_upstreams: 2,
+                expected_caveat: None,
+            },
+            Case {
+                case: "aggregate_prefers_capacity_weighted_when_any_lot_has_capacity",
+                lots: || {
+                    vec![lot(
+                        "u-1",
+                        Some(0.50),
+                        Some(1_000),
+                        Some(1_000_000.0),
+                        Some(500_000.0),
+                    )]
+                },
+                expected_utilization: None,
+                expected_contributing_upstreams: 1,
+                expected_caveat: None,
+            },
         ];
-        let response = build_aggregate_window_response(
-            SubscriptionQuotaWindow::FiveHour,
-            &lots,
-            0,
-            now_unix_secs_test(),
-        );
-        let utilization = response
-            .utilization
-            .expect("fallback should populate utilization");
-        assert!((utilization - 0.40).abs() < f64::EPSILON);
-        assert_eq!(response.confidence, "plan_weighted");
-        assert_eq!(response.contributing_upstreams, 2);
-    }
 
-    #[test]
-    fn aggregate_prefers_capacity_weighted_when_any_lot_has_capacity() {
-        let lots = vec![lot(
-            "u-1",
-            Some(0.50),
-            Some(1_000),
-            Some(1_000_000.0),
-            Some(500_000.0),
-        )];
-        let response = build_aggregate_window_response(
-            SubscriptionQuotaWindow::FiveHour,
-            &lots,
-            0,
-            now_unix_secs_test(),
-        );
-        assert!(response.utilization.is_some());
-        assert_eq!(response.confidence, "plan_weighted");
-        assert_eq!(response.contributing_upstreams, 1);
+        for case in cases {
+            let lots = (case.lots)();
+            let response = build_aggregate_window_response(
+                SubscriptionQuotaWindow::FiveHour,
+                &lots,
+                0,
+                now_unix_secs_test(),
+            );
+
+            if let Some(expected_utilization) = case.expected_utilization {
+                let utilization = response.utilization.unwrap_or_else(|| {
+                    panic!("fallback should populate utilization; case={}", case.case)
+                });
+                assert!(
+                    (utilization - expected_utilization).abs() < f64::EPSILON,
+                    "case={}",
+                    case.case
+                );
+            } else {
+                assert!(response.utilization.is_some(), "case={}", case.case);
+            }
+            assert_eq!(response.confidence, "plan_weighted", "case={}", case.case);
+            assert_eq!(
+                response.contributing_upstreams, case.expected_contributing_upstreams,
+                "case={}",
+                case.case
+            );
+            if let Some(expected_caveat) = case.expected_caveat {
+                assert!(
+                    response
+                        .caveats
+                        .iter()
+                        .any(|caveat| caveat.contains(expected_caveat)),
+                    "case={}",
+                    case.case
+                );
+            }
+        }
     }
 
     fn now_unix_secs_test() -> u64 {

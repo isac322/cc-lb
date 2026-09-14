@@ -7,7 +7,7 @@ use tower::ServiceExt;
 const STREAM_BODY: &str = r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"stream":true}"#;
 
 #[tokio::test]
-async fn fake_weather_determinism() {
+async fn t2__fake_weather_determinism() {
     // Given
     let headers = [
         ("x-fake-weather-seed", "42"),
@@ -27,7 +27,7 @@ async fn fake_weather_determinism() {
 }
 
 #[tokio::test]
-async fn fake_weather_defaults_preserve_stream_shape() {
+async fn t2__fake_weather_defaults_preserve_stream_shape() {
     // Given / When
     let stream = streaming_body(app(AppConfig::default()), &[]).await;
 
@@ -41,7 +41,7 @@ async fn fake_weather_defaults_preserve_stream_shape() {
 }
 
 #[tokio::test]
-async fn fake_529_retry_after() {
+async fn t2__fake_529_retry_after() {
     // Given
     let app = app(AppConfig::default());
 

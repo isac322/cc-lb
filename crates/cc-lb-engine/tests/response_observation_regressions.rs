@@ -2,7 +2,6 @@ use crate::common;
 
 use std::collections::VecDeque;
 use std::io::Write as _;
-use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -17,9 +16,9 @@ use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 use cc_lb_request_log::RequestEventUpdate;
+use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::types::RequestEvent;
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
-use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_testkit::InMemoryStorage;
 use cc_lb_upstream::SignedRequest;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderValue, Response, StatusCode};
@@ -34,95 +33,26 @@ use url::Url;
 use common::{TestAuthn, TestLifecycleBus, TestRouter, TestState, messages_request};
 
 const BOUNDED_WAIT: Duration = Duration::from_secs(2);
-const SPAN_CHILD_ENV: &str = "CC_LB_RESPONSE_SPAN_REGRESSION_CHILD";
-const SPAN_TEST_NAME: &str = "response_observation_regressions::response_span_closes_before_blocked_callback_at_eos_and_body_drop";
-const CHILD_WAIT: Duration = Duration::from_secs(15);
 
-fn run_span_regression_child() {
-    let executable = std::env::current_exe().expect("locate integration test executable");
-    let child = Command::new(executable)
-        .args(["--exact", SPAN_TEST_NAME, "--nocapture", "--test-threads=1"])
-        .env(SPAN_CHILD_ENV, "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn isolated response-span regression child");
-    let child_id = child.id();
-    let (output_tx, output_rx) = mpsc::channel();
-    let waiter = std::thread::spawn(move || {
-        let _ = output_tx.send(child.wait_with_output());
-    });
-
-    let output = match output_rx.recv_timeout(CHILD_WAIT) {
-        Ok(output) => output.expect("wait for response-span regression child"),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            signal_child(child_id, "-TERM");
-            let output = match output_rx.recv_timeout(BOUNDED_WAIT) {
-                Ok(output) => output.expect("wait for terminated response-span regression child"),
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    signal_child(child_id, "-KILL");
-                    output_rx
-                        .recv_timeout(BOUNDED_WAIT)
-                        .expect("killed response-span regression child exits")
-                        .expect("wait for killed response-span regression child")
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    panic!("response-span regression child waiter disconnected after timeout")
-                }
-            };
-            waiter.join().expect("response-span child waiter joins");
-            panic!(
-                "isolated response-span regression child timed out\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            panic!("response-span regression child waiter disconnected")
-        }
-    };
-    waiter.join().expect("response-span child waiter joins");
-    assert_child_success(output);
-}
-
-fn signal_child(child_id: u32, signal: &str) {
-    let child_id = child_id.to_string();
-    let status = Command::new("kill")
-        .args([signal, child_id.as_str()])
-        .status()
-        .expect("invoke kill for response-span regression child");
-    assert!(
-        status.success(),
-        "failed to {signal} child process {child_id}"
-    );
-}
-
-fn assert_child_success(output: Output) {
-    assert!(
-        output.status.success(),
-        "isolated response-span regression child failed with {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn response_span_closes_before_blocked_callback_at_eos_and_body_drop() {
-    if std::env::var_os(SPAN_CHILD_ENV).is_none() {
-        run_span_regression_child();
-        return;
-    }
-
+#[test]
+fn t2__response_span_closes_before_blocked_callback_at_eos_and_body_drop() {
     let (span_layer, span_closed_rx) = ResponseSpanCloseLayer::new();
     let created_count = Arc::clone(&span_layer.created_count);
     let closed_count = Arc::clone(&span_layer.closed_count);
     let seen_spans = Arc::clone(&span_layer.seen_spans);
-    tracing::subscriber::set_global_default(Registry::default().with(span_layer))
-        .expect("child installs its process-global tracing subscriber once");
+    let subscriber = Registry::default().with(span_layer);
 
-    finite_gzip_eos_case(&span_closed_rx, &created_count, &closed_count, &seen_spans).await;
-    delivered_body_drop_case(&span_closed_rx, &created_count, &closed_count, &seen_spans).await;
+    tracing::subscriber::with_default(subscriber, || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread response-span runtime");
+        runtime.block_on(async {
+            finite_gzip_eos_case(&span_closed_rx, &created_count, &closed_count, &seen_spans).await;
+            delivered_body_drop_case(&span_closed_rx, &created_count, &closed_count, &seen_spans)
+                .await;
+        });
+    });
 }
 
 async fn finite_gzip_eos_case(
@@ -131,8 +61,7 @@ async fn finite_gzip_eos_case(
     closed_count: &AtomicUsize,
     seen_spans: &Mutex<Vec<String>>,
 ) {
-    let dir = tempfile::tempdir().expect("temporary directory");
-    let storage = Arc::new(sqlite_storage(&dir, "blocked-finish.sqlite").await);
+    let storage = InMemoryStorage::new();
     let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
     else {
@@ -223,9 +152,7 @@ async fn finite_gzip_eos_case(
     let final_event = final_event.expect("assembler publishes final request event");
     assert_eq!(final_event.status, StatusCode::OK.as_u16());
     assert_eq!(final_event.error_code, None);
-    let persisted = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10)
-        .await
-        .expect("query persisted request event");
+    let persisted = storage.wait_for_request_events(1).await;
     assert_eq!(persisted.len(), 1);
     assert_eq!(persisted[0].status, StatusCode::OK.as_u16());
     assert_eq!(persisted[0].error_code, None);
@@ -321,7 +248,7 @@ async fn delivered_body_drop_case(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn callback_panic_preserves_bodies_and_worker_handles_next_completion() {
+async fn t2__callback_panic_preserves_bodies_and_worker_handles_next_completion() {
     let test_bus = TestLifecycleBus::new();
     let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
     else {
@@ -740,19 +667,6 @@ fn assert_finished_event(
     assert_eq!(output_tokens, expected_output_tokens);
     assert_eq!(cache_creation_input_tokens, Some(0));
     assert_eq!(cache_read_input_tokens, Some(0));
-}
-
-async fn sqlite_storage(dir: &tempfile::TempDir, file_name: &str) -> SqliteStorage {
-    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await
-            .expect("open sqlite storage");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite storage");
-    storage
 }
 
 fn gzip_bytes(body: &Bytes) -> Bytes {

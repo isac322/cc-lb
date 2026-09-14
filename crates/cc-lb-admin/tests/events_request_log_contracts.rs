@@ -17,7 +17,7 @@ use events_request_log_contracts_support::{
 };
 
 #[tokio::test]
-async fn events_stream_orders_parse_auth_route_enrichment_before_one_final() {
+async fn t2__events_stream_orders_parse_auth_route_enrichment_before_one_final() {
     let (_dir, storage) = temp_storage().await;
     let bus = event_bus();
     let mut state = test_state(Config::default(), Some(Arc::clone(&storage)));
@@ -102,7 +102,7 @@ async fn events_stream_orders_parse_auth_route_enrichment_before_one_final() {
 }
 
 #[tokio::test]
-async fn events_recent_returns_structured_429_and_distinct_499_without_control_fabrication() {
+async fn t2__events_recent_returns_structured_429_and_distinct_499_without_control_fabrication() {
     let (_dir, storage) = temp_storage().await;
     publish_recent_contracts(storage.as_ref()).await;
     let state = test_state(Config::default(), Some(Arc::clone(&storage)));
@@ -162,8 +162,8 @@ async fn events_recent_returns_structured_429_and_distinct_499_without_control_f
 }
 
 #[tokio::test]
-async fn events_recent_excludes_renewal_by_default_and_includes_when_requested() {
-    let (_dir, storage) = temp_storage().await;
+async fn t3__events_recent_excludes_renewal_by_default_and_includes_when_requested() {
+    let (_dir, storage) = crate::config_admin_common::sqlite_temp_storage().await;
     publish_source_kind_contracts(storage.as_ref()).await;
     let state = test_state(Config::default(), Some(Arc::clone(&storage)));
 

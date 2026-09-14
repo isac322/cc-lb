@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn inject_cache_stats_overrides_matching_message_usage_only() {
+async fn t2__inject_cache_stats_overrides_matching_message_usage_only() {
     let app = app(AppConfig::default());
     let matching_body = json!({
         "model": "claude-3-5-sonnet-20241022",

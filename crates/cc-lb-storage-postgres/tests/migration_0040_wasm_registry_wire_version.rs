@@ -4,7 +4,6 @@ use sqlx::{
     AssertSqlSafe, PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
-use uuid::Uuid;
 
 const BUILTIN_CACHE_AFFINITY_ID: &str = "00000000-0000-0000-0000-000000000001";
 const MIGRATION_0040: &str = include_str!("../migrations/0040_wasm_registry_wire_version.sql");
@@ -50,16 +49,20 @@ const MIGRATIONS_TO_0039: &[&str] = &[
     include_str!("../migrations/0039_wasm_registry_supported_slots.sql"),
 ];
 
-type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
+type TestError = Box<dyn Error + Send + Sync>;
+type TestResult = Result<(), TestError>;
+
+#[derive(Debug, PartialEq, Eq)]
+enum WireVersionColumn {
+    Missing,
+    Present(String),
+}
 
 #[tokio::test]
-async fn migration_0039_wasm_registry_has_no_wire_version() -> TestResult {
-    let Some(url) = postgres_url() else {
-        eprintln!("skip: CI_POSTGRES_URL or DATABASE_URL_TEST not set");
-        return Ok(());
-    };
+async fn t3_postgres__migration_0039_wasm_registry_has_no_wire_version() -> TestResult {
+    let url = crate::postgres_fixture::required_postgres_url();
 
-    let fixture = Fixture::create(&url).await?;
+    let fixture = Fixture::create(&url, "before_0040").await?;
     let result = assert_wire_version_absent_after_0039(&fixture.pool).await;
     let teardown = fixture.drop_schema().await;
 
@@ -68,13 +71,10 @@ async fn migration_0039_wasm_registry_has_no_wire_version() -> TestResult {
 }
 
 #[tokio::test]
-async fn migration_0040_adds_wire_version_and_updates_builtin() -> TestResult {
-    let Some(url) = postgres_url() else {
-        eprintln!("skip: CI_POSTGRES_URL or DATABASE_URL_TEST not set");
-        return Ok(());
-    };
+async fn t3_postgres__migration_0040_adds_wire_version_and_updates_builtin() -> TestResult {
+    let url = crate::postgres_fixture::required_postgres_url();
 
-    let fixture = Fixture::create(&url).await?;
+    let fixture = Fixture::create(&url, "after_0040").await?;
     let result = async {
         fixture.apply_migration_0040().await?;
         assert_wire_version_present_after_0040(&fixture.pool).await
@@ -87,13 +87,10 @@ async fn migration_0040_adds_wire_version_and_updates_builtin() -> TestResult {
 }
 
 #[tokio::test]
-async fn migration_0040_is_idempotent() -> TestResult {
-    let Some(url) = postgres_url() else {
-        eprintln!("skip: CI_POSTGRES_URL or DATABASE_URL_TEST not set");
-        return Ok(());
-    };
+async fn t3_postgres__migration_0040_is_idempotent() -> TestResult {
+    let url = crate::postgres_fixture::required_postgres_url();
 
-    let fixture = Fixture::create(&url).await?;
+    let fixture = Fixture::create(&url, "idempotent").await?;
     let result = async {
         fixture.apply_migration_0040().await?;
         fixture.apply_migration_0040().await?;
@@ -109,7 +106,8 @@ async fn migration_0040_is_idempotent() -> TestResult {
 async fn assert_wire_version_absent_after_0039(pool: &PgPool) -> TestResult {
     let column_name = wire_version_column(pool).await?;
     assert_eq!(
-        column_name, None,
+        column_name,
+        WireVersionColumn::Missing,
         "wire_version should not exist before migration 0040"
     );
 
@@ -128,8 +126,8 @@ async fn assert_wire_version_absent_after_0039(pool: &PgPool) -> TestResult {
 async fn assert_wire_version_present_after_0040(pool: &PgPool) -> TestResult {
     let column_name = wire_version_column(pool).await?;
     assert_eq!(
-        column_name.as_deref(),
-        Some("wire_version"),
+        column_name,
+        WireVersionColumn::Present("wire_version".to_owned()),
         "wire_version should exist after migration 0040"
     );
 
@@ -148,7 +146,7 @@ async fn assert_wire_version_present_after_0040(pool: &PgPool) -> TestResult {
     Ok(())
 }
 
-async fn wire_version_column(pool: &PgPool) -> TestResult<Option<String>> {
+async fn wire_version_column(pool: &PgPool) -> Result<WireVersionColumn, TestError> {
     let row = sqlx::query(
         "SELECT column_name
            FROM information_schema.columns
@@ -159,9 +157,10 @@ async fn wire_version_column(pool: &PgPool) -> TestResult<Option<String>> {
     .fetch_optional(pool)
     .await?;
 
-    row.map(|row| row.try_get("column_name"))
-        .transpose()
-        .map_err(Into::into)
+    match row {
+        Some(row) => Ok(WireVersionColumn::Present(row.try_get("column_name")?)),
+        None => Ok(WireVersionColumn::Missing),
+    }
 }
 
 fn assert_missing_column(error: sqlx::Error) {
@@ -179,12 +178,18 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn create(url: &str) -> TestResult<Self> {
-        let schema = format!("test_migration_0040_{}", Uuid::new_v4().simple());
+    async fn create(url: &str, case: &str) -> Result<Self, TestError> {
+        let schema = format!("test_migration_0040_{case}");
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(PgConnectOptions::from_str(url)?)
             .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE",
+            quote_ident(&schema)
+        )))
+        .execute(&admin_pool)
+        .await?;
         sqlx::query(AssertSqlSafe(format!(
             "CREATE SCHEMA {}",
             quote_ident(&schema)
@@ -237,12 +242,6 @@ impl Fixture {
         self.admin_pool.close().await;
         Ok(())
     }
-}
-
-fn postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL")
-        .or_else(|_| std::env::var("DATABASE_URL_TEST"))
-        .ok()
 }
 
 fn quote_ident(identifier: &str) -> String {

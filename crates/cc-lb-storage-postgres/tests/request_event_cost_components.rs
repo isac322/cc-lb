@@ -1,4 +1,4 @@
-use std::{error::Error, str::FromStr, sync::Arc};
+use std::{error::Error, str::FromStr};
 
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_postgres::PostgresStorage;
@@ -20,10 +20,8 @@ type StoredCostComponents = (
 );
 
 #[tokio::test]
-async fn append_request_event_persists_cost_component_columns() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__append_request_event_persists_cost_component_columns() -> TestResult {
+    let fixture = Fixture::create().await?;
     let event = RequestEvent {
         cost_usd_micros: Some(101),
         cost_input_micros: Some(102),
@@ -60,10 +58,8 @@ async fn append_request_event_persists_cost_component_columns() -> TestResult {
 }
 
 #[tokio::test]
-async fn append_request_event_leaves_unrecorded_cost_components_null() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__append_request_event_leaves_unrecorded_cost_components_null() -> TestResult {
+    let fixture = Fixture::create().await?;
     let event = request_event("cost-components-none");
 
     let result: TestResult = async {
@@ -81,10 +77,8 @@ async fn append_request_event_leaves_unrecorded_cost_components_null() -> TestRe
 }
 
 #[tokio::test]
-async fn legacy_insert_trigger_materializes_cost_components() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__legacy_insert_trigger_materializes_cost_components() -> TestResult {
+    let fixture = Fixture::create().await?;
     let event = RequestEvent {
         cost_usd_micros: Some(201),
         cost_input_micros: Some(202),
@@ -128,10 +122,8 @@ async fn legacy_insert_trigger_materializes_cost_components() -> TestResult {
 }
 
 #[tokio::test]
-async fn cost_component_migrations_reapply_after_registry_rewind() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__cost_component_migrations_reapply_after_registry_rewind() -> TestResult {
+    let fixture = Fixture::create().await?;
     let backfill_event = RequestEvent {
         cost_usd_micros: Some(301),
         cost_input_micros: Some(302),
@@ -201,10 +193,8 @@ async fn cost_component_migrations_reapply_after_registry_rewind() -> TestResult
 }
 
 #[tokio::test]
-async fn request_setup_timings_roundtrip_through_postgres_payload() -> TestResult {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__request_setup_timings_roundtrip_through_postgres_payload() -> TestResult {
+    let fixture = Fixture::create().await?;
     let event = RequestEvent {
         status: 502,
         json_parse_ms: Some(0.125),
@@ -289,11 +279,8 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn create() -> TestResult<Option<Self>> {
-        let Some(database_url) = std::env::var("CI_POSTGRES_URL").ok() else {
-            eprintln!("skipped: CI_POSTGRES_URL unset");
-            return Ok(None);
-        };
+    async fn create() -> TestResult<Self> {
+        let database_url = crate::postgres_fixture::required_postgres_url();
         let schema = format!("cc_lb_app_test_cost_components_{}", Uuid::new_v4().simple());
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -314,7 +301,7 @@ impl Fixture {
                     .options([("search_path", search_path.as_str())]),
             )
             .await?;
-        let storage = PostgresStorage::new(pool, Arc::new(cc_lb_clock::SystemClock));
+        let storage = PostgresStorage::new(pool, cc_lb_testkit::fixed_clock(1_700_000_000));
         if let Err(error) = storage.initialize(BackendKind::Postgres).await {
             storage.pool().close().await;
             sqlx::query(AssertSqlSafe(format!(
@@ -326,11 +313,11 @@ impl Fixture {
             return Err(error.into());
         }
 
-        Ok(Some(Self {
+        Ok(Self {
             schema,
             admin_pool,
             storage,
-        }))
+        })
     }
 
     async fn drop_schema(self) -> TestResult {

@@ -1,4 +1,9 @@
+#![allow(non_snake_case)]
+
 mod common;
+#[cfg(feature = "postgres")]
+#[path = "../../cc-lb-storage-conformance/src/postgres_fixture.rs"]
+mod postgres_fixture;
 mod router_lifecycle_support;
 mod sse_relay_support;
 
@@ -14,22 +19,20 @@ mod batched_observation_count;
 mod bulkhead_drops_release_permit;
 #[path = "byte_equivalent_passthrough.rs"]
 mod byte_equivalent_passthrough;
-#[path = "cache_hit_metric.rs"]
-mod cache_hit_metric;
 #[path = "cache_keepalive_proxy_path.rs"]
 mod cache_keepalive_proxy_path;
 #[path = "cache_ttl_floor_respected.rs"]
 mod cache_ttl_floor_respected;
 #[path = "case_insensitive.rs"]
 mod case_insensitive;
-#[path = "circuit_breaker_isolation.rs"]
-mod circuit_breaker_isolation;
 #[path = "client_disconnect_cancels_upstream.rs"]
 mod client_disconnect_cancels_upstream;
 #[path = "closed_to_open_on_failures.rs"]
 mod closed_to_open_on_failures;
 #[path = "concurrent_guard_smoke.rs"]
 mod concurrent_guard_smoke;
+#[path = "t3/dispatch_connection_reuse.rs"]
+mod dispatch_connection_reuse;
 #[path = "half_open_concurrent_only_one_probe.rs"]
 mod half_open_concurrent_only_one_probe;
 #[path = "half_open_failure_reopens.rs"]
@@ -90,8 +93,6 @@ mod lifecycle_unknown_upstream_id;
 mod limit_engine_smoke;
 #[path = "load_once_bind_dispatch.rs"]
 mod load_once_bind_dispatch;
-#[path = "loom_principal_view.rs"]
-mod loom_principal_view;
 #[path = "no_modification_of_success_body.rs"]
 mod no_modification_of_success_body;
 #[path = "open_rejects_immediately.rs"]
@@ -102,8 +103,6 @@ mod open_to_half_open_after_timeout;
 mod passthrough_anthropic_error;
 #[path = "per_upstream_isolation.rs"]
 mod per_upstream_isolation;
-#[path = "pg_listener_recovery.rs"]
-mod pg_listener_recovery;
 #[path = "pg_notify_fanout.rs"]
 mod pg_notify_fanout;
 #[path = "preserve_anthropic_headers.rs"]
@@ -118,8 +117,6 @@ mod prompt_cache_byte_oracle;
 mod prompt_cache_routing_component;
 #[path = "prompt_cache_structural_properties.rs"]
 mod prompt_cache_structural_properties;
-#[path = "queue_full_returns_503.rs"]
-mod queue_full_returns_503;
 #[path = "quota_header_surface_baseline.rs"]
 mod quota_header_surface_baseline;
 #[path = "renewal_accounting_e2e.rs"]
@@ -128,8 +125,6 @@ mod renewal_accounting_e2e;
 mod request_context;
 #[path = "request_context_proxy_parity.rs"]
 mod request_context_proxy_parity;
-#[path = "resolves_anthropic_host.rs"]
-mod resolves_anthropic_host;
 #[path = "response_observation_regressions.rs"]
 mod response_observation_regressions;
 #[path = "response_transform_paths.rs"]
@@ -156,8 +151,14 @@ mod subscription_preference_v11_preview;
 mod subscription_preference_v8_regression;
 #[path = "subscription_quota_checkpoint_writer.rs"]
 mod subscription_quota_checkpoint_writer;
-#[path = "task_23_no_hop_by_hop.rs"]
-mod task_23_no_hop_by_hop;
+#[path = "resolves_anthropic_host.rs"]
+mod t2__resolves_anthropic_host;
+#[path = "t3/dns_connector.rs"]
+mod t3__dns_connector;
+#[path = "pg_listener_recovery.rs"]
+mod t3_postgres__pg_listener_recovery;
+#[path = "t3/terminal_observer_h2.rs"]
+mod terminal_observer_h2;
 #[path = "tower_layer_round_trip.rs"]
 mod tower_layer_round_trip;
 #[path = "unknown_event_preserved.rs"]

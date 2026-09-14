@@ -2,10 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_pricing::{LiteLlmLoader, PriceCatalog, TierRate, UsdPerMillion};
-use cc_lb_storage_api::{BackendKind, MetaStore};
-use cc_lb_storage_sqlite::SqliteStorage;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use cc_lb_storage_api::PriceCatalogCache;
+use cc_lb_testkit::InMemoryStorage;
+use http::StatusCode;
+use tokio::net::TcpListener;
+
+use crate::support::{ObservedRequest, serve_single_http_response};
 
 const TIERED_LITELLM_JSON: &str = r#"
 {
@@ -51,30 +53,27 @@ const PARTIAL_TIER_LITELLM_JSON: &str = r#"
 }
 "#;
 
+const FIXED_UNIX_SECS: u64 = 1_700_000_000;
+const FIXED_UNIX_MILLIS: u64 = FIXED_UNIX_SECS * 1_000;
+
 #[tokio::test]
-async fn refresh_discovers_canonical_tiers_and_excludes_non_tier_suffixes()
+async fn t3__refresh_discovers_canonical_tiers_and_excludes_non_tier_suffixes()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Given a LiteLLM catalog with tier keys and similarly prefixed decoys.
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/prices"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(TIERED_LITELLM_JSON))
-        .expect(1)
-        .mount(&server)
-        .await;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = serve_single_http_response(listener, StatusCode::OK, TIERED_LITELLM_JSON);
     let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let storage = InMemoryStorage::new();
     let catalog = PriceCatalog::new_empty();
     let loader = LiteLlmLoader::new(
         Arc::clone(&catalog),
-        storage,
-        format!("{}/prices", server.uri()),
+        storage.clone(),
+        format!("http://{address}/prices"),
         Duration::from_secs(60 * 60),
         dir.path().join("litellm-cache.json"),
-        Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
+        Arc::new(cc_lb_clock::TestClock::new_at_secs(FIXED_UNIX_SECS)),
     );
 
-    // When the catalog is refreshed and parsed.
     loader.refresh_once().await?;
     let snapshot = catalog.current();
     let pricing = snapshot
@@ -82,7 +81,7 @@ async fn refresh_discovers_canonical_tiers_and_excludes_non_tier_suffixes()
         .get("tiered-model")
         .expect("tiered model should be parsed");
 
-    // Then suffixes are data-driven, canonical, complete, and decoys are excluded.
+    assert_eq!(server.await??, expected_request());
     assert_eq!(
         pricing.by_tier.get("priority"),
         Some(&TierRate {
@@ -119,38 +118,37 @@ async fn refresh_discovers_canonical_tiers_and_excludes_non_tier_suffixes()
             .map(std::collections::BTreeMap::len),
         Some(1)
     );
-    server.verify().await;
+    let persisted = storage
+        .get_price_snapshot()
+        .await?
+        .expect("refresh must persist the tiered catalog");
+    assert_eq!(persisted.json_bytes, TIERED_LITELLM_JSON.as_bytes());
+    assert_eq!(persisted.fetched_at_ms, FIXED_UNIX_MILLIS);
     Ok(())
 }
 
 #[tokio::test]
-async fn refresh_applies_component_fallbacks_to_partial_tier_rates()
+async fn t3__refresh_applies_component_fallbacks_to_partial_tier_rates()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Given a LiteLLM catalog with one explicit component per discovered tier.
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/prices"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(PARTIAL_TIER_LITELLM_JSON))
-        .expect(1)
-        .mount(&server)
-        .await;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = serve_single_http_response(listener, StatusCode::OK, PARTIAL_TIER_LITELLM_JSON);
     let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let storage = InMemoryStorage::new();
     let catalog = PriceCatalog::new_empty();
     let loader = LiteLlmLoader::new(
         Arc::clone(&catalog),
-        storage,
-        format!("{}/prices", server.uri()),
+        storage.clone(),
+        format!("http://{address}/prices"),
         Duration::from_secs(60 * 60),
         dir.path().join("litellm-cache.json"),
-        Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
+        Arc::new(cc_lb_clock::TestClock::new_at_secs(FIXED_UNIX_SECS)),
     );
 
-    // When the catalog is refreshed and parsed.
     loader.refresh_once().await?;
     let snapshot = catalog.current();
 
-    // Then missing batch components use half base while other tiers use full base.
+    assert_eq!(server.await??, expected_request());
     assert_eq!(
         snapshot.models["batch-input-only"].by_tier.get("batch"),
         Some(&TierRate {
@@ -181,22 +179,18 @@ async fn refresh_applies_component_fallbacks_to_partial_tier_rates()
             output_per_million_usd: UsdPerMillion::from_whole_usd(6),
         })
     );
-    server.verify().await;
+    let persisted = storage
+        .get_price_snapshot()
+        .await?
+        .expect("refresh must persist the partial tier catalog");
+    assert_eq!(persisted.json_bytes, PARTIAL_TIER_LITELLM_JSON.as_bytes());
+    assert_eq!(persisted.fetched_at_ms, FIXED_UNIX_MILLIS);
     Ok(())
 }
 
-async fn sqlite_storage(
-    dir: &tempfile::TempDir,
-) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path().join("tier-loader.sqlite").display()
-    );
-    let storage = cc_lb_storage_sqlite::open_sqlite(
-        &database_url,
-        Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
-    )
-    .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    Ok(storage)
+fn expected_request() -> ObservedRequest {
+    ObservedRequest {
+        method: "GET".to_owned(),
+        path: "/prices".to_owned(),
+    }
 }

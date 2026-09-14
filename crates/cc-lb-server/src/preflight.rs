@@ -437,3 +437,103 @@ async fn bind_addr(addr: SocketAddr) -> Result<(), PreflightError> {
     drop(listener);
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod t2__tests {
+    use super::*;
+
+    use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
+    use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
+    use cc_lb_storage_api::{PrincipalStore, UpstreamStore};
+    use cc_lb_testkit::{InMemoryStorage, fixed_clock};
+
+    #[tokio::test]
+    async fn preflight_report_is_built_from_fake_stores() {
+        let clock = fixed_clock(1_700_000_000);
+        let storage = Arc::new(InMemoryStorage::with_clock(clock.clone()));
+        let active = PrincipalStore::create(
+            storage.as_ref(),
+            PrincipalCreate {
+                name: "active-principal".to_owned(),
+                kind: PrincipalKind::Machine,
+                allowed_models: vec!["*".to_owned()],
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            1_700_000_000,
+        )
+        .await
+        .expect("active principal creates");
+        let disabled = PrincipalStore::create(
+            storage.as_ref(),
+            PrincipalCreate {
+                name: "disabled-principal".to_owned(),
+                kind: PrincipalKind::Human,
+                allowed_models: vec!["claude-test".to_owned()],
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            1_700_000_000,
+        )
+        .await
+        .expect("disabled principal creates");
+        PrincipalStore::set_enabled(
+            storage.as_ref(),
+            disabled.id,
+            disabled.revision,
+            false,
+            1_700_000_001,
+        )
+        .await
+        .expect("principal disable succeeds")
+        .expect("disabled principal remains");
+        UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                name: "preflight-upstream".to_owned(),
+                kind: UpstreamKind::AnthropicApiKey,
+                base_url: None,
+                api_key_ciphertext: Some(vec![1, 2, 3]),
+                oauth_token_generation: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+            },
+        )
+        .await
+        .expect("upstream creates");
+        let stores = Stores {
+            upstreams: storage.clone(),
+            principals: storage.clone(),
+            plugin_registry: storage.clone(),
+            upstream_rate_limits: storage.clone(),
+            upstream_subscription_quotas: storage.clone(),
+            upstream_subscription_metadata: storage.clone(),
+            organization_metadata: storage.clone(),
+            plan_tiers: storage.clone(),
+            prompt_cache_observations: storage.clone(),
+            anthropic_compatibility_kv: storage.clone(),
+            audit: Some(storage),
+        };
+
+        let report = run_preflight(&stores, &LifecycleConfig::default(), Path::new("."), clock)
+            .await
+            .expect("in-memory preflight succeeds");
+
+        assert_eq!(
+            report,
+            PreflightReport {
+                upstream_count: 1,
+                upstream_warnings: 0,
+                principal_count: 2,
+                principal_disabled_count: 1,
+                plugin_chain_entry_count: 2,
+                plugin_blob_missing_count: 0,
+                warnings: Vec::new(),
+            },
+        );
+        assert_ne!(active.id, disabled.id);
+    }
+}

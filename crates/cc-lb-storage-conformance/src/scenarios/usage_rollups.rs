@@ -26,6 +26,61 @@ where
     Ok(())
 }
 
+pub async fn checkpoint_is_absent_before_first_rollup<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    let mut fixture = ConformanceFixture::new(backend).await?;
+    let result = async {
+        ensure!(
+            fixture.storage().usage_rollup_checkpoint().await?.is_none(),
+            "a fresh storage must not fabricate a usage-rollup checkpoint"
+        );
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown
+}
+
+pub async fn empty_queries_preserve_range_boundaries<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    let mut fixture = ConformanceFixture::new(backend).await?;
+    let result = async {
+        let storage = fixture.storage();
+        ensure!(
+            storage.query_usage_rollups().await?.is_empty(),
+            "a fresh storage must not fabricate usage rollups"
+        );
+        ensure!(
+            storage
+                .query_usage_rollups_in_range(
+                    UsageRollupResolution::Minute,
+                    BUCKET_START,
+                    RANGE_END,
+                )
+                .await?
+                .is_empty(),
+            "an empty matching range must return no usage rollups"
+        );
+        ensure!(
+            storage
+                .query_usage_rollups_in_range(UsageRollupResolution::Hour, RANGE_END, BUCKET_START,)
+                .await?
+                .is_empty(),
+            "an inverted usage-rollup range must return no rows"
+        );
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown
+}
+
 async fn filtered_usage_rollups_refresh_after_upsert<B>(
     backend: &B,
     fixture: &ConformanceFixture<B>,
@@ -177,6 +232,102 @@ where
     );
 
     Ok(())
+}
+
+pub async fn overview_excluded_error_buckets_preserve_boundaries<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    let wait_backend = Arc::clone(&backend);
+    let mut fixture = ConformanceFixture::new(backend).await?;
+    let scenario_result = async {
+        let storage = fixture.storage();
+        let upstream_id =
+            create_upstream(storage.as_ref(), "overview-excluded-error-upstream").await?;
+        let statuses = [401, 403, 404, 400, 500, 200];
+        for (index, status) in statuses.into_iter().enumerate() {
+            let mut event = usage_event(
+                BUCKET_START + 5,
+                &format!("overview-excluded-error-{status}-{index}"),
+                upstream_id,
+                "overview-excluded-error-upstream",
+                0,
+            );
+            event.status = status;
+            storage.append_request_event(&event).await?;
+        }
+        let mut next_bucket = usage_event(
+            BUCKET_START + 65,
+            "overview-excluded-error-next-bucket",
+            upstream_id,
+            "overview-excluded-error-upstream",
+            0,
+        );
+        next_bucket.status = 404;
+        storage.append_request_event(&next_bucket).await?;
+
+        wait_backend
+            .wait_for_events_visible_for_rollup(storage.as_ref())
+            .await?;
+        storage.rollup_usage_once().await?;
+
+        let buckets = storage
+            .query_overview_excluded_error_buckets_in_range(
+                UsageRollupResolution::Minute,
+                BUCKET_START,
+                RANGE_END,
+            )
+            .await?;
+        ensure!(
+            buckets.len() == 2
+                && buckets[0].bucket_start == BUCKET_START
+                && buckets[0].error_count == 3
+                && buckets[1].bucket_start == BUCKET_START + 60
+                && buckets[1].error_count == 1,
+            "overview excluded-error rollups must count only 401/403/404 and order minute buckets ascending: {buckets:?}"
+        );
+
+        let first_bucket_only = storage
+            .query_overview_excluded_error_buckets_in_range(
+                UsageRollupResolution::Minute,
+                BUCKET_START,
+                BUCKET_START + 60,
+            )
+            .await?;
+        ensure!(
+            first_bucket_only.len() == 1
+                && first_bucket_only[0].bucket_start == BUCKET_START
+                && first_bucket_only[0].error_count == 3,
+            "overview excluded-error range end must be exclusive"
+        );
+        ensure!(
+            storage
+                .query_overview_excluded_error_buckets_in_range(
+                    UsageRollupResolution::Minute,
+                    RANGE_END,
+                    BUCKET_START,
+                )
+                .await?
+                .is_empty(),
+            "an inverted overview excluded-error range must return empty"
+        );
+        ensure!(
+            storage
+                .query_overview_excluded_error_buckets_in_range(
+                    UsageRollupResolution::Hour,
+                    RANGE_END,
+                    RANGE_END + 3_600,
+                )
+                .await?
+                .is_empty(),
+            "an overview excluded-error range without matching buckets must return empty"
+        );
+        Ok(())
+    }
+    .await;
+    let teardown_result = fixture.teardown().await;
+    scenario_result?;
+    teardown_result
 }
 
 async fn create_upstream<S>(storage: &S, name: &str) -> Result<Uuid>

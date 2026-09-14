@@ -83,40 +83,118 @@ pub enum RebindError {
     PluginRuntime(#[from] cc_lb_runtime_wasmtime::WasmtimeRuntimeError),
 }
 
-async fn register_filter_slot(
-    runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
-    manifest: &PluginManifest,
-) -> Result<
-    Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
-    cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
-> {
-    let wasm = read_wasm_for_manifest(manifest).await?;
-    runtime.register_filter(slot_key.clone(), manifest.name.clone(), &wasm)
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct PluginRuntimeSlotKey {
+    principal: String,
+    plugin: String,
 }
 
-async fn register_shape_slot(
-    runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
-    manifest: &PluginManifest,
-) -> Result<
-    Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
-    cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
-> {
-    let wasm = read_wasm_for_manifest(manifest).await?;
-    runtime.register_shape(slot_key.clone(), manifest.name.clone(), &wasm)
+impl PluginRuntimeSlotKey {
+    fn new(principal: impl Into<String>, plugin: impl Into<String>) -> Self {
+        Self {
+            principal: principal.into(),
+            plugin: plugin.into(),
+        }
+    }
 }
 
-async fn register_observe_slot(
-    runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
-    manifest: &PluginManifest,
-) -> Result<
-    Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
-    cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
-> {
-    let wasm = read_wasm_for_manifest(manifest).await?;
-    runtime.register_observe(slot_key.clone(), manifest.name.clone(), &wasm)
+#[async_trait]
+pub(crate) trait DynamicViewPluginRuntime: Send + Sync {
+    async fn instantiate_filter(
+        &self,
+        slot_key: &PluginRuntimeSlotKey,
+        manifest: &PluginManifest,
+        chain_entry_id: Uuid,
+    ) -> Result<Arc<dyn FilterPlugin>, RebindError>;
+
+    async fn instantiate_shape(
+        &self,
+        slot_key: &PluginRuntimeSlotKey,
+        manifest: &PluginManifest,
+    ) -> Result<Arc<dyn cc_lb_upstream::UpstreamDialect>, RebindError>;
+
+    async fn instantiate_observability_hook(
+        &self,
+        slot_key: &PluginRuntimeSlotKey,
+        manifest: &PluginManifest,
+    ) -> Result<Arc<dyn cc_lb_observability::ObservabilityHook>, RebindError>;
+
+    fn retain_slots(&self, slot_keys: &HashSet<PluginRuntimeSlotKey>) -> usize;
+}
+
+#[async_trait]
+impl DynamicViewPluginRuntime for WasmtimeRuntime {
+    async fn instantiate_filter(
+        &self,
+        slot_key: &PluginRuntimeSlotKey,
+        manifest: &PluginManifest,
+        chain_entry_id: Uuid,
+    ) -> Result<Arc<dyn FilterPlugin>, RebindError> {
+        let wasm = read_wasm_for_manifest(manifest).await?;
+        let slot = self.register_filter(
+            cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+                slot_key.principal.clone(),
+                slot_key.plugin.clone(),
+            ),
+            manifest.name.clone(),
+            &wasm,
+        )?;
+        let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(slot, self.config_arc()));
+        Ok(Arc::new(WasmtimeFilterPlugin::new(
+            dispatch,
+            chain_entry_id,
+            manifest.name.clone(),
+        )))
+    }
+
+    async fn instantiate_shape(
+        &self,
+        slot_key: &PluginRuntimeSlotKey,
+        manifest: &PluginManifest,
+    ) -> Result<Arc<dyn cc_lb_upstream::UpstreamDialect>, RebindError> {
+        let wasm = read_wasm_for_manifest(manifest).await?;
+        let slot = self.register_shape(
+            cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+                slot_key.principal.clone(),
+                slot_key.plugin.clone(),
+            ),
+            manifest.name.clone(),
+            &wasm,
+        )?;
+        let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(slot, self.config_arc()));
+        Ok(Arc::new(WasmtimeUpstreamDialect::new(dispatch)))
+    }
+
+    async fn instantiate_observability_hook(
+        &self,
+        slot_key: &PluginRuntimeSlotKey,
+        manifest: &PluginManifest,
+    ) -> Result<Arc<dyn cc_lb_observability::ObservabilityHook>, RebindError> {
+        let wasm = read_wasm_for_manifest(manifest).await?;
+        let slot = self.register_observe(
+            cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+                slot_key.principal.clone(),
+                slot_key.plugin.clone(),
+            ),
+            manifest.name.clone(),
+            &wasm,
+        )?;
+        let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(slot, self.config_arc()));
+        Ok(Arc::new(WasmtimeObservabilityHookPlugin::new(dispatch)))
+    }
+
+    fn retain_slots(&self, slot_keys: &HashSet<PluginRuntimeSlotKey>) -> usize {
+        let slot_keys: HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey> = slot_keys
+            .iter()
+            .map(|key| {
+                cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
+                    key.principal.clone(),
+                    key.plugin.clone(),
+                )
+            })
+            .collect();
+        WasmtimeRuntime::retain_slots(self, &slot_keys).len()
+    }
 }
 
 async fn read_wasm_for_manifest(
@@ -199,6 +277,38 @@ pub async fn build_dynamic_view(
     subscription_quota_routing_max_staleness_secs: u64,
     clock: cc_lb_engine::ClockHandle,
 ) -> Result<Arc<DynamicView>, RebindError> {
+    build_dynamic_view_with_plugin_runtime(
+        stores,
+        oauth_anthropic,
+        aead,
+        lazy_refresher,
+        current_generation,
+        runtime.as_ref(),
+        data_dir,
+        subscription_quota_cache,
+        prompt_cache_observation_cache,
+        prompt_cache_observation_sink,
+        subscription_quota_routing_max_staleness_secs,
+        clock,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_dynamic_view_with_plugin_runtime(
+    stores: &Stores,
+    oauth_anthropic: &AnthropicOAuthConfig,
+    aead: Arc<AeadService>,
+    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+    current_generation: u64,
+    runtime: &dyn DynamicViewPluginRuntime,
+    data_dir: &Path,
+    subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+    prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    subscription_quota_routing_max_staleness_secs: u64,
+    clock: cc_lb_engine::ClockHandle,
+) -> Result<Arc<DynamicView>, RebindError> {
     let upstreams = list_upstreams(stores).await?;
     let all_upstream_ids = upstreams
         .iter()
@@ -260,12 +370,9 @@ pub async fn build_dynamic_view(
     // `Arc<PluginSlotKind>` handles keep the evicted cells alive for the
     // duration of any in-flight call (see `WasmtimeRuntime::evict_slot`
     // docs).
-    let evicted = runtime.retain_slots(&registered_slot_keys);
-    if !evicted.is_empty() {
-        tracing::info!(
-            evicted_count = evicted.len(),
-            "reconcile swept orphan plugin slots",
-        );
+    let evicted_count = runtime.retain_slots(&registered_slot_keys);
+    if evicted_count > 0 {
+        tracing::info!(evicted_count, "reconcile swept orphan plugin slots",);
     }
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_secs(clock.now());
@@ -610,13 +717,13 @@ fn registry_entry_unsupported_slot(
 
 async fn build_principal_chains(
     stores: &Stores,
-    runtime: &Arc<WasmtimeRuntime>,
+    runtime: &dyn DynamicViewPluginRuntime,
     data_dir: &Path,
     principals: &[PrincipalRecord],
 ) -> Result<
     (
         HashMap<String, PrincipalRoutingArtifacts>,
-        HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey>,
+        HashSet<PluginRuntimeSlotKey>,
     ),
     RebindError,
 > {
@@ -643,7 +750,7 @@ async fn build_principal_chains(
             entries
         });
     let mut chains = HashMap::new();
-    let mut registered_slot_keys: HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey> = HashSet::new();
+    let mut registered_slot_keys: HashSet<PluginRuntimeSlotKey> = HashSet::new();
     for principal in principals {
         let router_entries =
             take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Router);
@@ -693,21 +800,13 @@ async fn build_principal_chains(
                 config: entry.config,
                 metadata: std::collections::BTreeMap::new(),
             };
-            let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
-                principal.name.clone(),
-                manifest.name.clone(),
-            );
+            let slot_key = PluginRuntimeSlotKey::new(principal.name.clone(), manifest.name.clone());
             registered_slot_keys.insert(slot_key.clone());
-            match register_observe_slot(runtime, &slot_key, &manifest).await {
-                Ok(slot) => {
-                    let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
-                        slot,
-                        runtime.config_arc(),
-                    ));
-                    let handle: Arc<dyn cc_lb_observability::ObservabilityHook> =
-                        Arc::new(WasmtimeObservabilityHookPlugin::new(dispatch));
-                    hooks.push(handle);
-                }
+            match runtime
+                .instantiate_observability_hook(&slot_key, &manifest)
+                .await
+            {
+                Ok(handle) => hooks.push(handle),
                 Err(error) => {
                     tracing::error!(
                         principal = %principal.name,
@@ -751,21 +850,11 @@ async fn build_principal_chains(
                     config: entry.config,
                     metadata: std::collections::BTreeMap::new(),
                 };
-                let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
-                    principal.name.clone(),
-                    manifest.name.clone(),
-                );
+                let slot_key =
+                    PluginRuntimeSlotKey::new(principal.name.clone(), manifest.name.clone());
                 registered_slot_keys.insert(slot_key.clone());
-                match register_shape_slot(runtime, &slot_key, &manifest).await {
-                    Ok(slot) => {
-                        let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
-                            slot,
-                            runtime.config_arc(),
-                        ));
-                        let handle: Arc<dyn cc_lb_upstream::UpstreamDialect> =
-                            Arc::new(WasmtimeUpstreamDialect::new(dispatch));
-                        DialectCache::Explicit(ShapePluginCache { dialect: handle })
-                    }
+                match runtime.instantiate_shape(&slot_key, &manifest).await {
+                    Ok(handle) => DialectCache::Explicit(ShapePluginCache { dialect: handle }),
                     Err(error) => {
                         tracing::error!(
                             principal = %principal.name,
@@ -852,12 +941,12 @@ async fn manifest_for_chain_entry(
 
 async fn build_router_pipeline(
     stores: &Stores,
-    runtime: &Arc<WasmtimeRuntime>,
+    runtime: &dyn DynamicViewPluginRuntime,
     data_dir: &Path,
     principal: &PrincipalRecord,
     mut router_entries: Vec<cc_lb_storage_api::PluginChainEntry>,
     registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
-    registered_slot_keys: &mut HashSet<cc_lb_runtime_wasmtime::RuntimeSlotKey>,
+    registered_slot_keys: &mut HashSet<PluginRuntimeSlotKey>,
 ) -> Result<Option<Arc<RouterPipelineCache>>, RebindError> {
     if router_entries.is_empty() {
         return Ok(None);
@@ -920,22 +1009,13 @@ async fn build_router_pipeline(
                 })));
             }
         };
-        let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
-            principal.name.clone(),
-            manifest.name.clone(),
-        );
+        let slot_key = PluginRuntimeSlotKey::new(principal.name.clone(), manifest.name.clone());
         registered_slot_keys.insert(slot_key.clone());
-        match register_filter_slot(runtime, &slot_key, &manifest).await {
-            Ok(slot) => {
-                let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
-                    slot,
-                    runtime.config_arc(),
-                ));
-                let handle: Arc<dyn FilterPlugin> = Arc::new(WasmtimeFilterPlugin::new(
-                    dispatch,
-                    entry.id,
-                    manifest.name.clone(),
-                ));
+        match runtime
+            .instantiate_filter(&slot_key, &manifest, entry.id)
+            .await
+        {
+            Ok(handle) => {
                 filters.push(handle);
             }
             Err(error) => {
@@ -1209,15 +1289,31 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+#[allow(non_snake_case)]
+mod t2__tests {
     use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    use axum::body::Bytes;
+    use axum::http::{Method, StatusCode};
+    use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
+    use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
+    use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+    use cc_lb_engine::{
+        Body, DispatchError, DynamicViewHolder, Lifecycle, LifecycleConfig, UpstreamDispatch,
+    };
+    use cc_lb_upstream::SignedRequest;
+    use http::{Request, Response};
+    use http_body_util::{BodyExt, Full};
 
     use cc_lb_domain::{TtlClass as PluginTtlClass, TtlClass as StorageTtlClass};
-    use cc_lb_engine::clock::{Clock, TestClock};
     use cc_lb_engine::lifecycle::PromptCacheObservationCacheLike;
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
-    use cc_lb_storage_api::{BackendKind, MetaStore, PromptCacheObservationRecord, UpstreamCreate};
-    use cc_lb_storage_sqlite::SqliteStorage as Storage;
+    use cc_lb_storage_api::{
+        OrganizationMetadataRecord, PlanTierRatioRecord, PromptCacheObservationRecord,
+        TierResolutionSource, UpstreamCreate, UpstreamSubscriptionMetadataRecord,
+    };
+    use cc_lb_testkit::{InMemoryStorage as Storage, fixed_clock};
 
     use super::*;
     use crate::prompt_cache_observation_cache::HASH_SCHEMA_VERSION;
@@ -1233,16 +1329,82 @@ mod tests {
         filters.iter().map(|filter| filter.plugin_id()).collect()
     }
 
+    #[derive(Default)]
+    struct RecordingPluginRuntime {
+        instantiations: Mutex<Vec<(&'static str, PluginRuntimeSlotKey)>>,
+        retained: Mutex<Vec<HashSet<PluginRuntimeSlotKey>>>,
+    }
+
+    impl RecordingPluginRuntime {
+        fn record_unexpected(
+            &self,
+            kind: &'static str,
+            slot_key: &PluginRuntimeSlotKey,
+        ) -> RebindError {
+            self.instantiations
+                .lock()
+                .expect("plugin runtime instantiation lock")
+                .push((kind, slot_key.clone()));
+            RebindError::Io(io::Error::other(format!(
+                "unexpected {kind} plugin instantiation"
+            )))
+        }
+
+        fn assert_no_instantiations(&self) {
+            assert!(
+                self.instantiations
+                    .lock()
+                    .expect("plugin runtime instantiation lock")
+                    .is_empty(),
+                "built-in/default composition must not instantiate a user plugin"
+            );
+        }
+    }
+
+    #[async_trait]
+    impl DynamicViewPluginRuntime for RecordingPluginRuntime {
+        async fn instantiate_filter(
+            &self,
+            slot_key: &PluginRuntimeSlotKey,
+            _manifest: &PluginManifest,
+            _chain_entry_id: Uuid,
+        ) -> Result<Arc<dyn FilterPlugin>, RebindError> {
+            Err(self.record_unexpected("filter", slot_key))
+        }
+
+        async fn instantiate_shape(
+            &self,
+            slot_key: &PluginRuntimeSlotKey,
+            _manifest: &PluginManifest,
+        ) -> Result<Arc<dyn cc_lb_upstream::UpstreamDialect>, RebindError> {
+            Err(self.record_unexpected("shape", slot_key))
+        }
+
+        async fn instantiate_observability_hook(
+            &self,
+            slot_key: &PluginRuntimeSlotKey,
+            _manifest: &PluginManifest,
+        ) -> Result<Arc<dyn cc_lb_observability::ObservabilityHook>, RebindError> {
+            Err(self.record_unexpected("observability-hook", slot_key))
+        }
+
+        fn retain_slots(&self, slot_keys: &HashSet<PluginRuntimeSlotKey>) -> usize {
+            self.retained
+                .lock()
+                .expect("plugin runtime retain lock")
+                .push(slot_keys.clone());
+            0
+        }
+    }
+
     async fn router_pipeline_for_seeded_principal(
+        runtime: &RecordingPluginRuntime,
         include_router_entries: bool,
     ) -> Option<Arc<RouterPipelineCache>> {
-        let (dir, storage) = storage_fixture(9).await;
+        let storage = storage_fixture();
         let stores = stores(
             storage.clone(),
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
-        );
-        let runtime = Arc::new(
-            cc_lb_runtime_wasmtime::WasmtimeRuntime::new(Default::default()).expect("runtime"),
         );
         let principal = PrincipalStore::create(
             storage.as_ref(),
@@ -1277,24 +1439,23 @@ mod tests {
             .collect();
 
         let mut slot_keys = HashSet::new();
-        let pipeline = build_router_pipeline(
+        build_router_pipeline(
             &stores,
-            &runtime,
-            dir.path(),
+            runtime,
+            Path::new("."),
             &principal,
             router_entries,
             &registry,
             &mut slot_keys,
         )
         .await
-        .expect("pipeline builds");
-        drop(dir);
-        pipeline
+        .expect("pipeline builds")
     }
 
     #[tokio::test]
-    async fn seeded_subscription_preference_chain_yields_the_builtin_filter() {
-        let pipeline = router_pipeline_for_seeded_principal(true)
+    async fn t2__seeded_subscription_preference_chain_yields_the_builtin_filter() {
+        let runtime = RecordingPluginRuntime::default();
+        let pipeline = router_pipeline_for_seeded_principal(&runtime, true)
             .await
             .expect("seeded entry produces a router pipeline");
 
@@ -1303,14 +1464,19 @@ mod tests {
             plugin_ids(&pipeline.user_filters),
             vec![BUILTIN_SUBSCRIPTION_PREFERENCE_ID]
         );
+        runtime.assert_no_instantiations();
     }
 
     #[tokio::test]
-    async fn empty_router_chain_yields_no_pipeline() {
+    async fn t2__empty_router_chain_yields_no_pipeline() {
+        let runtime = RecordingPluginRuntime::default();
         assert!(
-            router_pipeline_for_seeded_principal(false).await.is_none(),
+            router_pipeline_for_seeded_principal(&runtime, false)
+                .await
+                .is_none(),
             "an absent chain means no router filter pipeline"
         );
+        runtime.assert_no_instantiations();
     }
 
     #[derive(Clone)]
@@ -1318,6 +1484,7 @@ mod tests {
         records: Arc<Vec<PromptCacheObservationRecord>>,
         list_delay: Option<Duration>,
         upserts: Arc<tokio::sync::Mutex<Vec<PromptCacheObservationRecord>>>,
+        upserted: Arc<tokio::sync::Notify>,
     }
 
     impl FakePromptCacheObservationStore {
@@ -1326,19 +1493,27 @@ mod tests {
                 records: Arc::new(records),
                 list_delay: None,
                 upserts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                upserted: Arc::new(tokio::sync::Notify::new()),
             }
         }
 
-        fn sleeping(delay: Duration) -> Self {
+        fn sleeping(records: Vec<PromptCacheObservationRecord>, delay: Duration) -> Self {
             Self {
-                records: Arc::new(Vec::new()),
+                records: Arc::new(records),
                 list_delay: Some(delay),
                 upserts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                upserted: Arc::new(tokio::sync::Notify::new()),
             }
         }
 
         async fn list_count(&self) -> usize {
             self.upserts.lock().await.len()
+        }
+
+        async fn wait_for_upserts(&self, expected: usize) {
+            while self.list_count().await < expected {
+                self.upserted.notified().await;
+            }
         }
 
         async fn list_all(&self) -> Vec<PromptCacheObservationRecord> {
@@ -1372,25 +1547,13 @@ mod tests {
             record: &PromptCacheObservationRecord,
         ) -> StorageResult<()> {
             self.upserts.lock().await.push(record.clone());
+            self.upserted.notify_one();
             Ok(())
         }
     }
 
-    async fn storage_fixture(seed: u8) -> (tempfile::TempDir, Arc<Storage>) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let database_url = format!(
-            "sqlite://{}",
-            dir.path()
-                .join(format!("dynamic-view-builder-{seed}.sqlite"))
-                .display()
-        );
-        let storage =
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-                .await
-                .expect("storage");
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
-        let storage = Arc::new(storage);
-        (dir, storage)
+    fn storage_fixture() -> Arc<Storage> {
+        Arc::new(Storage::with_clock(fixed_clock(1_700_000_000)))
     }
 
     fn stores(
@@ -1431,7 +1594,7 @@ mod tests {
 
     async fn build_view(
         stores: &Stores,
-        runtime: &Arc<WasmtimeRuntime>,
+        runtime: &RecordingPluginRuntime,
         data_dir: &Path,
     ) -> Arc<DynamicView> {
         let config = cc_lb_config::Config::default();
@@ -1440,11 +1603,11 @@ mod tests {
 
     async fn build_view_with_config(
         stores: &Stores,
-        runtime: &Arc<WasmtimeRuntime>,
+        runtime: &RecordingPluginRuntime,
         data_dir: &Path,
         config: cc_lb_config::Config,
     ) -> Arc<DynamicView> {
-        let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let clock = fixed_clock(1_700_000_000);
         let cache = new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
         let (sink, _writer) = PromptCacheObservationSink::new(
             stores.prompt_cache_observations.clone(),
@@ -1454,7 +1617,7 @@ mod tests {
         let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
         let prompt_cache_observation_cache = Some(cache);
         let prompt_cache_observation_sink = Some(sink);
-        build_dynamic_view(
+        build_dynamic_view_with_plugin_runtime(
             stores,
             &AnthropicOAuthConfig::default(),
             Arc::new(AeadService::from_master_key([19; 32])),
@@ -1492,8 +1655,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn includes_prompt_cache() {
-        let (dir, storage) = storage_fixture(19).await;
+    async fn t2__includes_prompt_cache() {
+        let storage = storage_fixture();
         let upstream = create_upstream(&storage, "prompt-cache-upstream").await;
         let prompt_store = Arc::new(FakePromptCacheObservationStore::new(vec![
             prompt_record(upstream.id, "hash-a", 1_700_000_001),
@@ -1501,10 +1664,10 @@ mod tests {
             prompt_record(upstream.id, "hash-c", 1_700_000_003),
         ]));
         let stores = stores(storage, prompt_store);
-        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
+        let runtime = RecordingPluginRuntime::default();
 
-        let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
-        let clock = TestClock::new_at_secs(1_700_000_000);
+        let dynamic_view = build_view(&stores, &runtime, Path::new(".")).await;
+        let clock = fixed_clock(1_700_000_000);
 
         let snapshot = dynamic_view
             .prompt_cache_observation_cache_opt()
@@ -1536,14 +1699,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observation_sink_routes_records_to_store() {
-        let (dir, storage) = storage_fixture(22).await;
+    async fn t2__observation_sink_routes_records_to_store() {
+        let storage = storage_fixture();
         let upstream = create_upstream(&storage, "sink-wiring-upstream").await;
         let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
         let stores = stores(storage, prompt_store.clone());
-        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
+        let runtime = RecordingPluginRuntime::default();
 
-        let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
+        let dynamic_view = build_view(&stores, &runtime, Path::new(".")).await;
         let sink = dynamic_view
             .prompt_cache_observation_sink_opt()
             .expect("sink wired when prompt_cache_shadow enabled")
@@ -1562,12 +1725,7 @@ mod tests {
         };
         sink.enqueue(record.clone())
             .expect("enqueue succeeds while writer is alive");
-        for _ in 0..50 {
-            if prompt_store.list_count().await >= 1 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        prompt_store.wait_for_upserts(1).await;
         let stored = prompt_store.list_all().await;
         assert_eq!(
             stored.len(),
@@ -1579,27 +1737,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_prompt_cache_observation_cache_sees_live_upsert_after_rebind() {
+    async fn t2__shared_prompt_cache_observation_cache_sees_live_upsert_after_rebind() {
         // Given: two DynamicView builds share the process-level observation cache handle.
-        let (dir, storage) = storage_fixture(23).await;
+        let storage = storage_fixture();
         let upstream = create_upstream(&storage, "shared-cache-upstream").await;
         let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
         let stores = stores(storage, prompt_store);
-        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
+        let runtime = RecordingPluginRuntime::default();
         let config = cc_lb_config::Config::default();
-        let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let clock = fixed_clock(1_700_000_000);
         let shared_cache =
             new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
         let shared_cache_trait: Arc<dyn PromptCacheObservationCacheLike> = shared_cache.clone();
 
-        let view_a = build_dynamic_view(
+        let view_a = build_dynamic_view_with_plugin_runtime(
             &stores,
             &AnthropicOAuthConfig::default(),
             Arc::new(AeadService::from_master_key([19; 32])),
             None,
             0,
             &runtime,
-            dir.path(),
+            Path::new("."),
             Arc::new(SubscriptionQuotaCache::new()),
             Some(shared_cache.clone()),
             None,
@@ -1608,14 +1766,14 @@ mod tests {
         )
         .await
         .expect("first dynamic view builds");
-        let view_b = build_dynamic_view(
+        let view_b = build_dynamic_view_with_plugin_runtime(
             &stores,
             &AnthropicOAuthConfig::default(),
             Arc::new(AeadService::from_master_key([19; 32])),
             None,
             view_a.generation,
             &runtime,
-            dir.path(),
+            Path::new("."),
             Arc::new(SubscriptionQuotaCache::new()),
             Some(shared_cache.clone()),
             None,
@@ -1661,23 +1819,21 @@ mod tests {
         assert_eq!(snapshot[0].prefix_hash, "live-prefix");
     }
 
-    #[tokio::test]
-    async fn hydrate_timeout_logs_warn_and_continues() {
-        let (dir, storage) = storage_fixture(20).await;
+    #[tokio::test(start_paused = true)]
+    async fn t2__hydrate_timeout_logs_warn_and_continues() {
+        let storage = storage_fixture();
         let upstream = create_upstream(&storage, "timeout-upstream").await;
         let stores = stores(
             storage,
             Arc::new(FakePromptCacheObservationStore::sleeping(
+                vec![prompt_record(upstream.id, "hash-a", 1_700_000_001)],
                 Duration::from_secs(30),
             )),
         );
-        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-        let started = tokio::time::Instant::now();
+        let runtime = RecordingPluginRuntime::default();
 
-        let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
-        let clock = TestClock::new_at_secs(1_700_000_000);
-
-        assert!(started.elapsed() <= Duration::from_secs(6));
+        let dynamic_view = build_view(&stores, &runtime, Path::new(".")).await;
+        let clock = fixed_clock(1_700_000_000);
         let snapshot = dynamic_view
             .prompt_cache_observation_cache_opt()
             .expect("prompt cache enabled")
@@ -1691,18 +1847,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_config_constructs_cache() {
-        let (dir, storage) = storage_fixture(21).await;
+    async fn t2__default_config_constructs_cache() {
+        let storage = storage_fixture();
         let stores = stores(
             storage,
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
         );
-        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
+        let runtime = RecordingPluginRuntime::default();
 
         let dynamic_view = build_view_with_config(
             &stores,
             &runtime,
-            dir.path(),
+            Path::new("."),
             cc_lb_config::Config::default(),
         )
         .await;
@@ -1715,22 +1871,606 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tunables_propagate_to_cache() {
-        let (dir, storage) = storage_fixture(22).await;
+    async fn t2__tunables_propagate_to_cache() {
+        let storage = storage_fixture();
         let stores = stores(
             storage,
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
         );
-        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
+        let runtime = RecordingPluginRuntime::default();
         let mut config = cc_lb_config::Config::default();
         config.prompt_cache_shadow.grace_margin_secs = 99;
         config.prompt_cache_shadow.refresh_debounce_secs = 123;
 
-        let dynamic_view = build_view_with_config(&stores, &runtime, dir.path(), config).await;
+        let dynamic_view = build_view_with_config(&stores, &runtime, Path::new("."), config).await;
 
         let cache = dynamic_view
             .prompt_cache_observation_cache_opt()
             .expect("prompt cache enabled");
         assert_eq!(cache.grace_margin_secs(), 99);
+    }
+
+    struct ChosenUpstreamRouter {
+        target_id: Uuid,
+        reported_base_url: Option<Url>,
+    }
+
+    impl RouterPlugin for ChosenUpstreamRouter {
+        fn route(
+            &self,
+            _ctx: &cc_lb_routing::RoutingContext,
+            _principal: &Principal,
+            candidates: &[UpstreamCandidate],
+        ) -> Result<RouteDecision, RouteError> {
+            if !candidates
+                .iter()
+                .any(|candidate| candidate.upstream_id == self.target_id)
+            {
+                return Err(RouteError::NoRoute {
+                    reason: format!("target upstream {} is not eligible", self.target_id),
+                });
+            }
+            Ok(RouteDecision {
+                upstream_id: Some(self.target_id),
+                upstream: Upstream::AnthropicDirect {
+                    base_url: self.reported_base_url.clone(),
+                },
+                dialect: Arc::new(AnthropicDirectDialect::with_base_url(
+                    self.reported_base_url.clone(),
+                )),
+            })
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ObservedDispatch {
+        url: Url,
+        authorization: Option<String>,
+    }
+
+    struct RecordingDispatcher {
+        captured: Arc<Mutex<Vec<ObservedDispatch>>>,
+    }
+
+    #[async_trait]
+    impl UpstreamDispatch for RecordingDispatcher {
+        async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+            self.captured
+                .lock()
+                .expect("captured dispatch lock")
+                .push(ObservedDispatch {
+                    url: request.url().clone(),
+                    authorization: request
+                        .headers()
+                        .get(http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToOwned::to_owned),
+                });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::new(Full::from(Bytes::from_static(
+                    br#"{"type":"message","content":[]}"#,
+                ))))
+                .map_err(|error| DispatchError::RequestBuild {
+                    reason: error.to_string(),
+                })
+        }
+    }
+
+    fn message_request() -> Request<Bytes> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/messages")
+            .header("x-api-key", "sk-ant-downstream")
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .body(Bytes::from_static(
+                br#"{"model":"claude-3-5-sonnet-20241022","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .expect("request builds")
+    }
+
+    async fn build_dispatch_view(
+        storage: Arc<Storage>,
+        aead: Arc<AeadService>,
+        clock: cc_lb_engine::ClockHandle,
+        target_id: Uuid,
+        reported_base_url: Option<Url>,
+    ) -> Arc<DynamicView> {
+        let stores = stores(
+            storage,
+            Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
+        );
+        let runtime = RecordingPluginRuntime::default();
+        let view = build_dynamic_view_with_plugin_runtime(
+            &stores,
+            &AnthropicOAuthConfig::default(),
+            aead,
+            None,
+            0,
+            &runtime,
+            Path::new("."),
+            Arc::new(SubscriptionQuotaCache::new()),
+            None,
+            None,
+            1800,
+            clock,
+        )
+        .await
+        .expect("dynamic view builds");
+        runtime.assert_no_instantiations();
+        DynamicViewBuilder::from_view(&view)
+            .global_router(Arc::new(ChosenUpstreamRouter {
+                target_id,
+                reported_base_url,
+            }))
+            .build()
+    }
+
+    #[tokio::test]
+    async fn t2__router_choice_dispatches_to_matching_oauth_upstream_not_first_upstream() {
+        let clock = fixed_clock(1_800_000_000);
+        let storage = Arc::new(Storage::with_clock(clock.clone()));
+        let aead = Arc::new(AeadService::from_master_key([33; 32]));
+        let missing = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                name: "missing-before-target".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: Some(Url::parse("http://missing.invalid").expect("missing base URL")),
+                api_key_ciphertext: None,
+                oauth_token_generation: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+            },
+        )
+        .await
+        .expect("missing upstream created");
+        let target = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                name: "oauth-target".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: Some(Url::parse("http://oauth-target.invalid").expect("target base URL")),
+                api_key_ciphertext: None,
+                oauth_token_generation: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+            },
+        )
+        .await
+        .expect("target upstream created");
+        let tokens = EncryptedOAuthTokens::encrypt(
+            &aead,
+            &OAuthTokenBundle {
+                access_token: "sk-ant-oat01-oauth-target-access-token".to_owned(),
+                refresh_token: "sk-ant-ort01-oauth-target-refresh-token".to_owned(),
+                expires_at_unix_secs: 1_800_003_600,
+                refresh_token_expires_at_unix_secs: None,
+                scopes: vec!["messages".to_owned()],
+            },
+            target.id.as_bytes(),
+        )
+        .expect("tokens encrypt");
+        UpstreamStore::store_oauth_tokens(storage.as_ref(), target.id, target.revision, tokens)
+            .await
+            .expect("tokens stored");
+        PrincipalStore::create(
+            storage.as_ref(),
+            cc_lb_storage_api::PrincipalCreate {
+                name: "oauth-principal".to_owned(),
+                kind: cc_lb_storage_api::PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                allowed_upstreams: vec![target.id],
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            1_800_000_000,
+        )
+        .await
+        .expect("principal created");
+
+        let view = build_dispatch_view(storage, aead, clock.clone(), target.id, None).await;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let lifecycle = Lifecycle::new_with_dynamic_view(
+            Arc::new(BuiltinAuthn::new(
+                DownstreamAuthMode::None,
+                Some(NoneModeConfig {
+                    principal_id: "oauth-principal".to_owned(),
+                    upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
+                }),
+                None,
+                clock.clone(),
+            )),
+            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(RecordingDispatcher {
+                captured: captured.clone(),
+            }),
+            LifecycleConfig::default(),
+            clock,
+        );
+
+        let response = lifecycle
+            .handle(message_request())
+            .await
+            .expect("lifecycle response");
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let captured = captured.lock().expect("captured dispatch lock");
+        assert_eq!(captured.len(), 1, "expected one upstream dispatch");
+        assert_eq!(captured[0].url.host_str(), Some("oauth-target.invalid"));
+        assert_eq!(
+            captured[0].authorization.as_deref(),
+            Some("Bearer sk-ant-oat01-oauth-target-access-token")
+        );
+        assert_ne!(missing.id, target.id);
+    }
+
+    #[tokio::test]
+    async fn t2__dispatch_uses_resolved_upstream_base_url_not_reported_route_dialect() {
+        let clock = fixed_clock(1_800_000_000);
+        let storage = Arc::new(Storage::with_clock(clock.clone()));
+        let aead = Arc::new(AeadService::from_master_key([33; 32]));
+        let _primary = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                name: "aaa-primary".to_owned(),
+                kind: UpstreamKind::AnthropicApiKey,
+                base_url: None,
+                api_key_ciphertext: Some(vec![1, 2, 3]),
+                oauth_token_generation: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+            },
+        )
+        .await
+        .expect("primary upstream created");
+        let target = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                name: "bbb-target".to_owned(),
+                kind: UpstreamKind::AnthropicApiKey,
+                base_url: Some(Url::parse("http://target.invalid").expect("target base URL")),
+                api_key_ciphertext: Some(vec![1, 2, 3]),
+                oauth_token_generation: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+            },
+        )
+        .await
+        .expect("target upstream created");
+        PrincipalStore::create(
+            storage.as_ref(),
+            cc_lb_storage_api::PrincipalCreate {
+                name: "test-principal".to_owned(),
+                kind: cc_lb_storage_api::PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                allowed_upstreams: vec![target.id],
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            1_800_000_000,
+        )
+        .await
+        .expect("principal created");
+
+        let view = build_dispatch_view(
+            storage,
+            aead,
+            clock.clone(),
+            target.id,
+            Some(Url::parse("https://api.anthropic.com").expect("reported base URL")),
+        )
+        .await;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let lifecycle = Lifecycle::new_with_dynamic_view(
+            Arc::new(BuiltinAuthn::new(
+                DownstreamAuthMode::None,
+                Some(NoneModeConfig {
+                    principal_id: "test-principal".to_owned(),
+                    upstream_kind: NoneModeUpstreamKind::AnthropicKey,
+                }),
+                None,
+                clock.clone(),
+            )),
+            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(RecordingDispatcher {
+                captured: captured.clone(),
+            }),
+            LifecycleConfig::default(),
+            clock,
+        );
+
+        let response = lifecycle
+            .handle(message_request())
+            .await
+            .expect("lifecycle response");
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let captured = captured.lock().expect("captured dispatch lock");
+        assert_eq!(
+            captured.len(),
+            1,
+            "expected exactly one upstream dispatch; got {captured:?} status={status} body={body:?}"
+        );
+        assert_eq!(captured[0].url.host_str(), Some("target.invalid"));
+        assert_eq!(captured[0].url.path(), "/v1/messages");
+    }
+
+    fn rebind_stores(storage: Arc<Storage>) -> Stores {
+        Stores {
+            upstreams: storage.clone(),
+            principals: storage.clone(),
+            plugin_registry: storage.clone(),
+            upstream_rate_limits: storage.clone(),
+            upstream_subscription_quotas: storage.clone(),
+            upstream_subscription_metadata: storage.clone(),
+            organization_metadata: storage.clone(),
+            plan_tiers: storage.clone(),
+            prompt_cache_observations: storage.clone(),
+            anthropic_compatibility_kv: storage,
+            audit: None,
+        }
+    }
+
+    async fn create_rebind_principal(storage: &Storage, name: &str) -> PrincipalRecord {
+        PrincipalStore::create(
+            storage,
+            cc_lb_storage_api::PrincipalCreate {
+                name: name.to_owned(),
+                kind: cc_lb_storage_api::PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+            },
+            1,
+        )
+        .await
+        .expect("principal created")
+    }
+
+    async fn build_rebind_view(
+        stores: &Stores,
+        current_generation: u64,
+        runtime: &RecordingPluginRuntime,
+    ) -> Arc<DynamicView> {
+        build_dynamic_view_with_plugin_runtime(
+            stores,
+            &AnthropicOAuthConfig::default(),
+            Arc::new(AeadService::from_master_key([1; 32])),
+            None,
+            current_generation,
+            runtime,
+            Path::new("."),
+            Arc::new(SubscriptionQuotaCache::new()),
+            None,
+            None,
+            1800,
+            fixed_clock(1_800_000_000),
+        )
+        .await
+        .expect("dynamic view builds")
+    }
+
+    async fn attach_rebind_plan_metadata(storage: &Storage, upstream_id: Uuid) {
+        UpstreamSubscriptionMetadataStore::put_upstream_subscription_metadata(
+            storage,
+            &UpstreamSubscriptionMetadataRecord {
+                upstream_id,
+                organization_uuid: Some("org-max-5x".to_owned()),
+                organization_role: None,
+                workspace_role: None,
+                observed_at_unix_millis: 1_800_000_000_000,
+                last_error: None,
+                raw_roles: None,
+                raw_bootstrap: None,
+            },
+        )
+        .await
+        .expect("subscription metadata stored");
+        OrganizationMetadataStore::put_organization_metadata(
+            storage,
+            &OrganizationMetadataRecord {
+                organization_uuid: "org-max-5x".to_owned(),
+                organization_name: Some("Max 5x Org".to_owned()),
+                organization_type: Some("claude_max".to_owned()),
+                rate_limit_tier: Some("default_claude_max_5x".to_owned()),
+                seat_tier: None,
+                has_extra_usage_enabled: None,
+                billing_type: None,
+                subscription_created_at_unix_secs: None,
+                account_email: None,
+                account_display_name: None,
+                account_uuid: None,
+                overage_credit_amount_minor_units: None,
+                overage_credit_currency: None,
+                overage_credit_granted: None,
+                overage_credit_eligible: None,
+                observed_at_unix_millis: 1_800_000_000_000,
+                last_error: None,
+                raw_profile: None,
+                raw_overage_grant: None,
+            },
+        )
+        .await
+        .expect("organization metadata stored");
+    }
+
+    async fn seed_rebind_plan_ratio_catalog(storage: &Storage) {
+        PlanTierStore::upsert_plan_tier_ratio(
+            storage,
+            &PlanTierRatioRecord {
+                tier_key: "max_5x".to_owned(),
+                pro_relative_ratio: 5.0,
+                effective_from_unix_millis: 1_800_000_000_000,
+                effective_to_unix_millis: None,
+                provenance: "test_catalog".to_owned(),
+                created_at_unix_millis: 1_800_000_000_000,
+            },
+        )
+        .await
+        .expect("plan ratio catalog seeded");
+    }
+
+    #[tokio::test]
+    async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
+        let storage = Arc::new(Storage::with_clock(fixed_clock(1_800_000_000)));
+        let stores = rebind_stores(storage.clone());
+        let runtime = RecordingPluginRuntime::default();
+        let principal_a = create_rebind_principal(&storage, "principal-a").await;
+        create_rebind_principal(&storage, "principal-b").await;
+
+        let view = build_rebind_view(&stores, 0, &runtime).await;
+        assert_eq!(view.generation, 1);
+        assert_eq!(
+            view.principal_view.principal_status("principal-a"),
+            cc_lb_engine::api_keys::principal_view::PrincipalStatus::Active
+        );
+        assert_eq!(
+            view.principal_view.principal_status("principal-b"),
+            cc_lb_engine::api_keys::principal_view::PrincipalStatus::Active
+        );
+
+        PrincipalStore::soft_delete(storage.as_ref(), principal_a.id, principal_a.revision, 2)
+            .await
+            .expect("soft delete");
+        let view = build_rebind_view(&stores, view.generation, &runtime).await;
+
+        assert_eq!(view.generation, 2);
+        assert_eq!(
+            view.principal_view.principal_status("principal-a"),
+            cc_lb_engine::api_keys::principal_view::PrincipalStatus::Missing
+        );
+        assert_eq!(
+            view.principal_view.principal_status("principal-b"),
+            cc_lb_engine::api_keys::principal_view::PrincipalStatus::Active
+        );
+        runtime.assert_no_instantiations();
+    }
+
+    #[tokio::test]
+    async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
+        let storage = Arc::new(Storage::with_clock(fixed_clock(1_800_000_000)));
+        let stores = rebind_stores(storage.clone());
+        let runtime = RecordingPluginRuntime::default();
+        create_rebind_principal(&storage, "principal-a").await;
+        create_upstream(&storage, "healthy").await;
+        let corrupt = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                name: "corrupt".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_token_generation: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+            },
+        )
+        .await
+        .expect("oauth upstream created");
+        storage
+            .store_oauth_tokens(
+                corrupt.id,
+                corrupt.revision,
+                EncryptedOAuthTokens::from_ciphertext(vec![9]),
+            )
+            .await
+            .expect("corrupt oauth stored");
+
+        let view = build_rebind_view(&stores, 10, &runtime).await;
+        assert_eq!(view.generation, 11);
+        let mut upstream_names = view
+            .upstreams_snapshot()
+            .iter()
+            .map(|record| record.name.as_str())
+            .collect::<Vec<_>>();
+        upstream_names.sort_unstable();
+        assert_eq!(upstream_names, ["corrupt", "healthy"]);
+
+        let healthy = view
+            .upstream_status_snapshot
+            .entries
+            .get("healthy")
+            .expect("healthy status");
+        assert_eq!(healthy.status, ApplyStatus::Active);
+        assert!(healthy.last_apply_error.is_none());
+
+        let corrupt = view
+            .upstream_status_snapshot
+            .entries
+            .get("corrupt")
+            .expect("corrupt status");
+        assert_eq!(corrupt.status, ApplyStatus::Error);
+        assert!(
+            corrupt
+                .last_apply_error
+                .as_ref()
+                .is_some_and(|message| !message.is_empty())
+        );
+
+        let persisted = UpstreamStore::get_by_name(storage.as_ref(), "corrupt")
+            .await
+            .expect("load corrupt")
+            .expect("corrupt exists");
+        assert!(persisted.last_apply_error.is_some());
+        runtime.assert_no_instantiations();
+    }
+
+    #[tokio::test]
+    async fn plan_info_uses_catalog_ratio_and_reconciles_history() {
+        let storage = Arc::new(Storage::with_clock(fixed_clock(1_800_000_000)));
+        let stores = rebind_stores(storage.clone());
+        let runtime = RecordingPluginRuntime::default();
+        let upstream = create_upstream(&storage, "max-5x").await;
+        attach_rebind_plan_metadata(&storage, upstream.id).await;
+        seed_rebind_plan_ratio_catalog(&storage).await;
+
+        let view = build_rebind_view(&stores, 0, &runtime).await;
+
+        let plan_info = view
+            .plan_info_by_upstream
+            .get(&upstream.id)
+            .expect("upstream plan info");
+        assert_eq!(plan_info.organization_type.as_deref(), Some("claude_max"));
+        assert_eq!(
+            plan_info.rate_limit_tier.as_deref(),
+            Some("default_claude_max_5x")
+        );
+        assert_eq!(plan_info.capacity_ratio, 5.0);
+
+        let history = PlanTierStore::list_current_upstream_plan_tiers(storage.as_ref())
+            .await
+            .expect("plan tier history listed");
+        let resolved = history
+            .iter()
+            .find(|record| record.upstream_id == upstream.id)
+            .expect("upstream tier history");
+        assert_eq!(resolved.organization_uuid.as_deref(), Some("org-max-5x"));
+        assert_eq!(resolved.organization_type.as_deref(), Some("claude_max"));
+        assert_eq!(
+            resolved.rate_limit_tier.as_deref(),
+            Some("default_claude_max_5x")
+        );
+        assert_eq!(resolved.seat_tier, None);
+        assert_eq!(resolved.tier_key.as_deref(), Some("max_5x"));
+        assert_eq!(resolved.resolution_source, TierResolutionSource::Builtin);
+        assert_eq!(resolved.resolved_ratio_snapshot, Some(5.0));
+        assert_eq!(resolved.effective_to_unix_millis, None);
+        assert_eq!(resolved.provenance, "dynamic_view_reconcile");
+        runtime.assert_no_instantiations();
     }
 }

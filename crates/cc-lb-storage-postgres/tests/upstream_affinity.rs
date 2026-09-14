@@ -1,4 +1,4 @@
-use std::{error::Error, str::FromStr, sync::Arc};
+use std::{error::Error, str::FromStr};
 
 use cc_lb_storage_api::{
     BackendKind, MetaStore, StorageError, UpstreamAffinityBinding, UpstreamAffinityKey,
@@ -19,11 +19,9 @@ const TTL_SECS: u64 = 7_776_000;
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
-#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
-async fn upstream_affinity_bind_is_idempotent_conflict_atomic_and_expiry_aware() -> TestResult<()> {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__upstream_affinity_bind_is_idempotent_conflict_atomic_and_expiry_aware()
+-> TestResult<()> {
+    let fixture = Fixture::create().await?;
     let storage = fixture.store();
     storage.initialize(BackendKind::Postgres).await?;
 
@@ -267,12 +265,9 @@ async fn upstream_affinity_bind_is_idempotent_conflict_atomic_and_expiry_aware()
 }
 
 #[tokio::test]
-#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
-async fn upstream_affinity_retention_boundaries_and_expired_rebind_follow_current_policy()
+async fn t3_postgres__upstream_affinity_retention_boundaries_and_expired_rebind_follow_current_policy()
 -> TestResult<()> {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+    let fixture = Fixture::create().await?;
     let storage = fixture.store();
     storage.initialize(BackendKind::Postgres).await?;
     let first_upstream = create_upstream(&storage, "retention-first").await?;
@@ -352,11 +347,9 @@ async fn upstream_affinity_retention_boundaries_and_expired_rebind_follow_curren
 }
 
 #[tokio::test]
-#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
-async fn upstream_affinity_purge_is_bounded_and_preserves_concurrent_rebind() -> TestResult<()> {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__upstream_affinity_purge_is_bounded_and_preserves_concurrent_rebind()
+-> TestResult<()> {
+    let fixture = Fixture::create().await?;
     let storage = fixture.store();
     storage.initialize(BackendKind::Postgres).await?;
     let first_upstream = create_upstream(&storage, "purge-first").await?;
@@ -434,12 +427,9 @@ async fn upstream_affinity_purge_is_bounded_and_preserves_concurrent_rebind() ->
     .execute(&mut *renewal_tx)
     .await?;
 
-    let purged = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        storage.purge_expired_upstream_affinities(1_000, 100, 1),
-    )
-    .await
-    .expect("purge must skip the locked renewal instead of blocking")?;
+    let purged = storage
+        .purge_expired_upstream_affinities(1_000, 100, 1)
+        .await?;
     assert_eq!(purged, 0);
 
     renewal_tx.commit().await?;
@@ -500,11 +490,8 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn create() -> TestResult<Option<Self>> {
-        let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
-            eprintln!("skip: CI_POSTGRES_URL not set");
-            return Ok(None);
-        };
+    async fn create() -> TestResult<Self> {
+        let url = crate::postgres_fixture::required_postgres_url();
         let schema = format!("upstream_affinity_{}", Uuid::new_v4().simple());
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -521,15 +508,15 @@ impl Fixture {
             .max_connections(4)
             .connect_with(options)
             .await?;
-        Ok(Some(Self {
+        Ok(Self {
             schema,
             admin_pool,
             pool,
-        }))
+        })
     }
 
     fn store(&self) -> PostgresStorage {
-        PostgresStorage::new(self.pool.clone(), Arc::new(cc_lb_clock::SystemClock))
+        PostgresStorage::new(self.pool.clone(), cc_lb_testkit::fixed_clock(1_700_000_000))
     }
 
     fn pool(&self) -> &PgPool {

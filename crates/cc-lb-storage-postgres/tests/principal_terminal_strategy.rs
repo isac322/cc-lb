@@ -10,19 +10,9 @@ use serde_json::json;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-fn get_postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL").ok()
-}
-
 #[test]
-fn principal_terminal_strategy() {
-    let url = match get_postgres_url() {
-        Some(url) => url,
-        None => {
-            eprintln!("skip: CI_POSTGRES_URL not set");
-            return;
-        }
-    };
+fn t3_postgres__principal_terminal_strategy() {
+    let url = crate::postgres_fixture::required_postgres_url();
 
     tokio::runtime::Runtime::new()
         .expect("tokio runtime")
@@ -34,7 +24,7 @@ async fn run_test(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(
         fixture.pool.clone(),
-        std::sync::Arc::new(cc_lb_clock::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     );
     storage.initialize(BackendKind::Postgres).await?;
 

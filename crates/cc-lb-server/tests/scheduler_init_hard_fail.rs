@@ -14,7 +14,8 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
-async fn postgres_unreachable_scheduler_connection_failure_aborts_app_build() -> TestResult {
+async fn t3_postgres__postgres_unreachable_scheduler_connection_failure_aborts_app_build()
+-> TestResult {
     let directory = tempfile::tempdir()?;
     let main_path = directory.path().join("main-storage.sqlite");
     let main_storage = open_main_sqlite(&main_path).await?;
@@ -33,7 +34,7 @@ async fn postgres_unreachable_scheduler_connection_failure_aborts_app_build() ->
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn sqlite_apalis_index_migration_failure_aborts_app_build() -> TestResult {
+async fn t3__sqlite_apalis_index_migration_failure_aborts_app_build() -> TestResult {
     let directory = tempfile::tempdir()?;
     let main_path = directory.path().join("main-storage.sqlite");
     let scheduler_path = scheduler_sqlite_path(&main_path);
@@ -72,7 +73,7 @@ fn app_config(storage: StorageConfig) -> Config {
 async fn open_main_sqlite(path: &Path) -> TestResult<Arc<cc_lb_storage_sqlite::SqliteStorage>> {
     let database_url = format!("sqlite://{}", path.display());
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await?,
     );
     storage.initialize(BackendKind::Sqlite).await?;
@@ -83,7 +84,7 @@ async fn build_failing_app(
     config: Config,
     main_storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
 ) -> BuildError {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
     let managed_store: Arc<dyn ManagedKeyStore> = main_storage.clone();
     let storage: Arc<dyn StorageTrait> = main_storage;
     match build_app_with_storage(

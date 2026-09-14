@@ -19,6 +19,7 @@ use cc_lb_routing::{
 };
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
+use cc_lb_testkit::fixed_clock;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
     SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
@@ -108,8 +109,8 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
 
     let view = test_view(
         vec![
-            principal("limited", vec![allowed_high, allowed_low, allowed_mid]),
-            principal("all", Vec::new()),
+            principal(1, "limited", vec![allowed_high, allowed_low, allowed_mid]),
+            principal(2, "all", Vec::new()),
         ],
         vec![
             upstream(allowed_high, UpstreamKind::AnthropicApiKey, true, None),
@@ -120,6 +121,7 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
             upstream(allowed_low, UpstreamKind::AnthropicApiKey, true, None),
         ],
     );
+    let clock = fixed_clock(1_700_000_000);
 
     let limited = build_candidates(
         &view,
@@ -128,7 +130,7 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
         "",
         &[],
         None,
-        &cc_lb_engine::SystemClock,
+        clock.as_ref(),
     );
     assert_eq!(
         candidate_ids(&limited),
@@ -142,7 +144,7 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
         "",
         &[],
         None,
-        &cc_lb_engine::SystemClock,
+        clock.as_ref(),
     );
     assert_eq!(
         candidate_ids(&all),
@@ -157,14 +159,14 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
             "",
             &[],
             None,
-            &cc_lb_engine::SystemClock
+            clock.as_ref()
         )
         .is_empty()
     );
 }
 
 #[tokio::test]
-async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_strategy()
+async fn t2__lifecycle_filters_built_candidates_through_pipeline_before_terminal_strategy()
 -> Result<(), Box<dyn std::error::Error>> {
     let first = Uuid::from_u128(1);
     let second = Uuid::from_u128(2);
@@ -191,7 +193,7 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
         ),
     );
     let principal_view = Arc::new(PrincipalView::from_db(
-        &[principal("limited", vec![third, first, second])],
+        &[principal(1, "limited", vec![third, first, second])],
         chains,
     ));
     let view = test_view_with_principal_view(
@@ -206,6 +208,7 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
             upstream(second, UpstreamKind::AnthropicApiKey, true, None),
         ],
     );
+    let clock = fixed_clock(1_700_000_000);
 
     let built = build_candidates(
         &view,
@@ -214,7 +217,7 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
         "",
         &[],
         None,
-        &cc_lb_engine::SystemClock,
+        clock.as_ref(),
     );
     assert_eq!(candidate_ids(&built), vec![first, second, third]);
 
@@ -225,14 +228,14 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
             upstream_kind: NoneModeUpstreamKind::AnthropicKey,
         }),
         None,
-        Arc::new(cc_lb_engine::SystemClock),
+        clock.clone(),
     ));
     let lifecycle = Lifecycle::new_with_dynamic_view(
         authn,
         Arc::new(DynamicViewHolder::new(view)),
         Arc::new(TestDispatcher),
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        clock,
     );
 
     let response = lifecycle
@@ -284,9 +287,9 @@ fn test_view_with_principal_view(
         .build()
 }
 
-fn principal(name: &str, allowed_upstreams: Vec<Uuid>) -> PrincipalRecord {
+fn principal(id: u128, name: &str, allowed_upstreams: Vec<Uuid>) -> PrincipalRecord {
     PrincipalRecord {
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(id),
         name: name.to_owned(),
         kind: PrincipalKind::Machine,
         allowed_models: Vec::new(),

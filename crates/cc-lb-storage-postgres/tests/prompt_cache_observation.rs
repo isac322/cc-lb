@@ -21,13 +21,10 @@ use cc_lb_storage_api::{BackendKind, MetaStore};
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
-#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
-async fn postgres_prompt_cache_upsert_then_list_returns_active() -> TestResult<()> {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__postgres_prompt_cache_upsert_then_list_returns_active() -> TestResult<()> {
+    let fixture = Fixture::create().await?;
     let store = fixture.store();
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(1);
     let mut record = observation(
         upstream_id,
         "sha256:active",
@@ -50,13 +47,10 @@ async fn postgres_prompt_cache_upsert_then_list_returns_active() -> TestResult<(
 }
 
 #[tokio::test]
-#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
-async fn postgres_prompt_cache_purge_removes_expired() -> TestResult<()> {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__postgres_prompt_cache_purge_removes_expired() -> TestResult<()> {
+    let fixture = Fixture::create().await?;
     let store = fixture.store();
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(2);
     let expired = observation(
         upstream_id,
         "sha256:expired",
@@ -88,13 +82,10 @@ async fn postgres_prompt_cache_purge_removes_expired() -> TestResult<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
-async fn postgres_prompt_cache_count_after_inserts() -> TestResult<()> {
-    let Some(fixture) = Fixture::create().await? else {
-        return Ok(());
-    };
+async fn t3_postgres__postgres_prompt_cache_count_after_inserts() -> TestResult<()> {
+    let fixture = Fixture::create().await?;
     let store = fixture.store();
-    let upstream_id = Uuid::new_v4();
+    let upstream_id = Uuid::from_u128(3);
     let records = [
         observation(upstream_id, "sha256:a", TtlClass::Ephemeral5m, 200, 100),
         observation(upstream_id, "sha256:b", TtlClass::Ephemeral1h, 300, 100),
@@ -118,11 +109,8 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn create() -> TestResult<Option<Self>> {
-        let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
-            eprintln!("skip: CI_POSTGRES_URL not set");
-            return Ok(None);
-        };
+    async fn create() -> TestResult<Self> {
+        let url = crate::postgres_fixture::required_postgres_url();
         let schema = format!("test_prompt_cache_{}", Uuid::new_v4().simple());
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -143,18 +131,15 @@ impl Fixture {
         // fixture rotted: it applied only `0030` and never saw `0072` rename `prefix_hash` to
         // `v3_prefix_key`. `initialize` is the same entry point the sibling fixtures in this
         // directory use, so it cannot fall behind the migrations directory.
-        PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock))
+        PostgresStorage::new(pool.clone(), cc_lb_testkit::fixed_clock(1_700_000_000))
             .initialize(BackendKind::Postgres)
             .await?;
 
-        Ok(Some(Self { url, schema, pool }))
+        Ok(Self { url, schema, pool })
     }
 
     fn store(&self) -> PostgresStorage {
-        PostgresStorage::new(
-            self.pool.clone(),
-            std::sync::Arc::new(cc_lb_clock::SystemClock),
-        )
+        PostgresStorage::new(self.pool.clone(), cc_lb_testkit::fixed_clock(1_700_000_000))
     }
 
     async fn drop_schema(self) -> TestResult<()> {

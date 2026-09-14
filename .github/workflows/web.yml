@@ -11,6 +11,10 @@ on:
     paths:
       - 'crates/cc-lb-admin/web/**'
       - '.github/workflows/web.yml'
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -18,7 +22,7 @@ concurrency:
 
 jobs:
   bun-checks:
-    runs-on: cc-lb-1
+    runs-on: cc-lb-2
     defaults:
       run:
         working-directory: crates/cc-lb-admin/web
@@ -86,3 +90,65 @@ jobs:
           bun run --shell=bun lint
           bun run --shell=bun typecheck
           bunx --bun vitest run --passWithNoTests --maxWorkers=1 --no-file-parallelism
+
+  playwright:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/cc-lb-admin/web
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install bun 1.4.2
+        working-directory: .
+        run: |
+          set -euo pipefail
+          arch=$(uname -m)
+          os=$(uname -s)
+          case "$os-$arch" in
+            Linux-aarch64|Linux-arm64) asset=bun-linux-aarch64.zip ;;
+            Linux-x86_64) asset=bun-linux-x64.zip ;;
+            Darwin-arm64) asset=bun-darwin-aarch64.zip ;;
+            Darwin-x86_64) asset=bun-darwin-x64.zip ;;
+            *)
+              echo "::error::unsupported $os $arch for bun"
+              exit 1
+              ;;
+          esac
+          dest="$HOME/.local/bin"
+          mkdir -p "$dest"
+          python3 - "$asset" "$dest" <<'PY'
+          import io, os, stat, sys, urllib.request, zipfile
+          asset, dest = sys.argv[1], sys.argv[2]
+          url = f"https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/{asset}"
+          req = urllib.request.Request(url, headers={"User-Agent": "cc-lb-ci"})
+          data = urllib.request.urlopen(req).read()
+          zf = zipfile.ZipFile(io.BytesIO(data))
+          target = os.path.join(dest, "bun")
+          for info in zf.infolist():
+              name = info.filename.rsplit("/", 1)[-1]
+              if name == "bun" and not info.is_dir():
+                  with zf.open(info) as src, open(target, "wb") as out:
+                      out.write(src.read())
+                  os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                  print(f"installed {target} from {info.filename}")
+                  break
+          else:
+              raise SystemExit(f"bun binary not in {asset}: {zf.namelist()}")
+          PY
+          ln -sfn "$dest/bun" "$dest/bunx"
+          echo "$dest" >> "$GITHUB_PATH"
+          "$dest/bun" --version
+          "$dest/bunx" --version
+      - name: Cache Bun install store
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('crates/cc-lb-admin/web/bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+      - name: Run Playwright end-to-end tests
+        run: bun run e2e

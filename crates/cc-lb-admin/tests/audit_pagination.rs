@@ -5,21 +5,23 @@ use axum::{
     http::{Request, StatusCode},
 };
 use cc_lb_admin::{AdminState, router};
+use cc_lb_clock::ClockHandle;
 use cc_lb_config::Config;
 use cc_lb_storage_api::AuditEntry;
 use cc_lb_storage_api::AuditStore;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use cc_lb_testkit::fixed_clock;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-fn test_state(storage: Arc<Storage>) -> AdminState {
+fn test_state(storage: Arc<Storage>, clock: ClockHandle) -> AdminState {
     let config = Config::default();
     AdminState {
         storage: Some(storage.clone()),
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
+        limit_engine: admin_test_common::limit_engine_with_clock(clock.clone()),
         lifecycle: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(Config::default()),
@@ -30,17 +32,20 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         data_dir: None,
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
-        start_time: std::time::Instant::now(),
+        start_time: tokio::time::Instant::now().into_std(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_clock::SystemClock),
+        clock,
     }
 }
 
 #[tokio::test]
-async fn test_audit_pagination() {
+async fn t3__audit_pagination() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = admin_test_common::sqlite_storage(temp_dir.path(), "test.sqlite").await;
+    let clock = fixed_clock(1_700_000_000);
+    let storage =
+        admin_test_common::sqlite_storage_with_clock(temp_dir.path(), "test.sqlite", clock.clone())
+            .await;
 
     for i in 0..10 {
         let entry = AuditEntry {
@@ -60,7 +65,7 @@ async fn test_audit_pagination() {
         storage.append_audit(&entry).await.unwrap();
     }
 
-    let app = router(test_state(storage));
+    let app = router(test_state(storage, clock));
 
     let req = Request::builder()
         .method("GET")

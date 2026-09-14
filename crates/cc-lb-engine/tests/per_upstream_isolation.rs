@@ -14,8 +14,8 @@ use tokio::sync::Notify;
 
 use common::signed_request;
 
-#[tokio::test]
-async fn saturated_upstream_does_not_block_other_upstreams()
+#[tokio::test(start_paused = true)]
+async fn t2__saturated_upstream_does_not_block_other_upstreams()
 -> Result<(), Box<dyn std::error::Error>> {
     let registry = BulkheadRegistry::new();
     let config = BulkheadRuntimeConfig {

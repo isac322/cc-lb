@@ -13,7 +13,7 @@ const RECREATED_PRINCIPAL_ID: &str = "00000000-0000-0000-0000-000000000203";
 const DUPLICATE_PRINCIPAL_ID: &str = "00000000-0000-0000-0000-000000000204";
 
 #[tokio::test]
-async fn name_active_unique_migrations_preserve_data_and_allow_name_reuse() {
+async fn t3__name_active_unique_migrations_preserve_data_and_allow_name_reuse() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",

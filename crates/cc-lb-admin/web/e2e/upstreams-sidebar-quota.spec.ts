@@ -1,5 +1,6 @@
 import { expect, type Page, test } from '@playwright/test';
 import type { QuotaSnapshot } from '../src/lib/api';
+import { fulfillAuthenticatedSession } from './support/auth-session';
 
 type UpstreamFixture = {
   id: string;
@@ -49,6 +50,7 @@ async function installAppFixtures(
   });
 
   await page.route('**/admin/**', async (route) => {
+    if (await fulfillAuthenticatedSession(route)) return;
     const request = route.request();
     const url = new URL(request.url());
     const pathname = url.pathname;

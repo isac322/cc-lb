@@ -8,6 +8,7 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
+use cc_lb_testkit::fixed_clock;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -29,10 +30,10 @@ fn test_state() -> AdminState {
         data_dir: None,
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
-        start_time: std::time::Instant::now(),
+        start_time: tokio::time::Instant::now().into_std(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_clock::SystemClock),
+        clock: fixed_clock(1_700_000_000),
     }
 }
 
@@ -86,8 +87,8 @@ fn discover_index_asset(index_html: &str) -> String {
         .to_owned()
 }
 
-#[tokio::test]
-async fn asset_responses_are_immutable_and_support_conditional_get() {
+#[tokio::test(start_paused = true)]
+async fn t2__asset_responses_are_immutable_and_support_conditional_get() {
     let app = router(test_state());
 
     let index = get(&app, "/").await;
@@ -127,8 +128,8 @@ async fn asset_responses_are_immutable_and_support_conditional_get() {
     assert!(body_text(response).await.is_empty());
 }
 
-#[tokio::test]
-async fn index_and_spa_fallback_revalidate_and_support_conditional_get() {
+#[tokio::test(start_paused = true)]
+async fn t2__index_and_spa_fallback_revalidate_and_support_conditional_get() {
     let app = router(test_state());
 
     let response = get(&app, "/").await;
@@ -160,8 +161,8 @@ async fn index_and_spa_fallback_revalidate_and_support_conditional_get() {
     assert_strong_lowercase_sha256_etag(&header_value(&response, header::ETAG));
 }
 
-#[tokio::test]
-async fn admin_unknown_paths_do_not_fallback_to_spa() {
+#[tokio::test(start_paused = true)]
+async fn t2__admin_unknown_paths_do_not_fallback_to_spa() {
     let app = router(test_state());
 
     let response = get(&app, "/admin").await;

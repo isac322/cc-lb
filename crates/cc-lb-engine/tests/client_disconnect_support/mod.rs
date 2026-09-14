@@ -2,7 +2,7 @@ mod events;
 
 pub use events::{
     assert_dropped_terminal, assert_error_terminal, assert_one_final, assert_stream_error,
-    assert_success_terminal, lifecycle_receiver, sqlite_storage,
+    assert_success_terminal, lifecycle_receiver,
 };
 
 use std::collections::HashMap;
@@ -26,6 +26,7 @@ use cc_lb_engine::{
 };
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_testkit::fixed_clock;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ResponseTransformError, ShapedRequest, ShapedRequestBuilder,
     SignedRequest, SseEventTransformHook, TransformSseEventRequest, TransformSseEventResult,
@@ -115,7 +116,7 @@ pub fn transform_lifecycle(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        fixed_clock(1_700_000_000),
     )
     .with_event_bus(test_bus.bus_arc())
 }

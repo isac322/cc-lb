@@ -7,10 +7,8 @@ use thiserror::Error;
 mod legacy;
 mod wasmtime;
 
-pub use legacy::{
-    migrate_legacy_storage_toml, removed_prompt_cache_env_switches, removed_prompt_cache_switches,
-    validate_raw_toml,
-};
+pub(crate) use legacy::removed_prompt_cache_env_switches_in;
+pub use legacy::{migrate_legacy_storage_toml, removed_prompt_cache_switches, validate_raw_toml};
 
 use crate::{
     AdminAuthProviderConfig, Config, ConfigError, DEFAULT_SQLITE_PATH, DownstreamAuthMode,

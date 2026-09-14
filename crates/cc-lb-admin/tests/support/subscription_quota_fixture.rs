@@ -12,7 +12,7 @@ use crate::admin_test_common;
 pub(crate) const NOW_UNIX_SECS: u64 = 1_800_003_600;
 
 pub(crate) async fn create_oauth_upstream(
-    server: &admin_test_common::SpawnedAdminServer,
+    server: &admin_test_common::SpawnedAdminServer<impl Sized>,
     name: &str,
 ) -> Uuid {
     let (status, _, body) = server

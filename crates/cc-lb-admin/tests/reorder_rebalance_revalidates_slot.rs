@@ -10,8 +10,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn reorder_chain_revalidates_slot_drift() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__reorder_chain_revalidates_slot_drift() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let principal_id = seed_principal(&server.storage, "principal-reorder-slot-drift").await;
     let registry = seed_registry_with_slots(
         &server.storage,
@@ -58,8 +58,8 @@ async fn reorder_chain_revalidates_slot_drift() {
 }
 
 #[tokio::test]
-async fn rebalance_chain_revalidates_slot_drift() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__rebalance_chain_revalidates_slot_drift() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let principal_id = seed_principal(&server.storage, "principal-rebalance-slot-drift").await;
     let registry = seed_registry_with_slots(
         &server.storage,

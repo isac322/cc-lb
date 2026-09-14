@@ -1,0 +1,178 @@
+# One entry per Rust t4__/t5__ test. During migration, `test` may remain empty
+# until the representative test named by the plan is implemented.
+
+[[entry]]
+key = "proxy-messages-nonstream/happy"
+journey = "proxy-messages-nonstream"
+class = "happy"
+test = "tests-integration::integration::t4::representatives::t4__proxy_nonstream_happy"
+p0 = ["proxy-request-response"]
+why_no_fake = "real hyper connection, header reserialization, and body-byte preservation"
+
+[[entry]]
+key = "proxy-messages-nonstream/connect-failure"
+journey = "proxy-messages-nonstream"
+class = "connect-failure"
+test = "tests-integration::integration::t4::representatives::t4__proxy_nonstream_connect_failure"
+p0 = ["terminal-observation"]
+why_no_fake = "kernel EOF before response headers"
+
+[[entry]]
+key = "proxy-messages-nonstream/timeout-before-headers"
+journey = "proxy-messages-nonstream"
+class = "timeout-before-headers"
+test = "tests-integration::integration::t4::representatives::t4__proxy_nonstream_timeout_before_headers"
+p0 = ["timeout-mapping"]
+why_no_fake = "tower timeout coupled to a pending socket response"
+
+[[entry]]
+key = "proxy-messages-nonstream/401-refresh-replay"
+journey = "proxy-messages-nonstream"
+class = "401-refresh-replay"
+test = "tests-integration::integration::t4::representatives::t4__proxy_nonstream_401_refresh_replay"
+p0 = ["oauth-replay"]
+why_no_fake = "401 body drain followed by redispatch through the same hyper client"
+
+[[entry]]
+key = "proxy-messages-nonstream/downstream-cancel"
+journey = "proxy-messages-nonstream"
+class = "downstream-cancel"
+test = "tests-integration::integration::t4::representatives::t4__proxy_nonstream_downstream_cancel"
+p0 = ["cancellation-propagation"]
+why_no_fake = "client socket closure must cancel the live upstream future"
+
+[[entry]]
+key = "proxy-messages-nonstream/tls-handshake"
+journey = "proxy-messages-nonstream"
+class = "tls-handshake"
+test = "tests-integration::integration::t4::representatives::t4__proxy_nonstream_tls_handshake"
+p0 = ["tls-wiring"]
+why_no_fake = "rustls acceptor and proxy listener wiring"
+
+[[entry]]
+key = "proxy-messages-stream/happy"
+journey = "proxy-messages-stream"
+class = "happy"
+test = "tests-integration::integration::t4::representatives::t4__proxy_stream_happy"
+p0 = ["sse-boundary"]
+why_no_fake = "real hyper chunk boundaries and SSE relay ordering"
+
+[[entry]]
+key = "proxy-messages-stream/malformed-chunk-or-eof"
+journey = "proxy-messages-stream"
+class = "malformed-chunk-or-eof"
+test = "tests-integration::integration::t4::representatives::t4__proxy_stream_malformed_chunk_maps_to_upstream_stream_error"
+p0 = ["sse-boundary"]
+why_no_fake = "hyper chunk decoder produces EOF only at the transport boundary"
+
+[[entry]]
+key = "proxy-messages-stream/half-close-rst"
+journey = "proxy-messages-stream"
+class = "half-close-rst"
+test = "tests-integration::integration::t4::representatives::t4__proxy_stream_upstream_rst_mid_stream"
+p0 = ["stream-error-mapping"]
+why_no_fake = "TCP RST and partial downstream delivery are kernel behavior"
+
+[[entry]]
+key = "proxy-messages-stream/downstream-cancel"
+journey = "proxy-messages-stream"
+class = "downstream-cancel"
+test = "tests-integration::integration::t4::representatives::t4__proxy_stream_downstream_cancel"
+p0 = ["stream-cancellation"]
+why_no_fake = "downstream socket drop must propagate through the streaming guard"
+
+[[entry]]
+key = "proxy-count-tokens/happy"
+journey = "proxy-count-tokens"
+class = "happy"
+test = "tests-integration::integration::t4::representatives::t4__proxy_count_tokens_happy"
+p0 = ["route-wiring"]
+why_no_fake = "composition-root route wiring to the real proxy listener"
+
+[[entry]]
+key = "proxy-models/happy"
+journey = "proxy-models"
+class = "happy"
+test = "tests-integration::integration::t4::representatives::t4__proxy_models_happy"
+p0 = ["route-wiring"]
+why_no_fake = "composition-root route wiring to the real proxy listener"
+
+[[entry]]
+key = "admin-crud/happy"
+journey = "admin-crud"
+class = "happy"
+test = "tests-integration::integration::t4::representatives::t4__admin_crud_on_separate_listener"
+p0 = ["listener-separation"]
+why_no_fake = "admin and proxy listeners must remain separated in the real App"
+
+[[entry]]
+key = "admin-sse/happy"
+journey = "admin-sse"
+class = "happy"
+test = "tests-integration::integration::t4::representatives::t4__admin_sse_emits_final_request_event_update"
+p0 = ["admin-sse"]
+why_no_fake = "admin SSE keepalive and final update over a real socket"
+
+[[entry]]
+key = "proxy-messages-nonstream/parity-composition-root"
+journey = "proxy-messages-nonstream"
+class = "parity-composition-root"
+test = "tests-integration::integration::t4::parity_characterization::t4__parity_characterization_golden"
+p0 = ["composition-root-parity"]
+why_no_fake = "production build_app_with_path wiring and full response/event payload are the claim"
+
+[[entry]]
+key = "process-boot/happy"
+journey = "process-boot"
+class = "happy"
+test = "cc-lb-server::integration::t5__process::boot::t5__process_boot_default_config"
+p0 = ["process-boot"]
+why_no_fake = "argv, environment, startup output, bind, and exit are OS-process behavior"
+
+[[entry]]
+key = "process-boot/connect-failure"
+journey = "process-boot"
+class = "connect-failure"
+test = "cc-lb-server::integration::t5__process::boot::t5__process_boot_fatal_table"
+p0 = ["fatal-startup"]
+why_no_fake = "configuration and preflight failures must produce exact process exit codes"
+
+[[entry]]
+key = "process-reload/tls-handshake"
+journey = "process-reload"
+class = "tls-handshake"
+test = "cc-lb-server::integration::t5__process::tls_reload::t5__process_reload_cert_sighup_keeps_inflight_stream"
+p0 = ["tls-reload"]
+why_no_fake = "SIGHUP and certificate replacement are OS-process behavior"
+
+[[entry]]
+key = "process-drain/signal-drain"
+journey = "process-drain"
+class = "signal-drain"
+test = "cc-lb-server::integration::t5__process::drain::t5__process_drain_rejects_new_and_finishes_inflight"
+p0 = ["graceful-drain"]
+why_no_fake = "OS signal delivery and process exit after in-flight drain"
+
+[[entry]]
+key = "proxy-messages-nonstream/restart-recovery"
+journey = "proxy-messages-nonstream"
+class = "restart-recovery"
+test = "cc-lb-server::integration::t5__process::db_restart::t5__process_db_recovery_after_restart"
+p0 = ["database-recovery"]
+why_no_fake = "recovery after a database process restart"
+
+[[entry]]
+key = "multi-replica/multi-replica-notify"
+journey = "multi-replica"
+class = "multi-replica-notify"
+test = "tests-multi-replica::integration::multi_replica_notify_and_failover::t5__multi_replica_notify_and_failover"
+p0 = ["cross-replica-notify"]
+why_no_fake = "multiple OS processes and PostgreSQL NOTIFY propagation"
+
+[[entry]]
+key = "process-cli/happy"
+journey = "process-cli"
+class = "happy"
+test = "cc-lb-server::integration::t5__process::boot::t5__process_cli_doctor_runs"
+p0 = ["cli-doctor"]
+why_no_fake = "the CLI canary proves argv dispatch and stdout formatting"

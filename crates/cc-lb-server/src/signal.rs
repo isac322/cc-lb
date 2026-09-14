@@ -296,3 +296,119 @@ impl Drop for SignalTasks {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod t2__tests {
+    use super::*;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::middleware;
+    use axum::routing::post;
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn signal_shutdown_pipeline_orchestration() {
+        let drain = DrainController::new();
+        let request_started = Arc::new(Notify::new());
+        let request_release = Arc::new(Notify::new());
+        let app = Router::new()
+            .route(
+                "/v1/messages",
+                post({
+                    let request_started = Arc::clone(&request_started);
+                    let request_release = Arc::clone(&request_release);
+                    move || {
+                        let request_started = Arc::clone(&request_started);
+                        let request_release = Arc::clone(&request_release);
+                        async move {
+                            request_started.notify_one();
+                            request_release.notified().await;
+                            "done"
+                        }
+                    }
+                }),
+            )
+            .route_layer(middleware::from_fn_with_state(
+                drain.clone(),
+                crate::drain::proxy_drain_middleware,
+            ));
+        let request_task = tokio::spawn(
+            app.oneshot(
+                Request::post("/v1/messages")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            ),
+        );
+        request_started.notified().await;
+        assert_eq!(drain.in_flight(), 1);
+
+        let (shutdown, _) = watch::channel(false);
+        let (drain_complete, _) = watch::channel(false);
+        let handle = SignalHandle {
+            shutdown,
+            drain_complete,
+            drain: drain.clone(),
+            drain_timeout: Duration::from_secs(60),
+            shutdown_started: Arc::new(AtomicBool::new(false)),
+            debug_logging: Arc::new(AtomicBool::new(false)),
+            tasks: SignalTasks::default(),
+            shutdown_hooks: ShutdownHooks::default(),
+        };
+        let mut shutdown_rx = handle.subscribe();
+        let mut drain_complete_rx = handle.subscribe_drain_complete();
+        let hook_ran = Arc::new(Notify::new());
+        let hook_observation = Arc::new(Mutex::new(None));
+        handle.add_shutdown_hook({
+            let drain = drain.clone();
+            let shutdown_rx = shutdown_rx.clone();
+            let hook_ran = Arc::clone(&hook_ran);
+            let hook_observation = Arc::clone(&hook_observation);
+            move || {
+                let drain = drain.clone();
+                let shutdown_rx = shutdown_rx.clone();
+                let hook_ran = Arc::clone(&hook_ran);
+                let hook_observation = Arc::clone(&hook_observation);
+                async move {
+                    *hook_observation.lock().expect("hook observation lock") =
+                        Some((drain.is_draining(), *shutdown_rx.borrow()));
+                    hook_ran.notify_one();
+                }
+            }
+        });
+
+        handle.start_shutdown();
+        shutdown_rx
+            .changed()
+            .await
+            .expect("shutdown sender remains alive");
+        hook_ran.notified().await;
+
+        assert!(drain.is_draining());
+        assert!(*shutdown_rx.borrow());
+        assert_eq!(
+            *hook_observation.lock().expect("hook observation lock"),
+            Some((true, true)),
+            "shutdown hook runs after drain trigger and shutdown publication",
+        );
+        assert!(
+            !*drain_complete_rx.borrow(),
+            "drain completion waits for the in-flight request",
+        );
+
+        request_release.notify_one();
+        request_task
+            .await
+            .expect("request task joins")
+            .expect("request completes");
+        drain_complete_rx
+            .changed()
+            .await
+            .expect("drain-complete sender remains alive");
+        assert!(*drain_complete_rx.borrow());
+        assert_eq!(drain.in_flight(), 0);
+    }
+}

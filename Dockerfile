@@ -53,7 +53,7 @@ RUN if [ "${SKIP_SPA}" != "1" ]; then \
     fi
 
 # ---- Builder: cross toolchain, source, and the compile ----
-FROM --platform=$BUILDPLATFORM rust:1.98.0-alpine AS builder
+FROM --platform=$BUILDPLATFORM rust:1.98.1-alpine AS builder
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
 # clang/lld: xx uses clang as the cross linker driver for every target
@@ -232,7 +232,7 @@ xx-verify --static /out/cc-lb
 EOF
 
 # ---- CI smoke: run the static binary on BuildKit without a local Docker daemon ----
-FROM alpine:3.23 AS smoke
+FROM alpine:3.24 AS smoke
 ARG EXPECTED_VERSION=
 COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
 SHELL ["/bin/ash", "-o", "pipefail", "-c"]
@@ -246,7 +246,7 @@ RUN /usr/local/bin/cc-lb --version && \
 # base around the static binary. Digest-pinned for reproducible builds
 # (:nonroot is a rolling tag); bump alongside the other base images
 # (freshen-deps).
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7 AS distroless
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS distroless
 COPY --link --from=builder /out/cc-lb /usr/local/bin/cc-lb
 USER 65532:65532
 EXPOSE 8080 9090 9091

@@ -1,45 +1,69 @@
 #![cfg(feature = "postgres")]
 
+use std::collections::HashMap;
 use std::error::Error;
-use std::sync::{Arc, OnceLock};
+use std::net::Ipv4Addr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cc_lb_control::{BusReceiver, RequestEventBus};
 use cc_lb_engine::{DEFAULT_PG_NOTIFY_CHANNEL, InMemoryBus, PgListener};
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics::{
+    Counter, CounterFn, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
+};
 use secrecy::SecretString;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use tokio::sync::watch;
-use tokio::time::{Instant, MissedTickBehavior, timeout};
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 
 const CLUSTER_TOKEN: &str = "test-cluster-token";
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
-const PROBE_INTERVAL: Duration = Duration::from_millis(100);
-
-static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pg_listener_reconnects_after_backend_close() -> TestResult<()> {
-    let Some(database_url) = ci_postgres_url() else {
-        eprintln!("SKIP: CI_POSTGRES_URL unset");
-        return Ok(());
-    };
-    let _serial = postgres_test_lock().lock().await;
+#[test]
+fn t3_postgres__pg_listener_reconnects_after_backend_close() -> TestResult<()> {
+    let (recorder, reconnect_rx) = ReconnectRecorder::new();
+    metrics::with_local_recorder(&recorder, || {
+        current_thread_runtime()?.block_on(reconnect_after_backend_close(&recorder, reconnect_rx))
+    })
+}
 
-    let handle = metrics_handle();
-    let app_name = format!("pg-listener-recovery-{}", uuid::Uuid::now_v7());
-    let listener_pool = pg_pool_with_application_name(&database_url, 2, &app_name).await?;
-    let publisher_pool = pg_pool(&database_url, 2).await?;
+#[test]
+fn t3_postgres__pg_listener_shuts_down_during_reconnect_sleep() -> TestResult<()> {
+    let (recorder, reconnect_rx) = ReconnectRecorder::new();
+    metrics::with_local_recorder(&recorder, || {
+        current_thread_runtime()?.block_on(shutdown_during_reconnect_sleep(&recorder, reconnect_rx))
+    })
+}
+
+fn current_thread_runtime() -> TestResult<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?)
+}
+
+async fn reconnect_after_backend_close(
+    recorder: &ReconnectRecorder,
+    mut reconnect_rx: mpsc::Receiver<String>,
+) -> TestResult<()> {
+    let fixture = crate::postgres_fixture::postgres_fixture().await?;
+    let database_url = fixture.database_url().to_owned();
+    let app_name = format!(
+        "cclb-pg-listener-{}",
+        fixture.schema_name().trim_start_matches("cc_lb_test_")
+    );
+    let (connection_tx, mut connection_rx) = mpsc::unbounded_channel();
+    let listener_pool = pg_pool_with_application_name(&database_url, &app_name, connection_tx)?;
+    let publisher_pool = fixture.pool().clone();
     let consumer_bus = Arc::new(InMemoryBus::new());
     let mut consumer_rx = consumer_bus.subscribe();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let listener_task = PgListener::spawn(
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut listener_task = PgListener::spawn(
         listener_pool.clone(),
         consumer_bus,
         reqwest::Client::new(),
@@ -48,35 +72,36 @@ async fn pg_listener_reconnects_after_backend_close() -> TestResult<()> {
         shutdown_rx,
     );
 
-    publish_until_received(&publisher_pool, &mut consumer_rx, partial("before-close")).await?;
+    let test_result = async {
+        await_listener_ready(&mut connection_rx).await?;
+        publish_and_receive_once(&publisher_pool, &mut consumer_rx, partial("before-close"))
+            .await?;
 
-    let before = reconnect_counter_value(handle, "recv_failed");
-    terminate_listener_backends(&publisher_pool, &app_name).await?;
-    wait_for_counter_at_least(handle, "recv_failed", before + 1.0, RECOVERY_TIMEOUT).await?;
+        terminate_listener_backends(&publisher_pool, &app_name).await?;
+        await_reconnect(&mut reconnect_rx, "recv_failed").await?;
+        assert!(recorder.count_matching("recv_failed") >= 1);
 
-    publish_until_received(&publisher_pool, &mut consumer_rx, partial("after-close")).await?;
+        publish_and_receive_once(&publisher_pool, &mut consumer_rx, partial("after-close")).await
+    }
+    .await;
 
-    let _ = shutdown_tx.send(true);
-    listener_pool.close().await;
-    publisher_pool.close().await;
-    listener_task.await?;
-    Ok(())
+    let shutdown_result = shutdown_listener(shutdown_tx, &mut listener_task, &listener_pool).await;
+    let teardown_result: TestResult<()> = fixture.teardown().await.map_err(Into::into);
+
+    test_result?;
+    shutdown_result?;
+    teardown_result
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pg_listener_shuts_down_during_reconnect_sleep() -> TestResult<()> {
-    let Some(database_url) = ci_postgres_url() else {
-        eprintln!("SKIP: CI_POSTGRES_URL unset");
-        return Ok(());
-    };
-    let _serial = postgres_test_lock().lock().await;
-
-    let handle = metrics_handle();
-    let before = reconnect_counter_value(handle, "connect_failed");
-    let invalid_pool = invalid_pg_pool(&database_url)?;
+async fn shutdown_during_reconnect_sleep(
+    recorder: &ReconnectRecorder,
+    mut reconnect_rx: mpsc::Receiver<String>,
+) -> TestResult<()> {
+    let (invalid_pool, reset_task) = connection_resetting_pg_pool().await?;
     let consumer_bus = Arc::new(InMemoryBus::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let listener_task = PgListener::spawn(
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut listener_task = PgListener::spawn(
         invalid_pool.clone(),
         consumer_bus,
         reqwest::Client::new(),
@@ -85,58 +110,117 @@ async fn pg_listener_shuts_down_during_reconnect_sleep() -> TestResult<()> {
         shutdown_rx,
     );
 
-    wait_for_counter_at_least(handle, "connect_failed", before + 2.0, RECOVERY_TIMEOUT).await?;
-    let _ = shutdown_tx.send(true);
-    timeout(SHUTDOWN_TIMEOUT, listener_task).await??;
-    invalid_pool.close().await;
-    Ok(())
+    let test_result: TestResult<()> = async {
+        await_reconnect(&mut reconnect_rx, "connect_failed").await?;
+        assert_eq!(recorder.count_matching("connect_failed"), 1);
+        Ok(())
+    }
+    .await;
+
+    let shutdown_result = shutdown_listener(shutdown_tx, &mut listener_task, &invalid_pool).await;
+    reset_task.abort();
+    let _ = reset_task.await;
+
+    test_result?;
+    shutdown_result
 }
 
-fn ci_postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL").ok()
-}
-
-fn postgres_test_lock() -> &'static tokio::sync::Mutex<()> {
-    POSTGRES_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-fn metrics_handle() -> &'static PrometheusHandle {
-    METRICS_HANDLE.get_or_init(|| {
-        PrometheusBuilder::new()
-            .install_recorder()
-            .expect("prometheus recorder installs")
-    })
-}
-
-async fn pg_pool(database_url: &str, max_connections: u32) -> Result<PgPool, sqlx::Error> {
-    PgPoolOptions::new()
-        .max_connections(max_connections)
-        .connect(database_url)
-        .await
-}
-
-async fn pg_pool_with_application_name(
+fn pg_pool_with_application_name(
     database_url: &str,
-    max_connections: u32,
     app_name: &str,
+    connection_tx: mpsc::UnboundedSender<()>,
 ) -> TestResult<PgPool> {
     let options = database_url
         .parse::<PgConnectOptions>()?
         .application_name(app_name);
     Ok(PgPoolOptions::new()
-        .max_connections(max_connections)
-        .connect_with(options)
-        .await?)
+        .max_connections(2)
+        .after_connect(move |_connection, _metadata| {
+            let connection_tx = connection_tx.clone();
+            Box::pin(async move {
+                connection_tx
+                    .send(())
+                    .expect("listener connection receiver remains open");
+                Ok(())
+            })
+        })
+        .connect_lazy_with(options))
 }
 
-fn invalid_pg_pool(database_url: &str) -> TestResult<PgPool> {
-    let mut url = url::Url::parse(database_url)?;
-    let missing_database = format!("{}_missing", url.path().trim_start_matches('/'));
-    url.set_path(&missing_database);
+async fn connection_resetting_pg_pool() -> TestResult<(PgPool, JoinHandle<()>)> {
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let addr = listener.local_addr()?;
+    let reset_task = tokio::spawn(async move {
+        while let Ok((stream, _peer)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+    let options = PgConnectOptions::new()
+        .host(&addr.ip().to_string())
+        .port(addr.port())
+        .username("postgres")
+        .database("postgres");
     let pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect_lazy(url.as_str())?;
-    Ok(pool)
+        .acquire_timeout(Duration::from_secs(1))
+        .connect_lazy_with(options);
+    Ok((pool, reset_task))
+}
+
+async fn await_listener_ready(receiver: &mut mpsc::UnboundedReceiver<()>) -> TestResult<()> {
+    // PgListener holds the first pool connection. Its initial queue-usage poll opens the
+    // second connection only after PgListener::listen has completed.
+    for _ in 0..2 {
+        tokio::time::timeout(RECOVERY_TIMEOUT, receiver.recv())
+            .await
+            .map_err(|_| error("timed out waiting for PostgreSQL LISTEN readiness"))?
+            .ok_or_else(|| error("PostgreSQL LISTEN readiness channel closed"))?;
+    }
+    Ok(())
+}
+
+async fn shutdown_listener(
+    shutdown_tx: watch::Sender<bool>,
+    listener_task: &mut JoinHandle<()>,
+    pool: &PgPool,
+) -> TestResult<()> {
+    let send_result = shutdown_tx
+        .send(true)
+        .map_err(|_| error("pg listener shutdown receiver dropped"));
+    let join_result = match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut *listener_task).await {
+        Ok(result) => result.map_err(Into::into),
+        Err(_) => {
+            listener_task.abort();
+            let _ = listener_task.await;
+            Err(error("timed out waiting for pg listener shutdown"))
+        }
+    };
+    pool.close().await;
+    send_result?;
+    join_result
+}
+
+async fn await_reconnect(
+    receiver: &mut mpsc::Receiver<String>,
+    expected_reason: &str,
+) -> TestResult<()> {
+    tokio::time::timeout(RECOVERY_TIMEOUT, async {
+        loop {
+            let reason = receiver
+                .recv()
+                .await
+                .ok_or_else(|| error("reconnect metric channel closed"))?;
+            if reason == expected_reason {
+                return Ok(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        error(format!(
+            "timed out waiting for reconnect reason={expected_reason}"
+        ))
+    })?
 }
 
 async fn terminate_listener_backends(pool: &PgPool, app_name: &str) -> TestResult<()> {
@@ -154,27 +238,18 @@ async fn terminate_listener_backends(pool: &PgPool, app_name: &str) -> TestResul
     Ok(())
 }
 
-async fn publish_until_received(
+async fn publish_and_receive_once(
     pool: &PgPool,
     receiver: &mut BusReceiver,
     partial: RequestEventPartial,
 ) -> TestResult<()> {
     let event_id = partial.event_id.clone();
     let payload = serde_json::to_string(&RequestEventUpdate::Partial(partial))?;
-    let deadline = Instant::now() + RECOVERY_TIMEOUT;
-    let mut interval = tokio::time::interval(PROBE_INTERVAL);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    while Instant::now() < deadline {
-        publish_payload(pool, &payload).await?;
-        if timeout(PROBE_INTERVAL, receive_partial(receiver, &event_id))
-            .await
-            .is_ok()
-        {
-            return Ok(());
-        }
-        interval.tick().await;
-    }
-    Err(error(format!("timed out waiting for partial {event_id}")))
+    publish_payload(pool, &payload).await?;
+    tokio::time::timeout(RECOVERY_TIMEOUT, receive_partial(receiver, &event_id))
+        .await
+        .map_err(|_| error(format!("timed out waiting for partial {event_id}")))??;
+    Ok(())
 }
 
 async fn publish_payload(pool: &PgPool, payload: &str) -> Result<(), sqlx::Error> {
@@ -199,42 +274,93 @@ async fn receive_partial(receiver: &mut BusReceiver, expected_event_id: &str) ->
     }
 }
 
-async fn wait_for_counter_at_least(
-    handle: &PrometheusHandle,
-    reason: &str,
-    expected: f64,
-    timeout_after: Duration,
-) -> TestResult<()> {
-    let deadline = Instant::now() + timeout_after;
-    let mut interval = tokio::time::interval(PROBE_INTERVAL);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    while Instant::now() < deadline {
-        if reconnect_counter_value(handle, reason) >= expected {
-            return Ok(());
-        }
-        interval.tick().await;
-    }
-    Err(error(format!(
-        "timed out waiting for reconnect counter reason={reason} to reach {expected}"
-    )))
+#[derive(Clone)]
+struct ReconnectRecorder {
+    counts: Arc<Mutex<HashMap<String, u64>>>,
+    reconnect_tx: mpsc::Sender<String>,
 }
 
-fn reconnect_counter_value(handle: &PrometheusHandle, reason: &str) -> f64 {
-    let label_fragment = format!("reason=\"{reason}\"");
-    handle
-        .render()
-        .lines()
-        .find(|line| {
-            line.starts_with("sse_pg_listener_reconnects_total{") && line.contains(&label_fragment)
-        })
-        .and_then(|line| line.split_whitespace().last())
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(0.0)
+impl ReconnectRecorder {
+    fn new() -> (Self, mpsc::Receiver<String>) {
+        let (reconnect_tx, reconnect_rx) = mpsc::channel(8);
+        (
+            Self {
+                counts: Arc::new(Mutex::new(HashMap::new())),
+                reconnect_tx,
+            },
+            reconnect_rx,
+        )
+    }
+
+    fn count_matching(&self, reason: &str) -> u64 {
+        self.counts
+            .lock()
+            .expect("reconnect recorder lock")
+            .get(reason)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+struct ReconnectCounter {
+    reason: String,
+    counts: Arc<Mutex<HashMap<String, u64>>>,
+    reconnect_tx: mpsc::Sender<String>,
+}
+
+impl CounterFn for ReconnectCounter {
+    fn increment(&self, value: u64) {
+        let mut counts = self.counts.lock().expect("reconnect recorder lock");
+        *counts.entry(self.reason.clone()).or_insert(0) += value;
+        drop(counts);
+        self.reconnect_tx
+            .try_send(self.reason.clone())
+            .expect("reconnect metric receiver remains ready");
+    }
+
+    fn absolute(&self, value: u64) {
+        self.counts
+            .lock()
+            .expect("reconnect recorder lock")
+            .insert(self.reason.clone(), value);
+    }
+}
+
+impl Recorder for ReconnectRecorder {
+    fn describe_counter(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
+
+    fn describe_gauge(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
+
+    fn describe_histogram(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
+
+    fn register_counter(&self, key: &Key, _metadata: &Metadata<'_>) -> Counter {
+        if key.name() != "sse_pg_listener_reconnects_total" {
+            return Counter::noop();
+        }
+        let reason = key
+            .labels()
+            .find(|label| label.key() == "reason")
+            .map(|label| label.value().to_owned())
+            .expect("reconnect metric carries reason label");
+        Counter::from_arc(Arc::new(ReconnectCounter {
+            reason,
+            counts: Arc::clone(&self.counts),
+            reconnect_tx: self.reconnect_tx.clone(),
+        }))
+    }
+
+    fn register_gauge(&self, _key: &Key, _metadata: &Metadata<'_>) -> Gauge {
+        Gauge::noop()
+    }
+
+    fn register_histogram(&self, _key: &Key, _metadata: &Metadata<'_>) -> Histogram {
+        Histogram::noop()
+    }
 }
 
 fn partial(name: &str) -> RequestEventPartial {
     RequestEventPartial {
-        event_id: format!("event-{name}-{}", uuid::Uuid::now_v7()),
+        event_id: format!("event-{name}"),
         request_id: format!("req-{name}"),
         ts: 1_800_000_000,
         ts_ms: 1_800_000_000_000,

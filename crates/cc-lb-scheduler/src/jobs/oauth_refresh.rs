@@ -173,3 +173,85 @@ fn is_refreshable(upstream: &UpstreamRecord) -> bool {
         && upstream.deleted_at_unix_secs.is_none()
         && upstream.oauth_credentials.is_some()
 }
+
+#[cfg(test)]
+mod tests {
+    use cc_lb_aead::EncryptedOAuthTokens;
+
+    use super::*;
+
+    #[test]
+    fn is_refreshable_matches_eligibility_matrix() {
+        struct Case {
+            name: &'static str,
+            kind: UpstreamKind,
+            enabled: bool,
+            deleted: bool,
+            has_credentials: bool,
+            expected: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "oauth upstream with credentials",
+                kind: UpstreamKind::AnthropicOauth,
+                enabled: true,
+                deleted: false,
+                has_credentials: true,
+                expected: true,
+            },
+            Case {
+                name: "disabled oauth upstream with credentials",
+                kind: UpstreamKind::AnthropicOauth,
+                enabled: false,
+                deleted: false,
+                has_credentials: true,
+                expected: true,
+            },
+            Case {
+                name: "deleted oauth upstream",
+                kind: UpstreamKind::AnthropicOauth,
+                enabled: true,
+                deleted: true,
+                has_credentials: true,
+                expected: false,
+            },
+            Case {
+                name: "oauth upstream without credentials",
+                kind: UpstreamKind::AnthropicOauth,
+                enabled: true,
+                deleted: false,
+                has_credentials: false,
+                expected: false,
+            },
+            Case {
+                name: "non-oauth upstream",
+                kind: UpstreamKind::AnthropicApiKey,
+                enabled: true,
+                deleted: false,
+                has_credentials: true,
+                expected: false,
+            },
+        ];
+
+        for case in cases {
+            let upstream = UpstreamRecord {
+                id: Uuid::from_u128(1),
+                kind: case.kind,
+                enabled: case.enabled,
+                deleted_at_unix_secs: case.deleted.then_some(1_800_000_000),
+                oauth_credentials: case
+                    .has_credentials
+                    .then(|| EncryptedOAuthTokens::from_ciphertext(vec![1])),
+                ..UpstreamRecord::default()
+            };
+
+            assert_eq!(
+                is_refreshable(&upstream),
+                case.expected,
+                "case: {}",
+                case.name
+            );
+        }
+    }
+}

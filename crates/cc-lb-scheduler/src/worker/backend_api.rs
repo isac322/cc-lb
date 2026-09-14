@@ -105,36 +105,6 @@ impl SchedulerBackend {
         }
     }
 
-    pub async fn list_keepalive_tasks(
-        &self,
-        filter: &Filter,
-    ) -> Result<Vec<SchedulerTaskRow<AdaptiveJob>>, SchedulerError> {
-        match self {
-            #[cfg(feature = "sqlite")]
-            Self::Sqlite(sqlite) => {
-                let storage = sqlite.keepalive_storage();
-                storage
-                    .list_tasks(filter)
-                    .await
-                    .map_err(SchedulerError::Database)?
-                    .into_iter()
-                    .map(sqlite_task_to_row)
-                    .collect()
-            }
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => {
-                let storage = postgres.keepalive_operation_storage();
-                storage
-                    .list_tasks(filter)
-                    .await
-                    .map_err(SchedulerError::Database)?
-                    .into_iter()
-                    .map(postgres_task_to_row)
-                    .collect()
-            }
-        }
-    }
-
     pub async fn list_cron_tasks(
         &self,
         filter: &Filter,
@@ -323,6 +293,7 @@ fn u64_to_i64(value: u64, field: &str) -> Result<i64, SchedulerError> {
     i64::try_from(value).map_err(|_| SchedulerError::Job(format!("{field} exceeds i64::MAX")))
 }
 
+#[allow(non_snake_case)]
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use cc_lb_storage_api::CacheTtl;
@@ -354,7 +325,7 @@ mod tests {
     ";
 
     #[tokio::test]
-    async fn sqlite_insert_uses_task_max_attempts_override() {
+    async fn t3__sqlite_insert_uses_task_max_attempts_override() {
         let pool = SqlitePool::connect(":memory:").await.expect("sqlite pool");
         sqlx::query(CREATE_JOBS)
             .execute(&pool)

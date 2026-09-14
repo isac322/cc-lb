@@ -7,6 +7,8 @@ use fake_anthropic::{AppConfig, app};
 
 #[derive(Debug, Parser)]
 struct Args {
+    #[arg(long, env = "FAKE_DEFAULT_MODE", default_value = "")]
+    default_mode: String,
     #[arg(long, default_value_t = 9080)]
     port: u16,
     #[arg(long, default_value_t = 1024)]
@@ -25,6 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("fake-anthropic listening on http://{addr}");
 
     let app = app(AppConfig {
+        default_mode: fake_anthropic::modes::FakeMode::parse(&args.default_mode),
         slow_mode_bps: args.slow_mode_bps,
         files_cap_bytes: args.files_cap_bytes,
         tokens_expire_in: args.tokens_expire_in,

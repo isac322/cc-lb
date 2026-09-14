@@ -4,8 +4,6 @@ pub mod audit;
 mod cache_keepalive_session_read_row;
 pub mod cache_keepalive_session_reads;
 pub mod cache_keepalive_sessions;
-#[cfg(test)]
-mod cache_keepalive_sessions_tests;
 pub mod config_store;
 pub mod managed_keys;
 pub mod meta;

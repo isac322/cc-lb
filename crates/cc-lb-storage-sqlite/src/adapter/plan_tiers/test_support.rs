@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use cc_lb_storage_api::{
     BackendKind, MetaStore, MetadataTierMappingOverrideRecord, PlanTierRatioRecord, PlanTierStore,
     TierResolutionSource, UpstreamPlanTierRecord,
@@ -15,7 +13,7 @@ pub(super) async fn migrated_storage() -> (tempfile::TempDir, SqliteStorage) {
         "sqlite://{}",
         temp_dir.path().join("plan-tiers.sqlite").display()
     );
-    let storage = crate::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+    let storage = crate::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
         .await
         .expect("open sqlite");
     storage

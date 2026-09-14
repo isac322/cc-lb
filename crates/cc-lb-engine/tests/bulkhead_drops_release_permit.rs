@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 use common::signed_request;
 
 #[tokio::test]
-async fn cancelling_execute_drops_guard_and_releases_permit()
+async fn t2__cancelling_execute_drops_guard_and_releases_permit()
 -> Result<(), Box<dyn std::error::Error>> {
     let hold = Arc::new(HoldDispatch::default());
     let bulkhead = Bulkhead::new(
@@ -34,7 +34,7 @@ async fn cancelling_execute_drops_guard_and_releases_permit()
                 .await
         })
     };
-    tokio::time::timeout(Duration::from_secs(1), hold.started.notified()).await?;
+    hold.started.notified().await;
     assert_eq!(bulkhead.active(), 1);
     assert_eq!(bulkhead.semaphore.available_permits(), 0);
 

@@ -1,40 +1,30 @@
+#![allow(non_snake_case)]
+
 use super::*;
 
+use std::sync::Mutex;
+
 use bytes::Bytes;
-use cc_lb_config::{SchedulerConfig, StorageConfig};
-use cc_lb_engine::SystemClock;
+use cc_lb_aead::AeadError;
 use cc_lb_engine::cache_keepalive::{
-    CacheKeepaliveCancelRequest, CacheKeepaliveNotTrackedRequest, RequestSnapshot, ScheduleParams,
+    CacheKeepaliveCancelRequest, CacheKeepaliveNotTrackedRequest, PersistedRequestSnapshot,
+    RequestSnapshot, ScheduleParams,
 };
 use cc_lb_scheduler::error::SchedulerError;
-use cc_lb_scheduler::worker::{Filter, TaskStatus};
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
-    CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStatus, CacheTtl, MetaStore,
+    CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore,
+    CacheKeepaliveSessionStatus, CacheTtl, RequestEventStore,
 };
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use http::{HeaderMap, Method};
-use tempfile::TempDir;
 use url::Url;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn enqueue_persists_session_payload_and_apalis_job() {
-    let fixture = Fixture::new().await;
-    let backend = crate::scheduler_factory::open_scheduler_storage(
-        &StorageConfig::Sqlite {
-            path: fixture.sqlite_path.clone(),
-        },
-        &SchedulerConfig::default(),
-        Arc::new(SystemClock),
-    )
-    .await
-    .expect("open scheduler storage");
-    let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
-        storage: fixture.storage.clone(),
-        pusher: Arc::new(backend.backend.clone()),
-        aead: fixture.aead.clone(),
-        clock: Arc::new(SystemClock),
-    });
+async fn t2__cache_keepalive_enqueuer__persists_session_payload_and_apalis_job() {
+    let fixture = Fixture::new();
+    let pusher = Arc::new(RecordingPusher::default());
+    let enqueuer = fixture.enqueuer(pusher.clone());
 
     enqueuer
         .enqueue_cache_keepalive(enqueue_request())
@@ -53,34 +43,51 @@ async fn enqueue_persists_session_payload_and_apalis_job() {
     assert!(!record.encrypted_payload.is_empty());
     assert!(!String::from_utf8_lossy(&record.encrypted_payload).contains("cached prompt"));
 
-    let jobs = backend
-        .backend
-        .list_keepalive_tasks(&Filter {
-            status: Some(TaskStatus::Pending),
-            page: 1,
-            page_size: Some(10),
-        })
-        .await
-        .expect("list cache keepalive jobs");
-    assert_eq!(jobs.len(), 1);
-    let job = &jobs[0];
+    let job = pusher.take_only();
     assert_eq!(
         job.idempotency_key.as_deref(),
         Some(record.current_job_key.as_str())
     );
-    assert_eq!(job.max_attempts, 1);
-    assert_eq!(job.run_at_unix_secs, record.run_at_unix_secs);
+    assert_eq!(job.max_attempts, Some(1));
+    assert_eq!(job.run_at_unix_secs, Some(record.run_at_unix_secs));
 }
 
 #[tokio::test]
-async fn enqueue_failure_terminalizes_committed_pending_session() {
-    let fixture = Fixture::new().await;
-    let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
-        storage: fixture.storage.clone(),
-        pusher: Arc::new(FailingPusher),
-        aead: fixture.aead.clone(),
-        clock: Arc::new(SystemClock),
-    });
+async fn t2__cache_keepalive_enqueuer__aead_encryption_failure_marks_terminal() {
+    let fixture = Fixture::new();
+    let pusher = Arc::new(RecordingPusher::default());
+    let enqueuer =
+        fixture.enqueuer_with_payload_encryptor(pusher.clone(), Arc::new(FailingAeadService));
+
+    let error = enqueuer
+        .enqueue_cache_keepalive(enqueue_request())
+        .await
+        .expect_err("AEAD encryption failure must fail enqueue");
+
+    assert_eq!(
+        error.0,
+        "cache keepalive payload encryption failed: AEAD encryption failed"
+    );
+    let record = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load cache keepalive session")
+        .expect("committed session exists");
+    assert_eq!(record.generation, 1);
+    assert_eq!(record.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        record.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::DispatchError)
+    );
+    assert!(record.encrypted_payload.is_empty());
+    assert_eq!(pusher.len(), 0);
+}
+
+#[tokio::test]
+async fn t2__cache_keepalive_enqueuer__push_failure_terminalizes_committed_pending_session() {
+    let fixture = Fixture::new();
+    let enqueuer = fixture.enqueuer(Arc::new(FailingPusher));
 
     let result = enqueuer.enqueue_cache_keepalive(enqueue_request()).await;
 
@@ -99,27 +106,25 @@ async fn enqueue_failure_terminalizes_committed_pending_session() {
 }
 
 #[tokio::test]
-async fn cancel_terminalizes_active_session_without_deleting_pending_job() {
-    let fixture = Fixture::new().await;
-    let backend = crate::scheduler_factory::open_scheduler_storage(
-        &StorageConfig::Sqlite {
-            path: fixture.sqlite_path.clone(),
-        },
-        &SchedulerConfig::default(),
-        Arc::new(SystemClock),
-    )
-    .await
-    .expect("open scheduler storage");
-    let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
-        storage: fixture.storage.clone(),
-        pusher: Arc::new(backend.backend.clone()),
-        aead: fixture.aead.clone(),
-        clock: Arc::new(SystemClock),
-    });
+async fn t2__cache_keepalive_enqueuer__cancel_terminalizes_leased_session_without_deleting_pending_job()
+ {
+    let fixture = Fixture::new();
+    let pusher = Arc::new(RecordingPusher::default());
+    let enqueuer = fixture.enqueuer(pusher.clone());
     enqueuer
         .enqueue_cache_keepalive(enqueue_request())
         .await
         .expect("enqueue cache keepalive");
+    assert!(
+        CacheKeepaliveSessionStore::claim_cache_keepalive_turn(
+            fixture.storage.as_ref(),
+            "session-hash",
+            1,
+            1_700_000_000,
+        )
+        .await
+        .expect("claim cache keepalive lease")
+    );
 
     enqueuer
         .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
@@ -140,27 +145,16 @@ async fn cancel_terminalizes_active_session_without_deleting_pending_job() {
         record.terminal_reason,
         Some(CacheKeepaliveTerminalReason::Cancelled)
     );
-    let jobs = backend
-        .backend
-        .list_keepalive_tasks(&Filter {
-            status: Some(TaskStatus::Pending),
-            page: 1,
-            page_size: Some(10),
-        })
-        .await
-        .expect("list cache keepalive jobs");
-    assert_eq!(jobs.len(), 1);
+    assert_eq!(record.running_since_unix_secs, None);
+    assert!(record.encrypted_payload.is_empty());
+    assert_eq!(pusher.len(), 1);
 }
 
 #[tokio::test]
-async fn not_tracked_writes_a_decision_projection_without_a_renewal_turn() {
-    let fixture = Fixture::new().await;
-    let enqueuer = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
-        storage: fixture.storage.clone(),
-        pusher: Arc::new(FailingPusher),
-        aead: fixture.aead.clone(),
-        clock: Arc::new(SystemClock),
-    });
+async fn t2__cache_keepalive_enqueuer__not_tracked_writes_a_decision_projection_without_a_renewal_turn()
+ {
+    let fixture = Fixture::new();
+    let enqueuer = fixture.enqueuer(Arc::new(FailingPusher));
     let request = enqueue_request();
 
     assert!(
@@ -196,53 +190,121 @@ async fn not_tracked_writes_a_decision_projection_without_a_renewal_turn() {
     assert_eq!(page.rows.len(), 1);
     assert!(page.rows[0].is_decision());
     assert_eq!(page.rows[0].reason, "user turn (stop_reason=end_turn)");
-    let turns = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM cache_keepalive_turns")
-        .fetch_one(fixture.storage.pool())
+    let turns = fixture
+        .storage
+        .list_cache_keepalive_turns("principal", "session-hash")
         .await
         .expect("count renewal turns");
-    assert_eq!(turns, 0);
-    let request_events = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM request_events_v1")
-        .fetch_one(fixture.storage.pool())
+    assert_eq!(turns.len(), 0);
+    let request_events = fixture
+        .storage
+        .query_request_events(0, u64::MAX, usize::MAX)
         .await
         .expect("count request events");
-    assert_eq!(request_events, 0);
-    if let Ok(qa_database_path) = std::env::var("CC_LB_CACHE_KEEPALIVE_QA_DATABASE") {
-        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .execute(fixture.storage.pool())
-            .await
-            .expect("checkpoint QA database");
-        std::fs::copy(&fixture.sqlite_path, &qa_database_path).expect("copy QA database");
-        eprintln!("cache keepalive QA database: {qa_database_path}");
-    }
+    assert_eq!(request_events.len(), 0);
 }
 
 struct Fixture {
-    _dir: TempDir,
-    sqlite_path: std::path::PathBuf,
-    storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+    storage: Arc<InMemoryStorage>,
     aead: Arc<AeadService>,
+    clock: cc_lb_engine::ClockHandle,
 }
 
 impl Fixture {
-    async fn new() -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let sqlite_path = dir.path().join("keepalive.sqlite");
-        let database_url = format!("sqlite://{}", sqlite_path.display());
-        let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(SystemClock))
-                .await
-                .expect("open sqlite"),
-        );
-        storage
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("initialize sqlite");
+    fn new() -> Self {
+        let clock = fixed_clock(1_700_000_000);
         Self {
-            _dir: dir,
-            sqlite_path,
-            storage,
+            storage: Arc::new(InMemoryStorage::with_clock(clock.clone())),
             aead: Arc::new(AeadService::from_master_key([7; 32])),
+            clock,
         }
+    }
+
+    fn enqueuer(&self, pusher: Arc<dyn CacheKeepaliveTaskPusher>) -> ServerCacheKeepaliveEnqueuer {
+        self.enqueuer_with_payload_encryptor(pusher, Arc::new(FixedPayloadEncryptor))
+    }
+
+    fn enqueuer_with_payload_encryptor(
+        &self,
+        pusher: Arc<dyn CacheKeepaliveTaskPusher>,
+        payload_encryptor: Arc<dyn CacheKeepalivePayloadEncryptor>,
+    ) -> ServerCacheKeepaliveEnqueuer {
+        ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+            storage: self.storage.clone(),
+            pusher,
+            aead: self.aead.clone(),
+            clock: self.clock.clone(),
+        })
+        .with_payload_encryptor(payload_encryptor)
+        .with_decision_id_generator(Arc::new(FixedDecisionIdGenerator))
+    }
+}
+
+struct FixedDecisionIdGenerator;
+
+impl CacheKeepaliveDecisionIdGenerator for FixedDecisionIdGenerator {
+    fn next_id(&self) -> String {
+        "not-tracked:test-decision".to_owned()
+    }
+}
+
+struct FixedPayloadEncryptor;
+
+impl CacheKeepalivePayloadEncryptor for FixedPayloadEncryptor {
+    fn encrypt(
+        &self,
+        _principal_id: &str,
+        _session_key_hash: &str,
+        _upstream_id: Uuid,
+        _payload_generation: u64,
+        _snapshot: &PersistedRequestSnapshot,
+    ) -> Result<Vec<u8>, CacheKeepalivePayloadError> {
+        Ok(vec![0xA5; 32])
+    }
+}
+
+struct FailingAeadService;
+
+impl CacheKeepalivePayloadEncryptor for FailingAeadService {
+    fn encrypt(
+        &self,
+        _principal_id: &str,
+        _session_key_hash: &str,
+        _upstream_id: Uuid,
+        _payload_generation: u64,
+        _snapshot: &PersistedRequestSnapshot,
+    ) -> Result<Vec<u8>, CacheKeepalivePayloadError> {
+        Err(CacheKeepalivePayloadError::Aead(
+            AeadError::EncryptionFailed,
+        ))
+    }
+}
+
+#[derive(Default)]
+struct RecordingPusher {
+    tasks: Mutex<Vec<SchedulerPushTask<AdaptiveJob>>>,
+}
+
+impl RecordingPusher {
+    fn len(&self) -> usize {
+        self.tasks.lock().expect("recording pusher lock").len()
+    }
+
+    fn take_only(&self) -> SchedulerPushTask<AdaptiveJob> {
+        let mut tasks = self.tasks.lock().expect("recording pusher lock");
+        assert_eq!(tasks.len(), 1);
+        tasks.pop().expect("one recorded cache keepalive task")
+    }
+}
+
+#[async_trait]
+impl CacheKeepaliveTaskPusher for RecordingPusher {
+    async fn push_cache_keepalive_task(
+        &self,
+        task: SchedulerPushTask<AdaptiveJob>,
+    ) -> SchedulerResult<()> {
+        self.tasks.lock().expect("recording pusher lock").push(task);
+        Ok(())
     }
 }
 

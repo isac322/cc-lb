@@ -1,7 +1,6 @@
-use std::{str::FromStr, sync::Arc};
+use std::str::FromStr;
 
 use anyhow::Result;
-use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
     BackendKind, MetaStore, SubscriptionQuotaCheckpointRangeQuery,
     SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
@@ -14,13 +13,14 @@ use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOp
 use uuid::Uuid;
 
 #[tokio::test]
-async fn quota_aggregates_preserve_anchor_ties_and_inclusive_token_boundaries() -> Result<()> {
-    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
-        eprintln!("skip: CI_POSTGRES_URL not set; requires isolated local/test postgres DSN");
-        return Ok(());
-    };
+async fn t3_postgres__quota_aggregates_preserve_anchor_ties_and_inclusive_token_boundaries()
+-> Result<()> {
+    let url = crate::postgres_fixture::required_postgres_url();
     let fixture = Fixture::create(&url).await?;
-    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    let storage = PostgresStorage::new(
+        fixture.pool.clone(),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
+    );
     storage.initialize(BackendKind::Postgres).await?;
     let upstream_id = Uuid::from_u128(1);
     let checkpoints = [

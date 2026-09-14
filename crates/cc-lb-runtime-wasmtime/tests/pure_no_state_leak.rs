@@ -1,17 +1,8 @@
-//! Stage 7 — confirm pure-mode dispatch drops per-call wasm state.
+//! Pure-mode dispatch contracts.
 //!
-//! Pure mode builds a fresh `Store` for each hook call (Stage 2). This
-//! test exercises the cache-aware-wasmtime plugin 10 times in a row
-//! against a pure slot and verifies:
-//!
-//! 1. **Determinism**: every call returns byte-identical wire output
-//!    given identical input, i.e. no state from earlier calls leaks
-//!    into later ones.
-//! 2. **RSS bound (Linux only)**: the total `VmRSS` growth across the
-//!    10 calls stays under a generous ceiling (8 MiB). A leaking
-//!    per-call Store would blow past this within a few iterations
-//!    because the per-Store `PoolingAllocationConfig` reservation is
-//!    on the order of 4 MiB each.
+//! The deterministic T3 contract proves that a fresh `Store` per call
+//! produces byte-identical output. The Linux-only TX check separately
+//! constrains RSS growth across the same ten-call workload.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +13,7 @@ use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use rkyv::rancor::Error;
 
 const ITERATIONS: usize = 10;
+#[cfg(target_os = "linux")]
 const RSS_GROWTH_CEILING_KIB: u64 = 8 * 1024;
 
 fn wasm_path() -> PathBuf {
@@ -106,40 +98,31 @@ fn vmrss_kib() -> std::io::Result<u64> {
         .ok_or_else(|| std::io::Error::other("VmRSS missing"))
 }
 
-#[cfg(not(target_os = "linux"))]
-fn vmrss_kib() -> std::io::Result<u64> {
-    Ok(0)
-}
-
-#[test]
-fn pure_mode_does_not_accumulate_state() {
-    let wasm = match std::fs::read(wasm_path()) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            // The wasm fixture is pre-built by build.rs but on some
-            // workstation configs the artifact may be missing. Skip
-            // rather than fail — the lib test surface already covers
-            // dispatch correctness; this scenario is the RSS gate.
-            return;
-        }
-    };
+fn pure_mode_fixture() -> (Arc<WasmtimeRuntime>, RuntimeSlotKey, Vec<u8>) {
+    let wasm = std::fs::read(wasm_path()).expect("build script produces cache-aware wasm fixture");
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
     let slot = RuntimeSlotKey::global("pure-leak-probe");
     runtime
         .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register filter");
-    let req = request();
-    let in_bytes = rkyv::to_bytes::<Error>(&req).expect("encode");
+    let in_bytes = rkyv::to_bytes::<Error>(&request()).expect("encode");
+    (runtime, slot, in_bytes.to_vec())
+}
 
-    let baseline_rss = vmrss_kib().unwrap_or(0);
-    let mut outputs: Vec<Vec<u8>> = Vec::with_capacity(ITERATIONS);
-    for _ in 0..ITERATIONS {
-        let bytes = runtime
-            .call_filter(&slot, in_bytes.as_slice())
-            .expect("call");
-        outputs.push(bytes);
-    }
-    let final_rss = vmrss_kib().unwrap_or(0);
+fn call_pure_mode(
+    runtime: &WasmtimeRuntime,
+    slot: &RuntimeSlotKey,
+    in_bytes: &[u8],
+) -> Vec<Vec<u8>> {
+    (0..ITERATIONS)
+        .map(|_| runtime.call_filter(slot, in_bytes).expect("call"))
+        .collect()
+}
+
+#[test]
+fn t3__pure_mode_returns_deterministic_output() {
+    let (runtime, slot, in_bytes) = pure_mode_fixture();
+    let outputs = call_pure_mode(&runtime, &slot, &in_bytes);
 
     for (i, out) in outputs.iter().enumerate().skip(1) {
         assert_eq!(
@@ -147,12 +130,19 @@ fn pure_mode_does_not_accumulate_state() {
             "iteration {i} diverged from first call — state leaked",
         );
     }
+}
 
-    if baseline_rss > 0 {
-        let growth = final_rss.saturating_sub(baseline_rss);
-        assert!(
-            growth <= RSS_GROWTH_CEILING_KIB,
-            "RSS grew {growth} KiB over {ITERATIONS} pure-mode calls (ceiling {RSS_GROWTH_CEILING_KIB} KiB)",
-        );
-    }
+#[cfg(target_os = "linux")]
+#[test]
+fn tx__pure_mode_rss_stays_under_ceiling() {
+    let (runtime, slot, in_bytes) = pure_mode_fixture();
+    let baseline_rss = vmrss_kib().expect("read baseline VmRSS");
+    let _outputs = call_pure_mode(&runtime, &slot, &in_bytes);
+    let final_rss = vmrss_kib().expect("read final VmRSS");
+    let growth = final_rss.saturating_sub(baseline_rss);
+
+    assert!(
+        growth <= RSS_GROWTH_CEILING_KIB,
+        "RSS grew {growth} KiB over {ITERATIONS} pure-mode calls (ceiling {RSS_GROWTH_CEILING_KIB} KiB)",
+    );
 }

@@ -5,7 +5,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn sse_ok_path_uses_single_content_block_index_and_terminal_events() {
+async fn t2__sse_ok_path_uses_single_content_block_index_and_terminal_events() {
     let response = app(AppConfig::default())
         .oneshot(
             Request::builder()
@@ -43,7 +43,7 @@ async fn sse_ok_path_uses_single_content_block_index_and_terminal_events() {
 }
 
 #[tokio::test]
-async fn non_streaming_and_aux_endpoints_return_anthropic_like_shapes() {
+async fn t2__non_streaming_and_aux_endpoints_return_anthropic_like_shapes() {
     let app = app(AppConfig::default());
 
     let message = json_request(

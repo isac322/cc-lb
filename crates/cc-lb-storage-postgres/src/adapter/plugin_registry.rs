@@ -133,7 +133,7 @@ impl PluginRegistryStore for PostgresStorage {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE ($1::uuid IS NULL OR r.id > $1) ORDER BY r.id ASC LIMIT $2")
+        let rows = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS derived_refcount FROM wasm_registry_v2 r WHERE ($1::uuid IS NULL OR r.id > $1) ORDER BY r.id ASC LIMIT $2")
             .bind(after).bind(u64_to_i64(limit as u64, "plugin_registry.limit")?).fetch_all(&self.pool).await.map_err(map_sqlx_error)?;
         rows.into_iter().map(registry_from_row).collect()
     }
@@ -142,7 +142,7 @@ impl PluginRegistryStore for PostgresStorage {
         &self,
         sha256: [u8; 32],
     ) -> StorageResult<Option<WasmRegistryEntry>> {
-        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.sha256 = $1")
+        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS derived_refcount FROM wasm_registry_v2 r WHERE r.sha256 = $1")
             .bind(sha256.as_slice()).fetch_optional(&self.pool).await.map_err(map_sqlx_error)?;
         row.map(registry_from_row).transpose()
     }
@@ -151,7 +151,7 @@ impl PluginRegistryStore for PostgresStorage {
         &self,
         name: &str,
     ) -> StorageResult<Option<WasmRegistryEntry>> {
-        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.name = $1")
+        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS derived_refcount FROM wasm_registry_v2 r WHERE r.name = $1")
             .bind(name)
             .fetch_optional(&self.pool)
             .await
@@ -160,7 +160,7 @@ impl PluginRegistryStore for PostgresStorage {
     }
 
     async fn get_registry_entry_by_id(&self, id: Uuid) -> StorageResult<Option<WasmRegistryEntry>> {
-        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.id = $1")
+        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS derived_refcount FROM wasm_registry_v2 r WHERE r.id = $1")
             .bind(id).fetch_optional(&self.pool).await.map_err(map_sqlx_error)?;
         row.map(registry_from_row).transpose()
     }
@@ -697,7 +697,7 @@ impl PostgresStorage {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         sha256: [u8; 32],
     ) -> StorageResult<Option<WasmRegistryEntry>> {
-        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.sha256 = $1 FOR UPDATE")
+        let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS derived_refcount FROM wasm_registry_v2 r WHERE r.sha256 = $1 FOR UPDATE")
             .bind(sha256.as_slice())
             .fetch_optional(&mut **tx)
             .await
@@ -723,7 +723,7 @@ async fn registry_by_name_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     name: &str,
 ) -> StorageResult<Option<WasmRegistryEntry>> {
-    let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.name = $1 FOR UPDATE")
+    let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS derived_refcount FROM wasm_registry_v2 r WHERE r.name = $1 FOR UPDATE")
         .bind(name)
         .fetch_optional(&mut **tx)
         .await
@@ -735,7 +735,7 @@ async fn registry_by_id_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: Uuid,
 ) -> StorageResult<Option<WasmRegistryEntry>> {
-    let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.id = $1 FOR UPDATE")
+    let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS derived_refcount FROM wasm_registry_v2 r WHERE r.id = $1 FOR UPDATE")
         .bind(id)
         .fetch_optional(&mut **tx)
         .await
@@ -848,7 +848,7 @@ async fn insert_registry_in_tx(
         .iter()
         .map(|slot| slot.as_str().to_owned())
         .collect();
-    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots, schema_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12, $13) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, description, usage, hook_metadata, supported_slots, schema_hash")
+    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots, schema_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12, $13) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS derived_refcount, revision, description, usage, hook_metadata, supported_slots, schema_hash")
         .bind(id)
         .bind(sha256.as_slice())
         .bind(&input.name)
@@ -874,7 +874,7 @@ async fn delete_registry_entry_once(
     expected_revision: u64,
 ) -> StorageResult<Option<WasmRegistryEntry>> {
     let mut tx = begin_repeatable_read(pool).await?;
-    let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS refcount FROM wasm_registry_v2 r WHERE r.id = $1 FOR UPDATE")
+    let row = sqlx::query("SELECT r.*, (SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id) + (SELECT COUNT(*) FROM upstream_spec_v1 u WHERE u.deleted_at IS NULL AND (u.warmup_dialect_plugin->>'wasm_registry_id')::uuid = r.id) AS derived_refcount FROM wasm_registry_v2 r WHERE r.id = $1 FOR UPDATE")
         .bind(id).fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
     let Some(row) = row else {
         tx.commit().await.map_err(map_sqlx_error)?;
@@ -948,7 +948,7 @@ async fn begin_repeatable_read(
 
 fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEntry> {
     let id = row.try_get("id").map_err(map_sqlx_error)?;
-    let refcount = row.try_get("refcount").map_err(map_sqlx_error)?;
+    let refcount = row.try_get("derived_refcount").map_err(map_sqlx_error)?;
     if id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
         return Ok(WasmRegistryEntry::builtin_subscription_preference(refcount));
     }

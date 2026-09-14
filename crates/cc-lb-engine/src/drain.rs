@@ -161,6 +161,7 @@ impl Drop for InFlightGuard {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::convert::Infallible;
     use std::time::Duration;
@@ -172,13 +173,15 @@ mod tests {
     use axum::response::Response;
     use axum::routing::get;
     use bytes::Bytes;
+    use http_body_util::BodyExt;
+    use metrics_util::debugging::DebugValue;
     use tokio::sync::Notify;
     use tower::ServiceExt;
 
     use super::{DrainController, proxy_drain_middleware};
 
     #[tokio::test]
-    async fn response_body_stream_does_not_hold_in_flight() {
+    async fn t2__response_body_stream_does_not_hold_in_flight() {
         let controller = DrainController::new();
         let app = Router::new()
             .route("/", get(streaming_response))
@@ -200,7 +203,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_processing_still_holds_in_flight() {
+    async fn t2__request_processing_still_holds_in_flight() {
         let controller = DrainController::new();
         let entered = std::sync::Arc::new(Notify::new());
         let release = std::sync::Arc::new(Notify::new());
@@ -239,6 +242,59 @@ mod tests {
         release.notify_one();
         let response = request.await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(controller.in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn t1__drain_middleware_rejects_with_503_and_retry_after() {
+        let controller = DrainController::new();
+        controller.trigger();
+        let app = Router::new()
+            .route("/", get(|| async { "must not run" }))
+            .route_layer(middleware::from_fn_with_state(
+                controller,
+                proxy_drain_middleware,
+            ));
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "60");
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .expect("draining body collects")
+                .to_bytes(),
+            Bytes::from_static(b"draining")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn t1__drain_force_closed_metric_and_timeout() {
+        let controller = DrainController::new();
+        let guard = controller.try_track().expect("request is tracked");
+
+        assert!(
+            controller.await_drained(Duration::from_secs(60)).await,
+            "in-flight request must exceed the drain deadline"
+        );
+        cc_lb_testkit::with_local_recorder(|snapshotter| {
+            assert_eq!(controller.mark_force_closed(), 1);
+            assert_eq!(controller.force_closed_total(), 1);
+            assert_eq!(controller.mark_force_closed(), 0);
+
+            let samples = snapshotter.snapshot().into_vec();
+            assert_eq!(samples.len(), 1);
+            let (key, _, _, value) = &samples[0];
+            assert_eq!(key.key().name(), "cc_lb_drain_force_closed_total");
+            assert_eq!(*value, DebugValue::Counter(1));
+        });
+
+        drop(guard);
         assert_eq!(controller.in_flight(), 0);
     }
 

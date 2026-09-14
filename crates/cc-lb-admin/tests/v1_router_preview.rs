@@ -1,4 +1,4 @@
-use crate::admin_test_common;
+use crate::config_admin_common;
 
 use std::sync::Arc;
 
@@ -8,7 +8,6 @@ use cc_lb_admin::ports::{
     RoutePreviewError, RoutePreviewInput, RoutePreviewOutcome, RoutePreviewPort, RoutePreviewWinner,
 };
 use cc_lb_admin::{AdminPorts, AdminState, router};
-use cc_lb_config::Config;
 use cc_lb_domain::RoutingTrace;
 use http_body_util::BodyExt;
 use serde_json::json;
@@ -36,27 +35,7 @@ impl RoutePreviewPort for PreviewPort {
 }
 
 fn test_state() -> AdminState {
-    let config = Config::default();
-    AdminState {
-        storage: None,
-        key_store: None,
-        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
-        lifecycle: None,
-        dynamic_view: admin_test_common::dynamic_view_holder(&config),
-        config: Arc::new(Config::default()),
-        scheduler: None,
-        admin_auth: crate::admin_test_common::static_token_auth("test-token"),
-        lazy_refresher: None,
-        runtime: None,
-        data_dir: None,
-        warmup_dialect_dispatcher: None,
-        subscription_metadata_hook: None,
-        start_time: std::time::Instant::now(),
-        event_bus: None,
-        storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_clock::SystemClock),
-    }
+    config_admin_common::test_state_without_storage()
 }
 
 async fn send_preview_request(
@@ -96,7 +75,7 @@ async fn send_preview_request(
 }
 
 #[tokio::test]
-async fn route_preview_returns_admin_port_projection() {
+async fn t2__route_preview_returns_admin_port_projection() {
     let mut state = test_state();
     state.lifecycle = Some(AdminPorts {
         route_preview: Some(Arc::new(PreviewPort)),
@@ -131,7 +110,7 @@ async fn route_preview_returns_admin_port_projection() {
 }
 
 #[tokio::test]
-async fn missing_authorization_returns_401() {
+async fn t2__missing_authorization_returns_401() {
     let (status, _) = send_preview_request(
         None,
         Some((
@@ -144,7 +123,7 @@ async fn missing_authorization_returns_401() {
 }
 
 #[tokio::test]
-async fn wrong_token_returns_401() {
+async fn t2__wrong_admin_token_returns_401() {
     let (status, _) = send_preview_request(
         Some("wrong-token"),
         Some((
@@ -157,7 +136,7 @@ async fn wrong_token_returns_401() {
 }
 
 #[tokio::test]
-async fn lifecycle_unavailable_returns_500_with_structured_error() {
+async fn t2__lifecycle_unavailable_returns_500_with_structured_error() {
     let (status, body) = send_preview_request(
         Some("test-token"),
         Some((
@@ -172,7 +151,7 @@ async fn lifecycle_unavailable_returns_500_with_structured_error() {
 }
 
 #[tokio::test]
-async fn malformed_json_body_returns_400() {
+async fn t2__malformed_json_body_returns_400() {
     let (status, _) = send_preview_request(
         Some("test-token"),
         Some(("application/json", b"{ not json".to_vec())),

@@ -20,8 +20,7 @@ const DELTA_LIMIT_MIB: usize = 200;
 const BYTES_PER_MIB: usize = 1024 * 1024;
 
 #[tokio::test]
-#[ignore]
-async fn prompt_cache_100k_observations_under_200mib() {
+async fn tx__prompt_cache_100k_observations_under_200mib() {
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
     let now = unix_secs(clock.now());
     let cache = PromptCacheObservationCache::new_with_debounce(clock, 30, 60);

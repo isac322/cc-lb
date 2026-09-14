@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::clock::ClockHandle;
 use crate::lifecycle::observe_rate_limits;
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
 use cc_lb_control::dynamic_view::UpstreamRateLimitCache;
@@ -45,11 +46,13 @@ pub fn spawn_lifecycle_rate_limit_header_subscriber(
     rx: mpsc::Receiver<LifecycleEvent>,
     cache: Arc<RwLock<UpstreamRateLimitCache>>,
     sink: Option<UpstreamRateLimitSink>,
+    clock: ClockHandle,
 ) -> RateLimitHeaderSubscriberHandle {
     spawn_with_config(
         rx,
         cache,
         sink,
+        clock,
         DEFAULT_RATE_LIMIT_HEADER_MAP_CAP,
         DEFAULT_RATE_LIMIT_HEADER_TTL,
     )
@@ -59,11 +62,20 @@ pub fn spawn_with_config(
     rx: mpsc::Receiver<LifecycleEvent>,
     cache: Arc<RwLock<UpstreamRateLimitCache>>,
     sink: Option<UpstreamRateLimitSink>,
+    clock: ClockHandle,
     map_cap: usize,
     ttl: Duration,
 ) -> RateLimitHeaderSubscriberHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(subscriber_loop(rx, cache, sink, map_cap, ttl, shutdown_rx));
+    let join = tokio::spawn(subscriber_loop(
+        rx,
+        cache,
+        sink,
+        clock,
+        map_cap,
+        ttl,
+        shutdown_rx,
+    ));
     RateLimitHeaderSubscriberHandle { shutdown_tx, join }
 }
 
@@ -86,6 +98,7 @@ async fn subscriber_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     cache: Arc<RwLock<UpstreamRateLimitCache>>,
     sink: Option<UpstreamRateLimitSink>,
+    clock: ClockHandle,
     map_cap: usize,
     ttl: Duration,
     mut shutdown: oneshot::Receiver<()>,
@@ -100,7 +113,7 @@ async fn subscriber_loop(
             biased;
             event = rx.recv() => {
                 match event {
-                    Some(event) => handle_event(&cache, sink.as_ref(), &mut partials, map_cap, event),
+                    Some(event) => handle_event(&cache, sink.as_ref(), &clock, &mut partials, map_cap, event),
                     None => break,
                 }
             }
@@ -110,13 +123,14 @@ async fn subscriber_loop(
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(&cache, sink.as_ref(), &mut partials, map_cap, event);
+        handle_event(&cache, sink.as_ref(), &clock, &mut partials, map_cap, event);
     }
 }
 
 fn handle_event(
     cache: &Arc<RwLock<UpstreamRateLimitCache>>,
     sink: Option<&UpstreamRateLimitSink>,
+    clock: &ClockHandle,
     partials: &mut HashMap<EventId, Partial>,
     map_cap: usize,
     event: LifecycleEvent,
@@ -155,7 +169,7 @@ fn handle_event(
                 .increment(1);
                 return;
             };
-            apply_observations(cache, sink, upstream_id, &headers);
+            apply_observations(cache, sink, clock, upstream_id, &headers);
         }
         LifecycleEvent::RequestTerminated { .. } => {
             partials.remove(&event_id);
@@ -171,10 +185,11 @@ fn handle_event(
 fn apply_observations(
     cache: &Arc<RwLock<UpstreamRateLimitCache>>,
     sink: Option<&UpstreamRateLimitSink>,
+    clock: &ClockHandle,
     upstream_id: Uuid,
     snapshot: &HeaderSnapshot,
 ) {
-    let observed_at = system_time_unix_secs(SystemTime::now());
+    let observed_at = system_time_unix_secs(clock.now());
     let header_map = header_map_from_snapshot(snapshot);
     let records = observe_rate_limits(&header_map, upstream_id, observed_at);
     if records.is_empty() {
@@ -325,7 +340,12 @@ mod tests {
         let upstream_id = Uuid::from_u128(1);
         let cache = Arc::new(RwLock::new(UpstreamRateLimitCache::default()));
         let (sink, mut sink_rx) = UpstreamRateLimitSink::with_capacity(16);
-        let handle = spawn_lifecycle_rate_limit_header_subscriber(rx, cache.clone(), Some(sink));
+        let handle = spawn_lifecycle_rate_limit_header_subscriber(
+            rx,
+            cache.clone(),
+            Some(sink),
+            Arc::new(crate::clock::TestClock::new_at_secs(1_700_000_000)),
+        );
 
         tx.send(LifecycleEvent::UpstreamAttempt {
             event_id: eid("rate-a"),
@@ -372,7 +392,12 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let cache = Arc::new(RwLock::new(UpstreamRateLimitCache::default()));
         let (sink, mut sink_rx) = UpstreamRateLimitSink::with_capacity(16);
-        let handle = spawn_lifecycle_rate_limit_header_subscriber(rx, cache.clone(), Some(sink));
+        let handle = spawn_lifecycle_rate_limit_header_subscriber(
+            rx,
+            cache.clone(),
+            Some(sink),
+            Arc::new(crate::clock::TestClock::new_at_secs(1_700_000_000)),
+        );
 
         tx.send(response_started("rate-b", rate_limit_headers()))
             .await

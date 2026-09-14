@@ -26,7 +26,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn pipeline_filters_candidates_before_terminal_strategy()
+async fn t2__pipeline_filters_candidates_before_terminal_strategy()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream_id = default_upstream_id();
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
@@ -58,7 +58,7 @@ async fn pipeline_filters_candidates_before_terminal_strategy()
 }
 
 #[tokio::test]
-async fn request_model_reaches_filters_without_prompt_cache_shadow()
+async fn t2__request_model_reaches_filters_without_prompt_cache_shadow()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream_id = default_upstream_id();
     let canonical_models = Arc::new(ParkingMutex::new(Vec::new()));
@@ -84,8 +84,8 @@ async fn request_model_reaches_filters_without_prompt_cache_shadow()
 }
 
 #[tokio::test]
-async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn t2__trap_and_runtime_errors_pass_candidates_through()
+-> Result<(), Box<dyn std::error::Error>> {
     for error_kind in [FilterErrorKind::Trap, FilterErrorKind::Runtime] {
         let upstream_id = default_upstream_id();
         let error_filter_calls = Arc::new(Mutex::new(Vec::new()));
@@ -147,7 +147,69 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
-async fn empty_stage_output_propagates_to_later_stages_and_terminal_strategy()
+async fn t2__routing__invalid_filter_output_fails_open() -> Result<(), Box<dyn std::error::Error>> {
+    let upstream_id = default_upstream_id();
+    let unknown_id = Uuid::from_u128(99);
+    let invalid_calls = Arc::new(Mutex::new(Vec::new()));
+    let later_calls = Arc::new(Mutex::new(Vec::new()));
+    let router_calls = Arc::new(Mutex::new(Vec::new()));
+    let state = TestState::default();
+    let hook = Arc::new(RecordingHook::default());
+    let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![
+        hook.clone() as Arc<dyn cc_lb_observability::ObservabilityHook>
+    ]);
+    let filters: Vec<Arc<dyn FilterPlugin>> = vec![
+        Arc::new(RecordingFilter {
+            name: "invalid-unknown",
+            calls: invalid_calls.clone(),
+            kept_upstream_ids: vec![unknown_id],
+        }),
+        Arc::new(RecordingFilter {
+            name: "after-invalid",
+            calls: later_calls.clone(),
+            kept_upstream_ids: vec![upstream_id],
+        }),
+    ];
+    let lifecycle =
+        lifecycle_with_pipeline(filters, router_calls.clone(), state.clone(), hook.clone())
+            .with_event_bus(test_bus.bus_arc());
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        )))
+        .await?;
+    let (status, _headers, _body) = collect_body(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        invalid_calls.lock().unwrap().as_slice(),
+        &[vec![upstream_id]]
+    );
+    assert_eq!(
+        later_calls.lock().unwrap().as_slice(),
+        &[vec![upstream_id]],
+        "invalid output must preserve the previous candidate list"
+    );
+    assert!(router_calls.lock().unwrap().is_empty());
+    timeout(
+        Duration::from_secs(1),
+        hook.wait_for_event(|event| {
+            matches!(
+                event,
+                cc_lb_observability::ObserveEvent::Error { code, source, .. }
+                    if code == "router_filter_invalid_output" && source == "router"
+            )
+        }),
+    )
+    .await
+    .expect("invalid filter output observation arrives");
+    Ok(())
+}
+
+#[tokio::test]
+async fn t2__empty_stage_output_propagates_to_later_stages_and_terminal_strategy()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream_id = default_upstream_id();
     let empty_filter_calls = Arc::new(Mutex::new(Vec::new()));
@@ -216,7 +278,7 @@ fn lifecycle_with_pipeline(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     )
 }
 

@@ -214,12 +214,13 @@ mod tests {
     use futures_core::Stream;
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use tokio::time::Instant;
 
-    #[test]
-    fn phases_are_mutually_exclusive_and_snapshot_includes_active_time() {
+    #[tokio::test(start_paused = true)]
+    async fn phases_are_mutually_exclusive_and_snapshot_includes_active_time() {
         let timing = BodyIoTiming::default();
-        let start = Instant::now();
+        let start = Instant::now().into_std();
 
         timing.transition_at(Some(BodyIoPhase::Wait), start);
         timing.transition_at(Some(BodyIoPhase::Process), start + Duration::from_millis(7));
@@ -234,10 +235,10 @@ mod tests {
         assert_eq!(snapshot.response_body_downstream_poll_gap_ms, Some(11.0));
     }
 
-    #[test]
-    fn active_wait_is_preserved_without_terminal_transition() {
+    #[tokio::test(start_paused = true)]
+    async fn active_wait_is_preserved_without_terminal_transition() {
         let timing = BodyIoTiming::default();
-        let start = Instant::now();
+        let start = Instant::now().into_std();
         timing.transition_at(Some(BodyIoPhase::Wait), start);
 
         let first = timing.snapshot_at(start + Duration::from_millis(13));
@@ -249,10 +250,10 @@ mod tests {
         assert_eq!(later.response_body_downstream_poll_gap_ms, None);
     }
 
-    #[test]
-    fn entered_zero_duration_is_distinct_from_unmeasured() {
+    #[tokio::test(start_paused = true)]
+    async fn entered_zero_duration_is_distinct_from_unmeasured() {
         let timing = BodyIoTiming::default();
-        let start = Instant::now();
+        let start = Instant::now().into_std();
         timing.transition_at(Some(BodyIoPhase::Process), start);
         timing.stop_at(start);
 
@@ -275,10 +276,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn stop_freezes_timing_across_late_wrapper_polls_and_phase_transitions() {
+    #[tokio::test(start_paused = true)]
+    async fn stop_freezes_timing_across_late_wrapper_polls_and_phase_transitions() {
         let timing = BodyIoTiming::default();
-        let start = Instant::now();
+        let start = Instant::now().into_std();
         timing.transition_at(Some(BodyIoPhase::Process), start);
         timing.transition_at(Some(BodyIoPhase::Wait), start + Duration::from_millis(4));
         timing.stop_at(start + Duration::from_millis(11));
@@ -310,10 +311,10 @@ mod tests {
         assert_eq!(stopped.response_body_downstream_poll_gap_ms, None);
     }
 
-    #[test]
-    fn pending_cancellation_is_accrued_before_stop() {
+    #[tokio::test(start_paused = true)]
+    async fn pending_cancellation_is_accrued_before_stop() {
         let timing = BodyIoTiming::default();
-        let start = Instant::now();
+        let start = Instant::now().into_std();
         timing.transition_at(Some(BodyIoPhase::Process), start);
         timing.transition_at(Some(BodyIoPhase::Wait), start + Duration::from_millis(2));
 

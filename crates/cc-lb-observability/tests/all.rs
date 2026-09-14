@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 #[path = "common/mod.rs"]
 mod common;
 

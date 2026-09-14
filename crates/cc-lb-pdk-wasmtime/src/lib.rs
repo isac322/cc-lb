@@ -40,6 +40,12 @@
 #![deny(unsafe_code)]
 
 extern crate alloc;
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    target_os = "macos",
+    target_pointer_width = "64"
+))]
+extern crate std;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm32_glue {
@@ -80,6 +86,21 @@ pub mod __private {
     ))]
     use core::ffi::c_void;
     use core::slice;
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "macos",
+        target_pointer_width = "64"
+    ))]
+    use core::sync::atomic::{AtomicU32, Ordering};
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "macos",
+        target_pointer_width = "64"
+    ))]
+    use std::{
+        collections::BTreeMap,
+        sync::{LazyLock, Mutex},
+    };
 
     use cc_lb_plugin_wire::{
         ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest,
@@ -125,21 +146,55 @@ pub mod __private {
         free_with_layout(ptr, layout);
     }
 
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "macos",
+        target_pointer_width = "64"
+    ))]
+    struct NativeAllocation {
+        ptr: usize,
+        layout: Layout,
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "macos",
+        target_pointer_width = "64"
+    ))]
+    static NATIVE_ALLOCATIONS: LazyLock<Mutex<BTreeMap<u32, NativeAllocation>>> =
+        LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "macos",
+        target_pointer_width = "64"
+    ))]
+    static NEXT_NATIVE_HANDLE: AtomicU32 = AtomicU32::new(1);
+
     #[cfg(not(all(
         not(target_arch = "wasm32"),
-        target_os = "linux",
+        any(target_os = "linux", target_os = "macos"),
         target_pointer_width = "64"
     )))]
     #[allow(unsafe_code)]
     fn alloc_with_layout(layout: Layout) -> u32 {
         // SAFETY: layout has positive size and a valid alignment.
         let ptr = unsafe { alloc::alloc::alloc(layout) };
-        if ptr.is_null() { 0 } else { ptr as u32 }
+        if ptr.is_null() {
+            return 0;
+        }
+        if ptr as usize > u32::MAX as usize {
+            // Native test builds can have 64-bit pointers, while the guest ABI
+            // is intentionally u32. Never truncate a live native pointer.
+            unsafe { alloc::alloc::dealloc(ptr, layout) };
+            return 0;
+        }
+        ptr as u32
     }
 
     #[cfg(not(all(
         not(target_arch = "wasm32"),
-        target_os = "linux",
+        any(target_os = "linux", target_os = "macos"),
         target_pointer_width = "64"
     )))]
     #[allow(unsafe_code)]
@@ -165,11 +220,55 @@ pub mod __private {
 
     #[cfg(all(
         not(target_arch = "wasm32"),
+        target_os = "macos",
+        target_pointer_width = "64"
+    ))]
+    #[allow(unsafe_code)]
+    fn alloc_with_layout(layout: Layout) -> u32 {
+        let ptr = unsafe { alloc::alloc::alloc(layout) };
+        if ptr.is_null() {
+            return 0;
+        }
+        let handle = NEXT_NATIVE_HANDLE.fetch_add(1, Ordering::Relaxed);
+        assert_ne!(handle, 0, "native guest allocation handle overflow");
+        let previous = NATIVE_ALLOCATIONS
+            .lock()
+            .expect("native guest allocation registry poisoned")
+            .insert(
+                handle,
+                NativeAllocation {
+                    ptr: ptr as usize,
+                    layout,
+                },
+            );
+        assert!(previous.is_none(), "native guest allocation handle reused");
+        handle
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
         target_os = "linux",
         target_pointer_width = "64"
     ))]
     fn free_with_layout(ptr: u32, layout: Layout) {
         low_munmap(ptr, layout.size());
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "macos",
+        target_pointer_width = "64"
+    ))]
+    #[allow(unsafe_code)]
+    fn free_with_layout(ptr: u32, layout: Layout) {
+        let allocation = NATIVE_ALLOCATIONS
+            .lock()
+            .expect("native guest allocation registry poisoned")
+            .remove(&ptr)
+            .expect("unknown native guest allocation handle");
+        assert_eq!(allocation.layout.size(), layout.size());
+        assert_eq!(allocation.layout.align(), layout.align());
+        unsafe { alloc::alloc::dealloc(allocation.ptr as *mut u8, allocation.layout) };
     }
 
     #[cfg(all(
@@ -230,6 +329,29 @@ pub mod __private {
         let _ = unsafe { munmap(ptr as usize as *mut c_void, size) };
     }
 
+    #[cfg(not(all(
+        not(target_arch = "wasm32"),
+        target_os = "macos",
+        target_pointer_width = "64"
+    )))]
+    pub(crate) fn guest_ptr(ptr: u32) -> *mut u8 {
+        ptr as usize as *mut u8
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        target_os = "macos",
+        target_pointer_width = "64"
+    ))]
+    pub(crate) fn guest_ptr(ptr: u32) -> *mut u8 {
+        NATIVE_ALLOCATIONS
+            .lock()
+            .expect("native guest allocation registry poisoned")
+            .get(&ptr)
+            .unwrap_or_else(|| panic!("unknown native guest allocation handle {ptr}"))
+            .ptr as *mut u8
+    }
+
     /// Owned-mode filter dispatch — invoked from the macro-generated
     /// `cc_lb_filter` export when the handler signature takes
     /// `FilterRequest` (default).
@@ -248,7 +370,8 @@ pub mod __private {
     {
         // SAFETY: host promises `(in_ptr, in_len)` covers an initialised
         // buffer obtained from `cc_lb_alloc` immediately before this call.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let in_bytes =
+            unsafe { slice::from_raw_parts(guest_ptr(in_ptr) as *const u8, in_len as usize) };
 
         let archived: &ArchivedFilterRequest =
             rkyv::access::<ArchivedFilterRequest, Error>(in_bytes)
@@ -275,7 +398,7 @@ pub mod __private {
 
         // SAFETY: out_ptr points to `out_len` bytes we just allocated.
         unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, out_len as usize);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), guest_ptr(out_ptr), out_len as usize);
         }
 
         pack_ret(out_ptr, out_len)
@@ -296,7 +419,8 @@ pub mod __private {
         F: FnOnce(&ArchivedFilterRequest) -> FilterResponse,
     {
         // SAFETY: same as run_filter.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let in_bytes =
+            unsafe { slice::from_raw_parts(guest_ptr(in_ptr) as *const u8, in_len as usize) };
 
         let archived: &ArchivedFilterRequest =
             rkyv::access::<ArchivedFilterRequest, Error>(in_bytes)
@@ -319,7 +443,7 @@ pub mod __private {
 
         // SAFETY: out_ptr points to `out_len` bytes we just allocated.
         unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, out_len as usize);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), guest_ptr(out_ptr), out_len as usize);
         }
 
         pack_ret(out_ptr, out_len)
@@ -333,7 +457,8 @@ pub mod __private {
         F: FnOnce(ShapeRequest) -> ShapeResponse,
     {
         // SAFETY: host promises `(in_ptr, in_len)` covers an initialised buffer.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let in_bytes =
+            unsafe { slice::from_raw_parts(guest_ptr(in_ptr) as *const u8, in_len as usize) };
         let archived: &ArchivedShapeRequest = rkyv::access::<ArchivedShapeRequest, Error>(in_bytes)
             .expect("rkyv::access(ShapeRequest) failed");
         let owned: ShapeRequest = rkyv::deserialize::<ShapeRequest, Error>(archived)
@@ -350,7 +475,8 @@ pub mod __private {
         F: FnOnce(&ArchivedShapeRequest) -> ShapeResponse,
     {
         // SAFETY: same as run_shape.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let in_bytes =
+            unsafe { slice::from_raw_parts(guest_ptr(in_ptr) as *const u8, in_len as usize) };
         let archived: &ArchivedShapeRequest = rkyv::access::<ArchivedShapeRequest, Error>(in_bytes)
             .expect("rkyv::access(ShapeRequest) failed");
         let response = handler(archived);
@@ -366,7 +492,8 @@ pub mod __private {
         F: FnOnce(ObserveEvent),
     {
         // SAFETY: same as run_filter.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let in_bytes =
+            unsafe { slice::from_raw_parts(guest_ptr(in_ptr) as *const u8, in_len as usize) };
         let archived: &ArchivedObserveEvent = rkyv::access::<ArchivedObserveEvent, Error>(in_bytes)
             .expect("rkyv::access(ObserveEvent) failed");
         let owned: ObserveEvent = rkyv::deserialize::<ObserveEvent, Error>(archived)
@@ -382,7 +509,8 @@ pub mod __private {
         F: FnOnce(&ArchivedObserveEvent),
     {
         // SAFETY: same as run_filter.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let in_bytes =
+            unsafe { slice::from_raw_parts(guest_ptr(in_ptr) as *const u8, in_len as usize) };
         let archived: &ArchivedObserveEvent = rkyv::access::<ArchivedObserveEvent, Error>(in_bytes)
             .expect("rkyv::access(ObserveEvent) failed");
         handler(archived);
@@ -395,7 +523,8 @@ pub mod __private {
     where
         F: FnOnce(TransformResponseRequest) -> TransformResponseResult,
     {
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let in_bytes =
+            unsafe { slice::from_raw_parts(guest_ptr(in_ptr) as *const u8, in_len as usize) };
         let archived: &ArchivedTransformResponseRequest =
             match rkyv::access::<ArchivedTransformResponseRequest, Error>(in_bytes) {
                 Ok(value) => value,
@@ -416,7 +545,8 @@ pub mod __private {
     where
         F: FnOnce(&ArchivedTransformResponseRequest) -> TransformResponseResult,
     {
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let in_bytes =
+            unsafe { slice::from_raw_parts(guest_ptr(in_ptr) as *const u8, in_len as usize) };
         let archived: &ArchivedTransformResponseRequest =
             match rkyv::access::<ArchivedTransformResponseRequest, Error>(in_bytes) {
                 Ok(value) => value,
@@ -432,7 +562,8 @@ pub mod __private {
     where
         F: FnOnce(TransformSseEventRequest) -> TransformSseEventResult,
     {
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let in_bytes =
+            unsafe { slice::from_raw_parts(guest_ptr(in_ptr) as *const u8, in_len as usize) };
         let archived: &ArchivedTransformSseEventRequest =
             match rkyv::access::<ArchivedTransformSseEventRequest, Error>(in_bytes) {
                 Ok(value) => value,
@@ -453,7 +584,8 @@ pub mod __private {
     where
         F: FnOnce(&ArchivedTransformSseEventRequest) -> TransformSseEventResult,
     {
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+        let in_bytes =
+            unsafe { slice::from_raw_parts(guest_ptr(in_ptr) as *const u8, in_len as usize) };
         let archived: &ArchivedTransformSseEventRequest =
             match rkyv::access::<ArchivedTransformSseEventRequest, Error>(in_bytes) {
                 Ok(value) => value,
@@ -485,8 +617,163 @@ pub mod __private {
         assert!(out_ptr != 0, "cc_lb_alloc returned null for {type_name}");
         // SAFETY: out_ptr points to `out_len` bytes we just allocated.
         unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, out_len as usize);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), guest_ptr(out_ptr), out_len as usize);
         }
         pack_ret(out_ptr, out_len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::boxed::Box;
+
+    use super::__private::{self, DEFAULT_ALIGN, alloc_bytes, free_bytes};
+    use cc_lb_plugin_wire::{
+        CachePricingSummary, FilterRequest, FilterResponse, Header, Principal,
+        TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
+        TransformSseEventResult, Upstream,
+    };
+    use rkyv::rancor::Error as RkyvError;
+
+    fn filter_request() -> FilterRequest {
+        FilterRequest {
+            request_id: Box::from("req-pdk-service-tier"),
+            thread_id: None,
+            service_tier: Some(Box::from("priority")),
+            canonical_model_id: Box::from("claude-test"),
+            cache_pricing: CachePricingSummary {
+                status: Box::from("known"),
+                input_micros_per_million: None,
+                cache_creation_5m_micros_per_million: None,
+                cache_creation_1h_micros_per_million: None,
+                cache_read_micros_per_million: None,
+            },
+            method: Box::from("POST"),
+            path: Box::from("/v1/messages"),
+            query: None,
+            headers: Box::new([]),
+            body: Box::from(&b"{}"[..]),
+            principal: Principal {
+                id: Box::from("tenant"),
+                kind: Box::from("api_key"),
+                claims: Box::new([]),
+            },
+            candidates: Box::new([]),
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn copy_to_guest<T>(value: &T) -> (u32, u32)
+    where
+        T: for<'a> rkyv::Serialize<
+                rkyv::api::high::HighSerializer<
+                    rkyv::util::AlignedVec,
+                    rkyv::ser::allocator::ArenaHandle<'a>,
+                    RkyvError,
+                >,
+            >,
+    {
+        let bytes = rkyv::to_bytes::<RkyvError>(value).expect("encode input");
+        let len = u32::try_from(bytes.len()).expect("fixture fits u32");
+        let ptr = alloc_bytes(len, DEFAULT_ALIGN);
+        assert_ne!(ptr, 0);
+        // SAFETY: alloc_bytes returned a live allocation of exactly len bytes,
+        // and bytes.len() equals len, so this non-overlapping copy stays in bounds.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), __private::guest_ptr(ptr), bytes.len());
+        }
+        (ptr, len)
+    }
+
+    fn free_response(packed: u64) {
+        let (out_ptr, out_len) = cc_lb_plugin_wire::unpack_ret(packed);
+        assert_ne!(out_ptr, 0);
+        assert_ne!(out_len, 0);
+        free_bytes(out_ptr, out_len, DEFAULT_ALIGN);
+    }
+
+    fn response_request() -> TransformResponseRequest {
+        TransformResponseRequest {
+            request_id: Box::from("req-pdk"),
+            principal: Principal {
+                id: Box::from("tenant"),
+                kind: Box::from("api_key"),
+                claims: Box::new([]),
+            },
+            upstream: Upstream::AnthropicDirect { base_url: None },
+            request_method: Box::from("POST"),
+            request_path: Box::from("/v1/messages"),
+            canonical_model_id: Box::from("claude-test"),
+            response_status: 200,
+            response_headers: Box::new([Header {
+                name: Box::from("content-type"),
+                value: Box::from(&b"application/json"[..]),
+            }]),
+            body: Box::from(&b"{}"[..]),
+        }
+    }
+
+    fn sse_request() -> TransformSseEventRequest {
+        TransformSseEventRequest {
+            request_id: Box::from("req-pdk-sse"),
+            principal: response_request().principal,
+            upstream: Upstream::AnthropicDirect { base_url: None },
+            request_method: Box::from("POST"),
+            request_path: Box::from("/v1/messages"),
+            canonical_model_id: Box::from("claude-test"),
+            response_status: 200,
+            response_headers: Box::new([]),
+            event: cc_lb_plugin_wire::SseEvent {
+                event: Box::from("message_start"),
+                data: Box::from(&b"{}"[..]),
+            },
+        }
+    }
+
+    #[test]
+    fn run_filter_dispatches_owned_service_tier() {
+        let (ptr, len) = copy_to_guest(&filter_request());
+        let packed = __private::run_filter(ptr, len, |request| {
+            assert_eq!(request.service_tier.as_deref(), Some("priority"));
+            FilterResponse {
+                results: Box::new([]),
+            }
+        });
+
+        free_response(packed);
+    }
+
+    #[test]
+    fn run_filter_dispatches_archived_service_tier() {
+        let (ptr, len) = copy_to_guest(&filter_request());
+        let packed = __private::run_filter_view(ptr, len, |request| {
+            let tier: Option<&str> = request.service_tier.as_ref().map(|value| &**value);
+            assert_eq!(tier, Some("priority"));
+            FilterResponse {
+                results: Box::new([]),
+            }
+        });
+
+        free_response(packed);
+    }
+
+    #[test]
+    fn run_transform_response_dispatches_owned_request() {
+        let (ptr, len) = copy_to_guest(&response_request());
+        let packed = __private::run_transform_response(ptr, len, |request| {
+            assert_eq!(&*request.request_id, "req-pdk");
+            TransformResponseResult::Unchanged
+        });
+        free_response(packed);
+    }
+
+    #[test]
+    fn run_transform_sse_event_dispatches_owned_request() {
+        let (ptr, len) = copy_to_guest(&sse_request());
+        let packed = __private::run_transform_sse_event(ptr, len, |request| {
+            assert_eq!(&*request.event.event, "message_start");
+            TransformSseEventResult::Unchanged
+        });
+        free_response(packed);
     }
 }

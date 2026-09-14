@@ -1,8 +1,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Once};
 use std::time::Duration;
-#[cfg(not(test))]
-use std::time::Instant;
+
+use tokio::time::Instant;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -17,8 +17,6 @@ use hyper_util::rt::TokioExecutor;
 use metrics::Unit;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-#[cfg(test)]
-use tokio::time::Instant;
 
 use crate::dns_cache::{CachingDnsConnector, DnsResolverConfig};
 use crate::instrumented_connector::InstrumentedHttpsConnector;
@@ -271,7 +269,17 @@ impl UpstreamDispatch for Arc<Bulkhead> {
     }
 }
 
+type DefaultHttpsConnector =
+    InstrumentedHttpsConnector<hyper_rustls::HttpsConnector<CachingDnsConnector>>;
+type DefaultHttpsClient = Client<DefaultHttpsConnector, Full<Bytes>>;
+
 pub fn make_default_dispatcher(max_idle_per_host: usize) -> Arc<dyn UpstreamDispatch> {
+    Arc::new(build_default_https_dispatcher(max_idle_per_host))
+}
+
+fn build_default_https_dispatcher(
+    max_idle_per_host: usize,
+) -> HttpsHyperDispatcher<DefaultHttpsClient> {
     let caching_http = CachingDnsConnector::new(&DnsResolverConfig::default())
         .expect("default DNS resolver builds");
     let connector = HttpsConnectorBuilder::new()
@@ -282,23 +290,51 @@ pub fn make_default_dispatcher(max_idle_per_host: usize) -> Arc<dyn UpstreamDisp
         .wrap_connector(caching_http);
     let connector = InstrumentedHttpsConnector::new(connector);
     tracing::info!("dispatcher built with caching DNS + instrumented HTTPS connector");
-    Arc::new(HttpsHyperDispatcher {
+    HttpsHyperDispatcher {
         client: build_client(connector, max_idle_per_host),
-    })
-}
-
-#[derive(Clone)]
-struct HttpsHyperDispatcher {
-    client: Client<
-        InstrumentedHttpsConnector<hyper_rustls::HttpsConnector<CachingDnsConnector>>,
-        Full<Bytes>,
-    >,
+    }
 }
 
 #[async_trait]
-impl UpstreamDispatch for HttpsHyperDispatcher {
+trait DispatcherClient: Send + Sync {
+    type ResponseBody: http_body::Body<Data = Bytes> + Send + 'static;
+    type Error: std::fmt::Display + Send + Sync + 'static;
+
+    async fn request(
+        &self,
+        request: Request<Full<Bytes>>,
+    ) -> Result<Response<Self::ResponseBody>, Self::Error>;
+}
+
+#[async_trait]
+impl<C> DispatcherClient for Client<C, Full<Bytes>>
+where
+    C: Connect + Clone + Send + Sync + 'static,
+{
+    type ResponseBody = hyper::body::Incoming;
+    type Error = hyper_util::client::legacy::Error;
+
+    async fn request(
+        &self,
+        request: Request<Full<Bytes>>,
+    ) -> Result<Response<Self::ResponseBody>, Self::Error> {
+        Client::request(self, request).await
+    }
+}
+
+#[derive(Clone)]
+struct HttpsHyperDispatcher<C> {
+    client: C,
+}
+
+#[async_trait]
+impl<C> UpstreamDispatch for HttpsHyperDispatcher<C>
+where
+    C: DispatcherClient + 'static,
+    <C::ResponseBody as http_body::Body>::Error: Into<axum::BoxError>,
+{
     async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
-        dispatch_with_client(&self.client, request).await
+        dispatch_with_dispatcher_client(&self.client, request).await
     }
 }
 
@@ -324,6 +360,16 @@ fn record_dispatch_failure(span: &tracing::Span, error_type: &str) {
     span.record("error.type", error_type);
 }
 
+pub(crate) async fn dispatch_with_client<C>(
+    client: &Client<C, Full<Bytes>>,
+    request: SignedRequest,
+) -> Result<Response<Body>, DispatchError>
+where
+    C: Connect + Clone + Send + Sync + 'static,
+{
+    dispatch_with_dispatcher_client(client, request).await
+}
+
 #[tracing::instrument(
     name = "proxy.dispatch",
     skip_all,
@@ -340,12 +386,13 @@ fn record_dispatch_failure(span: &tracing::Span, error_type: &str) {
         url.path = request.url().path(),
     )
 )]
-pub(crate) async fn dispatch_with_client<C>(
-    client: &Client<C, Full<Bytes>>,
+async fn dispatch_with_dispatcher_client<C>(
+    client: &C,
     request: SignedRequest,
 ) -> Result<Response<Body>, DispatchError>
 where
-    C: Connect + Clone + Send + Sync + 'static,
+    C: DispatcherClient,
+    <C::ResponseBody as http_body::Body>::Error: Into<axum::BoxError>,
 {
     let span = tracing::Span::current();
     let (url, method, headers, body) = request.into_parts();
@@ -414,9 +461,7 @@ fn register_bulkhead_metrics() {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
     use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -427,18 +472,12 @@ mod tests {
         SignedRequest, Signer, SignerError, SigningCapability, UpstreamDialect, UpstreamError,
         shape_request, sign_request,
     };
-    use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-    use http::{HeaderMap, HeaderValue, Method, Response, header::CONTENT_ENCODING};
-    use http_body_util::BodyExt;
-    use hyper::{server::conn::http1, service::service_fn};
-    use hyper_util::client::legacy::connect::HttpConnector;
-    use hyper_util::rt::TokioIo;
-    use tokio::net::TcpListener;
+    use http::{HeaderMap, Method, Response};
     use url::Url;
 
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn no_contention_wait_ms_is_under_threshold() {
         use crate::request_timing::with_timings;
 
@@ -451,11 +490,7 @@ mod tests {
         })
         .await;
 
-        assert!(
-            timings.bulkhead_wait_ms.unwrap_or(0) <= 10,
-            "expected <=10ms, got {:?}",
-            timings.bulkhead_wait_ms
-        );
+        assert_eq!(timings.bulkhead_wait_ms, Some(0));
     }
 
     #[tokio::test(start_paused = true)]
@@ -464,34 +499,65 @@ mod tests {
 
         let bulkhead = bulkhead_for_test(1);
         let permit_holder = bulkhead.acquire().await.expect("acquire");
-        let release_handle = tokio::spawn(async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        });
-
-        let execute = with_timings(async {
-            bulkhead
-                .execute(signed_request().await)
+        let execute = tokio::spawn({
+            let bulkhead = Arc::clone(&bulkhead);
+            async move {
+                with_timings(async {
+                    bulkhead
+                        .execute(signed_request().await)
+                        .await
+                        .expect("bulkhead execute succeeds");
+                })
                 .await
-                .expect("bulkhead execute succeeds");
-        });
-        tokio::pin!(execute);
-        tokio::select! {
-            release_result = release_handle => {
-                release_result.expect("release task");
-                drop(permit_holder);
             }
-            _ = &mut execute => panic!("execute completed before permit release"),
-        }
-        let (_, timings) = execute.await;
+        });
+        tokio::task::yield_now().await;
 
+        tokio::time::advance(Duration::from_millis(100)).await;
         assert!(
-            timings.bulkhead_wait_ms.unwrap_or(0) >= 90,
-            "expected >=90ms wait, got {:?}",
-            timings.bulkhead_wait_ms
+            !execute.is_finished(),
+            "execute completed while the permit was still held"
         );
+        drop(permit_holder);
+        let (_, timings) = execute.await.expect("execute task");
+
+        assert_eq!(timings.bulkhead_wait_ms, Some(100));
     }
 
-    #[tokio::test]
+    #[allow(non_snake_case)]
+    #[tokio::test(start_paused = true)]
+    async fn t1__bulkhead_concurrency_cap_and_queue_full_returns_error() {
+        let bulkhead = bulkhead_for_test(3);
+        let mut permits = Vec::new();
+        for _ in 0..3 {
+            permits.push(
+                bulkhead
+                    .acquire()
+                    .await
+                    .expect("configured permit is admitted"),
+            );
+        }
+        assert_eq!(bulkhead.active(), 3);
+
+        match bulkhead.acquire().await {
+            Err(error) => assert_eq!(
+                error,
+                BulkheadError::QueueFull {
+                    retry_after: Duration::from_secs(1),
+                }
+            ),
+            Ok(_) => panic!("request beyond the concurrency cap must be rejected"),
+        }
+
+        drop(permits);
+        assert_eq!(bulkhead.active(), 0);
+        bulkhead
+            .acquire()
+            .await
+            .expect("dropping guards releases the configured slots");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn bulkhead_outside_scope_does_not_panic() {
         let bulkhead = bulkhead_for_test(4);
 
@@ -499,100 +565,6 @@ mod tests {
             .execute(signed_request().await)
             .await
             .expect("bulkhead execute succeeds");
-    }
-
-    #[tokio::test]
-    async fn http_dispatcher_reuses_connection_without_corrupting_gzip_body() {
-        let plaintext = Bytes::from_static(b"second response over the reused connection");
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&plaintext).expect("gzip write succeeds");
-        let compressed = Bytes::from(encoder.finish().expect("gzip finish succeeds"));
-
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("test listener binds");
-        let address = listener.local_addr().expect("listener address");
-        let accepted_connections = Arc::new(AtomicUsize::new(0));
-        let response_index = Arc::new(AtomicUsize::new(0));
-        let server_compressed = compressed.clone();
-        let server_connections = Arc::clone(&accepted_connections);
-        let server_responses = Arc::clone(&response_index);
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("client connects");
-            server_connections.fetch_add(1, Ordering::Relaxed);
-            http1::Builder::new()
-                .keep_alive(true)
-                .serve_connection(
-                    TokioIo::new(stream),
-                    service_fn(move |_request| {
-                        let index = server_responses.fetch_add(1, Ordering::Relaxed);
-                        let body = if index == 0 {
-                            Bytes::from_static(b"first response")
-                        } else {
-                            server_compressed.clone()
-                        };
-                        async move {
-                            let mut response = Response::new(Full::new(body));
-                            if index > 0 {
-                                response
-                                    .headers_mut()
-                                    .insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-                            }
-                            Ok::<_, std::convert::Infallible>(response)
-                        }
-                    }),
-                )
-                .await
-                .expect("HTTP/1.1 connection serves both responses");
-        });
-
-        let client = build_client(HttpConnector::new(), 1);
-        let base_url = Url::parse(&format!("http://{address}/")).expect("base URL parses");
-        let first = tokio::time::timeout(
-            Duration::from_secs(5),
-            dispatch_with_client(&client, signed_request_for_url(base_url.clone()).await),
-        )
-        .await
-        .expect("first dispatch completes")
-        .expect("first dispatch succeeds");
-        let first_body = first
-            .into_body()
-            .collect()
-            .await
-            .expect("first body reads")
-            .to_bytes();
-        assert_eq!(first_body, Bytes::from_static(b"first response"));
-
-        let second = tokio::time::timeout(
-            Duration::from_secs(5),
-            dispatch_with_client(&client, signed_request_for_url(base_url).await),
-        )
-        .await
-        .expect("second dispatch completes on the reusable connection")
-        .expect("second dispatch succeeds");
-        assert_eq!(
-            second.headers().get(CONTENT_ENCODING),
-            Some(&HeaderValue::from_static("gzip"))
-        );
-        let second_body = second
-            .into_body()
-            .collect()
-            .await
-            .expect("second body reads")
-            .to_bytes();
-        assert_eq!(second_body, compressed);
-
-        let mut decoder = GzDecoder::new(second_body.as_ref());
-        let mut decoded = Vec::new();
-        decoder
-            .read_to_end(&mut decoded)
-            .expect("captured gzip body decompresses");
-        assert_eq!(decoded, plaintext);
-        assert_eq!(accepted_connections.load(Ordering::Relaxed), 1);
-        assert_eq!(response_index.load(Ordering::Relaxed), 2);
-
-        server.abort();
-        let _ = server.await;
     }
 
     fn bulkhead_for_test(semaphore_permits: u32) -> Arc<Bulkhead> {
@@ -616,19 +588,184 @@ mod tests {
         }
     }
 
+    #[allow(non_snake_case)]
+    mod t2__dispatcher {
+        use std::convert::Infallible;
+        use std::sync::{Arc, Mutex};
+
+        use http::header::{AUTHORIZATION, CONTENT_TYPE};
+        use http::{HeaderValue, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::{Service, service_fn};
+
+        use super::*;
+
+        struct CapturedRequest {
+            uri: http::Uri,
+            method: Method,
+            headers: HeaderMap,
+            body: Bytes,
+        }
+
+        struct TowerServiceClient<S> {
+            service: tokio::sync::Mutex<S>,
+        }
+
+        impl<S> TowerServiceClient<S> {
+            fn new(service: S) -> Self {
+                Self {
+                    service: tokio::sync::Mutex::new(service),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl<S> DispatcherClient for TowerServiceClient<S>
+        where
+            S: Service<Request<Full<Bytes>>, Response = Response<Full<Bytes>>, Error = Infallible>
+                + Send,
+            S::Future: Send,
+        {
+            type ResponseBody = Full<Bytes>;
+            type Error = Infallible;
+
+            async fn request(
+                &self,
+                request: Request<Full<Bytes>>,
+            ) -> Result<Response<Self::ResponseBody>, Self::Error> {
+                self.service.lock().await.call(request).await
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn signed_request_is_delivered_exactly_and_response_is_mapped() {
+            let captured = Arc::new(Mutex::new(None));
+            let captured_by_service = Arc::clone(&captured);
+            let response_body = Bytes::from_static(b"mapped response body");
+            let service_response_body = response_body.clone();
+            let service = service_fn(move |request: Request<Full<Bytes>>| {
+                let captured = Arc::clone(&captured_by_service);
+                let response_body = service_response_body.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let body = body
+                        .collect()
+                        .await
+                        .expect("full request body is infallible")
+                        .to_bytes();
+                    *captured.lock().expect("capture lock is available") = Some(CapturedRequest {
+                        uri: parts.uri,
+                        method: parts.method,
+                        headers: parts.headers,
+                        body,
+                    });
+
+                    let mut response = Response::new(Full::new(response_body));
+                    *response.status_mut() = StatusCode::MULTI_STATUS;
+                    response.headers_mut().insert(
+                        "x-response-token",
+                        HeaderValue::from_static("response-value"),
+                    );
+                    Ok::<_, Infallible>(response)
+                }
+            });
+            let dispatcher = HttpsHyperDispatcher {
+                client: TowerServiceClient::new(service),
+            };
+
+            let mut request_headers = HeaderMap::new();
+            request_headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_static("Bearer signed-secret"),
+            );
+            request_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            request_headers.insert("x-signed-header", HeaderValue::from_static("signed-value"));
+            let request_body = Bytes::from_static(br#"{"dispatch":"exact"}"#);
+            let signed = signed_request_with_parts(
+                Url::parse("https://api.example.test/base").expect("test URL parses"),
+                request_headers.clone(),
+                Method::PATCH,
+                "/v1/messages",
+                Some("beta=dispatcher"),
+                request_body.clone(),
+            )
+            .await;
+
+            let response = dispatcher
+                .dispatch(signed)
+                .await
+                .expect("tower service dispatch succeeds");
+
+            let captured = captured
+                .lock()
+                .expect("capture lock is available")
+                .take()
+                .expect("service received the signed request");
+            assert_eq!(
+                captured.uri,
+                "https://api.example.test/v1/messages?beta=dispatcher"
+                    .parse::<http::Uri>()
+                    .expect("expected URI parses")
+            );
+            assert_eq!(captured.method, Method::PATCH);
+            assert_eq!(captured.headers, request_headers);
+            assert_eq!(captured.body, request_body);
+            assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+            assert_eq!(
+                response.headers().get("x-response-token"),
+                Some(&HeaderValue::from_static("response-value"))
+            );
+            assert_eq!(
+                response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("mapped response body reads")
+                    .to_bytes(),
+                response_body
+            );
+        }
+    }
+
+    #[test]
+    fn default_builder_returns_dispatcher_with_exact_real_hyper_client() {
+        fn accepts_exact_builder(_builder: fn(usize) -> HttpsHyperDispatcher<DefaultHttpsClient>) {}
+
+        accepts_exact_builder(build_default_https_dispatcher);
+    }
+
     async fn signed_request() -> SignedRequest {
         signed_request_for_url(Url::parse("http://upstream.local/").expect("test URL parses")).await
     }
 
     async fn signed_request_for_url(base_url: Url) -> SignedRequest {
+        signed_request_with_parts(
+            base_url,
+            HeaderMap::new(),
+            Method::POST,
+            "/v1/messages",
+            None,
+            Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
+        )
+        .await
+    }
+
+    async fn signed_request_with_parts(
+        base_url: Url,
+        downstream_headers: HeaderMap,
+        method: Method,
+        path: &str,
+        query: Option<&str>,
+        body_bytes: Bytes,
+    ) -> SignedRequest {
         let upstream = Upstream::AnthropicDirect { base_url: None };
         let context = DialectShapeContext {
             request_id: "test-request".to_owned(),
-            downstream_headers: HeaderMap::new(),
-            method: Method::POST,
-            path: "/v1/messages".to_owned(),
-            query: None,
-            body_bytes: Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
+            downstream_headers,
+            method,
+            path: path.to_owned(),
+            query: query.map(str::to_owned),
+            body_bytes,
         };
         let principal = Principal {
             id: "principal-test".to_owned(),

@@ -52,7 +52,7 @@ async fn create_principal(state: AdminState, body: Value) -> (Value, String) {
 }
 
 #[tokio::test]
-async fn cache_keepalive_survives_create_get_and_put_clear() {
+async fn t2__cache_keepalive_survives_create_get_and_put_clear() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -107,7 +107,7 @@ async fn cache_keepalive_survives_create_get_and_put_clear() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_omitted_on_update_remains_unchanged() {
+async fn t2__cache_keepalive_omitted_on_update_remains_unchanged() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
     let (created, etag) = create_principal(
@@ -141,7 +141,7 @@ async fn cache_keepalive_omitted_on_update_remains_unchanged() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_rejects_unimplemented_llm_judge_on_create() {
+async fn t2__cache_keepalive_rejects_unimplemented_llm_judge_on_create() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -172,7 +172,7 @@ async fn cache_keepalive_rejects_unimplemented_llm_judge_on_create() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_rejects_unimplemented_llm_judge_on_update() {
+async fn t2__cache_keepalive_rejects_unimplemented_llm_judge_on_update() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
     let (created, etag) = create_principal(

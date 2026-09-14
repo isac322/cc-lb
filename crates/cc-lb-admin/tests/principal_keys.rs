@@ -8,6 +8,8 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
+use cc_lb_control::api_keys::key_store::KeyStore;
+use cc_lb_storage_api::types::KeyStatus;
 use cc_lb_storage_api::{AuditStore, RequestEvent, RequestEventStore};
 use serde_json::json;
 use tower::ServiceExt;
@@ -37,7 +39,7 @@ fn test_state() -> AdminState {
 }
 
 #[tokio::test]
-async fn principal_keys_current_admin_principals_smoke() {
+async fn t2__principal_keys_current_admin_principals_smoke() {
     let response = router(test_state())
         .oneshot(
             Request::builder()
@@ -54,7 +56,7 @@ async fn principal_keys_current_admin_principals_smoke() {
 }
 
 #[tokio::test]
-async fn revoked_key_list_preserves_key_id_last4_and_audit_rows() {
+async fn t2__revoked_key_list_preserves_key_id_last4_and_audit_rows() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, _, principal) = server
         .client
@@ -104,7 +106,7 @@ async fn revoked_key_list_preserves_key_id_last4_and_audit_rows() {
 }
 
 #[tokio::test]
-async fn legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() {
+async fn t2__legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, _, principal) = server
         .client
@@ -175,8 +177,8 @@ async fn legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() 
 }
 
 #[tokio::test]
-async fn principal_key_usage_uses_persisted_request_events() {
-    let server = admin_test_common::spawn_admin_server().await;
+async fn t3__principal_key_usage_uses_persisted_request_events() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
     let (_, _, principal) = server
         .client
         .post_json(
@@ -196,8 +198,8 @@ async fn principal_key_usage_uses_persisted_request_events() {
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let key_id = issued["key_id"].as_str().unwrap();
-    let event_ts = cc_lb_clock::unix_secs(std::time::SystemTime::now());
-    let event_ts_ms = event_ts.saturating_mul(1_000);
+    let event_ts = 1_700_000_000;
+    let event_ts_ms = event_ts * 1_000;
 
     server
         .storage
@@ -250,8 +252,61 @@ async fn principal_key_usage_uses_persisted_request_events() {
     assert_eq!(observed["cost_usd_micros"], 50);
 }
 
+#[tokio::test]
+async fn t3__audit_append_failure_revokes_just_issued_key() {
+    let server = admin_test_common::spawn_admin_server_sqlite().await;
+    let (_, _, principal) = server
+        .client
+        .post_json(
+            "/admin/v1/principals",
+            json!({
+                "name": "audit-rollback",
+                "kind": "machine",
+                "allowed_models": [],
+                "default_limits": []
+            }),
+        )
+        .await;
+    let principal_id = principal["id"].as_str().unwrap();
+    admin_test_common::set_dynamic_principal(&server.dynamic_view, principal_id);
+
+    sqlx::query(
+        "CREATE TRIGGER fail_principal_key_issue_audit \
+         BEFORE INSERT ON audit_log_v1 \
+         WHEN NEW.admin_action = 'principal_key_issue' \
+         BEGIN \
+             SELECT RAISE(ABORT, 'injected principal key issue audit failure'); \
+         END",
+    )
+    .execute(server.storage.pool())
+    .await
+    .expect("audit failure trigger installs");
+
+    let (status, _, body) = server
+        .client
+        .post_json(
+            &format!("/admin/v1/principals/{principal_id}/keys"),
+            json!({ "label": "audit rollback" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, json!({ "error": "audit_write_failed" }));
+
+    let key_store = KeyStore::new(server.storage.clone());
+    let keys = key_store
+        .list_by_principal(principal_id)
+        .await
+        .expect("key lookup succeeds");
+    assert_eq!(keys.len(), 1);
+    let stored = &keys[0];
+    assert_eq!(stored.status, KeyStatus::Revoked);
+    assert_eq!(stored.index_hash, [0; 32]);
+    assert_eq!(stored.verify_hash, [0; 32]);
+    assert_eq!(stored.secret_salt, [0; 16]);
+}
+
 async fn wait_for_audit_action(
-    storage: &std::sync::Arc<cc_lb_storage_sqlite::SqliteStorage>,
+    storage: &std::sync::Arc<impl cc_lb_storage_api::AuditStore>,
     needle: &str,
     key_id: &str,
 ) {

@@ -9,8 +9,8 @@ use cc_lb_storage_api::{
     RequestEvent, RequestEventStore, UsageRollupStore, normalize_usage_rollup_dimension,
 };
 use config_admin_common::{
-    app, authed_bytes, authed_bytes_with_headers, authed_json, temp_storage,
-    temp_storage_with_clock, test_state, test_state_with_clock,
+    app, authed_bytes, authed_bytes_with_headers, authed_json, temp_storage, test_state,
+    test_state_with_clock,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -18,7 +18,7 @@ use uuid::Uuid;
 const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
 
 #[tokio::test]
-async fn usage_returns_200_grouped_by_model() {
+async fn t2__usage_returns_200_grouped_by_model() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -35,9 +35,10 @@ async fn usage_returns_200_grouped_by_model() {
 }
 
 #[tokio::test]
-async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
+async fn t3__dashboard_etags_short_circuit_rollup_scans_before_response_building() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let now = current_unix_secs(clock.as_ref());
     storage
         .append_request_event(&usage_event(
@@ -173,7 +174,7 @@ async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
 }
 
 #[tokio::test]
-async fn usage_legacy_dashboard_alias_matches_v1_body() {
+async fn t2__usage_legacy_dashboard_alias_matches_v1_body() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
     let admin_app = app(state);
@@ -199,7 +200,7 @@ async fn usage_legacy_dashboard_alias_matches_v1_body() {
 }
 
 #[tokio::test]
-async fn usage_returns_200_grouped_by_principal() {
+async fn t2__usage_returns_200_grouped_by_principal() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -215,9 +216,10 @@ async fn usage_returns_200_grouped_by_principal() {
 }
 
 #[tokio::test]
-async fn usage_totals_projection_preserves_full_series_totals() {
+async fn t3__usage_totals_projection_preserves_full_series_totals() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(10);
     let now = current_unix_secs(clock.as_ref());
 
@@ -284,9 +286,10 @@ async fn usage_totals_projection_preserves_full_series_totals() {
 }
 
 #[tokio::test]
-async fn usage_totals_projection_preserves_components_across_rollup_lag() {
+async fn t3__usage_totals_projection_preserves_components_across_rollup_lag() {
     let clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(11);
     let now = current_unix_secs(clock.as_ref());
 
@@ -377,9 +380,10 @@ async fn usage_totals_projection_preserves_components_across_rollup_lag() {
 }
 
 #[tokio::test]
-async fn usage_totals_projection_preserves_unrolled_recorded_zero_components() {
+async fn t3__usage_totals_projection_preserves_unrolled_recorded_zero_components() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(15);
     let now = current_unix_secs(clock.as_ref());
 
@@ -431,9 +435,10 @@ async fn usage_totals_projection_preserves_unrolled_recorded_zero_components() {
 }
 
 #[tokio::test]
-async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() {
+async fn t3__usage_totals_projection_matches_upstream_filter_and_empty_transition() {
     let clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let target_upstream_id = Uuid::from_u128(12);
     let other_upstream_id = Uuid::from_u128(13);
     let initially_empty_upstream_id = Uuid::from_u128(14);
@@ -538,7 +543,7 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
 }
 
 #[tokio::test]
-async fn usage_rejects_invalid_projection() {
+async fn t2__usage_rejects_invalid_projection() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -553,7 +558,7 @@ async fn usage_rejects_invalid_projection() {
 }
 
 #[tokio::test]
-async fn usage_rejects_invalid_group_by() {
+async fn t2__usage_rejects_invalid_group_by() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
@@ -568,9 +573,10 @@ async fn usage_rejects_invalid_group_by() {
 }
 
 #[tokio::test]
-async fn usage_filters_by_upstream_id() {
+async fn t3__usage_filters_by_upstream_id() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(1);
     let other_upstream_id = Uuid::from_u128(2);
     let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(3_600);
@@ -620,9 +626,10 @@ async fn usage_filters_by_upstream_id() {
 }
 
 #[tokio::test]
-async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
+async fn t3__usage_principal_enriches_mixed_legacy_and_component_costs() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(3);
     let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(60);
 
@@ -686,9 +693,10 @@ async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
 }
 
 #[tokio::test]
-async fn usage_principal_preserves_recorded_zero_component_costs() {
+async fn t3__usage_principal_preserves_recorded_zero_component_costs() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(4);
     let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(60);
     let mut event = usage_event(
@@ -730,9 +738,10 @@ async fn usage_principal_preserves_recorded_zero_component_costs() {
 }
 
 #[tokio::test]
-async fn usage_principal_omits_components_when_request_events_are_ahead() {
+async fn t3__usage_principal_omits_components_when_request_events_are_ahead() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(5);
     let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(60);
     let mut rolled = usage_event(
@@ -784,9 +793,10 @@ async fn usage_principal_omits_components_when_request_events_are_ahead() {
 }
 
 #[tokio::test]
-async fn usage_non_principal_grouping_does_not_expose_component_costs() {
+async fn t3__usage_non_principal_grouping_does_not_expose_component_costs() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(6);
     let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(60);
     let mut event = usage_event(
@@ -831,9 +841,10 @@ async fn usage_non_principal_grouping_does_not_expose_component_costs() {
 }
 
 #[tokio::test]
-async fn summary_error_rate_excludes_client_navigation_statuses() {
+async fn t3__summary_error_rate_excludes_client_navigation_statuses() {
     let clock = test_clock();
-    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let (_dir, storage) =
+        crate::config_admin_common::sqlite_temp_storage_with_clock(clock.clone()).await;
     let upstream_id = Uuid::from_u128(1);
     let bucket_ts = current_unix_secs(clock.as_ref()).saturating_sub(60);
 
@@ -861,7 +872,7 @@ async fn summary_error_rate_excludes_client_navigation_statuses() {
 }
 
 #[tokio::test]
-async fn usage_503_when_storage_missing() {
+async fn t2__usage_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
     let (status, _, _) = authed_bytes(
         app(state),

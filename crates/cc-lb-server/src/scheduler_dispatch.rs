@@ -37,8 +37,8 @@ use crate::scheduler_dispatch::http::{JsonHttpClient, json_http_client};
 use crate::scheduler_dispatch::outcomes::metadata_outcome;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
-pub(crate) struct SchedulerDispatchDeps {
-    pub backend: SchedulerBackend,
+pub(crate) struct SchedulerDispatchDeps<B = SchedulerBackend> {
+    pub backend: B,
     pub cache_keepalive_pusher: Arc<dyn CacheKeepaliveTaskPusher>,
     pub config: Config,
     pub storage: Arc<dyn Storage>,
@@ -63,7 +63,7 @@ pub(crate) struct SchedulerDispatchDeps {
 
 #[derive(Clone)]
 pub(super) struct SchedulerDispatch {
-    pub(super) backend: SchedulerBackend,
+    pub(super) backend: Arc<dyn cron::SchedulerDispatchBackend>,
     pub(super) cache_keepalive_pusher: Arc<dyn CacheKeepaliveTaskPusher>,
     pub(super) config: Arc<Config>,
     pub(super) storage: Arc<dyn Storage>,
@@ -98,9 +98,12 @@ pub(crate) fn build_scheduler_ctx(deps: SchedulerDispatchDeps) -> SchedulerCtx {
 }
 
 impl SchedulerDispatch {
-    fn new(deps: SchedulerDispatchDeps) -> Self {
+    fn new<B>(deps: SchedulerDispatchDeps<B>) -> Self
+    where
+        B: cron::SchedulerDispatchBackend + 'static,
+    {
         Self {
-            backend: deps.backend,
+            backend: Arc::new(deps.backend),
             cache_keepalive_pusher: deps.cache_keepalive_pusher,
             config: Arc::new(deps.config),
             storage: deps.storage,

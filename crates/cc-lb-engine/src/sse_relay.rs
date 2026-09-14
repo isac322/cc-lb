@@ -721,6 +721,7 @@ fn client_disconnected_status() -> StatusCode {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -749,7 +750,7 @@ mod tests {
     const TEST_MODEL: &str = "claude-sonnet-4-5-20250929";
 
     #[tokio::test]
-    async fn abort_skips_observation() {
+    async fn t2__abort_skips_observation() {
         let cache = Arc::new(RecordingPromptCacheObservationCache::default());
         let sink = Arc::new(RecordingPromptCacheObservationSink::default());
         let bus = Arc::new(InMemoryBus::new());
@@ -759,9 +760,9 @@ mod tests {
         let relay = relay_with_context_with_emitter(cache, sink.clone(), bus, "sse-abort");
 
         let response = relay.into_response_from_body(Body::from(sse_event(
-            "message_start",
-            r#"{"type":"message_start","message":{"usage":{"input_tokens":1600,"cache_creation_input_tokens":1600}}}"#,
-        )));
+        "message_start",
+        r#"{"type":"message_start","message":{"usage":{"input_tokens":1600,"cache_creation_input_tokens":1600}}}"#,
+    )));
         let _body = response.into_body().collect().await.expect("body collects");
 
         assert!(sink.records().is_empty());
@@ -780,15 +781,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abort_skips_in_memory_upsert() {
+    async fn t2__abort_skips_in_memory_upsert() {
         let cache = Arc::new(RecordingPromptCacheObservationCache::default());
         let sink = Arc::new(RecordingPromptCacheObservationSink::default());
         let relay = relay_with_context(cache.clone(), sink);
 
         let response = relay.into_response_from_body(Body::from(sse_event(
-            "message_start",
-            r#"{"type":"message_start","message":{"usage":{"input_tokens":1600,"cache_creation_input_tokens":1600}}}"#,
-        )));
+        "message_start",
+        r#"{"type":"message_start","message":{"usage":{"input_tokens":1600,"cache_creation_input_tokens":1600}}}"#,
+    )));
         let _body = response.into_body().collect().await.expect("body collects");
 
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000231").unwrap();
@@ -802,7 +803,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_stop_emits_observation_event() {
+    async fn t2__message_stop_emits_observation_event() {
         let cache = Arc::new(RecordingPromptCacheObservationCache::default());
         let sink = Arc::new(RecordingPromptCacheObservationSink::default());
         let bus = Arc::new(InMemoryBus::new());
@@ -1100,8 +1101,8 @@ mod tests {
     #[test]
     fn usage_from_json_bytes_nested_cache_creation_split() {
         let body = Bytes::from_static(
-            br#"{"usage":{"input_tokens":3,"output_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":400,"ephemeral_1h_input_tokens":1200},"cache_read_input_tokens":7}}"#,
-        );
+        br#"{"usage":{"input_tokens":3,"output_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":400,"ephemeral_1h_input_tokens":1200},"cache_read_input_tokens":7}}"#,
+    );
 
         let usage = usage_from_json_bytes(&body);
 
@@ -1117,8 +1118,8 @@ mod tests {
     #[test]
     fn usage_from_json_bytes_legacy_flat() {
         let body = Bytes::from_static(
-            br#"{"message":{"usage":{"cache_creation_input_tokens":42,"cache_read_input_tokens":3}}}"#,
-        );
+        br#"{"message":{"usage":{"cache_creation_input_tokens":42,"cache_read_input_tokens":3}}}"#,
+    );
 
         let usage = usage_from_json_bytes(&body);
 

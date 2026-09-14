@@ -1,28 +1,31 @@
-//! Local-only multi-process E2E for Postgres LISTEN/NOTIFY failover.
+//! Multi-process E2E for Postgres LISTEN/NOTIFY failover.
 //!
-//! Requires Docker (via `DOCKER_HOST`), the following fixed localhost ports —
-//! 8888, 8889, 8001, 8002, 8003, 8004, 18888 — plus these env vars:
-//!   - `CC_LB_MULTI_REPLICA_E2E=1`
-//!   - `CC_LB_MULTI_REPLICA_POSTGRES_URL=postgres://...`
+//! Requires prebuilt `CC_LB_MULTI_REPLICA_SERVER_BIN` and
+//! `CC_LB_MULTI_REPLICA_FAKE_ANTHROPIC_BIN` executables, fixed localhost ports
+//! 8888, 8889, 8001, 8002, 8003, 8004, and 18888, plus
+//! `CC_LB_MULTI_REPLICA_POSTGRES_URL=postgres://...`.
 //!
-//! Intentionally not enabled in PR CI: spinning up two `cc-lb-server`
-//! replicas, a fake Anthropic upstream, and a shared Postgres container in
-//! Docker on shared self-hosted runners is flaky by construction. The
-//! `postgres-scheduled.yml` cron workflow covers Postgres-live coverage on a
-//! schedule instead.
+//! `CC_LB_MULTI_REPLICA_POSTGRES_MODE=external` uses an already-running local
+//! Postgres service and host `psql`. The default `compose` mode owns a local
+//! Docker Compose Postgres service. Missing prerequisites fail loudly.
 use std::process::Command;
 
 #[test]
-fn multi_replica_notify_and_failover() {
-    if std::env::var("CC_LB_MULTI_REPLICA_E2E").is_err() {
-        eprintln!("skipped: CC_LB_MULTI_REPLICA_E2E not set");
-        return;
-    }
-
+fn t5__multi_replica_notify_and_failover() {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let status = Command::new("bash")
+    let output = Command::new("bash")
         .arg(manifest_dir.join("multi-replica-postgres.sh"))
-        .status()
+        .output()
         .expect("run multi-replica postgres script");
-    assert!(status.success(), "multi-replica postgres script failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    print!("{stdout}");
+    eprint!("{stderr}");
+    assert!(
+        output.status.success(),
+        "multi-replica postgres script failed with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        stdout,
+        stderr
+    );
 }

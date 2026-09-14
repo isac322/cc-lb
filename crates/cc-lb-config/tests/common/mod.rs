@@ -12,12 +12,6 @@ pub fn temp_config(contents: &str) -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-pub fn write_temp_file(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
-    let path = dir.join(name);
-    fs::write(&path, contents).unwrap();
-    path
-}
-
 pub fn toml_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "\\\\")
 }

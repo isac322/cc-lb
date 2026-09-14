@@ -358,6 +358,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use crate::api_keys::concurrent_guard::KeyConcurrencyManager;
@@ -366,7 +367,7 @@ mod tests {
     fn build_engine() -> Arc<LimitEngine> {
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(crate::clock::SystemClock),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         )
     }
 
@@ -490,5 +491,177 @@ mod tests {
         .unwrap();
         drop(tx);
         handle.shutdown().await;
+    }
+    #[test]
+    fn t2__reconcile_subscriber_reconciles_tokens_and_cost_on_success() {
+        use cc_lb_storage_api::types::{KeyStatus, Limit, LimitKind, StoredApiKeyRecord};
+        use metrics_util::debugging::DebugValue;
+
+        let (recorder, snapshotter) = cc_lb_testkit::local_recorder();
+        let _recorder_guard = cc_lb_testkit::install_local_recorder(&recorder);
+
+        let engine = build_engine();
+        let view = crate::api_keys::principal_view::PrincipalView::for_tests(
+            "principal-1",
+            true,
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "key-1".to_owned(),
+            status: KeyStatus::Active,
+            limit_overrides: vec![
+                Limit {
+                    kind: LimitKind::TotalTokens,
+                    window_secs: 60,
+                    cap_micros: 100,
+                },
+                Limit {
+                    kind: LimitKind::CostUsd,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+            ],
+            ..StoredApiKeyRecord::default()
+        };
+        let reservation = engine
+            .reserve(
+                &view,
+                &record,
+                "principal-1",
+                "claude-test",
+                100,
+                0,
+                Some(120),
+            )
+            .expect("reservation succeeds");
+        let reservation_id = reservation.id().to_owned();
+        reservation.forget();
+        let event_id = eid("reconcile-success");
+        let mut partials = HashMap::new();
+
+        for event in [
+            LifecycleEvent::LimitDecision {
+                event_id: event_id.clone(),
+                decision: LimitDecisionKind::Reserved {
+                    reservation_id,
+                    amount: 100,
+                    limit_reserve_ms: None,
+                },
+            },
+            LifecycleEvent::UsageObserved {
+                event_id: event_id.clone(),
+                usage: UsageSnapshot {
+                    input_tokens: 40,
+                    output_tokens: 0,
+                    ..UsageSnapshot::default()
+                },
+                source: UsageSource::NonStreamBody,
+            },
+            LifecycleEvent::Priced {
+                event_id: event_id.clone(),
+                cost: cc_lb_request_log::CostBreakdown {
+                    total_micros: Some(120),
+                    ..Default::default()
+                },
+            },
+            LifecycleEvent::RequestTerminated {
+                event_id: event_id.clone(),
+                reason: TerminationReason::Success,
+                client_status: 200,
+                duration_ms: 20,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                finalize_ms: None,
+                first_body_chunk_ms: None,
+                internal_errors: Vec::new(),
+                limit_reconcile_ms: None,
+                observability_post_ms: None,
+                proxy_setup_ms: None,
+                setup_timings: Default::default(),
+                io_timings: Default::default(),
+                upstream_body_ms: None,
+            },
+        ] {
+            handle_event(
+                &engine,
+                &mut partials,
+                DEFAULT_LIMIT_RECONCILE_MAP_CAP,
+                event,
+            );
+        }
+
+        assert!(partials.is_empty());
+        let headers = engine.headers_for("key-1", "principal-1");
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(name, _)| name == "anthropic-ratelimit-tokens-remaining")
+                .map(|(_, value)| value.as_str()),
+            Some("60")
+        );
+        assert_eq!(
+            engine
+                .reserve(
+                    &view,
+                    &record,
+                    "principal-1",
+                    "claude-test",
+                    0,
+                    0,
+                    Some(881),
+                )
+                .err(),
+            Some(crate::api_keys::limit_engine::RejectReason::CostRateLimit)
+        );
+        engine
+            .reserve(
+                &view,
+                &record,
+                "principal-1",
+                "claude-test",
+                0,
+                0,
+                Some(880),
+            )
+            .expect("reconciled cost leaves exactly 880 micros available");
+
+        let samples = snapshotter.snapshot().into_vec();
+        let counter_value = |name: &str, labels: &[(&str, &str)]| {
+            samples
+                .iter()
+                .filter(|(key, _, _, _)| {
+                    key.key().name() == name
+                        && labels.iter().all(|(expected_key, expected_value)| {
+                            key.key().labels().any(|label| {
+                                label.key() == *expected_key && label.value() == *expected_value
+                            })
+                        })
+                })
+                .map(|(_, _, _, value)| match value {
+                    DebugValue::Counter(value) => *value,
+                    other => panic!("expected counter {name}, got {other:?}"),
+                })
+                .sum::<u64>()
+        };
+        assert_eq!(
+            counter_value(
+                "cc_lb_limit_reconcile_subscriber_rows_total",
+                &[("outcome", "reconciled")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter_value(
+                "cc_lb_limit_reconcile_subscriber_rows_total",
+                &[("outcome", "id_unknown")]
+            ),
+            0
+        );
+        assert_eq!(
+            counter_value("cc_lb_limit_reservation_ttl_evicted_total", &[]),
+            0
+        );
     }
 }

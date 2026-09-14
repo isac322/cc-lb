@@ -51,11 +51,11 @@ fn principal_record_router_terminal_strategy_deserializes_with_default() {
 #[test]
 fn principal_record_router_terminal_strategy_serialization_roundtrip() {
     let original = PrincipalRecord {
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(1),
         name: "test-principal".to_string(),
         kind: PrincipalKind::Human,
         allowed_models: vec!["claude-3".to_string()],
-        allowed_upstreams: vec![Uuid::new_v4()],
+        allowed_upstreams: vec![Uuid::from_u128(2)],
         default_limits: vec![],
         enabled: true,
         last_apply_error: None,

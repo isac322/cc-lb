@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::v1::FilterResponse;
 
@@ -141,7 +143,7 @@ fn encode_leb128(buffer: &mut Vec<u8>, mut value: u64) {
 }
 
 #[test]
-fn agnostic_admission_accepts_filter_and_observe_hooks() {
+fn t3__agnostic_admission_accepts_filter_and_observe_hooks() {
     // Given: one artifact declaring two independent slot hooks.
     let wasm = plugin_wasm(
         &[(HookKind::Filter, None), (HookKind::Observe, None)],
@@ -243,7 +245,7 @@ fn agnostic_inspection_rejects_noop_primary_hook() {
 }
 
 #[test]
-fn agnostic_admission_probes_each_declared_hook() {
+fn t3__agnostic_admission_probes_each_declared_hook() {
     // Given: Filter is valid but the declared Observe export has the wrong result type.
     let wasm = plugin_wasm(
         &[(HookKind::Filter, None), (HookKind::Observe, None)],

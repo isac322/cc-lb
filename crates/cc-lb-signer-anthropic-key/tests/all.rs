@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 #[path = "debug_redacts_key.rs"]
 mod debug_redacts_key;
 #[path = "factory_wrong_strategy.rs"]

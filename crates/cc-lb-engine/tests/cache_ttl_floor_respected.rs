@@ -5,7 +5,7 @@ use cc_lb_engine::{DnsResolverConfig, make_resolver_with_factory};
 use hickory_resolver::config::ResolverOpts;
 
 #[test]
-fn cache_ttl_floor_respected() {
+fn cache_ttl_bounds_are_forwarded_to_hickory() {
     let captured = Arc::new(Mutex::new(None::<ResolverOpts>));
     let observed = Arc::clone(&captured);
 
@@ -26,4 +26,5 @@ fn cache_ttl_floor_respected() {
         .clone()
         .expect("opts");
     assert_eq!(opts.positive_min_ttl, Some(Duration::from_secs(30)));
+    assert_eq!(opts.positive_max_ttl, Some(Duration::from_secs(300)));
 }

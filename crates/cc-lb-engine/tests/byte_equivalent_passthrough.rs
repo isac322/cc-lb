@@ -10,7 +10,7 @@ use sse_relay_support::{
 };
 
 #[tokio::test]
-async fn byte_equivalent_passthrough() {
+async fn t2__byte_equivalent_passthrough() {
     let input = fixture_1000_events();
     let hook = Arc::new(RecordingHook::default());
     let relay = relay_for(

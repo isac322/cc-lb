@@ -1,9 +1,9 @@
+#![allow(non_snake_case)]
+
 mod common;
 
 #[path = "hot_reload.rs"]
 mod hot_reload;
-#[path = "load_env_override.rs"]
-mod load_env_override;
 #[path = "load_minimal.rs"]
 mod load_minimal;
 #[path = "scheduler_config.rs"]
@@ -12,6 +12,8 @@ mod scheduler_config;
 mod schema_freshness;
 #[path = "storage_postgres.rs"]
 mod storage_postgres;
+#[path = "string_parity.rs"]
+mod string_parity;
 #[path = "validation_failures.rs"]
 mod validation_failures;
 #[path = "wasmtime_config.rs"]

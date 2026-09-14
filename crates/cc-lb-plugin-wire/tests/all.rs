@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 #[path = "filter_versions.rs"]
 mod filter_versions;
 #[path = "schema_metadata.rs"]

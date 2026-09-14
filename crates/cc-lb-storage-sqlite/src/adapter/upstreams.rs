@@ -5,13 +5,13 @@ use cc_lb_storage_api::upstream::{
     UpstreamKind, UpstreamStatusUpdate, UpstreamWarmupDialectPlugin,
 };
 use cc_lb_storage_api::{
-    StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
-    validate_identifier,
+    ChangeChannel, StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore,
+    UpstreamUpdate, validate_identifier,
 };
 use sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
-use crate::{SqliteStorage, map_sqlx_error};
+use crate::{SqliteStorage, adapter::notifier::publish_change, map_sqlx_error};
 
 macro_rules! split_upstream_columns {
     () => {
@@ -168,7 +168,10 @@ impl UpstreamStore for SqliteStorage {
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-        tx.commit().await.map_err(map_sqlx_error)
+        let payload = id.to_string();
+        tx.commit().await.map_err(map_sqlx_error)?;
+        publish_change(ChangeChannel::Upstream, payload, self.clock());
+        Ok(())
     }
 
     async fn clear_warmup_dialect_plugin(
@@ -234,7 +237,9 @@ async fn create_split(
         .map_err(map_sqlx_error)?;
     }
 
+    let payload = id.to_string();
     tx.commit().await.map_err(map_sqlx_error)?;
+    publish_change(ChangeChannel::Upstream, payload, storage.clock());
     get_split_by_id(storage.pool(), id)
         .await?
         .ok_or_else(|| conflict("upstream not found"))
@@ -315,6 +320,7 @@ async fn update_split(
     // Spec, api-key, and generation updates share one transaction so a partial
     // update can never commit independently.
     let mut tx = storage.begin_immediate().await?;
+    let mut changed = has_spec_update;
     if has_spec_update {
         update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
     } else {
@@ -322,11 +328,17 @@ async fn update_split(
     }
     if let Some(ciphertext) = api_key_ciphertext {
         update_split_api_key_secret_in_tx(&mut tx, id, Some(ciphertext)).await?;
+        changed = true;
     }
     if let Some(generation) = oauth_token_generation {
         update_split_oauth_token_generation_in_tx(&mut tx, id, generation).await?;
+        changed = true;
     }
+    let payload = changed.then(|| id.to_string());
     tx.commit().await.map_err(map_sqlx_error)?;
+    if let Some(payload) = payload {
+        publish_change(ChangeChannel::Upstream, payload, storage.clock());
+    }
     get_split_by_id(storage.pool(), id)
         .await?
         .ok_or_else(|| conflict("upstream not found"))
@@ -343,7 +355,9 @@ async fn update_split_spec(
     }
     let mut tx = storage.begin_immediate().await?;
     update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
+    let payload = id.to_string();
     tx.commit().await.map_err(map_sqlx_error)?;
+    publish_change(ChangeChannel::Upstream, payload, storage.clock());
     get_split_by_id(storage.pool(), id)
         .await?
         .ok_or_else(|| conflict("upstream not found"))
@@ -391,7 +405,9 @@ async fn update_split_api_key_secret(
 ) -> StorageResult<UpstreamRecord> {
     let mut tx = storage.begin_immediate().await?;
     update_split_api_key_secret_in_tx(&mut tx, id, api_key_ciphertext).await?;
+    let payload = id.to_string();
     tx.commit().await.map_err(map_sqlx_error)?;
+    publish_change(ChangeChannel::Upstream, payload, storage.clock());
     get_split_by_id(storage.pool(), id)
         .await?
         .ok_or_else(|| conflict("upstream not found"))
@@ -445,7 +461,9 @@ async fn update_split_oauth_token(
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
+    let payload = id.to_string();
     tx.commit().await.map_err(map_sqlx_error)?;
+    publish_change(ChangeChannel::Upstream, payload, storage.clock());
     get_split_by_id(storage.pool(), id)
         .await?
         .ok_or_else(|| conflict("upstream not found"))
@@ -504,7 +522,10 @@ async fn complete_split_refresh(
         },
     )
     .await?;
-    tx.commit().await.map_err(map_sqlx_error)
+    let payload = id.to_string();
+    tx.commit().await.map_err(map_sqlx_error)?;
+    publish_change(ChangeChannel::Upstream, payload, storage.clock());
+    Ok(())
 }
 
 async fn read_split_oauth_token_generation(

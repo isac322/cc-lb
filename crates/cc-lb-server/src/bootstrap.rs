@@ -453,19 +453,24 @@ fn parse_upstream_kind(
 }
 
 #[cfg(test)]
-mod tests {
+#[allow(non_snake_case)]
+mod t2__tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
-    use cc_lb_engine::clock::TestClock;
     use cc_lb_storage_api::{
-        BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BackendKind, MetaStore, PluginRegistryStore,
-        PrincipalStore, WasmBlob, WasmRegistryEntryInput,
+        BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginRegistryStore, PrincipalStore, WasmBlob,
+        WasmRegistryEntryInput,
     };
-    use cc_lb_storage_sqlite::SqliteStorage as Storage;
+    use cc_lb_testkit::{InMemoryStorage as Storage, fixed_clock};
+    const TEST_ADMIN_ID: Uuid = Uuid::from_u128(1);
+    static NEXT_TEST_DATA_DIR: AtomicU64 = AtomicU64::new(0);
 
     #[tokio::test]
-    async fn bootstrap_seeds_principals_from_toml() {
-        let (dir, storage) = fixture().await;
-        let clock = TestClock::new_at_secs(1_800_000_000);
+    async fn t2__bootstrap_seeds_principals_from_toml() {
+        let clock = fixed_clock(1_800_000_000);
+        let (dir, storage) = fixture(clock.clone());
         fs::write(
             dir.path().join("bootstrap.toml"),
             format!(
@@ -482,7 +487,7 @@ mod tests {
             &storage,
             None,
             dir.path(),
-            &clock,
+            clock.as_ref(),
         )
         .await
         .unwrap();
@@ -508,7 +513,7 @@ mod tests {
             &storage,
             None,
             dir.path(),
-            &clock,
+            clock.as_ref(),
         )
         .await
         .unwrap();
@@ -524,9 +529,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bootstrap_seeds_plugin_chain_when_wasm_exists() {
-        let (dir, storage) = fixture().await;
-        let clock = TestClock::new_at_secs(1_800_000_000);
+    async fn t2__bootstrap_seeds_plugin_chain_when_wasm_exists() {
+        let clock = fixed_clock(1_800_000_000);
+        let (dir, storage) = fixture(clock.clone());
         let principal = seed_principal(&storage, "plugin-principal").await;
         let audit = seed_registry(&storage, "audit").await;
         fs::write(
@@ -547,7 +552,7 @@ plugins = ["audit"]
             &storage,
             None,
             dir.path(),
-            &clock,
+            clock.as_ref(),
         )
         .await
         .unwrap();
@@ -580,7 +585,7 @@ plugins = ["audit"]
             &storage,
             None,
             dir.path(),
-            &clock,
+            clock.as_ref(),
         )
         .await
         .unwrap();
@@ -599,9 +604,9 @@ plugins = ["audit"]
     }
 
     #[tokio::test]
-    async fn bootstrap_skips_chain_when_wasm_missing_with_warning() {
-        let (dir, storage) = fixture().await;
-        let clock = TestClock::new_at_secs(1_800_000_000);
+    async fn t2__bootstrap_skips_chain_when_wasm_missing_with_warning() {
+        let clock = fixed_clock(1_800_000_000);
+        let (dir, storage) = fixture(clock.clone());
         let principal = seed_principal(&storage, "plugin-principal").await;
         fs::write(
             dir.path().join("bootstrap.toml"),
@@ -621,7 +626,7 @@ plugins = ["missing-plugin"]
             &storage,
             None,
             dir.path(),
-            &clock,
+            clock.as_ref(),
         )
         .await
         .unwrap();
@@ -637,25 +642,34 @@ plugins = ["missing-plugin"]
         );
     }
 
-    #[test]
-    fn parse_plugin_slot_rejects_response_transform_slots() {
-        assert_eq!(parse_plugin_slot("transform_response"), None);
-        assert_eq!(parse_plugin_slot("TransformResponse"), None);
-        assert_eq!(parse_plugin_slot("transform_sse_event"), None);
-        assert_eq!(parse_plugin_slot("TransformSseEvent"), None);
+    struct TestDataDir {
+        path: PathBuf,
     }
 
-    async fn fixture() -> (tempfile::TempDir, Storage) {
-        let dir = tempfile::tempdir().unwrap();
-        let database_url = format!("sqlite://{}", dir.path().join("storage.sqlite").display());
-        let storage = cc_lb_storage_sqlite::open_sqlite(
-            &database_url,
-            std::sync::Arc::new(cc_lb_engine::SystemClock),
-        )
-        .await
-        .unwrap();
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
-        (dir, storage)
+    impl TestDataDir {
+        fn new() -> Self {
+            let sequence = NEXT_TEST_DATA_DIR.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "cc-lb-bootstrap-test-{}-{sequence}",
+                std::process::id(),
+            ));
+            fs::create_dir(&path).expect("create bootstrap test data dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDataDir {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.path).expect("remove bootstrap test data dir");
+        }
+    }
+
+    fn fixture(clock: cc_lb_engine::ClockHandle) -> (TestDataDir, Storage) {
+        (TestDataDir::new(), Storage::with_clock(clock))
     }
 
     async fn seed_principal(
@@ -694,7 +708,7 @@ plugins = ["missing-plugin"]
                     original_filename: format!("{name}.wasm"),
                     label: None,
                     uploaded_at_unix_secs: 1_800_000_000,
-                    uploaded_by_admin_id: Uuid::new_v4(),
+                    uploaded_by_admin_id: TEST_ADMIN_ID,
                     description: format!("{name} description"),
                     usage: "test fixture".to_owned(),
                     hook_metadata: Default::default(),
@@ -704,5 +718,19 @@ plugins = ["missing-plugin"]
             .await
             .unwrap();
         entry
+    }
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod t1__tests {
+    use super::parse_plugin_slot;
+
+    #[test]
+    fn parse_plugin_slot_rejects_response_transform_slots() {
+        assert_eq!(parse_plugin_slot("transform_response"), None);
+        assert_eq!(parse_plugin_slot("TransformResponse"), None);
+        assert_eq!(parse_plugin_slot("transform_sse_event"), None);
+        assert_eq!(parse_plugin_slot("TransformSseEvent"), None);
     }
 }

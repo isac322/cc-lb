@@ -45,7 +45,7 @@ async fn long_mode_error_message(app: axum::Router) -> String {
 }
 
 #[tokio::test]
-async fn long_mode_message_exceeds_cap_and_is_multiline_with_unbroken_run() {
+async fn t2__long_mode_message_exceeds_cap_and_is_multiline_with_unbroken_run() {
     // Given / When
     let message = long_mode_error_message(app(AppConfig::default())).await;
 
@@ -70,7 +70,7 @@ async fn long_mode_message_exceeds_cap_and_is_multiline_with_unbroken_run() {
 }
 
 #[tokio::test]
-async fn long_mode_message_is_deterministic() {
+async fn t2__long_mode_message_is_deterministic() {
     // Given / When
     let first = long_mode_error_message(app(AppConfig::default())).await;
     let second = long_mode_error_message(app(AppConfig::default())).await;

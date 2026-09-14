@@ -66,7 +66,7 @@ impl CacheKeepaliveEnqueuer for RecordingEnqueuer {
 }
 
 #[tokio::test(start_paused = true)]
-async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
+async fn t2__lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
     let upstream_id =
         Uuid::parse_str("00000000-0000-0000-0000-0000000000aa").expect("upstream id parses");
     let upstream = upstream_record(upstream_id, "primary", "http://keepalive.local/");
@@ -94,7 +94,7 @@ async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
         Arc::clone(&holder),
         Arc::new(AgentTurnDispatch),
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     )
     .with_cache_keepalive_enqueuer(Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>);
 

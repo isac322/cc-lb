@@ -8,7 +8,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn export_supported_slots_serializes_registry_entry_slots_as_snake_case() {
+async fn t2__export_supported_slots_serializes_registry_entry_slots_as_snake_case() {
     let (_dir, storage) = temp_storage().await;
     storage
         .persist_wasm_upload(
@@ -25,7 +25,7 @@ async fn export_supported_slots_serializes_registry_entry_slots_as_snake_case() 
                 original_filename: "plugin-slots.wasm".to_owned(),
                 label: Some("slot fixture".to_owned()),
                 uploaded_at_unix_secs: 1_800_000_000,
-                uploaded_by_admin_id: Uuid::new_v4(),
+                uploaded_by_admin_id: Uuid::from_u128(28),
                 description: "slot fixture".to_owned(),
                 usage: "test fixture".to_owned(),
                 hook_metadata: Default::default(),

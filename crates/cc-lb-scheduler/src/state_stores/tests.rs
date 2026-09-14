@@ -1,10 +1,12 @@
+#![allow(non_snake_case)]
+
 use super::*;
 use crate::error::Result;
 use uuid::Uuid;
 
 macro_rules! exercise_stores {
     ($pool:expr) => {{
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(1);
         let cursors = OAuthUsagePollCursorsStore::new($pool.clone());
         assert!(cursors.read(upstream_id).await?.is_none());
         let mut cursor = OAuthUsagePollCursor::new(upstream_id);
@@ -42,7 +44,7 @@ macro_rules! exercise_stores {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn idempotency_sqlite_stores_cover_insert_read_ttl_and_atomic_bump() -> Result<()> {
+async fn t3__idempotency_sqlite_stores_cover_insert_read_ttl_and_atomic_bump() -> Result<()> {
     use sqlx::sqlite::SqlitePoolOptions;
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -63,23 +65,19 @@ async fn idempotency_sqlite_stores_cover_insert_read_ttl_and_atomic_bump() -> Re
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
-async fn idempotency_postgres_stores_cover_insert_read_ttl_and_atomic_bump() -> Result<()> {
-    use sqlx::{Executor, PgPool, postgres::PgPoolOptions};
-    use std::str::FromStr;
+async fn t3_postgres__idempotency_stores_cover_insert_read_ttl_and_atomic_bump()
+-> anyhow::Result<()> {
+    use std::str::FromStr as _;
 
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("SKIP: DATABASE_URL not set - skipping postgres idempotency test");
-        return Ok(());
-    };
-    let admin = PgPool::connect(&url).await?;
-    let schema = format!("idempotency_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
-        .await?;
-    let options = sqlx::postgres::PgConnectOptions::from_str(&url)?
-        .options([("search_path", schema.as_str())]);
+    use sqlx::Executor;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    let fixture = cc_lb_storage_conformance::postgres_fixture().await?;
+    let search_path = format!("{},public", fixture.schema_name());
+    let options = PgConnectOptions::from_str(fixture.database_url())?
+        .options([("search_path", search_path.as_str())]);
     let pool = PgPoolOptions::new()
-        .max_connections(4)
+        .max_connections(8)
         .connect_with(options)
         .await?;
     pool.execute(include_str!(
@@ -91,8 +89,8 @@ async fn idempotency_postgres_stores_cover_insert_read_ttl_and_atomic_bump() -> 
     ))
     .await?;
     let outcome = exercise_stores!(pool);
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await?;
-    outcome
+    pool.close().await;
+    fixture.teardown().await?;
+    outcome?;
+    Ok(())
 }

@@ -1,21 +1,19 @@
 use std::sync::Arc;
 
 use cc_lb_engine::{
-    SubscriptionQuotaSink, SubscriptionQuotaWriterConfig, SystemClock,
-    start_subscription_quota_writer,
+    SubscriptionQuotaSink, SubscriptionQuotaWriterConfig, start_subscription_quota_writer,
 };
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
-    UpstreamSubscriptionQuotaStore,
+    Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
 };
-use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_testkit::InMemoryStorage;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn checkpoint_writer_latest_freshness() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage().await?;
+async fn t2__checkpoint_writer_latest_freshness() -> Result<(), Box<dyn std::error::Error>> {
+    let storage = InMemoryStorage::new();
     let upstream = upstream_id(1);
     let first = observation(upstream, 0, 1, 0.31);
     let after_heartbeat = observation(upstream, 31_000, 2, 0.31);
@@ -48,8 +46,9 @@ async fn checkpoint_writer_latest_freshness() -> Result<(), Box<dyn std::error::
 }
 
 #[tokio::test]
-async fn checkpoint_writer_representative_claim_only() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage().await?;
+async fn t2__checkpoint_writer_representative_claim_only() -> Result<(), Box<dyn std::error::Error>>
+{
+    let storage = InMemoryStorage::new();
     let upstream = upstream_id(2);
     let first = observation(upstream, 0, 1, 0.31);
     let mut changed_claim = observation(upstream, 1_000, 2, 0.31);
@@ -74,8 +73,8 @@ async fn checkpoint_writer_representative_claim_only() -> Result<(), Box<dyn std
 }
 
 #[tokio::test]
-async fn checkpoint_writer_semantic_payload_change() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage().await?;
+async fn t2__checkpoint_writer_semantic_payload_change() -> Result<(), Box<dyn std::error::Error>> {
+    let storage = InMemoryStorage::new();
     let upstream = upstream_id(3);
     let first = observation(upstream, 0, 1, 0.31);
     let changed_payload = observation(upstream, 1_000, 2, 0.32);
@@ -95,8 +94,8 @@ async fn checkpoint_writer_semantic_payload_change() -> Result<(), Box<dyn std::
 }
 
 #[tokio::test]
-async fn checkpoint_writer_decrease() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage().await?;
+async fn t2__checkpoint_writer_decrease() -> Result<(), Box<dyn std::error::Error>> {
+    let storage = InMemoryStorage::new();
     let upstream = upstream_id(4);
     let first = observation(upstream, 0, 1, 0.31);
     let decreased = observation(upstream, 1_000, 2, 0.30);
@@ -115,8 +114,67 @@ async fn checkpoint_writer_decrease() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+#[tokio::test(start_paused = true)]
+async fn t2__subscription_quota_writer_batches_and_flushes_on_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    let storage = InMemoryStorage::new();
+    let upstreams = (1_u128..=10).map(upstream_id).collect::<Vec<_>>();
+    let (sink, receiver) = SubscriptionQuotaSink::with_capacity(16);
+    let cancel = CancellationToken::new();
+    let storage_for_writer: Arc<dyn Storage> = storage.clone();
+    let handle = start_subscription_quota_writer(
+        storage_for_writer,
+        receiver,
+        SubscriptionQuotaWriterConfig {
+            batch_max_records: 256,
+            flush_max_ms: 100,
+        },
+        cancel.clone(),
+    );
+    for (index, upstream) in upstreams.iter().copied().enumerate() {
+        sink.enqueue(observation(
+            upstream,
+            index as u64,
+            100 + index as u128,
+            0.1 + index as f64 / 100.0,
+        ))?;
+    }
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(std::time::Duration::from_millis(99)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        storage
+            .list_latest_subscription_quota_for_upstreams(&upstreams)
+            .await?
+            .is_empty(),
+        "partial batch must wait for its configured deadline"
+    );
+
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    let persisted = storage
+        .list_latest_subscription_quota_for_upstreams(&upstreams)
+        .await?;
+    assert_eq!(persisted.len(), 10);
+    assert_eq!(
+        persisted
+            .iter()
+            .map(|sample| sample.upstream_id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        upstreams.iter().copied().collect()
+    );
+    let batches = storage.subscription_quota_sample_batches()?;
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].len(), 10);
+
+    cancel.cancel();
+    handle.await?;
+    Ok(())
+}
+
 async fn write_records<const N: usize>(
-    storage: Arc<SqliteStorage>,
+    storage: Arc<InMemoryStorage>,
     records: [SubscriptionQuotaSample; N],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (sink, receiver) = SubscriptionQuotaSink::with_capacity(N);
@@ -136,20 +194,6 @@ async fn write_records<const N: usize>(
     drop(sink);
     handle.await?;
     Ok(())
-}
-
-async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dyn std::error::Error>>
-{
-    let dir = tempfile::tempdir()?;
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path()
-            .join("subscription-quota-checkpoint-writer.sqlite")
-            .display()
-    );
-    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(SystemClock)).await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    Ok((dir, Arc::new(storage)))
 }
 
 fn observation(

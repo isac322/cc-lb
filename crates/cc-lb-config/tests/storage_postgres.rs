@@ -1,23 +1,24 @@
-use cc_lb_config::{Config, ConfigError, PostgresPoolConfig, StorageConfig, validate_postgres_url};
+use std::path::PathBuf;
+
+use cc_lb_config::{
+    Config, ConfigError, ConfigOverrides, PostgresPoolConfig, StorageConfig, validate_postgres_url,
+};
+
+fn load_config(toml: &str) -> Result<Config, ConfigError> {
+    Config::from_toml_str_with_overrides(toml, &ConfigOverrides::default())
+        .map(|(config, _warnings)| config)
+}
 
 #[test]
 fn test_legacy_flat_storage_parses() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage_path = dir.path().join("test.sqlite");
-    let config_path = dir.path().join("config.toml");
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"[storage]
-storage_path = "{}"
+    let storage_path = PathBuf::from("test.sqlite");
+    let config = load_config(
+        r#"[storage]
+storage_path = "test.sqlite"
 oauth_aead_key_env = "MY_KEY"
 "#,
-            crate::common::toml_path(&storage_path)
-        ),
     )
     .unwrap();
-
-    let config = Config::load(&config_path).unwrap();
 
     assert_eq!(config.storage, StorageConfig::Sqlite { path: storage_path });
     assert_eq!(config.aead.key_env, "MY_KEY");
@@ -59,20 +60,14 @@ fn test_postgres_pool_defaults() {
 
 #[test]
 fn test_tagged_kind_with_legacy_storage_path_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
-    std::fs::write(
-        &config_path,
+    let error = load_config(
         r#"[storage]
 kind = "postgres"
 url = "postgres://localhost/db"
 storage_path = "/tmp/leftover.sqlite"
 "#,
     )
-    .unwrap();
-
-    let error =
-        Config::load(&config_path).expect_err("conflicting [storage] keys must be rejected");
+    .expect_err("conflicting [storage] keys must be rejected");
 
     let message = format!("{error}");
     assert!(
@@ -85,10 +80,7 @@ storage_path = "/tmp/leftover.sqlite"
 
 #[test]
 fn test_tagged_kind_postgres_without_legacy_keys_parses() {
-    let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
-    std::fs::write(
-        &config_path,
+    let config = load_config(
         r#"[storage]
 kind = "postgres"
 url = "postgres://localhost/db"
@@ -98,8 +90,6 @@ instance_url = "http://127.0.0.1:9090"
 "#,
     )
     .unwrap();
-
-    let config = Config::load(&config_path).unwrap();
 
     assert!(matches!(
         config.storage,

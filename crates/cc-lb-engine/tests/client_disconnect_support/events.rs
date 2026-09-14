@@ -1,11 +1,9 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
 use cc_lb_lifecycle::{LifecycleEvent, StreamError, TerminationReason};
 use cc_lb_request_log::RequestEventUpdate;
-use cc_lb_storage_api::{BackendKind, MetaStore};
-use cc_lb_storage_sqlite::SqliteStorage;
+
 use tokio::sync::broadcast;
 
 use super::super::common::TestLifecycleBus;
@@ -110,18 +108,4 @@ pub async fn assert_one_final(rx: &mut broadcast::Receiver<RequestEventUpdate>) 
             .filter(|update| matches!(update, RequestEventUpdate::Final(_)))
             .count();
     assert_eq!(final_count, 1, "assembler published duplicate finals");
-}
-
-pub async fn sqlite_storage(
-    dir: &tempfile::TempDir,
-) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!(
-        "sqlite://{}",
-        dir.path().join("client-disconnect.sqlite").display()
-    );
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    Ok(storage)
 }

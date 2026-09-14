@@ -3,15 +3,10 @@ cc-lb-admin
 cc-lb-config
 cc-lb-engine
 cc-lb-dialect-anthropic
-cc-lb-dialect-bedrock
-cc-lb-dialect-vertex
 cc-lb-observability
-cc-lb-plugin-api
 cc-lb-server
 cc-lb-signer-anthropic-key
 cc-lb-signer-anthropic-oauth
-cc-lb-signer-aws
-cc-lb-signer-gcp
 cc-lb-storage-api
 cc-lb-storage-conformance
 cc-lb-storage-postgres

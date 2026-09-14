@@ -13,11 +13,13 @@ use axum::response::IntoResponse;
 use axum::routing::any;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, PostgresPoolConfig, StorageConfig};
-use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
+use cc_lb_server::app::{BuildError, build_app_with_storage, seed_app_testing_storage};
+use cc_lb_server::signal::SignalHandle;
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
 use cc_lb_storage_api::{
-    BackendKind, ManagedKeyStore, PrincipalStore, Storage as StorageTrait, StorageError,
+    ManagedKeyStore, PrincipalStore, Storage as StorageTrait, StorageError, UpstreamStore,
 };
+use cc_lb_storage_conformance::PostgresFixture;
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
 use serde_json::{Value, json};
@@ -39,11 +41,7 @@ const READY_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn ready_timeout() -> Duration {
-    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(READY_TIMEOUT_DEFAULT)
+    READY_TIMEOUT_DEFAULT
 }
 const MESSAGES_BODY: &str = r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#;
 
@@ -110,45 +108,52 @@ fn rebind_completions() -> &'static tokio::sync::broadcast::Sender<()> {
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cross_instance_issue_auth_revoke() -> TestResult<()> {
-    let Some(database_url) = ci_postgres_url() else {
-        eprintln!("skipped: CI_POSTGRES_URL unset");
-        return Ok(());
-    };
+#[tokio::test]
+async fn t3_postgres__cross_instance_issue_auth_revoke() -> TestResult<()> {
     let rebind_completions = rebind_completions();
-    let _serial = crate::common::postgres_test_lock(&database_url).await?;
+    let fixture = ManagedKeyFixture::spawn().await?;
+    let result = run_cross_instance_issue_auth_revoke(&fixture, rebind_completions).await;
+    let cleanup = fixture.shutdown().await;
+    combine_result_and_cleanup(result, cleanup)
+}
 
-    reset_managed_key_tables(&database_url).await?;
-    let upstream = spawn_ok_upstream().await?;
-    let (instance_a, instance_b) = spawn_two_instances(&database_url, upstream.addr).await?;
-
+async fn run_cross_instance_issue_auth_revoke(
+    fixture: &ManagedKeyFixture,
+    rebind_completions: &tokio::sync::broadcast::Sender<()>,
+) -> TestResult<()> {
     let mut issue_rebinds = rebind_completions.subscribe();
-    let issued = issue_key(instance_a.admin_addr, "issued-on-instance-a").await?;
-    assert_eq!(issued.principal_id, PRINCIPAL_ID);
+    let issued = issue_key(fixture.instance_a.admin_addr, "issued-on-instance-a").await?;
+    if issued.principal_id != PRINCIPAL_ID {
+        return Err(error(format!(
+            "issued key principal mismatch: expected={PRINCIPAL_ID} actual={}",
+            issued.principal_id
+        )));
+    }
     let authenticated = wait_for_proxy_status(
-        instance_b.proxy_addr,
+        fixture.instance_b.proxy_addr,
         &issued.plaintext_key,
         200,
         401,
         &mut issue_rebinds,
     )
     .await?;
-    assert!(
-        authenticated.body.contains(r#""type":"message""#),
-        "unexpected proxy success body: {}",
-        authenticated.body
-    );
+    if !authenticated.body.contains(r#""type":"message""#) {
+        return Err(error(format!(
+            "unexpected proxy success body: {}",
+            authenticated.body
+        )));
+    }
 
     let mut revoke_rebinds = rebind_completions.subscribe();
-    let revoked = revoke_key(instance_a.admin_addr, &issued.key_id).await?;
-    assert_eq!(
-        revoked.status, 200,
-        "instance A revoke should succeed: body={}",
-        revoked.body
-    );
+    let revoked = revoke_key(fixture.instance_a.admin_addr, &issued.key_id).await?;
+    if revoked.status != 200 {
+        return Err(error(format!(
+            "instance A revoke should succeed: status={} body={}",
+            revoked.status, revoked.body
+        )));
+    }
     wait_for_proxy_status(
-        instance_b.proxy_addr,
+        fixture.instance_b.proxy_addr,
         &issued.plaintext_key,
         401,
         200,
@@ -159,28 +164,25 @@ async fn cross_instance_issue_auth_revoke() -> TestResult<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_cross_instance_issue() -> TestResult<()> {
-    let Some(database_url) = ci_postgres_url() else {
-        eprintln!("skipped: CI_POSTGRES_URL unset");
-        return Ok(());
-    };
+#[tokio::test]
+async fn t3_postgres__concurrent_cross_instance_issue() -> TestResult<()> {
     let _ = rebind_completions();
-    let _serial = crate::common::postgres_test_lock(&database_url).await?;
+    let fixture = ManagedKeyFixture::spawn().await?;
+    let result = run_concurrent_cross_instance_issue(&fixture).await;
+    let cleanup = fixture.shutdown().await;
+    combine_result_and_cleanup(result, cleanup)
+}
 
-    reset_managed_key_tables(&database_url).await?;
-    let upstream = spawn_ok_upstream().await?;
-    let (instance_a, instance_b) = spawn_two_instances(&database_url, upstream.addr).await?;
-
+async fn run_concurrent_cross_instance_issue(fixture: &ManagedKeyFixture) -> TestResult<()> {
     let mut tasks = Vec::with_capacity(EXPECTED_ISSUED_KEYS);
     for index in 0..TASKS_PER_INSTANCE {
-        let admin_addr = instance_a.admin_addr;
+        let admin_addr = fixture.instance_a.admin_addr;
         tasks.push(tokio::task::spawn(async move {
             issue_key(admin_addr, &format!("instance-a-{index}")).await
         }));
     }
     for index in 0..TASKS_PER_INSTANCE {
-        let admin_addr = instance_b.admin_addr;
+        let admin_addr = fixture.instance_b.admin_addr;
         tasks.push(tokio::task::spawn(async move {
             issue_key(admin_addr, &format!("instance-b-{index}")).await
         }));
@@ -189,47 +191,175 @@ async fn concurrent_cross_instance_issue() -> TestResult<()> {
     let mut key_ids = HashSet::with_capacity(EXPECTED_ISSUED_KEYS);
     for task in tasks {
         let issued = task.await??;
-        assert!(
-            key_ids.insert(issued.key_id),
-            "duplicate key_id issued by concurrent requests"
-        );
+        if !key_ids.insert(issued.key_id) {
+            return Err(error("duplicate key_id issued by concurrent requests"));
+        }
     }
 
-    assert_eq!(key_ids.len(), EXPECTED_ISSUED_KEYS);
+    if key_ids.len() != EXPECTED_ISSUED_KEYS {
+        return Err(error(format!(
+            "issued key count mismatch: expected={EXPECTED_ISSUED_KEYS} actual={}",
+            key_ids.len()
+        )));
+    }
     println!("issued={} unique={}", EXPECTED_ISSUED_KEYS, key_ids.len());
 
     Ok(())
 }
 
-fn ci_postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL").ok()
+struct ManagedKeyFixture {
+    database: PostgresFixture,
+    _serial: sqlx::PgConnection,
+    upstream: RunningUpstream,
+    instance_a: RunningApp,
+    instance_b: RunningApp,
 }
 
-async fn spawn_two_instances(
-    database_url: &str,
-    upstream_addr: SocketAddr,
-) -> TestResult<(RunningApp, RunningApp)> {
-    let instance_a = tokio::task::spawn(build_running_app(
-        database_url.to_owned(),
-        upstream_addr,
-        "instance-a",
-    ));
-    let instance_b = tokio::task::spawn(build_running_app(
-        database_url.to_owned(),
-        upstream_addr,
-        "instance-b",
-    ));
+impl ManagedKeyFixture {
+    async fn spawn() -> TestResult<Self> {
+        let database = cc_lb_storage_conformance::postgres_fixture().await?;
+        let database_url =
+            match scoped_database_url(database.database_url(), database.schema_name()) {
+                Ok(url) => url,
+                Err(source) => {
+                    let cleanup = teardown_database(database).await;
+                    return Err(with_cleanup_error(source, cleanup));
+                }
+            };
+        let serial = match crate::common::postgres_test_lock(database.database_url()).await {
+            Ok(serial) => serial,
+            Err(source) => {
+                let cleanup = teardown_database(database).await;
+                return Err(with_cleanup_error(source.into(), cleanup));
+            }
+        };
+        let upstream = match spawn_ok_upstream().await {
+            Ok(upstream) => upstream,
+            Err(source) => {
+                let cleanup = teardown_database(database).await;
+                drop(serial);
+                return Err(with_cleanup_error(source, cleanup));
+            }
+        };
+        let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
+        let setup = async {
+            seed_app_testing_storage(
+                database.storage(),
+                Some(Url::parse(&format!("http://{}", upstream.addr))?),
+                &*clock,
+            )
+            .await?;
+            seed_test_principal(database.storage()).await
+        }
+        .await;
+        if let Err(source) = setup {
+            let cleanup = cleanup_partial_fixture(None, None, upstream, database, serial).await;
+            return Err(with_cleanup_error(source, cleanup));
+        }
 
-    let (instance_a, instance_b) = tokio::join!(instance_a, instance_b);
-    Ok((instance_a??, instance_b??))
+        let instance_a = match build_running_app(database_url.clone(), "instance-a").await {
+            Ok(instance) => instance,
+            Err(source) => {
+                let cleanup = cleanup_partial_fixture(None, None, upstream, database, serial).await;
+                return Err(with_cleanup_error(source, cleanup));
+            }
+        };
+        let instance_b = match build_running_app(database_url, "instance-b").await {
+            Ok(instance) => instance,
+            Err(source) => {
+                let cleanup =
+                    cleanup_partial_fixture(Some(instance_a), None, upstream, database, serial)
+                        .await;
+                return Err(with_cleanup_error(source, cleanup));
+            }
+        };
+
+        Ok(Self {
+            database,
+            _serial: serial,
+            upstream,
+            instance_a,
+            instance_b,
+        })
+    }
+
+    async fn shutdown(self) -> TestResult<()> {
+        cleanup_partial_fixture(
+            Some(self.instance_a),
+            Some(self.instance_b),
+            self.upstream,
+            self.database,
+            self._serial,
+        )
+        .await
+    }
 }
 
-async fn build_running_app(
-    database_url: String,
-    upstream_addr: SocketAddr,
-    label: &'static str,
-) -> TestResult<RunningApp> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+fn scoped_database_url(database_url: &str, schema_name: &str) -> TestResult<String> {
+    let mut url = Url::parse(database_url)?;
+    url.query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={schema_name},public"));
+    Ok(url.to_string())
+}
+
+async fn teardown_database(database: PostgresFixture) -> TestResult<()> {
+    database.teardown().await.map_err(|source| source.into())
+}
+
+async fn cleanup_partial_fixture(
+    instance_a: Option<RunningApp>,
+    instance_b: Option<RunningApp>,
+    upstream: RunningUpstream,
+    database: PostgresFixture,
+    _serial: sqlx::PgConnection,
+) -> TestResult<()> {
+    let mut failures = Vec::new();
+    if let Some(instance) = instance_a
+        && let Err(source) = instance.shutdown().await
+    {
+        failures.push(format!("shut down instance A: {source}"));
+    }
+    if let Some(instance) = instance_b
+        && let Err(source) = instance.shutdown().await
+    {
+        failures.push(format!("shut down instance B: {source}"));
+    }
+    if let Err(source) = upstream.shutdown().await {
+        failures.push(format!("shut down fake upstream: {source}"));
+    }
+    if let Err(source) = database.teardown().await {
+        failures.push(format!("tear down PostgreSQL fixture: {source:#}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(error(failures.join("; ")))
+    }
+}
+
+fn with_cleanup_error(
+    source: Box<dyn Error + Send + Sync>,
+    cleanup: TestResult<()>,
+) -> Box<dyn Error + Send + Sync> {
+    match cleanup {
+        Ok(()) => source,
+        Err(cleanup_error) => error(format!("{source}; cleanup also failed: {cleanup_error}")),
+    }
+}
+
+fn combine_result_and_cleanup(result: TestResult<()>, cleanup: TestResult<()>) -> TestResult<()> {
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(source), Ok(())) => Err(source),
+        (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(source), Err(cleanup_error)) => Err(error(format!(
+            "{source}; cleanup also failed: {cleanup_error}"
+        ))),
+    }
+}
+
+async fn build_running_app(database_url: String, label: &'static str) -> TestResult<RunningApp> {
+    let clock = cc_lb_testkit::fixed_clock(1_700_000_000);
     let pool = PgPoolOptions::new()
         .max_connections(16)
         .connect(&database_url)
@@ -240,21 +370,13 @@ async fn build_running_app(
         clock.clone(),
     ));
     let storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(pool, clock.clone()));
-    storage.initialize(BackendKind::Postgres).await?;
-    seed_app_testing_storage(
-        storage.as_ref(),
-        Some(Url::parse(&format!("http://{upstream_addr}"))?),
-        &*clock,
-    )
-    .await?;
-    seed_test_principal(storage.as_ref()).await?;
     let mut app = build_app_with_storage(
-        test_config(&database_url),
+        test_config(&database_url, label),
         None,
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),
-        clock.clone(),
+        clock,
     )
     .await?;
 
@@ -264,28 +386,28 @@ async fn build_running_app(
     let admin_addr = admin_listener.local_addr()?;
     app.proxy_addr = proxy_addr;
     app.admin_addr = admin_addr;
-
-    let proxy_router = app.router.clone();
-    let admin_router = app.admin_router.clone();
-    let proxy_task =
-        tokio::task::spawn(async move { axum::serve(proxy_listener, proxy_router).await });
-    let admin_task =
-        tokio::task::spawn(async move { axum::serve(admin_listener, admin_router).await });
+    let signal = app.signal_handle();
+    let task = tokio::task::spawn(app.start_with_listeners(proxy_listener, admin_listener));
 
     let running = RunningApp {
         _label: label,
-        _app: app,
         proxy_addr,
         admin_addr,
-        proxy_task,
-        admin_task,
+        signal,
+        task: Some(task),
     };
-    wait_for_status(running.proxy_addr, "/healthz", 200).await?;
-    wait_for_status(running.admin_addr, "/admin/health", 200).await?;
+    if let Err(source) = wait_for_status(running.proxy_addr, "/healthz", 200).await {
+        let cleanup = running.shutdown().await;
+        return Err(with_cleanup_error(source, cleanup));
+    }
+    if let Err(source) = wait_for_status(running.admin_addr, "/admin/health", 200).await {
+        let cleanup = running.shutdown().await;
+        return Err(with_cleanup_error(source, cleanup));
+    }
     Ok(running)
 }
 
-fn test_config(database_url: &str) -> Config {
+fn test_config(database_url: &str, label: &str) -> Config {
     let mut config = Config::default();
     config.listener.proxy_addr = "127.0.0.1:0".parse().expect("valid proxy addr");
     config.listener.admin_addr = "127.0.0.1:0".parse().expect("valid admin addr");
@@ -296,29 +418,23 @@ fn test_config(database_url: &str) -> Config {
     config.admin.token = Some(ADMIN_TOKEN.to_owned());
     config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
     config.downstream_auth.none_mode = None;
-    // Postgres always runs pg_notify fanout; borrow the always-set CI env as the
-    // shared cluster token so the app can build.
-    config.cluster.instance_url = Some("http://127.0.0.1:0".to_owned());
-    config.cluster.token_env = "CI_POSTGRES_URL".to_owned();
+    config.cluster.instance_url = Some(format!("http://{label}.example.test"));
+    config.cluster.token_env = crate::common::TEST_NONEMPTY_ENV.to_owned();
     config
 }
 
 async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
-    use cc_lb_engine::Clock as _;
-
-    let clock = cc_lb_engine::SystemClock;
-    let now = clock
-        .now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = 1_700_000_000;
+    let upstream = UpstreamStore::get_by_name(storage, "test-upstream")
+        .await?
+        .ok_or_else(|| error("seeded test upstream is missing"))?;
     match PrincipalStore::create(
         storage,
         PrincipalCreate {
             name: PRINCIPAL_ID.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: vec!["*".to_owned()],
-            allowed_upstreams: vec![],
+            allowed_upstreams: vec![upstream.id],
             default_limits: vec![],
             cache_keepalive: None,
         },
@@ -327,44 +443,44 @@ async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
     .await
     {
         Ok(_) | Err(StorageError::Conflict { .. }) => Ok(()),
-        Err(error) => Err(error.into()),
+        Err(source) => Err(source.into()),
     }
-}
-
-async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(database_url)
-        .await?;
-    let storage: Arc<dyn StorageTrait> =
-        Arc::new(PostgresStorage::new(pool.clone(), clock.clone()));
-    storage.initialize(BackendKind::Postgres).await?;
-    sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
-        .execute(&pool)
-        .await?;
-    sqlx::query("DELETE FROM upstream_spec_v1 WHERE name = 'test-upstream'")
-        .execute(&pool)
-        .await?;
-    sqlx::query("DROP SCHEMA IF EXISTS apalis CASCADE")
-        .execute(&pool)
-        .await?;
-    sqlx::query("DROP SCHEMA IF EXISTS cc_lb_scheduler CASCADE")
-        .execute(&pool)
-        .await?;
-    pool.close().await;
-
-    Ok(())
 }
 
 struct RunningUpstream {
     addr: SocketAddr,
-    task: JoinHandle<Result<(), io::Error>>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<JoinHandle<Result<(), io::Error>>>,
+}
+
+impl RunningUpstream {
+    async fn shutdown(mut self) -> TestResult<()> {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let mut task = self
+            .task
+            .take()
+            .ok_or_else(|| error("fake upstream task missing"))?;
+        match tokio::time::timeout(ready_timeout(), &mut task).await {
+            Ok(result) => {
+                result??;
+                Ok(())
+            }
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                Err(error("fake upstream did not shut down"))
+            }
+        }
+    }
 }
 
 impl Drop for RunningUpstream {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -379,23 +495,52 @@ async fn spawn_ok_upstream() -> TestResult<RunningUpstream> {
         )
             .into_response()
     }));
-    let task = tokio::task::spawn(async move { axum::serve(listener, router).await });
-    Ok(RunningUpstream { addr, task })
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::task::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    Ok(RunningUpstream {
+        addr,
+        shutdown: Some(shutdown),
+        task: Some(task),
+    })
 }
 
 struct RunningApp {
     _label: &'static str,
-    _app: App,
     proxy_addr: SocketAddr,
     admin_addr: SocketAddr,
-    proxy_task: JoinHandle<Result<(), io::Error>>,
-    admin_task: JoinHandle<Result<(), io::Error>>,
+    signal: SignalHandle,
+    task: Option<JoinHandle<Result<(), BuildError>>>,
+}
+
+impl RunningApp {
+    async fn shutdown(mut self) -> TestResult<()> {
+        self.signal.start_shutdown();
+        let mut task = self.task.take().ok_or_else(|| error("app task missing"))?;
+        match tokio::time::timeout(ready_timeout(), &mut task).await {
+            Ok(result) => {
+                result??;
+                Ok(())
+            }
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                Err(error(format!("{} did not shut down", self._label)))
+            }
+        }
+    }
 }
 
 impl Drop for RunningApp {
     fn drop(&mut self) {
-        self.proxy_task.abort();
-        self.admin_task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -416,11 +561,12 @@ async fn issue_key(admin_addr: SocketAddr, label: &str) -> TestResult<IssuedKey>
         }),
     )
     .await?;
-    assert_eq!(
-        response.status, 201,
-        "issue key failed for {label}: body={}",
-        response.body
-    );
+    if response.status != 201 {
+        return Err(error(format!(
+            "issue key failed for {label}: status={} body={}",
+            response.status, response.body
+        )));
+    }
 
     let payload: Value = serde_json::from_str(&response.body)?;
     Ok(IssuedKey {

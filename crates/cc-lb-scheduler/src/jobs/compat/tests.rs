@@ -1,12 +1,16 @@
-use cc_lb_control::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
+#![allow(non_snake_case)]
 
-use crate::state_stores::AnthropicCompatEtagsStore;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+use cc_lb_control::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
 
 use super::test_support::RecordingCompatibilityKv;
 use super::*;
 
 const INITIAL_TIME: u64 = 1_000;
 const UPDATED_TIME: u64 = 2_000;
+type MaybeCompatEtag = Option<crate::state_stores::AnthropicCompatEtag>;
 
 async fn exercise_etag_deduplicates_not_modified<E>(etags: E) -> Result<()>
 where
@@ -91,91 +95,230 @@ where
     Ok(())
 }
 
-#[cfg(feature = "sqlite")]
-async fn sqlite_etags() -> Result<AnthropicCompatEtagsStore<sqlx::Sqlite>> {
-    use sqlx::sqlite::SqlitePoolOptions;
+#[derive(Clone, Default)]
+struct RecordingCompatEtags {
+    state: Arc<Mutex<RecordingCompatEtagsState>>,
+}
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
+#[derive(Default)]
+struct RecordingCompatEtagsState {
+    etags: BTreeMap<String, crate::state_stores::AnthropicCompatEtag>,
+    read_keys: Vec<String>,
+    upserts: Vec<CompatUpsert>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompatUpsert {
+    key: String,
+    etag: Option<String>,
+    hash: String,
+    now_unix_secs: u64,
+}
+
+impl RecordingCompatEtags {
+    fn read_keys(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("compat etags lock")
+            .read_keys
+            .clone()
+    }
+
+    fn upserts(&self) -> Vec<CompatUpsert> {
+        self.state
+            .lock()
+            .expect("compat etags lock")
+            .upserts
+            .clone()
+    }
+}
+
+impl CompatEtagRepository for RecordingCompatEtags {
+    fn read_compat_etag<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> CompatJobFuture<'a, Result<MaybeCompatEtag>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().expect("compat etags lock");
+            state.read_keys.push(key.to_owned());
+            Ok(state.etags.get(key).cloned())
+        })
+    }
+
+    fn upsert_compat_value<'a>(
+        &'a self,
+        key: &'a str,
+        etag: Option<&'a str>,
+        hash: &'a str,
+        now_unix_secs: u64,
+    ) -> CompatJobFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().expect("compat etags lock");
+            state.upserts.push(CompatUpsert {
+                key: key.to_owned(),
+                etag: etag.map(str::to_owned),
+                hash: hash.to_owned(),
+                now_unix_secs,
+            });
+            state.etags.insert(
+                key.to_owned(),
+                crate::state_stores::AnthropicCompatEtag {
+                    key: key.to_owned(),
+                    etag: etag.map(str::to_owned),
+                    last_applied_at_unix_secs: now_unix_secs,
+                    last_value_hash: hash.to_owned(),
+                },
+            );
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn t2__etag_deduplicates_not_modified() -> Result<()> {
+    let stored_hash = compatibility_value_hash("2.1.150");
+    let etags = RecordingCompatEtags::default();
+
+    exercise_etag_deduplicates_not_modified(etags.clone()).await?;
+
+    assert_eq!(
+        etags.read_keys(),
+        vec![
+            CLAUDE_CODE_STABLE_VERSION_KEY.to_owned(),
+            CLAUDE_CODE_STABLE_VERSION_KEY.to_owned(),
+        ]
+    );
+    assert_eq!(
+        etags.upserts(),
+        vec![
+            CompatUpsert {
+                key: CLAUDE_CODE_STABLE_VERSION_KEY.to_owned(),
+                etag: Some("etag-1".to_owned()),
+                hash: stored_hash.clone(),
+                now_unix_secs: INITIAL_TIME,
+            },
+            CompatUpsert {
+                key: CLAUDE_CODE_STABLE_VERSION_KEY.to_owned(),
+                etag: Some("etag-1".to_owned()),
+                hash: stored_hash,
+                now_unix_secs: UPDATED_TIME,
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn t2__unchanged_hash_skips_value_write() -> Result<()> {
+    let stored_hash = compatibility_value_hash("2.1.150");
+    let etags = RecordingCompatEtags::default();
+
+    exercise_unchanged_hash_skips_value_write(etags.clone()).await?;
+
+    assert_eq!(
+        etags.read_keys(),
+        vec![
+            CLAUDE_CODE_STABLE_VERSION_KEY.to_owned(),
+            CLAUDE_CODE_STABLE_VERSION_KEY.to_owned(),
+        ]
+    );
+    assert_eq!(
+        etags.upserts(),
+        vec![
+            CompatUpsert {
+                key: CLAUDE_CODE_STABLE_VERSION_KEY.to_owned(),
+                etag: Some("etag-1".to_owned()),
+                hash: stored_hash.clone(),
+                now_unix_secs: INITIAL_TIME,
+            },
+            CompatUpsert {
+                key: CLAUDE_CODE_STABLE_VERSION_KEY.to_owned(),
+                etag: Some("etag-2".to_owned()),
+                hash: stored_hash,
+                now_unix_secs: UPDATED_TIME,
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+mod t3__sqlite {
+    use super::*;
+    use crate::state_stores::AnthropicCompatEtagsStore;
+
+    async fn etags() -> Result<AnthropicCompatEtagsStore<sqlx::Sqlite>> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/0002_idempotency_tables.sql"
+        ))
+        .execute(&pool)
         .await?;
-    sqlx::raw_sql(include_str!(
-        "../../../migrations/sqlite/0002_idempotency_tables.sql"
-    ))
-    .execute(&pool)
-    .await?;
-    Ok(AnthropicCompatEtagsStore::new(pool))
-}
+        Ok(AnthropicCompatEtagsStore::new(pool))
+    }
 
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn jobs_compat_etag_deduplicates_not_modified_sqlite() -> Result<()> {
-    exercise_etag_deduplicates_not_modified(sqlite_etags().await?).await
-}
+    #[tokio::test]
+    async fn etag_deduplicates_not_modified() -> Result<()> {
+        exercise_etag_deduplicates_not_modified(etags().await?).await
+    }
 
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn jobs_compat_unchanged_hash_skips_value_write_sqlite() -> Result<()> {
-    exercise_unchanged_hash_skips_value_write(sqlite_etags().await?).await
+    #[tokio::test]
+    async fn unchanged_hash_skips_value_write() -> Result<()> {
+        exercise_unchanged_hash_skips_value_write(etags().await?).await
+    }
 }
 
 #[cfg(feature = "postgres")]
-async fn postgres_etags() -> Result<
-    Option<(
+mod t3_postgres__postgres {
+    use std::str::FromStr as _;
+
+    use sqlx::Executor as _;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    use super::*;
+    use crate::state_stores::AnthropicCompatEtagsStore;
+
+    async fn etags() -> anyhow::Result<(
+        cc_lb_storage_conformance::PostgresFixture,
         sqlx::PgPool,
-        String,
         AnthropicCompatEtagsStore<sqlx::Postgres>,
-    )>,
-> {
-    use std::str::FromStr;
-
-    use sqlx::{Executor as _, PgPool, postgres::PgPoolOptions};
-    use uuid::Uuid;
-
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("SKIP: DATABASE_URL not set - skipping postgres compat test");
-        return Ok(None);
-    };
-    let admin = PgPool::connect(&url).await?;
-    let schema = format!("jobs_compat_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
+    )> {
+        let fixture = cc_lb_storage_conformance::postgres_fixture().await?;
+        let search_path = format!("{},public", fixture.schema_name());
+        let options = PgConnectOptions::from_str(fixture.database_url())?
+            .options([("search_path", search_path.as_str())]);
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect_with(options)
+            .await?;
+        pool.execute(include_str!(
+            "../../../migrations/postgres/0002_idempotency_tables.sql"
+        ))
         .await?;
-    let options = sqlx::postgres::PgConnectOptions::from_str(&url)?
-        .options([("search_path", schema.as_str())]);
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await?;
-    pool.execute(include_str!(
-        "../../../migrations/postgres/0002_idempotency_tables.sql"
-    ))
-    .await?;
-    Ok(Some((admin, schema, AnthropicCompatEtagsStore::new(pool))))
-}
+        let etags = AnthropicCompatEtagsStore::new(pool.clone());
+        Ok((fixture, pool, etags))
+    }
 
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn jobs_compat_etag_deduplicates_not_modified_postgres() -> Result<()> {
-    let Some((admin, schema, etags)) = postgres_etags().await? else {
-        return Ok(());
-    };
-    let outcome = exercise_etag_deduplicates_not_modified(etags).await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await?;
-    outcome
-}
+    #[tokio::test]
+    async fn etag_deduplicates_not_modified() -> anyhow::Result<()> {
+        let (fixture, pool, etags) = etags().await?;
+        let outcome = exercise_etag_deduplicates_not_modified(etags).await;
+        pool.close().await;
+        fixture.teardown().await?;
+        outcome?;
+        Ok(())
+    }
 
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn jobs_compat_unchanged_hash_skips_value_write_postgres() -> Result<()> {
-    let Some((admin, schema, etags)) = postgres_etags().await? else {
-        return Ok(());
-    };
-    let outcome = exercise_unchanged_hash_skips_value_write(etags).await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await?;
-    outcome
+    #[tokio::test]
+    async fn unchanged_hash_skips_value_write() -> anyhow::Result<()> {
+        let (fixture, pool, etags) = etags().await?;
+        let outcome = exercise_unchanged_hash_skips_value_write(etags).await;
+        pool.close().await;
+        fixture.teardown().await?;
+        outcome?;
+        Ok(())
+    }
 }

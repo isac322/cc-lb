@@ -9,19 +9,9 @@ use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-fn get_postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL").ok()
-}
-
 #[test]
-fn router_singleton_dropped() {
-    let url = match get_postgres_url() {
-        Some(url) => url,
-        None => {
-            eprintln!("skip: CI_POSTGRES_URL not set");
-            return;
-        }
-    };
+fn t3_postgres__router_singleton_dropped() {
+    let url = crate::postgres_fixture::required_postgres_url();
 
     tokio::runtime::Runtime::new()
         .expect("tokio runtime")
@@ -33,7 +23,7 @@ async fn run_test(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(
         fixture.pool.clone(),
-        std::sync::Arc::new(cc_lb_clock::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     );
     storage.initialize(BackendKind::Postgres).await?;
 
@@ -67,7 +57,7 @@ async fn run_test(url: &str) -> Result<()> {
                 original_filename: "test.wasm".to_owned(),
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
-                uploaded_by_admin_id: Uuid::new_v4(),
+                uploaded_by_admin_id: Uuid::from_u128(0x7002),
                 description: "test plugin".to_owned(),
                 usage: "test usage".to_owned(),
                 hook_metadata: Default::default(),

@@ -20,7 +20,6 @@
 
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use cc_lb_domain::TtlClass;
@@ -108,7 +107,7 @@ fn record(index: u64) -> PromptCacheObservationRecord {
 }
 
 #[test]
-fn observation_failure_does_not_fail_response() {
+fn t2__observation_failure_does_not_fail_response() {
     // Capture tracing output so we can assert the writer task logged
     // the simulated error.
     let logs = CapturedLogs::default();
@@ -157,13 +156,7 @@ fn observation_failure_does_not_fail_response() {
             // draining, then await it to guarantee all upserts (and their
             // failure-logging branches) have executed before we assert.
             drop(sink);
-            // Cap the wait at 5 s per the task budget. The writer drains 3
-            // records into a synchronous `Err(...)` return, so this completes
-            // in milliseconds in practice.
-            tokio::time::timeout(Duration::from_secs(5), writer)
-                .await
-                .expect("writer task drains within 5 s")
-                .expect("writer task exits cleanly");
+            writer.await.expect("writer task exits cleanly");
         });
     });
 

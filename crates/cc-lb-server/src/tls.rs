@@ -111,9 +111,40 @@ impl Listener for ReloadableListener {
     }
 }
 
+#[cfg(test)]
+const IN_MEMORY_CERT_PATH: &str = "<in-memory-cert-pem>";
+#[cfg(test)]
+const IN_MEMORY_KEY_PATH: &str = "<in-memory-key-pem>";
+
 pub fn load_certs(cert_path: &Path, key_path: &Path) -> Result<rustls::ServerConfig, TlsError> {
-    let certs = load_certificate_chain(cert_path)?;
-    let key = load_private_key(key_path)?;
+    let cert_pem = read_tls_file(cert_path)?;
+    let certs = parse_certificate_chain(&cert_pem, cert_path)?;
+    let key_pem = read_tls_file(key_path)?;
+    let key = parse_private_key(&key_pem, key_path)?;
+    build_server_config(certs, key)
+}
+
+#[cfg(test)]
+pub(crate) fn parse_certs_pem(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> Result<rustls::ServerConfig, TlsError> {
+    let certs = parse_certificate_chain(cert_pem, Path::new(IN_MEMORY_CERT_PATH))?;
+    let key = parse_private_key(key_pem, Path::new(IN_MEMORY_KEY_PATH))?;
+    build_server_config(certs, key)
+}
+
+fn read_tls_file(path: &Path) -> Result<Vec<u8>, TlsError> {
+    std::fs::read(path).map_err(|source| TlsError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn build_server_config(
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<rustls::ServerConfig, TlsError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -125,12 +156,11 @@ pub fn load_certs(cert_path: &Path, key_path: &Path) -> Result<rustls::ServerCon
     Ok(config)
 }
 
-fn load_certificate_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsError> {
-    let bytes = std::fs::read(path).map_err(|source| TlsError::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut reader = std::io::BufReader::new(bytes.as_slice());
+fn parse_certificate_chain(
+    cert_pem: &[u8],
+    path: &Path,
+) -> Result<Vec<CertificateDer<'static>>, TlsError> {
+    let mut reader = std::io::BufReader::new(cert_pem);
     let certs = rustls_pemfile::certs(&mut reader)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|source| TlsError::ParseCert {
@@ -147,17 +177,12 @@ fn load_certificate_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, T
     Ok(certs)
 }
 
-fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsError> {
-    let bytes = std::fs::read(path).map_err(|source| TlsError::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
-
-    if let Some(key) = first_pkcs8_key(&bytes, path)? {
+fn parse_private_key(key_pem: &[u8], path: &Path) -> Result<PrivateKeyDer<'static>, TlsError> {
+    if let Some(key) = first_pkcs8_key(key_pem, path)? {
         return Ok(PrivateKeyDer::from(key));
     }
 
-    if let Some(key) = first_rsa_key(&bytes, path)? {
+    if let Some(key) = first_rsa_key(key_pem, path)? {
         return Ok(PrivateKeyDer::from(key));
     }
 
@@ -248,4 +273,43 @@ pub enum TlsError {
         #[source]
         source: rustls::Error,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CERT_A: &[u8] = include_bytes!("../tests/fixtures/tls/cert-a.pem");
+    const CERT_BAD: &[u8] = include_bytes!("../tests/fixtures/tls/cert-bad.pem");
+    const KEY_A: &[u8] = include_bytes!("../tests/fixtures/tls/key-a.pem");
+
+    #[test]
+    fn parse_certs_pem_builds_server_config_from_bytes() {
+        let config = parse_certs_pem(CERT_A, KEY_A).unwrap();
+
+        assert_eq!(
+            config.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
+    }
+
+    #[test]
+    fn parse_certs_pem_rejects_invalid_certificate() {
+        let error = parse_certs_pem(CERT_BAD, KEY_A).expect_err("invalid certificate must fail");
+
+        assert!(matches!(error, TlsError::BuildConfig { .. }));
+    }
+
+    #[test]
+    fn parse_certs_pem_rejects_missing_private_key() {
+        let error = parse_certs_pem(CERT_A, CERT_A)
+            .expect_err("certificate-only PEM must not provide a private key");
+
+        match error {
+            TlsError::NoPrivateKey { path } => {
+                assert_eq!(path, Path::new(IN_MEMORY_KEY_PATH));
+            }
+            other => panic!("expected missing private key error, got {other}"),
+        }
+    }
 }

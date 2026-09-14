@@ -48,7 +48,7 @@ pub fn test_cache_pricing() -> cc_lb_domain::CachePricingSummary {
 
 pub fn principal_record(name: &str) -> PrincipalRecord {
     PrincipalRecord {
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(0x1007),
         name: name.to_owned(),
         kind: StoragePrincipalKind::Machine,
         allowed_models: Vec::new(),

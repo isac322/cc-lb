@@ -7,12 +7,12 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_control::api_keys::key_store::KeyStore;
-use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tower::ServiceExt;
 
-fn test_state(storage: Arc<Storage>) -> AdminState {
+fn test_state(storage: Arc<InMemoryStorage>) -> AdminState {
     let config = Config::default();
     AdminState {
         storage: Some(storage.clone()),
@@ -32,20 +32,17 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         start_time: Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_clock::SystemClock),
+        clock: fixed_clock(1_700_000_000),
     }
 }
 
-async fn new_storage() -> (tempfile::TempDir, Arc<Storage>) {
-    let dir = tempfile::tempdir().unwrap();
-    let storage =
-        admin_test_common::sqlite_storage(dir.path(), "oauth_no_authn_fallback.sqlite").await;
-    (dir, storage)
+async fn new_storage() -> Arc<InMemoryStorage> {
+    Arc::new(InMemoryStorage::with_clock(fixed_clock(1_700_000_000)))
 }
 
 #[tokio::test]
-async fn admin_401_sleeps_100ms() {
-    let (_dir, storage) = new_storage().await;
+async fn tx__admin_401_sleeps_100ms() {
+    let storage = new_storage().await;
     let app = router(test_state(storage));
 
     let req = Request::builder()

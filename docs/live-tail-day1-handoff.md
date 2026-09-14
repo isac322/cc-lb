@@ -19,7 +19,7 @@ curl -s http://<cc-lb-metrics-host>:52253/metrics | grep -E '^(sse_|cc_lb_lifecy
 
 ## 2. Validate alert rules
 
-The shipped rules live at [deploy/alerts/live-tail.yml](../deploy/alerts/live-tail.yml). CI already runs `promtool check rules` on this file (see the `promtool` job in [.github/workflows/ci.yml](../.github/workflows/ci.yml)), so syntax is guaranteed at merge time. Before rollout to production Prometheus:
+The shipped rules live at [deploy/alerts/live-tail.yml](../deploy/alerts/live-tail.yml). CI already runs `promtool check rules` on this file as part of [`static-checks`](../.github/workflows/ci.yml), so syntax is guaranteed at merge time. Before rollout to production Prometheus:
 
 1. Load the file into your Prometheus rule_files list (see [deploy/prometheus/cc-lb-scrape.yml](../deploy/prometheus/cc-lb-scrape.yml) for a reference scrape config).
 2. Reload Prometheus (`SIGHUP` or `POST /-/reload`).

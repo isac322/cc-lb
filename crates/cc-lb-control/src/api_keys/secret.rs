@@ -2,6 +2,9 @@ use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand::Rng;
+#[cfg(test)]
+use rand::{SeedableRng, rngs::StdRng};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -47,11 +50,15 @@ pub struct NewKeyOutput {
 pub struct ParseError;
 
 pub fn generate_new() -> NewKeyOutput {
+    generate_with(&mut rand::rng())
+}
+
+pub(crate) fn generate_with(rng: &mut impl Rng) -> NewKeyOutput {
     let mut secret_bytes = [0_u8; SECRET_BYTES_LEN];
-    rand::fill(&mut secret_bytes[..]);
+    rng.fill_bytes(&mut secret_bytes);
 
     let mut salt = [0_u8; SALT_BYTES_LEN];
-    rand::fill(&mut salt[..]);
+    rng.fill_bytes(&mut salt);
 
     let key_id = Ulid::generate().to_string();
     let secret_b64 = URL_SAFE_NO_PAD.encode(secret_bytes);
@@ -120,14 +127,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generate_new_parses_same_key_id() {
-        let generated = generate_new();
+    fn generate_with_uses_supplied_rng_and_produces_valid_ulid() {
+        let mut rng = <StdRng as SeedableRng>::from_seed([42; 32]);
+        let mut expected_rng = <StdRng as SeedableRng>::from_seed([42; 32]);
+        let generated = generate_with(&mut rng);
+
+        let mut expected_secret_bytes = [0_u8; SECRET_BYTES_LEN];
+        expected_rng.fill_bytes(&mut expected_secret_bytes);
+        let mut expected_salt = [0_u8; SALT_BYTES_LEN];
+        expected_rng.fill_bytes(&mut expected_salt);
 
         let (parsed_key_id, secret_b64_bytes) =
             parse(generated.plaintext.expose()).expect("parse generated key");
+        let secret_bytes = URL_SAFE_NO_PAD
+            .decode(&secret_b64_bytes)
+            .expect("generated secret is valid base64url");
 
         assert_eq!(parsed_key_id, generated.key_id);
-        assert_eq!(secret_b64_bytes.len(), SECRET_B64_LEN);
+        assert!(Ulid::from_string(&generated.key_id).is_ok());
+        assert_eq!(secret_bytes, expected_secret_bytes);
+        assert_eq!(generated.secret_salt, expected_salt);
         assert_eq!(generated.last_4.len(), 4);
         assert_eq!(generated.index_hash, compute_index_hash(&secret_b64_bytes));
         assert_eq!(

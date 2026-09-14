@@ -48,8 +48,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 bincode.workspace = true
-cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
-tempfile.workspace = true
+cc-lb-testkit = { path = "../cc-lb-testkit" }
 tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(loom)'.dependencies]

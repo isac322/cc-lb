@@ -16,7 +16,7 @@ use subscription_preference_v11_preview_support::{
 const REQUEST_ID: &str = "preview-v11-transition";
 
 #[test]
-fn preview_selects_use_it_or_lose_it_candidate_and_traces_all_candidates() {
+fn t2__preview_selects_use_it_or_lose_it_candidate_and_traces_all_candidates() {
     // Given: one urgent and one on-pace OAuth candidate at a fixed instant.
     let fixture = PreviewFixture::new(urgent_quota(), on_pace_quota());
 
@@ -84,7 +84,7 @@ fn preview_selects_use_it_or_lose_it_candidate_and_traces_all_candidates() {
 }
 
 #[test]
-fn preview_all_on_pace_uses_deterministic_uniform_factor() {
+fn t2__preview_all_on_pace_uses_deterministic_uniform_factor() {
     // Given: both OAuth candidates are on pace and the request id is fixed.
     let fixture = PreviewFixture::new(on_pace_quota(), on_pace_quota());
 
@@ -110,7 +110,7 @@ fn preview_all_on_pace_uses_deterministic_uniform_factor() {
 }
 
 #[tokio::test]
-async fn handle_base_warning_preserves_selection_until_rejected() {
+async fn t2__handle_base_warning_preserves_selection_until_rejected() {
     let mut urgent = on_pace_quota();
     let weekly = urgent
         .iter_mut()
@@ -168,7 +168,7 @@ async fn handle_base_warning_preserves_selection_until_rejected() {
 }
 
 #[tokio::test]
-async fn handle_shared_7d_exhaustion_without_api_key_returns_503_without_dispatch() {
+async fn t2__handle_shared_7d_exhaustion_without_api_key_returns_503_without_dispatch() {
     // Given: both OAuth upstreams have healthy 5h quota but exhausted shared
     // weekly quota, and there is no API-key fallback.
     let fixture = PreviewFixture::new(exhausted_shared_quota(), exhausted_shared_quota());
@@ -182,7 +182,7 @@ async fn handle_shared_7d_exhaustion_without_api_key_returns_503_without_dispatc
 }
 
 #[tokio::test]
-async fn handle_sonnet_excludes_observed_exhausted_scoped_upstream() {
+async fn t2__handle_sonnet_excludes_observed_exhausted_scoped_upstream() {
     let fixture = PreviewFixture::with_statuses(
         sonnet_quota(Some(1.0)),
         sonnet_quota(Some(0.2)),
@@ -197,7 +197,7 @@ async fn handle_sonnet_excludes_observed_exhausted_scoped_upstream() {
 }
 
 #[tokio::test]
-async fn handle_sonnet_missing_scoped_window_is_noop() {
+async fn t2__handle_sonnet_missing_scoped_window_is_noop() {
     let fixture = PreviewFixture::new(sonnet_quota(None), sonnet_quota(None));
 
     let status = fixture.handle_model("claude-sonnet-4-5").await;
@@ -207,7 +207,7 @@ async fn handle_sonnet_missing_scoped_window_is_noop() {
 }
 
 #[tokio::test]
-async fn handle_stale_exhausted_shared_quota_returns_503_without_dispatch() {
+async fn t2__handle_stale_exhausted_shared_quota_returns_503_without_dispatch() {
     let fixture = PreviewFixture::new(
         stale_exhausted_shared_quota(),
         stale_exhausted_shared_quota(),
@@ -220,7 +220,7 @@ async fn handle_stale_exhausted_shared_quota_returns_503_without_dispatch() {
 }
 
 #[tokio::test]
-async fn handle_stale_overage_positive_returns_503_without_dispatch() {
+async fn t2__handle_stale_overage_positive_returns_503_without_dispatch() {
     let fixture = PreviewFixture::new(
         stale_overage_positive_quota(),
         stale_overage_positive_quota(),
@@ -233,7 +233,7 @@ async fn handle_stale_overage_positive_returns_503_without_dispatch() {
 }
 
 #[test]
-fn preview_fable_request_excludes_exhausted_scoped_quota() {
+fn t2__preview_fable_request_excludes_exhausted_scoped_quota() {
     // Given: shared quota is healthy on both OAuth upstreams, while only the
     // first upstream has exhausted its Fable-scoped weekly quota.
     let fixture = PreviewFixture::new(fable_quota(1.0), fable_quota(0.2));
@@ -251,7 +251,7 @@ fn preview_fable_request_excludes_exhausted_scoped_quota() {
 }
 
 #[tokio::test]
-async fn handle_fable_excludes_exhausted_scoped_upstream() {
+async fn t2__handle_fable_excludes_exhausted_scoped_upstream() {
     // Given: dispatching the exhausted first upstream would return 429, while
     // the second upstream has healthy Fable quota and returns 200.
     let fixture = PreviewFixture::with_statuses(
@@ -270,7 +270,7 @@ async fn handle_fable_excludes_exhausted_scoped_upstream() {
 }
 
 #[tokio::test]
-async fn handle_fable_without_shared_7d_uses_available_quota_windows() {
+async fn t2__handle_fable_without_shared_7d_uses_available_quota_windows() {
     // Given: a new-account quota shape exposes 5h and 7d_fable, while the
     // shared 7d window is absent from the upstream usage response.
     let fixture = PreviewFixture::new(
@@ -292,7 +292,7 @@ async fn handle_fable_without_shared_7d_uses_available_quota_windows() {
     assert_eq!(fixture.dispatch_hosts().len(), 1);
 }
 #[tokio::test]
-async fn handle_fable_with_unobserved_shared_7d_remains_partial_base() {
+async fn t2__handle_fable_with_unobserved_shared_7d_remains_partial_base() {
     let fixture = PreviewFixture::new(
         fable_quota_with_unobserved_shared_seven_day(),
         fable_quota_with_unobserved_shared_seven_day(),
@@ -310,7 +310,7 @@ async fn handle_fable_with_unobserved_shared_7d_remains_partial_base() {
 }
 
 #[tokio::test]
-async fn handle_non_fable_ignores_fable_scoped_exhaustion() {
+async fn t2__handle_non_fable_ignores_fable_scoped_exhaustion() {
     // Given: the first upstream is exhausted only in the Fable-scoped window.
     let fixture = PreviewFixture::with_statuses(
         fable_quota(1.0),
@@ -328,7 +328,7 @@ async fn handle_non_fable_ignores_fable_scoped_exhaustion() {
 }
 
 #[tokio::test]
-async fn handle_fable_propagates_selected_upstream_429_without_retrying_exhausted() {
+async fn t2__handle_fable_propagates_selected_upstream_429_without_retrying_exhausted() {
     // Given: the exhausted first upstream would return 200 if called, while the
     // healthy Fable candidate returns a provider 429.
     let fixture = PreviewFixture::with_statuses(

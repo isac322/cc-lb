@@ -4,7 +4,7 @@ use http::{Request, StatusCode};
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn tamper_unknown_event_mode_emits_foo_event() {
+async fn t2__tamper_unknown_event_mode_emits_foo_event() {
     let response = app(AppConfig::default())
         .oneshot(
             Request::builder()

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::{Router, body::Body};
-use cc_lb_clock::{ClockHandle, SystemClock};
+use cc_lb_clock::ClockHandle;
 use cc_lb_config::Config;
 use cc_lb_control::api_keys::{
     concurrent_guard::KeyConcurrencyManager, principal_view::PrincipalView,
@@ -16,25 +16,25 @@ use cc_lb_control::{
 };
 use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_observability::ObservabilityHook;
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, Storage};
 use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 pub fn limit_engine() -> Arc<LimitEngine> {
-    limit_engine_with_clock(system_clock())
+    limit_engine_with_clock(fixed_clock(1_700_000_000))
 }
 
 pub fn limit_engine_with_clock(clock: ClockHandle) -> Arc<LimitEngine> {
     LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock)
 }
 
-fn system_clock() -> ClockHandle {
-    Arc::new(SystemClock)
-}
-
-pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<cc_lb_control::api_keys::key_store::KeyStore> {
+pub fn key_store<S>(storage: Arc<S>) -> Arc<cc_lb_control::api_keys::key_store::KeyStore>
+where
+    S: ManagedKeyStore + 'static,
+{
     Arc::new(cc_lb_control::api_keys::key_store::KeyStore::new(storage))
 }
 
@@ -93,9 +93,9 @@ impl RouterPlugin for NoopRouter {
     }
 }
 
-pub struct SpawnedAdminServer {
-    pub _dir: tempfile::TempDir,
-    pub storage: Arc<SqliteStorage>,
+pub struct SpawnedAdminServer<S = InMemoryStorage> {
+    pub _dir: Option<tempfile::TempDir>,
+    pub storage: Arc<S>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub client: AdminClient,
 }
@@ -116,25 +116,56 @@ pub fn static_token_auth(token: &str) -> Arc<cc_lb_admin::auth::AdminAuthenticat
 }
 
 pub async fn spawn_admin_server() -> SpawnedAdminServer {
-    spawn_admin_server_with_clock(system_clock()).await
+    spawn_admin_server_with_clock(fixed_clock(1_700_000_000)).await
 }
 
 pub async fn spawn_admin_server_with_auth(
     admin_auth: Arc<cc_lb_admin::auth::AdminAuthenticator>,
 ) -> SpawnedAdminServer {
-    spawn_admin_server_with_clock_and_auth(system_clock(), admin_auth).await
+    spawn_admin_server_with_clock_and_auth(fixed_clock(1_700_000_000), admin_auth).await
 }
 
-pub async fn spawn_admin_server_with_clock(clock: ClockHandle) -> SpawnedAdminServer {
+pub async fn spawn_admin_server_with_clock(
+    clock: ClockHandle,
+) -> SpawnedAdminServer<InMemoryStorage> {
     spawn_admin_server_with_clock_and_auth(clock, static_token_auth("test-token")).await
 }
 
 pub async fn spawn_admin_server_with_clock_and_auth(
     clock: ClockHandle,
     admin_auth: Arc<cc_lb_admin::auth::AdminAuthenticator>,
-) -> SpawnedAdminServer {
+) -> SpawnedAdminServer<InMemoryStorage> {
+    let storage = Arc::new(InMemoryStorage::with_clock(clock.clone()));
+    spawn_admin_server_with_storage_and_auth(storage, None, clock, admin_auth).await
+}
+
+pub async fn spawn_admin_server_sqlite() -> SpawnedAdminServer<SqliteStorage> {
+    spawn_admin_server_sqlite_with_clock(fixed_clock(1_700_000_000)).await
+}
+
+pub async fn spawn_admin_server_sqlite_with_clock(
+    clock: ClockHandle,
+) -> SpawnedAdminServer<SqliteStorage> {
     let dir = tempfile::tempdir().expect("temp admin server dir");
     let storage = sqlite_storage_with_clock(dir.path(), "admin.sqlite", clock.clone()).await;
+    spawn_admin_server_with_storage_and_auth(
+        storage,
+        Some(dir),
+        clock,
+        static_token_auth("test-token"),
+    )
+    .await
+}
+
+async fn spawn_admin_server_with_storage_and_auth<S>(
+    storage: Arc<S>,
+    dir: Option<tempfile::TempDir>,
+    clock: ClockHandle,
+    admin_auth: Arc<cc_lb_admin::auth::AdminAuthenticator>,
+) -> SpawnedAdminServer<S>
+where
+    S: Storage + ManagedKeyStore + 'static,
+{
     let config = Config::default();
     let dynamic_view = dynamic_view_holder(&config);
     let state = cc_lb_admin::AdminState {
@@ -187,7 +218,7 @@ pub fn set_dynamic_principal(dynamic_view: &DynamicViewHolder, principal_id: &st
 }
 
 pub async fn sqlite_storage(dir: &std::path::Path, filename: &str) -> Arc<SqliteStorage> {
-    sqlite_storage_with_clock(dir, filename, system_clock()).await
+    sqlite_storage_with_clock(dir, filename, fixed_clock(1_700_000_000)).await
 }
 
 pub async fn sqlite_storage_with_clock(

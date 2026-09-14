@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeSet, HashSet},
     str::FromStr,
-    sync::Arc,
 };
 
 use cc_lb_storage_api::{
@@ -13,7 +12,7 @@ use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 use uuid::Uuid;
 
 #[tokio::test]
-async fn request_event_list_uses_materialized_sort_columns() {
+async fn t3__request_event_list_uses_materialized_sort_columns() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -23,7 +22,7 @@ async fn request_event_list_uses_materialized_sort_columns() {
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage
@@ -85,7 +84,7 @@ async fn request_event_list_uses_materialized_sort_columns() {
 }
 
 #[tokio::test]
-async fn request_event_principal_costs_use_principal_range_indexes() {
+async fn t3__request_event_principal_costs_use_principal_range_indexes() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -95,7 +94,7 @@ async fn request_event_principal_costs_use_principal_range_indexes() {
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage
@@ -168,7 +167,7 @@ async fn request_event_principal_costs_use_principal_range_indexes() {
 }
 
 #[tokio::test]
-async fn request_event_key_aggregates_use_normalized_columns() {
+async fn t3__request_event_key_aggregates_use_normalized_columns() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -178,7 +177,7 @@ async fn request_event_key_aggregates_use_normalized_columns() {
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage
@@ -320,7 +319,7 @@ async fn request_event_key_aggregates_use_normalized_columns() {
 }
 
 #[tokio::test]
-async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_backfill() {
+async fn t3__request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_backfill() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -330,7 +329,7 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage
@@ -465,7 +464,7 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
 }
 
 #[tokio::test]
-async fn cursor_pages_cover_two_hundred_rows_without_gaps_or_duplicates() {
+async fn t3__cursor_pages_cover_two_hundred_rows_without_gaps_or_duplicates() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -475,7 +474,7 @@ async fn cursor_pages_cover_two_hundred_rows_without_gaps_or_duplicates() {
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage
@@ -537,7 +536,7 @@ async fn cursor_pages_cover_two_hundred_rows_without_gaps_or_duplicates() {
 /// continuous axis, the UI's danger set for `error_count`, and an index range
 /// scan instead of a table scan.
 #[tokio::test]
-async fn request_event_histogram_matches_list_and_uses_index() {
+async fn t3__request_event_histogram_matches_list_and_uses_index() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -547,7 +546,7 @@ async fn request_event_histogram_matches_list_and_uses_index() {
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage
@@ -739,7 +738,7 @@ async fn request_event_histogram_matches_list_and_uses_index() {
 }
 
 #[tokio::test]
-async fn request_setup_timings_roundtrip_through_sqlite_payload() {
+async fn t3__request_setup_timings_roundtrip_through_sqlite_payload() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -749,7 +748,7 @@ async fn request_setup_timings_roundtrip_through_sqlite_payload() {
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage
@@ -838,7 +837,7 @@ async fn request_setup_timings_roundtrip_through_sqlite_payload() {
 }
 
 #[tokio::test]
-async fn request_io_timing_list_fields_preserve_legacy_nulls_and_fractional_values() {
+async fn t3__request_io_timing_list_fields_preserve_legacy_nulls_and_fractional_values() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -929,7 +928,7 @@ async fn request_io_timing_list_fields_preserve_legacy_nulls_and_fractional_valu
     drop(connection);
 
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open migrated sqlite");
     storage

@@ -235,11 +235,13 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use cc_lb_lifecycle::{ParseInfo, RouteInfo, TerminationReason, UsageSnapshot, UsageSource};
     use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
     use cc_lb_request_log::{RequestCacheBreakpoint, RequestCacheBreakpointSource};
+    use parking_lot::Mutex;
     use uuid::Uuid;
 
     fn eid(s: &str) -> EventId {
@@ -262,6 +264,28 @@ mod tests {
 
     fn noop_metrics() -> Arc<dyn EngineMetricsHook> {
         Arc::new(NoopMetricsHook)
+    }
+
+    #[derive(Default)]
+    struct RecordingMetrics {
+        hits: Mutex<Vec<(String, String)>>,
+    }
+
+    impl EngineMetricsHook for RecordingMetrics {
+        fn record_cache_hit(&self, upstream: &str, model: &str) {
+            self.hits
+                .lock()
+                .push((upstream.to_owned(), model.to_owned()));
+        }
+
+        fn record_cache_miss(&self, _upstream: &str, _model: &str) {}
+
+        fn record_cache_observation_dropped(&self, _reason: &str) {}
+
+        fn record_dropped_events_by(&self, _reason: &str, _count: u64) {}
+
+        fn record_routing_tier_selection(&self, _tier: &str, _upstream: &str, _principal_id: &str) {
+        }
     }
 
     fn parse_completed(event_id: &str) -> LifecycleEvent {
@@ -328,9 +352,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn terminated_after_usage_sequence_records_cache_hit_metric() {
+    async fn t2__prompt_cache_subscriber__usage_observed_emits_hit_metric_once() {
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_lifecycle_cache_hit_miss_subscriber(rx, noop_metrics());
+        let metrics = Arc::new(RecordingMetrics::default());
+        let handle = spawn_lifecycle_cache_hit_miss_subscriber(rx, metrics.clone());
 
         tx.send(parse_completed("cache-a")).await.unwrap();
         tx.send(route_completed("cache-a")).await.unwrap();
@@ -345,12 +370,19 @@ mod tests {
         .await
         .unwrap();
         tx.send(terminated("cache-a")).await.unwrap();
+        tx.send(terminated("cache-a")).await.unwrap();
         drop(tx);
         handle.shutdown().await;
+
+        assert_eq!(
+            metrics.hits.lock().as_slice(),
+            &[("upstream-a".to_owned(), "claude-sonnet-4".to_owned())],
+            "termination emits once and removes the partial"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn terminated_without_usage_shuts_down_cleanly() {
+    async fn t2__terminated_without_usage_shuts_down_cleanly() {
         let (tx, rx) = mpsc::channel(16);
         let handle = spawn_lifecycle_cache_hit_miss_subscriber(rx, noop_metrics());
 

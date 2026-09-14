@@ -1,9 +1,7 @@
-use std::sync::Arc;
-
 use cc_lb_storage_api::{BackendKind, MetaStore, PriceCatalogCache};
 
 #[tokio::test]
-async fn price_catalog_keeps_only_latest_snapshots() {
+async fn t3__price_catalog_keeps_only_latest_snapshots() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -13,7 +11,7 @@ async fn price_catalog_keeps_only_latest_snapshots() {
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage

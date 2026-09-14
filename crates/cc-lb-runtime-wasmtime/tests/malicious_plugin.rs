@@ -59,7 +59,7 @@ fn build_malicious_wat(wat_body: &str, initial_pages: u32) -> Vec<u8> {
 }
 
 #[test]
-fn test_null_ptr_behavior() {
+fn t3__test_null_ptr_behavior() {
     // Given: A malicious plugin that returns a null pointer (out_ptr = 0, out_len = 10)
     let wasm_bytes = build_malicious_wat(
         r#"
@@ -99,7 +99,7 @@ fn test_null_ptr_behavior() {
 }
 
 #[test]
-fn test_zero_len_behavior() {
+fn t3__test_zero_len_behavior() {
     // Given: A malicious plugin that returns a zero length (out_ptr = 1024, out_len = 0)
     let wasm_bytes = build_malicious_wat(
         r#"
@@ -140,7 +140,7 @@ fn test_zero_len_behavior() {
 }
 
 #[test]
-fn test_oob_output_behavior() {
+fn t3__test_oob_output_behavior() {
     // Given: A malicious plugin that returns an out-of-bounds pointer/length (out_ptr = 1024, out_len = 1000000)
     let wasm_bytes = build_malicious_wat(
         r#"
@@ -181,7 +181,7 @@ fn test_oob_output_behavior() {
 }
 
 #[test]
-fn test_ptr_len_overflow_behavior() {
+fn t3__test_ptr_len_overflow_behavior() {
     // Given: A malicious plugin that returns overflowing pointer/length (out_ptr = 0xFFFF_FFFF, out_len = 0xFFFF_FFFF)
     let wasm_bytes = build_malicious_wat(
         r#"
@@ -221,7 +221,7 @@ fn test_ptr_len_overflow_behavior() {
 }
 
 #[test]
-fn test_memory_grow_before_return_behavior() {
+fn t3__test_memory_grow_before_return_behavior() {
     // Given: A plugin that calls memory.grow immediately before returning a valid pointer/length in the newly grown page
     use cc_lb_plugin_wire::{FilterResponse, PerCandidateReason};
     use rkyv::rancor::Error as RkyvError;
@@ -281,7 +281,7 @@ fn test_memory_grow_before_return_behavior() {
 }
 
 #[test]
-fn test_misaligned_valid_rkyv() {
+fn t3__test_misaligned_valid_rkyv() {
     // Given: A plugin that returns a misaligned but valid rkyv response (out_ptr = 1025, out_len = len)
     let response = FilterResponse {
         results: Box::new([PerCandidateReason {
@@ -339,7 +339,7 @@ fn test_misaligned_valid_rkyv() {
 }
 
 #[test]
-fn test_corrupt_rkyv() {
+fn t3__test_corrupt_rkyv() {
     // Given: A plugin that returns corrupt rkyv bytes (out_ptr = 1024, out_len = 32)
     let corrupt_bytes = vec![0xAA; 32];
     let mut data_section = String::new();

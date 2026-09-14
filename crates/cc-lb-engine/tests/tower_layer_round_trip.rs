@@ -7,7 +7,7 @@ use tower::{Layer, ServiceExt, service_fn};
 use cc_lb_engine::HopByHopStripLayer;
 
 #[tokio::test]
-async fn strips_hop_by_hop_on_request_and_response() {
+async fn t2__strips_hop_by_hop_on_request_and_response() {
     let layer = HopByHopStripLayer::new();
     let service = layer.layer(service_fn(|request: Request<()>| async move {
         let seen_headers = request

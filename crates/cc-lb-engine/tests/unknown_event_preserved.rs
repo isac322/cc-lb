@@ -8,7 +8,7 @@ use cc_lb_engine::SseBatchConfig;
 use sse_relay_support::{RecordingHook, body_from_chunks, collect_response_body, relay_for};
 
 #[tokio::test]
-async fn unknown_event_preserved() {
+async fn t2__unknown_event_preserved() {
     let input = Bytes::from_static(b"event: foo\ndata: {}\n\n");
     let hook = Arc::new(RecordingHook::default());
     let relay = relay_for(Arc::clone(&hook), SseBatchConfig::default());

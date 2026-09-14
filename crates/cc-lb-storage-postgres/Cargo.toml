@@ -38,4 +38,5 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+cc-lb-testkit = { path = "../cc-lb-testkit" }
 cc-lb-storage-conformance = { path = "../cc-lb-storage-conformance" }

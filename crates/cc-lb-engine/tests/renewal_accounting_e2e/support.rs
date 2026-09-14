@@ -1,9 +1,11 @@
-mod claims;
 mod finalizer;
 #[path = "../renewal_characterization/support.rs"]
 mod renewal_fixture;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use cc_lb_engine::{
     InMemoryBus,
@@ -17,13 +19,13 @@ use cc_lb_engine::{
     },
 };
 use cc_lb_storage_api::{
-    CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord,
-    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheTtl,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionReadStore,
+    CacheKeepaliveSessionRecord, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+    CacheTtl, RequestEventStore,
     types::{KeyStatus, Limit as StoredLimit, LimitKind, StoredApiKeyRecord},
 };
 
 use self::finalizer::{Completion, FinalizeInput, install_test_pricing, persist_finalization};
-use claims::concurrent_sqlite_claims;
 use renewal_fixture::RenewalFixture;
 
 const PRINCIPAL_ID: &str = "renewal-principal";
@@ -35,6 +37,7 @@ pub(crate) struct RenewalAccountingScenario {
     limit_engine: Arc<LimitEngine>,
     principal_view: Arc<PrincipalView>,
     key_record: StoredApiKeyRecord,
+    scheduled_source_refs: Mutex<Vec<String>>,
 }
 
 impl RenewalAccountingScenario {
@@ -65,10 +68,11 @@ impl RenewalAccountingScenario {
             fixture,
             limit_engine: LimitEngine::new(
                 Arc::new(KeyConcurrencyManager::new()),
-                Arc::new(cc_lb_engine::SystemClock),
+                cc_lb_testkit::fixed_clock(1_700_000_000),
             ),
             principal_view,
             key_record,
+            scheduled_source_refs: Mutex::new(Vec::new()),
         }
     }
 
@@ -102,6 +106,13 @@ impl RenewalAccountingScenario {
             })
             .await
             .expect("schedule renewal session");
+        self.scheduled_source_refs
+            .lock()
+            .expect("scheduled source refs lock")
+            .push(format!(
+                "{}:{}",
+                session.session_key_hash, session.generation
+            ));
         assert!(
             self.fixture
                 .storage
@@ -125,7 +136,24 @@ impl RenewalAccountingScenario {
     }
 
     pub(crate) async fn concurrent_claims(&self, session: &CacheKeepaliveSessionRecord) -> u8 {
-        concurrent_sqlite_claims(Arc::clone(&self.fixture.storage), session.generation).await
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first_barrier = Arc::clone(&barrier);
+        let first = async {
+            first_barrier.wait().await;
+            self.fixture
+                .storage
+                .claim_cache_keepalive_turn(&session.session_key_hash, session.generation, 1_002)
+                .await
+        };
+        let second = async {
+            barrier.wait().await;
+            self.fixture
+                .storage
+                .claim_cache_keepalive_turn(&session.session_key_hash, session.generation, 1_002)
+                .await
+        };
+        let (first, second) = tokio::join!(first, second);
+        u8::from(first.expect("first claim")) + u8::from(second.expect("second claim"))
     }
 
     pub(crate) async fn dispatch(
@@ -191,19 +219,41 @@ impl RenewalAccountingScenario {
     }
 
     pub(crate) async fn row_counts(&self) -> (i64, i64, i64) {
-        let events = sqlx::query_scalar("SELECT COUNT(*) FROM request_events_v1")
-            .fetch_one(self.fixture.storage.pool())
+        let events = self
+            .fixture
+            .storage
+            .query_request_events(0, u64::MAX, usize::MAX)
             .await
-            .expect("count request events");
-        let turns = sqlx::query_scalar("SELECT COUNT(*) FROM cache_keepalive_turns")
-            .fetch_one(self.fixture.storage.pool())
+            .expect("query request events")
+            .len();
+        let turns = self
+            .fixture
+            .storage
+            .list_cache_keepalive_turns(PRINCIPAL_ID, "renewal-session")
             .await
-            .expect("count renewal turns");
-        let decisions = sqlx::query_scalar("SELECT COUNT(*) FROM cache_keepalive_decisions")
-            .fetch_one(self.fixture.storage.pool())
-            .await
-            .expect("count renewal decisions");
-        (events, turns, decisions)
+            .expect("list renewal turns")
+            .len();
+        let source_refs = self
+            .scheduled_source_refs
+            .lock()
+            .expect("scheduled source refs lock")
+            .clone();
+        let mut decisions = 0_usize;
+        for source_ref in source_refs {
+            decisions += usize::from(
+                self.fixture
+                    .storage
+                    .get_cache_keepalive_decision_for_principal(PRINCIPAL_ID, &source_ref)
+                    .await
+                    .expect("load renewal decision")
+                    .is_some(),
+            );
+        }
+        (
+            i64::try_from(events).expect("request event count fits i64"),
+            i64::try_from(turns).expect("renewal turn count fits i64"),
+            i64::try_from(decisions).expect("renewal decision count fits i64"),
+        )
     }
 
     pub(crate) fn http_calls(&self) -> u64 {

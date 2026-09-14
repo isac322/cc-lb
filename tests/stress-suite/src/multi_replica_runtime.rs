@@ -98,8 +98,8 @@ fn execute_run(
     ))?;
     let mut request_counts = vec![0_u64; input.replicas];
     let mut wave_counts = vec![BatchResult::default(); input.profile.wave_count()];
-    let target_per_wave = input.profile.target_requests_per_wave();
-    let wave_duration_secs = input.profile.wave_duration_ms().div_ceil(1_000).max(1);
+    let target_per_wave = input.target_requests_per_wave();
+    let wave_duration_secs = input.wave_duration_ms().div_ceil(1_000).max(1);
     let fabric = crate::multi_replica_load::FabricRef {
         docker,
         names,
@@ -108,6 +108,7 @@ fn execute_run(
     for (wave_index, wave_count) in wave_counts.iter_mut().enumerate() {
         for (replica_index, batch) in request_wave_via_fabric(
             fabric,
+            input.load,
             replica_ports,
             &key,
             target_per_wave,
@@ -120,7 +121,7 @@ fn execute_run(
             wave_count.completed = wave_count.completed.saturating_add(batch.completed);
             wave_count.failed = wave_count.failed.saturating_add(batch.failed);
         }
-        if wave_count.failed > 0 && !crate::multi_replica_load::timed_load_enabled() {
+        if wave_count.failed > 0 && !input.load.timed() {
             return Err(format!(
                 "wave-{wave_index} had {} failed load requests",
                 wave_count.failed
@@ -144,12 +145,10 @@ fn execute_run(
         }
     }
     let storage = storage_impairment(docker, names, &input.run_id, replica_ports, &key, latency)?;
-    pace_profile(input.profile, waves_started);
+    pace_profile(input.min_wave_execution_ms, waves_started)?;
     let wave_execution_ms = elapsed_ms(waves_started);
     let total_completed = request_counts.iter().copied().sum::<u64>();
-    input
-        .profile
-        .validate_throughput(total_completed, wave_execution_ms)?;
+    input.validate_throughput(total_completed, wave_execution_ms)?;
     let replicas = replica_ports
         .iter()
         .enumerate()
@@ -161,7 +160,7 @@ fn execute_run(
             requests: request_counts[index],
         })
         .collect::<Vec<_>>();
-    let per_replica_allowed = if crate::multi_replica_load::timed_load_enabled() {
+    let per_replica_allowed = if input.load.timed() {
         u64::MAX
     } else {
         input.profile.per_replica_allowed()
@@ -176,8 +175,7 @@ fn execute_run(
     evidence.verdict = Verdict::Pass;
     evidence.setup_ms = Some(setup_ms);
     evidence.wave_execution_ms = Some(wave_execution_ms);
-    evidence.waves =
-        crate::multi_replica_final::wave_evidence(input.profile, &wave_counts, &storage)?;
+    evidence.waves = crate::multi_replica_final::wave_evidence(input, &wave_counts, &storage)?;
     evidence.replicas = replicas;
     evidence.replica_process_metrics =
         crate::multi_replica_final::replica_process_metrics(&evidence.replicas);
@@ -194,11 +192,18 @@ fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn pace_profile(profile: crate::multi_replica::RunProfile, started: Instant) {
+fn pace_profile(min_wave_execution_ms: u64, started: Instant) -> Result<(), String> {
     let elapsed_ms = elapsed_ms(started);
-    if let Some(remaining_ms) = profile.min_wave_execution_ms().checked_sub(elapsed_ms) {
-        std::thread::sleep(std::time::Duration::from_millis(remaining_ms));
+    if let Some(remaining_ms) = min_wave_execution_ms.checked_sub(elapsed_ms) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(|error| format!("build stress pacing runtime: {error}"))?;
+        runtime.block_on(tokio::time::sleep(std::time::Duration::from_millis(
+            remaining_ms,
+        )));
     }
+    Ok(())
 }
 
 fn ensure_postgres_server_binary() -> Result<(), String> {

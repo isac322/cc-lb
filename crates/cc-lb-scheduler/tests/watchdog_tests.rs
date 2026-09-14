@@ -3,7 +3,7 @@
 use std::str::FromStr as _;
 use std::sync::Arc;
 
-use cc_lb_clock::SystemClock;
+use cc_lb_clock::TestClock;
 use cc_lb_scheduler::jobs::watchdog::{WatchdogEntityKind, run_entity_watchdog};
 use cc_lb_scheduler::worker::AdaptiveJob;
 use cc_lb_scheduler::worker::{SchedulerBackend, SchedulerPushTask, SqliteSchedulerBackend};
@@ -16,11 +16,11 @@ const RUN_AT_UNIX_SECS: u64 = 1_800_000_001;
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[tokio::test]
-async fn watchdog_seeds_only_when_primary_is_inactive() -> TestResult<()> {
+async fn t3__watchdog_seeds_only_when_primary_is_inactive() -> TestResult<()> {
     for kind in [WatchdogEntityKind::Warmup, WatchdogEntityKind::OAuthRefresh] {
         for scenario in scenarios() {
             let fixture = Fixture::new().await?;
-            let upstream_id = Uuid::new_v4();
+            let upstream_id = Uuid::from_u128(1);
             if let Some(existing) = scenario.existing {
                 fixture
                     .insert_existing(
@@ -60,10 +60,10 @@ async fn watchdog_seeds_only_when_primary_is_inactive() -> TestResult<()> {
 }
 
 #[tokio::test]
-async fn watchdog_concurrent_same_tick_uses_one_bootstrap_key() -> TestResult<()> {
+async fn t3__watchdog_concurrent_same_tick_uses_one_bootstrap_key() -> TestResult<()> {
     for kind in [WatchdogEntityKind::Warmup, WatchdogEntityKind::OAuthRefresh] {
         let fixture = Fixture::new().await?;
-        let upstream_id = Uuid::new_v4();
+        let upstream_id = Uuid::from_u128(2);
         let upstream_ids = [upstream_id];
         let first = run_entity_watchdog(
             &fixture.backend,
@@ -170,7 +170,7 @@ impl Fixture {
         cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
         let backend = SchedulerBackend::Sqlite(SqliteSchedulerBackend::new(
             pool.clone(),
-            Arc::new(SystemClock),
+            Arc::new(TestClock::new_at_secs(TICK_UNIX_SECS)),
         ));
         Ok(Self {
             _dir: dir,

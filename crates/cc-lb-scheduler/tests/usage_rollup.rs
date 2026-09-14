@@ -13,9 +13,10 @@ mod jobs {
             UsageRollupStore,
         };
         use tokio::sync::{Mutex, Notify, oneshot};
+        type MaybeRollupCheckpoint = Option<u64>;
 
         #[tokio::test]
-        async fn rollup_execution_calls_storage_once_and_returns_done() {
+        async fn t2__rollup_execution_calls_storage_once_and_returns_done() {
             let store = RecordingRollupStore::new(vec![Ok(UsageRollupRun {
                 processed_events: 7,
                 updated_rollups: 3,
@@ -38,7 +39,7 @@ mod jobs {
         }
 
         #[tokio::test]
-        async fn rollup_execution_returns_retry_when_storage_fails() {
+        async fn t2__rollup_execution_returns_retry_when_storage_fails() {
             let store = RecordingRollupStore::new(vec![Err(StorageError::Unavailable {
                 message: "database unavailable".to_owned(),
             })]);
@@ -56,7 +57,7 @@ mod jobs {
         }
 
         #[tokio::test]
-        async fn advisory_lock_coordination_treats_contended_rollup_as_done() {
+        async fn t2__advisory_lock_coordination_treats_contended_rollup_as_done() {
             let (entered_tx, entered_rx) = oneshot::channel();
             let store = Arc::new(AdvisoryRollupStore::new(entered_tx));
             let first_store = Arc::clone(&store);
@@ -152,7 +153,7 @@ mod jobs {
                 Ok(Vec::new())
             }
 
-            async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
+            async fn usage_rollup_checkpoint(&self) -> StorageResult<MaybeRollupCheckpoint> {
                 Ok(None)
             }
 
@@ -203,7 +204,7 @@ mod jobs {
                 Ok(Vec::new())
             }
 
-            async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
+            async fn usage_rollup_checkpoint(&self) -> StorageResult<MaybeRollupCheckpoint> {
                 Ok(None)
             }
 

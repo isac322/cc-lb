@@ -58,6 +58,7 @@ base64.workspace = true
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-rustls.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
 oauth2.workspace = true
 secrecy.workspace = true
@@ -76,6 +77,8 @@ nix = { version = "0.31.3", features = ["signal"] }
 
 [dev-dependencies]
 cc-lb-observability = { path = "../cc-lb-observability" }
+cc-lb-testkit = { path = "../cc-lb-testkit" }
+tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 http-body-util.workspace = true
 wat = "1"
@@ -87,6 +90,7 @@ tempfile.workspace = true
 mock-anthropic-oauth-server = { path = "../../tests/fixtures/mock-anthropic-oauth-server" }
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
+cc-lb-storage-conformance = { path = "../cc-lb-storage-conformance", default-features = false, features = ["postgres"] }
 apalis-postgres = "^1.0.0-rc.8"
 apalis-sqlite = "^1.0.0-rc.8"
 metrics-exporter-prometheus.workspace = true

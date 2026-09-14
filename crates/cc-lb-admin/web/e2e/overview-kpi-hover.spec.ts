@@ -6,6 +6,7 @@ import type {
   UsageBucket,
 } from '../src/lib/api';
 import type { Theme } from '../src/lib/theme';
+import { fulfillAuthenticatedSession } from './support/auth-session';
 
 const TIMESTAMPS = [
   Date.UTC(2026, 7, 17, 13, 30) / 1000,
@@ -444,6 +445,7 @@ async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
   });
 
   await page.route('**/admin/**', async (route) => {
+    if (await fulfillAuthenticatedSession(route)) return;
     const request = route.request();
     const url = new URL(request.url());
     const { pathname } = url;

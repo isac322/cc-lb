@@ -1,5 +1,5 @@
 #[tokio::test(flavor = "current_thread")]
-async fn route_quota_fields_follow_resolved_upstream() {
+async fn t2__route_quota_fields_follow_resolved_upstream() {
     const FIRST_LOSER: QuotaFields = QuotaFields {
         urgency_5h: Some(0.11),
         urgency_7d: Some(0.22),
@@ -48,7 +48,7 @@ async fn route_quota_fields_follow_resolved_upstream() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn exact_fable_effective_weekly_pressure_survives_assembly() {
+async fn t2__exact_fable_effective_weekly_pressure_survives_assembly() {
     const FABLE: QuotaFields = QuotaFields {
         urgency_5h: Some(0.405_465_108_108_164_4),
         urgency_7d: Some(0.821_399_906_936_681_4),
@@ -74,7 +74,7 @@ async fn exact_fable_effective_weekly_pressure_survives_assembly() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn route_quota_fields_are_null_when_resolved_upstream_missing_from_trace() {
+async fn t2__route_quota_fields_are_null_when_resolved_upstream_missing_from_trace() {
     let first_loser_id = Uuid::from_u128(1);
     let formula_winner_id = Uuid::from_u128(3);
     let missing_resolved_id = Uuid::from_u128(4);

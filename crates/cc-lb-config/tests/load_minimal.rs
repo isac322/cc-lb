@@ -1,14 +1,17 @@
 use cc_lb_config::{
-    Config, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES,
-    DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH, DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS,
-    StorageConfig,
+    Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES,
+    DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH,
+    DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS, StorageConfig,
 };
+
+fn load_config(toml: &str) -> (Config, Vec<String>) {
+    Config::from_toml_str_with_overrides(toml, &ConfigOverrides::default())
+        .expect("config should load")
+}
 
 #[test]
 fn load_minimal_toml_applies_plan_defaults() {
-    let (_dir, path) = crate::common::temp_config("[listener]\n");
-
-    let config = Config::load(&path).unwrap();
+    let (config, _warnings) = load_config("[listener]\n");
 
     assert_eq!(config.listener.proxy_addr, "[::]:8080".parse().unwrap());
     assert_eq!(config.listener.admin_addr, "[::1]:9090".parse().unwrap());
@@ -42,7 +45,7 @@ fn load_minimal_toml_applies_plan_defaults() {
 
 #[test]
 fn upstream_affinity_ttl_loads_from_toml() {
-    let (_dir, path) = crate::common::temp_config(
+    let (config, _warnings) = load_config(
         r#"
 [listener]
 
@@ -51,15 +54,13 @@ ttl_days = 14
 "#,
     );
 
-    let config = Config::load(&path).unwrap();
-
     assert_eq!(config.upstream_affinity.ttl_days, 14);
     assert_eq!(config.upstream_affinity.ttl_secs(), 14 * 86_400);
 }
 
 #[test]
 fn removed_prompt_cache_disable_switches_are_ignored_with_warnings() {
-    let (_dir, path) = crate::common::temp_config(
+    let (config, warnings) = load_config(
         r#"
 [listener]
 
@@ -74,8 +75,6 @@ enabled = false
 enabled = false
 "#,
     );
-
-    let (config, warnings) = Config::load_with_warnings(&path).unwrap();
 
     assert_eq!(config.prompt_cache_shadow.grace_margin_secs, 17);
     assert_eq!(

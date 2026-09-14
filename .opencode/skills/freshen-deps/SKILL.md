@@ -175,7 +175,7 @@ Skip `cargo nextest`, `cargo llvm-cov`, real-client E2E locally. They're slow an
 Branch:
 ```bash
 git checkout -b chore/upgrade-toolchain-and-deps  # or chore/freshen-deps-YYYY-MM-DD
-git add <only the files you changed; ignore untracked conformance-plugin-* Cargo.lock artifacts>
+git add <only the files you changed; ignore untracked plugins/test-fixtures/wasmtime-* and fuzz/Cargo.lock artifacts>
 ```
 
 Commit (plain body — per AGENTS.md, **never** add Sisyphus / Co-authored-by trailers):
@@ -254,12 +254,10 @@ Treat this as a hint, not a contract. Re-discover every run per Phase 1.
 
 ### Cargo
 - `Cargo.toml` — `workspace.dependencies` (the big block)
-- All per-crate `Cargo.toml` under `crates/`, `tests/`, `tests/fixtures/`, `plugins/`, `benches/`, `fuzz/`
+- All per-crate `Cargo.toml` under `crates/`, `tests/`, `plugins/`, `benches/`, `fuzz/`
 - Workspace-excluded Cargo.tomls each have their own `Cargo.lock` and need `cargo update` run from inside the crate dir:
-  - `fuzz/`
-  - `crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-observe/`
-  - `crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-router/`
-  - `crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-shape/`
+  - `fuzz/` (`Cargo.lock` is gitignored; do not stage it)
+  - `plugins/test-fixtures/wasmtime-*/`
 - `deny.toml` — `[advisories] ignore` cross-reference (don't claim a wasmtime/rustls-pemfile/bincode "miss" if it's already documented)
 
 ### Web (bun)

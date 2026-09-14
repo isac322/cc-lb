@@ -17,11 +17,11 @@ use cc_lb_engine::{
 };
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_observability::ObserveEvent;
+use cc_lb_storage_api::Storage as StorageTrait;
 use cc_lb_storage_api::principal::PrincipalRecord;
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
-use cc_lb_storage_sqlite::SqliteStorage;
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ResponseTransformError, ResponseTransformHook,
     ShapedRequest, ShapedRequestBuilder, SignedRequest, SseEvent, SseEventTransformHook,
@@ -34,7 +34,6 @@ use http_body_util::BodyExt as _;
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use url::Url;
 use uuid::Uuid;
 
@@ -44,7 +43,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
+async fn t2__buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
     let transform = Arc::new(BufferedToolNameTransform::default());
     let lifecycle = lifecycle_with_transforms(Some(transform.clone()), None, buffered_dispatch());
 
@@ -81,7 +80,7 @@ async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
 }
 
 #[tokio::test]
-async fn buffered_transform_rewrites_upstream_error_response() {
+async fn t2__buffered_transform_rewrites_upstream_error_response() {
     let transform = Arc::new(BufferedToolNameTransform::default());
     let lifecycle = lifecycle_with_transforms(
         Some(transform.clone()),
@@ -108,7 +107,7 @@ async fn buffered_transform_rewrites_upstream_error_response() {
 }
 
 #[tokio::test]
-async fn buffered_unchanged_preserves_compressed_upstream_bytes() {
+async fn t2__buffered_unchanged_preserves_compressed_upstream_bytes() {
     let compressed = gzip_bytes(&buffered_upstream_body());
     let transform = Arc::new(UnchangedBufferedTransform::default());
     let lifecycle = lifecycle_with_transforms(
@@ -144,7 +143,7 @@ async fn buffered_unchanged_preserves_compressed_upstream_bytes() {
 }
 
 #[tokio::test]
-async fn buffered_header_only_transform_preserves_compressed_upstream_bytes() {
+async fn t2__buffered_header_only_transform_preserves_compressed_upstream_bytes() {
     let compressed = gzip_bytes(&buffered_upstream_body());
     let transform = Arc::new(HeaderOnlyBufferedTransform::default());
     let lifecycle = lifecycle_with_transforms(
@@ -185,7 +184,7 @@ async fn buffered_header_only_transform_preserves_compressed_upstream_bytes() {
 }
 
 #[tokio::test]
-async fn buffered_unsupported_encoding_skips_transform() {
+async fn t2__buffered_unsupported_encoding_skips_transform() {
     let transform = Arc::new(BufferedToolNameTransform::default());
     let mut headers = json_headers(buffered_upstream_body().len(), false);
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("snappy"));
@@ -216,7 +215,7 @@ async fn buffered_unsupported_encoding_skips_transform() {
 }
 
 #[tokio::test]
-async fn buffered_transform_failure_fails_open_to_original_response() {
+async fn t2__buffered_transform_failure_fails_open_to_original_response() {
     let transform = Arc::new(FailingBufferedTransform);
     let lifecycle = lifecycle_with_transforms(Some(transform), None, buffered_dispatch());
 
@@ -240,10 +239,9 @@ async fn buffered_transform_failure_fails_open_to_original_response() {
 }
 
 #[tokio::test]
-async fn buffered_transform_failure_is_observed_as_error() -> Result<(), Box<dyn std::error::Error>>
-{
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "response-transform-observation.sqlite").await?);
+async fn t2__buffered_transform_failure_is_observed_as_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let transform = Arc::new(FailingBufferedTransform);
@@ -261,7 +259,7 @@ async fn buffered_transform_failure_is_observed_as_error() -> Result<(), Box<dyn
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, buffered_upstream_body());
 
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     let event = &events[0];
     assert_eq!(event.status, StatusCode::OK.as_u16());
@@ -270,13 +268,12 @@ async fn buffered_transform_failure_is_observed_as_error() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
-async fn buffered_http_error_preserves_canonical_error_over_transform_failure()
+async fn t2__buffered_http_error_preserves_canonical_error_over_transform_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     let body = Bytes::from_static(
         br#"{"type":"error","error":{"type":"rate_limit_error","message":"forced fake rate limit response"}}"#,
     );
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "buffered-error-precedence.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
@@ -300,7 +297,7 @@ async fn buffered_http_error_preserves_canonical_error_over_transform_failure()
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(output, body);
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].error_code.as_deref(), Some("upstream_4xx"));
     assert_eq!(
@@ -314,37 +311,8 @@ async fn buffered_http_error_preserves_canonical_error_over_transform_failure()
     Ok(())
 }
 
-async fn sqlite_storage(
-    dir: &tempfile::TempDir,
-    file_name: &str,
-) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
-    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
-    let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
-            .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
-    Ok(storage)
-}
-
-async fn wait_for_events(
-    storage: &dyn RequestEventStore,
-    expected: usize,
-) -> Result<Vec<cc_lb_storage_api::types::RequestEvent>, Box<dyn std::error::Error>> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
-        if events.len() >= expected {
-            return Ok(events);
-        }
-        if std::time::Instant::now() >= deadline {
-            panic!("expected {expected} request event(s), got {}", events.len());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-}
-
 #[tokio::test]
-async fn buffered_accounting_uses_pre_transform_usage() {
+async fn t2__buffered_accounting_uses_pre_transform_usage() {
     let transform = Arc::new(BufferedUsageMutatingTransform);
     let recording = Arc::new(RecordingHook::default());
     let lifecycle = lifecycle_with_transforms_and_hook(
@@ -377,7 +345,7 @@ async fn buffered_accounting_uses_pre_transform_usage() {
 }
 
 #[tokio::test]
-async fn sse_transform_rewrites_content_block_start_event() {
+async fn t2__sse_transform_rewrites_content_block_start_event() {
     let transform = Arc::new(SseToolNameTransform::default());
     let lifecycle = lifecycle_with_transforms(None, Some(transform.clone()), sse_dispatch(false));
 
@@ -400,7 +368,7 @@ async fn sse_transform_rewrites_content_block_start_event() {
 }
 
 #[tokio::test]
-async fn sse_transform_receives_sanitized_response_headers() {
+async fn t2__sse_transform_receives_sanitized_response_headers() {
     let transform = Arc::new(HeaderCapturingSseTransform::default());
     let mut headers = sse_headers();
     headers.insert(CONTENT_LENGTH, HeaderValue::from_static("123"));
@@ -439,7 +407,7 @@ async fn sse_transform_receives_sanitized_response_headers() {
 }
 
 #[tokio::test]
-async fn sse_unchanged_transform_preserves_raw_event_bytes() {
+async fn t2__sse_unchanged_transform_preserves_raw_event_bytes() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let body =
         Bytes::from_static(b": keep-this-comment\nevent: ping\ndata: {\"type\":\"ping\"}\n\n");
@@ -466,7 +434,7 @@ async fn sse_unchanged_transform_preserves_raw_event_bytes() {
 }
 
 #[tokio::test]
-async fn sse_transform_decodes_gzip_and_emits_identity_sse() {
+async fn t2__sse_transform_decodes_gzip_and_emits_identity_sse() {
     let transform = Arc::new(SseToolNameTransform::default());
     let body = gzip_bytes(&sse_upstream_body(false));
     let mut headers = sse_headers();
@@ -504,7 +472,7 @@ async fn sse_transform_decodes_gzip_and_emits_identity_sse() {
 }
 
 #[tokio::test]
-async fn gzip_content_length_passthrough_preserves_upstream_bytes_and_headers() {
+async fn t2__gzip_content_length_passthrough_preserves_upstream_bytes_and_headers() {
     let plaintext = sse_upstream_body(false);
     let compressed = gzip_bytes(&plaintext);
     let split_points = [
@@ -560,7 +528,7 @@ async fn gzip_content_length_passthrough_preserves_upstream_bytes_and_headers() 
     assert_eq!(output, compressed);
 }
 #[tokio::test]
-async fn content_length_client_stops_after_declared_gzip_bytes_without_terminal_drop() {
+async fn t2__content_length_client_stops_after_declared_gzip_bytes_without_terminal_drop() {
     let plaintext = sse_upstream_body(false);
     let compressed = gzip_bytes(&plaintext);
     let mut headers = sse_headers();
@@ -628,7 +596,7 @@ async fn content_length_client_stops_after_declared_gzip_bytes_without_terminal_
 }
 
 #[tokio::test]
-async fn content_length_malformed_sse_delivers_raw_bytes_before_error_telemetry() {
+async fn t2__content_length_malformed_sse_delivers_raw_bytes_before_error_telemetry() {
     let malformed =
         Bytes::from_static(b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"");
     let mut headers = sse_headers();
@@ -701,14 +669,13 @@ async fn content_length_malformed_sse_delivers_raw_bytes_before_error_telemetry(
 }
 
 #[tokio::test]
-async fn truncated_gzip_passthrough_is_recorded_as_upstream_decode_error()
+async fn t2__truncated_gzip_passthrough_is_recorded_as_upstream_decode_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
     let body = incomplete_gzip_prefix(&plaintext);
     let mut headers = sse_headers();
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "truncated-gzip-passthrough.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
@@ -735,7 +702,7 @@ async fn truncated_gzip_passthrough_is_recorded_as_upstream_decode_error()
         Some(&HeaderValue::from_static("gzip"))
     );
     assert_eq!(output, body);
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].error_code.as_deref(),
@@ -755,7 +722,7 @@ async fn truncated_gzip_passthrough_is_recorded_as_upstream_decode_error()
 }
 
 #[tokio::test]
-async fn sse_transform_decodes_brotli_and_emits_identity_sse() {
+async fn t2__sse_transform_decodes_brotli_and_emits_identity_sse() {
     let transform = Arc::new(SseToolNameTransform::default());
     let body = brotli_bytes(&sse_upstream_body(false));
     let mut headers = sse_headers();
@@ -793,15 +760,14 @@ async fn sse_transform_decodes_brotli_and_emits_identity_sse() {
 }
 
 #[tokio::test]
-async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
+async fn t2__truncated_gzip_after_transformed_output_is_upstream_decode_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let transform = Arc::new(UnchangedSseTransform::default());
     let plaintext = Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
     let body = incomplete_gzip_prefix(&plaintext);
     let mut headers = sse_headers();
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "truncated-gzip.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
@@ -835,7 +801,7 @@ async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
     assert!(!text.contains("response_transform_error"));
     assert_eq!(transform.seen_events(), vec!["ping".to_owned()]);
 
-    let error = tokio::time::timeout(Duration::from_secs(1), async {
+    let error = async {
         loop {
             if let LifecycleEvent::StreamCompleted {
                 result: Err(error), ..
@@ -847,13 +813,12 @@ async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
                 break error;
             }
         }
-    })
-    .await
-    .expect("stream error observed");
+    }
+    .await;
     assert_eq!(error.error_type, "upstream_response_decode_error");
     assert!(error.error_message.contains("matching checksum"));
 
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     let event = &events[0];
     assert_eq!(event.error_code.as_deref(), Some("upstream_stream_error"));
@@ -871,15 +836,14 @@ async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
 }
 
 #[tokio::test]
-async fn truncated_gzip_before_transformed_output_emits_decode_error()
+async fn t2__truncated_gzip_before_transformed_output_emits_decode_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let transform = Arc::new(UnchangedSseTransform::default());
     let plaintext = Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}");
     let body = incomplete_gzip_prefix(&plaintext);
     let mut headers = sse_headers();
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "truncated-gzip-before-output.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
@@ -907,7 +871,7 @@ async fn truncated_gzip_before_transformed_output_emits_decode_error()
     assert!(text.contains("\"api_error\""));
     assert!(text.contains("matching checksum"));
     assert!(transform.seen_events().is_empty());
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].upstream_error_type.as_deref(),
@@ -917,8 +881,8 @@ async fn truncated_gzip_before_transformed_output_emits_decode_error()
 }
 
 #[tokio::test]
-async fn gzip_transform_failure_preserves_transform_error() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn t2__gzip_transform_failure_preserves_transform_error()
+-> Result<(), Box<dyn std::error::Error>> {
     let transform = Arc::new(FailAfterFirstSseTransform::default());
     let chunks = gzip_event_chunks(
         b"event: ping\ndata: {\"type\":\"ping\"}\n\n",
@@ -926,8 +890,7 @@ async fn gzip_transform_failure_preserves_transform_error() -> Result<(), Box<dy
     );
     let mut headers = sse_headers();
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "gzip-transform-failure.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
@@ -954,7 +917,7 @@ async fn gzip_transform_failure_preserves_transform_error() -> Result<(), Box<dy
     assert!(text.contains("response_transform_error"));
     assert!(!text.contains("\"api_error\""));
 
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].upstream_error_type.as_deref(),
@@ -964,14 +927,13 @@ async fn gzip_transform_failure_preserves_transform_error() -> Result<(), Box<dy
 }
 
 #[tokio::test]
-async fn raw_deflate_passthrough_decode_failure_remains_success()
+async fn t2__raw_deflate_passthrough_decode_failure_remains_success()
 -> Result<(), Box<dyn std::error::Error>> {
     let plaintext = Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
     let body = raw_deflate_bytes(&plaintext);
     let mut headers = sse_headers();
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("deflate"));
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "raw-deflate-passthrough.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
@@ -998,7 +960,7 @@ async fn raw_deflate_passthrough_decode_failure_remains_success()
         headers.get(CONTENT_ENCODING),
         Some(&HeaderValue::from_static("deflate"))
     );
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].error_code, None);
     assert_eq!(events[0].upstream_error_type, None);
@@ -1006,13 +968,12 @@ async fn raw_deflate_passthrough_decode_failure_remains_success()
 }
 
 #[tokio::test]
-async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn t2__non_sse_gzip_decode_failure_skips_sse_transform()
+-> Result<(), Box<dyn std::error::Error>> {
     let transform = Arc::new(UnchangedSseTransform::default());
     let body = incomplete_gzip_prefix(&Bytes::from_static(br#"{"partial":true}"#));
     let headers = json_headers(body.len(), true);
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "non-sse-gzip.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
@@ -1027,7 +988,7 @@ async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn
     .with_static_limit_subject(
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_engine::SystemClock),
+            fixed_clock(1_700_000_000),
         ),
         "principal-test".to_owned(),
         "key-test".to_owned(),
@@ -1053,7 +1014,7 @@ async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn
         Some(&HeaderValue::from_static("gzip"))
     );
     assert!(transform.seen_events().is_empty());
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].error_code, None);
     assert_eq!(events[0].upstream_error_type, None);
@@ -1061,7 +1022,7 @@ async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
-async fn sse_unsupported_encoding_skips_transform_and_raw_passes_through() {
+async fn t2__sse_unsupported_encoding_skips_transform_and_raw_passes_through() {
     let transform = Arc::new(SseToolNameTransform::default());
     let body = sse_upstream_body(false);
     let mut headers = sse_headers();
@@ -1093,7 +1054,7 @@ async fn sse_unsupported_encoding_skips_transform_and_raw_passes_through() {
 }
 
 #[tokio::test]
-async fn sse_transform_failure_before_output_fails_open_raw() {
+async fn t2__sse_transform_failure_before_output_fails_open_raw() {
     let transform = Arc::new(AlwaysFailingSseTransform);
     let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(false));
 
@@ -1109,7 +1070,7 @@ async fn sse_transform_failure_before_output_fails_open_raw() {
 }
 
 #[tokio::test]
-async fn sse_unterminated_final_event_is_upstream_framing_error() {
+async fn t2__sse_unterminated_final_event_is_upstream_framing_error() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let body = Bytes::from_static(b"event: message_stop\ndata: {}\n");
     let lifecycle = lifecycle_with_transforms(
@@ -1139,11 +1100,10 @@ async fn sse_unterminated_final_event_is_upstream_framing_error() {
 }
 
 #[tokio::test]
-async fn sse_unterminated_passthrough_is_upstream_framing_error()
+async fn t2__sse_unterminated_passthrough_is_upstream_framing_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let body = Bytes::from_static(b"event: message_stop\ndata: {}\n");
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "unterminated-passthrough.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
@@ -1171,7 +1131,7 @@ async fn sse_unterminated_passthrough_is_upstream_framing_error()
         text[..error_offset].ends_with("\n\n"),
         "error frame must start after an SSE event boundary: {text:?}",
     );
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].error_code.as_deref(),
@@ -1185,10 +1145,10 @@ async fn sse_unterminated_passthrough_is_upstream_framing_error()
 }
 
 #[tokio::test]
-async fn sse_trailing_line_terminators_remain_success() -> Result<(), Box<dyn std::error::Error>> {
+async fn t2__sse_trailing_line_terminators_remain_success() -> Result<(), Box<dyn std::error::Error>>
+{
     let body = Bytes::from_static(b"event: message_stop\ndata: {}\n\n\r\n");
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "trailing-terminators.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let lifecycle = lifecycle_with_transforms(
@@ -1211,7 +1171,7 @@ async fn sse_trailing_line_terminators_remain_success() -> Result<(), Box<dyn st
     let (_status, _headers, output) = collect_body(response).await;
 
     assert_eq!(output, body);
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].error_code, None);
     assert_eq!(events[0].upstream_error_type, None);
@@ -1219,7 +1179,7 @@ async fn sse_trailing_line_terminators_remain_success() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
-async fn sse_body_failure_after_parser_budget_starts_separate_error_frame() {
+async fn t2__sse_body_failure_after_parser_budget_starts_separate_error_frame() {
     let mut body = Vec::from(&b"data: "[..]);
     body.extend(std::iter::repeat_n(b'x', 256));
     let config = LifecycleConfig {
@@ -1255,7 +1215,7 @@ async fn sse_body_failure_after_parser_budget_starts_separate_error_frame() {
 }
 
 #[tokio::test]
-async fn sse_gzip_unterminated_final_event_emits_upstream_framing_error() {
+async fn t2__sse_gzip_unterminated_final_event_emits_upstream_framing_error() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let compressed = gzip_bytes(&Bytes::from_static(b"event: message_stop\ndata: {}\n"));
     let mut headers = sse_headers();
@@ -1288,10 +1248,9 @@ async fn sse_gzip_unterminated_final_event_emits_upstream_framing_error() {
 }
 
 #[tokio::test]
-async fn sse_unterminated_http_error_preserves_upstream_status()
+async fn t2__sse_unterminated_http_error_preserves_upstream_status()
 -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "unterminated-http-error.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let transform = Arc::new(UnchangedSseTransform::default());
@@ -1320,7 +1279,7 @@ async fn sse_unterminated_http_error_preserves_upstream_status()
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     let text = std::str::from_utf8(&output).expect("error frame is utf8");
     assert!(text.contains(r#""type":"api_error""#));
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].status, StatusCode::TOO_MANY_REQUESTS.as_u16());
     assert_eq!(events[0].error_code.as_deref(), Some("upstream_4xx"));
@@ -1332,10 +1291,9 @@ async fn sse_unterminated_http_error_preserves_upstream_status()
 }
 
 #[tokio::test]
-async fn sse_unterminated_http_error_passthrough_preserves_upstream_body()
+async fn t2__sse_unterminated_http_error_passthrough_preserves_upstream_body()
 -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "unterminated-http-passthrough.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let body = Bytes::from_static(
@@ -1362,7 +1320,7 @@ async fn sse_unterminated_http_error_passthrough_preserves_upstream_body()
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(output, body);
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].error_code.as_deref(), Some("upstream_4xx"));
     assert_ne!(
@@ -1379,15 +1337,14 @@ async fn sse_unterminated_http_error_passthrough_preserves_upstream_body()
 }
 
 #[tokio::test]
-async fn sse_gzip_transform_failure_before_output_emits_error_frame() {
+async fn t2__sse_gzip_transform_failure_before_output_emits_error_frame() {
     assert_gzip_transform_failure_before_output(Arc::new(AlwaysFailingSseTransform)).await;
 }
 
 #[tokio::test]
-async fn sse_gzip_transform_failure_preserves_http_error_status()
+async fn t2__sse_gzip_transform_failure_preserves_http_error_status()
 -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(sqlite_storage(&dir, "transform-http-error.sqlite").await?);
+    let storage = InMemoryStorage::new();
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let compressed = gzip_bytes(&sse_upstream_body(false));
@@ -1415,7 +1372,7 @@ async fn sse_gzip_transform_failure_preserves_http_error_status()
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     let text = std::str::from_utf8(&output).expect("error frame is utf8");
     assert!(text.contains("response_transform_error"));
-    let events = wait_for_events(storage.as_ref(), 1).await?;
+    let events = storage.wait_for_request_events(1).await;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].status, StatusCode::TOO_MANY_REQUESTS.as_u16());
     assert_eq!(events[0].error_code.as_deref(), Some("upstream_4xx"));
@@ -1427,7 +1384,7 @@ async fn sse_gzip_transform_failure_preserves_http_error_status()
 }
 
 #[tokio::test]
-async fn sse_gzip_invalid_event_name_before_output_emits_error_frame() {
+async fn t2__sse_gzip_invalid_event_name_before_output_emits_error_frame() {
     assert_gzip_transform_failure_before_output(Arc::new(InvalidEventNameSseTransform)).await;
 }
 
@@ -1461,7 +1418,7 @@ async fn assert_gzip_transform_failure_before_output(transform: Arc<dyn SseEvent
 }
 
 #[tokio::test]
-async fn sse_transform_invalid_event_name_fails_open_without_injection() {
+async fn t2__sse_transform_invalid_event_name_fails_open_without_injection() {
     let transform = Arc::new(InvalidEventNameSseTransform);
     let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(false));
 
@@ -1479,7 +1436,7 @@ async fn sse_transform_invalid_event_name_fails_open_without_injection() {
 }
 
 #[tokio::test]
-async fn sse_transform_failure_after_transformed_output_terminates_classified() {
+async fn t2__sse_transform_failure_after_transformed_output_terminates_classified() {
     let transform = Arc::new(FailAfterFirstSseTransform::default());
     let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(false));
 
@@ -1499,7 +1456,7 @@ async fn sse_transform_failure_after_transformed_output_terminates_classified() 
 }
 
 #[tokio::test]
-async fn sse_decompression_budget_before_output_emits_transform_error() {
+async fn t2__sse_decompression_budget_before_output_emits_transform_error() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let plaintext = vec![b'x'; 1024];
     let compressed = gzip_bytes(&Bytes::from(plaintext));
@@ -1536,7 +1493,7 @@ async fn sse_decompression_budget_before_output_emits_transform_error() {
 }
 
 #[tokio::test]
-async fn sse_gzip_incomplete_event_budget_before_output_emits_transform_error() {
+async fn t2__sse_gzip_incomplete_event_budget_before_output_emits_transform_error() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let mut plaintext = Vec::from(&b"data: "[..]);
     plaintext.extend(std::iter::repeat_n(b'x', 256));
@@ -1575,7 +1532,7 @@ async fn sse_gzip_incomplete_event_budget_before_output_emits_transform_error() 
 }
 
 #[tokio::test]
-async fn sse_brotli_incomplete_event_budget_never_replays_compressed_bytes() {
+async fn t2__sse_brotli_incomplete_event_budget_never_replays_compressed_bytes() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let mut plaintext = Vec::from(&b"data: "[..]);
     plaintext.extend(std::iter::repeat_n(b'x', 256));
@@ -1614,7 +1571,7 @@ async fn sse_brotli_incomplete_event_budget_never_replays_compressed_bytes() {
 }
 
 #[tokio::test]
-async fn sse_incomplete_event_budget_after_output_uses_existing_error_frame() {
+async fn t2__sse_incomplete_event_budget_after_output_uses_existing_error_frame() {
     let transform = Arc::new(UnchangedSseTransform::default());
     let mut body = Vec::from(&b"event: ping\ndata: {\"type\":\"ping\"}\n\n"[..]);
     body.extend_from_slice(b"data: ");
@@ -1650,7 +1607,7 @@ async fn sse_incomplete_event_budget_after_output_uses_existing_error_frame() {
 }
 
 #[tokio::test]
-async fn sse_accounting_uses_pre_transform_usage() {
+async fn t2__sse_accounting_uses_pre_transform_usage() {
     let transform = Arc::new(SseUsageMutatingTransform);
     let recording = Arc::new(RecordingHook::default());
     let lifecycle = lifecycle_with_transforms_and_hook(
@@ -1670,12 +1627,9 @@ async fn sse_accounting_uses_pre_transform_usage() {
 
     let text = std::str::from_utf8(&body).expect("sse body is utf8");
     assert!(text.contains(r#""input_tokens":999"#));
-    let event = tokio::time::timeout(
-        Duration::from_secs(1),
-        recording.wait_for_event(|event| matches!(event, ObserveEvent::RequestFinished { .. })),
-    )
-    .await
-    .expect("request-finished observation arrives");
+    let event = recording
+        .wait_for_event(|event| matches!(event, ObserveEvent::RequestFinished { .. }))
+        .await;
     let ObserveEvent::RequestFinished {
         input_tokens,
         output_tokens,
@@ -1754,10 +1708,10 @@ fn lifecycle_with_transforms_and_hook_and_config(
         ),
     );
     let principal = PrincipalRecord {
-        id: Uuid::new_v4(),
         name: "principal-test".to_owned(),
         kind: cc_lb_storage_api::PrincipalKind::Machine,
-        allowed_models: vec!["*".to_owned()],
+        id: Uuid::from_u128(0x200),
+        allowed_models: Vec::new(),
         allowed_upstreams: vec![default_upstream_id()],
         default_limits: Vec::new(),
         enabled: true,
@@ -1788,7 +1742,7 @@ fn lifecycle_with_transforms_and_hook_and_config(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         config,
-        Arc::new(cc_lb_engine::SystemClock),
+        fixed_clock(1_700_000_000),
     )
 }
 

@@ -10,7 +10,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn internal_partial_fetch_returns_payload_when_token_valid() {
+async fn t2__internal_partial_fetch_returns_payload_when_token_valid() {
     let update = RequestEventUpdate::Partial(RequestEventPartial {
         event_id: "event-present".to_owned(),
         request_id: "req-present".to_owned(),
@@ -44,7 +44,7 @@ async fn internal_partial_fetch_returns_payload_when_token_valid() {
 }
 
 #[tokio::test]
-async fn internal_partial_fetch_rejects_missing_or_wrong_token() {
+async fn t2__internal_partial_fetch_rejects_missing_or_wrong_token() {
     let app = router(InternalPartialsState {
         retention: Arc::new(TestRetainedPartials::default()),
         cluster_token: "cluster-token".to_owned(),
@@ -65,7 +65,7 @@ async fn internal_partial_fetch_rejects_missing_or_wrong_token() {
 }
 
 #[tokio::test]
-async fn internal_partial_fetch_returns_not_found_when_event_absent() {
+async fn t2__internal_partial_fetch_returns_not_found_when_event_absent() {
     let response = router(InternalPartialsState {
         retention: Arc::new(TestRetainedPartials::default()),
         cluster_token: "cluster-token".to_owned(),

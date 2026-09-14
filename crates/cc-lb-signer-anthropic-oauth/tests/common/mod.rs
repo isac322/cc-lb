@@ -49,6 +49,7 @@ impl OAuthHttpClient for FakeOAuthClient {
             .lock()
             .expect("bodies lock")
             .push(request.form_body.expose_secret().to_owned());
+
         self.responses
             .lock()
             .expect("responses lock")

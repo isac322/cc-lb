@@ -9,6 +9,8 @@ use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshUpstreams;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use uuid::Uuid;
+type MaybeUpstreamRecord = Option<UpstreamRecord>;
+type MaybeGeneration = Option<u64>;
 
 #[derive(Clone)]
 pub struct FakeUpstreams {
@@ -46,7 +48,7 @@ impl FakeUpstreams {
 }
 
 impl OAuthRefreshUpstreams for FakeUpstreams {
-    async fn get_by_id(&self, _id: Uuid) -> Result<Option<UpstreamRecord>> {
+    async fn get_by_id(&self, _id: Uuid) -> Result<MaybeUpstreamRecord> {
         Ok(Some(
             self.state.lock().expect("upstreams lock").record.clone(),
         ))
@@ -64,7 +66,7 @@ impl OAuthRefreshUpstreams for FakeUpstreams {
         Ok(state.record.clone())
     }
 
-    async fn read_oauth_token_generation(&self, _id: Uuid) -> Result<Option<u64>> {
+    async fn read_oauth_token_generation(&self, _id: Uuid) -> Result<MaybeGeneration> {
         let mut state = self.state.lock().expect("upstreams lock");
         Ok(state
             .read_generations

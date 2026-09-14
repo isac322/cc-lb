@@ -20,7 +20,7 @@ use crate::common::{TestAuthn, TestRouter, TestState, lifecycle_with_parts, mess
 type FilterOutcome = (String, Vec<PerCandidateReason>);
 
 #[tokio::test]
-async fn fixed_request_preserves_routing_shape_and_signing_observables() {
+async fn t2__fixed_request_preserves_routing_shape_and_signing_observables() {
     let state = ParityState::default();
     let lifecycle = lifecycle(state.clone());
     let request = messages_request(Bytes::from_static(
@@ -51,7 +51,7 @@ async fn fixed_request_preserves_routing_shape_and_signing_observables() {
     );
 }
 #[tokio::test]
-async fn four_breakpoint_request_preserves_upstream_bytes_and_response() {
+async fn t2__four_breakpoint_request_preserves_upstream_bytes_and_response() {
     let state = ParityState::default();
     let lifecycle = lifecycle(state.clone());
     let body = Bytes::from_static(

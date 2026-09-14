@@ -87,15 +87,15 @@ impl PromptCacheObservationSinkLike for PromptCacheObservationSink {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::sync::{Arc, Mutex, atomic::AtomicU64};
-    use std::time::Duration;
 
     use crate::prompt_cache_observation_cache::HASH_SCHEMA_VERSION;
     use async_trait::async_trait;
     use cc_lb_domain::TtlClass;
     use cc_lb_storage_api::{PromptCacheObservationRecord, StorageResult};
-    use tokio::sync::mpsc;
+    use tokio::sync::{Notify, mpsc};
     use uuid::Uuid;
 
     use super::*;
@@ -103,6 +103,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct MockStore {
         records: Arc<Mutex<Vec<PromptCacheObservationRecord>>>,
+        wrote: Arc<Notify>,
     }
 
     #[async_trait]
@@ -115,6 +116,7 @@ mod tests {
                 .lock()
                 .expect("mock store lock")
                 .push(record.clone());
+            self.wrote.notify_one();
             Ok(())
         }
     }
@@ -155,16 +157,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_processes_records_into_store() {
+    async fn t2__writer_processes_records_into_store() {
         let store = MockStore::default();
         let records = Arc::clone(&store.records);
+        let wrote = Arc::clone(&store.wrote);
         let (sink, writer) = PromptCacheObservationSink::new(Arc::new(store), 8, "sqlite");
-
         for index in 0..3 {
             sink.enqueue(record(index)).expect("record enqueued");
         }
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        while records.lock().expect("mock store lock").len() < 3 {
+            wrote.notified().await;
+        }
 
         assert_eq!(records.lock().expect("mock store lock").len(), 3);
 
@@ -173,7 +176,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_channel_returns_closed_error() {
+    async fn t2__closed_channel_returns_closed_error() {
         let (sink, writer) =
             PromptCacheObservationSink::new(Arc::new(MockStore::default()), 2, "sqlite");
 

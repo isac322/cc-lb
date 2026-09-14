@@ -1510,12 +1510,10 @@ fn default_prompt_cache_shadow_max_live_entries_per_partition() -> usize {
 mod tests {
     use super::*;
     use crate::{Config, ConfigOverrides};
-    use std::fs;
 
     fn load_config(toml: &str) -> Result<Config, crate::ConfigError> {
-        let temp_file = tempfile::NamedTempFile::new().expect("create temp config");
-        fs::write(temp_file.path(), toml).expect("write temp config");
-        Config::load_with_overrides(temp_file.path(), ConfigOverrides::default())
+        Config::from_toml_str_with_overrides(toml, &ConfigOverrides::default())
+            .map(|(config, _warnings)| config)
     }
 
     #[test]

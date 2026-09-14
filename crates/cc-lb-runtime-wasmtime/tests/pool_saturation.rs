@@ -26,7 +26,7 @@ use cc_lb_runtime_wasmtime::{WasmtimeRuntime, WasmtimeRuntimeError};
 use metrics_exporter_prometheus::PrometheusBuilder;
 
 #[test]
-fn pool_saturated_variant_is_part_of_error_surface() {
+fn t3__pool_saturated_variant_is_part_of_error_surface() {
     // Synthetic construction. If PoolSaturated ever gets removed or
     // renamed, this stops compiling — the point.
     let err = WasmtimeRuntimeError::PoolSaturated { resource: "pool" };
@@ -41,7 +41,7 @@ fn pool_saturated_variant_is_part_of_error_surface() {
 }
 
 #[test]
-fn pool_utilization_gauges_are_emitted() {
+fn t3__pool_utilization_gauges_are_emitted() {
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
 

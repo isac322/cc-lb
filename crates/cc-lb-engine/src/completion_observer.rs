@@ -578,6 +578,7 @@ mod tests {
         assert!(TEST_DROPS.lock().expect("test drop lock").is_empty());
     }
 
+    // tier-allow(multi-thread): os-thread claim
     #[cfg(panic = "unwind")]
     #[tokio::test(flavor = "current_thread")]
     async fn callback_panic_is_counted_and_worker_processes_following_job() {

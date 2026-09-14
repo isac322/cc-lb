@@ -4,8 +4,8 @@ use std::process::Command;
 use cc_lb_load_tests::{LiveTailSoakEvidence, SoakProfile, evaluate_live_tail_soak};
 
 #[test]
-#[ignore = "opt-in live-tail load smoke; run with --ignored or a dedicated CI job"]
-fn live_tail_soak_smoke_profile_passes() {
+#[allow(non_snake_case)]
+fn tx__live_tail_soak_smoke_profile_passes() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let status = Command::new("bash")
         .arg("tests/load/live-tail-soak.sh")

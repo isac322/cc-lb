@@ -137,6 +137,7 @@ mod tests {
     use super::*;
 
     #[test]
+    // tier-allow(real-clock): SystemClock wall-clock adapter contract until=2027-03-31
     fn system_clock_now_is_between_two_system_time_now_samples() {
         let clock = SystemClock;
         let before = SystemTime::now();

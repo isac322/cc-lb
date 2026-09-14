@@ -329,6 +329,7 @@ fn run_events(events: Vec<LifecycleEvent>) -> (Vec<RequestEvent>, Vec<RequestEve
             store.clone(),
             Some(bus.clone() as Arc<dyn RequestEventBus>),
             Arc::new(NoopMetricsHook),
+            cc_lb_testkit::fixed_clock(1_700_000_000),
         );
         for event in events {
             tx.send(event).await.expect("send lifecycle event");
@@ -419,7 +420,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
-    fn arbitrary_single_event_sequence_persists_at_most_one_final_row(
+    fn t2__arbitrary_single_event_sequence_persists_at_most_one_final_row(
         ops in prop::collection::vec(event_op_strategy(true), 0..40),
     ) {
         let events = ops
@@ -438,7 +439,7 @@ proptest! {
     }
 
     #[test]
-    fn interleaved_distinct_event_ids_do_not_bleed_usage_cache_or_route_fields(
+    fn t2__interleaved_distinct_event_ids_do_not_bleed_usage_cache_or_route_fields(
         steps in prop::collection::vec((any::<bool>(), event_op_strategy(true)), 0..60),
     ) {
         let events = steps
@@ -456,7 +457,7 @@ proptest! {
     }
 
     #[test]
-    fn partial_snapshots_for_one_event_only_gain_optional_fields(
+    fn t2__partial_snapshots_for_one_event_only_gain_optional_fields(
         ops in prop::collection::vec(event_op_strategy(false), 0..60),
     ) {
         let events = ops

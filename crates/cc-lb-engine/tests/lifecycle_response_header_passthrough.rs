@@ -12,7 +12,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn protocol_response_headers_pass_through_unchanged() {
+async fn t2__protocol_response_headers_pass_through_unchanged() {
     let state = TestState::default();
     let headers = protocol_headers();
     let hook = Arc::new(RecordingHook::default());
@@ -44,7 +44,7 @@ async fn protocol_response_headers_pass_through_unchanged() {
 }
 
 #[tokio::test]
-async fn upstream_error_response_passes_through_without_body_rewrite() {
+async fn t2__upstream_error_response_passes_through_without_body_rewrite() {
     let state = TestState::default();
     let body = gzipped_anthropic_error_body();
     let mut headers = HeaderMap::new();

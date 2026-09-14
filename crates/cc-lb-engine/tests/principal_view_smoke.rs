@@ -10,7 +10,7 @@ use cc_lb_storage_api::principal::{
 
 fn sample_principals(enabled: bool) -> Vec<PrincipalRecord> {
     vec![PrincipalRecord {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::from_u128(0x1005),
         name: "u1".to_owned(),
         kind: DbPrincipalKind::Machine,
         allowed_models: vec![

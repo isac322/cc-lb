@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use cc_lb_admin::{AdminState, CurrentConfig, DynamicViewRebinder, router};
+use cc_lb_admin::{CurrentConfig, DynamicViewRebinder, router};
 use cc_lb_config::Config;
 use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_control::{
@@ -15,7 +15,7 @@ use cc_lb_control::{
 };
 use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
 use cc_lb_storage_api::UpstreamStore;
-use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use cc_lb_testkit::{InMemoryStorage, fixed_clock};
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
 use serde_json::json;
@@ -37,7 +37,7 @@ impl CurrentConfig for TestCurrentConfig {
 }
 
 struct SnapshotRebinder {
-    storage: Arc<Storage>,
+    storage: Arc<InMemoryStorage>,
 }
 
 #[async_trait]
@@ -123,34 +123,16 @@ impl RouterPlugin for NoopRouter {
 }
 
 #[tokio::test]
-async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
-    let dir = tempfile::tempdir().expect("temp admin dir");
-    let storage = admin_test_common::sqlite_storage(dir.path(), "admin.sqlite").await;
+async fn t2__create_upstream_rebinds_dynamic_view_before_response_returns() {
+    let storage = Arc::new(InMemoryStorage::with_clock(fixed_clock(1_700_000_000)));
     let config = Config::default();
     let holder = admin_test_common::dynamic_view_holder(&config);
     let rebinder = Arc::new(SnapshotRebinder {
         storage: storage.clone(),
     });
-    let state = AdminState {
-        storage: Some(storage.clone()),
-        key_store: Some(admin_test_common::key_store(storage.clone())),
-        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
-        lifecycle: None,
-        dynamic_view: holder.clone(),
-        config: Arc::new(TestCurrentConfig { config, rebinder }),
-        scheduler: None,
-        admin_auth: crate::admin_test_common::static_token_auth("test-token"),
-        lazy_refresher: None,
-        runtime: None,
-        data_dir: None,
-        warmup_dialect_dispatcher: None,
-        subscription_metadata_hook: None,
-        start_time: std::time::Instant::now(),
-        event_bus: None,
-        storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_clock::SystemClock),
-    };
+    let mut state = crate::config_admin_common::test_state(config.clone(), Some(storage.clone()));
+    state.dynamic_view = holder.clone();
+    state.config = Arc::new(TestCurrentConfig { config, rebinder });
     let app = router(state);
 
     let response = app

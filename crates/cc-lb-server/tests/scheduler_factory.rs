@@ -1,4 +1,4 @@
-use std::sync::Arc;
+#![allow(non_snake_case)]
 
 use cc_lb_config::{PostgresPoolConfig, SchedulerConfig, StorageConfig};
 use cc_lb_server::scheduler_factory::{
@@ -7,7 +7,7 @@ use cc_lb_server::scheduler_factory::{
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() {
+async fn t3__scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() {
     let directory = tempfile::tempdir().expect("tempdir is created");
     let storage = StorageConfig::Sqlite {
         path: directory.path().join("scheduler.sqlite"),
@@ -16,7 +16,7 @@ async fn scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() 
     let opened = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     )
     .await
     .expect("sqlite scheduler opens");
@@ -46,7 +46,7 @@ async fn scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() 
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn scheduler_factory_sqlite_bad_path_returns_connection_failed() {
+async fn t3__scheduler_factory_sqlite_bad_path_returns_connection_failed() {
     let directory = tempfile::tempdir().expect("tempdir is created");
     let storage = StorageConfig::Sqlite {
         path: directory
@@ -58,7 +58,7 @@ async fn scheduler_factory_sqlite_bad_path_returns_connection_failed() {
     let error = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     )
     .await
     .expect_err("missing parent cannot open sqlite database");
@@ -71,30 +71,26 @@ async fn scheduler_factory_sqlite_bad_path_returns_connection_failed() {
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
-async fn scheduler_factory_postgres_happy_path_sets_up_tables_and_index() {
-    let Some(admin_url) = postgres_url() else {
-        eprintln!("SKIP: postgres URL unset");
-        return;
-    };
-    if !is_safe_database_url(&admin_url) {
-        eprintln!("SKIP: postgres URL is not local/test-like");
-        return;
-    }
-    let database_name = format!("cc_lb_scheduler_factory_{}", uuid::Uuid::new_v4().simple());
+async fn t3_postgres__scheduler_factory_happy_path_sets_up_tables_and_index() {
+    let fixture = cc_lb_storage_conformance::postgres_fixture()
+        .await
+        .expect("canonical postgres fixture opens");
+    let admin_url = fixture.database_url().to_owned();
+    assert!(
+        is_safe_database_url(&admin_url),
+        "CI_POSTGRES_URL must identify localhost, 127.0.0.1, or cc_lb_test"
+    );
+    let database_name = format!("cc_lb_scheduler_factory_{}", fixture.schema_name());
     let admin_pool = scheduler_sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect(&admin_url)
         .await
         .expect("admin postgres connects");
     let create_database = format!(r#"CREATE DATABASE "{database_name}""#);
-    if let Err(error) = scheduler_sqlx::query(&create_database)
+    scheduler_sqlx::query(&create_database)
         .execute(&admin_pool)
         .await
-    {
-        eprintln!("SKIP: could not create temporary postgres database: {error}");
-        admin_pool.close().await;
-        return;
-    }
+        .expect("temporary postgres database is created");
 
     let database_url = database_url_for(&admin_url, &database_name).expect("database URL is valid");
     let storage = StorageConfig::Postgres {
@@ -104,7 +100,7 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_and_index() {
     let opened = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     )
     .await
     .expect("postgres scheduler opens");
@@ -122,11 +118,15 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_and_index() {
         .await
         .expect("temporary database drops");
     admin_pool.close().await;
+    fixture
+        .teardown()
+        .await
+        .expect("postgres fixture tears down");
 }
 
 #[cfg(not(feature = "postgres"))]
 #[tokio::test]
-async fn scheduler_factory_postgres_feature_disabled_returns_error() {
+async fn t2__scheduler_factory_postgres_feature_disabled_returns_error() {
     let storage = StorageConfig::Postgres {
         url: "postgres://localhost/cc_lb".to_owned(),
         pool: PostgresPoolConfig::default(),
@@ -135,7 +135,7 @@ async fn scheduler_factory_postgres_feature_disabled_returns_error() {
     let error = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     )
     .await
     .expect_err("postgres feature is disabled");
@@ -148,7 +148,7 @@ async fn scheduler_factory_postgres_feature_disabled_returns_error() {
 
 #[cfg(not(feature = "sqlite"))]
 #[tokio::test]
-async fn scheduler_factory_sqlite_feature_disabled_returns_error() {
+async fn t2__scheduler_factory_sqlite_feature_disabled_returns_error() {
     let storage = StorageConfig::Sqlite {
         path: std::path::PathBuf::from("scheduler.sqlite"),
     };
@@ -156,7 +156,7 @@ async fn scheduler_factory_sqlite_feature_disabled_returns_error() {
     let error = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     )
     .await
     .expect_err("sqlite feature is disabled");
@@ -169,7 +169,7 @@ async fn scheduler_factory_sqlite_feature_disabled_returns_error() {
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
-async fn scheduler_factory_postgres_bad_url_returns_connection_failed() {
+async fn t3_postgres__scheduler_factory_postgres_bad_url_returns_connection_failed() {
     let storage = StorageConfig::Postgres {
         url: "not-a-postgres-url".to_owned(),
         pool: PostgresPoolConfig::default(),
@@ -178,7 +178,7 @@ async fn scheduler_factory_postgres_bad_url_returns_connection_failed() {
     let error = open_scheduler_storage(
         &storage,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        cc_lb_testkit::fixed_clock(1_700_000_000),
     )
     .await
     .expect_err("invalid postgres URL cannot open");
@@ -187,14 +187,6 @@ async fn scheduler_factory_postgres_bad_url_returns_connection_failed() {
         error,
         SchedulerFactoryError::ConnectionFailed { .. }
     ));
-}
-
-#[cfg(feature = "postgres")]
-fn postgres_url() -> Option<String> {
-    std::env::var("CI_POSTGRES_URL")
-        .or_else(|_| std::env::var("DATABASE_URL_TEST"))
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()
 }
 
 #[cfg(feature = "postgres")]

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use cc_lb_storage_api::{
     BackendKind, MetaStore, SubscriptionQuotaCheckpointRangeQuery,
     SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLot,
@@ -18,7 +16,7 @@ async fn quota_storage(database_name: &str) -> (TempDir, SqliteStorage) {
     let temp_dir = tempfile::tempdir().expect("create quota tempdir");
     let database_url = format!("sqlite://{}", temp_dir.path().join(database_name).display());
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open quota sqlite");
     storage
@@ -77,7 +75,7 @@ fn slim(checkpoint: SubscriptionQuotaCheckpointRecord) -> SubscriptionQuotaSlimC
 }
 
 #[tokio::test]
-async fn quota_slim_checkpoints_match_old_ranges_with_anchor_and_sample_ties() {
+async fn t3__quota_slim_checkpoints_match_old_ranges_with_anchor_and_sample_ties() {
     let (_temp_dir, storage) = quota_storage("slim-parity.sqlite").await;
     let upstream_id = Uuid::from_u128(0x100);
     let records = vec![
@@ -119,7 +117,7 @@ async fn quota_slim_checkpoints_match_old_ranges_with_anchor_and_sample_ties() {
 }
 
 #[tokio::test]
-async fn quota_left_anchor_plan_avoids_correlated_anti_join() {
+async fn t3__quota_left_anchor_plan_avoids_correlated_anti_join() {
     let (_temp_dir, storage) = quota_storage("left-anchor-plan.sqlite").await;
     let upstream_id = Uuid::from_u128(0x101);
 
@@ -176,7 +174,7 @@ async fn quota_left_anchor_plan_avoids_correlated_anti_join() {
 }
 
 #[tokio::test]
-async fn quota_provider_lots_preserve_reset_cycles_without_full_records() {
+async fn t3__quota_provider_lots_preserve_reset_cycles_without_full_records() {
     let (_temp_dir, storage) = quota_storage("provider-lots.sqlite").await;
     let upstream_id = Uuid::from_u128(0x200);
     storage
@@ -231,7 +229,7 @@ async fn quota_provider_lots_preserve_reset_cycles_without_full_records() {
 }
 
 #[tokio::test]
-async fn quota_usage_token_intervals_include_both_boundaries_and_use_covering_indexes() {
+async fn t3__quota_usage_token_intervals_include_both_boundaries_and_use_covering_indexes() {
     let (_temp_dir, storage) = quota_storage("token-intervals.sqlite").await;
     let upstream_id = Uuid::from_u128(0x300);
     for (resolution, bucket, tokens) in [

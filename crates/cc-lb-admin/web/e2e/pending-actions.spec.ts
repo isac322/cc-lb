@@ -1,5 +1,6 @@
 import { expect, type Locator, type Page, test } from '@playwright/test';
 import type { Principal } from '../src/lib/queries';
+import { fulfillAuthenticatedSession } from './support/auth-session';
 
 type ApiKeyRecord = {
   key_id: string;
@@ -109,6 +110,7 @@ async function installPrincipalFixtures(page: Page) {
   let keepaliveSessionGetCount = 0;
 
   await page.route('**/admin/**', async (route) => {
+    if (await fulfillAuthenticatedSession(route)) return;
     const request = route.request();
     const url = new URL(request.url());
     const { pathname } = url;

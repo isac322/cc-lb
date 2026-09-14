@@ -5,10 +5,10 @@ use anyhow::{Result, ensure};
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME,
-    BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, PluginChainConflictReason, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind, PrincipalStore, StorageError,
-    UpstreamCreate, UpstreamStore, UpstreamWarmupDialectPlugin, WasmBlob, WasmRegistryEntryInput,
-    default_wire_version,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, PluginBlobRepo, PluginChainConflictReason,
+    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind,
+    PrincipalStore, StorageError, UpstreamCreate, UpstreamStore, UpstreamWarmupDialectPlugin,
+    WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput, default_wire_version,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
     sparse_order,
 };
@@ -26,7 +26,7 @@ const REFCOUNT_CONCURRENCY_OPS_PER_TASK: usize = 16;
 pub async fn run_all<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
-    B::Storage: PluginRegistryStore + PrincipalStore + UpstreamStore,
+    B::Storage: PluginBlobRepo + PluginRegistryStore + PrincipalStore + UpstreamStore,
 {
     with_conformance_fixture(backend, |storage| async move {
         run_all_on_storage(storage.as_ref()).await
@@ -36,7 +36,7 @@ where
 
 pub async fn run_all_on_storage<S>(storage: &S) -> Result<()>
 where
-    S: PluginRegistryStore + PrincipalStore + UpstreamStore + 'static,
+    S: PluginBlobRepo + PluginRegistryStore + PrincipalStore + UpstreamStore + 'static,
 {
     persist_wasm_upload_creates_blob_and_registry(storage).await?;
     persist_wasm_upload_idempotent_on_same_entry_input(storage).await?;
@@ -55,6 +55,8 @@ where
     cascade_delete_registry_entry_rejects_changed_fingerprint_on_storage(storage).await?;
     registry_by_id_returns_seeded_builtin_subscription_preference_on_storage(storage).await?;
     created_principal_has_builtin_subscription_preference_chain_entry_on_storage(storage).await?;
+    builtin_subscription_preference_is_visible_and_insertable_on_storage(storage).await?;
+    refcount_transitions_follow_live_chain_and_warmup_references_on_storage(storage).await?;
     registry_label_update_with_correct_revision_bumps_and_persists(storage).await?;
     registry_label_update_with_stale_revision_conflicts(storage).await?;
     chain_insert_preserves_sparse_order(storage).await?;
@@ -292,12 +294,47 @@ pub async fn get_blob_bytes_returns_persisted_blob<S: PluginRegistryStore>(
 }
 
 pub async fn registry_list_paginates<S: PluginRegistryStore>(storage: &S) -> Result<()> {
-    storage
-        .persist_wasm_upload(blob(8, b"one".to_vec()), entry("plugin-page-a"))
-        .await?;
+    for (seed, name) in [
+        (8, "plugin-page-a"),
+        (9, "plugin-page-b"),
+        (10, "plugin-page-c"),
+    ] {
+        storage
+            .persist_wasm_upload(blob(seed, name.as_bytes().to_vec()), entry(name))
+            .await?;
+    }
+
+    let all = storage.list_registry(None, 100).await?;
     ensure!(
-        storage.list_registry(None, 1).await?.len() == 1,
-        "limit applies"
+        all.windows(2).all(|pair| pair[0].id < pair[1].id),
+        "registry entries are ordered by id ascending"
+    );
+    ensure!(
+        storage.list_registry(None, 0).await?.is_empty(),
+        "zero limit returns no entries"
+    );
+    ensure!(
+        storage.list_registry(None, 1).await? == all[..1],
+        "limit applies to the ordered result"
+    );
+
+    let after = all[0].id;
+    let expected = all
+        .iter()
+        .filter(|entry| entry.id > after)
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>();
+    ensure!(
+        storage.list_registry(Some(after), 2).await? == expected,
+        "after is an exclusive id filter applied before the limit"
+    );
+    ensure!(
+        storage
+            .list_registry(Some(Uuid::max()), 100)
+            .await?
+            .is_empty(),
+        "an after cursor above every id returns no entries"
     );
     Ok(())
 }
@@ -306,7 +343,7 @@ pub async fn get_registry_entry_by_sha_returns_entry<S: PluginRegistryStore>(
     storage: &S,
 ) -> Result<()> {
     let (created, _) = storage
-        .persist_wasm_upload(blob(10, b"sha".to_vec()), entry("plugin-sha"))
+        .persist_wasm_upload(blob(53, b"sha".to_vec()), entry("plugin-sha"))
         .await?;
     ensure!(
         storage
@@ -670,6 +707,159 @@ pub async fn created_principal_has_builtin_subscription_preference_chain_entry_o
     ensure!(
         registry.refcount == refcount_before + 1,
         "builtin refcount increments for the seeded entry"
+    );
+    Ok(())
+}
+
+plugin_registry_scenario!(
+    builtin_subscription_preference_is_visible_and_insertable,
+    builtin_subscription_preference_is_visible_and_insertable_on_storage
+);
+
+pub async fn builtin_subscription_preference_is_visible_and_insertable_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let by_id = storage
+        .get_registry_entry_by_id(BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+        .await?
+        .expect("builtin subscription-preference registry row is seeded");
+    let expected = WasmRegistryEntry::builtin_subscription_preference(by_id.refcount);
+    ensure!(
+        by_id == expected.clone(),
+        "builtin id lookup returns the canonical entry"
+    );
+    ensure!(
+        storage
+            .get_registry_entry_by_sha(BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256)
+            .await?
+            == Some(expected.clone()),
+        "builtin sha lookup returns the canonical entry"
+    );
+    ensure!(
+        storage
+            .get_registry_entry_by_name(BUILTIN_SUBSCRIPTION_PREFERENCE_NAME)
+            .await?
+            == Some(expected.clone()),
+        "builtin name lookup returns the canonical entry"
+    );
+    ensure!(
+        storage.list_registry(None, 100).await?.contains(&expected),
+        "builtin is visible in registry exports"
+    );
+    ensure!(
+        storage
+            .get_blob_bytes(BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256)
+            .await?
+            == Some(Vec::new()),
+        "builtin exports an empty pseudo-blob"
+    );
+
+    let principal = PrincipalStore::create(storage, principal_create(54), BASE_TS + 54).await?;
+    let inserted = storage
+        .insert_chain_entry(chain(
+            principal.id,
+            BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+            sparse_order::STEP,
+        ))
+        .await?;
+    ensure!(
+        inserted.wasm_registry_id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+        "explicit chain insertion accepts the builtin registry id"
+    );
+    let chain = storage
+        .list_chain_for_principal(principal.id, PluginSlotKind::Router)
+        .await?;
+    ensure!(
+        chain
+            .iter()
+            .filter(|entry| entry.wasm_registry_id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+            .count()
+            == 2,
+        "explicit insertion is listed beside the principal's seeded builtin entry"
+    );
+    ensure_registry_refcount(storage, &expected, expected.refcount + 2).await?;
+    Ok(())
+}
+
+plugin_registry_upstream_scenario!(
+    refcount_transitions_follow_live_chain_and_warmup_references,
+    refcount_transitions_follow_live_chain_and_warmup_references_on_storage
+);
+
+async fn refcount_transitions_follow_live_chain_and_warmup_references_on_storage<
+    S: PluginRegistryStore + PrincipalStore + UpstreamStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) =
+        principal_and_plugin(storage, 55, "plugin-refcount-transitions").await?;
+    ensure_registry_refcount(storage, &plugin, 0).await?;
+
+    let chain = storage
+        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .await?;
+    ensure_registry_refcount(storage, &plugin, 1).await?;
+
+    let upstream = UpstreamStore::create(
+        storage,
+        warmup_upstream("plugin-refcount-transitions-upstream", plugin.id),
+    )
+    .await?;
+    ensure_registry_refcount(storage, &plugin, 2).await?;
+
+    storage
+        .delete_chain_entry(chain.id, chain.revision)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("chain reference remains deletable"))?;
+    ensure_registry_refcount(storage, &plugin, 1).await?;
+
+    UpstreamStore::clear_warmup_dialect_plugin(storage, upstream.id, upstream.revision)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("warmup reference remains clearable"))?;
+    ensure_registry_refcount(storage, &plugin, 0).await?;
+    Ok(())
+}
+
+async fn ensure_registry_refcount<S: PluginRegistryStore>(
+    storage: &S,
+    expected_entry: &WasmRegistryEntry,
+    expected_refcount: i64,
+) -> Result<()> {
+    let by_id = storage
+        .get_registry_entry_by_id(expected_entry.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("registry entry is present by id"))?;
+    let by_sha = storage
+        .get_registry_entry_by_sha(expected_entry.sha256)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("registry entry is present by sha"))?;
+    let by_name = storage
+        .get_registry_entry_by_name(&expected_entry.name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("registry entry is present by name"))?;
+    let listed = storage
+        .list_registry(None, 100)
+        .await?
+        .into_iter()
+        .find(|entry| entry.id == expected_entry.id)
+        .ok_or_else(|| anyhow::anyhow!("registry entry is present in list"))?;
+    let references = storage.list_registry_references(expected_entry.id).await?;
+    ensure!(
+        references.references.len() as i64 == expected_refcount,
+        "registry reference list derives refcount={expected_refcount}; actual={:?}",
+        references.references
+    );
+    let actual = [
+        by_id.refcount,
+        by_sha.refcount,
+        by_name.refcount,
+        listed.refcount,
+    ];
+    ensure!(
+        actual == [expected_refcount; 4],
+        "all registry read surfaces derive refcount={expected_refcount}; actual={actual:?}"
     );
     Ok(())
 }
@@ -1288,7 +1478,10 @@ pub async fn reorder_chain_needs_rebalance_conflicts<S: PluginRegistryStore + Pr
         .reorder_chain(
             first.principal_id,
             first.slot,
-            vec![(first.id, 1000, first.revision), (Uuid::new_v4(), 1001, 0)],
+            vec![
+                (first.id, 1000, first.revision),
+                (Uuid::from_u128(0x7101), 1001, 0),
+            ],
         )
         .await
         .expect_err("tight gap conflicts");
@@ -1347,7 +1540,7 @@ pub async fn delete_chain_entry_missing_is_false<S: PluginRegistryStore>(
 ) -> Result<()> {
     ensure!(
         storage
-            .delete_chain_entry(Uuid::new_v4(), 0)
+            .delete_chain_entry(Uuid::from_u128(0x7102), 0)
             .await?
             .is_none(),
         "missing delete none"
@@ -1365,14 +1558,19 @@ pub async fn decrement_blob_refcount_or_delete_missing_is_false<S: PluginRegistr
     Ok(())
 }
 
-// RED until W3a
-plugin_registry_scenario!(
-    list_orphan_blobs_returns_blobs_without_registry,
-    list_orphan_blobs_returns_blobs_without_registry_on_storage
-);
+pub async fn list_orphan_blobs_returns_blobs_without_registry<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PluginRegistryStore + PluginBlobRepo + PrincipalStore + 'static,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        list_orphan_blobs_returns_blobs_without_registry_on_storage(storage.as_ref()).await
+    })
+    .await
+}
 
 async fn list_orphan_blobs_returns_blobs_without_registry_on_storage<
-    S: PluginRegistryStore + PrincipalStore + 'static,
+    S: PluginRegistryStore + PluginBlobRepo + PrincipalStore + 'static,
 >(
     storage: &S,
 ) -> Result<()> {
@@ -1389,18 +1587,19 @@ async fn list_orphan_blobs_returns_blobs_without_registry_on_storage<
         .await?;
     ensure!(deleted.is_some(), "registry entry deletes");
     ensure!(
-        storage.get_blob(created.sha256).await?.is_none(),
+        PluginRegistryStore::get_blob(storage, created.sha256)
+            .await?
+            .is_none(),
         "deleting an unreferenced registry entry removes its blob row"
     );
 
     let orphan_blob = blob(24, b"manual-orphan".to_vec());
-    if insert_orphan_blob_if_exposed(storage, &orphan_blob).await? {
-        let orphaned = storage.list_orphan_blobs().await?;
-        ensure!(
-            orphaned.contains(&orphan_blob.sha256),
-            "unregistered blob rows are reported as orphans"
-        );
-    }
+    PluginBlobRepo::put_blob(storage, &orphan_blob.sha256, &orphan_blob.bytes).await?;
+    let orphaned = storage.list_orphan_blobs().await?;
+    ensure!(
+        orphaned.contains(&orphan_blob.sha256),
+        "unregistered blob rows are reported as orphans"
+    );
     Ok(())
 }
 
@@ -1521,18 +1720,6 @@ plugin_registry_scenario!(
 async fn persist_wasm_upload_heals_missing_blob_on_storage<S: PluginRegistryStore + 'static>(
     storage: &S,
 ) -> Result<()> {
-    // NOTE: Phase-3 partially green; W3a hardening still needed for chain-scan/atomicity.
-    // Postgres enforces wasm_registry_v2.sha256 -> wasm_blobs_v2.sha256 with ON DELETE RESTRICT,
-    // which prevents the zombie state this scenario exercises. Skip on postgres.
-    #[cfg(feature = "postgres")]
-    {
-        if (storage as &dyn std::any::Any)
-            .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
-            .is_some()
-        {
-            return Ok(());
-        }
-    }
     let wasm = blob(28, b"heal-missing-blob".to_vec());
     let input = entry("plugin-heal-missing-blob");
     let (created, _) = storage
@@ -1541,7 +1728,11 @@ async fn persist_wasm_upload_heals_missing_blob_on_storage<S: PluginRegistryStor
 
     if !delete_blob_row_if_exposed(storage, created.sha256).await? {
         let chain_entry = storage
-            .insert_chain_entry(chain(Uuid::new_v4(), created.id, sparse_order::STEP))
+            .insert_chain_entry(chain(
+                Uuid::from_u128(0x7103),
+                created.id,
+                sparse_order::STEP,
+            ))
             .await?;
         storage
             .delete_chain_entry(chain_entry.id, chain_entry.revision)
@@ -1553,6 +1744,7 @@ async fn persist_wasm_upload_heals_missing_blob_on_storage<S: PluginRegistryStor
     );
 
     let (healed, existed) = storage.persist_wasm_upload(wasm, input).await?;
+    restore_blob_fk_if_exposed(storage).await?;
     ensure!(
         existed,
         "re-upload of a zombie registry row reports existed"
@@ -1622,7 +1814,11 @@ async fn insert_chain_entry_rejects_unknown_principal_on_storage<S: PluginRegist
         )
         .await?;
     let err = storage
-        .insert_chain_entry(chain(Uuid::new_v4(), plugin.id, sparse_order::STEP))
+        .insert_chain_entry(chain(
+            Uuid::from_u128(0x7104),
+            plugin.id,
+            sparse_order::STEP,
+        ))
         .await
         .expect_err("chain insert must reject an unknown principal");
     let message = err.to_string();
@@ -1820,28 +2016,6 @@ async fn same_sha_metadata_mismatch_conflicts_on_storage<S: PluginRegistryStore>
     Ok(())
 }
 
-async fn insert_orphan_blob_if_exposed<S: PluginRegistryStore + 'static>(
-    storage: &S,
-    blob: &WasmBlob,
-) -> Result<bool> {
-    #[cfg(feature = "postgres")]
-    {
-        if let Some(postgres) = (storage as &dyn std::any::Any)
-            .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
-        {
-            sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, created_at) VALUES ($1, $2, $3, NOW(), NOW()) ON CONFLICT (sha256) DO NOTHING")
-                .bind(blob.sha256.as_slice())
-                .bind(blob.bytes.as_slice())
-                .bind(i64::try_from(blob.size_bytes)?)
-                .execute(postgres.pool())
-                .await?;
-            return Ok(true);
-        }
-    }
-    let _ = (storage, blob);
-    Ok(false)
-}
-
 async fn delete_blob_row_if_exposed<S: PluginRegistryStore + 'static>(
     storage: &S,
     sha256: [u8; 32],
@@ -1851,6 +2025,11 @@ async fn delete_blob_row_if_exposed<S: PluginRegistryStore + 'static>(
         if let Some(postgres) = (storage as &dyn std::any::Any)
             .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
         {
+            sqlx::query(
+                "ALTER TABLE wasm_registry_v2 DROP CONSTRAINT IF EXISTS wasm_registry_v2_sha_fk",
+            )
+            .execute(postgres.pool())
+            .await?;
             let result = sqlx::query("DELETE FROM wasm_blobs_v2 WHERE sha256 = $1")
                 .bind(sha256.as_slice())
                 .execute(postgres.pool())
@@ -1860,6 +2039,24 @@ async fn delete_blob_row_if_exposed<S: PluginRegistryStore + 'static>(
     }
     let _ = (storage, sha256);
     Ok(false)
+}
+async fn restore_blob_fk_if_exposed<S: PluginRegistryStore + 'static>(storage: &S) -> Result<()> {
+    #[cfg(feature = "postgres")]
+    {
+        if let Some(postgres) = (storage as &dyn std::any::Any)
+            .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
+        {
+            sqlx::query(
+                "ALTER TABLE wasm_registry_v2
+                 ADD CONSTRAINT wasm_registry_v2_sha_fk
+                 FOREIGN KEY (sha256) REFERENCES wasm_blobs_v2 (sha256) ON DELETE RESTRICT",
+            )
+            .execute(postgres.pool())
+            .await?;
+        }
+    }
+    let _ = storage;
+    Ok(())
 }
 
 pub async fn validate_identifier_rejects_bad_name<S: PluginRegistryStore>(
@@ -1951,7 +2148,7 @@ fn entry(name: &str) -> WasmRegistryEntryInput {
         original_filename: format!("{name}.wasm"),
         label: None,
         uploaded_at_unix_secs: 1_800_000_100,
-        uploaded_by_admin_id: Uuid::new_v4(),
+        uploaded_by_admin_id: Uuid::from_u128(0x7105),
         description: format!("{name} description"),
         usage: format!("{name} usage"),
         hook_metadata: filter_hook_metadata(),

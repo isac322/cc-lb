@@ -23,7 +23,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn cache_keepalive_user_turn_cancels_durable_without_scheduler() {
+async fn t2__cache_keepalive_user_turn_cancels_durable_without_scheduler() {
     let calls = Arc::new(AtomicUsize::new(0));
     let response = handle_keepalive_response(
         Bytes::from_static(
@@ -43,7 +43,7 @@ async fn cache_keepalive_user_turn_cancels_durable_without_scheduler() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_ambiguous_cancels_durable_without_scheduler() {
+async fn t2__cache_keepalive_ambiguous_cancels_durable_without_scheduler() {
     let calls = Arc::new(AtomicUsize::new(0));
     let response = handle_keepalive_response(
         Bytes::from_static(
@@ -63,7 +63,7 @@ async fn cache_keepalive_ambiguous_cancels_durable_without_scheduler() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_cancel_failure_does_not_change_proxy_response() {
+async fn t2__cache_keepalive_cancel_failure_does_not_change_proxy_response() {
     let calls = Arc::new(AtomicUsize::new(0));
     let response = handle_keepalive_response(
         Bytes::from_static(
@@ -162,7 +162,7 @@ impl UpstreamDispatch for FixedSuccessDispatch {
 
 fn principal_with_keepalive() -> PrincipalRecord {
     PrincipalRecord {
-        id: Uuid::new_v4(),
+        id: Uuid::from_u128(0x1001),
         name: "principal-test".to_owned(),
         kind: PrincipalKind::Machine,
         allowed_models: vec!["*".to_owned()],

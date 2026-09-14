@@ -11,7 +11,7 @@ use router_lifecycle_support::{
 };
 
 #[tokio::test]
-async fn no_candidates_are_passed_to_router_and_return_route_error() {
+async fn t2__no_candidates_are_passed_to_router_and_return_route_error() {
     let state = RouterLifecycleState::default();
     let lifecycle = lifecycle_with_records(
         Vec::new(),

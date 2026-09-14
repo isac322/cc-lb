@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use cc_lb_storage_api::{
     BackendKind, MetaStore, StorageError, UpstreamAffinityBinding, UpstreamAffinityKey,
     UpstreamAffinityKind, UpstreamAffinityStore, UpstreamCreate, UpstreamStore,
@@ -11,14 +9,14 @@ const BIND_BATCH_SIZE: usize = 128;
 const TTL_SECS: u64 = 7_776_000;
 
 #[tokio::test]
-async fn upstream_affinity_bind_is_idempotent_conflict_atomic_and_expiry_aware() {
+async fn t3__upstream_affinity_bind_is_idempotent_conflict_atomic_and_expiry_aware() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
         temp_dir.path().join("upstream-affinity.sqlite").display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage
@@ -280,7 +278,7 @@ async fn upstream_affinity_bind_is_idempotent_conflict_atomic_and_expiry_aware()
 }
 
 #[tokio::test]
-async fn upstream_affinity_retention_boundaries_and_expired_rebind_follow_current_policy() {
+async fn t3__upstream_affinity_retention_boundaries_and_expired_rebind_follow_current_policy() {
     let (_temp_dir, storage) = open_storage("retention-boundaries").await;
     let first_upstream = create_upstream(&storage, "retention-first").await;
     let second_upstream = create_upstream(&storage, "retention-second").await;
@@ -367,7 +365,7 @@ async fn upstream_affinity_retention_boundaries_and_expired_rebind_follow_curren
 }
 
 #[tokio::test]
-async fn upstream_affinity_purge_is_bounded_and_preserves_concurrent_rebind() {
+async fn t3__upstream_affinity_purge_is_bounded_and_preserves_concurrent_rebind() {
     let (_temp_dir, storage) = open_storage("bounded-purge").await;
     let first_upstream = create_upstream(&storage, "purge-first").await;
     let second_upstream = create_upstream(&storage, "purge-second").await;
@@ -462,7 +460,7 @@ async fn open_storage(file_name: &str) -> (tempfile::TempDir, cc_lb_storage_sqli
             .display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, cc_lb_testkit::fixed_clock(1_700_000_000))
             .await
             .expect("open sqlite");
     storage

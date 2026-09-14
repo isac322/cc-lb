@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRow, CacheKeepaliveSessionReadStore, CacheKeepaliveTurnRecord,
-    CacheKeepaliveTurnRow, CacheTtl, RequestEventProjections, RequestEventStore,
-    types::RequestEvent,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRecord, CacheKeepaliveDecisionRow,
+    CacheKeepaliveHitRefreshRequest, CacheKeepaliveReplaceRequest,
+    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
+    CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+    CacheKeepaliveTurnRecord, CacheKeepaliveTurnRow, CacheTtl, RequestEventProjections,
+    RequestEventStore, types::RequestEvent,
 };
 use uuid::Uuid;
 
@@ -284,4 +287,511 @@ fn turn_fixture(
     };
 
     (event, projections, record)
+}
+
+pub async fn list_detail_filters_preserve_frozen_projection_contract<B>(
+    backend: Arc<B>,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let renewed = storage
+            .replace_from_real_request(&read_request(
+                "renewed-session",
+                TARGET_PRINCIPAL,
+                103,
+                "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s",
+            ))
+            .await?;
+        let renewed_after_hit = storage
+            .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+                session_key_hash: renewed.session_key_hash,
+                generation: renewed.generation,
+                cache_anchor_at_unix_secs: 104,
+                run_at_unix_secs: 374,
+                expires_at_unix_secs: 404,
+                encrypted_payload: None,
+                now_unix_secs: 104,
+            })
+            .await?
+            .expect("renewed session must reschedule");
+        ensure!(
+            renewed_after_hit.first_scheduled_at_unix_secs == 103
+                && renewed_after_hit.cache_anchor_at_unix_secs == 104,
+            "renewal must preserve the frozen message timestamp while advancing the cache anchor"
+        );
+        storage
+            .replace_from_real_request(&read_request(
+                "scheduled-session",
+                TARGET_PRINCIPAL,
+                106,
+                "agent-in-turn",
+            ))
+            .await?;
+        terminalize_read_session(
+            storage.as_ref(),
+            "capped-session",
+            102,
+            CacheKeepaliveTerminalReason::MaxRefreshes,
+        )
+        .await?;
+        terminalize_read_session(
+            storage.as_ref(),
+            "expired-session",
+            101,
+            CacheKeepaliveTerminalReason::Expired,
+        )
+        .await?;
+        terminalize_read_session(
+            storage.as_ref(),
+            "max-duration-session",
+            100,
+            CacheKeepaliveTerminalReason::MaxDuration,
+        )
+        .await?;
+        storage
+            .replace_from_real_request(&read_request(
+                "foreign-session",
+                OTHER_PRINCIPAL,
+                110,
+                "foreign",
+            ))
+            .await?;
+
+        append_read_projection(
+            storage.as_ref(),
+            "not-tracked-decision",
+            None,
+            TARGET_PRINCIPAL,
+            105,
+            "not_tracked",
+            "user turn (stop_reason=end_turn)",
+            Some("renewal dispatch unavailable"),
+        )
+        .await?;
+        append_read_projection(
+            storage.as_ref(),
+            "renewed-z",
+            Some("renewed-session"),
+            TARGET_PRINCIPAL,
+            103,
+            "reschedule",
+            "first renewal",
+            None,
+        )
+        .await?;
+        append_read_projection(
+            storage.as_ref(),
+            "renewed-a",
+            Some("renewed-session"),
+            TARGET_PRINCIPAL,
+            103,
+            "reschedule",
+            "second renewal",
+            None,
+        )
+        .await?;
+
+        let page = storage
+            .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+                principal_id: TARGET_PRINCIPAL.to_owned(),
+                horizon_start_ms: None,
+                filter: CacheKeepaliveSessionFilter::All,
+                cursor: None,
+                limit: 10,
+            })
+            .await?;
+        let ids = page
+            .rows
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>();
+        ensure!(
+            ids
+                == [
+                    "scheduled-session",
+                    "not-tracked-decision",
+                    "renewed-session",
+                    "capped-session",
+                    "expired-session",
+                    "max-duration-session",
+                ],
+            "list order and decision/session projection membership must be stable; got {ids:?}"
+        );
+        ensure!(page.next_cursor.is_none(), "single page must not emit a cursor");
+
+        let decision = &page.rows[1];
+        ensure!(
+            decision.source == CacheKeepaliveSessionEntrySource::Decision
+                && decision.session_key_hash.is_none()
+                && decision.reason == "user turn (stop_reason=end_turn)"
+                && decision.error.as_deref() == Some("renewal dispatch unavailable")
+                && decision.config_snapshot.as_ref() == Some(&read_snapshot()),
+            "decision-only rows must preserve their frozen display projection: {decision:#?}"
+        );
+        let renewed_item = &page.rows[2];
+        ensure!(
+            renewed_item.source == CacheKeepaliveSessionEntrySource::Session
+                && renewed_item.refresh_count == Some(1)
+                && renewed_item.last_message_at_ms == 103_000
+                && renewed_item.reason
+                    == "agent-in-turn (tool_use: `bash`) — first renewal in 4m 30s"
+                && renewed_item.config_snapshot.as_ref() == Some(&read_snapshot()),
+            "session rows must preserve the frozen message projection: {renewed_item:#?}"
+        );
+        ensure!(
+            page.rows[3].reason == "max renewals reached"
+                && page.rows[4].reason == "TTL expired before follow-up"
+                && page.rows[5].reason == "max duration reached (4h)",
+            "terminal display reasons must match the public session contract"
+        );
+
+        for (filter, expected_ids) in [
+            (
+                CacheKeepaliveSessionFilter::Renewed,
+                vec!["renewed-session"],
+            ),
+            (
+                CacheKeepaliveSessionFilter::Scheduled,
+                vec!["scheduled-session"],
+            ),
+            (
+                CacheKeepaliveSessionFilter::Capped,
+                vec!["capped-session", "max-duration-session"],
+            ),
+            (
+                CacheKeepaliveSessionFilter::Expired,
+                vec!["expired-session"],
+            ),
+            (
+                CacheKeepaliveSessionFilter::NotTracked,
+                vec!["not-tracked-decision"],
+            ),
+            (
+                CacheKeepaliveSessionFilter::Error,
+                vec!["not-tracked-decision"],
+            ),
+        ] {
+            let filtered = storage
+                .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+                    principal_id: TARGET_PRINCIPAL.to_owned(),
+                    horizon_start_ms: None,
+                    filter,
+                    cursor: None,
+                    limit: 10,
+                })
+                .await?;
+            let actual = filtered
+                .rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>();
+            ensure!(
+                actual == expected_ids,
+                "{filter:?} filter mismatch: expected {expected_ids:?}, got {actual:?}"
+            );
+        }
+
+        let session = storage
+            .get_cache_keepalive_session_for_principal(
+                TARGET_PRINCIPAL,
+                "renewed-session",
+            )
+            .await?
+            .expect("principal-scoped session must exist");
+        ensure!(
+            session == renewed_after_hit,
+            "principal-scoped detail must return the complete stored session after renewal"
+        );
+        ensure!(
+            storage
+                .get_cache_keepalive_session_for_principal(
+                    OTHER_PRINCIPAL,
+                    "renewed-session",
+                )
+                .await?
+                .is_none(),
+            "session detail must not cross principal boundaries"
+        );
+
+        let turns = storage
+            .list_cache_keepalive_turns(TARGET_PRINCIPAL, "renewed-session")
+            .await?;
+        ensure!(
+            turns
+                .iter()
+                .map(|turn| turn.source_ref_id.as_str())
+                .collect::<Vec<_>>()
+                == ["renewed-a", "renewed-z"],
+            "per-session turns must sort by timestamp descending then source id ascending: {turns:#?}"
+        );
+        let stored_decision = storage
+            .get_cache_keepalive_decision_for_principal(
+                TARGET_PRINCIPAL,
+                "not-tracked-decision",
+            )
+            .await?
+            .expect("principal-scoped decision must exist");
+        ensure!(
+            stored_decision
+                == CacheKeepaliveDecisionRecord {
+                    source_ref_id: "not-tracked-decision".to_owned(),
+                    principal_id: TARGET_PRINCIPAL.to_owned(),
+                    session_key_hash: None,
+                    upstream_id: Uuid::from_u128(7),
+                    decision: "not_tracked".to_owned(),
+                    reason: "user turn (stop_reason=end_turn)".to_owned(),
+                    error: Some("renewal dispatch unavailable".to_owned()),
+                    generation: 1,
+                    ttl: CacheTtl::Ttl5m,
+                    config_snapshot: Some(read_snapshot()),
+                    last_message_at_ms: 105_000,
+                    ts: 105,
+                },
+            "decision detail must preserve every frozen field"
+        );
+        ensure!(
+            storage
+                .get_cache_keepalive_decision_for_principal(
+                    OTHER_PRINCIPAL,
+                    "not-tracked-decision",
+                )
+                .await?
+                .is_none(),
+            "decision detail must not cross principal boundaries"
+        );
+        Ok(())
+    })
+    .await
+}
+
+pub async fn pagination_horizon_cursor_and_frozen_order_contract<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let alpha = storage
+            .replace_from_real_request(&read_request(
+                "alpha-session",
+                TARGET_PRINCIPAL,
+                200,
+                "agent-in-turn",
+            ))
+            .await?;
+        storage
+            .replace_from_real_request(&read_request(
+                "beta-session",
+                TARGET_PRINCIPAL,
+                200,
+                "agent-in-turn",
+            ))
+            .await?;
+        storage
+            .replace_from_real_request(&read_request(
+                "old-session",
+                TARGET_PRINCIPAL,
+                100,
+                "agent-in-turn",
+            ))
+            .await?;
+        ensure!(
+            storage
+                .mark_cache_keepalive_enqueued("alpha-session", alpha.generation, 999,)
+                .await?,
+            "scheduler state update fixture must apply"
+        );
+
+        let query = CacheKeepaliveSessionListQuery {
+            principal_id: TARGET_PRINCIPAL.to_owned(),
+            horizon_start_ms: Some(200_000),
+            filter: CacheKeepaliveSessionFilter::Scheduled,
+            cursor: None,
+            limit: 1,
+        };
+        let first = storage.list_cache_keepalive_sessions(&query).await?;
+        ensure!(
+            first.rows.len() == 1 && first.rows[0].id == "alpha-session",
+            "first tied page must use stable entry-id ordering: {first:#?}"
+        );
+        let second = storage
+            .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+                cursor: first.next_cursor.clone(),
+                ..query.clone()
+            })
+            .await?;
+        ensure!(
+            second.rows.len() == 1
+                && second.rows[0].id == "beta-session"
+                && second.next_cursor.is_none(),
+            "cursor must continue without duplicates and exclude the old horizon row: {second:#?}"
+        );
+
+        let zero = storage
+            .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+                limit: 0,
+                cursor: None,
+                ..query.clone()
+            })
+            .await?;
+        ensure!(
+            zero.rows.is_empty() && zero.next_cursor.is_none(),
+            "zero limit must return an empty terminal page"
+        );
+
+        let error = storage
+            .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+                cursor: Some(cc_lb_storage_api::CacheKeepaliveSessionCursor {
+                    principal_id: OTHER_PRINCIPAL.to_owned(),
+                    horizon_start_ms: query.horizon_start_ms,
+                    filter: query.filter,
+                    last_message_at_ms: 200_000,
+                    entry_id: "session:alpha-session".to_owned(),
+                }),
+                ..query
+            })
+            .await
+            .expect_err("mismatched cursor must be rejected");
+        ensure!(
+            matches!(
+                error,
+                cc_lb_storage_api::StorageError::InvalidInput {
+                    ref field,
+                    ..
+                } if field == "cache_keepalive_session_cursor"
+            ),
+            "cursor mismatch must return the public invalid-input field: {error}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+async fn terminalize_read_session<S>(
+    storage: &S,
+    session_key_hash: &str,
+    now: u64,
+    reason: CacheKeepaliveTerminalReason,
+) -> Result<()>
+where
+    S: CacheKeepaliveSessionStore + Sync,
+{
+    let record = storage
+        .replace_from_real_request(&read_request(
+            session_key_hash,
+            TARGET_PRINCIPAL,
+            now,
+            "raw fixture display reason",
+        ))
+        .await?;
+    ensure!(
+        storage
+            .mark_cache_keepalive_terminal(session_key_hash, record.generation, reason, now,)
+            .await?,
+        "terminal fixture {session_key_hash} must transition"
+    );
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the conformance fixture keeps each projected field explicit at call sites"
+)]
+async fn append_read_projection<S>(
+    storage: &S,
+    source_ref_id: &str,
+    session_key_hash: Option<&str>,
+    principal_id: &str,
+    ts: u64,
+    decision: &str,
+    reason: &str,
+    error: Option<&str>,
+) -> Result<()>
+where
+    S: RequestEventStore + Sync,
+{
+    let turn = session_key_hash.map(|session_key_hash| CacheKeepaliveTurnRow {
+        source_ref_id: source_ref_id.to_owned(),
+        session_key_hash: session_key_hash.to_owned(),
+        principal_id: principal_id.to_owned(),
+        accounting_key_id: Some("accounting-key".to_owned()),
+        upstream_id: Uuid::from_u128(7),
+        model: "claude-sonnet-4-5".to_owned(),
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_creation_input_tokens: 30,
+        cache_creation_input_tokens_5m: 10,
+        cache_creation_input_tokens_1h: 20,
+        cache_read_input_tokens: 80,
+        cost_micros: 123,
+        hit_miss: "hit".to_owned(),
+        ts,
+    });
+    storage
+        .append_request_event_with_projections(
+            &RequestEvent {
+                ts,
+                ts_ms: Some(ts.saturating_mul(1_000)),
+                request_id: format!("read-contract-{source_ref_id}"),
+                source_kind: Some("cache_keepalive_decision".to_owned()),
+                source_ref_id: Some(source_ref_id.to_owned()),
+                event_id: Some(format!("read-contract-event-{source_ref_id}")),
+                principal_id: Some(principal_id.to_owned()),
+                upstream_id: Some(Uuid::from_u128(7)),
+                status: 200,
+                duration_ms: 1,
+                ..RequestEvent::default()
+            },
+            &RequestEventProjections {
+                turn,
+                decision: CacheKeepaliveDecisionRow {
+                    source_ref_id: source_ref_id.to_owned(),
+                    principal_id: principal_id.to_owned(),
+                    session_key_hash: session_key_hash.map(str::to_owned),
+                    upstream_id: Uuid::from_u128(7),
+                    decision: decision.to_owned(),
+                    reason: reason.to_owned(),
+                    error: error.map(str::to_owned),
+                    generation: 1,
+                    ttl: CacheTtl::Ttl5m,
+                    config_snapshot: Some(read_snapshot()),
+                    last_message_at_ms: ts.saturating_mul(1_000),
+                    ts,
+                },
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+fn read_request(
+    session_key_hash: &str,
+    principal_id: &str,
+    now: u64,
+    display_reason: &str,
+) -> CacheKeepaliveReplaceRequest {
+    CacheKeepaliveReplaceRequest {
+        session_key_hash: session_key_hash.to_owned(),
+        principal_id: principal_id.to_owned(),
+        accounting_key_id: None,
+        upstream_id: Uuid::from_u128(7),
+        cache_anchor_at_unix_secs: now,
+        ttl: CacheTtl::Ttl5m,
+        run_at_unix_secs: now + 270,
+        expires_at_unix_secs: now + 300,
+        encrypted_payload: vec![1],
+        display_reason: display_reason.to_owned(),
+        config_snapshot: read_snapshot(),
+        now_unix_secs: now,
+    }
+}
+
+fn read_snapshot() -> CacheKeepaliveConfigSnapshot {
+    CacheKeepaliveConfigSnapshot {
+        refresh_lead_time_5m_secs: 30,
+        refresh_lead_time_1h_secs: 300,
+        max_refreshes_per_session: 12,
+        max_total_duration_secs: 14_400,
+        snapshot_max_bytes: 524_288,
+    }
 }

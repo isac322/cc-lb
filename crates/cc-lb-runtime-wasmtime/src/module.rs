@@ -167,6 +167,7 @@ fn admit_inspected_wasm(
 #[cfg(test)]
 mod agnostic_tests;
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -177,7 +178,7 @@ mod tests {
     use crate::engine::{HostState, HotEngineConfig, build_hot_engine};
 
     #[test]
-    fn compiled_module_cache_reuses_identical_bytes_without_recompiling() {
+    fn t3__compiled_module_cache_reuses_identical_bytes_without_recompiling() {
         // Given: one engine, one bounded cache, and one module identity.
         let engine = build_hot_engine(&HotEngineConfig::default()).expect("engine");
         let linker = Linker::<HostState>::new(&engine);
@@ -211,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn compiled_module_cache_misses_for_different_bytes_or_validation_policy() {
+    fn t3__compiled_module_cache_misses_for_different_bytes_or_validation_policy() {
         // Given: one cache and distinct content identities.
         let config = HotEngineConfig::default();
         let engine = build_hot_engine(&config).expect("engine");

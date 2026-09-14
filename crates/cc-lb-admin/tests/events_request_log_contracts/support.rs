@@ -9,7 +9,6 @@ use cc_lb_admin::AdminState;
 use cc_lb_control::{InMemoryBus, RequestEventBus};
 use cc_lb_request_log::{RequestEvent, RequestEventPartial, RequestEventUpdate};
 use cc_lb_storage_api::RequestEventStore;
-use cc_lb_storage_sqlite::SqliteStorage;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tokio::time::timeout;
@@ -32,7 +31,7 @@ pub fn event_bus() -> Arc<InMemoryBus> {
     Arc::new(InMemoryBus::new())
 }
 
-pub async fn publish_enriched(bus: &InMemoryBus, storage: &SqliteStorage) {
+pub async fn publish_enriched(bus: &InMemoryBus, storage: &(impl RequestEventStore + ?Sized)) {
     for partial in enriched_partials() {
         bus.publish(RequestEventUpdate::partial(partial));
     }
@@ -66,7 +65,7 @@ pub async fn publish_enriched(bus: &InMemoryBus, storage: &SqliteStorage) {
     bus.publish(RequestEventUpdate::final_(event, 1));
 }
 
-pub async fn publish_recent_contracts(storage: &SqliteStorage) {
+pub async fn publish_recent_contracts(storage: &(impl RequestEventStore + ?Sized)) {
     for event in [
         request_event(RequestEventFixture {
             request_id: STRUCTURED_REQUEST_ID,
@@ -112,7 +111,7 @@ pub async fn publish_recent_contracts(storage: &SqliteStorage) {
     }
 }
 
-pub async fn publish_source_kind_contracts(storage: &SqliteStorage) {
+pub async fn publish_source_kind_contracts(storage: &(impl RequestEventStore + ?Sized)) {
     for event in [
         request_event(RequestEventFixture {
             request_id: "req-normal",
