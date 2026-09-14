@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderValue, Method, Request, StatusCode,
@@ -18,7 +18,7 @@ use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
 use cc_lb_control::anthropic_metadata::make_metadata_http_client;
-use cc_lb_control::{AuditEntry, AuditPayload, run_metadata_refresh};
+use cc_lb_control::{AuditPayload, run_metadata_refresh};
 use cc_lb_quota::{
     UnifiedQuotaObservation, build_subscription_quota_samples, parse_anthropic_unified_headers,
 };
@@ -45,7 +45,11 @@ use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
 use crate::ports::{WarmupAttemptInput, WarmupAttemptResult};
-use crate::{AdminState, WarmupDialectDispatchErrorKind};
+use crate::{
+    AdminState, WarmupDialectDispatchErrorKind,
+    audit::{AdminAuditEvent, record_admin_audit},
+    auth::AdminIdentity,
+};
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
@@ -211,6 +215,7 @@ enum UpstreamError {
     MetadataRefreshTimeout,
     WarmupUnavailable,
     Internal { detail: String },
+    AuditWriteFailed,
     Storage(StorageError),
 }
 
@@ -297,6 +302,11 @@ impl IntoResponse for UpstreamError {
                 Json(json!({ "error": "internal_error", "detail": detail })),
             )
                 .into_response(),
+            Self::AuditWriteFailed => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "audit_write_failed" })),
+            )
+                .into_response(),
             Self::Storage(error) => {
                 tracing::error!(error = %error, "admin v1 upstream storage operation failed");
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -325,6 +335,7 @@ impl From<SchedulerError> for UpstreamError {
 
 async fn create_upstream(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Json(body): Json<UpstreamCreateBody>,
 ) -> Result<Response, UpstreamError> {
     let storage = storage(&state)?;
@@ -362,14 +373,30 @@ async fn create_upstream(
         }
         Err(error) => return Err(error.into()),
     };
-    enqueue_upstream_audit(
+    let payload = AuditPayload::UpstreamCreate {
+        upstream_id: created.id.to_string(),
+        kind: created.kind.as_str().to_owned(),
+    };
+    let action = payload.to_string();
+    if let Err(error) = record_admin_audit(
         &state,
-        &created,
-        AuditPayload::UpstreamCreate {
-            upstream_id: created.id.to_string(),
-            kind: created.kind.as_str().to_owned(),
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action: &action,
+            route: "/admin/v1/upstreams",
+            target_principal_id: None,
+            target_upstream: Some(&created.name),
+            api_key_id: None,
+            status: StatusCode::CREATED.as_u16(),
+            payload: None,
         },
-    );
+    )
+    .await
+    {
+        tracing::error!(error = %error, action = %action, "admin audit write failed");
+        return Err(UpstreamError::AuditWriteFailed);
+    }
 
     let mut response = (StatusCode::CREATED, Json(upstream_response(&created))).into_response();
     response.headers_mut().insert(
@@ -448,6 +475,7 @@ async fn get_upstream_subscription_metadata(
 async fn refresh_upstream_subscription_metadata(
     State(state): State<AdminState>,
     Path(upstream_id): Path<Uuid>,
+    Extension(identity): Extension<AdminIdentity>,
 ) -> Result<Json<SubscriptionMetadataResponse>, UpstreamError> {
     let storage = storage_arc(&state)?;
     let upstream = UpstreamStore::get_by_id(storage.as_ref(), upstream_id)
@@ -481,6 +509,28 @@ async fn refresh_upstream_subscription_metadata(
         detail: error.to_string(),
     })?;
 
+    let action = "upstream_subscription_metadata_refresh";
+    let route = format!("/admin/v1/upstreams/{upstream_id}/subscription-metadata/refresh");
+    if let Err(error) = record_admin_audit(
+        &state,
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action,
+            route: &route,
+            target_principal_id: None,
+            target_upstream: Some(&upstream.name),
+            api_key_id: None,
+            status: StatusCode::OK.as_u16(),
+            payload: None,
+        },
+    )
+    .await
+    {
+        tracing::error!(error = %error, action, "admin audit write failed");
+        return Err(UpstreamError::AuditWriteFailed);
+    }
+
     subscription_metadata_response(storage.as_ref(), upstream_id)
         .await
         .map(Json)
@@ -489,11 +539,45 @@ async fn refresh_upstream_subscription_metadata(
 async fn fire_now_upstream_warmup(
     State(state): State<AdminState>,
     Path(upstream_id): Path<Uuid>,
+    Extension(identity): Extension<AdminIdentity>,
 ) -> Result<Response, UpstreamError> {
     let storage = storage_arc(&state)?;
     let upstream = UpstreamStore::get_by_id(storage.as_ref(), upstream_id)
         .await?
         .ok_or(UpstreamError::NotFound)?;
+    let target_upstream = upstream.name.clone();
+    let response = fire_now_upstream_warmup_inner(&state, storage, upstream_id, upstream).await?;
+    let status = response.status().as_u16();
+    let action = "upstream_warmup_fire_now";
+    let route = format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now");
+    if let Err(error) = record_admin_audit(
+        &state,
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action,
+            route: &route,
+            target_principal_id: None,
+            target_upstream: Some(&target_upstream),
+            api_key_id: None,
+            status,
+            payload: None,
+        },
+    )
+    .await
+    {
+        tracing::error!(error = %error, action, "admin audit write failed");
+        return Err(UpstreamError::AuditWriteFailed);
+    }
+    Ok(response)
+}
+
+async fn fire_now_upstream_warmup_inner(
+    state: &AdminState,
+    storage: Arc<dyn Storage>,
+    upstream_id: Uuid,
+    upstream: UpstreamRecord,
+) -> Result<Response, UpstreamError> {
     if upstream.kind != UpstreamKind::AnthropicOauth {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -507,7 +591,7 @@ async fn fire_now_upstream_warmup(
     let now_unix_secs = unix_now_secs_i64(&*state.clock)?;
     if !upstream.warmup_enabled {
         let _ = record_fire_now_skip(
-            &state,
+            state,
             storage.as_ref(),
             &upstream,
             now_unix_secs,
@@ -523,7 +607,7 @@ async fn fire_now_upstream_warmup(
     }
     if upstream.oauth_credentials.is_none() {
         let outcome = record_fire_now_failure(
-            &state,
+            state,
             storage.as_ref(),
             &upstream,
             now_unix_secs,
@@ -556,7 +640,7 @@ async fn fire_now_upstream_warmup(
     {
         tracing::warn!(target: "warmup", upstream_id = %upstream_id, holder = %holder, action = "cycle_abandoned", reason = "dialect_plugin_failed");
         let outcome = record_fire_now_failure(
-            &state,
+            state,
             storage.as_ref(),
             &upstream,
             now_unix_secs,
@@ -619,11 +703,11 @@ async fn fire_now_upstream_warmup(
             },
         }
     } else {
-        let bundle = match decrypt_oauth_bundle(&state, &upstream) {
+        let bundle = match decrypt_oauth_bundle(state, &upstream) {
             Ok(bundle) => bundle,
             Err(error) => {
                 let _ = record_fire_now_failure(
-                    &state,
+                    state,
                     storage.as_ref(),
                     &upstream,
                     now_unix_secs,
@@ -639,11 +723,11 @@ async fn fire_now_upstream_warmup(
             }
         };
         let access_token =
-            match fresh_enough_access_token(&state, storage.clone(), &upstream, bundle).await {
+            match fresh_enough_access_token(state, storage.clone(), &upstream, bundle).await {
                 Ok(access_token) => access_token,
                 Err(error) => {
                     let _ = record_fire_now_failure(
-                        &state,
+                        state,
                         storage.as_ref(),
                         &upstream,
                         now_unix_secs,
@@ -662,7 +746,7 @@ async fn fire_now_upstream_warmup(
             Ok(base_url) => base_url,
             Err(error) => {
                 let _ = record_fire_now_failure(
-                    &state,
+                    state,
                     storage.as_ref(),
                     &upstream,
                     now_unix_secs,
@@ -694,7 +778,7 @@ async fn fire_now_upstream_warmup(
         }
     };
     let record = record_warmup_attempt(
-        &state,
+        state,
         WarmupAttemptInput {
             storage: storage.as_ref(),
             upstream: &upstream,
@@ -712,7 +796,7 @@ async fn fire_now_upstream_warmup(
     .await?;
     if let FireNowDispatchAttempt::Response { headers, .. } = &dispatch_attempt {
         record_fire_now_subscription_quota_observations(
-            &state,
+            state,
             storage.as_ref(),
             upstream_id,
             headers,
@@ -1072,6 +1156,7 @@ async fn update_upstream(
     State(state): State<AdminState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Extension(identity): Extension<AdminIdentity>,
     Json(body): Json<UpstreamUpdateBody>,
 ) -> Result<Response, UpstreamError> {
     let expected_revision = parse_if_match(&headers)?;
@@ -1114,14 +1199,31 @@ async fn update_upstream(
     {
         Ok(updated) => {
             seed_warmup_if_toggled(&state, &current, &updated).await?;
-            enqueue_upstream_audit(
+            let payload = AuditPayload::UpstreamUpdate {
+                upstream_id: updated.id.to_string(),
+                fields_changed,
+            };
+            let action = payload.to_string();
+            let route = format!("/admin/v1/upstreams/{}", updated.id);
+            if let Err(error) = record_admin_audit(
                 &state,
-                &updated,
-                AuditPayload::UpstreamUpdate {
-                    upstream_id: updated.id.to_string(),
-                    fields_changed,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: &action,
+                    route: &route,
+                    target_principal_id: None,
+                    target_upstream: Some(&updated.name),
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: None,
                 },
-            );
+            )
+            .await
+            {
+                tracing::error!(error = %error, action = %action, "admin audit write failed");
+                return Err(UpstreamError::AuditWriteFailed);
+            }
             let mut response = respond_with_etag(&updated);
             add_dynamic_rebind_headers(&mut response, &state).await;
             Ok(response)
@@ -1177,22 +1279,25 @@ async fn enable_upstream(
     State(state): State<AdminState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Extension(identity): Extension<AdminIdentity>,
 ) -> Result<Response, UpstreamError> {
-    set_enabled(state, id, headers, true).await
+    set_enabled(state, id, headers, true, identity).await
 }
 
 async fn disable_upstream(
     State(state): State<AdminState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Extension(identity): Extension<AdminIdentity>,
 ) -> Result<Response, UpstreamError> {
-    set_enabled(state, id, headers, false).await
+    set_enabled(state, id, headers, false, identity).await
 }
 
 async fn delete_upstream(
     State(state): State<AdminState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Extension(identity): Extension<AdminIdentity>,
 ) -> Result<Response, UpstreamError> {
     let expected_revision = parse_if_match(&headers)?;
     let current = find_upstream(&state, &id)
@@ -1207,13 +1312,30 @@ async fn delete_upstream(
     let storage = storage(&state)?;
     match UpstreamStore::soft_delete(storage, current.id, expected_revision).await {
         Ok(()) => {
-            enqueue_upstream_audit(
+            let payload = AuditPayload::UpstreamDelete {
+                upstream_id: current.id.to_string(),
+            };
+            let action = payload.to_string();
+            let route = format!("/admin/v1/upstreams/{}", current.id);
+            if let Err(error) = record_admin_audit(
                 &state,
-                &current,
-                AuditPayload::UpstreamDelete {
-                    upstream_id: current.id.to_string(),
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: &action,
+                    route: &route,
+                    target_principal_id: None,
+                    target_upstream: Some(&current.name),
+                    api_key_id: None,
+                    status: StatusCode::NO_CONTENT.as_u16(),
+                    payload: None,
                 },
-            );
+            )
+            .await
+            {
+                tracing::error!(error = %error, action = %action, "admin audit write failed");
+                return Err(UpstreamError::AuditWriteFailed);
+            }
             let mut response = StatusCode::NO_CONTENT.into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             Ok(response)
@@ -1229,6 +1351,7 @@ async fn delete_upstream_warmup_dialect_plugin(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
+    Extension(identity): Extension<AdminIdentity>,
 ) -> Result<Response, UpstreamError> {
     let expected_revision = parse_if_match(&headers)?;
     let storage = storage(&state)?;
@@ -1241,14 +1364,31 @@ async fn delete_upstream_warmup_dialect_plugin(
         .await?
     {
         Some(updated) => {
-            enqueue_upstream_audit(
+            let payload = AuditPayload::UpstreamUpdate {
+                upstream_id: updated.id.to_string(),
+                fields_changed: vec!["warmup_dialect_plugin"],
+            };
+            let action = payload.to_string();
+            let route = format!("/admin/v1/upstreams/{}/warmup-dialect-plugin", updated.id);
+            if let Err(error) = record_admin_audit(
                 &state,
-                &updated,
-                AuditPayload::UpstreamUpdate {
-                    upstream_id: updated.id.to_string(),
-                    fields_changed: vec!["warmup_dialect_plugin"],
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action: &action,
+                    route: &route,
+                    target_principal_id: None,
+                    target_upstream: Some(&updated.name),
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: None,
                 },
-            );
+            )
+            .await
+            {
+                tracing::error!(error = %error, action = %action, "admin audit write failed");
+                return Err(UpstreamError::AuditWriteFailed);
+            }
             let mut response = respond_with_etag(&updated);
             add_dynamic_rebind_headers(&mut response, &state).await;
             Ok(response)
@@ -1270,6 +1410,7 @@ async fn set_enabled(
     id: String,
     headers: HeaderMap,
     enabled: bool,
+    identity: AdminIdentity,
 ) -> Result<Response, UpstreamError> {
     let storage = storage(&state)?;
     let expected_revision = parse_if_match(&headers)?;
@@ -1288,19 +1429,40 @@ async fn set_enabled(
         Err(error) => return Err(error.into()),
     };
 
-    enqueue_upstream_audit(
+    let payload = if enabled {
+        AuditPayload::UpstreamEnable {
+            upstream_id: updated.id.to_string(),
+        }
+    } else {
+        AuditPayload::UpstreamDisable {
+            upstream_id: updated.id.to_string(),
+        }
+    };
+    let action = payload.to_string();
+    let route = if enabled {
+        format!("/admin/v1/upstreams/{}/enable", updated.id)
+    } else {
+        format!("/admin/v1/upstreams/{}/disable", updated.id)
+    };
+    if let Err(error) = record_admin_audit(
         &state,
-        &updated,
-        if enabled {
-            AuditPayload::UpstreamEnable {
-                upstream_id: updated.id.to_string(),
-            }
-        } else {
-            AuditPayload::UpstreamDisable {
-                upstream_id: updated.id.to_string(),
-            }
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action: &action,
+            route: &route,
+            target_principal_id: None,
+            target_upstream: Some(&updated.name),
+            api_key_id: None,
+            status: StatusCode::OK.as_u16(),
+            payload: None,
         },
-    );
+    )
+    .await
+    {
+        tracing::error!(error = %error, action = %action, "admin audit write failed");
+        return Err(UpstreamError::AuditWriteFailed);
+    }
 
     let mut response = respond_with_etag(&updated);
     crate::v1::add_dynamic_rebind_headers(&mut response, &state).await;
@@ -1626,25 +1788,6 @@ async fn list_all_upstreams(state: &AdminState) -> Result<Vec<UpstreamRecord>, U
         }
     }
     Ok(all)
-}
-
-fn enqueue_upstream_audit(state: &AdminState, upstream: &UpstreamRecord, payload: AuditPayload) {
-    let Some(audit_sink) = &state.audit_sink else {
-        return;
-    };
-    let ts = cc_lb_clock::unix_secs(state.clock.now());
-    let action = payload.to_string();
-    let mut entry: AuditEntry = payload.into();
-    entry.ts = ts;
-    entry.request_id = format!("admin-upstream-{}-{ts}", upstream.id);
-    entry.principal_id = "admin".to_owned();
-    entry.route = "admin_v1_upstreams".to_owned();
-    entry.upstream = upstream.name.clone();
-    entry.status = 200;
-    entry.duration_ms = 0;
-    entry.actor = Some("admin".to_owned());
-    entry.admin_action = Some(action);
-    let _ = audit_sink.try_enqueue(entry);
 }
 
 fn unix_now_secs_i64(clock: &dyn Clock) -> Result<i64, UpstreamError> {
@@ -2011,11 +2154,10 @@ mod tests {
             runtime: None,
             data_dir: None,
             warmup_dialect_dispatcher: None,
-            audit_sink: None,
             dynamic_view: Arc::new(DynamicViewHolder::new(test_view())),
             config: Arc::new(Config::default()),
             scheduler: None,
-            admin_token: None,
+            admin_auth: Arc::new(crate::auth::AdminAuthenticator::new(Vec::new())),
             start_time: std::time::Instant::now(),
             event_bus: None,
             storage_tail: crate::events::storage_tail_channel(),
@@ -2102,6 +2244,19 @@ mod tests {
             .expect("token store succeeds")
     }
 
+    fn test_admin_identity() -> AdminIdentity {
+        AdminIdentity {
+            authority: "test".to_owned(),
+            subject: "upstream-unit-tests".to_owned(),
+            kind: crate::auth::AdminActorKind::Service,
+            provider_id: "test".to_owned(),
+            email: None,
+            display_name: None,
+            groups: Vec::new(),
+            expires_at_unix_secs: None,
+        }
+    }
+
     async fn fire_now_response(state: AdminState, upstream_id: Uuid) -> (StatusCode, Value) {
         let response = router()
             .with_state(state)
@@ -2109,6 +2264,7 @@ mod tests {
                 Request::builder()
                     .method(Method::POST)
                     .uri(format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now"))
+                    .extension(test_admin_identity())
                     .body(AxumBody::empty())
                     .expect("request builds"),
             )
@@ -2178,6 +2334,7 @@ mod tests {
                     .method(Method::POST)
                     .uri("/admin/v1/upstreams")
                     .header("content-type", "application/json")
+                    .extension(test_admin_identity())
                     .body(AxumBody::from(body.to_string()))
                     .expect("request builds"),
             )
@@ -2207,6 +2364,7 @@ mod tests {
                     .method(Method::POST)
                     .uri("/admin/v1/upstreams")
                     .header("content-type", "application/json")
+                    .extension(test_admin_identity())
                     .body(AxumBody::from(body.to_string()))
                     .expect("request builds"),
             )
@@ -2236,6 +2394,7 @@ mod tests {
                     .uri(format!("/admin/v1/upstreams/{}", upstream.id))
                     .header("content-type", "application/json")
                     .header("if-match", format!("W/\"{}\"", upstream.revision))
+                    .extension(test_admin_identity())
                     .body(AxumBody::from(r#"{"warmup_enabled":true}"#.to_owned()))
                     .expect("request builds"),
             )
@@ -2298,6 +2457,7 @@ mod tests {
                     .uri(format!("/admin/v1/upstreams/{}", upstream.id))
                     .header("content-type", "application/json")
                     .header("if-match", format!("W/\"{}\"", upstream.revision))
+                    .extension(test_admin_identity())
                     .body(AxumBody::from(r#"{"warmup_enabled":true}"#.to_owned()))
                     .expect("request builds"),
             )
@@ -2346,6 +2506,7 @@ mod tests {
                         "/admin/v1/upstreams/{}/warmup/fire-now",
                         upstream.id
                     ))
+                    .extension(test_admin_identity())
                     .body(AxumBody::empty())
                     .expect("request builds"),
             )

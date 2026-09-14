@@ -31,7 +31,36 @@ pub struct AuditEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_authority: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AuditActorFields {
+    pub actor: String,
+    pub authority: String,
+    pub subject: String,
+    pub kind: String,
+    pub email: Option<String>,
+}
+
+impl AuditActorFields {
+    pub fn system(component: &str) -> Self {
+        Self {
+            actor: format!("system:{component}"),
+            authority: "cc-lb".to_owned(),
+            subject: component.to_owned(),
+            kind: "system".to_owned(),
+            email: None,
+        }
+    }
 }

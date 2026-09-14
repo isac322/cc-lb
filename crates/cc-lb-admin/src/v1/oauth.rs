@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -17,14 +17,14 @@ use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
 use cc_lb_control::anthropic_metadata::make_metadata_http_client;
-use cc_lb_control::{AuditEntry, AuditPayload, fetch_metadata_only};
+use cc_lb_control::{AuditPayload, fetch_metadata_only};
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
-    OrganizationMetadataRecord, Storage, StorageError, UpstreamCreate, UpstreamRecord,
-    UpstreamStore, UpstreamSubscriptionMetadataRecord, validate_identifier,
+    AuditActorFields, OrganizationMetadataRecord, Storage, StorageError, UpstreamCreate,
+    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord, validate_identifier,
 };
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,8 @@ use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
 use crate::AdminState;
+use crate::audit::{AdminAuditEvent, record_admin_audit};
+use crate::auth::AdminIdentity;
 use crate::oauth_pkce::{
     HyperOAuthHttpClient, OAuthTokenError, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
 };
@@ -150,6 +152,7 @@ struct UpstreamStatusResponse {
 struct InFlightPkce {
     handshake: PkceHandshakeState,
     created_at_unix_secs: u64,
+    initiated_by: AuditActorFields,
     target: PkceTarget,
 }
 
@@ -181,6 +184,7 @@ struct StateToken {
 
 async fn start_oauth(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Path(upstream_id): Path<Uuid>,
     Json(_payload): Json<StartRequest>,
 ) -> Response {
@@ -245,6 +249,7 @@ async fn start_oauth(
     let in_flight = InFlightPkce {
         handshake: handshake_state.clone(),
         created_at_unix_secs: now,
+        initiated_by: identity.audit_fields(),
         target: PkceTarget::ExistingUpstream {
             upstream_id,
             upstream_name: upstream.name.clone(),
@@ -261,15 +266,40 @@ async fn start_oauth(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 
-    enqueue_upstream_audit(
+    let target_upstream = upstream.name.clone();
+    let audit_action = AuditPayload::UpstreamOauthStart {
+        upstream_id: upstream_id.to_string(),
+        upstream_name: upstream.name,
+    }
+    .to_string();
+    let route = format!("/admin/v1/upstreams/{upstream_id}/oauth/start");
+    if let Err(error) = record_admin_audit(
         &state,
-        AuditPayload::UpstreamOauthStart {
-            upstream_id: upstream_id.to_string(),
-            upstream_name: upstream.name,
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action: &audit_action,
+            route: &route,
+            target_principal_id: None,
+            target_upstream: Some(&target_upstream),
+            api_key_id: None,
+            status: StatusCode::OK.as_u16(),
+            payload: None,
         },
-        upstream_id,
-        200,
-    );
+    )
+    .await
+    {
+        tracing::error!(
+            error = %error,
+            action = %audit_action,
+            "admin audit write failed"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "audit_write_failed" })),
+        )
+            .into_response();
+    }
 
     Json(StartResponse {
         authorize_url: handshake_state.authorize_url.to_string(),
@@ -279,7 +309,10 @@ async fn start_oauth(
     .into_response()
 }
 
-async fn start_oauth_draft(State(state): State<AdminState>) -> Response {
+async fn start_oauth_draft(
+    State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
+) -> Response {
     let config = state.config.current_config();
     let claude_default;
     let oauth = match config.oauth.anthropic.as_ref() {
@@ -318,6 +351,7 @@ async fn start_oauth_draft(State(state): State<AdminState>) -> Response {
     let in_flight = InFlightPkce {
         handshake: handshake_state.clone(),
         created_at_unix_secs: now,
+        initiated_by: identity.audit_fields(),
         target: PkceTarget::PendingDraft { completed: None },
     };
     match pkce_flows().lock() {
@@ -330,6 +364,34 @@ async fn start_oauth_draft(State(state): State<AdminState>) -> Response {
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 
+    if let Err(error) = record_admin_audit(
+        &state,
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action: "upstream_oauth_draft_start",
+            route: "/admin/v1/oauth/draft/start",
+            target_principal_id: None,
+            target_upstream: None,
+            api_key_id: None,
+            status: StatusCode::OK.as_u16(),
+            payload: None,
+        },
+    )
+    .await
+    {
+        tracing::error!(
+            error = %error,
+            action = "upstream_oauth_draft_start",
+            "admin audit write failed"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "audit_write_failed" })),
+        )
+            .into_response();
+    }
+
     Json(DraftStartResponse {
         authorize_url: handshake_state.authorize_url.to_string(),
         state_token,
@@ -339,6 +401,7 @@ async fn start_oauth_draft(State(state): State<AdminState>) -> Response {
 
 async fn complete_oauth_draft(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Json(payload): Json<CompleteRequest>,
 ) -> Response {
     let in_flight = match pkce_flows().lock() {
@@ -359,6 +422,7 @@ async fn complete_oauth_draft(
             return invalid_state_response("state token is for an existing upstream");
         }
     }
+    let initiated_by = in_flight.initiated_by.actor.clone();
 
     let handshake = match in_flight.handshake.into_handshake() {
         Ok(handshake) => handshake,
@@ -466,6 +530,34 @@ async fn complete_oauth_draft(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 
+    if let Err(error) = record_admin_audit(
+        &state,
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action: "upstream_oauth_draft_complete",
+            route: "/admin/v1/oauth/draft/complete",
+            target_principal_id: None,
+            target_upstream: None,
+            api_key_id: None,
+            status: StatusCode::OK.as_u16(),
+            payload: Some(json!({ "initiated_by": initiated_by })),
+        },
+    )
+    .await
+    {
+        tracing::error!(
+            error = %error,
+            action = "upstream_oauth_draft_complete",
+            "admin audit write failed"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "audit_write_failed" })),
+        )
+            .into_response();
+    }
+
     Json(DraftCompleteResponse {
         state_token: payload.state_token,
         suggested_name,
@@ -477,6 +569,7 @@ async fn complete_oauth_draft(
 
 async fn create_upstream_from_oauth_draft(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Json(payload): Json<CreateFromDraftRequest>,
 ) -> Response {
     if let Err(error) = validate_identifier("upstream.name", &payload.name) {
@@ -490,18 +583,18 @@ async fn create_upstream_from_oauth_draft(
         )
             .into_response();
     }
-    let completion = match pkce_flows().lock() {
+    let draft = match pkce_flows().lock() {
         Ok(flows) => flows
             .get(&payload.state_token)
             .and_then(|flow| match &flow.target {
                 PkceTarget::PendingDraft {
                     completed: Some(completion),
-                } => Some(completion.clone()),
+                } => Some((completion.clone(), flow.initiated_by.actor.clone())),
                 _ => None,
             }),
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let Some(completion) = completion else {
+    let Some((completion, initiated_by)) = draft else {
         return invalid_state_response("OAuth draft is missing or incomplete");
     };
     let Some(storage) = state.storage.as_ref() else {
@@ -636,6 +729,35 @@ async fn create_upstream_from_oauth_draft(
         flows.remove(&payload.state_token);
     }
 
+    let target_upstream = updated.name.clone();
+    if let Err(error) = record_admin_audit(
+        &state,
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action: "upstream_create_from_oauth_draft",
+            route: "/admin/v1/upstreams/from-oauth-draft",
+            target_principal_id: None,
+            target_upstream: Some(&target_upstream),
+            api_key_id: None,
+            status: StatusCode::CREATED.as_u16(),
+            payload: Some(json!({ "initiated_by": initiated_by })),
+        },
+    )
+    .await
+    {
+        tracing::error!(
+            error = %error,
+            action = "upstream_create_from_oauth_draft",
+            "admin audit write failed"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "audit_write_failed" })),
+        )
+            .into_response();
+    }
+
     let mut response = (StatusCode::CREATED, Json(upstream_response(&updated))).into_response();
     if let Ok(location) = HeaderValue::from_str(&format!("/admin/v1/upstreams/{}", updated.id)) {
         response.headers_mut().insert(header::LOCATION, location);
@@ -646,6 +768,7 @@ async fn create_upstream_from_oauth_draft(
 
 async fn complete_oauth(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Path(upstream_id): Path<Uuid>,
     Json(payload): Json<CompleteRequest>,
 ) -> Response {
@@ -780,17 +903,42 @@ async fn complete_oauth(
         return scheduler_error_response(&error);
     }
 
-    enqueue_upstream_audit(
+    let target_upstream = upstream_name.clone();
+    let audit_action = AuditPayload::UpstreamOauthComplete {
+        upstream_id: upstream_id.to_string(),
+        upstream_name,
+        expires_at_unix_secs: bundle.expires_at_unix_secs,
+        access_token_fingerprint: access_token_fingerprint.clone(),
+    }
+    .to_string();
+    let route = format!("/admin/v1/upstreams/{upstream_id}/oauth/complete");
+    if let Err(error) = record_admin_audit(
         &state,
-        AuditPayload::UpstreamOauthComplete {
-            upstream_id: upstream_id.to_string(),
-            upstream_name,
-            expires_at_unix_secs: bundle.expires_at_unix_secs,
-            access_token_fingerprint: access_token_fingerprint.clone(),
+        AdminAuditEvent {
+            identity: Some(&identity),
+            system_component: None,
+            action: &audit_action,
+            route: &route,
+            target_principal_id: None,
+            target_upstream: Some(&target_upstream),
+            api_key_id: None,
+            status: StatusCode::OK.as_u16(),
+            payload: None,
         },
-        upstream_id,
-        200,
-    );
+    )
+    .await
+    {
+        tracing::error!(
+            error = %error,
+            action = %audit_action,
+            "admin audit write failed"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "audit_write_failed" })),
+        )
+            .into_response();
+    }
 
     let mut response = Json(CompleteResponse {
         upstream_id: updated.id,
@@ -1129,38 +1277,6 @@ fn to_hex(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
-}
-
-fn enqueue_upstream_audit(
-    state: &AdminState,
-    payload: AuditPayload,
-    upstream_id: Uuid,
-    status: u16,
-) {
-    let Some(audit_sink) = &state.audit_sink else {
-        return;
-    };
-    let ts = cc_lb_clock::unix_secs(state.clock.now());
-    let _ = audit_sink.try_enqueue(AuditEntry {
-        ts,
-        request_id: format!("admin-upstream-oauth-{upstream_id}-{ts}"),
-        principal_id: String::new(),
-        route: "admin_v1_upstream_oauth".to_owned(),
-        upstream: upstream_id.to_string(),
-        model: None,
-        status,
-        input_tokens: None,
-        output_tokens: None,
-        duration_ms: 0,
-        agent_label: None,
-        api_key_id: None,
-        cost_usd_micros: None,
-        limit_violation: None,
-        admin_action: Some(payload.to_string()),
-        actor: Some("admin".to_owned()),
-        kind: None,
-        payload: None,
-    });
 }
 
 fn normalize_oauth_code(input: &str) -> String {

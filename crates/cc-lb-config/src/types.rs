@@ -33,6 +33,7 @@ pub const DEFAULT_MESSAGES_CAP_BYTES: u64 = 32 * 1024 * 1024;
 pub const DEFAULT_FILES_CAP_BYTES: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_OAUTH_AEAD_KEY_ENV: &str = "CC_LB_MASTER_KEY";
 pub const DEFAULT_ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
+pub const ADMIN_AUTH_PROVIDERS_JSON_ENV: &str = "CC_LB_ADMIN_AUTH_PROVIDERS_JSON";
 pub const DEFAULT_SQLITE_PATH: &str = "/var/lib/cc-lb/storage.sqlite";
 pub const DEFAULT_EVENT_BUS_BROADCAST_CAPACITY: usize = 4096;
 pub const DEFAULT_CLUSTER_TOKEN_ENV: &str = "CC_LB_CLUSTER_TOKEN";
@@ -1023,10 +1024,12 @@ impl Default for ObservabilityConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct AdminConfig {
-    #[serde(default = "default_admin_token_env")]
+    #[serde(default = "default_token_env")]
     pub token_env: String,
     #[serde(skip)]
     pub token: Option<String>,
+    #[serde(default)]
+    pub auth: AdminAuthConfig,
 }
 
 impl Default for AdminConfig {
@@ -1034,8 +1037,34 @@ impl Default for AdminConfig {
         Self {
             token_env: DEFAULT_ADMIN_TOKEN_ENV.to_owned(),
             token: None,
+            auth: AdminAuthConfig::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct AdminAuthConfig {
+    pub providers: Vec<AdminAuthProviderConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AdminAuthProviderConfig {
+    StaticToken {
+        id: String,
+        #[serde(default = "default_token_env")]
+        token_env: String,
+    },
+    CloudflareAccess {
+        id: String,
+        /// Access team domain, used as the issuer and JWKS base URL.
+        team_domain: String,
+        /// Access application audience tags accepted for the admin surface.
+        audiences: Vec<String>,
+        #[serde(default = "default_cf_access_header")]
+        header: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1413,8 +1442,12 @@ fn default_price_catalog_cache_path() -> PathBuf {
     PathBuf::from("/var/lib/cc-lb/litellm.json")
 }
 
-fn default_admin_token_env() -> String {
+fn default_token_env() -> String {
     DEFAULT_ADMIN_TOKEN_ENV.to_owned()
+}
+
+fn default_cf_access_header() -> String {
+    "cf-access-jwt-assertion".to_owned()
 }
 
 fn default_failures_to_open() -> u32 {

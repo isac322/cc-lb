@@ -8,6 +8,8 @@ kind = "sqlite"
 path = "/var/lib/cc-lb/store.sqlite"
 oauth_aead_key_env = "CC_LB_MASTER_KEY"
 
+# Prefer CC_LB_ADMIN_AUTH_PROVIDERS_JSON for new deployments. This legacy
+# token reference is automatically migrated in memory during the rollout.
 [admin]
 token_env = "CC_LB_ADMIN_TOKEN"
 

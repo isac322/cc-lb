@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -11,7 +12,10 @@ pub use legacy::{
     validate_raw_toml,
 };
 
-use crate::{Config, ConfigError, DEFAULT_SQLITE_PATH, DownstreamAuthMode, StorageConfig};
+use crate::{
+    AdminAuthProviderConfig, Config, ConfigError, DEFAULT_SQLITE_PATH, DownstreamAuthMode,
+    StorageConfig,
+};
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{field}: {message}")]
@@ -31,6 +35,7 @@ impl ValidationError {
 
 pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_downstream_auth(config)?;
+    validate_admin_auth(config)?;
     validate_tls(config)?;
     validate_storage(config)?;
     validate_event_bus(config)?;
@@ -40,6 +45,86 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn validate_admin_auth(config: &Config) -> Result<(), ValidationError> {
+    let mut provider_ids = HashSet::new();
+
+    for (index, provider) in config.admin.auth.providers.iter().enumerate() {
+        let prefix = format!("admin.auth.providers[{index}]");
+        let id = match provider {
+            AdminAuthProviderConfig::StaticToken { id, token_env } => {
+                if token_env.trim().is_empty() {
+                    return Err(ValidationError::new(
+                        format!("{prefix}.token_env"),
+                        "static token environment variable must not be empty",
+                    ));
+                }
+                id
+            }
+            AdminAuthProviderConfig::CloudflareAccess {
+                id,
+                team_domain,
+                audiences,
+                header,
+            } => {
+                validate_cloudflare_team_domain(&prefix, team_domain)?;
+                if audiences.is_empty() {
+                    return Err(ValidationError::new(
+                        format!("{prefix}.audiences"),
+                        "at least one Cloudflare Access audience is required",
+                    ));
+                }
+                if http::HeaderName::from_bytes(header.as_bytes()).is_err() {
+                    return Err(ValidationError::new(
+                        format!("{prefix}.header"),
+                        "Cloudflare Access header must be a valid HTTP header name",
+                    ));
+                }
+                id
+            }
+        };
+
+        if id.trim().is_empty() {
+            return Err(ValidationError::new(
+                format!("{prefix}.id"),
+                "admin authentication provider id must not be empty",
+            ));
+        }
+        if !provider_ids.insert(id.as_str()) {
+            return Err(ValidationError::new(
+                format!("{prefix}.id"),
+                "admin authentication provider id must be unique",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_cloudflare_team_domain(prefix: &str, team_domain: &str) -> Result<(), ValidationError> {
+    let field = format!("{prefix}.team_domain");
+    let parsed = url::Url::parse(team_domain).map_err(|_| {
+        ValidationError::new(
+            field.clone(),
+            "Cloudflare Access team domain must be a valid HTTPS URL",
+        )
+    })?;
+
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(ValidationError::new(
+            field,
+            "Cloudflare Access team domain must be an HTTPS origin without a path or query",
+        ));
+    }
+
+    Ok(())
+}
 fn validate_upstream_affinity(config: &Config) -> Result<(), ValidationError> {
     if config.upstream_affinity.ttl_days == 0 {
         return Err(ValidationError::new(

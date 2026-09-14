@@ -17,7 +17,9 @@ use cc_lb_scheduler::worker::{
     AdaptiveJob, Filter, SchedulerBackend, SchedulerPushTask, TaskStatus,
 };
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
-use cc_lb_storage_api::{AuditEntry, AuditStore, StorageError, StorageResult, UpstreamRecord};
+use cc_lb_storage_api::{
+    AuditActorFields, AuditEntry, AuditStore, StorageError, StorageResult, UpstreamRecord,
+};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderValue, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -804,6 +806,13 @@ async fn emit_audit(
         return;
     };
     let now = unix_secs(clock.now());
+    let AuditActorFields {
+        actor,
+        authority,
+        subject,
+        kind,
+        email,
+    } = AuditActorFields::system("oauth_refresh");
     let entry = AuditEntry {
         ts: now,
         request_id: format!("oauth-refresh-{}-{now}", upstream.id),
@@ -820,7 +829,11 @@ async fn emit_audit(
         cost_usd_micros: None,
         limit_violation: None,
         admin_action: Some(payload.to_string()),
-        actor: Some("system".to_owned()),
+        actor: Some(actor),
+        actor_authority: Some(authority),
+        actor_subject: Some(subject),
+        actor_kind: Some(kind),
+        actor_email: email,
         kind: Some(payload.to_string()),
         payload: None,
     };

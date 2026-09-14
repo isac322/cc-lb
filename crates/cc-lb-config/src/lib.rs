@@ -17,17 +17,18 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub use types::{
-    AdminConfig, AnthropicOAuthConfig, ApiKeysConfig, BodyConfig, BulkheadConfig,
-    CircuitBreakerConfig, ClusterConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
-    DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
-    DEFAULT_SQLITE_PATH, DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS, DnsConfig, DownstreamAuthConfig,
-    DownstreamAuthMode, EgressConfig, EventBusConfig, ListenerConfig, ListenerOverrides,
-    NoneModeConfig, NoneModeUpstreamKind, ObservabilityConfig, PluginFailurePolicy,
-    PluginWireBounds, PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig,
-    RecurringJobConfig, RestartRequiredField, RuntimeConfig, SchedulerConfig,
-    SchedulerIdempotencyConfig, SchedulerPoolConfig, SchedulerRetryClasses, SchedulerRetryConfig,
-    SchedulerStalenessConfig, ShapeOriginPolicy, StorageConfig, SubscriptionQuotaConfig,
-    TimeoutsConfig, TlsConfig, UpstreamAffinityConfig, WasmtimeAllocationStrategy, WasmtimeConfig,
+    ADMIN_AUTH_PROVIDERS_JSON_ENV, AdminAuthConfig, AdminAuthProviderConfig, AdminConfig,
+    AnthropicOAuthConfig, ApiKeysConfig, BodyConfig, BulkheadConfig, CircuitBreakerConfig,
+    ClusterConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES,
+    DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH,
+    DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS, DnsConfig, DownstreamAuthConfig, DownstreamAuthMode,
+    EgressConfig, EventBusConfig, ListenerConfig, ListenerOverrides, NoneModeConfig,
+    NoneModeUpstreamKind, ObservabilityConfig, PluginFailurePolicy, PluginWireBounds,
+    PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig, RecurringJobConfig,
+    RestartRequiredField, RuntimeConfig, SchedulerConfig, SchedulerIdempotencyConfig,
+    SchedulerPoolConfig, SchedulerRetryClasses, SchedulerRetryConfig, SchedulerStalenessConfig,
+    ShapeOriginPolicy, StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig,
+    UpstreamAffinityConfig, WasmtimeAllocationStrategy, WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 
@@ -35,6 +36,14 @@ pub fn removed_prompt_cache_switch_warning(field: &str) -> String {
     format!(
         "removed prompt-cache disable switch `{field}` is ignored; cache-aware routing is always enabled"
     )
+}
+
+pub fn config_warning_message(warning: &str) -> String {
+    if warning.starts_with("legacy [admin].token_env ") {
+        warning.to_owned()
+    } else {
+        removed_prompt_cache_switch_warning(warning)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -45,6 +54,8 @@ pub enum ConfigError {
     Validation(#[from] ValidationError),
     #[error("invalid postgres URL: {message}")]
     InvalidPostgresUrl { message: String },
+    #[error("invalid {env}: {message}")]
+    InvalidAdminAuthProvidersEnv { env: &'static str, message: String },
     #[error("postgres statement timeout {statement}s must be less than request timeout {request}s")]
     StatementTimeoutExceedsRequestTimeout { statement: u64, request: u64 },
 }
@@ -100,8 +111,19 @@ impl Config {
             .merge(Serialized::defaults(cli_overrides))
             .extract()?;
 
+        let admin_auth_env_override = config.apply_admin_auth_env_override()?;
         config.resolve_runtime_values();
         config.validate()?;
+        if !admin_auth_env_override
+            && config.admin.auth.providers.is_empty()
+            && config.admin.token.is_some()
+        {
+            warnings.push(format!(
+                "legacy [admin].token_env was automatically migrated in memory to the \
+                 static-token/legacy provider; configure {ADMIN_AUTH_PROVIDERS_JSON_ENV} before \
+                 legacy admin-token compatibility is removed"
+            ));
+        }
         Ok((config, warnings))
     }
 
@@ -116,6 +138,34 @@ impl Config {
 
     pub fn json_schema() -> schemars::Schema {
         schemars::schema_for!(Config)
+    }
+
+    fn apply_admin_auth_env_override(&mut self) -> Result<bool, ConfigError> {
+        let encoded = match env::var(ADMIN_AUTH_PROVIDERS_JSON_ENV) {
+            Ok(encoded) => encoded,
+            Err(env::VarError::NotPresent) => return Ok(false),
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidAdminAuthProvidersEnv {
+                    env: ADMIN_AUTH_PROVIDERS_JSON_ENV,
+                    message: "value must be valid UTF-8 JSON".to_owned(),
+                });
+            }
+        };
+        let providers: Vec<AdminAuthProviderConfig> =
+            serde_json::from_str(&encoded).map_err(|error| {
+                ConfigError::InvalidAdminAuthProvidersEnv {
+                    env: ADMIN_AUTH_PROVIDERS_JSON_ENV,
+                    message: error.to_string(),
+                }
+            })?;
+        if providers.is_empty() {
+            return Err(ConfigError::InvalidAdminAuthProvidersEnv {
+                env: ADMIN_AUTH_PROVIDERS_JSON_ENV,
+                message: "provider list must not be empty".to_owned(),
+            });
+        }
+        self.admin.auth.providers = providers;
+        Ok(true)
     }
 
     fn resolve_runtime_values(&mut self) {

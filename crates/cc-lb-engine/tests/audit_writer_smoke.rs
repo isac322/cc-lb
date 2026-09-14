@@ -103,6 +103,10 @@ fn audit_entry(index: usize) -> AuditEntry {
         limit_violation: None,
         admin_action: None,
         actor: Some("system".to_owned()),
+        actor_authority: None,
+        actor_subject: None,
+        actor_kind: None,
+        actor_email: None,
         kind: None,
         payload: None,
     }

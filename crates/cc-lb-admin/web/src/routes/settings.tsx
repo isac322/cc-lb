@@ -29,6 +29,7 @@ import {
   RelativeTime,
 } from '../components/ui/RelativeTime';
 import { downloadJson } from '../lib/api';
+import { useAuthSessionContext } from '../lib/authSession';
 import { formatAbsolute, useLocale, useTimezone } from '../lib/locale';
 import {
   useApplyConfig,
@@ -213,6 +214,7 @@ export const Route = createFileRoute('/settings')({
 });
 
 function SettingsPage() {
+  const authSession = useAuthSessionContext();
   const status = useStatus();
   const [exporting, setExporting] = useState(false);
   const exportingRef = useRef(false);
@@ -324,27 +326,28 @@ function SettingsPage() {
           </CardBody>
         </Card>
 
-        {/* Admin token */}
-        <Card data-testid="admin-token-card">
-          <CardHeader
-            title="Admin Token"
-            subtitle="The admin bearer token is loaded from the environment when cc-lb starts."
-          />
-          <CardBody>
-            <p
-              data-testid="admin-token-guidance"
-              className="text-sm text-text-muted"
-            >
-              Update the environment variable named by{' '}
-              <code className="font-mono text-text">admin.token_env</code>{' '}
-              (default:{' '}
-              <code className="font-mono text-text">CC_LB_ADMIN_TOKEN</code>) in
-              your service&apos;s secret manager, then restart the cc-lb
-              process. The token is loaded only at startup and cannot be rotated
-              from this dashboard.
-            </p>
-          </CardBody>
-        </Card>
+        {authSession?.auth_mode === 'static_token' ? (
+          <Card data-testid="admin-token-card">
+            <CardHeader
+              title="Admin Token"
+              subtitle="The admin bearer token is loaded from the environment when cc-lb starts."
+            />
+            <CardBody>
+              <p
+                data-testid="admin-token-guidance"
+                className="text-sm text-text-muted"
+              >
+                Update the environment variable named by{' '}
+                <code className="font-mono text-text">admin.token_env</code>{' '}
+                (default:{' '}
+                <code className="font-mono text-text">CC_LB_ADMIN_TOKEN</code>)
+                in your service&apos;s secret manager, then restart the cc-lb
+                process. The token is loaded only at startup and cannot be
+                rotated from this dashboard.
+              </p>
+            </CardBody>
+          </Card>
+        ) : null}
 
         {/* Localization */}
         <Card>
@@ -944,6 +947,10 @@ const RESTART_MATRIX: { field: string; reason: string }[] = [
   { field: 'storage.url', reason: 'Storage backend' },
   { field: 'storage.pool', reason: 'Storage pool' },
   { field: 'aead.key_env', reason: 'Storage encryption key env' },
+  {
+    field: 'admin.auth.providers',
+    reason: 'Admin authentication providers are built at process start',
+  },
   { field: 'oauth.anthropic.client_id', reason: 'Anthropic OAuth client' },
   { field: 'oauth.anthropic.auth_url', reason: 'Anthropic OAuth endpoint' },
   { field: 'oauth.anthropic.token_url', reason: 'Anthropic OAuth endpoint' },

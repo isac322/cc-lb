@@ -3,12 +3,31 @@ import { createEventSource, type EventSourceClient } from 'eventsource-client';
 import * as z from 'zod';
 import { clearAdminToken, getAdminToken } from './auth';
 
-const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
+export const AdminAuthModeSchema = z.enum(['static_token', 'external']);
+export type AdminAuthMode = z.infer<typeof AdminAuthModeSchema>;
 
-function notifyAuthRequired(): void {
+const UnauthorizedResponseSchema = z.object({
+  auth_mode: AdminAuthModeSchema,
+});
+
+export type AuthRequiredEventDetail = {
+  authMode: AdminAuthMode | null;
+  hadToken: boolean;
+};
+
+export const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
+
+function notifyAuthRequired(
+  authMode: AdminAuthMode | null,
+  hadToken: boolean,
+): void {
   clearAdminToken();
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
+    window.dispatchEvent(
+      new CustomEvent<AuthRequiredEventDetail>(AUTH_REQUIRED_EVENT, {
+        detail: { authMode, hadToken },
+      }),
+    );
   }
 }
 
@@ -31,6 +50,35 @@ export class ApiError extends Error {
   }
 }
 
+export function getUnauthorizedAuthMode(error: unknown): AdminAuthMode | null {
+  if (!(error instanceof ApiError) || error.status !== 401) {
+    return null;
+  }
+  const parsed = UnauthorizedResponseSchema.safeParse(error.body);
+  return parsed.success ? parsed.data.auth_mode : null;
+}
+
+export const AuthSessionSchema = z.object({
+  authority: z.string(),
+  subject: z.string(),
+  kind: z.enum(['human', 'service', 'break_glass']),
+  provider_id: z.string(),
+  email: z.string().nullable(),
+  display_name: z.string().nullable(),
+  expires_at_unix_secs: z.number().int().nonnegative().nullable(),
+  auth_mode: AdminAuthModeSchema,
+});
+
+export type AuthSession = z.infer<typeof AuthSessionSchema>;
+
+export async function getAuthSession(): Promise<AuthSession> {
+  const response = await fetchWithAuth('/admin/v1/auth/session', {
+    method: 'GET',
+    notifyOnUnauthorized: false,
+  });
+  return AuthSessionSchema.parse(await response.json());
+}
+
 export function buildHeaders(
   base: HeadersInit | undefined,
   ifMatch: number | undefined,
@@ -42,18 +90,23 @@ export function buildHeaders(
   return h;
 }
 
+type AuthenticatedRequestInit = RequestInit & {
+  notifyOnUnauthorized?: boolean;
+};
+
 export async function fetchWithAuth(
   path: string,
-  options: RequestInit = {},
+  options: AuthenticatedRequestInit = {},
 ): Promise<Response> {
+  const { notifyOnUnauthorized = true, ...requestOptions } = options;
   const token = getAdminToken();
-  const headers = new Headers(options.headers);
+  const headers = new Headers(requestOptions.headers);
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
 
   const controller = new AbortController();
-  const externalSignal = options.signal;
+  const externalSignal = requestOptions.signal;
   const abortFromExternal = () => controller.abort(externalSignal?.reason);
   if (externalSignal?.aborted) {
     abortFromExternal();
@@ -66,7 +119,7 @@ export async function fetchWithAuth(
 
   try {
     const res = await fetch(path, {
-      ...options,
+      ...requestOptions,
       headers,
       signal: controller.signal,
     });
@@ -95,7 +148,13 @@ export async function fetchWithAuth(
       }
       if (res.status === 401) {
         code = 'unauthorized';
-        notifyAuthRequired();
+        if (notifyOnUnauthorized) {
+          const parsed = UnauthorizedResponseSchema.safeParse(body);
+          notifyAuthRequired(
+            parsed.success ? parsed.data.auth_mode : null,
+            Boolean(token),
+          );
+        }
       }
       throw new ApiError(res.status, code, body, message);
     }
@@ -471,8 +530,16 @@ export async function* streamRequestEventUpdates(
     fetch: async (url, init) => {
       const res = await fetch(url, init as RequestInit);
       if (res.status === 401) {
-        notifyAuthRequired();
-        throw new ApiError(401, 'unauthorized', null, 'Unauthorized');
+        const body = await res
+          .clone()
+          .json()
+          .catch(() => null);
+        const parsed = UnauthorizedResponseSchema.safeParse(body);
+        notifyAuthRequired(
+          parsed.success ? parsed.data.auth_mode : null,
+          Boolean(token),
+        );
+        throw new ApiError(401, 'unauthorized', body, 'Unauthorized');
       }
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -791,6 +858,10 @@ interface AuditEntry {
   duration_ms: number;
   agent_label: string | null;
   actor: string | null;
+  actor_authority?: string | null;
+  actor_subject?: string | null;
+  actor_kind?: string | null;
+  actor_email?: string | null;
   admin_action: string | null;
   kind?: string;
   payload?: Record<string, unknown>;

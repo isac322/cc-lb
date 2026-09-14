@@ -54,6 +54,7 @@ async fn put_router_terminal_strategy_persists_and_audits() {
     );
 
     let deadline = Instant::now() + Duration::from_secs(5);
+    let expected_route = format!("/admin/v1/principals/{id}/router-terminal");
     let mut saw_audit = false;
     while Instant::now() < deadline {
         let entries = server
@@ -61,12 +62,13 @@ async fn put_router_terminal_strategy_persists_and_audits() {
             .query_audit(Some(&id), 0, u64::MAX, 20)
             .await
             .unwrap();
-        saw_audit = entries
-            .iter()
-            .filter_map(|entry| entry.admin_action.as_deref())
-            .any(|action| {
-                action.contains("principal_update") && action.contains("router_terminal_strategy")
-            });
+        saw_audit = entries.iter().any(|entry| {
+            entry.route == expected_route
+                && entry.admin_action.as_deref().is_some_and(|action| {
+                    action.contains("principal_update")
+                        && action.contains("router_terminal_strategy")
+                })
+        });
         if saw_audit {
             break;
         }

@@ -56,6 +56,18 @@ vi.mock('../lib/locale', () => ({
   }),
 }));
 
+vi.mock('../lib/authSession', () => ({
+  useAuthSessionContext: () => ({
+    authority: 'static-token',
+    subject: 'legacy',
+    kind: 'break_glass',
+    provider_id: 'legacy',
+    email: null,
+    display_name: 'Shared admin token',
+    expires_at_unix_secs: null,
+    auth_mode: 'static_token',
+  }),
+}));
 const SettingsComponent = SettingsRoute.options
   .component as React.ComponentType;
 
