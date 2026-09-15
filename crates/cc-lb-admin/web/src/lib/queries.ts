@@ -4,6 +4,7 @@
 
 import {
   type InfiniteData,
+  type QueryClient,
   queryOptions,
   experimental_streamedQuery as streamedQuery,
   useInfiniteQuery,
@@ -18,6 +19,7 @@ import {
   type AggregateResponse,
   type AnalysisResponse,
   ApiError,
+  type Upstream as ApiUpstream,
   type AuditQueryResponse,
   type ConfigDraftResponse,
   type ConfigHistoryResponse,
@@ -78,30 +80,10 @@ export const POLLING_INTERVALS = {
   CACHE_KEEPALIVE_DETAIL_MS: 5_000,
 };
 
-export interface UpstreamStatus {
-  last_apply_error: string | null;
-  last_apply_at_unix_secs: number | null;
-  last_warmup_at_unix_secs: number | null;
-}
-
-export interface Upstream {
-  id: string;
-  name: string;
-  kind: 'anthropic_api_key' | 'anthropic_oauth';
-  enabled: boolean;
-  spec_revision: number;
-  base_url?: string | null;
-  api_key_env?: string | null;
-  warmup_enabled: boolean;
-  warmup_dialect_plugin: UpstreamWarmupDialectPlugin | null;
-  status: UpstreamStatus;
-}
-
-export interface UpstreamWarmupDialectPlugin {
-  wasm_registry_id: string;
-  config: Record<string, unknown>;
-  wire_version?: number;
-}
+export type Upstream = ApiUpstream;
+export type UpstreamWarmupDialectPlugin = NonNullable<
+  Upstream['warmup_dialect_plugin']
+>;
 
 interface UpstreamListResp {
   upstreams: Upstream[];
@@ -307,6 +289,7 @@ export const qk = {
   upstream: (id: string) => ['upstream', id] as const,
   principals: ['principals'] as const,
   principal: (id: string) => ['principal', id] as const,
+  routerTerminal: (id: string) => ['router-terminal', id] as const,
   principalUsage: (id: string, range: string, step: string) =>
     ['principal-usage', id, range, step] as const,
   principalLimits: (id: string) => ['principal-limits', id] as const,
@@ -314,6 +297,7 @@ export const qk = {
   pluginRegistry: ['plugins', 'registry'] as const,
   pluginChain: (pid: string, slot?: ChainSlot) =>
     ['plugin-chain', pid, slot ?? 'all'] as const,
+  pluginReferences: (id: string) => ['plugin-references', id] as const,
   events: (filters: Record<string, string | undefined>) =>
     ['events', filters] as const,
   audit: (filters: Record<string, string | undefined>) =>
@@ -346,6 +330,17 @@ export const qk = {
   cacheKeepaliveSessionDetail: (principalId: string, sessionId: string) =>
     ['cache-keepalive', 'detail', principalId, sessionId] as const,
 };
+
+async function invalidatePrincipalRecordQueries(
+  client: QueryClient,
+  id: string,
+) {
+  await Promise.all([
+    client.invalidateQueries({ queryKey: qk.principal(id) }),
+    client.invalidateQueries({ queryKey: qk.principals }),
+    client.invalidateQueries({ queryKey: qk.routerTerminal(id) }),
+  ]);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Read hooks
@@ -470,7 +465,7 @@ export function usePluginChain(principalId: string | null, slot?: ChainSlot) {
 }
 export function useRouterTerminalStrategy(principalId: string | null) {
   return useQuery({
-    queryKey: ['router-terminal', principalId ?? ''],
+    queryKey: qk.routerTerminal(principalId ?? ''),
     queryFn: () =>
       getJson<{ strategy: string; revision: number }>(
         `/admin/v1/principals/${principalId}/router-terminal`,
@@ -1264,7 +1259,9 @@ export function useTogglePrincipal() {
         {},
         { ifMatch: revision },
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.principals }),
+    onSuccess: async (_data, vars) => {
+      await invalidatePrincipalRecordQueries(qc, vars.id);
+    },
   });
 }
 export function useSetAllowedModels() {
@@ -1284,9 +1281,8 @@ export function useSetAllowedModels() {
         `/admin/v1/principals/${id}/allowed_models`,
         { models, expected_revision },
       ),
-    onSuccess: (_d, vars) => {
-      qc.invalidateQueries({ queryKey: qk.principal(vars.id) });
-      qc.invalidateQueries({ queryKey: qk.principals });
+    onSuccess: async (_data, vars) => {
+      await invalidatePrincipalRecordQueries(qc, vars.id);
     },
   });
 }
@@ -1308,9 +1304,8 @@ export function useUpdatePrincipalDefaultLimits() {
         { default_limits },
         { ifMatch: expected_revision },
       ),
-    onSuccess: (_d, vars) => {
-      qc.invalidateQueries({ queryKey: qk.principal(vars.id) });
-      qc.invalidateQueries({ queryKey: qk.principals });
+    onSuccess: async (_data, vars) => {
+      await invalidatePrincipalRecordQueries(qc, vars.id);
     },
   });
 }
@@ -1333,9 +1328,8 @@ export function useUpdatePrincipalCacheKeepalive() {
         { cache_keepalive },
         { ifMatch: expected_revision },
       ),
-    onSuccess: (_d, vars) => {
-      qc.invalidateQueries({ queryKey: qk.principal(vars.id) });
-      qc.invalidateQueries({ queryKey: qk.principals });
+    onSuccess: async (_data, vars) => {
+      await invalidatePrincipalRecordQueries(qc, vars.id);
     },
   });
 }
@@ -1427,18 +1421,25 @@ export interface PluginReferencesResponse {
 
 export function usePluginReferences(id: string | null) {
   return useQuery({
-    queryKey: ['plugin-references', id],
+    queryKey: qk.pluginReferences(id ?? ''),
     queryFn: () =>
       getJson<PluginReferencesResponse>(
         `/admin/v1/plugins/registry/${id}/references`,
       ),
     enabled: !!id,
+    gcTime: 0,
   });
 }
 
 export function useDeletePlugin() {
   const qc = useQueryClient();
   return useMutation({
+    onMutate: async (vars) => {
+      await qc.cancelQueries({
+        queryKey: qk.pluginReferences(vars.id),
+        exact: true,
+      });
+    },
     mutationFn: ({
       id,
       revision,
@@ -1463,7 +1464,6 @@ export function useDeletePlugin() {
     onSuccess: async (_data, vars) => {
       const invalidations = [
         qc.invalidateQueries({ queryKey: qk.pluginRegistry }),
-        qc.invalidateQueries({ queryKey: ['plugin-references', vars.id] }),
       ];
       if (vars.cascade) {
         invalidations.push(
@@ -1472,6 +1472,11 @@ export function useDeletePlugin() {
         );
       }
       await Promise.all(invalidations);
+      qc.removeQueries({
+        queryKey: qk.pluginReferences(vars.id),
+        exact: true,
+        type: 'inactive',
+      });
     },
   });
 }
@@ -1573,8 +1578,9 @@ export function useUpdateRouterTerminalStrategy() {
         { strategy },
         { ifMatch: revision },
       ),
-    onSuccess: (_d, vars) =>
-      qc.invalidateQueries({ queryKey: ['router-terminal', vars.id] }),
+    onSuccess: async (_data, vars) => {
+      await invalidatePrincipalRecordQueries(qc, vars.id);
+    },
   });
 }
 export function useApplyConfig() {

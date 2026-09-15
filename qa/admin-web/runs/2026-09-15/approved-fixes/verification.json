@@ -1,0 +1,63 @@
+{
+  "schema": "cc-lb-approved-fixes-verification/v2",
+  "candidate": "f564dcf57a4c2b914b2c690b8dee4e1c68f4fa472ae680bbe599d250dcd28f65",
+  "source_base": "ef70b347790c46fa9956435a820a51b60c547d04",
+  "historical_candidate_patch": "7ef937736bfb0432d3b5c22c1af90bace625c1df04a05201a475806f70a34166",
+  "isolated_functional_checks": {
+    "upstreams_required": {
+      "passed": 6,
+      "failed": 0
+    },
+    "principals": {
+      "passed": 10,
+      "failed": 0,
+      "channel_boundary": "Ten functional checks include UI observations, one direct API-only case and one proxy-only authentication check; this is not a count of ten browser interactions.",
+      "direct_api_only_checks": 1,
+      "proxy_only_checks": 1
+    },
+    "plugins": {
+      "passed_flows": 3,
+      "failed_flows": 0
+    }
+  },
+  "backend_gate_history": [
+    {
+      "result": "FAIL",
+      "run": 1520,
+      "passed": 1519,
+      "failed": 1,
+      "skipped": 9,
+      "failure": "admin_warmup_endpoints::test_upstream_detail_shape_unchanged",
+      "cause": "Exact response-key-set assertion rejected the approved base_url addition."
+    },
+    {
+      "result": "PASS",
+      "scope": "Corrected response test plus warmup and Base URL/OAuth regression selection",
+      "run": 9,
+      "passed": 9,
+      "skipped_by_selection": 283
+    },
+    {
+      "result": "PASS",
+      "scope": "cc-lb-admin, cc-lb-storage-api, cc-lb-storage-sqlite, cc-lb-storage-postgres, cc-lb-storage-conformance, cc-lb-engine; --all-features --test-threads=4 --no-fail-fast",
+      "run": 1520,
+      "passed": 1520,
+      "failed": 0,
+      "skipped": 9,
+      "duration_seconds": 1545.753,
+      "process_exit": 0
+    }
+  ],
+  "format_check": {
+    "command": "cargo fmt --all --check",
+    "exit": 0
+  },
+  "frontend_prior_gate": {
+    "tests": 699,
+    "passed": 699,
+    "scope": "Historical combined-candidate frontend gate; no frontend code edited by Main since that gate."
+  },
+  "independent_review": "review-dispositions.json",
+  "full_runtime_qa_complete": false,
+  "full_runtime_measurement_gate": "BLOCKED: incomplete production matrix and missing same-request SQL/pool evidence"
+}

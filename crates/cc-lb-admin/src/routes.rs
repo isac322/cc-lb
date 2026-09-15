@@ -8,7 +8,7 @@ use axum::{
     routing::{get, post},
 };
 
-use cc_lb_storage_api::{Storage, StorageError};
+use cc_lb_storage_api::{AuditQueryScope, Storage, StorageError};
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -362,21 +362,19 @@ async fn query_audit(
     let until = query.until.unwrap_or(u64::MAX);
     let limit = query.limit.unwrap_or(100).min(1000);
 
-    let result = match (
-        query.actor_authority.as_deref(),
-        query.actor_subject.as_deref(),
-    ) {
-        (Some(authority), Some(subject)) => {
-            storage
-                .query_audit_by_actor(authority, subject, since, until, limit)
-                .await
-        }
-        (None, None) => {
-            storage
-                .query_audit(query.principal_id.as_deref(), since, until, limit)
-                .await
-        }
-        _ => unreachable!("actor query fields were validated above"),
+    let result = {
+        let scope = match (
+            query.actor_authority.as_deref(),
+            query.actor_subject.as_deref(),
+        ) {
+            (Some(authority), Some(subject)) => AuditQueryScope::Actor { authority, subject },
+            (None, None) => query
+                .principal_id
+                .as_deref()
+                .map_or(AuditQueryScope::All, AuditQueryScope::Principal),
+            _ => unreachable!("actor query fields were validated above"),
+        };
+        storage.query_recent_audit(scope, since, until, limit).await
     };
     let entries = match result {
         Ok(entries) => entries,

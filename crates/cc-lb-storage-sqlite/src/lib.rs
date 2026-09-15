@@ -69,6 +69,7 @@ pub async fn open_sqlite(database_url: &str, clock: ClockHandle) -> StorageResul
     // deferred->write upgrades to deadlock; writers serialize via the write lock
     // + busy_timeout.
     let pool = SqlitePoolOptions::new()
+        .acquire_time_level(log::LevelFilter::Debug)
         .max_connections(8)
         .min_connections(1)
         .connect_with(options)

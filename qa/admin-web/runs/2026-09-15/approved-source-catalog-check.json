@@ -1,0 +1,554 @@
+{
+  "schema": "cc-lb-approved-source-catalog-check/v1",
+  "generation_exit": 0,
+  "check_exit": 0,
+  "standard_yaml_parser": "Ruby/Psych YAML.safe_load",
+  "standard_parse_verified": true,
+  "source_reconciliation": {
+    "status": "source_reconciled",
+    "ui_actions": 205,
+    "ui_request_occurrences": 149,
+    "api_endpoints": 115,
+    "registered_backend_routes": 115,
+    "production_ui_source_files": 93,
+    "ui_routes": 8,
+    "unknown_ui_requests": [],
+    "moved_legacy_ids_missing_from_api_catalog": [],
+    "unknown_latest_only_source_ids": [],
+    "unknown_latest_only_endpoints": [],
+    "registered_routes_missing_from_catalog": [],
+    "catalog_routes_missing_from_registration": [],
+    "backend_only_endpoints": [
+      {
+        "method": "GET",
+        "path": "/",
+        "reason": "API catalog declares non-UI clients: built-in-ui: browser document entry point serving embedded index.html"
+      },
+      {
+        "method": "GET",
+        "path": "/{*file}",
+        "reason": "API catalog declares non-UI clients: built-in-ui: browser static-asset and SPA-fallback requests served from the embedded admin web bundle"
+      },
+      {
+        "method": "GET",
+        "path": "/admin/health/state",
+        "reason": "API catalog declares non-UI clients: backend-only: listener readiness/monitoring endpoint; no built-in admin web caller."
+      },
+      {
+        "method": "GET",
+        "path": "/internal/v1/partials/{event_id}",
+        "reason": "API catalog declares non-UI clients: backend-only: authenticated cluster-peer partial-fetch endpoint; no browser UI caller."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/config/current",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/config/current."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/config/schema",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/config/schema."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/config/draft",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/config/draft."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/config/history",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/config/history."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/config/diff",
+        "reason": "API catalog declares non-UI clients: backend-only: no built-in admin web caller; the settings UI has no revision-diff modal."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/config/diff",
+        "reason": "API catalog declares non-UI clients: backend-only: versioned config-diff alias; the settings UI has no revision-diff modal."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/audit",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/audit."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/dashboard/summary",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/dashboard/summary."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/dashboard/usage",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/usage."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/dashboard/usage",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/usage."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/events/recent",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/events/recent."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/events/histogram",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/events/histogram."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/events/delta",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/events/delta."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/events/stream",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/events/stream."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/subscription-quotas/latest",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/latest."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/subscription-quotas/series",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/series."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/subscription-quotas/aggregate",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/aggregate."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/subscription-quotas/analysis",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/analysis."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/subscription-quotas/pool-history",
+        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/pool-history."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/scheduler/status",
+        "reason": "API catalog declares non-UI clients: backend-only: scheduler diagnostics endpoint; no built-in admin web caller."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/scheduler/failures",
+        "reason": "API catalog declares non-UI clients: backend-only: scheduler failure diagnostics endpoint; no built-in admin web caller."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/plugins/registry/{id}",
+        "reason": "API catalog declares non-UI clients: backend-only: single registry-entry read endpoint; built-in UI uses the registry list and references query instead."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/plugin-chain-entries/{id}",
+        "reason": "API catalog declares non-UI clients: backend-only: single chain-entry read endpoint; built-in UI reads chains by principal and slot."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/principals/{id}",
+        "reason": "API catalog declares non-UI clients: backend-only: single principal read endpoint; built-in UI reads the principal collection."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/principals/{id}/allowed_models",
+        "reason": "API catalog declares non-UI clients: backend-only: dedicated allowed-models read endpoint; built-in UI uses fields from the principal collection."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/principals/{id}/usage",
+        "reason": "API catalog declares non-UI clients: backend-only: principal-specific usage endpoint; no built-in admin web caller."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/principals/{id}/usage",
+        "reason": "API catalog declares non-UI clients: backend-only: versioned principal-usage alias; no built-in admin web caller."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/principals/{id}/limits",
+        "reason": "API catalog declares non-UI clients: backend-only: unversioned limits alias; built-in UI calls /admin/v1/principals/{id}/limits."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/principals/{id}/limits",
+        "reason": "API catalog declares non-UI clients: crates/cc-lb-admin/web/src/lib/queries.ts:437"
+      },
+      {
+        "method": "GET",
+        "path": "/admin/principals/{id}/keys/{key_id}",
+        "reason": "API catalog declares non-UI clients: backend-only: individual managed-key detail endpoint; built-in UI reads the principal key collection."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/principals/{id}/keys/{key_id}/usage",
+        "reason": "API catalog declares non-UI clients: backend-only: key-specific usage endpoint; no built-in admin web caller."
+      },
+      {
+        "method": "GET",
+        "path": "/admin/v1/upstreams/{id}",
+        "reason": "API catalog declares non-UI clients: backend-only: single upstream read endpoint; built-in UI reads the upstream collection."
+      },
+      {
+        "method": "POST",
+        "path": "/admin/principals/{id}/keys/{key_id}/revoke",
+        "reason": "No Admin Web caller in current source."
+      },
+      {
+        "method": "POST",
+        "path": "/admin/principals/{id}/keys/{key_id}/disable",
+        "reason": "No Admin Web caller in current source."
+      },
+      {
+        "method": "POST",
+        "path": "/admin/principals/{id}/keys/{key_id}/enable",
+        "reason": "No Admin Web caller in current source."
+      },
+      {
+        "method": "PUT",
+        "path": "/admin/v1/config/draft",
+        "reason": "API catalog declares non-UI clients: useSaveDraft (crates/cc-lb-admin/web/src/lib/queries.ts:1610) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:453)"
+      },
+      {
+        "method": "POST",
+        "path": "/admin/v1/config/draft/validate",
+        "reason": "API catalog declares non-UI clients: useValidateConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1601) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:454)"
+      },
+      {
+        "method": "POST",
+        "path": "/admin/v1/config/apply",
+        "reason": "API catalog declares non-UI clients: useApplyConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1586) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:455)"
+      },
+      {
+        "method": "POST",
+        "path": "/admin/v1/config/reload",
+        "reason": "API catalog declares non-UI clients: useReloadConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1627) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:456)"
+      },
+      {
+        "method": "POST",
+        "path": "/admin/v1/principals/{principal_id}/plugin-chain/rebalance",
+        "reason": "No Admin Web caller in current source."
+      },
+      {
+        "method": "PUT",
+        "path": "/admin/v1/plugin-chain-entries/{id}",
+        "reason": "No Admin Web caller in current source."
+      },
+      {
+        "method": "PUT",
+        "path": "/admin/v1/principals/{id}",
+        "reason": "API catalog declares non-UI clients: Aliased full-replacement route (calls update_principal_record)"
+      },
+      {
+        "method": "POST",
+        "path": "/admin/v1/router/preview",
+        "reason": "No Admin Web caller in current source."
+      },
+      {
+        "method": "POST",
+        "path": "/admin/v1/upstreams/{id}/enable",
+        "reason": "API catalog declares non-UI clients: useUpdateUpstream (queries.ts:1052 via PUT /admin/v1/upstreams/{id}) or direct API / CLI"
+      },
+      {
+        "method": "POST",
+        "path": "/admin/v1/upstreams/{id}/disable",
+        "reason": "API catalog declares non-UI clients: useUpdateUpstream (queries.ts:1052 via PUT /admin/v1/upstreams/{id}) or direct API / CLI"
+      }
+    ],
+    "api_contract_gaps": [],
+    "classification_notes": [
+      {
+        "source_contract": "api-write.json",
+        "area": "legacy_key_routes",
+        "description": "POST /admin/principals/{id}/keys/{key_id}/{revoke|disable|enable} are backend compatibility routes. Admin Web uses only the v1 issue/revoke routes; disable/enable remain direct API or operator-CLI-only."
+      },
+      {
+        "source_contract": "api-write.json",
+        "area": "operator_cli_only_endpoints",
+        "description": "No Admin Web caller exists for POST /admin/v1/router/preview, POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance, or PUT /admin/v1/plugin-chain-entries/{id}; each is cataloged with its source behavior and parameters."
+      },
+      {
+        "source_contract": "api-write.json",
+        "area": "read_only_post",
+        "description": "POST /admin/v1/router/preview is intentionally a read-only POST because its simulation input is a JSON body. It performs no storage query, audit append, external request, cache mutation, or persistent side effect."
+      },
+      {
+        "source_contract": "api-write.json",
+        "area": "config_apply_runtime_only",
+        "description": "The registered POST /admin[/v1]/config/apply handler calls CurrentConfig::apply_draft_config and appends an admin audit event. It does not call the separate settings::apply_config file/history workflow, so no ConfigStore::append_config_history SQL is attributed to these endpoints."
+      },
+      {
+        "source_contract": "api-write.json",
+        "area": "plugin_registry_patch_audit",
+        "description": "PATCH /admin/v1/plugins/registry/{id} updates the registry label and dynamic view but does not call record_admin_audit; no audit operation is attributed."
+      },
+      {
+        "source_contract": "api-write.json",
+        "area": "plugin_wasm_gc_audit",
+        "description": "POST /admin/v1/plugins/wasm/gc deletes only orphan blobs (sha256 absent from wasm_registry_v2) and their local cache files — registry-referenced blobs are kept even at refcount 0 — and does not emit an admin audit event."
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "GET /admin/v1/status",
+        "deployed_behavior": "Returns full status object including principals, plugin_chain_summary, killswitch, last_reload_status, restart_required_changes.",
+        "latest_behavior": "Returns simplified status object containing only version, git_sha, rust_version, profile, target, uptime_secs, replica_id, generation, upstreams.",
+        "impact": "Clients expecting killswitch, principals, or restart_required_changes in /admin/v1/status receive undefined in latest."
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "GET /admin/audit and GET /admin/v1/audit",
+        "deployed_behavior": "Accepts query params: since, until, limit, principal_id. No actor filtering. No SensitiveRead authorization enforcement.",
+        "latest_behavior": "Accepts additional query params: actor_authority, actor_subject. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. Enforces SensitiveRead authorization.",
+        "impact": "In deployed, querying by actor_authority or actor_subject is ignored/not supported. In latest, missing permissions return 403 Forbidden."
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "GET /admin/v1/events/detail/{event_id}",
+        "deployed_behavior": "Fetches event detail from storage without RBAC check or audit logging.",
+        "latest_behavior": "Requires SensitiveRead permission (returns 403 if unauthorized) and logs 'request_event_detail_read' audit event.",
+        "impact": "Requires authenticated identity with read permission in latest."
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "GET /admin/v1/export",
+        "deployed_behavior": "Exports config and chains without RBAC check or audit logging.",
+        "latest_behavior": "Requires SensitiveRead permission (403 on denial) and logs 'config_export' audit event (500 audit_write_failed if audit write fails).",
+        "impact": "Protected by RBAC in latest."
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "POST /admin/v1/principals/{id}/keys",
+        "deployed_behavior": "Accepts arbitrary extra JSON fields in request body; uses best-effort audit emission.",
+        "latest_behavior": "Enforces serde(deny_unknown_fields) on IssueKeyRequest; uses record_issue_audit_or_revoke (rolls back key creation if audit write fails).",
+        "impact": "Stricter payload validation and transactional audit guarantees in latest."
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "GET /admin/v1/principals/{id}/keys",
+        "deployed_behavior": "Lists keys for principal without SensitiveRead check or audit logging.",
+        "latest_behavior": "Requires SensitiveRead permission (403 if unauthorized) and logs 'principal_keys_list' audit event.",
+        "impact": "Protected by RBAC in latest."
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "POST /admin/v1/config/apply",
+        "deployed_behavior": "Logs audit record with hardcoded actor 'admin' and principal_id 'admin'.",
+        "latest_behavior": "Logs audit record with resolved actor metadata (actor_authority, actor_subject, actor_kind, actor_email).",
+        "impact": "Audit records contain structured actor identity in latest."
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx",
+        "deployed_behavior": "Synchronously checks localStorage for cclb_admin_token. If found, mounts children immediately. Form submit sets localStorage and unblocks without API validation.",
+        "latest_behavior": "Asynchronously calls GET /admin/v1/auth/session to validate token and identify actor. Shows loading spinner. Differentiates between static_token and external auth mode.",
+        "impact": "In deployed, the app will never make a network request on startup to verify the token, and does not support external auth redirect."
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "crates/cc-lb-admin/web/src/routes/settings.tsx (Admin Token card)",
+        "deployed_behavior": "Admin Token card is unconditionally rendered.",
+        "latest_behavior": "Admin Token card is conditionally rendered only when auth_mode === 'static_token'.",
+        "impact": "Under external auth in latest, Admin Token card is hidden."
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "crates/cc-lb-admin/web/src/routes/settings.tsx (Config History)",
+        "deployed_behavior": "Table has 6 columns: Revision, Applied, Upstreams, Principals, Plugins, TLS.",
+        "latest_behavior": "Table has 3 columns: Revision, Applied, TLS.",
+        "impact": "UI columns removed to match backend HistorySummary simplification."
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "GET /admin/audit and GET /admin/v1/audit (result ordering)",
+        "deployed_behavior": "Returns audit entries oldest first (ORDER BY id/seq ASC) via AuditStore::query_audit / query_audit_by_actor.",
+        "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor); scope filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler.",
+        "impact": "Entry order reverses vs deployed; clients paging by position see newest-first pages. Candidate only - not committed or deployed.",
+        "candidate_uncommitted": true
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "GET /admin/v1/upstreams and GET /admin/v1/upstreams/{id} (UpstreamResponse)",
+        "deployed_behavior": "UpstreamResponse has no base_url field.",
+        "latest_behavior": "Uncommitted candidate: UpstreamResponse adds base_url (Option<Url>, serialized as nullable string); frontend UpstreamSchema (web/src/lib/api.ts:784) requires the base_url key (nullable) and createUpstreamFromOauthDraft parses the response through UpstreamSchema.",
+        "impact": "Deployed responses lack base_url; candidate frontend schema validation fails against a backend that omits the key. Candidate only.",
+        "candidate_uncommitted": true
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "POST /admin/v1/principals/{id}/keys (label handling and error mapping)",
+        "deployed_behavior": "Omitted label becomes empty string; both stores run validate_identifier on the empty label and reject it; any KeyStoreError maps to 500.",
+        "latest_behavior": "Uncommitted candidate: empty label skips validate_identifier on both SqliteStorage and PostgresStorage (label optional); KeyStoreError::Storage(InvalidInput{field,reason}) maps to 400 {error:'invalid_input',field,reason}; other errors remain 500.",
+        "impact": "Key issuance without a label succeeds in candidate; client input errors surface as 400 invalid_input instead of 500. Candidate only.",
+        "candidate_uncommitted": true
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "crates/cc-lb-admin/web/src/components/upstreams/InlineNameEditor.tsx",
+        "deployed_behavior": "handleSave has no reentrancy guard; blur after Enter (or rapid Enter/blur) can issue a second PUT /admin/v1/upstreams/{id} with a stale spec_revision.",
+        "latest_behavior": "Uncommitted candidate: saveStartedRef latch allows a single submission per edit session; entering edit mode resets the latch; Escape sets the latch so the subsequent blur cannot save.",
+        "impact": "Duplicate rename submissions eliminated in candidate. Candidate only.",
+        "candidate_uncommitted": true
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "crates/cc-lb-admin/web/src/lib/queries.ts (principal mutations)",
+        "deployed_behavior": "enable/disable invalidates only ['principals']; allowed_models, default_limits and cache_keepalive PATCH invalidate ['principal',id]+['principals']; router-terminal PUT invalidates only ['router-terminal',id]. Router revision shown by useRouterTerminal can stay stale after non-router principal mutations.",
+        "latest_behavior": "Uncommitted candidate: all five mutations plus the router-terminal PUT funnel through invalidatePrincipalRecordQueries, invalidating ['principal',id], ['principals'] and ['router-terminal',id] together; qk.routerTerminal and qk.pluginReferences key factories added.",
+        "impact": "Router revision refreshes after every principal mutation in candidate. Candidate only.",
+        "candidate_uncommitted": true
+      },
+      {
+        "classification": "changed_since_deploy",
+        "target": "crates/cc-lb-admin/web/src/components/plugins/PluginCatalog.tsx + PluginDeleteDialog.tsx + queries.ts (plugin delete lifecycle and GC)",
+        "deployed_behavior": "GC button 'Delete unused uploads' disabled when zero unused uploads; toast 'Deleted N unused uploads'; per-row delete disabled during sweep; dialog uses del.mutate with local onSuccess toast; usePluginReferences cached normally and invalidated on delete.",
+        "latest_behavior": "Uncommitted candidate: GC button 'Clean orphaned uploads' always enabled (gcInFlight latch and gcPending guard remain), toasts 'No orphaned upload blobs found' / 'Removed N orphaned upload blobs', progress label 'Cleaning orphaned uploads'; row delete no longer disabled during sweep; dialog awaits del.mutateAsync, relies on the shared MutationCache error toast, supports onDeleted callback; usePluginReferences gcTime:0, delete cancels the in-flight reference query and removes the inactive cache entry on success.",
+        "impact": "GC presentation clarifies that only unreferenced WASM blobs are removed (registered plugins kept even at Used By 0); delete lifecycle hardened against stale reference cache. Candidate only.",
+        "candidate_uncommitted": true
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "route",
+        "path": "crates/cc-lb-admin/web/src/routes/credentials.tsx",
+        "reason": "Credentials page deprecated and removed in favor of upstream-specific credentials"
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "route",
+        "path": "crates/cc-lb-admin/web/src/routes/status.tsx",
+        "reason": "Dedicated /status page removed in favor of Settings and Metrics views"
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "api",
+        "endpoints": [
+          "GET /admin/status",
+          "GET /admin/killswitch",
+          "POST /admin/killswitch",
+          "DELETE /admin/killswitch",
+          "GET /admin/v1/killswitch",
+          "POST /admin/v1/killswitch",
+          "DELETE /admin/v1/killswitch",
+          "GET /admin/credentials",
+          "GET /admin/v1/credentials",
+          "GET /admin/oauth/status",
+          "GET /admin/v1/oauth/status",
+          "POST /admin/credentials/{principal_id}/{provider}/rotate",
+          "POST /admin/credentials/{principal_id}/{provider}/revoke"
+        ]
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "schema_field",
+        "endpoint": "GET /admin/v1/status",
+        "removed_fields": [
+          "principals",
+          "plugin_chain_summary",
+          "killswitch",
+          "last_reload_status",
+          "restart_required_changes"
+        ]
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "schema_field",
+        "endpoint": "GET /admin/config/history",
+        "removed_fields": [
+          "summary.upstreams",
+          "summary.principals",
+          "summary.plugin_count"
+        ]
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "ui_element",
+        "location": "crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx",
+        "elements": [
+          "/credentials nav item",
+          "/status nav item"
+        ]
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "ui_element",
+        "location": "crates/cc-lb-admin/web/src/components/CommandPalette.tsx",
+        "elements": [
+          "Go to Status navigation action"
+        ]
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "ui_element",
+        "location": "crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx",
+        "elements": [
+          "Global Killswitch badge",
+          "Plugin chain global usage summary"
+        ]
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "ui_element",
+        "location": "crates/cc-lb-admin/web/src/routes/settings.tsx",
+        "elements": [
+          "RestartRequiredMatrix: fully dynamic row",
+          "ConfigHistory: Upstreams, Principals, Plugins columns"
+        ]
+      }
+    ]
+  },
+  "runtime_reconciliation": {
+    "status": "runtime_pending",
+    "browser_execution": "not_run",
+    "entity_populations": "not_resolved",
+    "pagination_termination": "not_observed",
+    "polling_and_stream_cycles": "not_observed"
+  },
+  "files": [
+    {
+      "path": "qa/admin-web/source-contracts/ui.json",
+      "sha256": "75954442d5b6b5de8f30da866fa4bbb5f3aa2258329259705f30cfe9729e6e24"
+    },
+    {
+      "path": "qa/admin-web/source-contracts/api-read.json",
+      "sha256": "d0e784b879d05e72cafaa8accae915e696a5da02d443b60bf9b65954c5c7f1d5"
+    },
+    {
+      "path": "qa/admin-web/source-contracts/api-write.json",
+      "sha256": "a8c5127b8cc37b1cbe2b45fd662101aad784afa562a9bcf3cc4dae9759a56755"
+    },
+    {
+      "path": "qa/admin-web/source-contracts/deployed-delta.json",
+      "sha256": "6ab2c0035e90fb5272ebfaf84b02dfd95b1f76704e3772f8443a797a4b08a007"
+    },
+    {
+      "path": "scripts/generate-qa-inventory.mjs",
+      "sha256": "437defa05020f634c5d6fc16f2b7a8e166166cccbd8fb7100817b19e7a20bb7d"
+    },
+    {
+      "path": "qa/admin-web/api-query-inventory.yaml",
+      "sha256": "6ad1fc438c72cec0a4d09b89073dfbc8840730f6cfc572b473004629c768362f"
+    },
+    {
+      "path": "qa/admin-web/api-query-inventory.md",
+      "sha256": "4e037bd287593d28563e62caa88acbde0223e4d4f9151d4d0d30e14d045ee2bd"
+    },
+    {
+      "path": "qa/admin-web/source-reconciliation.json",
+      "sha256": "0001ffbc938d10ef94f27735433408e079d09234f8e6c734d311b6e11884db76"
+    }
+  ],
+  "final_recheck": {
+    "inventory_check_exit": 0,
+    "standard_yaml_parse_exit": 0,
+    "commit_prefix_minimum_guard_verified": true
+  }
+}

@@ -1,0 +1,221 @@
+{
+  "schema_version": 1,
+  "observed_at_utc": "2026-09-15T14:22:04.100223+00:00",
+  "experiment": "instrumentation-server-timing browser proof",
+  "binary": "/data/tmp/cc-lb-admin-web-qa-evidence/cc-lb-server-timing-candidate",
+  "binary_sha256": "db564601fbc351b33750ef3f766b916d829264004a5fd2a11b0ce2aeb5652de5",
+  "result": "PROVEN \u2014 instrumented binary emits Server-Timing 'rid;desc=req_admin_*' on every UI-issued GET; readable via performance.getEntriesByType('resource')[i].serverTiming from camofox_evaluate isolated world, on BOTH sqlite and postgres fixtures",
+  "tabs": {
+    "sqlite": "906e94b2-e6d0-4623-84dc-0080f1d582fa",
+    "postgres": "389f68be-25c4-4939-ba50-b089734210e2"
+  },
+  "auth": "static token injected into localStorage via REST /tabs/:tabId/evaluate (userId=omp) reading fixture admin-token file directly; token never printed/logged/screenshotted",
+  "method_note": "method=null for all rows \u2014 ResourceTiming does not expose method; backend join (Main) will confirm GET",
+  "ui_get_rows": [
+    {
+      "db": "sqlite",
+      "resource_url": "http://127.0.0.1:56152/admin/v1/auth/session",
+      "timeOrigin": 1789481983807,
+      "startTime": 109,
+      "responseStart": 111,
+      "responseEnd": 111,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a570-1fad-7bd1-b61d-dd9bf6b7490a",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "sqlite",
+      "resource_url": "http://127.0.0.1:56152/admin/health",
+      "timeOrigin": 1789481983807,
+      "startTime": 120,
+      "responseStart": 122,
+      "responseEnd": 122,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a570-1fb8-74c1-86bc-f7c77d52fdb2",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "sqlite",
+      "resource_url": "http://127.0.0.1:56152/admin/v1/upstreams",
+      "timeOrigin": 1789481983807,
+      "startTime": 120,
+      "responseStart": 123,
+      "responseEnd": 123,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a570-1fb8-74c1-86bc-f7a488498691",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "sqlite",
+      "resource_url": "http://127.0.0.1:56152/admin/v1/status",
+      "timeOrigin": 1789481983807,
+      "startTime": 120,
+      "responseStart": 123,
+      "responseEnd": 123,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a570-1fb8-74c1-86bc-f7e739d7081e",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "sqlite",
+      "resource_url": "http://127.0.0.1:56152/admin/v1/subscription-quotas/latest",
+      "timeOrigin": 1789481983807,
+      "startTime": 120,
+      "responseStart": 124,
+      "responseEnd": 124,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a570-1fb8-74c1-86bc-f7b8f173f2ff",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "sqlite",
+      "resource_url": "http://127.0.0.1:56152/admin/v1/principals",
+      "timeOrigin": 1789481983807,
+      "startTime": 120,
+      "responseStart": 128,
+      "responseEnd": 128,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a570-1fb9-7e21-9ff9-2bb7ac71e41a",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "sqlite",
+      "resource_url": "http://127.0.0.1:56152/admin/usage",
+      "timeOrigin": 1789481983807,
+      "startTime": 120,
+      "responseStart": 128,
+      "responseEnd": 128,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a570-1fb8-74c1-86bc-f7d9ad589b05",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "postgres",
+      "resource_url": "http://127.0.0.1:56162/admin/v1/auth/session",
+      "timeOrigin": 1789482050203,
+      "startTime": 121,
+      "responseStart": 122,
+      "responseEnd": 122,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a571-2314-7cc3-b8ca-7caf5f635f2c",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "postgres",
+      "resource_url": "http://127.0.0.1:56162/admin/v1/upstreams",
+      "timeOrigin": 1789482050203,
+      "startTime": 138,
+      "responseStart": 142,
+      "responseEnd": 142,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a571-2326-7113-9910-fe362488bf32",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "postgres",
+      "resource_url": "http://127.0.0.1:56162/admin/v1/subscription-quotas/latest",
+      "timeOrigin": 1789482050203,
+      "startTime": 138,
+      "responseStart": 142,
+      "responseEnd": 142,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a571-2326-7113-9910-fe4dc28bee0d",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "postgres",
+      "resource_url": "http://127.0.0.1:56162/admin/usage",
+      "timeOrigin": 1789482050203,
+      "startTime": 138,
+      "responseStart": 147,
+      "responseEnd": 147,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a571-2326-7113-9910-fe5668060823",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "postgres",
+      "resource_url": "http://127.0.0.1:56162/admin/v1/status",
+      "timeOrigin": 1789482050203,
+      "startTime": 138,
+      "responseStart": 193,
+      "responseEnd": 193,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a571-2327-7ee0-84ab-cbc60c4b481b",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "postgres",
+      "resource_url": "http://127.0.0.1:56162/admin/health",
+      "timeOrigin": 1789482050203,
+      "startTime": 139,
+      "responseStart": 141,
+      "responseEnd": 141,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a571-2327-7ee0-84ab-cbd3fcc352c0",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    },
+    {
+      "db": "postgres",
+      "resource_url": "http://127.0.0.1:56162/admin/v1/principals",
+      "timeOrigin": 1789482050203,
+      "startTime": 139,
+      "responseStart": 182,
+      "responseEnd": 182,
+      "responseStatus": 200,
+      "method": null,
+      "rid": "req_admin_01a0a571-2327-7ee0-84ab-cbe8eacc4807",
+      "ui_dom_state": "/upstreams mounted: '0 total / No upstreams' empty state, sidebar nav rendered"
+    }
+  ],
+  "cache_rid_reuse_counterexample": {
+    "db": "sqlite",
+    "asset": "http://127.0.0.1:56152/assets/index-BiWHYIv1.js",
+    "cache_control": "public, max-age=31536000, immutable",
+    "etag": "\"c74af72ff51f6d35e3c3017f6f5296a93ea2b8cd98ecddd6332375d1440977b8\"",
+    "finding": "force-cache fetch x2 produced 2 additional resource entries, ALL carrying the SAME rid req_admin_01a0a56f-c865-7510-b84e-4fce6056f4ca (transferSize=0, served from cache). rid is NOT unique per resource-timing entry for cacheable assets \u2014 rid dedup required before counting server requests; cached responses reuse the original response's Server-Timing header.",
+    "entries": [
+      {
+        "startTime": 24,
+        "responseStart": 24,
+        "responseEnd": 45,
+        "transferSize": 0,
+        "rid": "req_admin_01a0a56f-c865-7510-b84e-4fce6056f4ca"
+      },
+      {
+        "startTime": 38669,
+        "responseStart": 38669,
+        "responseEnd": 38672,
+        "transferSize": 0,
+        "rid": "req_admin_01a0a56f-c865-7510-b84e-4fce6056f4ca"
+      },
+      {
+        "startTime": 38673,
+        "responseStart": 38673,
+        "responseEnd": 38676,
+        "transferSize": 0,
+        "rid": "req_admin_01a0a56f-c865-7510-b84e-4fce6056f4ca"
+      }
+    ]
+  },
+  "caveats": [
+    "1 native click can produce 2 requests (camofox_click double-dispatch reported separately); do not assume 1 UI action = 1 HTTP request",
+    "static assets also carry rid \u2014 filter by /admin/ paths for API join",
+    "polling GETs (usage/quotas/status/health) recur every ~5s/15s \u2014 rid set grows while tab open"
+  ],
+  "writes_observed": 0,
+  "secret": false
+}

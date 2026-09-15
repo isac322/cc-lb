@@ -3,6 +3,7 @@ import {
   FinalRequestEventUpdateSchema,
   fetchWithAuth,
   RequestEventPartialSchema,
+  UpstreamSchema,
 } from './api';
 
 vi.mock('./auth', () => ({
@@ -213,6 +214,38 @@ describe('RequestEventPartialSchema', () => {
         response_body_wait_ms: Number.POSITIVE_INFINITY,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('UpstreamSchema', () => {
+  const fixture = {
+    id: 'upstream-1',
+    name: 'Primary',
+    kind: 'anthropic_oauth',
+    enabled: true,
+    base_url: 'https://gateway.example.com/v1/',
+    warmup_enabled: true,
+    warmup_dialect_plugin: null,
+    spec_revision: 3,
+    status: {
+      last_apply_error: null,
+      last_apply_at_unix_secs: null,
+      last_warmup_at_unix_secs: null,
+    },
+  };
+
+  it('preserves a stored base URL and accepts an explicit null', () => {
+    expect(UpstreamSchema.parse(fixture).base_url).toBe(
+      'https://gateway.example.com/v1/',
+    );
+    expect(
+      UpstreamSchema.parse({ ...fixture, base_url: null }).base_url,
+    ).toBeNull();
+  });
+
+  it('requires the backend base URL field instead of silently stripping it', () => {
+    const { base_url: _baseUrl, ...withoutBaseUrl } = fixture;
+    expect(UpstreamSchema.safeParse(withoutBaseUrl).success).toBe(false);
   });
 });
 

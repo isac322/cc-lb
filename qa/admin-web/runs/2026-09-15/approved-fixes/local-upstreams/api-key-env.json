@@ -1,0 +1,23 @@
+{
+  "name": "api_key_env_source_and_secret_blank_writeonly",
+  "verdict": "FAIL",
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/upstreams",
+      "status": 201
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/upstreams",
+      "status": 200
+    }
+  ],
+  "detail": {
+    "api_response_has_env": false,
+    "ui_env_source": false,
+    "edit_env_value": "https://api.anthropic.com/",
+    "secret_input_blank": true,
+    "secret_value_recorded": false
+  }
+}

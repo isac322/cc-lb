@@ -1,0 +1,77 @@
+{
+  "attribution": {
+    "app_database_user": "admin_web_qa",
+    "background_separation": {
+      "non_target_shared_blks_read_total": 0,
+      "non_target_statement_intervals": 13,
+      "observed_non_target_family": "api_key_usage_writers_v1 plus transaction/control statements",
+      "request_events_shared_blks_read_total": 0,
+      "request_events_supporting_intervals": 30
+    },
+    "method": "isolated_serial_pg_stat_statements_delta",
+    "not_protocol_request_id_tracing": true,
+    "same_family_background_residual": "No request-ID trace attribution was available. Fresh app per cold sample, concurrency=1, isolated database, and fixture run_at anchored six hours in the future suppress keepalive job execution, but an unobserved background task issuing an identical target SQL family cannot be excluded absolutely.",
+    "sequence": "pg_stat_statements_reset immediately before one concurrency-1 HTTP request; capture immediately after",
+    "shared_blks_read_meaning": "PostgreSQL buffers loaded into shared_buffers during the serial interval; not proof of physical device I/O, storage latency, or pool wait.",
+    "target_sql_family": "statements whose parsed/referenced SQL names include keepalive, principal, upstream, or request-events supporting relations"
+  },
+  "controls": {
+    "cold_each_sample": [
+      "stop app",
+      "stop PostgreSQL cleanly",
+      "evict explicitly selected owned PostgreSQL relation files with POSIX_FADV_DONTNEED",
+      "verify mincore",
+      "restart PostgreSQL (clears shared_buffers)",
+      "verify pg_buffercache for target relations",
+      "start app",
+      "reset app-user pg_stat_statements",
+      "make exactly one fixed API request",
+      "capture response and SQL block stats"
+    ],
+    "transition_order": [
+      "cold-A",
+      "warm",
+      "cold-B"
+    ],
+    "warm": [
+      "same running app and PostgreSQL after an initial warm-up",
+      "30 requests per fixed API key without reset"
+    ]
+  },
+  "created_at_utc": "2026-09-15T06:45:49Z",
+  "limitations": [
+    "mincore measures only explicitly selected relation files, not WAL/metadata/temp/tablespaces/storage-controller cache",
+    "fadvise is advisory and success requires measured post-eviction residency",
+    "PostgreSQL restart controls shared_buffers; it does not prove hardware/storage-controller coldness",
+    "app startup may read non-target relations; target pg_buffercache/mincore proof is captured immediately before the request",
+    "pure pool wait is not observable and will be reported missing rather than zero-filled",
+    "PostgreSQL buffers loaded into shared_buffers during the serial interval; not proof of physical device I/O, storage latency, or pool wait.",
+    "No request-ID trace attribution was available. Fresh app per cold sample, concurrency=1, isolated database, and fixture run_at anchored six hours in the future suppress keepalive job execution, but an unobserved background task issuing an identical target SQL family cannot be excluded absolutely."
+  ],
+  "ports": {
+    "admin": 53272,
+    "metrics": 53273,
+    "postgres": 53279,
+    "proxy": 53271
+  },
+  "schema": "cc-lb-controlled-cache-experiment/v1",
+  "scope": {
+    "api_origin": "http://127.0.0.1:53272",
+    "binary": "/data/tmp/cc-lb-admin-web-qa-completion/target/debug/cc-lb",
+    "binary_sha256": "322b9bba2fb92918698461e6419adf1e0cdde379c83101d2dc2ad94463cfc168",
+    "claim_boundary": "Only the fixed principalKeepalive endpoints and seeded fixture keys are measured; not all product queries.",
+    "database": "isolated PostgreSQL 16 named volume only",
+    "queries": [
+      "principal cache-keepalive summary (list response summary)",
+      "principal cache-keepalive list rows",
+      "principal cache-keepalive session detail"
+    ],
+    "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04"
+  },
+  "source_fixture": {
+    "config_sha256": "37f1e702d7f49e2f23a31e70d5e4c44404adbc981fa673c048676251a8bdb273",
+    "dump": "/data/tmp/cc-lb-admin-web-qa-completion/target/keepalive-qa/admin-web-fixtures-postgres/snapshots/populated/database.pgdump",
+    "fixture_sha256": "839a50bded1fc770af46638c041f4afb1aa7dc39cbd443176de8844a81dbf0d7",
+    "sha256": "9a7bd8ef49d70651d3806a6e99a8d0bea726d5dbd71ddc56e77c1e543f3f7a89"
+  }
+}

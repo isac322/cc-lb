@@ -13,7 +13,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::Body;
 use axum::error_handling::HandleErrorLayer;
-use axum::extract::State;
+use axum::extract::{MatchedPath, State};
 use axum::http::header::{CONTENT_LENGTH, HeaderValue};
 use axum::http::{HeaderMap, HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
@@ -2359,6 +2359,7 @@ fn admin_router(
         .layer(crate::admin_compression::layer());
 
     crate::admin_security::with_browser_security_headers(admin_router)
+        .layer(middleware::from_fn(admin_request_trace_middleware))
 }
 
 fn server_state_router(server_state: Arc<ServerStateHandle>) -> Router {
@@ -2812,6 +2813,59 @@ async fn request_id_middleware(
         .headers_mut()
         .insert(HeaderName::from_static("request-id"), request_id);
     response
+}
+
+async fn admin_request_trace_middleware(
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response<Body>, StatusCode> {
+    let mut request_id = String::with_capacity("req_admin_".len() + 36);
+    let _ = write!(&mut request_id, "req_admin_{}", uuid::Uuid::now_v7());
+    let mut server_timing = String::with_capacity("rid;desc=\"\"".len() + request_id.len());
+    let _ = write!(&mut server_timing, "rid;desc=\"{request_id}\"");
+    let method = match request.method().as_str() {
+        method @ ("GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS" | "CONNECT"
+        | "TRACE") => method,
+        _ => "OTHER",
+    };
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("unmatched", MatchedPath::as_str);
+    let span = tracing::info_span!(
+        "admin.request",
+        request_id = request_id.as_str(),
+        "http.request.method" = method,
+        "http.route" = route,
+        "http.response.status_code" = tracing::field::Empty,
+        handler_ms = tracing::field::Empty,
+    );
+    let header = HeaderValue::from_maybe_shared(Bytes::from(request_id))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let timing_header = HeaderValue::from_maybe_shared(Bytes::from(server_timing))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Measure response-head generation without reading or buffering the body.
+    let started = Instant::now();
+    let mut response = next.run(request).instrument(span.clone()).await;
+    let handler_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let status = u64::from(response.status().as_u16());
+    span.record("http.response.status_code", status);
+    span.record("handler_ms", handler_ms);
+    response
+        .headers_mut()
+        .insert(HeaderName::from_static("x-request-id"), header);
+    // Expose only the same opaque ID to Resource Timing, not a duration.
+    response
+        .headers_mut()
+        .append(HeaderName::from_static("server-timing"), timing_header);
+    span.in_scope(|| {
+        tracing::info!(
+            "http.response.status_code" = status,
+            handler_ms,
+            "admin_response_head_ready"
+        );
+    });
+    Ok(response)
 }
 
 async fn lifecycle_middleware(

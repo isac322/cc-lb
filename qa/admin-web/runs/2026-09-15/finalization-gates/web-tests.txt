@@ -1,0 +1,166 @@
+
+ RUN  v5.0.0 /data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web
+
+ ✓ |components| src/routes/-principals.test.tsx (27 tests) 1585ms
+ ✓ |components| src/components/ui/RequestEventsTable.test.tsx (22 tests) 802ms
+ ✓ |components| src/routes/-settings-loading.test.tsx (10 tests) 763ms
+ ✓ |components| src/components/principals/cache-keepalive/__tests__/CacheKeepaliveSettingsDrawer.test.tsx (16 tests) 672ms
+ ✓ |components| src/routes/-upstreams-loading.test.tsx (15 tests) 627ms
+ ✓ |components| src/lib/hooks/__tests__/polling-retention.test.ts (2 tests) 649ms
+   ✓ quota polling retention (2)
+     ✓ keeps successful data through a same-range refresh failure and replaces it only after recovery 324ms
+     ✓ uses same-identity data as a range placeholder but never crosses upstream identity 324ms
+ ✓ |components| src/components/ui/RequestEventDrawer.test.tsx (27 tests) 605ms
+ ✓ |components| src/lib/hooks/__tests__/histogram-retention.test.ts (2 tests) 566ms
+   ✓ event histogram retention (2)
+     ✓ retains the same filter density through polling and a pending pan 328ms
+ ✓ |components| src/components/principals/cache-keepalive/__tests__/CacheKeepaliveSessionsDrawer.test.tsx (21 tests) 549ms
+ ✓ |components| src/routes/-index.test.tsx (25 tests) 425ms
+ ✓ |components| src/components/logs.test.tsx (7 tests) 428ms
+ ✓ |components| src/lib/hooks/__tests__/query-boundary.test.ts (4 tests) 394ms
+ ✓ |components| src/components/ui/latency/LatencyCell.test.tsx (18 tests) 343ms
+ ✓ |components| src/lib/hooks/__tests__/queries.events.test.ts (2 tests) 281ms
+ ✓ |components| src/components/ui/latency/LatencyTimeline.test.tsx (36 tests) 262ms
+ ✓ |components| src/routes/-logs-polling.test.tsx (5 tests) 258ms
+ ✓ |components| src/routes/-audit-loading.test.tsx (5 tests) 243ms
+ ✓ |components| src/routes/-plugins.test.tsx (7 tests) 241ms
+ ✓ |components| src/components/ui/CalendarPopover.test.tsx (6 tests) 226ms
+ ✓ |components| src/lib/hooks/__tests__/queries.cacheKeepalive.test.ts (5 tests) 226ms
+ ✓ |components| src/components/principals/cache-keepalive/__tests__/CacheKeepaliveCard.test.tsx (8 tests) 163ms
+ ✓ |components| src/components/ui/RequestEventsTable.live.test.tsx (8 tests) 138ms
+ ✓ |components| src/components/plugins/PluginDetail.loading.test.tsx (9 tests) 128ms
+ ✓ |components| src/components/ui/RequestEventDrawer.responsive.test.tsx (2 tests) 122ms
+ ✓ |components| src/components/AuthRequiredGate.test.tsx (6 tests) 99ms
+ ✓ |components| src/components/plugins/PluginCatalog.loading.test.tsx (4 tests) 102ms
+ ✓ |components| src/components/ui/Hint.test.tsx (5 tests) 100ms
+ ✓ |components| src/components/principals/cache-keepalive/__tests__/SessionDetailPane.test.tsx (8 tests) 109ms
+ ✓ |components| src/components/ui/primitives.loading.test.tsx (16 tests) 96ms
+ ✓ |components| src/components/upstreams/warmup/WarmupHistoryDrawer.loading.test.tsx (2 tests) 98ms
+ ✓ |components| src/components/ui/LogSelect.test.tsx (2 tests) 91ms
+ ✓ |components| src/components/ui/LogsPagination.test.tsx (10 tests) 93ms
+ ✓ |components| src/lib/hooks/__tests__/preferences.test.tsx (8 tests) 87ms
+ ✓ |components| src/components/upstreams/SettingsCard.test.tsx (4 tests) 85ms
+ ✓ |components| src/components/LiveTailFailureBanner.test.tsx (5 tests) 83ms
+ ✓ |components| src/lib/hooks/__tests__/queries.warmup.test.ts (13 tests) 73ms
+ ✓ |components| src/lib/hooks/__tests__/queries.usage.test.ts (1 test) 63ms
+ ✓ |components| src/components/upstreams/__tests__/ApiUsageCard.legend-reserve.test.tsx (3 tests) 58ms
+ ✓ |components| src/components/ui/TimeRangeStrip.test.tsx (3 tests) 57ms
+ ✓ |components| src/components/upstreams/warmup/WarmupCardMinimal.loading.test.tsx (2 tests) 38ms
+ ✓ |components| src/lib/hooks/__tests__/useLiveEventStream.partial-cap.test.ts (1 test) 34ms
+ ✓ |components| src/components/ui/RelativeTime.test.tsx (10 tests) 29ms
+ ✓ |components| src/lib/useLiveEventStream.test.tsx (6 tests) 25ms
+ ✓ |components| src/lib/hooks/__tests__/stream-lifecycle.test.tsx (7 tests) 17ms
+ ✓ |components| src/routes/-principals-loading.test.tsx (2 tests) 18ms
+ ✓ |components| src/lib/hooks/__tests__/useLiveEventStream.retention.test.ts (6 tests) 19ms
+ ✓ |components| src/components/upstreams/__tests__/QuotaObservedAt.test.tsx (2 tests) 14ms
+ ✓ |components| src/lib/usePolledData.test.tsx (1 test) 12ms
+ ✓ |components| src/lib/hooks/__tests__/oauthInvalidation.test.ts (2 tests) 10ms
+ ✓ |components| src/routes/-plugin-upload-contract.test.tsx (1 test) 9ms
+ ✓ |components| src/components/ui/DateTimeField.test.tsx (7 tests) 7ms
+ ✓ |components| src/components/principals/cache-keepalive/cacheKeepaliveContract.test.tsx (3 tests) 3ms
+ ✓ |lib| src/lib/api.test.ts (14 tests) 12ms
+ ✓ |lib| src/lib/upsertReducer.test.ts (8 tests) 11ms
+ ✓ |lib| src/lib/timezone.test.ts (5 tests) 7ms
+ ✓ |lib| src/lib/cacheKeepaliveApi.test.ts (25 tests) 7ms
+ ✓ |lib| src/lib/format.test.ts (47 tests) 7ms
+ ✓ |lib| src/components/upstreams/buildQuotaChartData.test.ts (5 tests) 5ms
+ ✓ |lib| src/lib/logRows.test.ts (9 tests) 4ms
+ ✓ |lib| src/components/ui/latency/computeStageGroups.test.ts (28 tests) 5ms
+ ✓ |lib| src/lib/visibilityManager.test.ts (2 tests) 4ms
+ ✓ |lib| src/lib/calendarDate.test.ts (8 tests) 4ms
+ ✓ |lib| src/routes/-logs.test.ts (11 tests) 4ms
+ ✓ |lib| src/components/upstreams/quotaWindowVisibility.test.ts (30 tests) 4ms
+ ✓ |lib| src/lib/queryClient.mutation-error.test.ts (2 tests) 4ms
+ ✓ |lib| src/lib/reasoningTier.test.ts (36 tests) 4ms
+ ✓ |lib| src/lib/upsertReducer.partials.test.ts (4 tests) 3ms
+ ✓ |lib| src/components/upstreams/quotaWindowVisibility.sidebar.test.ts (10 tests) 3ms
+ ✓ |lib| src/components/principals/cache-keepalive/__tests__/liveMergeSessions.test.ts (4 tests) 3ms
+ ✓ |lib| src/lib/timeBuckets.test.ts (7 tests) 2ms
+ ✓ |lib| src/routes/-overviewPoolQuota.test.ts (2 tests) 2ms
+ ✓ |lib| src/lib/requestKind.test.ts (13 tests) 2ms
+
+ Test Files  72 passed (72)
+      Tests  699 passed (699)
+   Start at  01:22:22
+   Duration  34.20s (tests 39%, environment 31%, import 21%, setup 6%, transform 3%)
+
+stderr | src/components/ui/RequestEventsTable.test.tsx > RequestEventsTable > Cost Tooltip > renders 5 rows with $0.0000 formatting for each sub-cost and sums correctly
+Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.
+
+stderr | src/components/ui/RequestEventsTable.test.tsx > RequestEventsTable > Cost Tooltip > shows em-dash for partial rows
+Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.
+    at Hint (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/primitives.tsx:537:62)
+
+stderr | src/routes/-upstreams-loading.test.tsx > /upstreams refresh retention > keeps API usage, sidebar totals, and recent rows during placeholder refresh
+The width(0) and height(0) of chart should be greater than 0,
+       please check the style of container, or the props width(100%) and height(100%),
+       or add a minWidth(0) or minHeight(undefined) or use aspect(undefined) to control the
+       height and width.
+The width(0) and height(0) of chart should be greater than 0,
+       please check the style of container, or the props width(100%) and height(100%),
+       or add a minWidth(0) or minHeight(undefined) or use aspect(undefined) to control the
+       height and width.
+The width(0) and height(0) of chart should be greater than 0,
+       please check the style of container, or the props width(100%) and height(100%),
+       or add a minWidth(0) or minHeight(undefined) or use aspect(undefined) to control the
+       height and width.
+
+stderr | src/components/ui/latency/LatencyTimeline.test.tsx > LatencyTimeline > renders group rows for a streaming event
+Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.
+    at InfoPopover (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:301:155)
+    at StreamCounters (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1142:52)
+    at SseLane (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1127:51)
+    at LatencyTimeline (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1890:70)
+Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.
+    at InfoPopover (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:301:155)
+    at StreamCounters (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1151:52)
+    at SseLane (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1127:51)
+    at LatencyTimeline (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1890:70)
+Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.
+    at InfoPopover (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:301:155)
+    at StreamCounters (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1160:52)
+    at SseLane (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1127:51)
+    at LatencyTimeline (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1890:70)
+Base UI: A component that acts as a button expected a native <button> because the `nativeButton` prop is true. Rendering a non-<button> removes native button semantics, which can impact forms and accessibility. Use a real <button> in the `render` prop, or set `nativeButton` to `false`.
+    at InfoPopover (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:301:155)
+    at StreamCounters (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1178:52)
+    at SseLane (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1127:51)
+    at LatencyTimeline (/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx:1890:70)
+
+stderr | src/routes/-plugins.test.tsx > shows references, cascade deletes, and returns a deleted detail to catalog
+[react-timeago] Invalid Date provided
+[react-timeago] Invalid Date provided
+[react-timeago] Invalid Date provided
+[react-timeago] Invalid Date provided
+
+stderr | src/routes/-plugins.test.tsx > shows references, cascade deletes, and returns a deleted detail to catalog
+[react-timeago] Invalid Date provided
+[react-timeago] Invalid Date provided
+
+stderr | src/routes/-plugins.test.tsx > shows catalog and opens detail view
+[react-timeago] Invalid Date provided
+[react-timeago] Invalid Date provided
+[react-timeago] Invalid Date provided
+
+stderr | src/components/plugins/PluginDetail.loading.test.tsx > PluginDetail loading geometry > keeps the Used by content slot height in the pending state
+[react-timeago] Invalid Date provided
+[react-timeago] Invalid Date provided
+
+stderr | src/components/plugins/PluginDetail.loading.test.tsx > PluginDetail loading geometry > keeps the Used by content slot height in the zero references state
+[react-timeago] Invalid Date provided
+[react-timeago] Invalid Date provided
+
+stderr | src/components/plugins/PluginDetail.loading.test.tsx > PluginDetail loading geometry > keeps the Used by content slot height in the one reference state
+[react-timeago] Invalid Date provided
+[react-timeago] Invalid Date provided
+
+stderr | src/components/plugins/PluginDetail.loading.test.tsx > PluginDetail loading geometry > renders two structured Used by skeleton lines while pending
+[react-timeago] Invalid Date provided
+[react-timeago] Invalid Date provided
+
+stderr | src/components/upstreams/__tests__/ApiUsageCard.legend-reserve.test.tsx > ApiUsageCard legend slot reservation > renders legend slot with model name when data has series
+The width(0) and height(0) of chart should be greater than 0,
+       please check the style of container, or the props width(100%) and height(100%),
+       or add a minWidth(0) or minHeight(undefined) or use aspect(undefined) to control the
+       height and width.
+

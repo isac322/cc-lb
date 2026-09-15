@@ -1,0 +1,241 @@
+{
+  "run_id": "plugins-approved-candidate-2026-09-15",
+  "candidate": {
+    "path": "/data/tmp/cc-lb-admin-web-qa-evidence/cc-lb-approved-fixes-candidate",
+    "sha256": "f564dcf57a4c2b914b2c690b8dee4e1c68f4fa472ae680bbe599d250dcd28f65",
+    "patch_sha256": "7ef937736bfb0432d3b5c22c1af90bace625c1df04a05201a475806f70a34166"
+  },
+  "status": "PASS",
+  "results": {
+    "simple.json": {
+      "mode": "simple",
+      "status": "PASS",
+      "actual": {
+        "delete_status": 204,
+        "dispatch": 1,
+        "pending": {
+          "cancel_disabled": true,
+          "dialog_retained": true
+        },
+        "url_plugin_absent": true,
+        "registry_absent": true,
+        "browser_deleted_refs_get_count": 0
+      },
+      "screen_sha256": "315e8e29058541bb6efcb99063be74eedc3abffdc44da984b1e1ae942045fcd0",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/admin/v1/auth/session",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/plugins/registry",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/health",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/upstreams",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/principals",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "POST",
+          "path": "/admin/v1/plugins/wasm",
+          "query_names": [],
+          "status": 201
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/plugins/registry",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/plugins/registry/e91e45b2-4fb8-47b7-a155-4b5cf75e9efe/references",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "DELETE",
+          "path": "/admin/v1/plugins/registry/e91e45b2-4fb8-47b7-a155-4b5cf75e9efe",
+          "query_names": [],
+          "status": 204
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/plugins/registry",
+          "query_names": [],
+          "status": 200
+        }
+      ]
+    },
+    "cascade.json": {
+      "mode": "cascade",
+      "status": "PASS",
+      "actual": {
+        "delete_status": 200,
+        "dispatch": 1,
+        "pending": {
+          "cancel_disabled": true,
+          "dialog_retained": true
+        },
+        "url_plugin_absent": true,
+        "registry_absent": true,
+        "browser_deleted_refs_get_count": 0,
+        "direct_refs_status": 404,
+        "chain_count": 0,
+        "warmup_plugin": null
+      },
+      "screen_sha256": "ffa83add65dffa98d14beb73babd99ac4b2377a463c52c6d758a180daef64568",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/admin/v1/auth/session",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/plugins/registry",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/health",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/upstreams",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/principals",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/plugins/registry/bb7dea6b-2d35-457b-9b7b-0ee6213c22a1/references",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "DELETE",
+          "path": "/admin/v1/plugins/registry/bb7dea6b-2d35-457b-9b7b-0ee6213c22a1",
+          "query_names": [
+            "cascade"
+          ],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/plugins/registry",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/upstreams",
+          "query_names": [],
+          "status": 200
+        }
+      ]
+    },
+    "gc.json": {
+      "mode": "gc",
+      "status": "PASS",
+      "actual": {
+        "new_label_visible": true,
+        "description": "Remove uploaded WASM blobs no longer referenced by any registered plugin. Registered plugins remain available, even when Used By is 0.",
+        "button_disabled_before": false,
+        "catalog_text": "1 available",
+        "registry_count_before": 1,
+        "registry_unchanged": true,
+        "post_status": 200
+      },
+      "screen_sha256": "9f5dfaad24ed06134ac6df5385de95015efa63134855572ecbd1237350ca8841",
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/admin/v1/auth/session",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/plugins/registry",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/health",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/upstreams",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/principals",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "POST",
+          "path": "/admin/v1/plugins/wasm/gc",
+          "query_names": [],
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/plugins/registry",
+          "query_names": [],
+          "status": 200
+        }
+      ]
+    },
+    "gc-storage.json": {
+      "orphan_blob_rows_after_gc": 0,
+      "registry_owner_rows_after_gc": 0
+    }
+  },
+  "assertions": {
+    "simple_delete": "204, one dispatch, pending lock, success toast observed, catalog URL cleanup, registry absent, no browser references GET 404",
+    "cascade_delete": "200, one dispatch, pending lock, success toast observed, URL cleanup, registry absent, no browser references GET 404, direct refs 404, chain empty, warmup cleared",
+    "gc_empty_contract": "New Clean orphaned uploads label and source-exact explanatory title do not promise deletion of registered refcount-0 plugins",
+    "gc_orphan_removal": "Browser received Removed 1 orphaned upload blob; direct readonly SQLite proved seeded orphan blob row removed; registry remained unchanged during browser action"
+  },
+  "restoration": {
+    "final_snapshot": "populated",
+    "app": "stopped",
+    "browsers": "closed",
+    "source_or_config_edits": false,
+    "production_access": false
+  }
+}

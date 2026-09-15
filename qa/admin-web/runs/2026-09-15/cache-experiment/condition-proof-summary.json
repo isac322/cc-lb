@@ -1,0 +1,87 @@
+{
+  "attribution": {
+    "app_database_user": "admin_web_qa",
+    "background_separation": {
+      "non_target_shared_blks_read_total": 0,
+      "non_target_statement_intervals": 13,
+      "observed_non_target_family": "api_key_usage_writers_v1 plus transaction/control statements",
+      "request_events_shared_blks_read_total": 0,
+      "request_events_supporting_intervals": 30
+    },
+    "method": "isolated_serial_pg_stat_statements_delta",
+    "not_protocol_request_id_tracing": true,
+    "same_family_background_residual": "No request-ID trace attribution was available. Fresh app per cold sample, concurrency=1, isolated database, and fixture run_at anchored six hours in the future suppress keepalive job execution, but an unobserved background task issuing an identical target SQL family cannot be excluded absolutely.",
+    "sequence": "pg_stat_statements_reset immediately before one concurrency-1 HTTP request; capture immediately after",
+    "shared_blks_read_meaning": "PostgreSQL buffers loaded into shared_buffers during the serial interval; not proof of physical device I/O, storage latency, or pool wait.",
+    "target_sql_family": "statements whose parsed/referenced SQL names include keepalive, principal, upstream, or request-events supporting relations"
+  },
+  "cold_cycles": 48,
+  "eviction": {
+    "all_successful": true,
+    "resident_pages_after_values": [
+      0
+    ]
+  },
+  "helper_limitations": [
+    "mincore measures only explicitly selected relation files, not WAL/metadata/temp/tablespaces/storage-controller cache",
+    "fadvise is advisory and success requires measured post-eviction residency",
+    "PostgreSQL restart controls shared_buffers; it does not prove hardware/storage-controller coldness",
+    "app startup may read non-target relations; target pg_buffercache/mincore proof is captured immediately before the request",
+    "pure pool wait is not observable and will be reported missing rather than zero-filled",
+    "PostgreSQL buffers loaded into shared_buffers during the serial interval; not proof of physical device I/O, storage latency, or pool wait.",
+    "No request-ID trace attribution was available. Fresh app per cold sample, concurrency=1, isolated database, and fixture run_at anchored six hours in the future suppress keepalive job execution, but an unobserved background task issuing an identical target SQL family cannot be excluded absolutely."
+  ],
+  "helper_report_files": 192,
+  "post_request": {
+    "keepalive_mincore_pages_by_endpoint": {
+      "detail": {
+        "max": 34,
+        "median": 34.0,
+        "min": 34
+      },
+      "list": {
+        "max": 1110,
+        "median": 1110.0,
+        "min": 1110
+      },
+      "summary": {
+        "max": 1110,
+        "median": 1110.0,
+        "min": 0
+      }
+    },
+    "keepalive_pg_buffer_pages_by_endpoint": {
+      "detail": {
+        "max": 9,
+        "median": 9.0,
+        "min": 9
+      },
+      "list": {
+        "max": 453,
+        "median": 453.0,
+        "min": 453
+      },
+      "summary": {
+        "max": 453,
+        "median": 453.0,
+        "min": 453
+      }
+    }
+  },
+  "pre_request": {
+    "keepalive_mincore_resident_pages_values": [
+      0
+    ],
+    "keepalive_pg_buffer_pages_values": [
+      0
+    ]
+  },
+  "response_canonical_sha256": {
+    "detail": "d50eeff7d8bd4622937525e089ac8db8b0b09c02d085f8f368fb425e28a9ea5e",
+    "list": "1f56c162fcef6a544bfcac2016db1a7ef6fb17cf2df56c05837a0e9fa8d4a32d",
+    "summary": "b2474d3f2ec19bab3e5d49f7de3954f53332cc114a38d1ef49d54a6c13c52f92"
+  },
+  "schema": "cc-lb-controlled-cache-condition-proof/v1",
+  "selected_relation_files": 341,
+  "selected_relation_pages": 37684
+}

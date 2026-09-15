@@ -1,0 +1,17 @@
+[
+  {
+    "index": "qa/admin-web/runs/2026-09-15/approved-fixes/index.json",
+    "files_verified": 21,
+    "mismatches": 0
+  },
+  {
+    "index": "qa/admin-web/runs/2026-09-15/instrumentation/index.json",
+    "files_verified": 19,
+    "mismatches": 0
+  },
+  {
+    "index": "qa/admin-web/runs/2026-09-15/server-timing/index.json",
+    "files_verified": 20,
+    "mismatches": 0
+  }
+]

@@ -170,7 +170,7 @@ mod tests {
     use cc_lb_control::audit_writer::spawn_audit_writer;
     use cc_lb_lifecycle::{LimitRequestSummary, LimitSubject, RouteSummary};
     use cc_lb_storage_api::{
-        AuditEntry as StoredAuditEntry, AuditStore, StorageError, StorageResult,
+        AuditEntry as StoredAuditEntry, AuditQueryScope, AuditStore, StorageError, StorageResult,
     };
     use std::sync::Mutex as StdMutex;
 
@@ -195,6 +195,18 @@ mod tests {
         ) -> StorageResult<Vec<StoredAuditEntry>> {
             Err(StorageError::Fatal {
                 message: "query_audit is not used by subscriber tests".to_owned(),
+            })
+        }
+
+        async fn query_recent_audit(
+            &self,
+            _scope: AuditQueryScope<'_>,
+            _since: u64,
+            _until: u64,
+            _limit: usize,
+        ) -> StorageResult<Vec<StoredAuditEntry>> {
+            Err(StorageError::Fatal {
+                message: "query_recent_audit is not used by subscriber tests".to_owned(),
             })
         }
 

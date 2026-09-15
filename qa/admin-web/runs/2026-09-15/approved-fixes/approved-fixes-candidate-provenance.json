@@ -1,0 +1,15 @@
+{
+  "source_base": "ef70b347790c46fa9956435a820a51b60c547d04",
+  "candidate_uncommitted": true,
+  "app_patch_sha256": "7ef937736bfb0432d3b5c22c1af90bace625c1df04a05201a475806f70a34166",
+  "binary": "/data/tmp/cc-lb-admin-web-qa-evidence/cc-lb-approved-fixes-candidate",
+  "binary_sha256": "f564dcf57a4c2b914b2c690b8dee4e1c68f4fa472ae680bbe599d250dcd28f65",
+  "spa_index_sha256": "ae1289d3891c777fc2cc1c4a8cad2aeb959a0db732b39cf0de9fac347c9cbe71",
+  "scope": "Audit latest + approved FIX01..05 only",
+  "tests_so_far": {
+    "web": 699,
+    "focused_backend": 10,
+    "audit": 32
+  },
+  "full_combined_gate": "pending"
+}

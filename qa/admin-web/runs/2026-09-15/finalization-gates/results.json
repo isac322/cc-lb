@@ -1,0 +1,60 @@
+[
+  {
+    "name": "rust-format",
+    "exit_code": 0,
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ]
+  },
+  {
+    "name": "web-lint",
+    "exit_code": 0,
+    "command": [
+      "bun",
+      "run",
+      "lint"
+    ]
+  },
+  {
+    "name": "web-typecheck",
+    "exit_code": 0,
+    "command": [
+      "bun",
+      "run",
+      "typecheck"
+    ]
+  },
+  {
+    "name": "web-tests",
+    "exit_code": 0,
+    "command": [
+      "bunx",
+      "--bun",
+      "vitest",
+      "run",
+      "--maxWorkers=1",
+      "--no-file-parallelism"
+    ]
+  },
+  {
+    "name": "inventory-check",
+    "exit_code": 0,
+    "command": [
+      "bun",
+      "scripts/generate-qa-inventory.mjs",
+      "--check"
+    ]
+  },
+  {
+    "name": "recorder-syntax",
+    "exit_code": 0,
+    "command": [
+      "node",
+      "--check",
+      "crates/cc-lb-admin/web/qa/admin-web-browser-recorder.js"
+    ]
+  }
+]

@@ -1,0 +1,128 @@
+{
+  "run_kind": "recorder_v1_0_5_focused_pending_fetch_smoke",
+  "environment": "local",
+  "browser": "playwright-chromium-headless",
+  "started_at_utc": "2026-09-15T06:38:17.658Z",
+  "collector_version": "1.0.5",
+  "pending_snapshot": {
+    "elapsed_ms": 6,
+    "capture": {
+      "complete": false,
+      "incomplete_reasons": [
+        "action_window_still_open",
+        "wrapped_fetch_promise_still_pending"
+      ],
+      "overflow": {
+        "dropped_records": 0,
+        "first_dropped_sequence": null,
+        "last_dropped_sequence": null
+      },
+      "observer_dropped_entries": 0
+    },
+    "record_type_counts": {
+      "action_window": 1,
+      "fetch_observation": 1
+    },
+    "pending_fetch_records": [
+      {
+        "request_id": "2db3a86a-1cac-41e2-bb00-29056e07b071",
+        "settled_epoch_ms": null,
+        "response_status": {
+          "value": null,
+          "reason": "pending"
+        }
+      }
+    ]
+  },
+  "pending_drain": {
+    "elapsed_ms": 5,
+    "capture": {
+      "complete": false,
+      "incomplete_reasons": [
+        "action_window_still_open",
+        "wrapped_fetch_promise_still_pending"
+      ],
+      "overflow": {
+        "dropped_records": 0,
+        "first_dropped_sequence": null,
+        "last_dropped_sequence": null
+      },
+      "observer_dropped_entries": 0
+    },
+    "pending_fetch_records": [
+      {
+        "request_id": "2db3a86a-1cac-41e2-bb00-29056e07b071",
+        "settled_epoch_ms": null,
+        "response_status": {
+          "value": null,
+          "reason": "pending"
+        }
+      }
+    ]
+  },
+  "settlement": {
+    "status": 200,
+    "body_chars": 24,
+    "response_body_stored": false
+  },
+  "settled_drain": {
+    "capture": {
+      "complete": true,
+      "incomplete_reasons": [],
+      "overflow": {
+        "dropped_records": 0,
+        "first_dropped_sequence": null,
+        "last_dropped_sequence": null
+      },
+      "observer_dropped_entries": 0
+    },
+    "fetch_records": [
+      {
+        "request_id": "2db3a86a-1cac-41e2-bb00-29056e07b071",
+        "settled_epoch_ms": 1789454299158,
+        "response_status": {
+          "value": 200,
+          "reason": null
+        },
+        "body_sha256_present": true,
+        "body_reason": null,
+        "resource_timing_link": {
+          "state": "unique_url_time_window_candidate",
+          "source_entry_ids": [
+            "9225fd39-d1dd-45a0-8045-038edd27f3ab"
+          ],
+          "candidate_source_entry_ids": [
+            "9225fd39-d1dd-45a0-8045-038edd27f3ab"
+          ],
+          "reason": "not a protocol request ID; uniqueness is limited to wrapped fetch URL/time overlap"
+        }
+      }
+    ]
+  },
+  "body_hash_spot_check": {
+    "status": {
+      "value": 200,
+      "reason": null
+    },
+    "sha256_present": true,
+    "bytes": 50,
+    "reason": null,
+    "secret_scan": "clear_within_bounded_scan"
+  },
+  "privacy": {
+    "private_query_value_present": false,
+    "response_body_present": false,
+    "raw_query_url_present": false,
+    "bearer_value_present": false,
+    "cookie_header_value_present": false
+  },
+  "uninstall": {
+    "installed": false,
+    "fetch_restored": true,
+    "fetch_restore_reason": null,
+    "observer_disconnected": true
+  },
+  "verdict": "PASS",
+  "page_errors": [],
+  "completed_at_utc": "2026-09-15T06:38:19.405Z"
+}

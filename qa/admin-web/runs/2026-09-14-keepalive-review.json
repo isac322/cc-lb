@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-09-15",
+  "source": "qa/admin-web/runs/2026-09-14-keepalive.json",
+  "source_sha256": "cfa2453dc62ddba98b424e665285ce61819f53ff0da4887d76375eba3d9b525f",
+  "source_modified": false,
+  "coverage_verdict": "NOT_VERIFIED",
+  "reported_counts": {
+    "ui_combinations": 462,
+    "direct_fetch_combinations": 462,
+    "detail_measurements": 3,
+    "pagination_runs": 10
+  },
+  "limitations": [
+    {
+      "id": "historical-pagination-terminal",
+      "finding": "A 20-page cap was used; stored terminal flags lack the raw response cursor chain needed to independently verify completion.",
+      "affected_runs_at_20_pages": 8,
+      "required_replacement": "Capture each wire cursor input/output and the actual null terminal response without a page-count cap."
+    },
+    {
+      "id": "historical-detail-independence",
+      "finding": "All three UI/direct detail timing pairs are numerically identical and have no independent request timestamps; independent measurement is not established. Equal timings alone do not establish fabrication.",
+      "equal_timing_pairs": 3,
+      "required_replacement": "Capture independent UI resource and direct-request start/end timestamps and request IDs."
+    },
+    {
+      "id": "historical-cache-labels",
+      "finding": "First/subsequent request labels do not establish cold/warm OS or database cache conditions.",
+      "required_replacement": "Keep production observations separate from controlled isolated cold/warm runs."
+    }
+  ],
+  "replacement_run": null,
+  "follow_up": "docs/admin-web-qa-completion-plan-2026-09-15.md"
+}

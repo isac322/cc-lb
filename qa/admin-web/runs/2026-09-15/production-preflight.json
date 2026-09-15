@@ -1,0 +1,212 @@
+{
+  "run_kind": "production_admin_web_preflight",
+  "environment": "production",
+  "base_url": "https://cc-lb.runbear.io",
+  "source_workspace": "/data/tmp/cc-lb-admin-web-qa-completion",
+  "plan": "/data/tmp/cc-lb-admin-web-qa-completion/docs/admin-web-qa-completion-plan-2026-09-15.md",
+  "owner_tab_id": "c33f0839-7b36-4000-a1ee-5dc1a09c1db7",
+  "initial_tab_count": 0,
+  "current_page": "https://cc-lb.runbear.io/status",
+  "observed_window_utc": {
+    "start": "2026-09-15T05:23:59.433Z",
+    "end": "2026-09-15T05:28:10.385Z"
+  },
+  "role": {
+    "operator_role": "production_read_only_browser_qa",
+    "auth_identity_role": {
+      "status": "runtime_unavailable",
+      "value": null,
+      "reason": "GET /admin/v1/auth/session returned 404 on deployed v0.4.9. The current source maps a static-token identity to break_glass, but that role is source-derived inference and is not recorded as a runtime fact.",
+      "source_inference": "break_glass"
+    }
+  },
+  "auth_access": {
+    "observed_transport": "static bearer token read by the existing SPA from localStorage",
+    "storage_key": "cc-lb-admin-token",
+    "stored_value_present": true,
+    "secret_returned_or_written": false,
+    "auth_mode": "static_token_legacy_runtime_observation",
+    "evidence": [
+      "The mounted SPA rendered protected production pages.",
+      "The existing SPA storage key was present and was used without returning its value.",
+      "GET /admin/health, /admin/v1/status, /admin/v1/principals, /admin/v1/upstreams, and /admin/v1/plugins/registry returned 200 with the SPA bearer transport.",
+      "GET /admin/v1/auth/session returned 404, so provider/subject/runtime role metadata could not be obtained."
+    ],
+    "access_scope_observed": "protected admin read endpoints and Overview, Upstreams, Principals, Plugins, and Status UI mounts",
+    "unauthenticated_probe_performed": false,
+    "unauthenticated_probe_reason": "The current source records authorization denials to audit storage; an intentional failing auth request would violate the production read-only/no-write boundary."
+  },
+  "deployment": {
+    "ui_footer_version": "0.4.9",
+    "health": {
+      "path": "/admin/health",
+      "method": "GET",
+      "status": 200,
+      "started_at_utc": "2026-09-15T05:27:26.260Z",
+      "completed_at_utc": "2026-09-15T05:27:26.491Z",
+      "duration_ms": 231,
+      "response_chars": 73,
+      "response_fnv1a64": "c7be3505512c4bed",
+      "reported_status": "ok",
+      "version": "0.4.9",
+      "git_sha": "unknown",
+      "uptime_secs": 29383
+    },
+    "status": {
+      "path": "/admin/v1/status",
+      "method": "GET",
+      "status": 200,
+      "started_at_utc": "2026-09-15T05:27:26.492Z",
+      "completed_at_utc": "2026-09-15T05:27:26.866Z",
+      "duration_ms": 376,
+      "response_chars": 3989,
+      "response_fnv1a64": "f858e01ea9ae6e1b",
+      "version": "0.4.9",
+      "git_sha": "unknown",
+      "generation": 7,
+      "killswitch": false,
+      "restart_required_change_count": 0,
+      "last_reload_status": null,
+      "build": {
+        "rust_version": "unknown",
+        "profile": "unknown",
+        "target": "unknown"
+      }
+    },
+    "status_ui": {
+      "storage_backend": "postgres",
+      "pool": "10/10 idle",
+      "principal_count_with_plugin_chain": 22,
+      "plugin_chain_total_entries": 31,
+      "killswitch": "OFF",
+      "restart_required": false
+    },
+    "deployed_commit_status": "blocked",
+    "deployed_commit_reason": "Both health and status report git_sha as unknown.",
+    "deployed_image_status": "blocked",
+    "deployed_image_reason": "No deployed image identifier is exposed by the mounted UI or the observed GET responses."
+  },
+  "resource_denominators": {
+    "principals": {
+      "source": "GET /admin/v1/principals and mounted Principals UI",
+      "method": "GET",
+      "status": 200,
+      "started_at_utc": "2026-09-15T05:27:09.770Z",
+      "completed_at_utc": "2026-09-15T05:27:10.004Z",
+      "duration_ms": 234,
+      "response_chars": 4613,
+      "response_fnv1a64": "6875511c59e89f8a",
+      "denominator_id_set_fnv1a64": "1df10881d711fdf7",
+      "count": 22,
+      "ui_count": 22,
+      "enabled": 22,
+      "disabled": 0,
+      "kinds": {
+        "admin": 1,
+        "human": 15,
+        "machine": 6
+      },
+      "cursor_range": {
+        "request_after": null,
+        "response_next_cursor": null,
+        "terminal": true,
+        "contract": "single_collection_no_cursor_fields"
+      }
+    },
+    "upstreams": {
+      "source": "GET /admin/v1/upstreams and mounted Upstreams UI",
+      "method": "GET",
+      "status": 200,
+      "started_at_utc": "2026-09-15T05:27:10.004Z",
+      "completed_at_utc": "2026-09-15T05:27:10.228Z",
+      "duration_ms": 224,
+      "response_chars": 3189,
+      "response_fnv1a64": "7e413c8f70ec55bf",
+      "denominator_id_set_fnv1a64": "eb20a7496772fb0d",
+      "count": 9,
+      "ui_count": 9,
+      "enabled": 9,
+      "disabled": 0,
+      "kinds": {
+        "anthropic_oauth": 9
+      },
+      "cursor_range": {
+        "request_after": null,
+        "response_next_cursor": null,
+        "terminal": true,
+        "contract": "single_collection_no_cursor_fields"
+      }
+    },
+    "plugins": {
+      "source": "GET /admin/v1/plugins/registry and mounted Plugins UI",
+      "method": "GET",
+      "status": 200,
+      "started_at_utc": "2026-09-15T05:27:10.228Z",
+      "completed_at_utc": "2026-09-15T05:27:10.480Z",
+      "duration_ms": 252,
+      "response_chars": 3755,
+      "response_fnv1a64": "c743240320daaef1",
+      "denominator_id_set_fnv1a64": "e332214572d06d50",
+      "count": 2,
+      "ui_count": 2,
+      "builtin": 1,
+      "uploaded": 1,
+      "total_refcount": 40,
+      "cursor_range": {
+        "request_after": null,
+        "response_next_cursor": null,
+        "terminal": true,
+        "contract": "single_collection_no_cursor_fields"
+      }
+    }
+  },
+  "ui_navigation_evidence": [
+    {
+      "target": "/upstreams",
+      "interaction": "DOM link click inside Camofox page",
+      "mounted": true,
+      "heading": "Upstreams",
+      "visible_count": 9,
+      "body_text_fnv1a64": "a797ebe63608db8d",
+      "observed_at_utc": "2026-09-15T05:28:07.423Z"
+    },
+    {
+      "target": "/principals",
+      "interaction": "DOM link click inside Camofox page",
+      "mounted": true,
+      "heading": "Principals",
+      "visible_count": 22,
+      "body_text_fnv1a64": "ff552b3958895e69",
+      "observed_at_utc": "2026-09-15T05:28:08.453Z"
+    },
+    {
+      "target": "/plugins",
+      "interaction": "DOM link click inside Camofox page",
+      "mounted": true,
+      "heading": "Plugins",
+      "visible_count": 2,
+      "body_text_fnv1a64": "bf40d71714eda4b6",
+      "observed_at_utc": "2026-09-15T05:28:09.446Z"
+    },
+    {
+      "target": "/status",
+      "interaction": "DOM link click inside Camofox page",
+      "mounted": true,
+      "body_text_fnv1a64": "a627f862320028aa",
+      "observed_at_utc": "2026-09-15T05:28:10.385Z"
+    }
+  ],
+  "browser_tool_notes": {
+    "native_click": "Two native mouse clicks timed out and their temporary owner tabs disappeared. A fresh owner tab was created and navigation was completed with actual anchor element click() calls through Camofox evaluate, followed by Camofox snapshots.",
+    "production_mutations": [],
+    "forbidden_operations_invoked": false
+  },
+  "hash_algorithm": "FNV-1a 64-bit over exact response text or sorted identifier set joined by newline",
+  "preflight_verdict": "PASS_WITH_EXPLICIT_DEPLOYMENT_IDENTITY_BLOCKERS",
+  "not_claimed": [
+    "No exhaustive matrix execution is claimed.",
+    "No per-entity workflow completion is claimed.",
+    "No deployed commit or image is claimed.",
+    "No runtime auth identity role is claimed."
+  ]
+}

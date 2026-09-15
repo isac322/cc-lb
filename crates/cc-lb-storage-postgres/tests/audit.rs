@@ -2,7 +2,7 @@ use std::{str::FromStr, sync::Arc};
 
 use anyhow::{Context, Result};
 use cc_lb_clock::TestClock;
-use cc_lb_storage_api::{AuditEntry, AuditStore, BackendKind, MetaStore};
+use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, BackendKind, MetaStore};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
     AssertSqlSafe, PgPool,
@@ -37,6 +37,31 @@ fn query_audit_by_actor_filters_before_limit() {
             result
         })
         .expect("PostgreSQL audit actor query contract");
+}
+
+#[test]
+fn query_recent_audit_orders_before_limit_and_filters_exactly() {
+    let Some(url) = std::env::var("CI_POSTGRES_URL")
+        .ok()
+        .or_else(|| std::env::var("PG_URL").ok())
+    else {
+        eprintln!(
+            "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
+        );
+        return;
+    };
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async move {
+            let fixture = Fixture::create(&url).await?;
+            let result = run_recent_contract(&fixture.pool).await;
+            fixture
+                .drop_schema()
+                .await
+                .context("drop recent audit query schema")?;
+            result
+        })
+        .expect("PostgreSQL recent audit query contract");
 }
 
 async fn run_contract(pool: &PgPool) -> Result<()> {
@@ -76,6 +101,164 @@ async fn run_contract(pool: &PgPool) -> Result<()> {
             && entry.actor_email.as_deref() == Some("alice@example.com")
     }));
     Ok(())
+}
+
+async fn run_recent_contract(pool: &PgPool) -> Result<()> {
+    let storage = PostgresStorage::new(pool.clone(), Arc::new(TestClock::new_at_secs(NOW)));
+    storage.initialize(BackendKind::Postgres).await?;
+    let entries = [
+        recent_audit_entry("matching-old", NOW, "target-principal", AUTHORITY, SUBJECT),
+        recent_audit_entry(
+            "other-principal-newest-match",
+            NOW + 9,
+            "other-principal",
+            AUTHORITY,
+            SUBJECT,
+        ),
+        recent_audit_entry(
+            "wrong-authority-newer",
+            NOW + 11,
+            "target-principal",
+            "https://other.example",
+            SUBJECT,
+        ),
+        recent_audit_entry(
+            "wrong-subject-newer",
+            NOW + 10,
+            "target-principal",
+            AUTHORITY,
+            "bob",
+        ),
+        recent_audit_entry(
+            "matching-tie-first",
+            NOW + 8,
+            "target-principal",
+            AUTHORITY,
+            SUBJECT,
+        ),
+        recent_audit_entry(
+            "matching-tie-second",
+            NOW + 8,
+            "target-principal",
+            AUTHORITY,
+            SUBJECT,
+        ),
+        recent_audit_entry(
+            "late-inserted-old-timestamp",
+            NOW + 2,
+            "target-principal",
+            AUTHORITY,
+            SUBJECT,
+        ),
+    ];
+    for entry in &entries {
+        storage.append_audit(entry).await?;
+    }
+
+    let all_rows = storage
+        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 11, 5)
+        .await?;
+    assert_request_ids(
+        &all_rows,
+        &[
+            "wrong-authority-newer",
+            "wrong-subject-newer",
+            "other-principal-newest-match",
+            "matching-tie-second",
+            "matching-tie-first",
+        ],
+    );
+
+    let all_with_late_row = storage
+        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 11, 6)
+        .await?;
+    assert_eq!(
+        all_with_late_row
+            .last()
+            .map(|entry| entry.request_id.as_str()),
+        Some("late-inserted-old-timestamp")
+    );
+
+    let principal_rows = storage
+        .query_recent_audit(
+            AuditQueryScope::Principal("target-principal"),
+            NOW,
+            NOW + 11,
+            4,
+        )
+        .await?;
+    assert_request_ids(
+        &principal_rows,
+        &[
+            "wrong-authority-newer",
+            "wrong-subject-newer",
+            "matching-tie-second",
+            "matching-tie-first",
+        ],
+    );
+
+    let actor_rows = storage
+        .query_recent_audit(
+            AuditQueryScope::Actor {
+                authority: AUTHORITY,
+                subject: SUBJECT,
+            },
+            NOW,
+            NOW + 11,
+            3,
+        )
+        .await?;
+    assert_request_ids(
+        &actor_rows,
+        &[
+            "other-principal-newest-match",
+            "matching-tie-second",
+            "matching-tie-first",
+        ],
+    );
+
+    let tied_boundary_rows = storage
+        .query_recent_audit(AuditQueryScope::All, NOW + 8, NOW + 8, 10)
+        .await?;
+    assert_request_ids(
+        &tied_boundary_rows,
+        &["matching-tie-second", "matching-tie-first"],
+    );
+
+    assert!(
+        storage
+            .query_recent_audit(AuditQueryScope::All, NOW, NOW + 11, 0)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        storage
+            .query_recent_audit(AuditQueryScope::All, NOW + 1, NOW, 10)
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+fn assert_request_ids(rows: &[AuditEntry], expected: &[&str]) {
+    let actual = rows
+        .iter()
+        .map(|entry| entry.request_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(actual.as_slice(), expected);
+}
+
+fn recent_audit_entry(
+    request_id: &str,
+    ts: u64,
+    principal_id: &str,
+    authority: &str,
+    subject: &str,
+) -> AuditEntry {
+    AuditEntry {
+        principal_id: principal_id.to_owned(),
+        ..audit_entry(request_id, ts, authority, subject)
+    }
 }
 
 fn audit_entry(request_id: &str, ts: u64, authority: &str, subject: &str) -> AuditEntry {

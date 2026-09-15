@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{AuditEntry, AuditStore, StorageError, StorageResult};
+use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, StorageError, StorageResult};
 use serde_json::Value;
 use sqlx::{Row, sqlite::SqliteRow};
 
@@ -86,6 +86,79 @@ impl AuditStore for SqliteStorage {
         .bind(u64_to_i64(limit as u64, "audit limit")?)
         .fetch_all(self.pool())
         .await
+        .map_err(map_sqlx_error)?;
+
+        rows.into_iter().map(row_to_audit_entry).collect()
+    }
+
+    async fn query_recent_audit(
+        &self,
+        scope: AuditQueryScope<'_>,
+        since: u64,
+        until: u64,
+        limit: usize,
+    ) -> StorageResult<Vec<AuditEntry>> {
+        if limit == 0 || until < since {
+            return Ok(Vec::new());
+        }
+
+        let since = u64_to_i64(since, "audit since")?;
+        let until = u64_to_i64_upper(until);
+        let limit = u64_to_i64(limit as u64, "audit limit")?;
+        let rows = match scope {
+            AuditQueryScope::All => {
+                sqlx::query(
+                    "SELECT ts, request_id, principal_id, route, upstream, model, status, \
+                     input_tokens, output_tokens, duration_ms, agent_label, api_key_id, \
+                     cost_usd_micros, limit_violation, admin_action, actor, actor_authority, \
+                     actor_subject, actor_kind, actor_email, kind, payload \
+                     FROM audit_log_v1 \
+                     WHERE ts >= ? AND ts <= ? \
+                     ORDER BY ts DESC, id DESC LIMIT ?",
+                )
+                .bind(since)
+                .bind(until)
+                .bind(limit)
+                .fetch_all(self.pool())
+                .await
+            }
+            AuditQueryScope::Principal(principal_id) => {
+                sqlx::query(
+                    "SELECT ts, request_id, principal_id, route, upstream, model, status, \
+                     input_tokens, output_tokens, duration_ms, agent_label, api_key_id, \
+                     cost_usd_micros, limit_violation, admin_action, actor, actor_authority, \
+                     actor_subject, actor_kind, actor_email, kind, payload \
+                     FROM audit_log_v1 \
+                     WHERE ts >= ? AND ts <= ? AND principal_id = ? \
+                     ORDER BY ts DESC, id DESC LIMIT ?",
+                )
+                .bind(since)
+                .bind(until)
+                .bind(principal_id)
+                .bind(limit)
+                .fetch_all(self.pool())
+                .await
+            }
+            AuditQueryScope::Actor { authority, subject } => {
+                sqlx::query(
+                    "SELECT ts, request_id, principal_id, route, upstream, model, status, \
+                     input_tokens, output_tokens, duration_ms, agent_label, api_key_id, \
+                     cost_usd_micros, limit_violation, admin_action, actor, actor_authority, \
+                     actor_subject, actor_kind, actor_email, kind, payload \
+                     FROM audit_log_v1 \
+                     WHERE ts >= ? AND ts <= ? \
+                     AND actor_authority = ? AND actor_subject = ? \
+                     ORDER BY ts DESC, id DESC LIMIT ?",
+                )
+                .bind(since)
+                .bind(until)
+                .bind(authority)
+                .bind(subject)
+                .bind(limit)
+                .fetch_all(self.pool())
+                .await
+            }
+        }
         .map_err(map_sqlx_error)?;
 
         rows.into_iter().map(row_to_audit_entry).collect()

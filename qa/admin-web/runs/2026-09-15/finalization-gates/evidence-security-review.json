@@ -1,0 +1,20 @@
+{
+  "schema": "cc-lb-qa-evidence-security-review/v1",
+  "reviewer": "ReviewPublishableQaEvidence",
+  "scope": "Read-only review of the specified run artifacts and two QA skills",
+  "reviewed_text_files": 91,
+  "reviewed_text_bytes": 4709721,
+  "structured_json_jsonl_files_reviewed_excluding_runtime_progress": 80,
+  "confirmed_secret_or_unnecessary_personal_data_findings": 0,
+  "archive_limit": "Archive purpose, member names and recorded hashes inspected; ZIP payload not reviewed by this reviewer.",
+  "finding": {
+    "id": "QA-EVIDENCE-UI-DIRECT-001",
+    "priority": "P2",
+    "issue": "Ten mixed UI/direct API/proxy functional checks were labeled local_browser.principals.",
+    "resolution": "verification.json schema v2 uses isolated_functional_checks and explicitly identifies one direct API-only check and one proxy-only check.",
+    "raw_checks_modified": false,
+    "reviewer_rechecked_resolution": true
+  },
+  "overall_runtime_qa_complete": false,
+  "verification_boundary": "This is source/evidence review, not an executed browser, API, SQL, or production QA result."
+}

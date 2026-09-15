@@ -1,0 +1,135 @@
+{
+  "schema": "cc-lb-approved-fix-evidence-index/v1",
+  "candidate_binary_sha256": "f564dcf57a4c2b914b2c690b8dee4e1c68f4fa472ae680bbe599d250dcd28f65",
+  "source_base": "ef70b347790c46fa9956435a820a51b60c547d04",
+  "original_app_patch_sha256": "7ef937736bfb0432d3b5c22c1af90bace625c1df04a05201a475806f70a34166",
+  "files": [
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-upstreams/approved-candidate/manifest.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-upstreams/manifest.json",
+      "sha256": "64dd21be3f60af1f4a7f3adbbca5f88bdf9090a97a94eac3e2217e0b7be2aaa4",
+      "bytes": 672
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-upstreams/approved-candidate/final-summary.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-upstreams/final-summary.json",
+      "sha256": "22a0e383c360317e5fca8e9002a22d81437a4606536227047df69bef7c2ff7bd",
+      "bytes": 14486
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-upstreams/approved-candidate/actions.jsonl",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-upstreams/actions.jsonl",
+      "sha256": "4b1c504cc1e7a8189f38ebdd3710a25d3027387590e02eab24cbb08a4a288e06",
+      "bytes": 12705
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-upstreams/approved-candidate/db-before-reset.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-upstreams/db-before-reset.json",
+      "sha256": "69903437449fd55622e8b405e0ff4c262cf2eeb00c3fdc7b225b7101fd4a7398",
+      "bytes": 204
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-upstreams/approved-candidate/null-default.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-upstreams/null-default.json",
+      "sha256": "fd15d5ba3e81bcb8609cc376a10f816e1b9828f9ac4d739e554941f304874bb1",
+      "bytes": 493
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-upstreams/approved-candidate/api-key-env.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-upstreams/api-key-env.json",
+      "sha256": "e2dc04808c8ad9c7214dc06a2629ab0a368434850de85959c6431d8bc0bb6ef2",
+      "bytes": 491
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-principals/approved-candidate/manifest.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-principals/manifest.json",
+      "sha256": "69ee6965f51fa88be15be74dd25ed673e7fb628f8b91621060f4b433a78f4fcf",
+      "bytes": 1973
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-principals/approved-candidate/summary.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-principals/summary.json",
+      "sha256": "bf03ffcdb8a25495bac568e8a1946896c848d5f0e8ba73e1cc0cbd542ec0b863",
+      "bytes": 2336
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-principals/approved-candidate/actions.jsonl",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-principals/actions.jsonl",
+      "sha256": "c90834f4b8ee9118bb2c4405b99a16fccfe3d3b55d4e5f701ad66bc66a7f0f78",
+      "bytes": 25599
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-plugins/approved-candidate/manifest.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-plugins/manifest.json",
+      "sha256": "8d41f392b0cb02e40f90e682ee308c3dc9d7f36806297bb82e20d64d91def2aa",
+      "bytes": 1696
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-plugins/approved-candidate/summary.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-plugins/summary.json",
+      "sha256": "29d59e75d090063df25bf781a6b1fd682f1d50a13c904a25738a80aaf25cfd25",
+      "bytes": 6994
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-plugins/approved-candidate/simple.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-plugins/simple.json",
+      "sha256": "a2be53d254515d3a4272e8cdb149c856aa323b19ba8b8d38479596f72bf5bb05",
+      "bytes": 1703
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-plugins/approved-candidate/cascade.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-plugins/cascade.json",
+      "sha256": "a58d15048eb8e0e141ddafacfaabdbfc7051df79179560daebd397e4372a79d6",
+      "bytes": 1680
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-plugins/approved-candidate/gc.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-plugins/gc.json",
+      "sha256": "54e7940aed5a21ad4efd78d41fccf2a03565e0c7f15f7228705f774f3aa9426e",
+      "bytes": 1356
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/local-plugins/approved-candidate/gc-storage.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/local-plugins/gc-storage.json",
+      "sha256": "e2116c36b61f1e2dab1fc1aa8c0c30b10166350e170f1713e6f45e1e9a0f9ddd",
+      "bytes": 73
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/approved-fixes-candidate-provenance.json",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/approved-fixes-candidate-provenance.json",
+      "sha256": "515d3bdb119635b162e8989452066b9dab92ee9f41a3e09bd9b84901768c960a",
+      "bytes": 620
+    },
+    {
+      "source": "/data/tmp/cc-lb-admin-web-qa-evidence/detail-contract-regression.txt",
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/detail-contract-regression.txt",
+      "sha256": "b83a36e0790cd8b9fb3286c1c0ff42b7fe136ca7eb58d689a0174330b24e8a86",
+      "bytes": 1284
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/review-dispositions.json",
+      "sha256": "34e4996d0204f5c92b99090f4368d78a0d843075b0dec15f9d37d29254626eb3",
+      "bytes": 2564,
+      "origin": "Main review and verification evidence"
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/approved-fixes-full-backend-gate.txt",
+      "sha256": "5fcd93d7bf8ad0ea4bd7f2e7188f24d9ee2029c038e8417375411b05a8ce7f18",
+      "bytes": 334,
+      "origin": "Main review and verification evidence"
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/approved-fixes-format-check.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "origin": "Main review and verification evidence"
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/approved-fixes/verification.json",
+      "sha256": "d23def62f73bd42a9c6c82114629ac3b30d9caf1a5336a675740178a8cd27e3b",
+      "bytes": 2152,
+      "origin": "Main review and verification evidence"
+    }
+  ],
+  "claim_boundary": "Local isolated functional checks include UI, direct API and proxy observations. Baseline failures remain preserved. The repaired selected backend gate passed 1520/1520 with 9 skipped; no full runtime QA or production activation claim."
+}

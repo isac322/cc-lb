@@ -1,0 +1,58 @@
+{
+  "mode": "gc",
+  "status": "PASS",
+  "actual": {
+    "new_label_visible": true,
+    "description": "Remove uploaded WASM blobs no longer referenced by any registered plugin. Registered plugins remain available, even when Used By is 0.",
+    "button_disabled_before": false,
+    "catalog_text": "1 available",
+    "registry_count_before": 1,
+    "registry_unchanged": true,
+    "post_status": 200
+  },
+  "screen_sha256": "9f5dfaad24ed06134ac6df5385de95015efa63134855572ecbd1237350ca8841",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/auth/session",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/plugins/registry",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/health",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/upstreams",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/principals",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/plugins/wasm/gc",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/plugins/registry",
+      "query_names": [],
+      "status": 200
+    }
+  ]
+}

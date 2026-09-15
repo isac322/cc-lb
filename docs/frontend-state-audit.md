@@ -101,4 +101,4 @@
 - production preview/browser: lazy chunk를 350ms 이상 보류한 command action, Logs cursor/filter/Canvas DPR·drag·polling 및 실제 DB→API→UI 변경, Audit principal/시간 필터와 중복 ID 행 보존 통과.
 - request partial→final은 실제 compiled component browser harness와 실제 backend detail 응답으로 검증했다. backend in-process partial bus를 외부 SQLite 쓰기로 발행할 수 없어 proxy/SSE full-stack 검증으로 표현하지 않는다.
 - 독립 counterproof: 동일 payload query render 0회, 변경 payload 1회; 200행 table의 동일 props 계산 0회, 한 행 변경 계산 1회(나머지 199행 DOM 유지); heartbeat/cursor 추가 render 0회; grace 이내 hide/show 연결 1개 유지, close 0회.
-- 원문 실행 로그 및 화면 증거는 격리 QA 산출물로 보존했고, 재현 절차는 `.opencode/skills/user-flow-qa/references/scenarios/frontend-state-boundaries.md`에 정리했다.
+- 원문 실행 로그 및 화면 증거는 격리 QA 산출물로 보존했고, 재현 절차는 `.agents/skills/user-flow-qa/references/scenarios/frontend-state-boundaries.md`에 정리했다.

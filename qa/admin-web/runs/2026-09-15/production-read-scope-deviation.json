@@ -1,0 +1,41 @@
+{
+  "schema": "cc-lb-production-read-scope-deviation/v1",
+  "observed_at": "2026-09-15T15:33:04.068282+00:00",
+  "scope": "Five production GETs executed by a browser subtask assigned to local-only validation. Kept separate from local proof and historical production coverage.",
+  "requests": [
+    {
+      "method": "GET",
+      "route": "/admin/v1/auth/session",
+      "status": 404
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/status",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/principals",
+      "status": 200,
+      "observed_total": 22
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/upstreams",
+      "status": 200,
+      "observed_total": 9
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/plugins/registry",
+      "status": 200,
+      "observed_total": 2
+    }
+  ],
+  "explicit_mutating_http_methods": 0,
+  "server_code_or_configuration_changed": false,
+  "production_tab_closed": true,
+  "recorder_copy": "diagnostic patched copy, not canonical validation",
+  "source_sha256": "336e06216a5b409da53c646f9e67aedc7aa385191e5ca33abaa0430b3cac81b3",
+  "full_runtime_qa_complete": false
+}
