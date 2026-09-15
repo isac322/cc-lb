@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Cache Keepalive summary, list, and detail reads now use bounded storage queries and targeted detail lookup instead of materializing unrelated historical decisions, while preserving ordering, pricing, pagination, and selected-row error mappings.
+- Cache Keepalive 24-hour and 7-day cursors now retain the first page's time-window anchor, so pagination remains valid while the server clock advances.
+
 ## [0.4.9] - 2026-09-11
 
 ### Changed

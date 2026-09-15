@@ -152,3 +152,41 @@ fn batched_cache_keepalive_turns_preserve_serialized_row_behavior() {
         serde_json::to_vec(&legacy_row).expect("serialize legacy row"),
     );
 }
+
+#[test]
+fn mixed_activity_ties_order_by_source_ref_id_ascending_and_only_newest_active_turn_pending() {
+    let item = item(CacheKeepaliveSessionEntrySource::Session);
+    let turns = [
+        turn("z-turn", 200),
+        turn("a-turn", 200),
+        turn("older-turn", 199),
+    ];
+    let catalog = PriceCatalog::new_empty();
+
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &item,
+            session: None,
+            turns: &turns,
+            now_ms: 1_730_000_100_000,
+        },
+        catalog.as_ref(),
+    );
+
+    let ordered_ids = activity
+        .turns
+        .iter()
+        .map(|turn| turn.source_ref_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ordered_ids, ["a-turn", "z-turn", "older-turn"]);
+    assert!(activity.turns[0].pending);
+    assert!(activity.turns[1..].iter().all(|turn| !turn.pending));
+    assert_eq!(
+        activity
+            .turns
+            .iter()
+            .map(|turn| turn.turn_number)
+            .collect::<Vec<_>>(),
+        [3, 2, 1]
+    );
+}
