@@ -147,7 +147,7 @@ async fn run_inner(
         bind_addr(cfg.listener.admin_addr).await?;
         bind_addr(cfg.listener.metrics_addr).await?;
     }
-    if let Some((_label, tls_config)) = active_tls_config(cfg) {
+    if let Some(tls_config) = active_tls_config(cfg) {
         verify_tls(tls_config)?;
     }
     Ok(report)
@@ -397,13 +397,8 @@ fn validate_sqlite_path(path: &Path) -> Result<(), PreflightError> {
     Ok(())
 }
 
-fn active_tls_config(config: &Config) -> Option<(&'static str, &TlsConfig)> {
-    config
-        .listener
-        .tls
-        .as_ref()
-        .map(|tls| ("listener", tls))
-        .or_else(|| config.tls.as_ref().map(|tls| ("legacy", tls)))
+fn active_tls_config(config: &Config) -> Option<&TlsConfig> {
+    config.listener.tls.as_ref()
 }
 
 fn verify_tls(tls_config: &TlsConfig) -> Result<(), PreflightError> {

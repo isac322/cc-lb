@@ -56,33 +56,19 @@ comparison machinery deleted with it.
   30s sweeper. On `RequestTerminated` it writes a shadow row
   (`event_id = <fresh v7>, shadow_event_id = <incoming EventId>`) and
   republishes the finalized row to the admin SSE broadcast.
-- **Per-concern subscribers** replace six formerly-inline observations:
-  1. `lifecycle_pricing_subscriber` — cost computation.
-  2. `lifecycle_limit_reconcile_subscriber` — `reconcile_by_id`
-     (Phase 8 of the RFC's plan; the ownership redesign in Phase 7 was
-     already landed in the pre-Phase-1 base commit 070c9614).
-  3. `lifecycle_cache_observation_subscriber` — prompt-cache observations.
-  4. `lifecycle_hook_adapter_subscriber` — ObservabilityHook fanout.
-  5. `lifecycle_rate_limit_header_subscriber`,
-     `lifecycle_subscription_quota_subscriber`,
-     `lifecycle_limit_rejection_audit_subscriber`,
-     `lifecycle_api_key_metrics_subscriber`,
-     `lifecycle_cache_hit_miss_subscriber`,
-     `lifecycle_prompt_cache_drift_subscriber` — the six additional
-     subscribers that own responsibilities the RFC treated as part of
-     "ObservabilityHook fanout" but were in fact independent inline
-     observations on the handler tail.
-- **Bus wiring**: `InMemoryBus` fans `LifecycleEvent` out to per-subscriber
-  bounded mpsc channels via `attach_lifecycle_<name>(capacity)` methods.
+- **Per-concern subscribers** replace formerly-inline observations for pricing,
+  limit reconciliation, prompt-cache observations, hook fanout, rate-limit
+  headers, subscription quota, limit rejection audit, API-key metrics,
+  cache hit/miss, and prompt-cache drift.
+- **Bus wiring**: `InMemoryBus` fans `LifecycleEvent` out to bounded
+  per-subscriber mpsc channels. Required subscribers are always attached.
   Each channel drops-newest on overflow and increments
   `cc_lb_dropped_events_total{reason="<channel>_full"}`. The
   `RequestEventUpdate` broadcast channel remains, now fed exclusively by
   the assembler's post-write republish.
-- **Configuration**: each subscriber is toggled by
-  `config.lifecycle_<name>_subscriber.enabled`. All defaults are `true`
-  after Phase 6; the flags exist as emergency kill switches. The writer
-  cutover flag (`request_event_writer_source`) has been removed — the
-  assembler is now the only writer.
+- **Configuration**: required subscribers are attached unconditionally. There
+  are no lifecycle subscriber kill switches or alternate request-event writers.
+  The assembler is the only writer.
 
 ### Deviations from the original phased plan
 
@@ -629,8 +615,8 @@ matches the row count 1:1. No behaviour change. ~400 LOC.
   legacy rows carry `event_id = <legacy uuid>, shadow_event_id = NULL`.
   This lets both paths coexist without collision on the partial unique
   index.
-- New config flag `features.lifecycle_shadow_writer = false` default. Enable
-  it in production and let it run overnight.
+- During the migration phase, the shadow writer was enabled for an overnight
+  comparison before the clean cutover.
 - Add a comparison SQL query documented in `docs/runbook/lifecycle-shadow.md`
   that diffs shadow vs legacy rows for the same `request_id`.
 
@@ -638,18 +624,14 @@ matches the row count 1:1. No behaviour change. ~400 LOC.
 `status`, `event_id` present on both. ~600 LOC + 2 migrations. Legacy path
 still authoritative.
 
-### Phase 4 — ObservabilityHook adapter subscriber
+### Phase 4 — Direct observability hooks
 
-- Implement `ObservabilityHookAdapter` subscriber that consumes
-  `LifecycleEvent`s and calls the same `ObservabilityHook::observe_finished*`
-  methods that the handler calls today.
-- **Handler continues calling hooks synchronously** in this phase — the
-  adapter is another shadow path. Compare metric emissions to ensure the
-  adapter fires the right hooks at the right time.
-- New config flag `features.lifecycle_hook_adapter = false` default.
+- Keep `ObservabilityHook` delivery on the request path, where principal plugin
+  chains are already resolved.
+- Do not duplicate hook delivery through the lifecycle event bus. The event bus
+  remains responsible for durable lifecycle-derived subscribers only.
 
-**Deliverable**: hooks fired twice in shadow mode. Feature flag off by
-default so no double-count in normal ops. ~200 LOC.
+**Deliverable**: hooks fire once through the resolved principal pipeline.
 
 ### Phase 5 — Pricing + CacheObservation subscribers
 

@@ -2487,7 +2487,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
     <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}>
       <CardHeader
         title="API Keys"
-        subtitle="Issue, view fingerprints, revoke"
+        subtitle="Authenticates as this DB principal; routing selects a DB upstream"
         action={
           <Button
             size="sm"

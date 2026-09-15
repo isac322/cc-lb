@@ -23,9 +23,9 @@ use cc_lb_request_log::{
 };
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, RouteDecision, RouterPlugin};
 use cc_lb_storage_api::{
-    UpstreamAffinityBinding, UpstreamAffinityKey, UpstreamAffinityStore,
-    UpstreamRateLimitObservationRecord, UpstreamRecord, types::StoredApiKeyRecord,
-    upstream::UpstreamKind as StorageUpstreamKind,
+    PrincipalKind as DbPrincipalKind, PrincipalKindLite, UpstreamAffinityBinding,
+    UpstreamAffinityKey, UpstreamAffinityStore, UpstreamRateLimitObservationRecord, UpstreamRecord,
+    types::StoredApiKeyRecord, upstream::UpstreamKind as StorageUpstreamKind,
 };
 use cc_lb_upstream::{
     ApiKeyAwareSignerFactory, DialectError, DialectShapeContext, ResponseTransformError,
@@ -2108,7 +2108,7 @@ impl Lifecycle {
             .build();
         let principal = Principal {
             id: input.principal_id,
-            kind: PrincipalKind::ApiKey,
+            kind: PrincipalKind::InternalKey,
             claims: serde_json::Map::new(),
         };
 
@@ -2277,12 +2277,19 @@ impl Lifecycle {
         if body_view.stream() {
             handle_span.record("gen_ai.request.stream", true);
         }
-        let observer: Option<LifecycleContext> = observer_from_ext.or_else(|| {
+        let mut observer: Option<LifecycleContext> = observer_from_ext.or_else(|| {
             self.event_bus
                 .as_ref()
                 .map(|bus| LifecycleContext::new(ctx.request_id.clone(), bus.clone(), &self.clock))
         });
+        if observer.is_none() && !view.global_observability_hooks.is_empty() {
+            observer = Some(LifecycleContext::without_bus(
+                ctx.request_id.clone(),
+                &self.clock,
+            ));
+        }
         if let Some(o) = observer.as_ref() {
+            o.set_observability_hooks(&view.global_observability_hooks);
             o.set_request_span(handle_span.clone());
             o.emit_request_started(body_view.stream());
         }
@@ -2397,77 +2404,49 @@ impl Lifecycle {
         );
 
         let auth_start = Instant::now();
-        let success = if let Some(success) = self
+        let success = match self
             .authn
-            .authenticate_none_mode(&ctx.downstream_headers)
-            .instrument(tracing::info_span!(
-                "proxy.authenticate",
-                cc_lb.auth.mode = "none"
-            ))
+            .authenticate(&ctx.downstream_headers, &principal_view)
+            .instrument(tracing::info_span!("proxy.authenticate"))
             .await
         {
-            success
-        } else {
-            match self
-                .authn
-                .authenticate(&ctx.downstream_headers, &principal_view)
-                .instrument(tracing::info_span!(
-                    "proxy.authenticate",
-                    cc_lb.auth.mode = "api_key"
-                ))
-                .await
-            {
-                Ok(success) => success,
-                Err(source) => {
-                    if let Some(o) = observer.as_ref() {
-                        o.emit_provider_error("authentication_error", &source.to_string(), "authn");
-                    }
-                    let status = StatusCode::from_u16(source.http_status())
-                        .unwrap_or(StatusCode::UNAUTHORIZED);
-                    let response = match &source {
-                        BuiltinAuthError::Unavailable => anthropic_error_response_with_retry_after(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "authentication_error",
-                            &source.to_string(),
-                            1,
-                        ),
-                        _ => anthropic_error_response(
-                            status,
-                            "authentication_error",
-                            &source.to_string(),
-                        ),
-                    };
-                    if let Some(o) = observer.as_ref() {
-                        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
-                            event_id: o.event_id().to_owned(),
-                            result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
-                                http_status: status.as_u16(),
-                                reason: Some(key_auth_failure_reason(&source).to_owned()),
-                            }),
-                        });
-                        o.set_terminal(status, error_codes::AUTHENTICATION_FAILED);
-                        o.finish();
-                    }
-                    return Ok(response);
+            Ok(success) => success,
+            Err(source) => {
+                if let Some(o) = observer.as_ref() {
+                    o.emit_provider_error("authentication_error", &source.to_string(), "authn");
                 }
+                let status =
+                    StatusCode::from_u16(source.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
+                let response = match &source {
+                    BuiltinAuthError::Unavailable => anthropic_error_response_with_retry_after(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "authentication_error",
+                        &source.to_string(),
+                        1,
+                    ),
+                    _ => anthropic_error_response(
+                        status,
+                        "authentication_error",
+                        &source.to_string(),
+                    ),
+                };
+                if let Some(o) = observer.as_ref() {
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+                        event_id: o.event_id().to_owned(),
+                        result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
+                            http_status: status.as_u16(),
+                            reason: Some(key_auth_failure_reason(&source).to_owned()),
+                        }),
+                    });
+                    o.set_terminal(status, error_codes::AUTHENTICATION_FAILED);
+                    o.finish();
+                }
+                return Ok(response);
             }
         };
         let auth_ms = duration_to_ms(auth_start.elapsed());
         let principal_id = success.principal_id.clone();
         handle_span.record("cc_lb.principal.id", principal_id.as_str());
-        if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
-                event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_lifecycle::AuthInfo {
-                    principal_id: principal_id.clone(),
-                    key_id: Some(success.key_id.clone()),
-                    principal_kind: Some(
-                        principal_kind_lite_as_str(&success.record.principal_kind).to_owned(),
-                    ),
-                    auth_ms: Some(auth_ms),
-                }),
-            });
-        }
         let Some(cached) = principal_view.get(&principal_id) else {
             tracing::error!(%principal_id, "authenticated principal missing from principal view");
             if let Some(o) = observer.as_ref() {
@@ -2497,11 +2476,40 @@ impl Lifecycle {
             }
             return Ok(response);
         };
+        let db_principal_kind = cached.principal_kind();
+        let lifecycle_principal_kind = principal_kind_lite(db_principal_kind);
+        if let Some(o) = observer.as_ref() {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+                event_id: o.event_id().to_owned(),
+                result: Ok(cc_lb_lifecycle::AuthInfo {
+                    principal_id: principal_id.clone(),
+                    key_id: Some(success.key_id.clone()),
+                    principal_kind: Some(db_principal_kind_as_str(db_principal_kind).to_owned()),
+                    auth_ms: Some(auth_ms),
+                }),
+            });
+        }
         let hooks = cached.resolved_hooks(&view.global_observability_hooks);
+        if observer.is_none() && !hooks.is_empty() {
+            observer = Some(LifecycleContext::without_bus(
+                ctx.request_id.clone(),
+                &self.clock,
+            ));
+        }
+        if let Some(o) = observer.as_ref() {
+            o.set_observability_hooks(hooks);
+        }
+        observe_many(
+            hooks,
+            ObserveEvent::AuthnComplete {
+                principal_id: principal_id.clone(),
+                kind: PrincipalKind::InternalKey,
+            },
+        );
         let stream_hooks = StreamHooks::new(hooks);
         let principal = Principal {
             id: principal_id,
-            kind: PrincipalKind::ApiKey,
+            kind: PrincipalKind::InternalKey,
             claims: serde_json::Map::new(),
         };
         let request_affinity_keys = match body_view
@@ -2568,7 +2576,7 @@ impl Lifecycle {
             return Ok(response);
         }
         if let Some(o) = observer.as_ref() {
-            o.emit_authentication_completed(principal.id.clone(), success.record.principal_kind);
+            o.emit_authentication_completed(principal.id.clone(), lifecycle_principal_kind);
         }
 
         let route_start = Instant::now();
@@ -2728,7 +2736,13 @@ impl Lifecycle {
                     upstream_id: resolved_upstream_id,
                     upstream_name: router_chosen_upstream_name.clone(),
                     model: body_view.model(),
-                    upstream_kind: pricing_upstream_kind_label(&route.upstream).map(str::to_owned),
+                    upstream_kind: Some(
+                        match resolved_record.kind {
+                            StorageUpstreamKind::AnthropicApiKey => "anthropic_key",
+                            StorageUpstreamKind::AnthropicOauth => "anthropic_oauth",
+                        }
+                        .to_owned(),
+                    ),
                     route_ms: Some(route_ms),
                     routing_trace: Some(routing_trace_value.clone()),
                     predicted_cache_read_tokens: Some(predicted_cache_read_tokens),
@@ -2796,7 +2810,7 @@ impl Lifecycle {
                 &principal_view,
                 &ctx,
                 &principal,
-                &route,
+                resolved_record,
                 &success,
                 &body_view,
             )
@@ -3146,7 +3160,7 @@ impl Lifecycle {
         view: &PrincipalView,
         ctx: &RequestContext,
         principal: &Principal,
-        route: &RouteDecision,
+        upstream_record: &UpstreamRecord,
         authn_success: &AuthnSuccess,
         body_view: &RequestBodyView,
     ) -> Result<Option<ActiveLimit>, LimitRejectionErr> {
@@ -3163,7 +3177,10 @@ impl Lifecycle {
             return Ok(None);
         };
         let limit_request = body_view.limit_request();
-        let upstream_kind = pricing_upstream_kind_label(&route.upstream);
+        let upstream_kind = Some(match upstream_record.kind {
+            StorageUpstreamKind::AnthropicApiKey => "anthropic_key",
+            StorageUpstreamKind::AnthropicOauth => "anthropic_oauth",
+        });
         let max_input_estimate = DEFAULT_MAX_INPUT_ESTIMATE;
         let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
             estimator.estimate_max(
@@ -3216,7 +3233,7 @@ impl Lifecycle {
                         method: ctx.method.as_str().to_owned(),
                     },
                     route_summary: cc_lb_lifecycle::RouteSummary {
-                        upstream_name: audit_upstream_name(&route.upstream).to_owned(),
+                        upstream_name: upstream_record.name.clone(),
                     },
                     limit_violation,
                     reason_label,
@@ -3613,6 +3630,7 @@ impl Lifecycle {
             }
             let finalize_ms = duration_to_ms(finalize_started.elapsed());
             o.set_finalize_ms(finalize_ms);
+            o.mark_observe_finished_emitted();
             o.finish();
             finalize_ms
         } else {
@@ -5512,6 +5530,7 @@ impl Lifecycle {
                 let finalize_ms = duration_to_ms(response_body_completed_at.elapsed());
                 o.set_finalize_ms(finalize_ms);
                 o.set_io_timings(stream_body_io_timing.snapshot());
+                o.mark_observe_finished_emitted();
                 o.finish();
                 finalize_ms
             } else {
@@ -6793,18 +6812,6 @@ fn limit_kind_name(kind: LimitKind) -> &'static str {
     }
 }
 
-fn audit_upstream_name(upstream: &Upstream) -> &'static str {
-    match upstream {
-        Upstream::AnthropicDirect { .. } => "anthropic_direct",
-    }
-}
-
-fn pricing_upstream_kind_label(upstream: &Upstream) -> Option<&'static str> {
-    match upstream {
-        Upstream::AnthropicDirect { .. } => Some("anthropic_key"),
-    }
-}
-
 fn upstream_for_record(record: &UpstreamRecord) -> Result<Upstream, String> {
     match record.kind {
         StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
@@ -6905,10 +6912,18 @@ fn record_thread_usage_from_response(
     );
 }
 
-fn principal_kind_lite_as_str(kind: &cc_lb_storage_api::types::PrincipalKindLite) -> &'static str {
+fn principal_kind_lite(kind: DbPrincipalKind) -> PrincipalKindLite {
     match kind {
-        cc_lb_storage_api::types::PrincipalKindLite::Machine => "machine",
-        cc_lb_storage_api::types::PrincipalKindLite::Human => "human",
+        DbPrincipalKind::Human => PrincipalKindLite::Human,
+        DbPrincipalKind::Machine | DbPrincipalKind::Admin => PrincipalKindLite::Machine,
+    }
+}
+
+fn db_principal_kind_as_str(kind: DbPrincipalKind) -> &'static str {
+    match kind {
+        DbPrincipalKind::Machine => "machine",
+        DbPrincipalKind::Human => "human",
+        DbPrincipalKind::Admin => "admin",
     }
 }
 

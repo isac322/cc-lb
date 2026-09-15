@@ -1,8 +1,8 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use metrics::Unit;
-use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
@@ -37,10 +37,9 @@ const SUBSCRIPTION_QUOTA_BATCH_BUCKETS: [f64; 9] =
 pub struct ObservabilityConfig {
     pub tracing_level: String,
     pub otlp_endpoint: Option<String>,
-    pub prometheus_endpoint: Option<String>,
+    pub metrics_addr: SocketAddr,
     pub log_redaction: bool,
     pub user_prompt_redaction: bool,
-    pub hook_channel_capacity: usize,
 }
 
 impl Default for ObservabilityConfig {
@@ -48,30 +47,16 @@ impl Default for ObservabilityConfig {
         Self {
             tracing_level: "info".to_owned(),
             otlp_endpoint: None,
-            prometheus_endpoint: None,
+            metrics_addr: SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 9091),
             log_redaction: true,
             user_prompt_redaction: false,
-            hook_channel_capacity: crate::DEFAULT_HOOK_CHANNEL_CAPACITY,
         }
     }
 }
 
 #[derive(Debug)]
 pub struct TracingGuard {
-    prometheus_handle: Option<PrometheusHandle>,
     tracer_provider: Option<SdkTracerProvider>,
-}
-
-impl TracingGuard {
-    pub fn prometheus_handle(&self) -> Option<&PrometheusHandle> {
-        self.prometheus_handle.as_ref()
-    }
-
-    pub fn flush_metrics(&self) {
-        if let Some(handle) = &self.prometheus_handle {
-            let _ = handle.render();
-        }
-    }
 }
 
 impl Drop for TracingGuard {
@@ -90,11 +75,6 @@ pub enum InitError {
     TracingSubscriber {
         #[from]
         source: tracing::subscriber::SetGlobalDefaultError,
-    },
-    #[error("invalid prometheus endpoint {endpoint:?}: {source}")]
-    PrometheusEndpoint {
-        endpoint: String,
-        source: std::net::AddrParseError,
     },
     #[error("failed to install prometheus recorder: {message}")]
     Prometheus { message: String },
@@ -313,7 +293,7 @@ const METRIC_DEFINITIONS: [MetricDefinition; 53] = [
 ];
 
 pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
-    let prometheus_handle = install_prometheus(cfg)?;
+    install_prometheus(cfg)?;
     // Register describes + touch counters AFTER installing the recorder so
     // zero-value touches (`.absolute(0)`) actually materialize on the
     // Prometheus scrape path.
@@ -326,13 +306,20 @@ pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
         .or_else(|_| EnvFilter::try_new(&cfg.tracing_level))
         .map_err(|source| InitError::TracingFilter { source })?;
 
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .json()
-        .with_ansi(false)
-        .with_writer(RedactingMakeWriter::new(std::io::stdout, policy));
-
-    let mut layers: Vec<BoxedRegistryLayer> =
-        vec![RedactionLayer::new(policy).boxed(), fmt_layer.boxed()];
+    let mut layers: Vec<BoxedRegistryLayer> = if cfg.log_redaction {
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_ansi(false)
+            .with_writer(RedactingMakeWriter::new(std::io::stdout, policy));
+        vec![RedactionLayer::new(policy).boxed(), fmt_layer.boxed()]
+    } else {
+        vec![
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_ansi(false)
+                .boxed(),
+        ]
+    };
 
     let tracer_provider = if let Some(endpoint) = cfg.otlp_endpoint.as_deref() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
@@ -361,10 +348,7 @@ pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
     let subscriber = filtered_subscriber(layers, env_filter);
     tracing::subscriber::set_global_default(subscriber)?;
 
-    Ok(TracingGuard {
-        prometheus_handle,
-        tracer_provider,
-    })
+    Ok(TracingGuard { tracer_provider })
 }
 
 fn filtered_subscriber(
@@ -582,8 +566,8 @@ pub fn panic_total() -> u64 {
     PANIC_TOTAL.load(Ordering::Relaxed)
 }
 
-fn install_prometheus(cfg: &ObservabilityConfig) -> Result<Option<PrometheusHandle>, InitError> {
-    let builder = PrometheusBuilder::new()
+fn install_prometheus(cfg: &ObservabilityConfig) -> Result<(), InitError> {
+    PrometheusBuilder::new()
         .set_buckets_for_metric(
             Matcher::Full("cc_lb_request_duration_seconds".to_owned()),
             &REQUEST_DURATION_BUCKETS,
@@ -604,33 +588,11 @@ fn install_prometheus(cfg: &ObservabilityConfig) -> Result<Option<PrometheusHand
         )
         .map_err(|source| InitError::Prometheus {
             message: source.to_string(),
-        })?;
-
-    if let Some(endpoint) = cfg.prometheus_endpoint.as_deref() {
-        let addr = parse_socket_addr(endpoint)?;
-        builder
-            .with_http_listener(addr)
-            .install()
-            .map_err(|source| InitError::Prometheus {
-                message: source.to_string(),
-            })?;
-        Ok(None)
-    } else {
-        builder
-            .install_recorder()
-            .map(Some)
-            .map_err(|source| InitError::Prometheus {
-                message: source.to_string(),
-            })
-    }
-}
-
-fn parse_socket_addr(endpoint: &str) -> Result<SocketAddr, InitError> {
-    endpoint
-        .parse::<SocketAddr>()
-        .map_err(|source| InitError::PrometheusEndpoint {
-            endpoint: endpoint.to_owned(),
-            source,
+        })?
+        .with_http_listener(cfg.metrics_addr)
+        .install()
+        .map_err(|source| InitError::Prometheus {
+            message: source.to_string(),
         })
 }
 

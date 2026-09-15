@@ -8,18 +8,8 @@ messages_cap_bytes = 33554432
 files_cap_bytes = 104857600
 
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
 
 [storage]
 kind = "sqlite"
@@ -33,13 +23,9 @@ tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = false
 
-[quotas]
-default_window_secs = 60
-default_requests_per_window = 1000
-default_input_tokens = 1000000
-default_output_tokens = 1000000
-
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "test"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 [circuit_breaker]
@@ -50,9 +36,3 @@ half_open_after_secs = 30
 [bulkhead]
 max_conns_per_upstream = 50
 semaphore_per_upstream = 100
-
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]

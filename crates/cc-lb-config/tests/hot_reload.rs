@@ -35,7 +35,7 @@ proxy_addr = "[::]:8181"
 
     fs::write(
         &path,
-        r#"[tls]
+        r#"[listener.tls]
 cert_path = "/definitely/missing/cert.pem"
 "#,
     )

@@ -71,19 +71,8 @@ messages_cap_bytes = 33554432
 files_cap_bytes = 104857600
 
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "qa-principal-keys"
-upstream_kind = "anthropic_key"
-
 [storage]
 kind = "sqlite"
 path = "$DB"
@@ -96,13 +85,9 @@ tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = true
 
-[quotas]
-default_window_secs = 60
-default_requests_per_window = 1000
-default_input_tokens = 1000000
-default_output_tokens = 1000000
-
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "qa"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 [circuit_breaker]
@@ -114,16 +99,15 @@ half_open_after_secs = 30
 max_conns_per_upstream = 50
 semaphore_per_upstream = 100
 
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]
 EOF
 ```
 
 This is a fresh database, not a copy of a shared database. The scenario must
 leave every non-QA listener and database untouched.
+
+The issued key carries no principal or upstream kind. Authentication resolves
+the principal from the database, and routing derives the upstream kind from the
+database upstream selected for that request.
 
 ### 0.3 Create the deterministic response gate
 
@@ -441,8 +425,9 @@ curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
 ```
 
 The list API may expose `key_id`, label, issue/revoke timestamps, last four, and
-last-used time. It must never expose `plaintext_key`, `verify_hash`,
-`secret_salt`, `index_hash`, or the complete secret.
+last-used time. It must not duplicate `principal_kind` or `upstream_kind`, and
+it must never expose `plaintext_key`, `verify_hash`, `secret_salt`,
+`index_hash`, or the complete secret.
 
 ### 1.3 Gate state
 

@@ -42,7 +42,7 @@ EOF
 # 2. Generate per-run random credentials (do not print these)
 ADMIN_TOKEN=$(uuidgen)
 MASTER_KEY=$(openssl rand -hex 32)
-CLIENT_KEY="sk-ant-$(openssl rand -hex 16)"
+CLIENT_KEY=""
 SESSION_ID="qa-req-logs-$(openssl rand -hex 4)"
 
 # 3. Render config
@@ -57,19 +57,8 @@ messages_cap_bytes = 33554432
 files_cap_bytes = 104857600
 
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
-
 [storage]
 kind = "sqlite"
 path = "$TMP_DIR/cc-lb.sqlite"
@@ -82,13 +71,9 @@ tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = false
 
-[quotas]
-default_window_secs = 60
-default_requests_per_window = 1000
-default_input_tokens = 1000000
-default_output_tokens = 1000000
-
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "qa"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 [circuit_breaker]
@@ -100,11 +85,6 @@ half_open_after_secs = 30
 max_conns_per_upstream = 50
 semaphore_per_upstream = 100
 
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]
 EOF
 
 # 4. Create exact-size valid JSON request fixtures and an evidence directory.
@@ -295,10 +275,17 @@ wait_http_200 "http://127.0.0.1:$admin_port/admin/health" "cc-lb admin health"
 wait_port $vite_port "vite"
 wait_http_200 "http://127.0.0.1:$vite_port/" "vite dev server"
 
-# 7. Seed principal and upstream
-curl -sS -f -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' --data '{"name":"api-key","kind":"machine","allowed_models":["*"]}' "http://127.0.0.1:$admin_port/admin/v1/principals" > /dev/null
+# 7. Seed the DB-owned principal and upstream, then issue the managed proxy key.
+curl -sS -f -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' --data '{"name":"api-key","kind":"machine","allowed_models":["*"]}' "http://127.0.0.1:$admin_port/admin/v1/principals" > "$TMP_DIR/principal.json"
+PRINCIPAL_ID=$(jq -er '.id' "$TMP_DIR/principal.json")
 curl -sS -f -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' --data '{"name":"real_client","kind":"anthropic_api_key","base_url":"http://127.0.0.1:'$fake_port'","api_key_value":"sk-ant-test"}' "http://127.0.0.1:$admin_port/admin/v1/upstreams" > /dev/null
+curl -sS -f -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' --data '{"label":"request-log-qa"}' "http://127.0.0.1:$admin_port/admin/v1/principals/$PRINCIPAL_ID/keys" > "$TMP_DIR/proxy-key.json"
+CLIENT_KEY=$(jq -er '.plaintext_key' "$TMP_DIR/proxy-key.json")
+
 ```
+The managed key authenticates the request as the selected database principal.
+Principal kind comes from that principal record, and upstream kind comes from
+the database upstream selected for the request.
 
 ## Context Data and Surface Capture
 

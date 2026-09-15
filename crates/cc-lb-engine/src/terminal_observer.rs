@@ -26,6 +26,7 @@
 
 use std::error::Error as StdError;
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -33,7 +34,7 @@ use std::time::Instant;
 use cc_lb_control::RequestEventBus;
 use cc_lb_domain::InternalError;
 use cc_lb_lifecycle::{LifecycleEvent, RequestIoTimings, RequestSetupTimings, TerminationReason};
-use cc_lb_observability::{RedactionPolicy, truncate_reason};
+use cc_lb_observability::{ObservabilityHook, ObserveEvent, RedactionPolicy, truncate_reason};
 use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
 use uuid::Uuid;
@@ -237,10 +238,11 @@ pub struct LifecycleContext {
 
 struct Inner {
     event_id: String,
-    bus: Arc<dyn RequestEventBus>,
+    bus: Option<Arc<dyn RequestEventBus>>,
     started_unix_ms: u64,
     started: Instant,
     state: Mutex<TerminalState>,
+    observability_hooks: Mutex<Arc<[Arc<dyn ObservabilityHook>]>>,
     finalized: AtomicBool,
 }
 
@@ -264,10 +266,23 @@ struct TerminalState {
     upstream_body_ms: Option<u64>,
     first_body_chunk_ms: Option<u64>,
     finalize_ms: Option<u64>,
+    observe_finished_emitted: bool,
 }
 
 impl LifecycleContext {
     pub fn new(request_id: String, bus: Arc<dyn RequestEventBus>, clock: &ClockHandle) -> Self {
+        Self::new_inner(request_id, Some(bus), clock)
+    }
+
+    pub(crate) fn without_bus(request_id: String, clock: &ClockHandle) -> Self {
+        Self::new_inner(request_id, None, clock)
+    }
+
+    fn new_inner(
+        request_id: String,
+        bus: Option<Arc<dyn RequestEventBus>>,
+        clock: &ClockHandle,
+    ) -> Self {
         let event_id = Uuid::now_v7().to_string();
         let started_unix_ms = unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64;
         Self {
@@ -276,6 +291,7 @@ impl LifecycleContext {
                 bus,
                 started_unix_ms,
                 started: Instant::now(),
+                observability_hooks: Mutex::new(Arc::from([])),
                 state: Mutex::new(TerminalState {
                     request_id,
                     ..TerminalState::default()
@@ -394,6 +410,9 @@ impl LifecycleContext {
         self.lock_state().internal_errors = errors;
     }
 
+    pub(crate) fn mark_observe_finished_emitted(&self) {
+        self.lock_state().observe_finished_emitted = true;
+    }
     pub(crate) fn finish(&self) {
         if self
             .inner
@@ -438,17 +457,18 @@ impl LifecycleContext {
     /// been parsed enough to know whether the client asked for a streaming
     /// response.
     pub(crate) fn emit_request_started(&self, stream: bool) {
+        let Some(bus) = self.inner.bus.as_ref() else {
+            return;
+        };
         let request_id = self.lock_state().request_id.clone();
-        self.inner
-            .bus
-            .publish_lifecycle(LifecycleEvent::RequestStarted {
-                event_id: self.inner.event_id.clone(),
-                request_id,
-                ts_ms: self.inner.started_unix_ms,
-                stream,
-                source_kind: Some("proxy".to_owned()),
-                source_ref_id: None,
-            });
+        bus.publish_lifecycle(LifecycleEvent::RequestStarted {
+            event_id: self.inner.event_id.clone(),
+            request_id,
+            ts_ms: self.inner.started_unix_ms,
+            stream,
+            source_kind: Some("proxy".to_owned()),
+            source_ref_id: None,
+        });
     }
 
     /// Publish a lifecycle event on the bus.
@@ -457,7 +477,9 @@ impl LifecycleContext {
     /// This is fire-and-forget: overflow drops the event and increments the
     /// bus-side drop counter.
     pub(crate) fn emit_lifecycle(&self, event: LifecycleEvent) {
-        self.inner.bus.publish_lifecycle(event);
+        if let Some(bus) = self.inner.bus.as_ref() {
+            bus.publish_lifecycle(event);
+        }
     }
 
     pub(crate) fn emit_authentication_completed(
@@ -465,24 +487,46 @@ impl LifecycleContext {
         principal_id: String,
         principal_kind: PrincipalKindLite,
     ) {
-        self.inner
-            .bus
-            .publish_lifecycle(LifecycleEvent::AuthenticationCompleted {
+        if let Some(bus) = self.inner.bus.as_ref() {
+            bus.publish_lifecycle(LifecycleEvent::AuthenticationCompleted {
                 event_id: self.inner.event_id.clone(),
                 principal_id,
                 principal_kind,
             });
+        }
+    }
+
+    pub fn set_observability_hooks(&self, hooks: &[Arc<dyn ObservabilityHook>]) {
+        *self
+            .inner
+            .observability_hooks
+            .lock()
+            .expect("terminal observer hooks mutex poisoned") = hooks.iter().cloned().collect();
     }
 
     pub(crate) fn emit_provider_error(&self, code: &str, message: &str, source: &str) {
-        self.inner
-            .bus
-            .publish_lifecycle(LifecycleEvent::ProviderErrorObserved {
+        if let Some(bus) = self.inner.bus.as_ref() {
+            bus.publish_lifecycle(LifecycleEvent::ProviderErrorObserved {
                 event_id: self.inner.event_id.clone(),
                 code: code.to_owned(),
                 message: message.to_owned(),
                 source: source.to_owned(),
             });
+        }
+        let hooks = self
+            .inner
+            .observability_hooks
+            .lock()
+            .expect("terminal observer hooks mutex poisoned")
+            .clone();
+        let event = ObserveEvent::Error {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            source: source.to_owned(),
+        };
+        for hook in hooks.iter() {
+            let _ = hook.observe(event.clone());
+        }
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, TerminalState> {
@@ -567,8 +611,8 @@ impl Inner {
             }
             span.record("cc_lb.request.unaccounted_ms", unaccounted_ms);
         }
-        self.bus
-            .publish_lifecycle(LifecycleEvent::RequestTerminated {
+        if let Some(bus) = self.bus.as_ref() {
+            bus.publish_lifecycle(LifecycleEvent::RequestTerminated {
                 event_id: self.event_id.clone(),
                 reason,
                 client_status: state.status,
@@ -585,6 +629,33 @@ impl Inner {
                 finalize_ms: state.finalize_ms,
                 internal_errors: state.internal_errors.clone(),
             });
+        }
+        let terminal_hook_event =
+            (!state.observe_finished_emitted).then(|| ObserveEvent::RequestFinished {
+                status: StatusCode::from_u16(state.status).unwrap_or(StatusCode::OK),
+                input_tokens: None,
+                output_tokens: None,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                duration_ms,
+            });
+        drop(state);
+
+        if let Some(event) = terminal_hook_event {
+            let hooks = self
+                .observability_hooks
+                .lock()
+                .expect("terminal observer hooks mutex poisoned")
+                .clone();
+            for hook in hooks.iter() {
+                let event = event.clone();
+                if catch_unwind(AssertUnwindSafe(|| hook.observe(event))).is_err() {
+                    tracing::warn!(
+                        "observability hook panicked while recording request termination"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1296,5 +1367,33 @@ mod tests {
             .expect("server waits until Hyper exposes the reset");
         server.await.expect("HTTP/2 server task completes");
         client_connection.abort();
+    }
+    struct PanickingHook;
+
+    impl cc_lb_observability::ObservabilityHook for PanickingHook {
+        fn observe(
+            &self,
+            _event: cc_lb_observability::ObserveEvent,
+        ) -> Result<(), cc_lb_observability::ObservabilityError> {
+            panic!("intentional terminal hook panic");
+        }
+    }
+
+    #[test]
+    fn terminal_drop_isolates_panicking_hook() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let clock: ClockHandle = Arc::new(SystemClock);
+            let observer = LifecycleContext::without_bus("panic-hook".to_owned(), &clock);
+            let hooks: Vec<Arc<dyn cc_lb_observability::ObservabilityHook>> =
+                vec![Arc::new(PanickingHook)];
+            observer.set_observability_hooks(&hooks);
+            observer.set_terminal(StatusCode::BAD_GATEWAY, error_codes::UPSTREAM_5XX);
+            drop(observer);
+        }));
+
+        assert!(
+            result.is_ok(),
+            "hook panic must not escape LifecycleContext drop"
+        );
     }
 }

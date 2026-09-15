@@ -23,7 +23,7 @@ use cc_lb_scheduler::worker::CronJob;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, Limit,
-    LimitKind, PrincipalKindLite, RequestEventStore,
+    LimitKind, RequestEventStore,
 };
 use serde_json::Value;
 use std::sync::Mutex;
@@ -641,7 +641,6 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
         .create(
             "principal",
             CreateParams {
-                upstream_kind: cc_lb_storage_api::types::UpstreamKind::AnthropicKey,
                 label: "renewal accounting".to_owned(),
                 description: None,
                 expires_at_unix_secs: None,
@@ -650,7 +649,6 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
                     window_secs: 60,
                     cap_micros: 10,
                 }],
-                principal_kind: PrincipalKindLite::Machine,
             },
         )
         .await
@@ -801,7 +799,6 @@ async fn create_accounting_key(fixture: &Fixture, kind: LimitKind, cap_micros: i
         .create(
             "principal",
             CreateParams {
-                upstream_kind: cc_lb_storage_api::types::UpstreamKind::AnthropicKey,
                 label: "renewal accounting".to_owned(),
                 description: None,
                 expires_at_unix_secs: None,
@@ -810,7 +807,6 @@ async fn create_accounting_key(fixture: &Fixture, kind: LimitKind, cap_micros: i
                     window_secs: 60,
                     cap_micros,
                 }],
-                principal_kind: PrincipalKindLite::Machine,
             },
         )
         .await
@@ -1047,7 +1043,6 @@ async fn cache_keepalive_accounting_key_uses_real_reserve_before_dispatch() {
         .create(
             "principal",
             CreateParams {
-                upstream_kind: cc_lb_storage_api::types::UpstreamKind::AnthropicKey,
                 label: "renewal accounting".to_owned(),
                 description: None,
                 expires_at_unix_secs: None,
@@ -1056,7 +1051,6 @@ async fn cache_keepalive_accounting_key_uses_real_reserve_before_dispatch() {
                     window_secs: 60,
                     cap_micros: 0,
                 }],
-                principal_kind: PrincipalKindLite::Machine,
             },
         )
         .await

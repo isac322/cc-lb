@@ -4,13 +4,22 @@ cc-lb is a Rust workspace for an Anthropic-compatible multi-principal reverse pr
 
 ## Quick start
 
-1. Set the admin bootstrap token: `export CC_LB_BOOTSTRAP_ADMIN_TOKEN=$(uuidgen)`
-2. Optionally seed initial state via `bootstrap.toml` in your data_dir
-3. Run `cc-lb-server serve --config cc-lb.toml`
-4. Open the dashboard at `http://localhost:<admin_port>/`
-5. Add upstreams, principals, and plugin chains via the dashboard
+1. Set the secrets referenced by the config: `export CC_LB_MASTER_KEY=$(openssl rand -hex 32)`, `export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)`, and your upstream credential such as `ANTHROPIC_UPSTREAM_API_KEY`.
+2. Configure an explicit admin authentication provider in `cc-lb.toml`:
 
-See [docs/runtime-management.md](docs/runtime-management.md) for the full API and architecture.
+   ```toml
+   [[admin.auth.providers]]
+   kind = "static_token"
+   id = "local"
+   token_env = "CC_LB_ADMIN_TOKEN"
+   ```
+
+3. Run `cc-lb-server serve --config cc-lb.toml`.
+4. Create the database-backed upstream with `POST /admin/v1/upstreams`.
+5. Create the database-backed principal with `POST /admin/v1/principals`, then issue its proxy key with `POST /admin/v1/principals/{id}/keys`.
+6. Open the dashboard at `http://localhost:<admin_port>/` to manage upstreams, principals, and plugin chains.
+
+See [docs/runtime-management.md](docs/runtime-management.md) for request bodies, the full API, and the architecture.
 
 ## Operator Guides
 

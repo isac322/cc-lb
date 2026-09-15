@@ -3,16 +3,17 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_domain::{Principal, PrincipalKind, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_engine::api_keys::key_store::KeyStore;
 use cc_lb_engine::api_keys::principal_view::PrincipalView;
+use cc_lb_engine::api_keys::secret;
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
     LifecycleConfig, UpstreamDispatch,
@@ -20,6 +21,9 @@ use cc_lb_engine::{
 use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_storage_api::{
+    ApiKeyMutation, IssueParams, KeyStatus, ManagedKeyStore, StorageResult, StoredApiKeyRecord,
+};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
     SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
@@ -66,19 +70,125 @@ impl TestAuthn {
 
     pub fn with_principal_view(state: TestState, view: Arc<PrincipalView>) -> Self {
         Self {
-            authn: Arc::new(BuiltinAuthn::new(
-                DownstreamAuthMode::None,
-                Some(NoneModeConfig {
-                    principal_id: "principal-test".to_owned(),
-                    upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-                }),
-                None,
-                Arc::new(cc_lb_engine::SystemClock),
-            )),
+            authn: managed_authn("principal-test"),
             principal_view: view,
             state,
             refresh_allowed: true,
         }
+    }
+}
+
+struct ManagedKeyFixture {
+    plaintext: String,
+    key_id: String,
+    record: StoredApiKeyRecord,
+}
+
+static MANAGED_KEY_FIXTURE: LazyLock<ManagedKeyFixture> = LazyLock::new(|| {
+    let generated = secret::generate_new();
+    ManagedKeyFixture {
+        plaintext: generated.plaintext.expose().to_owned(),
+        key_id: generated.key_id,
+        record: StoredApiKeyRecord {
+            label: "engine test key".to_owned(),
+            verify_hash: generated.verify_hash,
+            secret_salt: generated.secret_salt,
+            status: KeyStatus::Active,
+            last_4: generated.last_4,
+            index_hash: generated.index_hash,
+            ..StoredApiKeyRecord::default()
+        },
+    }
+});
+
+pub fn managed_api_key() -> &'static str {
+    &MANAGED_KEY_FIXTURE.plaintext
+}
+
+pub fn managed_key_id() -> &'static str {
+    &MANAGED_KEY_FIXTURE.key_id
+}
+
+pub fn managed_authn(principal_id: &str) -> Arc<BuiltinAuthn> {
+    let storage: Arc<dyn ManagedKeyStore> = Arc::new(InMemoryManagedKeyStore {
+        principal_id: principal_id.to_owned(),
+    });
+    Arc::new(BuiltinAuthn::new(
+        Arc::new(KeyStore::new(storage)),
+        Arc::new(cc_lb_engine::SystemClock),
+    ))
+}
+
+struct InMemoryManagedKeyStore {
+    principal_id: String,
+}
+
+#[async_trait]
+impl ManagedKeyStore for InMemoryManagedKeyStore {
+    async fn issue(
+        &self,
+        _principal_id: &str,
+        _key_id: &str,
+        _params: IssueParams,
+    ) -> StorageResult<StoredApiKeyRecord> {
+        Ok(MANAGED_KEY_FIXTURE.record.clone())
+    }
+
+    async fn get(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+    ) -> StorageResult<Option<StoredApiKeyRecord>> {
+        Ok(
+            (principal_id == self.principal_id && key_id == MANAGED_KEY_FIXTURE.key_id)
+                .then(|| MANAGED_KEY_FIXTURE.record.clone()),
+        )
+    }
+
+    async fn lookup_by_index_hash(
+        &self,
+        index_hash: &[u8; 32],
+    ) -> StorageResult<Option<(String, String, StoredApiKeyRecord)>> {
+        Ok(
+            (index_hash == &MANAGED_KEY_FIXTURE.record.index_hash).then(|| {
+                (
+                    self.principal_id.clone(),
+                    MANAGED_KEY_FIXTURE.key_id.clone(),
+                    MANAGED_KEY_FIXTURE.record.clone(),
+                )
+            }),
+        )
+    }
+
+    async fn list_by_principal(
+        &self,
+        principal_id: &str,
+    ) -> StorageResult<Vec<StoredApiKeyRecord>> {
+        Ok((principal_id == self.principal_id)
+            .then(|| MANAGED_KEY_FIXTURE.record.clone())
+            .into_iter()
+            .collect())
+    }
+
+    async fn list_all(&self) -> StorageResult<Vec<(String, String, StoredApiKeyRecord)>> {
+        Ok(vec![(
+            self.principal_id.clone(),
+            MANAGED_KEY_FIXTURE.key_id.clone(),
+            MANAGED_KEY_FIXTURE.record.clone(),
+        )])
+    }
+
+    async fn update(
+        &self,
+        _principal_id: &str,
+        _key_id: &str,
+        _mutation: ApiKeyMutation,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn revoke_zero_secrets(&self, _principal_id: &str, _key_id: &str) -> StorageResult<()> {
+        Ok(())
     }
 }
 
@@ -393,7 +503,7 @@ pub fn messages_request(body: Bytes) -> Request<Bytes> {
     Request::builder()
         .method(Method::POST)
         .uri("/v1/messages")
-        .header("x-api-key", "sk-ant-downstream")
+        .header("x-api-key", managed_api_key())
         .header("anthropic-version", "2023-06-01")
         .body(body)
         .expect("test request builds")
@@ -516,7 +626,6 @@ fn default_json_for_status(status: StatusCode) -> serde_json::Value {
 pub struct TestLifecycleBus {
     pub bus: Arc<cc_lb_engine::InMemoryBus>,
     _assembler: Option<cc_lb_engine::RequestEventAssemblerHandle>,
-    _hook_adapter: Option<cc_lb_engine::ObservabilityHookAdapterHandle>,
     _rate_limit_header: Option<cc_lb_engine::RateLimitHeaderSubscriberHandle>,
 }
 
@@ -525,7 +634,6 @@ impl TestLifecycleBus {
         Self {
             bus: Arc::new(cc_lb_engine::InMemoryBus::new()),
             _assembler: None,
-            _hook_adapter: None,
             _rate_limit_header: None,
         }
     }
@@ -541,14 +649,6 @@ impl TestLifecycleBus {
             Some(bus_arc),
             Arc::new(cc_lb_observability::NoopMetricsHook),
         ));
-        self
-    }
-
-    pub fn with_hook_adapter(mut self, hooks: Vec<Arc<dyn ObservabilityHook>>) -> Self {
-        let rx = self.bus.attach_lifecycle_hook_adapter(
-            cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY,
-        );
-        self._hook_adapter = Some(cc_lb_engine::spawn_observability_hook_adapter(rx, hooks));
         self
     }
 

@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::any;
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DownstreamAuthMode, PostgresPoolConfig, StorageConfig};
+use cc_lb_config::{AdminAuthProviderConfig, Config, PostgresPoolConfig, StorageConfig};
 use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
 use cc_lb_storage_api::{
@@ -31,7 +31,7 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::{Layer, prelude::*};
 use url::Url;
 
-const ADMIN_TOKEN: &str = "test-token";
+const ADMIN_TOKEN: &str = env!("CARGO_PKG_NAME");
 const PRINCIPAL_ID: &str = "multi-instance-principal";
 const TASKS_PER_INSTANCE: usize = 50;
 const EXPECTED_ISSUED_KEYS: usize = TASKS_PER_INSTANCE * 2;
@@ -293,9 +293,10 @@ fn test_config(database_url: &str) -> Config {
         url: database_url.to_owned(),
         pool: PostgresPoolConfig::default(),
     };
-    config.admin.token = Some(ADMIN_TOKEN.to_owned());
-    config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
-    config.downstream_auth.none_mode = None;
+    config.admin.auth.providers = vec![AdminAuthProviderConfig::StaticToken {
+        id: "test".to_owned(),
+        token_env: crate::common::TEST_NONEMPTY_ENV.to_owned(),
+    }];
     // Postgres always runs pg_notify fanout; borrow the always-set CI env as the
     // shared cluster token so the app can build.
     config.cluster.instance_url = Some("http://127.0.0.1:0".to_owned());
@@ -410,10 +411,7 @@ async fn issue_key(admin_addr: SocketAddr, label: &str) -> TestResult<IssuedKey>
     let response = admin_post_json(
         admin_addr,
         &format!("/admin/v1/principals/{PRINCIPAL_ID}/keys"),
-        json!({
-            "label": label,
-            "upstream_kind": "anthropic_key",
-        }),
+        json!({ "label": label }),
     )
     .await?;
     assert_eq!(

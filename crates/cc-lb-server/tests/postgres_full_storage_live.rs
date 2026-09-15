@@ -13,7 +13,7 @@ use axum::response::IntoResponse;
 use axum::routing::any;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{
-    AnthropicOAuthConfig, Config, DownstreamAuthMode, PostgresPoolConfig, StorageConfig,
+    AdminAuthProviderConfig, AnthropicOAuthConfig, Config, PostgresPoolConfig, StorageConfig,
 };
 use cc_lb_server::app::{
     App, build_app_for_testing_postgres, build_app_with_storage, seed_app_testing_storage,
@@ -29,7 +29,7 @@ use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use url::Url;
 
-const ADMIN_TOKEN: &str = "test-token";
+const ADMIN_TOKEN: &str = env!("CARGO_PKG_NAME");
 const PRINCIPAL_ID: &str = "test-principal";
 const POSTGRES_TEST_SCHEMA: &str = "cc_lb_app_test";
 const MESSAGES_BODY: &[u8] = br#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#;
@@ -191,9 +191,10 @@ fn test_config(database_url: &str, upstream_addr: SocketAddr) -> TestResult<Conf
         url: database_url.to_owned(),
         pool: PostgresPoolConfig::default(),
     };
-    config.admin.token = Some(ADMIN_TOKEN.to_owned());
-    config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
-    config.downstream_auth.none_mode = None;
+    config.admin.auth.providers = vec![AdminAuthProviderConfig::StaticToken {
+        id: "test".to_owned(),
+        token_env: crate::common::TEST_NONEMPTY_ENV.to_owned(),
+    }];
     // Postgres always runs pg_notify fanout; borrow the always-set CI env as the
     // shared cluster token so the app can build.
     config.cluster.instance_url = Some("http://127.0.0.1:0".to_owned());

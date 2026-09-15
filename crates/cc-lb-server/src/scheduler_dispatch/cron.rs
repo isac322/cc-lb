@@ -43,7 +43,7 @@ impl SchedulerDispatch {
                 let result = handle_usage_prune_job(
                     job,
                     &StorageHandle::new(self.storage.clone()),
-                    self.config.api_keys.usage_retention_days,
+                    self.config.request_event_retention_days,
                     self.clock.clone(),
                     cc_lb_control::api_keys::limit_engine::LimitEngine::durable_usage_writer_inactive_after_secs(),
                     cc_lb_control::api_keys::limit_engine::LimitEngine::durable_usage_retention_secs(),
@@ -320,9 +320,8 @@ impl SchedulerDispatch {
         let loader = LiteLlmLoader::new(
             self.price_catalog.clone(),
             self.storage.clone(),
-            self.config.api_keys.price_catalog.url.clone(),
-            self.config.api_keys.price_catalog.refresh_interval,
-            self.config.api_keys.price_catalog.cache_path.clone(),
+            self.config.price_catalog.url.clone(),
+            self.config.price_catalog.cache_path.clone(),
             self.clock.clone(),
         );
         match &self.backend {

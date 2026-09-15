@@ -16,8 +16,9 @@ async fn oversized_content_length_returns_413_before_the_client_sends_a_body() -
     let server = common::spawn_test_server().await;
     let mut stream = connect_proxy(server.proxy_addr).await?;
     let request = format!(
-        "POST /v1/messages HTTP/1.1\r\nHost: {}\r\nx-api-key: sk-ant-test\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "POST /v1/messages HTTP/1.1\r\nHost: {}\r\nx-api-key: {}\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         server.proxy_addr,
+        server.managed_key.plaintext,
         MESSAGES_CAP_BYTES + 1,
     );
 
@@ -37,8 +38,8 @@ async fn chunked_body_over_cap_returns_413_before_the_client_finishes_streaming(
     let server = common::spawn_test_server().await;
     let mut stream = connect_proxy(server.proxy_addr).await?;
     let request = format!(
-        "POST /v1/messages HTTP/1.1\r\nHost: {}\r\nx-api-key: sk-ant-test\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
-        server.proxy_addr,
+        "POST /v1/messages HTTP/1.1\r\nHost: {}\r\nx-api-key: {}\r\nanthropic-version: 2023-06-01\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+        server.proxy_addr, server.managed_key.plaintext,
     );
     stream.write_all(request.as_bytes()).await?;
     stream
@@ -63,7 +64,14 @@ async fn body_exactly_at_messages_cap_reaches_the_real_upstream() -> TestResult<
     let body = messages_body_with_len(MESSAGES_CAP_BYTES);
 
     // When
-    let response = common::http_post(server.proxy_addr, "/v1/messages", &body, &[]).await?;
+    let response = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &body,
+        &[],
+    )
+    .await?;
 
     // Then
     assert_eq!(response.status, 200, "{}", response.body);
@@ -78,8 +86,22 @@ async fn messages_and_files_paths_use_their_distinct_configured_caps() -> TestRe
     let body = messages_body_with_len(MESSAGES_CAP_BYTES + 1);
 
     // When
-    let messages = common::http_post(server.proxy_addr, "/v1/messages", &body, &[]).await?;
-    let files = common::http_post(server.proxy_addr, "/v1/files", &body, &[]).await?;
+    let messages = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &body,
+        &[],
+    )
+    .await?;
+    let files = common::http_post(
+        server.proxy_addr,
+        "/v1/files",
+        &server.managed_key.plaintext,
+        &body,
+        &[],
+    )
+    .await?;
 
     // Then
     assert_eq!(messages.status, 413, "{}", messages.body);

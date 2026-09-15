@@ -3,9 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
-use cc_lb_config::{
-    Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
-};
+use cc_lb_config::{Config, StorageConfig};
 use cc_lb_server::app::{BuildError, build_app_with_storage};
 use cc_lb_server::scheduler_factory::SchedulerFactoryError;
 use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, Storage as StorageTrait};
@@ -59,11 +57,6 @@ fn app_config(storage: StorageConfig) -> Config {
     // Postgres validates the cluster token before opening the scheduler pool.
     // Borrow an immutable harness variable instead of mutating process-wide env.
     config.cluster.token_env = crate::common::TEST_NONEMPTY_ENV.to_owned();
-    config.downstream_auth.mode = DownstreamAuthMode::None;
-    config.downstream_auth.none_mode = Some(NoneModeConfig {
-        principal_id: "task40-hard-fail".to_owned(),
-        upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-    });
     config.scheduler.separate_pool.min_connections = 0;
     config.scheduler.separate_pool.acquire_timeout_secs = 10;
     config

@@ -345,8 +345,8 @@ reflects success without new event schema.
 
 ## Rollout
 
-- **Phase 0 (default off):** ship code with feature disabled at the
-  principal level. Bootstrap principals unchanged.
+- **Phase 0 (default off):** ship code with the feature disabled at the
+  principal level. Existing database principals remain unchanged.
 - **Phase 1 (internal opt-in):** enable on a single test principal in
   staging with `max_refreshes = 2, max_total_duration = 600s`. Verify
   metrics and log output.

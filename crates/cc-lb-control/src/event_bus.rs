@@ -66,7 +66,6 @@ pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 /// [`LifecycleEventLogger`](crate::lifecycle_event_logger::LifecycleEventLogger).
 pub const DEFAULT_LIFECYCLE_WRITER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY: usize = 4096;
-pub const DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_PRICING_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY: usize = 4096;
@@ -137,7 +136,6 @@ struct InMemoryBusInner {
     lifecycle_broadcast_tx: broadcast::Sender<LifecycleEvent>,
     lifecycle_writer_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_assembler_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_hook_adapter_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_pricing_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_limit_reconcile_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_cache_obs_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
@@ -167,7 +165,6 @@ impl InMemoryBus {
                 lifecycle_broadcast_tx,
                 lifecycle_writer_tx: Mutex::new(None),
                 lifecycle_assembler_tx: Mutex::new(None),
-                lifecycle_hook_adapter_tx: Mutex::new(None),
                 lifecycle_pricing_tx: Mutex::new(None),
                 lifecycle_limit_reconcile_tx: Mutex::new(None),
                 lifecycle_cache_obs_tx: Mutex::new(None),
@@ -203,17 +200,6 @@ impl InMemoryBus {
             .lifecycle_assembler_tx
             .lock()
             .expect("event bus lifecycle assembler mutex poisoned");
-        *guard = Some(tx);
-        rx
-    }
-
-    pub fn attach_lifecycle_hook_adapter(&self, capacity: usize) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_hook_adapter_tx
-            .lock()
-            .expect("event bus lifecycle hook adapter mutex poisoned");
         *guard = Some(tx);
         rx
     }
@@ -416,14 +402,6 @@ impl RequestEventBus for InMemoryBus {
                 .expect("event bus lifecycle assembler mutex poisoned");
             guard.clone()
         };
-        let hook_adapter_tx = {
-            let guard = self
-                .inner
-                .lifecycle_hook_adapter_tx
-                .lock()
-                .expect("event bus lifecycle hook adapter mutex poisoned");
-            guard.clone()
-        };
         let pricing_tx = {
             let guard = self
                 .inner
@@ -533,22 +511,6 @@ impl RequestEventBus for InMemoryBus {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     tracing::debug!("lifecycle assembler mpsc closed");
-                }
-            }
-        }
-        if let Some(tx) = hook_adapter_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_hook_adapter_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle hook adapter mpsc full; dropping event (hook fire may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle hook adapter mpsc closed");
                 }
             }
         }
@@ -854,7 +816,6 @@ mod tests {
             panic!("expected in-memory lifecycle receiver");
         };
         let mut assembler_rx = bus.attach_lifecycle_assembler(1);
-        let mut hook_rx = bus.attach_lifecycle_hook_adapter(1);
         let mut writer_rx = bus.attach_lifecycle_writer(1);
         let event = LifecycleEvent::RequestLogUpstreamErrorObserved {
             event_id: "evt-private".into(),
@@ -866,7 +827,6 @@ mod tests {
 
         assert_eq!(assembler_rx.try_recv().expect("assembler event"), event);
         assert!(broadcast_rx.try_recv().is_err());
-        assert!(hook_rx.try_recv().is_err());
         assert!(writer_rx.try_recv().is_err());
     }
 

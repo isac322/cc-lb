@@ -46,21 +46,6 @@ memory_max_pages = 2048
 }
 
 #[test]
-fn wasmtime_allocation_strategy_ondemand_alias_parses_from_toml() {
-    let cfg = parse(
-        r#"
-[runtime.wasmtime]
-allocation_strategy = "on_demand"
-"#,
-    );
-
-    assert_eq!(
-        cfg.runtime.wasmtime.allocation_strategy,
-        WasmtimeAllocationStrategy::OnDemand,
-    );
-}
-
-#[test]
 fn wasmtime_memory_pool_and_reservation_knobs_parse_from_toml() {
     let cfg = parse(
         r#"

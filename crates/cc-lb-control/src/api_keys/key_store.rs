@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use cc_lb_storage_api::{
     ManagedKeyStore, StorageError,
-    types::{
-        ApiKeyMutation, IssueParams, KeyStatus, Limit, PrincipalKindLite, StoredApiKeyRecord,
-        UpstreamKind,
-    },
+    types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, StoredApiKeyRecord},
 };
 use thiserror::Error;
 
@@ -20,12 +17,10 @@ pub struct KeyStore {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateParams {
-    pub upstream_kind: UpstreamKind,
     pub label: String,
     pub description: Option<String>,
     pub expires_at_unix_secs: Option<u64>,
     pub limit_overrides: Vec<Limit>,
-    pub principal_kind: PrincipalKindLite,
 }
 
 #[derive(Debug, Error)]
@@ -61,13 +56,11 @@ impl KeyStore {
         let issue_params = IssueParams {
             label: params.label,
             description: params.description,
-            upstream_kind: params.upstream_kind,
             expires_at_unix_secs: params.expires_at_unix_secs,
             limit_overrides: params.limit_overrides,
             secret_salt,
             verify_hash,
             last_4,
-            principal_kind: params.principal_kind,
             index_hash,
         };
 

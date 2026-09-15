@@ -47,7 +47,6 @@ refresh_debounce_secs = 0
 "#;
     let server = common::spawn_test_server_with_two_upstreams(extra_config, fake_config).await;
     assert!(server.sqlite_path.starts_with(server._config_dir.path()));
-    assert!(server.managed_key.is_none());
     let pool = support::open_sqlite_pool(&server).await;
     let upstream_rows = support::fetch_upstreams(&pool).await;
     assert_eq!(upstream_rows.len(), 2);
@@ -68,9 +67,15 @@ refresh_debounce_secs = 0
         "messages": [{"role": "user", "content": [{"type": "text", "text": tail}]}]
     });
     let first_body = serde_json::to_string(&first_request).expect("serialize first request");
-    let first_response = common::http_post(server.proxy_addr, "/v1/messages", &first_body, &[])
-        .await
-        .expect("send first request through cc-lb proxy");
+    let first_response = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &first_body,
+        &[],
+    )
+    .await
+    .expect("send first request through cc-lb proxy");
     assert_message_response(&first_response, "cache_creation_input_tokens");
 
     let first_upstream_id = support::wait_for_initial_observations(&pool, MODEL).await;
@@ -92,9 +97,15 @@ refresh_debounce_secs = 0
         .duration_since(UNIX_EPOCH)
         .expect("system time after unix epoch")
         .as_secs() as i64;
-    let second_response = common::http_post(server.proxy_addr, "/v1/messages", &second_body, &[])
-        .await
-        .expect("send second request through cc-lb proxy");
+    let second_response = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &second_body,
+        &[],
+    )
+    .await
+    .expect("send second request through cc-lb proxy");
     assert_message_response(&second_response, "cache_read_input_tokens");
     assert!(script.wait_for_requests(2, Duration::from_secs(2)).await);
     assert_eq!(script.request_count(), 2);
@@ -159,9 +170,15 @@ refresh_debounce_secs = 0
     });
     let body = serde_json::to_string(&request).expect("serialize automatic-caching request");
 
-    let first = common::http_post(server.proxy_addr, "/v1/messages", &body, &[])
-        .await
-        .expect("send first automatic-caching request through cc-lb proxy");
+    let first = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &body,
+        &[],
+    )
+    .await
+    .expect("send first automatic-caching request through cc-lb proxy");
     assert_message_response(&first, "cache_creation_input_tokens");
     let first_event = support::wait_for_settled_event(&pool, MODEL, 0).await;
     assert!(
@@ -175,9 +192,15 @@ refresh_debounce_secs = 0
         "the synthesized automatic breakpoint must be counted exactly once"
     );
 
-    let second = common::http_post(server.proxy_addr, "/v1/messages", &body, &[])
-        .await
-        .expect("send second automatic-caching request through cc-lb proxy");
+    let second = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &body,
+        &[],
+    )
+    .await
+    .expect("send second automatic-caching request through cc-lb proxy");
     assert_message_response(&second, "cache_read_input_tokens");
     assert!(script.wait_for_requests(2, Duration::from_secs(2)).await);
 
@@ -255,15 +278,27 @@ refresh_debounce_secs = 0
     let base_body = serde_json::to_string(&base).expect("serialize base request");
     let variant_body = serde_json::to_string(&variant).expect("serialize variant request");
 
-    let first = common::http_post(server.proxy_addr, "/v1/messages", &base_body, &[])
-        .await
-        .expect("send base request through cc-lb proxy");
+    let first = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &base_body,
+        &[],
+    )
+    .await
+    .expect("send base request through cc-lb proxy");
     assert_eq!(first.status, 200);
     let first_event = support::wait_for_settled_event(&pool, MODEL, 0).await;
 
-    let second = common::http_post(server.proxy_addr, "/v1/messages", &variant_body, &[])
-        .await
-        .expect("send variant request through cc-lb proxy");
+    let second = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &variant_body,
+        &[],
+    )
+    .await
+    .expect("send variant request through cc-lb proxy");
     assert_eq!(second.status, 200);
     assert!(script.wait_for_requests(2, Duration::from_secs(2)).await);
     let second_event = support::wait_for_settled_event(&pool, MODEL, first_event.id).await;
@@ -361,9 +396,15 @@ refresh_debounce_secs = 0
         "messages": [{"role": "user", "content": [{"type": "text", "text": "tail"}]}]
     });
     let body = serde_json::to_string(&request).expect("serialize opus-4-7 request");
-    let response = common::http_post(server.proxy_addr, "/v1/messages", &body, &[])
-        .await
-        .expect("send opus-4-7 request through cc-lb proxy");
+    let response = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &body,
+        &[],
+    )
+    .await
+    .expect("send opus-4-7 request through cc-lb proxy");
     assert_eq!(response.status, 200);
 
     let (count, _) = support::observation_stats(&pool, OPUS_4_7, Duration::from_secs(10)).await;
@@ -416,15 +457,27 @@ refresh_debounce_secs = 0
     let plain_body = serde_json::to_string(&base).expect("serialize standard-speed request");
     let fast_body = serde_json::to_string(&fast).expect("serialize fast-speed request");
 
-    let first = common::http_post(server.proxy_addr, "/v1/messages", &plain_body, &[])
-        .await
-        .expect("send standard-speed request through cc-lb proxy");
+    let first = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &plain_body,
+        &[],
+    )
+    .await
+    .expect("send standard-speed request through cc-lb proxy");
     assert_eq!(first.status, 200);
     let first_event = support::wait_for_settled_event(&pool, IGNORES_FAST, 0).await;
 
-    let second = common::http_post(server.proxy_addr, "/v1/messages", &fast_body, &[])
-        .await
-        .expect("send fast-speed request through cc-lb proxy");
+    let second = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &fast_body,
+        &[],
+    )
+    .await
+    .expect("send fast-speed request through cc-lb proxy");
     assert_eq!(second.status, 200);
     assert!(script.wait_for_requests(2, Duration::from_secs(2)).await);
     let second_event = support::wait_for_settled_event(&pool, IGNORES_FAST, first_event.id).await;
@@ -507,15 +560,27 @@ refresh_debounce_secs = 0
     let thinking_body =
         serde_json::to_string(&with_thinking).expect("serialize thinking-block request");
 
-    let first = common::http_post(server.proxy_addr, "/v1/messages", &base_body, &[])
-        .await
-        .expect("send base request through cc-lb proxy");
+    let first = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &base_body,
+        &[],
+    )
+    .await
+    .expect("send base request through cc-lb proxy");
     assert_eq!(first.status, 200);
     let first_event = support::wait_for_settled_event(&pool, MODEL, 0).await;
 
-    let second = common::http_post(server.proxy_addr, "/v1/messages", &thinking_body, &[])
-        .await
-        .expect("send thinking-block request through cc-lb proxy");
+    let second = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        &thinking_body,
+        &[],
+    )
+    .await
+    .expect("send thinking-block request through cc-lb proxy");
     assert_eq!(second.status, 200);
     assert!(script.wait_for_requests(2, Duration::from_secs(2)).await);
     let second_event = support::wait_for_settled_event(&pool, MODEL, first_event.id).await;

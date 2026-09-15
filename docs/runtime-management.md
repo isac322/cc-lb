@@ -12,28 +12,10 @@ The runtime architecture relies on a lock-free `DynamicView` snapshot managed vi
 
 In multi-replica deployments, replicas synchronize their local views using Postgres `LISTEN/NOTIFY` channels for sub-second updates. If a notification is missed, a background reconciler polls the database every 60 seconds as a fallback. The system uses a single rebind primitive to safely commit staged plugin slots and rebuild the routing table.
 
-## Bootstrap
-
-When starting a fresh deployment, you can bootstrap the initial admin principal and seed resources. The server checks the `CC_LB_BOOTSTRAP_ADMIN_TOKEN` environment variable on startup. If present, it automatically seeds the admin principal with this token.
-
-You can also place a `bootstrap.toml` file in your data directory to seed initial upstreams, principals, and plugin chains. The server processes this file once on startup, applies the resources to the database, and renames the file to `bootstrap.toml.consumed-<timestamp>` to prevent re-processing.
-
-An example `bootstrap.toml` file:
-
-```toml
-[[ upstreams ]]
-name = "primary-api"
-kind = "anthropic_api_key"
-api_key_env = "ANTHROPIC_API_KEY"
-
-[[ principals ]]
-name = "default-user"
-kind = "user"
-```
 
 ## Admin v1 REST API
 
-All administrative operations are authenticated via a Bearer token in the `Authorization` header.
+Administrative operations use the providers configured in `admin.auth.providers`. A static-token provider accepts its environment-backed Bearer token in the `Authorization` header.
 
 ### Local proxy key files
 
@@ -345,12 +327,11 @@ Some configuration changes in `cc-lb.toml` cannot be applied via hot-reload and 
 | `listener.metrics_addr` | No | Yes | Socket bindings are fixed at process start |
 | `listener.tls.cert_path` | No | Yes | Listener TLS certificate changes require a process restart |
 | `listener.tls.key_path` | No | Yes | Listener TLS key changes require a process restart |
-| `tls.cert_path` | No | Yes | TLS certificate changes require a process restart |
-| `tls.key_path` | No | Yes | TLS key changes require a process restart |
 | `storage.path` | No | Yes | Storage backend changes require a process restart |
 | `storage.url` | No | Yes | Storage backend changes require a process restart |
 | `storage.pool` | No | Yes | Storage pool changes require a process restart |
 | `aead.key_env` | No | Yes | Storage encryption key environment changes require a process restart |
+| `admin.auth.providers` | No | Yes | Admin authentication providers are built at process start |
 | `oauth.anthropic.client_id` | No | Yes | Anthropic OAuth client changes require a process restart |
 | `oauth.anthropic.auth_url` | No | Yes | Anthropic OAuth endpoint changes require a process restart |
 | `oauth.anthropic.token_url` | No | Yes | Anthropic OAuth endpoint changes require a process restart |

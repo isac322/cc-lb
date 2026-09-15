@@ -17,7 +17,7 @@ use http::{HeaderValue, StatusCode};
 use serde_json::Value;
 use uuid::Uuid;
 
-use common::{RecordingHook, TestAuthn, TestState, collect_body, messages_request};
+use common::{RecordingHook, TestAuthn, TestState, collect_body, managed_key_id, messages_request};
 use fixtures::{
     AgentTurnDispatch, FirstRouter, RecordingSignerFactory, principal_with_keepalive, settle,
     upstream_record,
@@ -101,9 +101,6 @@ async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
     let mut request = messages_request(Bytes::from_static(
         br#"{"model":"claude-test","max_tokens":32,"tool_choice":{"type":"any"},"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}]}"#,
     ));
-    request
-        .headers_mut()
-        .insert("x-api-key", HeaderValue::from_static("sk-cclb-downstream"));
     request.headers_mut().insert(
         "anthropic-beta",
         HeaderValue::from_static("prompt-caching-2024-07-31"),
@@ -120,7 +117,7 @@ async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
     assert_eq!(enqueuer.cancelled_count(), 0);
     let enqueue = &enqueued[0];
     assert!(!enqueue.session_key_hash.is_empty());
-    assert_eq!(enqueue.accounting_key_id.as_deref(), Some("none-mode"));
+    assert_eq!(enqueue.accounting_key_id.as_deref(), Some(managed_key_id()));
     let snapshot = &enqueue.snapshot;
     assert_eq!(snapshot.upstream_id, upstream_id);
     assert_eq!(snapshot.ttl, CacheTtl::Ttl5m);

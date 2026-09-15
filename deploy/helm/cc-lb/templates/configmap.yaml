@@ -6,6 +6,8 @@ metadata:
     {{- include "cc-lb.labels" . | nindent 4 }}
 data:
   cc-lb.toml: |
+    request_event_retention_days = {{ .Values.config.requestEventRetentionDays }}
+
     [runtime]
     data_dir = {{ .Values.config.dataDir | quote }}
 
@@ -28,13 +30,15 @@ data:
     {{- end }}
     {{- end }}
 
-    [admin]
-    token_env = {{ .Values.config.admin.tokenEnv | quote }}
+    [[admin.auth.providers]]
+    kind = "static_token"
+    id = "helm"
+    token_env = {{ .Values.config.admin.staticTokenEnv | quote }}
 
     [aead]
     key_env = {{ .Values.config.aead.keyEnv | quote }}
 
-    [api_keys.price_catalog]
+    [price_catalog]
     cache_path = {{ .Values.config.priceCatalog.cachePath | quote }}
     {{- with .Values.config.extraToml }}
 {{ . | nindent 4 }}

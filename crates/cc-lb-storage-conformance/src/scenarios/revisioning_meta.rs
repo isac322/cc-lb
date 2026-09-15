@@ -116,7 +116,7 @@ where
             ConfigStore::append_config_history(
                 storage.as_ref(),
                 revision,
-                format!("revision = {revision}"),
+                format!("[timeouts]\nupstream_total_secs = {revision}"),
                 1_800_000_000 + revision,
                 history_summary(revision),
             )
@@ -160,7 +160,7 @@ where
         ConfigStore::append_config_history(
             storage.as_ref(),
             7,
-            "[legacy-upstreams.primary]".to_owned(),
+            "[timeouts]\nupstream_total_secs = 70".to_owned(),
             1_800_000_007,
             summary.clone(),
         )
@@ -168,7 +168,7 @@ where
         ConfigStore::append_config_history(
             storage.as_ref(),
             3,
-            "[legacy-principals.local]".to_owned(),
+            "[timeouts]\nupstream_total_secs = 30".to_owned(),
             1_800_000_003,
             history_summary(3),
         )
@@ -178,7 +178,7 @@ where
             .await?
             .expect("revision 7 should be present");
         assert_eq!(entry.revision, 7);
-        assert_eq!(entry.config_toml, "[legacy-upstreams.primary]");
+        assert_eq!(entry.config_toml, "[timeouts]\nupstream_total_secs = 70");
         assert_eq!(entry.applied_at_unix_secs, 1_800_000_007);
         assert_eq!(entry.summary, summary);
         assert!(
@@ -323,9 +323,6 @@ where
 
 fn history_summary(seed: u64) -> HistorySummary {
     HistorySummary {
-        upstreams: seed as usize,
-        principals: (seed + 1) as usize,
-        plugin_count: (seed + 2) as usize,
         tls_enabled: seed.is_multiple_of(2),
     }
 }

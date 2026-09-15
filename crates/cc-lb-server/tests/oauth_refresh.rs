@@ -7,9 +7,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_config::{
-    AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
-};
+use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_domain::Upstream;
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
@@ -36,8 +34,7 @@ use cc_lb_signer_anthropic_oauth::{
 };
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamRecord,
-    UpstreamStore,
-    types::{KeyStatus, PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
+    UpstreamStore, types::KeyStatus,
 };
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
@@ -259,6 +256,19 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
 async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_message_request() {
     let fixture = Fixture::new().await;
     fixture.create_principal("oauth-principal").await;
+    let key_store = Arc::new(KeyStore::new(fixture.storage.clone()));
+    let (_key_record, key_secret) = key_store
+        .create(
+            "oauth-principal",
+            CreateParams {
+                label: "oauth-refresh-proxy".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("managed key created");
     let tokens = initial_tokens(&fixture.fake_base).await;
     fixture
         .create_oauth_upstream_with_tokens(
@@ -300,15 +310,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
     .await
     .expect("dynamic view builds");
     let lifecycle = Lifecycle::new_with_dynamic_view(
-        Arc::new(BuiltinAuthn::new(
-            DownstreamAuthMode::None,
-            Some(NoneModeConfig {
-                principal_id: "oauth-principal".to_owned(),
-                upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
-            }),
-            None,
-            fixture.clock.clone(),
-        )),
+        Arc::new(BuiltinAuthn::new(key_store, fixture.clock.clone())),
         Arc::new(DynamicViewHolder::new(view)),
         cc_lb_engine::make_default_dispatcher(50),
         LifecycleConfig::default(),
@@ -316,7 +318,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
     );
 
     let response = lifecycle
-        .handle(message_request())
+        .handle(message_request(key_secret.expose()))
         .await
         .expect("lifecycle response");
     let status = response.status();
@@ -776,11 +778,11 @@ fn shaped_request() -> ShapedRequest {
     .expect("shape")
 }
 
-fn message_request() -> Request<Bytes> {
+fn message_request(api_key: &str) -> Request<Bytes> {
     Request::builder()
         .method(Method::POST)
         .uri("/v1/messages")
-        .header("x-api-key", "sk-ant-downstream")
+        .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
         .body(Bytes::from_static(

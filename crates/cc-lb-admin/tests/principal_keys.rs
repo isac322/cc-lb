@@ -54,13 +54,42 @@ async fn principal_keys_current_admin_principals_smoke() {
 }
 
 #[tokio::test]
+async fn key_issue_rejects_removed_kind_fields() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let (_, _, principal) = server
+        .client
+        .post_json(
+            "/admin/v1/principals",
+            json!({ "name": "strict-key-issue", "kind": "human", "allowed_models": [], "default_limits": [] }),
+        )
+        .await;
+    let principal_id = principal["id"].as_str().unwrap();
+
+    for removed in ["principal_kind", "upstream_kind"] {
+        let mut request = json!({ "label": "must-reject" });
+        request[removed] = json!("machine");
+        let (status, _, body) = server
+            .client
+            .post_json(
+                &format!("/admin/v1/principals/{principal_id}/keys"),
+                request,
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "validation_failed");
+        assert!(body["message"].as_str().unwrap().contains(removed));
+    }
+}
+
+#[tokio::test]
 async fn revoked_key_list_preserves_key_id_last4_and_audit_rows() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, _, principal) = server
         .client
         .post_json(
             "/admin/v1/principals",
-            json!({ "name": "keys", "kind": "machine", "allowed_models": [], "default_limits": [] }),
+            json!({ "name": "keys", "kind": "human", "allowed_models": [], "default_limits": [] }),
         )
         .await;
     let principal_id = principal["id"].as_str().unwrap();
@@ -74,6 +103,8 @@ async fn revoked_key_list_preserves_key_id_last4_and_audit_rows() {
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
+    assert!(issued.get("principal_kind").is_none());
+    assert!(issued.get("upstream_kind").is_none());
     let key_id = issued["key_id"].as_str().unwrap();
     let plaintext = issued["plaintext_key"].as_str().unwrap();
     let expected_last4 = &plaintext[plaintext.len() - 4..];
@@ -98,6 +129,8 @@ async fn revoked_key_list_preserves_key_id_last4_and_audit_rows() {
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0]["key_id"], key_id);
     assert_eq!(keys[0]["last_4"], expected_last4);
+    assert!(keys[0].get("principal_kind").is_none());
+    assert!(keys[0].get("upstream_kind").is_none());
 
     wait_for_audit_action(&server.storage, "principal_key_issue", key_id).await;
     wait_for_audit_action(&server.storage, "principal_key_revoke", key_id).await;
@@ -137,6 +170,8 @@ async fn legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() 
     assert_eq!(key["id"], key_id);
     assert_eq!(key["principal_id"], principal_id);
     assert!(key.get("plaintext_key").is_none());
+    assert!(key.get("principal_kind").is_none());
+    assert!(key.get("upstream_kind").is_none());
 
     for (operation, action, expected_key_status) in [
         ("disable", "principal_key_disable", "disabled"),
@@ -168,7 +203,7 @@ async fn legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() 
         assert_eq!(entry.principal_id, principal_id);
         assert_eq!(entry.status, StatusCode::OK.as_u16());
         assert_eq!(entry.actor_authority.as_deref(), Some("static-token"));
-        assert_eq!(entry.actor_subject.as_deref(), Some("legacy"));
+        assert_eq!(entry.actor_subject.as_deref(), Some("test-static-token"));
         assert_eq!(entry.actor_kind.as_deref(), Some("break_glass"));
         assert!(entry.payload.is_none());
     }

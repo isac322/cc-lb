@@ -4,7 +4,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
+use cc_lb_config::Config;
 use cc_lb_server::app::{build_app_for_testing, build_app_with_storage};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -59,11 +59,6 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
     };
     config.runtime.data_dir = Some(dir.path().to_path_buf());
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
-    config.downstream_auth.mode = DownstreamAuthMode::None;
-    config.downstream_auth.none_mode = Some(NoneModeConfig {
-        principal_id: "declared-principal".to_owned(),
-        upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-    });
     let app = build_app_with_storage(
         config,
         None,

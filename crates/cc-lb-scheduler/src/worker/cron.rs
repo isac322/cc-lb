@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use cc_lb_clock::ClockHandle;
-use cc_lb_config::Config;
+use cc_lb_config::SchedulerConfig;
 use cc_lb_control::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
@@ -33,7 +33,7 @@ impl crate::cron::SingletonCronJob for CronJob {
 
 pub(super) fn spawn_cron_producer(
     backend: SchedulerBackend,
-    config: Config,
+    config: SchedulerConfig,
     cancel: CancellationToken,
     clock: ClockHandle,
 ) -> JoinHandle<()> {
@@ -54,7 +54,7 @@ pub(super) fn spawn_cron_producer(
 #[cfg(feature = "sqlite")]
 async fn run_sqlite_cron_producer(
     sqlite: SqliteSchedulerBackend,
-    config: Config,
+    config: SchedulerConfig,
     cancel: CancellationToken,
     clock: ClockHandle,
 ) {
@@ -74,7 +74,7 @@ async fn run_sqlite_cron_producer(
 #[cfg(feature = "postgres")]
 async fn run_postgres_cron_producer(
     postgres: PostgresSchedulerBackend,
-    config: Config,
+    config: SchedulerConfig,
     cancel: CancellationToken,
     clock: ClockHandle,
 ) {
@@ -187,7 +187,7 @@ struct SingletonCronSpec {
     factory: CronJobFactory,
 }
 
-fn singleton_cron_specs(config: &Config, clock: ClockHandle) -> Vec<SingletonCronSpec> {
+fn singleton_cron_specs(config: &SchedulerConfig, clock: ClockHandle) -> Vec<SingletonCronSpec> {
     let mut specs = Vec::new();
     push_singleton_spec(&mut specs, config, &clock, "usage_rollup", |_| {
         CronJob::UsageRollup(Default::default())
@@ -251,12 +251,12 @@ fn singleton_cron_specs(config: &Config, clock: ClockHandle) -> Vec<SingletonCro
 
 fn push_singleton_spec(
     specs: &mut Vec<SingletonCronSpec>,
-    config: &Config,
+    config: &SchedulerConfig,
     clock: &ClockHandle,
     name: &'static str,
     factory: CronJobFactory,
 ) {
-    let Some(job_config) = config.scheduler.recurring_jobs.get(name) else {
+    let Some(job_config) = config.recurring_jobs.get(name) else {
         return;
     };
     if !job_config.enabled {
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn default_registry_contains_the_actual_upstream_affinity_purge_job() {
-        let config = Config::default();
+        let config = SchedulerConfig::default();
         let clock: ClockHandle = std::sync::Arc::new(TestClock::new_at_secs(1_800_000_000));
         let specs = singleton_cron_specs(&config, clock);
         let spec = specs
@@ -341,9 +341,8 @@ mod tests {
 
     #[test]
     fn disabled_upstream_affinity_purge_is_not_registered() {
-        let mut config = Config::default();
+        let mut config = SchedulerConfig::default();
         config
-            .scheduler
             .recurring_jobs
             .get_mut("upstream_affinity_purge")
             .expect("default upstream affinity purge config")

@@ -55,7 +55,6 @@ pub mod lifecycle_cache_hit_miss_subscriber;
 pub mod lifecycle_cache_observation_subscriber;
 pub mod lifecycle_event_assembler;
 pub mod lifecycle_event_logger;
-pub mod lifecycle_hook_adapter;
 pub mod lifecycle_limit_reconcile_subscriber;
 pub mod lifecycle_limit_rejection_audit_subscriber;
 pub mod lifecycle_prompt_cache_observation_subscriber;
@@ -168,9 +167,9 @@ pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
 #[cfg(not(loom))]
 pub use event_bus::{
     BusError, DEFAULT_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
-    DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY, DEFAULT_LIFECYCLE_PRICING_CAPACITY,
-    DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY, DEFAULT_LIFECYCLE_WRITER_CAPACITY,
-    EventFanout, InMemoryBus, InMemoryFanout, new_in_memory_bus, record_dashboard_sse_lagged,
+    DEFAULT_LIFECYCLE_PRICING_CAPACITY, DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
+    DEFAULT_LIFECYCLE_WRITER_CAPACITY, EventFanout, InMemoryBus, InMemoryFanout, new_in_memory_bus,
+    record_dashboard_sse_lagged,
 };
 #[cfg(not(loom))]
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
@@ -192,9 +191,6 @@ pub use lifecycle_cache_observation_subscriber::{
 };
 pub use lifecycle_event_assembler::{RequestEventAssemblerHandle, spawn_request_event_assembler};
 pub use lifecycle_event_logger::{LifecycleEventLoggerHandle, spawn_lifecycle_event_logger};
-pub use lifecycle_hook_adapter::{
-    ObservabilityHookAdapterHandle, spawn_observability_hook_adapter,
-};
 pub use lifecycle_limit_reconcile_subscriber::{
     LimitReconcileSubscriberHandle, spawn_lifecycle_limit_reconcile_subscriber,
 };

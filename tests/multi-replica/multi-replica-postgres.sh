@@ -12,6 +12,7 @@ MASTER_KEY="0000000000000000000000000000000000000000000000000000000000000000"
 CLUSTER_TOKEN="00000000-0000-4000-8000-000000000038"
 UPSTREAM_NAME="multi-replica-oauth"
 PRINCIPAL_NAME="multi-replica-principal"
+PROXY_API_KEY=""
 PROXY_A_PORT=8888
 ADMIN_A_PORT=8001
 METRICS_A_PORT=8003
@@ -253,18 +254,8 @@ messages_cap_bytes = 33554432
 files_cap_bytes = 104857600
 
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "$PRINCIPAL_NAME"
-upstream_kind = "anthropic_o_auth"
 
 [storage]
 kind = "postgres"
@@ -297,7 +288,9 @@ tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = false
 
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "test"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 [circuit_breaker]
@@ -309,11 +302,6 @@ half_open_after_secs = 30
 max_conns_per_upstream = 50
 semaphore_per_upstream = 100
 
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]
 TOML
 }
 
@@ -342,7 +330,6 @@ PY
 start_replica_a() {
   CC_LB_MASTER_KEY="$MASTER_KEY" \
   CC_LB_ADMIN_TOKEN="$ADMIN_TOKEN" \
-  CC_LB_BOOTSTRAP_ADMIN_TOKEN="$ADMIN_TOKEN" \
   CC_LB_CLUSTER_TOKEN="$CLUSTER_TOKEN" \
   CC_LB_DATA_DIR="$TMP_DIR/A-data" \
   RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
@@ -373,6 +360,19 @@ create_principal() {
     cat "$output" >&2 || true
     fail "create principal expected HTTP 201 or 409, got $code"
   fi
+
+  local principal_id key_output
+  principal_id=$(json_get "$output" id)
+  key_output="$TMP_DIR/principal-key-create.json"
+  code=$(request_with_retry POST \
+    "http://127.0.0.1:$ADMIN_A_PORT/admin/v1/principals/$principal_id/keys" \
+    '{"label":"multi-replica"}' "$key_output") || true
+  if [ "$code" != "201" ]; then
+    printf '%s\n' "--- create principal key response ---" >&2
+    cat "$key_output" >&2 || true
+    fail "create principal key expected HTTP 201, got $code"
+  fi
+  PROXY_API_KEY=$(json_get "$key_output" plaintext_key)
 }
 
 create_oauth_upstream() {
@@ -450,7 +450,7 @@ proxy_request() {
   local code
   code=$(curl -sS -o "$output" -w '%{http_code}' -X POST \
     -H 'content-type: application/json' \
-    -H 'x-api-key: sk-ant-test' \
+    -H "x-api-key: $PROXY_API_KEY" \
     -H 'anthropic-version: 2023-06-01' \
     --data '{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hello multi replica"}],"max_tokens":32}' \
     "http://127.0.0.1:$port/v1/messages") || code=000

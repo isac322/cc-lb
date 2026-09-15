@@ -6,7 +6,6 @@ use cc_lb_domain::{
 };
 use cc_lb_request_log::{CostBreakdown, RequestCacheLookbackPrefix, RequestEventUpdate};
 use cc_lb_storage_api::principal::{Limit, LimitKind};
-use cc_lb_storage_api::types::UpstreamKind;
 use cc_lb_storage_api::types::{Limit as TypesLimit, LimitKind as TypesLimitKind};
 use cc_lb_storage_api::{
     ApiKeyRecord, AuditEntry, BackendKind, BucketKind, CacheKeepaliveConfig,
@@ -16,8 +15,8 @@ use cc_lb_storage_api::{
     LlmJudgeConfig, OAuthCredentials, PrincipalCreate, PrincipalKind, PrincipalKindLite,
     PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RequestCacheBreakpoint,
     RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventUpstream,
-    StorageError, StoredApiKeyRecord, StoredHistoryEntry, UsageRollup, UsageRollupKey,
-    UsageRollupResolution, UsageRollupRun,
+    StorageError, StoredApiKeyRecord, UsageRollup, UsageRollupKey, UsageRollupResolution,
+    UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -191,8 +190,8 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
 
     assert_json_roundtrip(ConfigDraftState {
         draft: Some(json!({
-            "upstreams": [{ "name": "anthropic", "kind": "direct" }],
-            "limits": { "requests": 100 }
+            "timeouts": { "upstream_total_secs": 30 },
+            "body": { "messages_cap_bytes": 1048576 }
         })),
         revision: 7,
         last_validated_revision: Some(6),
@@ -200,27 +199,13 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         saved_at_unix_secs: Some(1_716_000_004),
     });
 
-    let summary = HistorySummary {
-        upstreams: 2,
-        principals: 3,
-        plugin_count: 1,
-        tls_enabled: true,
-    };
+    let summary = HistorySummary { tls_enabled: true };
     assert_json_roundtrip(summary.clone());
     assert_json_roundtrip(HistoryEntry {
         revision: 8,
-        config_toml: "[server]
-listen = '127.0.0.1:8080'"
-            .to_owned(),
+        config_toml: "[timeouts]\nupstream_total_secs = 30".to_owned(),
         applied_at_unix_secs: 1_716_000_005,
         summary: summary.clone(),
-    });
-    assert_json_roundtrip(StoredHistoryEntry {
-        config_toml: "[storage]
-backend = 'sqlite'"
-            .to_owned(),
-        applied_at_unix_secs: 1_716_000_006,
-        summary,
     });
 
     assert_json_roundtrip(UsageRollupKey {
@@ -291,7 +276,6 @@ backend = 'sqlite'"
         key_hash_b64: "YWJjMTIz".to_owned(),
         verify_hash: [1; 32],
         secret_salt: [2; 16],
-        upstream_kind: UpstreamKind::AnthropicKey,
         limit_overrides: vec![TypesLimit {
             kind: TypesLimitKind::Requests,
             window_secs: 60,
@@ -301,7 +285,6 @@ backend = 'sqlite'"
         expires_at_unix_secs: Some(1_800_000_000),
         last_4: "c123".to_owned(),
         description: Some("default key".to_owned()),
-        principal_kind: PrincipalKindLite::Machine,
         index_hash: [3; 32],
     });
 

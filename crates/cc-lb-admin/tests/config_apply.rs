@@ -39,7 +39,7 @@ fn test_state() -> AdminState {
 }
 
 #[tokio::test]
-async fn config_apply_current_admin_principals_smoke() {
+async fn config_apply_current_admin_config_smoke() {
     let response = router(test_state())
         .oneshot(
             Request::builder()
@@ -86,6 +86,6 @@ async fn config_apply_audit_records_static_token_actor_identity() {
         .find(|entry| entry["admin_action"] == "config_apply")
         .expect("config apply audit entry");
     assert_eq!(entry["actor_authority"], "static-token");
-    assert_eq!(entry["actor_subject"], "legacy");
+    assert_eq!(entry["actor_subject"], "test-static-token");
     assert_eq!(entry["actor_kind"], "break_glass");
 }

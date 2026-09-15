@@ -103,7 +103,7 @@ impl Fixture {
                     calls: Arc::clone(&signer_calls),
                 }))
                 .global_router(Arc::new(NoRouteRouter))
-                .global_observability_hooks(vec![Arc::new(crate::builtins::NoopObservabilityHook)])
+                .global_observability_hooks(Vec::new())
                 .principal_view(Arc::new(PrincipalView::from_db(
                     &[principal_record_with_id("principal")],
                     std::collections::HashMap::new(),

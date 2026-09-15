@@ -9,9 +9,15 @@ async fn fable_non_streaming_request_returns_exact_model_through_proxy() {
     let request = r#"{"model":"claude-fable-5","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"stream":false}"#;
 
     // When
-    let response = common::http_post(server.proxy_addr, "/v1/messages", request, &[])
-        .await
-        .expect("post non-streaming Fable message");
+    let response = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        request,
+        &[],
+    )
+    .await
+    .expect("post non-streaming Fable message");
 
     // Then
     assert_eq!(response.status, 200);
@@ -30,6 +36,7 @@ async fn fable_streaming_request_returns_exact_model_in_message_start_through_pr
     let response = common::http_post(
         server.proxy_addr,
         "/v1/messages",
+        &server.managed_key.plaintext,
         request,
         &[("accept", "text/event-stream")],
     )

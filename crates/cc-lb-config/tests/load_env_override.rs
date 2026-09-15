@@ -1,13 +1,10 @@
 use std::process::Command;
 
-use cc_lb_config::{
-    ADMIN_AUTH_PROVIDERS_JSON_ENV, AdminAuthProviderConfig, Config, DEFAULT_ADMIN_TOKEN_ENV,
-};
+use cc_lb_config::{ADMIN_AUTH_PROVIDERS_JSON_ENV, AdminAuthProviderConfig, Config};
 
 const ENV_OVERRIDE_CHILD: &str = "CC_LB_CONFIG_ENV_OVERRIDE_CHILD";
 const ADMIN_AUTH_ENV_CHILD: &str = "CC_LB_CONFIG_ADMIN_AUTH_ENV_CHILD";
 const ADMIN_AUTH_INVALID_CHILD: &str = "CC_LB_CONFIG_ADMIN_AUTH_INVALID_CHILD";
-const ADMIN_AUTH_LEGACY_CHILD: &str = "CC_LB_CONFIG_ADMIN_AUTH_LEGACY_CHILD";
 
 #[test]
 fn double_underscore_env_names_map_to_nested_config_fields() {
@@ -94,7 +91,7 @@ token_env = "TOML_ADMIN_TOKEN"
 }
 
 #[test]
-fn invalid_admin_auth_provider_json_does_not_fall_back_to_legacy_token() {
+fn invalid_admin_auth_provider_json_is_rejected() {
     if std::env::var_os(ADMIN_AUTH_INVALID_CHILD).is_some() {
         assert_invalid_admin_auth_env_fails();
         return;
@@ -102,12 +99,9 @@ fn invalid_admin_auth_provider_json_does_not_fall_back_to_legacy_token() {
 
     let output = Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
-        .arg(
-            "load_env_override::invalid_admin_auth_provider_json_does_not_fall_back_to_legacy_token",
-        )
+        .arg("load_env_override::invalid_admin_auth_provider_json_is_rejected")
         .env(ADMIN_AUTH_INVALID_CHILD, "1")
         .env(ADMIN_AUTH_PROVIDERS_JSON_ENV, "not-json")
-        .env(DEFAULT_ADMIN_TOKEN_ENV, "legacy-token")
         .output()
         .unwrap();
 
@@ -116,8 +110,7 @@ fn invalid_admin_auth_provider_json_does_not_fall_back_to_legacy_token() {
 
 fn assert_invalid_admin_auth_env_fails() {
     let (_dir, path) = crate::common::temp_config(
-        r#"[admin]
-token_env = "CC_LB_ADMIN_TOKEN"
+        r#"[listener]
 "#,
     );
 
@@ -125,45 +118,6 @@ token_env = "CC_LB_ADMIN_TOKEN"
 
     assert!(error.contains(ADMIN_AUTH_PROVIDERS_JSON_ENV), "{error}");
     assert!(error.contains("invalid"), "{error}");
-}
-
-#[test]
-fn legacy_admin_token_is_automatically_migrated_in_memory() {
-    if std::env::var_os(ADMIN_AUTH_LEGACY_CHILD).is_some() {
-        assert_legacy_admin_token_migration();
-        return;
-    }
-
-    let output = Command::new(std::env::current_exe().unwrap())
-        .arg("--exact")
-        .arg("load_env_override::legacy_admin_token_is_automatically_migrated_in_memory")
-        .env(ADMIN_AUTH_LEGACY_CHILD, "1")
-        .env_remove(ADMIN_AUTH_PROVIDERS_JSON_ENV)
-        .env(DEFAULT_ADMIN_TOKEN_ENV, "legacy-token")
-        .output()
-        .unwrap();
-
-    assert_child_succeeded(output);
-}
-
-fn assert_legacy_admin_token_migration() {
-    let (_dir, path) = crate::common::temp_config(
-        r#"[admin]
-token_env = "CC_LB_ADMIN_TOKEN"
-"#,
-    );
-
-    let (config, warnings) = Config::load_with_warnings(&path).unwrap();
-
-    assert_eq!(config.admin.token.as_deref(), Some("legacy-token"));
-    assert!(config.admin.auth.providers.is_empty());
-    assert!(
-        warnings.iter().any(|warning| {
-            warning.contains("static-token/legacy")
-                && warning.contains(ADMIN_AUTH_PROVIDERS_JSON_ENV)
-        }),
-        "{warnings:?}"
-    );
 }
 
 fn assert_child_succeeded(output: std::process::Output) {

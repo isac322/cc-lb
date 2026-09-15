@@ -147,23 +147,19 @@ impl JwtFixture {
         include_static_token: bool,
     ) -> Arc<AdminAuthenticator> {
         let mut providers = if include_static_token {
-            build_providers(&AdminAuthConfig::default(), Some("test-token".to_owned()))
-                .expect("static provider builds")
+            vec![admin_test_common::static_token_provider("test-token")]
         } else {
             Vec::new()
         };
         providers.extend(
-            build_providers(
-                &AdminAuthConfig {
-                    providers: vec![AdminAuthProviderConfig::CloudflareAccess {
-                        id: "cloudflare".to_owned(),
-                        team_domain,
-                        audiences: vec![ACCESS_AUDIENCE.to_owned()],
-                        header: ACCESS_HEADER.to_owned(),
-                    }],
-                },
-                None,
-            )
+            build_providers(&AdminAuthConfig {
+                providers: vec![AdminAuthProviderConfig::CloudflareAccess {
+                    id: "cloudflare".to_owned(),
+                    team_domain,
+                    audiences: vec![ACCESS_AUDIENCE.to_owned()],
+                    header: ACCESS_HEADER.to_owned(),
+                }],
+            })
             .expect("Cloudflare provider builds"),
         );
         Arc::new(AdminAuthenticator::new(providers))

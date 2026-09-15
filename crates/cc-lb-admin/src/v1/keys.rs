@@ -9,7 +9,7 @@ use axum::{
 };
 use cc_lb_control::api_keys::key_store::CreateParams;
 use cc_lb_control::api_keys::secret;
-use cc_lb_storage_api::types::{KeyStatus, PrincipalKindLite, UpstreamKind};
+use cc_lb_storage_api::types::KeyStatus;
 use cc_lb_storage_api::{RequestEventKeyLastUsedQuery, StorageError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -34,6 +34,7 @@ pub fn router() -> Router<AdminState> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IssueKeyRequest {
     label: Option<String>,
 }
@@ -108,12 +109,10 @@ async fn issue_key(
     };
 
     let params = CreateParams {
-        upstream_kind: UpstreamKind::AnthropicKey,
         label: body.label.unwrap_or_default(),
         description: None,
         expires_at_unix_secs: None,
         limit_overrides: vec![],
-        principal_kind: PrincipalKindLite::Machine,
     };
 
     match key_store.create(&id, params).await {
@@ -390,7 +389,7 @@ mod tests {
 
     use async_trait::async_trait;
     use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
-    use cc_lb_storage_api::types::{KeyStatus, PrincipalKindLite, UpstreamKind};
+    use cc_lb_storage_api::types::KeyStatus;
     use cc_lb_storage_api::{
         AuditEntry, AuditStore, BackendKind, MetaStore, StorageError, StorageResult,
     };
@@ -467,12 +466,10 @@ mod tests {
             .create(
                 "principal-1",
                 CreateParams {
-                    upstream_kind: UpstreamKind::AnthropicKey,
                     label: "audit rollback".to_owned(),
                     description: None,
                     expires_at_unix_secs: None,
                     limit_overrides: Vec::new(),
-                    principal_kind: PrincipalKindLite::Machine,
                 },
             )
             .await

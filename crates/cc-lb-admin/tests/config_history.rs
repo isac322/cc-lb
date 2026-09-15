@@ -40,18 +40,18 @@ fn test_state() -> AdminState {
 #[tokio::test]
 async fn config_history_route_returns_applied_history() {
     let (_dir, storage) = config_admin_common::temp_storage().await;
-    let config = Config::default();
+    let mut config = Config {
+        request_event_retention_days: 45,
+        ..Config::default()
+    };
+    config.price_catalog.url = "https://catalog.example/history.json".to_owned();
+    config.price_catalog.cache_path = "/tmp/history-catalog.json".into();
     storage
         .append_config_history(
             7,
             toml::to_string_pretty(&config).unwrap(),
             1234,
-            HistorySummary {
-                upstreams: 0,
-                principals: 0,
-                plugin_count: 0,
-                tls_enabled: false,
-            },
+            HistorySummary { tls_enabled: false },
         )
         .await
         .unwrap();
@@ -63,6 +63,10 @@ async fn config_history_route_returns_applied_history() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["history"][0]["revision"], 7);
     assert_eq!(json["history"][0]["applied_at_unix_secs"], 1234);
+    assert_eq!(
+        json["history"][0]["config_summary"],
+        serde_json::json!({ "tls_enabled": false })
+    );
 }
 
 #[tokio::test]

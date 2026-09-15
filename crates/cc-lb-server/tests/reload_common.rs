@@ -12,7 +12,6 @@ use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
 };
-use cc_lb_observability::ObservabilityHook;
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_upstream::SignerFactory;
 use metrics_exporter_prometheus::PrometheusHandle;
@@ -85,7 +84,7 @@ pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(NoopSignerFactory))
             .global_router(Arc::new(NoopRouter))
-            .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
+            .global_observability_hooks(Vec::new())
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build(),

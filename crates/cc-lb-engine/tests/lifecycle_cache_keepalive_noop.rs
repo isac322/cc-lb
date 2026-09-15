@@ -19,7 +19,8 @@ use http::{Response, StatusCode};
 use uuid::Uuid;
 
 use common::{
-    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts, settle,
+    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts,
+    managed_api_key, settle,
 };
 
 #[tokio::test]
@@ -43,7 +44,7 @@ async fn cache_keepalive_without_scheduler_is_response_noop() {
     let request = http::Request::builder()
         .method(http::Method::POST)
         .uri("/v1/messages")
-        .header("x-api-key", "sk-ant-downstream")
+        .header("x-api-key", managed_api_key())
         .header("anthropic-version", "2023-06-01")
         .body(Bytes::from_static(
             br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}]}"#,
@@ -90,7 +91,7 @@ async fn cache_keepalive_enqueue_failure_does_not_change_proxy_response() {
     let request = http::Request::builder()
         .method(http::Method::POST)
         .uri("/v1/messages")
-        .header("x-api-key", "sk-ant-downstream")
+        .header("x-api-key", managed_api_key())
         .header("x-session-id", "session-1")
         .header("anthropic-version", "2023-06-01")
         .body(Bytes::from_static(

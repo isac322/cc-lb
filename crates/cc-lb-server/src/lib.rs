@@ -9,7 +9,6 @@ pub(crate) mod admin_compression;
 pub(crate) mod admin_ports;
 pub(crate) mod admin_security;
 pub mod app;
-pub mod bootstrap;
 pub mod build_meta;
 pub mod builtins;
 pub(crate) mod cache_keepalive_enqueuer;

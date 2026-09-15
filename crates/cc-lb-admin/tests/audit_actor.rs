@@ -32,12 +32,12 @@ async fn static_token_actor_fields_are_recorded_and_queryable() {
         .find(|entry| entry["admin_action"] == "config_draft_put")
         .expect("config draft audit entry");
     assert_eq!(config_draft["actor_authority"], "static-token");
-    assert_eq!(config_draft["actor_subject"], "legacy");
+    assert_eq!(config_draft["actor_subject"], "test-static-token");
     assert_eq!(config_draft["actor_kind"], "break_glass");
 
     let (status, _, filtered) = server
         .client
-        .get("/admin/v1/audit?actor_authority=static-token&actor_subject=legacy")
+        .get("/admin/v1/audit?actor_authority=static-token&actor_subject=test-static-token")
         .await;
     assert_eq!(status, StatusCode::OK);
     let entries = filtered["entries"].as_array().expect("audit entries array");
@@ -49,7 +49,7 @@ async fn static_token_actor_fields_are_recorded_and_queryable() {
     assert_eq!(actions, HashSet::from(["config_draft_put", "audit_query"]));
     assert!(entries.iter().all(|entry| {
         entry["actor_authority"] == "static-token"
-            && entry["actor_subject"] == "legacy"
+            && entry["actor_subject"] == "test-static-token"
             && entry["actor_kind"] == "break_glass"
     }));
 
@@ -69,7 +69,7 @@ async fn static_token_actor_fields_are_recorded_and_queryable() {
     let (status, _, invalid_combination) = server
         .client
         .get(
-            "/admin/v1/audit?principal_id=principal-a&actor_authority=static-token&actor_subject=legacy",
+            "/admin/v1/audit?principal_id=principal-a&actor_authority=static-token&actor_subject=test-static-token",
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

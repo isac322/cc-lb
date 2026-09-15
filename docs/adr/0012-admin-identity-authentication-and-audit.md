@@ -68,7 +68,7 @@ export CC_LB_ADMIN_AUTH_PROVIDERS_JSON='[
 export CC_LB_ADMIN_TOKEN='...'
 ```
 
-Configuration precedence is `CC_LB_ADMIN_AUTH_PROVIDERS_JSON`, then TOML `[[admin.auth.providers]]`, then the temporary legacy-token migration.
+Configuration precedence is `CC_LB_ADMIN_AUTH_PROVIDERS_JSON`, then TOML `[[admin.auth.providers]]`.
 
 Each provider examines only its configured credential location and returns `NotPresent`, `Verified(AdminIdentity)`, or `Rejected(reason)`. The kernel applies these rules:
 
@@ -121,20 +121,14 @@ The web client discovers the current identity and authentication mode through `G
 
 The audit UI continues to use `actor` as its concise display value and exposes the four structured actor fields in event details.
 
-### 9. Temporary legacy deployment migration
-
-The first release carrying this architecture must upgrade the existing deployed cc-lb instance without a pre-upgrade configuration change. When both `CC_LB_ADMIN_AUTH_PROVIDERS_JSON` and TOML `[[admin.auth.providers]]` are absent, startup automatically translates the legacy `[admin].token_env` and resolved `CC_LB_ADMIN_TOKEN` value into one in-memory `static_token` provider with authority `static-token`, subject `legacy`, and kind `BreakGlass`. This migration does not rewrite the configuration file, expose the token, or change the existing Admin API and UI entry behavior. Startup emits a migration warning naming `CC_LB_ADMIN_AUTH_PROVIDERS_JSON`.
-
-This compatibility path is intentionally temporary, not a permanent public contract. There is currently one deployed instance. After that instance has been changed to the new environment-based provider configuration and the new authentication/session/audit flow has been verified in deployment, remove the legacy `AdminConfig.token_env` and resolved token field, the implicit provider synthesis, their tests, and their documentation in one clean cutover. Do not retain aliases or a second fallback after the migration is confirmed.
 
 ## Consequences
 
 - A Cloudflare service token with an empty `sub` and a `common_name` is recorded as a `Service` actor rather than being rejected as an invalid human identity.
-- The shared static token is recorded as a `BreakGlass` actor. It preserves backward compatibility but cannot identify which person possessed the shared secret.
+- A shared static token is recorded as a `BreakGlass` actor and cannot identify which person possessed the shared secret.
 - Administrative responses incur one local database write for each audited operation or sensitive read.
 - Provider-specific validation stays isolated from handlers and audit code, so new request authentication methods do not create parallel authorization or actor-recording paths.
 - Identity continuity is bounded by the issuer's subject semantics. cc-lb records observed identities but does not infer account linking.
-- Legacy token compatibility exists only to migrate the current deployment. Its removal trigger is successful deployment and verification of the new environment-based provider configuration on the sole existing instance.
 
 ## Verification
 
@@ -147,4 +141,3 @@ This compatibility path is intentionally temporary, not a permanent public contr
 - A local static-token server returns a `BreakGlass` identity from `/admin/v1/auth/session`, records the actor for a kill-switch mutation and audit-log read, and records a credential-free request as `auth_rejected`.
 - In `crates/cc-lb-admin/web`, `bun run test`, `bun run typecheck`, and `bun run build` pass; browser verification covers static-token entry, external identity display, and structured audit actor details.
 - Provider-independence scans find no `cloudflare_access`, `static_token`, `jsonwebtoken`, or `Cf-Access` references in admin handlers, audit recording, authorization, or identity modules. The server references provider construction only through the registry builder and `AdminAuthenticator`.
-- An upgrade test starts cc-lb with only the legacy `[admin].token_env` and `CC_LB_ADMIN_TOKEN`, verifies automatic `static-token/legacy` authentication, and requires no configuration rewrite. A separate test covers the new environment-only provider configuration. After the deployed instance migration is confirmed, both the compatibility implementation and its legacy-only test are removed together.

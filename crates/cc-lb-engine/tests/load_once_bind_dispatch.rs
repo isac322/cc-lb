@@ -4,9 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::builtin_authn::{BuiltinAuthError, BuiltinAuthn};
+use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthError;
 use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_engine::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::api_keys::principal_view::{
@@ -25,19 +24,13 @@ use tokio::time::{Duration, timeout};
 use url::Url;
 
 use common::{
-    DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestState, collect_body,
-    messages_request,
+    DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, managed_authn, messages_request,
 };
 
 #[test]
 fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error::Error>> {
     let view = principal_view("principal-a", None);
-    let authn = BuiltinAuthn::new(
-        DownstreamAuthMode::ApiKey,
-        None,
-        None,
-        Arc::new(cc_lb_engine::SystemClock),
-    );
+    let authn = managed_authn("principal-a");
 
     let error = tokio::runtime::Builder::new_current_thread()
         .build()?
@@ -89,7 +82,6 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
         events: explicit_hook_events.clone(),
         notify: explicit_hook_notify.clone(),
     });
-    let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![Arc::clone(&explicit_hook)]);
     let global_hook: Arc<dyn ObservabilityHook> = Arc::new(RecordingNamedHook {
         name: "global",
         events: global_hook_events.clone(),
@@ -103,7 +95,7 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
         )),
     );
     let state = TestState::default();
-    let authn = none_mode_authn("principal-a", view.clone(), state.clone())?;
+    let authn = managed_test_authn("principal-a", view.clone(), state.clone());
     let dispatcher = Arc::new(MockDispatch {
         state,
         mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
@@ -121,8 +113,7 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
         dispatcher,
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
-    )
-    .with_event_bus(test_bus.bus_arc());
+    );
 
     let response = lifecycle
         .handle(messages_request(Bytes::from_static(
@@ -177,25 +168,13 @@ fn principal_view(
     ))
 }
 
-fn none_mode_authn(
-    principal_id: &str,
-    view: Arc<PrincipalView>,
-    state: TestState,
-) -> Result<TestAuthn, Box<dyn std::error::Error>> {
-    Ok(TestAuthn {
-        authn: Arc::new(BuiltinAuthn::new(
-            DownstreamAuthMode::None,
-            Some(NoneModeConfig {
-                principal_id: principal_id.to_owned(),
-                upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-            }),
-            None,
-            Arc::new(cc_lb_engine::SystemClock),
-        )),
+fn managed_test_authn(principal_id: &str, view: Arc<PrincipalView>, state: TestState) -> TestAuthn {
+    TestAuthn {
+        authn: managed_authn(principal_id),
         principal_view: view,
         state,
         refresh_allowed: true,
-    })
+    }
 }
 
 fn test_upstream_record() -> UpstreamRecord {

@@ -2,7 +2,7 @@
 
 ## Purpose and isolation
 
-Verify the repairs recorded in `docs/frontend-state-audit.md`, separately from the polling-flicker base PR #705. Use a fresh SQLite database, private loopback ports and disposable bearer/master keys. Never change the shared service. Follow `principal-api-key-issuance.md` §0 for the server configuration; use `downstream_auth.mode = "api_key"` when no proxy requests are required. Vite must target the isolated admin listener through `CC_LB_ADMIN_URL`.
+Verify the repairs recorded in `docs/frontend-state-audit.md`, separately from the polling-flicker base PR #705. Use a fresh SQLite database, private loopback ports and disposable bearer/master keys. Never change the shared service. Follow `principal-api-key-issuance.md` §0 for the server configuration. Vite must target the isolated admin listener through `CC_LB_ADMIN_URL`.
 
 Run both the development UI and a production build/preview. The production preview is required for cold lazy-route navigation. Browser normal responses must come from the real server; route gates may delay real responses or inject explicit failure statuses only. Keep credentials out of evidence.
 
