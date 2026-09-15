@@ -44,7 +44,7 @@ Secrets:
   Using existing secret "{{ .Values.secrets.existingSecret }}" for the master key{{ if .Values.secrets.keys.adminToken }} / tokens{{ end }}.
 {{- else }}
   A Secret "{{ include "cc-lb.fullname" . }}" holds {{ .Values.config.aead.keyEnv }}
-  {{- if .Values.secrets.adminToken }} and {{ .Values.config.admin.tokenEnv }}{{ end }}.
+  {{- if .Values.secrets.adminToken }} and {{ .Values.config.admin.staticTokenEnv }}{{ end }}.
   Rotate it with `helm upgrade` and a new secrets.masterKey, or migrate to secrets.existingSecret.
 {{- end }}
 {{- if not $isSqlite }}

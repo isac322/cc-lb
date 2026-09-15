@@ -19,7 +19,8 @@ use http::{Response, StatusCode};
 use uuid::Uuid;
 
 use common::{
-    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts, settle,
+    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts,
+    managed_api_key, settle,
 };
 
 #[tokio::test]
@@ -216,7 +217,7 @@ async fn handle_keepalive_response(
             http::Request::builder()
                 .method(http::Method::POST)
                 .uri("/v1/messages")
-                .header("x-api-key", "sk-ant-downstream")
+                .header("x-api-key", managed_api_key())
                 .header("x-session-id", "session-1")
                 .header("anthropic-version", "2023-06-01")
                 .body(Bytes::from_static(

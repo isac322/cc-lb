@@ -203,7 +203,7 @@ impl LifecycleKeepalive {
         let snapshot = match RequestSnapshot::capture(
             url,
             http::Method::POST,
-            downstream_auth_headers(downstream_headers),
+            keepalive_forward_headers(downstream_headers),
             shaped_body,
             upstream_id,
             ttl,
@@ -437,7 +437,7 @@ impl StreamingKeepaliveResponse {
 
 const KEEPALIVE_FORWARD_HEADERS: &[&str] = &["anthropic-version", "anthropic-beta"];
 
-fn downstream_auth_headers(headers: &HeaderMap) -> HeaderMap {
+fn keepalive_forward_headers(headers: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::new();
     for name in KEEPALIVE_FORWARD_HEADERS {
         if let Some(value) = headers.get(*name)
@@ -479,14 +479,14 @@ mod tests {
     use http::HeaderValue;
 
     #[test]
-    fn downstream_auth_headers_preserves_protocol_headers_without_auth_secrets() {
+    fn keepalive_forward_headers_preserve_protocol_headers_without_auth_secrets() {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", HeaderValue::from_static("secret-key"));
         headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
         headers.insert("anthropic-beta", HeaderValue::from_static("prompt-caching"));
 
-        let forwarded = downstream_auth_headers(&headers);
+        let forwarded = keepalive_forward_headers(&headers);
 
         assert!(forwarded.get("x-api-key").is_none());
         assert!(forwarded.get("authorization").is_none());

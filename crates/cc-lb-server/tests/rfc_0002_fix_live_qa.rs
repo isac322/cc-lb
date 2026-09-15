@@ -187,22 +187,15 @@ async fn wait_metric_delta(
 }
 
 async fn post_happy(server: &common::TestServer) -> common::RawResponse {
-    common::http_post(server.proxy_addr, "/v1/messages", HAPPY_BODY, &[])
-        .await
-        .expect("post happy message")
-}
-
-async fn post_happy_with_key(server: &common::TestServer) -> common::RawResponse {
-    let key = server.managed_key.as_ref().expect("managed key");
-    common::http_post_with_api_key(
+    common::http_post(
         server.proxy_addr,
         "/v1/messages",
-        &key.plaintext,
+        &server.managed_key.plaintext,
         HAPPY_BODY,
         &[],
     )
     .await
-    .expect("post happy message with key")
+    .expect("post happy message")
 }
 
 async fn open_admin_sse(addr: SocketAddr) -> BufReader<TcpStream> {
@@ -261,12 +254,7 @@ async fn live_qa_1_default_boot_happy_path_writes_row_and_reconciles() {
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
 
-    let response = common::http_post(
-        server.proxy_addr,
-        "/v1/messages",
-        r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#,
-        &[],
-    )
+    let response = common::http_post(server.proxy_addr, "/v1/messages", &server.managed_key.plaintext, r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#, &[])
     .await
     .expect("post messages");
 
@@ -296,12 +284,15 @@ async fn live_qa_2_oauth_usage_does_not_produce_request_event_row() {
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
 
-    // /api/oauth/usage is served by non_lifecycle_routes and MUST bypass
-    // the lifecycle middleware. If middleware creates a LifecycleContext for
-    // this path, Drop will publish a `terminal_dropped` row.
-    let response = common::http_get(server.proxy_addr, "/api/oauth/usage")
-        .await
-        .expect("oauth usage GET");
+    // /api/oauth/usage bypasses the proxy lifecycle. If middleware creates a
+    // LifecycleContext for this path, Drop will publish a `terminal_dropped` row.
+    let response = common::proxy_get(
+        server.proxy_addr,
+        "/api/oauth/usage",
+        &server.managed_key.plaintext,
+    )
+    .await
+    .expect("oauth usage GET");
     // Whatever the response status, no request_events row should appear.
     assert!(
         response.status < 500 || response.status == 401 || response.status == 404,
@@ -333,9 +324,13 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
 
-    let not_found = common::http_get(server.proxy_addr, "/definitely/not-a-route")
-        .await
-        .expect("404 GET");
+    let not_found = common::proxy_get(
+        server.proxy_addr,
+        "/definitely/not-a-route",
+        &server.managed_key.plaintext,
+    )
+    .await
+    .expect("404 GET");
     assert_eq!(not_found.status, 404);
 
     sleep(Duration::from_millis(300)).await;
@@ -360,27 +355,12 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
 /// leaving the row with NULL cost/cache and only partial usage.
 #[tokio::test]
 async fn live_qa_6b_assembler_populates_cost_cache_usage_fields() {
-    let extra = r#"
-[lifecycle_cache_observation_subscriber]
-enabled = true
-
-[lifecycle_hook_adapter]
-enabled = false
-
-[lifecycle_pricing_subscriber]
-enabled = true
-"#;
-    let server = common::spawn_test_server_with_extra_config(extra).await;
+    let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
 
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
-    let response = common::http_post(
-        server.proxy_addr,
-        "/v1/messages",
-        r#"{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#,
-        &[],
-    )
+    let response = common::http_post(server.proxy_addr, "/v1/messages", &server.managed_key.plaintext, r#"{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#, &[])
     .await
     .expect("post messages");
     assert_eq!(response.status, 200);
@@ -412,26 +392,11 @@ enabled = true
 /// stream_* timings) are None on non-stream and would hide divergences.
 #[tokio::test]
 async fn live_qa_6c_assembler_populates_stream_fields() {
-    let extra = r#"
-[lifecycle_cache_observation_subscriber]
-enabled = true
-
-[lifecycle_hook_adapter]
-enabled = false
-
-[lifecycle_pricing_subscriber]
-enabled = true
-"#;
-    let server = common::spawn_test_server_with_extra_config(extra).await;
+    let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
 
-    let response = common::http_post(
-        server.proxy_addr,
-        "/v1/messages",
-        r#"{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true}"#,
-        &[("accept", "text/event-stream")],
-    )
+    let response = common::http_post(server.proxy_addr, "/v1/messages", &server.managed_key.plaintext, r#"{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true}"#, &[("accept", "text/event-stream")])
     .await
     .expect("post streaming messages");
     assert_eq!(response.status, 200);
@@ -478,6 +443,7 @@ async fn lqa_1b_proxy_path_streaming_returns_sse_and_stream_payload_fields() {
     let response = common::http_post(
         server.proxy_addr,
         "/v1/messages",
+        &server.managed_key.plaintext,
         STREAM_BODY,
         &[("accept", "text/event-stream")],
     )
@@ -513,7 +479,10 @@ async fn lqa_2a_event_emission_happy_row_has_columns_and_payload() {
     wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
     let where_clause = "event_id IS NOT NULL";
     assert_eq!(fetch_text(&pool, "SELECT principal_id FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "api-key");
-    assert_eq!(fetch_text(&pool, "SELECT key_id FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "none-mode");
+    assert_eq!(
+        fetch_text(&pool, "SELECT key_id FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await,
+        server.managed_key.key_id
+    );
     assert_eq!(fetch_text(&pool, "SELECT upstream_name FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "fake_anthropic");
     assert!(!fetch_text(&pool, "SELECT model FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await.is_empty());
     assert!(fetch_i64(&pool, "SELECT input_tokens FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await > 0);
@@ -599,9 +568,10 @@ async fn lqa_3a_bus_drop_counters_do_not_increment_under_burst() {
         let mut set = JoinSet::new();
         for _ in 0..50 {
             let addr = server.proxy_addr;
-            set.spawn(
-                async move { common::http_post(addr, "/v1/messages", HAPPY_BODY, &[]).await },
-            );
+            let api_key = server.managed_key.plaintext.clone();
+            set.spawn(async move {
+                common::http_post(addr, "/v1/messages", &api_key, HAPPY_BODY, &[]).await
+            });
         }
         while let Some(result) = set.join_next().await {
             let response = result.expect("join request").expect("burst request");
@@ -614,7 +584,6 @@ async fn lqa_3a_bus_drop_counters_do_not_increment_under_burst() {
     for reason in [
         "lifecycle_writer_full",
         "lifecycle_assembler_full",
-        "lifecycle_hook_adapter_full",
         "lifecycle_pricing_full",
         "lifecycle_limit_reconcile_full",
         "lifecycle_cache_obs_full",
@@ -674,12 +643,12 @@ async fn lqa_4a_admin_sse_stream_emits_final_request_event_update() {
 #[tokio::test]
 async fn lqa_5b_api_key_auth_invalid_key_returns_401_metrics_and_row() {
     let server =
-        common::spawn_test_server_with_apikey_mode("", Vec::new(), AppConfig::default()).await;
+        common::spawn_test_server_with_principal_limits("", Vec::new(), AppConfig::default()).await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
     let pre = fetch_metric_scrape(server.metrics_addr).await;
 
-    let response = common::http_post_with_api_key(
+    let response = common::http_post(
         server.proxy_addr,
         "/v1/messages",
         "not-a-cclb-key",
@@ -730,8 +699,8 @@ async fn lqa_5c_concurrent_limit_rejects_second_request_and_audits() {
         window_secs: 60,
         cap_micros: 1,
     }];
-    let server = common::spawn_test_server_with_apikey_mode("", limits, fake_config).await;
-    let key = server.managed_key.as_ref().expect("managed key").clone();
+    let server = common::spawn_test_server_with_principal_limits("", limits, fake_config).await;
+    let key = server.managed_key.clone();
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
     let pre = fetch_metric_scrape(server.metrics_addr).await;
@@ -741,7 +710,7 @@ async fn lqa_5c_concurrent_limit_rejects_second_request_and_audits() {
         let addr = server.proxy_addr;
         let plaintext = key.plaintext.clone();
         set.spawn(async move {
-            common::http_post_with_api_key(addr, "/v1/messages", &plaintext, HAPPY_BODY, &[]).await
+            common::http_post(addr, "/v1/messages", &plaintext, HAPPY_BODY, &[]).await
         });
     }
     let mut statuses = Vec::new();
@@ -814,12 +783,13 @@ async fn lqa_5d_limit_reconcile_records_successful_reservation() {
         window_secs: 60,
         cap_micros: 100,
     }];
-    let server = common::spawn_test_server_with_apikey_mode("", limits, AppConfig::default()).await;
+    let server =
+        common::spawn_test_server_with_principal_limits("", limits, AppConfig::default()).await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
     let pre = fetch_metric_scrape(server.metrics_addr).await;
 
-    let response = post_happy_with_key(&server).await;
+    let response = post_happy(&server).await;
 
     assert_eq!(response.status, 200);
     wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
@@ -949,6 +919,7 @@ async fn lqa_6b_non_stream_and_stream_rows_have_cache_and_cost_fields() {
     let stream = common::http_post(
         server.proxy_addr,
         "/v1/messages",
+        &server.managed_key.plaintext,
         STREAM_BODY,
         &[("accept", "text/event-stream")],
     )
@@ -1032,9 +1003,10 @@ async fn lqa_6e_admin_sse_keeps_up_with_fifty_final_frames_without_lag() {
     for _batch in 0..5 {
         for _ in 0..10 {
             let addr = server.proxy_addr;
-            set.spawn(
-                async move { common::http_post(addr, "/v1/messages", HAPPY_BODY, &[]).await },
-            );
+            let api_key = server.managed_key.plaintext.clone();
+            set.spawn(async move {
+                common::http_post(addr, "/v1/messages", &api_key, HAPPY_BODY, &[]).await
+            });
         }
         while let Some(result) = set.join_next().await {
             let response = result
@@ -1069,9 +1041,15 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
     let baseline = settled_row_count(&pool, "1=1").await;
     let pre = fetch_metric_scrape(server.metrics_addr).await;
 
-    let response = common::http_post(server.proxy_addr, "/v1/messages", "not json at all", &[])
-        .await
-        .expect("post invalid json");
+    let response = common::http_post(
+        server.proxy_addr,
+        "/v1/messages",
+        &server.managed_key.plaintext,
+        "not json at all",
+        &[],
+    )
+    .await
+    .expect("post invalid json");
 
     assert_eq!(response.status, 400);
     wait_for_row_count(&pool, "1=1", baseline + 1).await;

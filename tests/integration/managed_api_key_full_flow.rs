@@ -5,9 +5,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use http::{HeaderMap, StatusCode};
 
-use cc_lb_config::{
-    Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
-};
+use cc_lb_config::{AdminAuthProviderConfig, Config, StorageConfig};
 use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_pricing::{
     CatalogSnapshot, CatalogStatus, Pricing, UpstreamKind as PricingUpstreamKind, UsdPerMillion,
@@ -20,10 +18,7 @@ use cc_lb_storage_api::{
         Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
         PrincipalStore,
     },
-    types::{
-        Limit as KeyLimit, LimitKind as KeyLimitKind, PrincipalKindLite,
-        UpstreamKind as KeyUpstreamKind,
-    },
+    types::{Limit as KeyLimit, LimitKind as KeyLimitKind},
     upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -37,6 +32,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const ADMIN_TOKEN: &str = "task-31-admin-token";
+const ADMIN_TOKEN_ENV: &str = "CC_LB_TASK_31_ADMIN_TOKEN";
 const MASTER_KEY_ENV: &str = "CC_LB_TASK_31_MASTER_KEY";
 const MASTER_KEY_HEX: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const MODEL: &str = "claude-3-5-sonnet-20241022";
@@ -46,6 +42,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(evidence_dir())?;
     let dir = tempfile::tempdir()?;
     unsafe {
+        std::env::set_var(ADMIN_TOKEN_ENV, ADMIN_TOKEN);
         std::env::set_var(MASTER_KEY_ENV, MASTER_KEY_HEX);
     }
 
@@ -68,12 +65,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     let storage_path = dir.path().join("managed-api-key.sqlite");
-    let initial_config = base_config(
-        DownstreamAuthMode::ApiKey,
-        None,
-        storage_path.clone(),
-        litellm.uri(),
-    );
+    let initial_config = base_config(storage_path.clone(), litellm.uri());
     let (plaintext_key, key_id) = seed_runtime_state(&storage_path, upstream.uri(), "u1").await?;
     let server = StartedServer::start(initial_config).await?;
     wait_for_price_catalog().await?;
@@ -88,7 +80,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     append_step(3, &format!("issued key {key_id} for principal u1"))?;
 
-    let happy = send_message(&client, &server.proxy_url, Some(&plaintext_key)).await?;
+    let happy = send_message(&client, &server.proxy_url, &plaintext_key).await?;
     assert_eq!(
         happy.status(),
         StatusCode::OK,
@@ -134,7 +126,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     usage_tokens.store(10_000, Ordering::SeqCst);
     let mut rejected = None;
     for _ in 0..90 {
-        let response = send_message(&client, &server.proxy_url, Some(&plaintext_key)).await?;
+        let response = send_message(&client, &server.proxy_url, &plaintext_key).await?;
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             rejected = Some(response);
             break;
@@ -172,7 +164,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         "disable response: {}",
         disable_response.text().await?
     );
-    let disabled = send_message(&client, &server.proxy_url, Some(&plaintext_key)).await?;
+    let disabled = send_message(&client, &server.proxy_url, &plaintext_key).await?;
     assert_eq!(
         disabled.status(),
         StatusCode::FORBIDDEN,
@@ -233,7 +225,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         "revoke response: {}",
         revoke_response.text().await?
     );
-    let revoked = send_message(&client, &server.proxy_url, Some(&plaintext_key)).await?;
+    let revoked = send_message(&client, &server.proxy_url, &plaintext_key).await?;
     assert_eq!(
         revoked.status(),
         StatusCode::UNAUTHORIZED,
@@ -242,34 +234,6 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     );
     append_step(10, "revoked key rejects /v1/messages with 401")?;
     server.shutdown().await;
-
-    usage_tokens.store(20, Ordering::SeqCst);
-    let none_storage_path = dir.path().join("managed-api-key-none.sqlite");
-    let none_config = base_config(
-        DownstreamAuthMode::None,
-        Some(NoneModeConfig {
-            principal_id: "anon".to_owned(),
-            upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-        }),
-        none_storage_path.clone(),
-        litellm.uri(),
-    );
-    seed_runtime_state(&none_storage_path, upstream.uri(), "anon").await?;
-    let none_server = StartedServer::start(none_config).await?;
-    wait_for_price_catalog().await?;
-    let none_response = send_message(&client, &none_server.proxy_url, None).await?;
-    assert_eq!(
-        none_response.status(),
-        StatusCode::OK,
-        "mode none response: {}",
-        none_response.text().await?
-    );
-    none_server.shutdown().await;
-    assert_ne!(storage_path, none_storage_path);
-    append_step(
-        11,
-        "mode=None server accepted request without x-api-key on isolated storage path",
-    )?;
 
     Ok(())
 }
@@ -560,19 +524,20 @@ impl Drop for StartedServer {
 async fn send_message(
     client: &TestClient,
     proxy_url: &str,
-    key: Option<&str>,
+    key: &str,
 ) -> Result<TestResponse, Box<dyn std::error::Error>> {
     let body = serde_json::to_vec(&json!({
         "model": MODEL,
         "max_tokens": 100,
         "messages": [{"role": "user", "content": "hi"}]
     }))?;
-    let mut headers = vec![("content-type", "application/json")];
-    if let Some(key) = key {
-        headers.push(("x-api-key", key));
-    }
     client
-        .request("POST", &format!("{proxy_url}/v1/messages"), &headers, &body)
+        .request(
+            "POST",
+            &format!("{proxy_url}/v1/messages"),
+            &[("content-type", "application/json"), ("x-api-key", key)],
+            &body,
+        )
         .await
         .map_err(Into::into)
 }
@@ -744,7 +709,6 @@ async fn seed_runtime_state(
         .create(
             principal_name,
             CreateParams {
-                upstream_kind: KeyUpstreamKind::AnthropicKey,
                 label: "prod".to_owned(),
                 description: None,
                 expires_at_unix_secs: None,
@@ -753,7 +717,6 @@ async fn seed_runtime_state(
                     window_secs: 60 * 60,
                     cap_micros: 1_000_000,
                 }],
-                principal_kind: PrincipalKindLite::Machine,
             },
         )
         .await?;
@@ -761,12 +724,7 @@ async fn seed_runtime_state(
     Ok((plaintext.expose().to_owned(), key_id))
 }
 
-fn base_config(
-    mode: DownstreamAuthMode,
-    none_mode: Option<NoneModeConfig>,
-    sqlite_path: std::path::PathBuf,
-    litellm_url: String,
-) -> ReservedConfig {
+fn base_config(sqlite_path: std::path::PathBuf, litellm_url: String) -> ReservedConfig {
     let proxy_reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve proxy port");
     let admin_reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve admin port");
     let metrics_addr = free_addr();
@@ -775,14 +733,14 @@ fn base_config(
     config.listener.admin_addr = admin_reservation.local_addr().expect("admin addr");
     config.listener.metrics_addr = metrics_addr;
     config.timeouts.upstream_total_secs = 10;
-    config.downstream_auth.mode = mode;
-    config.downstream_auth.none_mode = none_mode;
     config.storage = StorageConfig::Sqlite { path: sqlite_path };
-    config.admin.token = Some(ADMIN_TOKEN.to_owned());
+    config.admin.auth.providers = vec![AdminAuthProviderConfig::StaticToken {
+        id: "task-31".to_owned(),
+        token_env: ADMIN_TOKEN_ENV.to_owned(),
+    }];
     config.aead.key_env = MASTER_KEY_ENV.to_owned();
-    config.api_keys.price_catalog.url = format!("{litellm_url}/prices");
-    config.api_keys.price_catalog.refresh_interval = Duration::from_secs(60 * 60);
-    config.api_keys.price_catalog.cache_path = tempfile::tempdir()
+    config.price_catalog.url = format!("{litellm_url}/prices");
+    config.price_catalog.cache_path = tempfile::tempdir()
         .expect("price cache tempdir")
         .keep()
         .join("prices.json");

@@ -3,20 +3,6 @@
 //! copies each value across so this crate stays independent of the
 //! config crate.
 
-/// Behaviour when a filter or shape plugin fails at the runtime
-/// boundary (trap, pool saturation, invalid wire
-/// output). `PassThrough` is the historical behaviour: filter treats
-/// the failure as no-op and shape falls back to raw upstream
-/// passthrough. `FailClosed` returns 503 upstream unavailable — pick
-/// this when the plugin enforces load-bearing authz / tenant policy
-/// and cannot silently degrade.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PluginFailurePolicy {
-    #[default]
-    PassThrough,
-    FailClosed,
-}
-
 /// Whether a shape plugin may return a URL whose origin
 /// (scheme+host+port) differs from the selected upstream. Historical
 /// behaviour is `Unrestricted`; deployments where a compromised or

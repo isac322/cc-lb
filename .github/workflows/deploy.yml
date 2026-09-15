@@ -34,9 +34,10 @@ jobs:
     runs-on: cc-lb-500m
     env:
       CHART: deploy/helm/cc-lb
-      # helm lint/template never runs the binary, so any non-empty value satisfies
-      # the chart's "master key required" guard for rendering.
+      # helm lint/template never runs the binary, so non-empty placeholders
+      # satisfy the chart's required secret guards for rendering.
       LINT_MASTER_KEY: ci-lint-placeholder
+      LINT_ADMIN_TOKEN: ci-admin-placeholder
     steps:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
@@ -47,7 +48,10 @@ jobs:
           kubeconform-version: '0.8.0'
 
       - name: Helm lint (sqlite defaults)
-        run: helm lint "$CHART" --set secrets.masterKey="$LINT_MASTER_KEY"
+        run: >-
+          helm lint "$CHART"
+          --set secrets.masterKey="$LINT_MASTER_KEY"
+          --set secrets.adminToken="$LINT_ADMIN_TOKEN"
 
       - name: Helm lint (postgres + autoscaling)
         run: |
@@ -59,7 +63,9 @@ jobs:
 
       - name: Render + validate manifests (sqlite)
         run: |
-          helm template rel "$CHART" --set secrets.masterKey="$LINT_MASTER_KEY" \
+          helm template rel "$CHART" \
+            --set secrets.masterKey="$LINT_MASTER_KEY" \
+            --set secrets.adminToken="$LINT_ADMIN_TOKEN" \
             | kubeconform -strict -ignore-missing-schemas -kubernetes-version 1.29.0 -summary
 
       - name: Render + validate manifests (postgres + all extras)

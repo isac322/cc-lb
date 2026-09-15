@@ -1,29 +1,6 @@
 use cc_lb_config::{Config, ConfigError, PostgresPoolConfig, StorageConfig, validate_postgres_url};
 
 #[test]
-fn test_legacy_flat_storage_parses() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage_path = dir.path().join("test.sqlite");
-    let config_path = dir.path().join("config.toml");
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"[storage]
-storage_path = "{}"
-oauth_aead_key_env = "MY_KEY"
-"#,
-            crate::common::toml_path(&storage_path)
-        ),
-    )
-    .unwrap();
-
-    let config = Config::load(&config_path).unwrap();
-
-    assert_eq!(config.storage, StorageConfig::Sqlite { path: storage_path });
-    assert_eq!(config.aead.key_env, "MY_KEY");
-}
-
-#[test]
 fn test_postgres_url_invalid_scheme() {
     let error = validate_postgres_url("mysql://host/db").unwrap_err();
 
@@ -58,33 +35,7 @@ fn test_postgres_pool_defaults() {
 }
 
 #[test]
-fn test_tagged_kind_with_legacy_storage_path_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
-    std::fs::write(
-        &config_path,
-        r#"[storage]
-kind = "postgres"
-url = "postgres://localhost/db"
-storage_path = "/tmp/leftover.sqlite"
-"#,
-    )
-    .unwrap();
-
-    let error =
-        Config::load(&config_path).expect_err("conflicting [storage] keys must be rejected");
-
-    let message = format!("{error}");
-    assert!(
-        message.contains("conflicting [storage] keys")
-            && message.contains("storage_path")
-            && message.contains("`kind`"),
-        "unexpected error message: {message}"
-    );
-}
-
-#[test]
-fn test_tagged_kind_postgres_without_legacy_keys_parses() {
+fn test_tagged_postgres_parses() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     std::fs::write(

@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore, KeyStoreError};
 use cc_lb_engine::api_keys::secret;
-use cc_lb_storage_api::types::{
-    ApiKeyMutation, KeyStatus, Limit, LimitKind, PrincipalKindLite, UpstreamKind,
-};
+use cc_lb_storage_api::types::{ApiKeyMutation, KeyStatus, Limit, LimitKind};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 
 #[tokio::test]
@@ -143,7 +141,6 @@ async fn new_store() -> Result<(tempfile::TempDir, KeyStore), Box<dyn std::error
 
 fn create_params(label: &str) -> CreateParams {
     CreateParams {
-        upstream_kind: UpstreamKind::AnthropicKey,
         label: label.to_owned(),
         description: Some("test key".to_owned()),
         expires_at_unix_secs: Some(1_800_000_000),
@@ -152,6 +149,5 @@ fn create_params(label: &str) -> CreateParams {
             window_secs: 60,
             cap_micros: 100,
         }],
-        principal_kind: PrincipalKindLite::Machine,
     }
 }

@@ -43,18 +43,8 @@ messages_cap_bytes = 33554432
 files_cap_bytes = 104857600
 
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
 
 [storage]
 kind = "postgres"
@@ -75,13 +65,9 @@ tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = false
 
-[quotas]
-default_window_secs = 60
-default_requests_per_window = 1000
-default_input_tokens = 1000000
-default_output_tokens = 1000000
-
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "test"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 [circuit_breaker]
@@ -93,11 +79,6 @@ half_open_after_secs = 30
 max_conns_per_upstream = 50
 semaphore_per_upstream = 100
 
-[dns]
-cache_ttl_floor_secs = 30
-cache_ttl_ceiling_secs = 300
-
-[egress]
 TOML
 
 wait_port() {
@@ -150,6 +131,14 @@ seed_runtime() {
     cat "$TMP_DIR/admin-principal.json" >&2 || true
     exit 1
   fi
+
+  principal_id=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['id'])" "$TMP_DIR/admin-principal.json")
+  curl -sS -o "$TMP_DIR/admin-key.json" -X POST \
+    -H 'Authorization: Bearer test' \
+    -H 'content-type: application/json' \
+    --data '{"label":"postgres-smoke"}' \
+    "http://127.0.0.1:$admin_port/admin/v1/principals/$principal_id/keys"
+  PROXY_API_KEY=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plaintext_key'])" "$TMP_DIR/admin-key.json")
 }
 
 # Verify psql is available and reset prior-test runtime state before spawning
@@ -188,7 +177,7 @@ seed_runtime
 echo "===> step 3: send /v1/messages through postgres-backed proxy"
 response=$(curl -sS -w '\n%{http_code}' -X POST \
   -H 'content-type: application/json' \
-  -H 'x-api-key: sk-ant-test' \
+  -H "x-api-key: $PROXY_API_KEY" \
   -H 'anthropic-version: 2023-06-01' \
   --data '{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hello postgres backend"}],"max_tokens":32}' \
   "http://127.0.0.1:$proxy_port/v1/messages")

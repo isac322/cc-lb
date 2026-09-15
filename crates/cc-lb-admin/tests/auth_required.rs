@@ -196,11 +196,7 @@ async fn authentication_rejection_reports_provider_neutral_auth_mode() {
     assert_eq!(body["auth_mode"], "static_token");
     assert!(body.get("provider_id").is_none());
 
-    let mut providers = cc_lb_admin::auth::build_providers(
-        &cc_lb_config::AdminAuthConfig::default(),
-        Some("test-token".to_owned()),
-    )
-    .expect("static provider builds");
+    let mut providers = vec![admin_test_common::static_token_provider("test-token")];
     providers.push(Arc::new(FakeVerifiedProvider::from_header()));
     let external_server = admin_test_common::spawn_admin_server_with_auth(Arc::new(
         AdminAuthenticator::new(providers),
@@ -218,11 +214,7 @@ async fn authentication_rejection_reports_provider_neutral_auth_mode() {
 
 #[tokio::test]
 async fn ambiguous_credentials_rejected() {
-    let mut providers = cc_lb_admin::auth::build_providers(
-        &cc_lb_config::AdminAuthConfig::default(),
-        Some("test-token".to_owned()),
-    )
-    .expect("static provider builds");
+    let mut providers = vec![admin_test_common::static_token_provider("test-token")];
     providers.push(Arc::new(FakeVerifiedProvider::always()));
     let app = router(test_state_with_auth(Arc::new(AdminAuthenticator::new(
         providers,
@@ -304,18 +296,23 @@ async fn new_provider_plugs_into_audit_without_handler_changes() {
 }
 
 #[test]
+fn empty_provider_config_stays_unconfigured() {
+    let providers =
+        cc_lb_admin::auth::build_providers(&cc_lb_config::AdminAuthConfig::default()).unwrap();
+
+    assert!(providers.is_empty());
+}
+
+#[test]
 fn invalid_provider_header_returns_build_error() {
-    let result = cc_lb_admin::auth::build_providers(
-        &cc_lb_config::AdminAuthConfig {
-            providers: vec![cc_lb_config::AdminAuthProviderConfig::CloudflareAccess {
-                id: "cf".to_owned(),
-                team_domain: "https://team.cloudflareaccess.com".to_owned(),
-                audiences: vec!["admin".to_owned()],
-                header: "Cf Access Jwt".to_owned(),
-            }],
-        },
-        None,
-    );
+    let result = cc_lb_admin::auth::build_providers(&cc_lb_config::AdminAuthConfig {
+        providers: vec![cc_lb_config::AdminAuthProviderConfig::CloudflareAccess {
+            id: "cf".to_owned(),
+            team_domain: "https://team.cloudflareaccess.com".to_owned(),
+            audiences: vec!["admin".to_owned()],
+            header: "Cf Access Jwt".to_owned(),
+        }],
+    });
 
     assert!(matches!(
         result,

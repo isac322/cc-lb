@@ -99,7 +99,6 @@ fn spawn_replica(
         .arg(&replica_dir)
         .env("CC_LB_MASTER_KEY", MASTER_KEY)
         .env("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN)
-        .env("CC_LB_BOOTSTRAP_ADMIN_TOKEN", ADMIN_TOKEN)
         .env("CC_LB_CLUSTER_TOKEN", CLUSTER_TOKEN);
     SupervisedChild::spawn(command)
 }

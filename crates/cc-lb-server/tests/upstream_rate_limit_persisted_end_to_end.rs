@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
+use cc_lb_config::Config;
+use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_server::app::build_app_with_storage;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -58,6 +59,18 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
         1,
     )
     .await?;
+    let key_store = KeyStore::new(storage_arc.clone());
+    let (_key_record, key_secret) = key_store
+        .create(
+            "api-key",
+            CreateParams {
+                label: "rate-limit-persistence".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await?;
 
     let managed_store: Arc<dyn ManagedKeyStore> = storage_arc.clone();
     let storage: Arc<dyn StorageTrait> = storage_arc.clone();
@@ -67,11 +80,6 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
     };
     config.runtime.data_dir = Some(dir.path().to_path_buf());
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
-    config.downstream_auth.mode = DownstreamAuthMode::None;
-    config.downstream_auth.none_mode = Some(NoneModeConfig {
-        principal_id: "api-key".to_owned(),
-        upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-    });
     let app = build_app_with_storage(
         config,
         None,
@@ -89,7 +97,7 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
             Request::builder()
                 .method("POST")
                 .uri("/v1/messages")
-                .header("x-api-key", "sk-ant-test")
+                .header("x-api-key", key_secret.expose())
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .body(Body::from(

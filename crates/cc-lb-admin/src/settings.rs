@@ -19,36 +19,25 @@ const INVALID_DRAFT_TTL_SECS: u64 = 24 * 60 * 60;
 
 pub const COVERAGE_CHECKLIST: &[&str] = &[
     "listener",
-    "tls",
     "body",
     "timeouts",
-    "downstream_auth",
-    "api_keys",
+    "request_event_retention_days",
+    "price_catalog",
     "storage",
     "scheduler",
     "upstream_affinity",
     "aead",
     "observability",
     "admin",
+    "event_bus",
+    "cluster",
     "oauth",
+    "subscription_quota",
     "runtime",
     "circuit_breaker",
     "bulkhead",
-    "dns",
-    "egress",
-    "subscription_quota",
     "prompt_cache_shadow",
     "limit_reservation_ttl",
-    "lifecycle_hook_adapter",
-    "lifecycle_pricing_subscriber",
-    "lifecycle_cache_observation_subscriber",
-    "lifecycle_rate_limit_header_subscriber",
-    "lifecycle_subscription_quota_subscriber",
-    "lifecycle_limit_rejection_audit_subscriber",
-    "lifecycle_api_key_metrics_subscriber",
-    "lifecycle_cache_hit_miss_subscriber",
-    "lifecycle_routing_tier_subscriber",
-    "lifecycle_limit_reconcile_subscriber",
 ];
 
 #[derive(Debug, Error)]
@@ -180,7 +169,6 @@ pub fn current_config_response(
 
 pub fn schema_response() -> Result<ConfigSchemaResponse, SettingsError> {
     let mut schema = serde_json::to_value(schemars::schema_for!(cc_lb_config::Config))?;
-    crate::management::extend_config_schema(&mut schema);
     strip_schema_defaults(&mut schema);
     Ok(ConfigSchemaResponse {
         schema,
@@ -470,73 +458,14 @@ fn invalid_draft_expired(state: &ConfigDraftState, now_unix_secs: u64) -> bool {
 }
 
 fn deserialize_and_validate_config(value: Value) -> Result<Config, String> {
-    reject_unknown_top_level_keys(&value)?;
     let config: Config = serde_json::from_value(value).map_err(|source| source.to_string())?;
     config.validate().map_err(|source| source.to_string())?;
     Ok(config)
 }
 
-fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
-    let Some(object) = value.as_object() else {
-        return Err("config draft must be a JSON object".to_owned());
-    };
-    let allowed = [
-        "listener",
-        "tls",
-        "body",
-        "timeouts",
-        "downstream_auth",
-        "api_keys",
-        "storage",
-        "scheduler",
-        "upstream_affinity",
-        "aead",
-        "observability",
-        "admin",
-        "oauth",
-        "runtime",
-        "circuit_breaker",
-        "bulkhead",
-        "dns",
-        "egress",
-        "subscription_quota",
-        "prompt_cache_shadow",
-        "lifecycle_hook_adapter",
-        "lifecycle_pricing_subscriber",
-        "lifecycle_cache_observation_subscriber",
-        "limit_reservation_ttl",
-        "lifecycle_limit_reconcile_subscriber",
-        "lifecycle_rate_limit_header_subscriber",
-        "lifecycle_subscription_quota_subscriber",
-        "lifecycle_limit_rejection_audit_subscriber",
-        "lifecycle_api_key_metrics_subscriber",
-        "lifecycle_cache_hit_miss_subscriber",
-        "lifecycle_routing_tier_subscriber",
-        "event_bus",
-        "cluster",
-    ];
-    let allowed: BTreeSet<&str> = allowed.into_iter().collect();
-    let unknown: Vec<&str> = object
-        .keys()
-        .map(String::as_str)
-        .filter(|key| !allowed.contains(key))
-        .collect();
-    if unknown.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "unknown top-level config keys: {}",
-            unknown.join(", ")
-        ))
-    }
-}
-
 fn history_summary(config: &Config) -> HistorySummary {
     HistorySummary {
-        upstreams: 0,
-        principals: 0,
-        plugin_count: 0,
-        tls_enabled: config.tls.is_some() || config.listener.tls.is_some(),
+        tls_enabled: config.listener.tls.is_some(),
     }
 }
 
@@ -549,10 +478,11 @@ fn history_item(entry: HistoryEntry) -> ConfigHistoryItem {
 }
 
 fn history_config_json(entry: &HistoryEntry) -> Result<Value, SettingsError> {
-    let config: Config =
-        toml::from_str(&entry.config_toml).map_err(|source| SettingsError::ValidationFailed {
+    let config = Config::from_stored_toml(&entry.config_toml).map_err(|source| {
+        SettingsError::ValidationFailed {
             detail: source.to_string(),
-        })?;
+        }
+    })?;
     config
         .validate()
         .map_err(|source| SettingsError::ValidationFailed {

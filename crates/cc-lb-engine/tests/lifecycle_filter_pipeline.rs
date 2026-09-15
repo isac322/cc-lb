@@ -21,8 +21,7 @@ use url::Url;
 use uuid::Uuid;
 
 use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestLifecycleBus, TestState,
-    collect_body, messages_request,
+    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, messages_request,
 };
 
 #[tokio::test]
@@ -93,9 +92,6 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
         let router_calls = Arc::new(Mutex::new(Vec::new()));
         let state = TestState::default();
         let hook = Arc::new(RecordingHook::default());
-        let test_bus = TestLifecycleBus::new().with_hook_adapter(vec![
-            hook.clone() as Arc<dyn cc_lb_observability::ObservabilityHook>
-        ]);
         let filters: Vec<Arc<dyn FilterPlugin>> = vec![
             Arc::new(ErrorFilter {
                 name: error_kind.stage_name(),
@@ -109,8 +105,7 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
             }),
         ];
         let lifecycle =
-            lifecycle_with_pipeline(filters, router_calls.clone(), state.clone(), hook.clone())
-                .with_event_bus(test_bus.bus_arc());
+            lifecycle_with_pipeline(filters, router_calls.clone(), state.clone(), hook.clone());
 
         let response = lifecycle
             .handle(messages_request(Bytes::from_static(

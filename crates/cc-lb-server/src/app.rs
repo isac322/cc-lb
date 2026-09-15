@@ -20,7 +20,7 @@ use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use bytes::{Bytes, BytesMut};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DownstreamAuthMode, TlsConfig};
+use cc_lb_config::{Config, TlsConfig};
 use cc_lb_engine::{
     BreakerRegistry, BreakerRuntimeConfig, BulkheadDispatch, BulkheadRegistry,
     BulkheadRuntimeConfig, CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewBuilder,
@@ -61,7 +61,6 @@ use crate::admin_ports::ServerRetainedPartialPort;
 use crate::admin_ports::{
     ServerRoutePreviewPort, ServerSubscriptionQuotaIngestionPort, ServerWarmupPort,
 };
-use crate::bootstrap;
 use crate::build_meta::BuildMeta;
 use crate::builtins::NoopObservabilityHook;
 use crate::drain::DrainController;
@@ -325,8 +324,6 @@ pub enum BuildError {
     #[error("storage connection failed: {message}")]
     StorageConnect { message: String },
     #[error(transparent)]
-    Bootstrap(#[from] crate::bootstrap::BootstrapError),
-    #[error(transparent)]
     Tls(#[from] crate::tls::TlsError),
     #[error(transparent)]
     Rebind(#[from] crate::dynamic_view_builder::RebindError),
@@ -502,15 +499,14 @@ pub async fn run_serve(
     _force_handshake: Option<bool>,
     clock: ClockHandle,
 ) -> Result<(), ServeError> {
-    let (mut config, config_warnings) = Config::load_with_warnings(config_path)?;
+    let mut config = Config::load(config_path)?;
     if let Some(data_dir) = data_dir {
         config.runtime.data_dir = Some(data_dir.to_path_buf());
     }
     cc_lb_observability::install_panic_hook(cc_lb_observability::RedactionPolicy::new(
         config.observability.user_prompt_redaction,
     ));
-    let guard = init_observability(&mut config)?;
-    crate::reload::warn_config_warnings(&config_warnings);
+    let _guard = init_observability(&config)?;
     let app = match build_app_with_path_inner(
         config,
         Some(config_path),
@@ -522,7 +518,6 @@ pub async fn run_serve(
         Ok(app) => app,
         Err(error @ BuildError::SchedulerFactory(_)) => {
             cc_lb_scheduler::scheduler_metrics::set_scheduler_init_failure(true);
-            guard.flush_metrics();
             return Err(error.into());
         }
         Err(error) => return Err(error.into()),
@@ -578,11 +573,6 @@ pub async fn build_app_for_testing(
     let storage: Arc<dyn Storage> = storage_arc.clone();
     config.storage = cc_lb_config::StorageConfig::Sqlite { path };
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
-    config.downstream_auth.mode = DownstreamAuthMode::None;
-    config.downstream_auth.none_mode = Some(cc_lb_config::NoneModeConfig {
-        principal_id: "test-principal".to_owned(),
-        upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
-    });
     std::mem::forget(dir);
     let plugin_blob_repo = storage_arc.clone() as Arc<dyn PluginBlobRepo>;
     let opened_scheduler = crate::scheduler_factory::open_scheduler_storage(
@@ -761,8 +751,6 @@ pub async fn seed_app_testing_storage(
 
 #[cfg(feature = "postgres")]
 fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
-    const TEST_ADMIN_TOKEN: &str = "test-token";
-
     let mut config = Config {
         storage: cc_lb_config::StorageConfig::Postgres {
             url: database_url.to_owned(),
@@ -770,10 +758,7 @@ fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
         },
         ..Config::default()
     };
-    config.admin.token = Some(TEST_ADMIN_TOKEN.to_owned());
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
-    config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
-    config.downstream_auth.none_mode = None;
     // The postgres backend always runs pg_notify fanout, which needs a peer
     // identity and a shared cluster token. Postgres tests only run with
     // CI_POSTGRES_URL set, so borrow it as the token env instead of mutating
@@ -909,7 +894,7 @@ async fn build_app_with_storage_inner(
             clock.clone(),
         );
     let (sink, audit_writer_task) = spawn_audit_writer(storage.clone(), 1024);
-    let audit_sink = Some(Arc::new(sink));
+    let audit_sink = Arc::new(sink);
     let (upstream_rate_limit_sink, upstream_rate_limit_receiver) =
         UpstreamRateLimitSink::with_metrics(Arc::clone(&metrics_hook));
     let upstream_rate_limit_writer_task = start_upstream_rate_limit_writer(
@@ -939,14 +924,6 @@ async fn build_app_with_storage_inner(
         clock.clone(),
     ));
     let mut hot_engine_cfg = hot_engine_config_from_config(&config);
-    hot_engine_cfg.plugin_failure_policy = match config.runtime.wasmtime.plugin_failure_policy {
-        cc_lb_config::PluginFailurePolicy::PassThrough => {
-            cc_lb_runtime_wasmtime::policy::PluginFailurePolicy::PassThrough
-        }
-        cc_lb_config::PluginFailurePolicy::FailClosed => {
-            cc_lb_runtime_wasmtime::policy::PluginFailurePolicy::FailClosed
-        }
-    };
     hot_engine_cfg.shape_origin_policy = match config.runtime.wasmtime.shape_origin_policy {
         cc_lb_config::ShapeOriginPolicy::Unrestricted => {
             cc_lb_runtime_wasmtime::policy::ShapeOriginPolicy::Unrestricted
@@ -969,17 +946,6 @@ async fn build_app_with_storage_inner(
         spawn_wasmtime_pool_metrics_publisher(runtime.clone());
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
-    let env_token = std::env::var("CC_LB_BOOTSTRAP_ADMIN_TOKEN").ok();
-    bootstrap::apply_bootstrap(
-        &config,
-        storage.as_ref(),
-        storage.as_ref(),
-        storage.as_ref(),
-        env_token,
-        &data_dir,
-        &*clock,
-    )
-    .await?;
     ensure_wasm_cache_dirs(&data_dir)?;
 
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
@@ -1000,12 +966,7 @@ async fn build_app_with_storage_inner(
             Option<cc_lb_control::api_keys::limit_engine::ReservationTtlSweeperHandle>,
         >,
     > = Arc::new(tokio::sync::Mutex::new(limit_reservation_ttl_handle));
-    let builtin_authn = Arc::new(BuiltinAuthn::new(
-        config.downstream_auth.mode.clone(),
-        config.downstream_auth.none_mode.clone(),
-        Some(key_store.clone()),
-        clock.clone(),
-    ));
+    let builtin_authn = Arc::new(BuiltinAuthn::new(key_store.clone(), clock.clone()));
 
     let (dispatcher, _breaker_registry) = dispatcher(&config, clock.clone());
 
@@ -1159,82 +1120,34 @@ async fn build_app_with_storage_inner(
         cc_lb_control::InMemoryBus::with_capacity(config.event_bus.broadcast_capacity);
     let lifecycle_event_logger_rx = in_memory_bus
         .attach_lifecycle_writer(cc_lb_control::event_bus::DEFAULT_LIFECYCLE_WRITER_CAPACITY);
-    let lifecycle_assembler_rx = Some(in_memory_bus.attach_lifecycle_assembler(
-        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
-    ));
-    let lifecycle_hook_adapter_rx = if config.lifecycle_hook_adapter.enabled {
-        Some(in_memory_bus.attach_lifecycle_hook_adapter(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_HOOK_ADAPTER_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_pricing_rx =
-        if config.lifecycle_pricing_subscriber.enabled {
-            Some(in_memory_bus.attach_lifecycle_pricing(
-                cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PRICING_CAPACITY,
-            ))
-        } else {
-            None
-        };
-    let lifecycle_limit_reconcile_rx = if config.lifecycle_limit_reconcile_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_limit_reconcile(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_cache_obs_rx = if config.lifecycle_cache_observation_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_cache_observation(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_rate_limit_header_rx = if config.lifecycle_rate_limit_header_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_rate_limit_header(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_subscription_quota_rx = if config.lifecycle_subscription_quota_subscriber.enabled
-    {
-        Some(in_memory_bus.attach_lifecycle_subscription_quota(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_SUBSCRIPTION_QUOTA_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_limit_rejection_audit_rx =
-        if config.lifecycle_limit_rejection_audit_subscriber.enabled && audit_sink.is_some() {
-            Some(in_memory_bus.attach_lifecycle_limit_rejection_audit(
-                cc_lb_control::event_bus::DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY,
-            ))
-        } else {
-            None
-        };
-    let lifecycle_api_key_metrics_rx = if config.lifecycle_api_key_metrics_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_api_key_metrics(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_cache_hit_miss_rx = if config.lifecycle_cache_hit_miss_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_cache_hit_miss(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY,
-        ))
-    } else {
-        None
-    };
-    let lifecycle_routing_tier_rx = if config.lifecycle_routing_tier_subscriber.enabled {
-        Some(in_memory_bus.attach_lifecycle_routing_tier(
-            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ROUTING_TIER_CAPACITY,
-        ))
-    } else {
-        None
-    };
+    let lifecycle_assembler_rx = in_memory_bus
+        .attach_lifecycle_assembler(cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY);
+    let lifecycle_pricing_rx = in_memory_bus
+        .attach_lifecycle_pricing(cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PRICING_CAPACITY);
+    let lifecycle_limit_reconcile_rx = in_memory_bus.attach_lifecycle_limit_reconcile(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY,
+    );
+    let lifecycle_cache_obs_rx = in_memory_bus.attach_lifecycle_cache_observation(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY,
+    );
+    let lifecycle_rate_limit_header_rx = in_memory_bus.attach_lifecycle_rate_limit_header(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
+    );
+    let lifecycle_subscription_quota_rx = in_memory_bus.attach_lifecycle_subscription_quota(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_SUBSCRIPTION_QUOTA_CAPACITY,
+    );
+    let lifecycle_limit_rejection_audit_rx = in_memory_bus.attach_lifecycle_limit_rejection_audit(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY,
+    );
+    let lifecycle_api_key_metrics_rx = in_memory_bus.attach_lifecycle_api_key_metrics(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY,
+    );
+    let lifecycle_cache_hit_miss_rx = in_memory_bus.attach_lifecycle_cache_hit_miss(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY,
+    );
+    let lifecycle_routing_tier_rx = in_memory_bus.attach_lifecycle_routing_tier(
+        cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ROUTING_TIER_CAPACITY,
+    );
     let lifecycle_prompt_cache_observation_rx =
         Some(in_memory_bus.attach_lifecycle_prompt_cache_observation(
             cc_lb_control::event_bus::DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
@@ -1339,57 +1252,57 @@ async fn build_app_with_storage_inner(
     };
     let lifecycle_event_logger_handle =
         cc_lb_engine::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
-    let lifecycle_event_assembler_handle = lifecycle_assembler_rx.map(|rx| {
-        cc_lb_engine::spawn_request_event_assembler(
-            rx,
-            storage.clone(),
-            Some(event_bus.clone()),
-            Arc::clone(&metrics_hook),
-        )
-    });
-    let lifecycle_hook_adapter_handle = lifecycle_hook_adapter_rx.map(|rx| {
-        let hooks = initial_view.global_observability_hooks.to_vec();
-        cc_lb_engine::spawn_observability_hook_adapter(rx, hooks)
-    });
-    let lifecycle_pricing_subscriber_handle = lifecycle_pricing_rx
-        .map(|rx| cc_lb_pricing::spawn_lifecycle_pricing_subscriber(rx, event_bus.clone()));
-    let lifecycle_limit_reconcile_subscriber_handle = lifecycle_limit_reconcile_rx.map(|rx| {
-        cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(rx, limit_engine.clone())
-    });
-    let lifecycle_cache_observation_subscriber_handle = lifecycle_cache_obs_rx.map(|rx| {
-        cc_lb_engine::spawn_lifecycle_cache_observation_subscriber(rx, event_bus.clone())
-    });
-    let lifecycle_rate_limit_header_subscriber_handle = lifecycle_rate_limit_header_rx.map(|rx| {
+    let lifecycle_event_assembler_handle = cc_lb_engine::spawn_request_event_assembler(
+        lifecycle_assembler_rx,
+        storage.clone(),
+        Some(event_bus.clone()),
+        Arc::clone(&metrics_hook),
+    );
+    let lifecycle_pricing_subscriber_handle =
+        cc_lb_pricing::spawn_lifecycle_pricing_subscriber(lifecycle_pricing_rx, event_bus.clone());
+    let lifecycle_limit_reconcile_subscriber_handle =
+        cc_lb_engine::spawn_lifecycle_limit_reconcile_subscriber(
+            lifecycle_limit_reconcile_rx,
+            limit_engine.clone(),
+        );
+    let lifecycle_cache_observation_subscriber_handle =
+        cc_lb_engine::spawn_lifecycle_cache_observation_subscriber(
+            lifecycle_cache_obs_rx,
+            event_bus.clone(),
+        );
+    let lifecycle_rate_limit_header_subscriber_handle =
         cc_lb_engine::spawn_lifecycle_rate_limit_header_subscriber(
-            rx,
+            lifecycle_rate_limit_header_rx,
             Arc::clone(&initial_view.upstream_rate_limit_cache),
             Some(upstream_rate_limit_sink.clone()),
-        )
-    });
+        );
+    let cache: Arc<dyn cc_lb_engine::SubscriptionQuotaCacheLike> = subscription_quota_cache.clone();
     let lifecycle_subscription_quota_subscriber_handle =
-        lifecycle_subscription_quota_rx.map(|rx| {
-            let cache: Arc<dyn cc_lb_engine::SubscriptionQuotaCacheLike> =
-                subscription_quota_cache.clone();
-            cc_lb_engine::spawn_lifecycle_subscription_quota_subscriber(
-                rx,
-                Some(cache),
-                Some(subscription_quota_sink.clone()),
-            )
-        });
-    let lifecycle_limit_rejection_audit_subscriber_handle = lifecycle_limit_rejection_audit_rx
-        .and_then(|rx| {
-            audit_sink.clone().map(|sink| {
-                cc_lb_engine::spawn_lifecycle_limit_rejection_audit_subscriber(rx, sink)
-            })
-        });
-    let lifecycle_api_key_metrics_subscriber_handle = lifecycle_api_key_metrics_rx
-        .map(|rx| cc_lb_engine::spawn_lifecycle_api_key_metrics_subscriber(rx, event_bus.clone()));
-    let lifecycle_cache_hit_miss_subscriber_handle = lifecycle_cache_hit_miss_rx.map(|rx| {
-        cc_lb_engine::spawn_lifecycle_cache_hit_miss_subscriber(rx, Arc::clone(&metrics_hook))
-    });
-    let lifecycle_routing_tier_subscriber_handle = lifecycle_routing_tier_rx.map(|rx| {
-        cc_lb_engine::spawn_lifecycle_routing_tier_subscriber(rx, Arc::clone(&metrics_hook))
-    });
+        cc_lb_engine::spawn_lifecycle_subscription_quota_subscriber(
+            lifecycle_subscription_quota_rx,
+            Some(cache),
+            Some(subscription_quota_sink.clone()),
+        );
+    let lifecycle_limit_rejection_audit_subscriber_handle =
+        cc_lb_engine::spawn_lifecycle_limit_rejection_audit_subscriber(
+            lifecycle_limit_rejection_audit_rx,
+            audit_sink.clone(),
+        );
+    let lifecycle_api_key_metrics_subscriber_handle =
+        cc_lb_engine::spawn_lifecycle_api_key_metrics_subscriber(
+            lifecycle_api_key_metrics_rx,
+            event_bus.clone(),
+        );
+    let lifecycle_cache_hit_miss_subscriber_handle =
+        cc_lb_engine::spawn_lifecycle_cache_hit_miss_subscriber(
+            lifecycle_cache_hit_miss_rx,
+            Arc::clone(&metrics_hook),
+        );
+    let lifecycle_routing_tier_subscriber_handle =
+        cc_lb_engine::spawn_lifecycle_routing_tier_subscriber(
+            lifecycle_routing_tier_rx,
+            Arc::clone(&metrics_hook),
+        );
     let lifecycle_prompt_cache_observation_subscriber_handle =
         lifecycle_prompt_cache_observation_rx.and_then(|rx| {
             prompt_cache_observation_cache.clone().map(|cache| {
@@ -1407,53 +1320,54 @@ async fn build_app_with_storage_inner(
     > = Arc::new(tokio::sync::Mutex::new(Some(lifecycle_event_logger_handle)));
     let lifecycle_event_assembler_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::RequestEventAssemblerHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(lifecycle_event_assembler_handle));
-    let lifecycle_hook_adapter_slot: Arc<
-        tokio::sync::Mutex<Option<cc_lb_engine::ObservabilityHookAdapterHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(lifecycle_hook_adapter_handle));
+    > = Arc::new(tokio::sync::Mutex::new(Some(
+        lifecycle_event_assembler_handle,
+    )));
     let lifecycle_pricing_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_pricing::PricingSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(lifecycle_pricing_subscriber_handle));
+    > = Arc::new(tokio::sync::Mutex::new(Some(
+        lifecycle_pricing_subscriber_handle,
+    )));
     let lifecycle_limit_reconcile_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::LimitReconcileSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(
+    > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_limit_reconcile_subscriber_handle,
-    ));
+    )));
     let lifecycle_cache_observation_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::CacheObservationSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(
+    > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_cache_observation_subscriber_handle,
-    ));
+    )));
     let lifecycle_rate_limit_header_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::RateLimitHeaderSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(
+    > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_rate_limit_header_subscriber_handle,
-    ));
+    )));
     let lifecycle_subscription_quota_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::SubscriptionQuotaSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(
+    > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_subscription_quota_subscriber_handle,
-    ));
+    )));
     let lifecycle_limit_rejection_audit_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::LimitRejectionAuditSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(
+    > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_limit_rejection_audit_subscriber_handle,
-    ));
+    )));
     let lifecycle_api_key_metrics_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::ApiKeyMetricsSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(
+    > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_api_key_metrics_subscriber_handle,
-    ));
+    )));
     let lifecycle_cache_hit_miss_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::CacheHitMissSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(
+    > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_cache_hit_miss_subscriber_handle,
-    ));
+    )));
     let lifecycle_routing_tier_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::RoutingTierSubscriberHandle>>,
-    > = Arc::new(tokio::sync::Mutex::new(
+    > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_routing_tier_subscriber_handle,
-    ));
+    )));
     let lifecycle_prompt_cache_observation_subscriber_slot: Arc<
         tokio::sync::Mutex<Option<cc_lb_engine::PromptCacheObservationSubscriberHandle>>,
     > = Arc::new(tokio::sync::Mutex::new(
@@ -1502,7 +1416,7 @@ async fn build_app_with_storage_inner(
     let drain_controller = DrainController::new();
     let tls_state = build_tls_state(&config)?;
     let reload_tls_state = match active_tls_config(&config) {
-        Some((_, tls)) if tls.reload_on_sighup => tls_state.clone(),
+        Some(tls) if tls.reload_on_sighup => tls_state.clone(),
         _ => None,
     };
     let admin_rebinder: Arc<dyn DynamicViewRebinder> = Arc::new(ServerDynamicViewRebinder {
@@ -1553,18 +1467,6 @@ async fn build_app_with_storage_inner(
             let assembler_slot = assembler_slot.clone();
             async move {
                 let mut guard = assembler_slot.lock().await;
-                if let Some(handle) = guard.take() {
-                    handle.shutdown().await;
-                }
-            }
-        });
-    }
-    {
-        let hook_adapter_slot = lifecycle_hook_adapter_slot.clone();
-        signals.add_shutdown_hook(move || {
-            let hook_adapter_slot = hook_adapter_slot.clone();
-            async move {
-                let mut guard = hook_adapter_slot.lock().await;
                 if let Some(handle) = guard.take() {
                     handle.shutdown().await;
                 }
@@ -1743,7 +1645,7 @@ async fn build_app_with_storage_inner(
         },
     );
     let scheduler_tasks = opened_scheduler
-        .spawn(config.clone(), scheduler_ctx, scheduler_cancel.clone())
+        .spawn(scheduler_ctx, scheduler_cancel.clone())
         .await?;
     spawn_reconcile_shutdown(signals.subscribe(), scheduler_cancel.clone());
     spawn_reconcile_shutdown(signals.subscribe(), subscription_quota_writer_cancel);
@@ -1776,7 +1678,7 @@ async fn build_app_with_storage_inner(
         aead: aead.clone(),
         storage: storage.clone(),
         dynamic_view: dynamic_view.clone(),
-        builtin_authn: Some(builtin_authn.clone()),
+        builtin_authn: builtin_authn.clone(),
         clock: clock.clone(),
     };
 
@@ -1820,15 +1722,7 @@ async fn build_app_with_storage_inner(
             scheduler_lazy_handle.clone(),
         )),
         admin_auth: Arc::new(AdminAuthenticator::new(
-            build_providers(
-                &config.admin.auth,
-                config
-                    .admin
-                    .token
-                    .clone()
-                    .or_else(|| std::env::var(&config.admin.token_env).ok()),
-            )
-            .map_err(|error| BuildError::AdminAuth {
+            build_providers(&config.admin.auth).map_err(|error| BuildError::AdminAuth {
                 message: error.to_string(),
             })?,
         )),
@@ -2121,7 +2015,7 @@ fn cap_to_usize(value: u64) -> usize {
 }
 
 fn build_tls_state(config: &Config) -> Result<Option<Arc<TlsState>>, BuildError> {
-    let Some((_label, tls_config)) = active_tls_config(config) else {
+    let Some(tls_config) = active_tls_config(config) else {
         return Ok(None);
     };
     let Some(cert_path) = tls_config.cert_path.as_ref() else {
@@ -2133,13 +2027,8 @@ fn build_tls_state(config: &Config) -> Result<Option<Arc<TlsState>>, BuildError>
     Ok(Some(Arc::new(TlsState::from_paths(cert_path, key_path)?)))
 }
 
-fn active_tls_config(config: &Config) -> Option<(&'static str, &TlsConfig)> {
-    config
-        .listener
-        .tls
-        .as_ref()
-        .map(|tls| ("listener", tls))
-        .or_else(|| config.tls.as_ref().map(|tls| ("legacy", tls)))
+fn active_tls_config(config: &Config) -> Option<&TlsConfig> {
+    config.listener.tls.as_ref()
 }
 
 fn sighup_handler(
@@ -2272,7 +2161,7 @@ struct ProxyState {
     aead: Arc<AeadService>,
     storage: Arc<dyn Storage>,
     dynamic_view: Arc<DynamicViewHolder>,
-    builtin_authn: Option<Arc<BuiltinAuthn>>,
+    builtin_authn: Arc<BuiltinAuthn>,
     clock: ClockHandle,
 }
 
@@ -2284,13 +2173,12 @@ fn spawn_price_catalog_local_installer(
 ) -> (CancellationToken, JoinHandle<()>) {
     install_default_fallback_if_uninitialized(&price_catalog, &*clock);
 
-    let cfg = &config.api_keys.price_catalog;
+    let cfg = &config.price_catalog;
     let storage_cache: Arc<dyn cc_lb_storage_api::PriceCatalogCache> = storage;
     let loader = cc_lb_pricing::LiteLlmLoader::new(
         price_catalog,
         storage_cache,
         cfg.url.clone(),
-        cfg.refresh_interval,
         cfg.cache_path.clone(),
         clock.clone(),
     );
@@ -2847,29 +2735,17 @@ async fn oauth_usage_handler(
     State(state): State<ProxyState>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let Some(authn) = state.builtin_authn.as_ref() else {
-        return json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            serde_json::json!({ "error": "auth_unavailable" }),
-        );
-    };
-    if authn
-        .authenticate_none_mode(request.headers())
+    let authn = &state.builtin_authn;
+    let dynamic_view = state.dynamic_view.load();
+    if let Err(error) = authn
+        .authenticate(request.headers(), &dynamic_view.principal_view)
         .await
-        .is_none()
     {
-        let dynamic_view = state.dynamic_view.load();
-        if let Err(error) = authn
-            .authenticate(request.headers(), &dynamic_view.principal_view)
-            .await
-        {
-            let status =
-                StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
-            return json_response(
-                status,
-                serde_json::json!({ "error": "authentication_error", "message": error.to_string() }),
-            );
-        }
+        let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
+        return json_response(
+            status,
+            serde_json::json!({ "error": "authentication_error", "message": error.to_string() }),
+        );
     }
 
     match cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
@@ -2950,7 +2826,9 @@ async fn lifecycle_middleware(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("req_server_unknown")
             .to_owned();
-        cc_lb_engine::LifecycleContext::new(request_id, bus, &state.clock)
+        let context = cc_lb_engine::LifecycleContext::new(request_id, bus, &state.clock);
+        context.set_observability_hooks(&state.dynamic_view.load().global_observability_hooks);
+        context
     });
     if let Some(c) = ctx.as_ref() {
         request.extensions_mut().insert(c.clone());
@@ -2987,15 +2865,13 @@ async fn await_or_abort<T>(mut task: JoinHandle<T>, timeout: Duration) {
     }
 }
 
-fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
-    config.observability.prometheus_endpoint = Some(config.listener.metrics_addr.to_string());
+fn init_observability(config: &Config) -> Result<TracingGuard, BuildError> {
     cc_lb_observability::init(&ObservabilityConfig {
         tracing_level: config.observability.tracing_level.clone(),
         otlp_endpoint: config.observability.otlp_endpoint.clone(),
-        prometheus_endpoint: config.observability.prometheus_endpoint.clone(),
+        metrics_addr: config.listener.metrics_addr,
         log_redaction: config.observability.log_redaction,
         user_prompt_redaction: config.observability.user_prompt_redaction,
-        hook_channel_capacity: cc_lb_observability::DEFAULT_HOOK_CHANNEL_CAPACITY,
     })
     .map_err(BuildError::from)
 }

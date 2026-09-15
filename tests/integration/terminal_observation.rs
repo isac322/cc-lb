@@ -7,7 +7,7 @@ use http::{HeaderMap, StatusCode};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-use cc_lb_config::{Config, DownstreamAuthMode, NoneModeConfig, StorageConfig};
+use cc_lb_config::{Config, StorageConfig};
 use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_pricing::{
     CatalogSnapshot, CatalogStatus, Pricing, UpstreamKind as PricingUpstreamKind, UsdPerMillion,
@@ -20,10 +20,7 @@ use cc_lb_storage_api::{
         Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
         PrincipalStore,
     },
-    types::{
-        Limit as KeyLimit, LimitKind as KeyLimitKind, PrincipalKindLite,
-        UpstreamKind as KeyUpstreamKind,
-    },
+    types::{Limit as KeyLimit, LimitKind as KeyLimitKind},
     upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -36,7 +33,6 @@ use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const ADMIN_TOKEN: &str = "terminal-observation-admin-token";
 const MASTER_KEY_ENV: &str = "CC_LB_TERMINAL_OBS_MASTER_KEY";
 const MASTER_KEY_HEX: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 const MODEL: &str = "claude-3-5-sonnet-20241022";
@@ -512,7 +508,6 @@ async fn send_messages(
 fn ensure_env() {
     unsafe {
         std::env::set_var(MASTER_KEY_ENV, MASTER_KEY_HEX);
-        std::env::set_var("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN);
     }
 }
 
@@ -1061,7 +1056,6 @@ async fn seed_runtime_state_full_v2(
         .create(
             principal_name,
             CreateParams {
-                upstream_kind: KeyUpstreamKind::AnthropicKey,
                 label: "prod".to_owned(),
                 description: None,
                 expires_at_unix_secs: None,
@@ -1070,7 +1064,6 @@ async fn seed_runtime_state_full_v2(
                     window_secs: 60 * 60,
                     cap_micros: 1_000_000,
                 }],
-                principal_kind: PrincipalKindLite::Machine,
             },
         )
         .await?;
@@ -1079,15 +1072,6 @@ async fn seed_runtime_state_full_v2(
 }
 
 fn base_config(sqlite_path: std::path::PathBuf, litellm_url: String) -> ReservedConfig {
-    base_config_with_mode(DownstreamAuthMode::ApiKey, None, sqlite_path, litellm_url)
-}
-
-fn base_config_with_mode(
-    mode: DownstreamAuthMode,
-    none_mode: Option<NoneModeConfig>,
-    sqlite_path: std::path::PathBuf,
-    litellm_url: String,
-) -> ReservedConfig {
     let proxy_reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve proxy port");
     let admin_reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve admin port");
     let metrics_addr = free_addr();
@@ -1096,13 +1080,10 @@ fn base_config_with_mode(
     config.listener.admin_addr = admin_reservation.local_addr().expect("admin addr");
     config.listener.metrics_addr = metrics_addr;
     config.timeouts.upstream_total_secs = 10;
-    config.downstream_auth.mode = mode;
-    config.downstream_auth.none_mode = none_mode;
     config.storage = StorageConfig::Sqlite { path: sqlite_path };
     config.aead.key_env = MASTER_KEY_ENV.to_owned();
-    config.api_keys.price_catalog.url = format!("{litellm_url}/prices");
-    config.api_keys.price_catalog.refresh_interval = Duration::from_secs(60 * 60);
-    config.api_keys.price_catalog.cache_path = tempfile::tempdir()
+    config.price_catalog.url = format!("{litellm_url}/prices");
+    config.price_catalog.cache_path = tempfile::tempdir()
         .expect("price cache tempdir")
         .keep()
         .join("prices.json");

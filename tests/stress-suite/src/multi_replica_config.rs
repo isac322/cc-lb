@@ -71,14 +71,9 @@ messages_cap_bytes = 33554432
 files_cap_bytes = 104857600
 
 [timeouts]
-request_header_secs = 10
-request_body_chunk_secs = 30
-idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[downstream_auth]
-mode = "api_key"
 
 [storage]
 kind = "postgres"
@@ -99,13 +94,14 @@ instance_url = "{instance_url}"
 [aead]
 key_env = "CC_LB_MASTER_KEY"
 
-[admin]
+[[admin.auth.providers]]
+kind = "static_token"
+id = "stress-admin"
 token_env = "CC_LB_ADMIN_TOKEN"
 
 [runtime]
 data_dir = "{data_dir}"
 
-[egress]
 "#,
         proxy = input.ports.proxy,
         admin = input.ports.admin,

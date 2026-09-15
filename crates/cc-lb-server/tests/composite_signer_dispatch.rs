@@ -8,10 +8,9 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_config::{
-    AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
-};
+use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_engine::{DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
@@ -45,6 +44,19 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
     fixture
         .create_principal("oauth-principal", vec![target_id])
         .await;
+    let key_store = Arc::new(KeyStore::new(fixture.storage.clone()));
+    let (_key_record, key_secret) = key_store
+        .create(
+            "oauth-principal",
+            CreateParams {
+                label: "composite-signer-dispatch".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("managed key created");
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
@@ -64,12 +76,7 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
     .expect("dynamic view builds");
     let lifecycle = Lifecycle::new_with_dynamic_view(
         Arc::new(BuiltinAuthn::new(
-            DownstreamAuthMode::None,
-            Some(NoneModeConfig {
-                principal_id: "oauth-principal".to_owned(),
-                upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
-            }),
-            None,
+            key_store,
             Arc::new(cc_lb_engine::SystemClock),
         )),
         Arc::new(DynamicViewHolder::new(view)),
@@ -79,7 +86,7 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
     );
 
     let response = lifecycle
-        .handle(message_request())
+        .handle(message_request(key_secret.expose()))
         .await
         .expect("lifecycle response");
     let status = response.status();
@@ -512,11 +519,11 @@ fn encrypted(
     EncryptedOAuthTokens::encrypt(aead, bundle, upstream_id.as_bytes()).expect("encrypt")
 }
 
-fn message_request() -> Request<Bytes> {
+fn message_request(api_key: &str) -> Request<Bytes> {
     Request::builder()
         .method(Method::POST)
         .uri("/v1/messages")
-        .header("x-api-key", "sk-ant-downstream")
+        .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
         .body(Bytes::from_static(

@@ -1,9 +1,7 @@
 use std::time::Duration;
 
 use cc_lb_engine::api_keys::principal_view::{PrincipalStatus, PrincipalView};
-use cc_lb_engine::api_keys::types::{
-    LimitKind as CoreLimitKind, PrincipalType as CorePrincipalType,
-};
+use cc_lb_engine::api_keys::types::LimitKind as CoreLimitKind;
 use cc_lb_storage_api::principal::{
     Limit, LimitKind, PrincipalKind as DbPrincipalKind, PrincipalRecord,
 };
@@ -44,7 +42,7 @@ fn principal_view_smoke() {
     assert!(spec.is_some());
     let spec = spec.expect("principal should exist");
     assert_eq!(spec.id(), "u1");
-    assert_eq!(spec.principal_type(), CorePrincipalType::Machine);
+    assert_eq!(spec.principal_kind(), DbPrincipalKind::Machine);
     assert!(view.is_model_allowed("u1", "claude-3-5-sonnet-20241022"));
     assert!(view.is_model_allowed("u1", "claude-3-5-sonnet-20250101"));
     assert!(!view.is_model_allowed("u1", "gpt-4"));

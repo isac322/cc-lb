@@ -393,13 +393,10 @@ if ! wait_port "$admin_port" cc-lb-admin; then
   fail "cc-lb-admin did not start"
 fi
 
-# The test config sets downstream_auth.mode = "none" with principal_id =
-# "api-key" and upstream_kind = "anthropic_key". The principal and the
-# routing-target upstream named "real_client" must exist in the dynamic
-# store before cc-lb can route the request.
-# Master b82e211 (feat: runtime-dynamic-mgmt) replaced the previous
-# [upstreams.*] / [principals.*] TOML blocks with admin-API registration, so
-# every test harness must seed them at startup.
+# The test uses a managed API key issued for the DB principal. The principal
+# and routing-target upstream named "real_client" must exist in the dynamic
+# store before cc-lb can route the request. The database records are the only
+# source of principal and upstream kinds.
 principal_code=$(curl -sS -o "$TMP_DIR/admin-principal.json" -w '%{http_code}' -X POST \
   -H 'Authorization: Bearer admin-token' \
   -H 'content-type: application/json' \
@@ -421,6 +418,30 @@ if [ "$upstream_code" != "201" ] && [ "$upstream_code" != "409" ]; then
   printf '%s\n' '--- admin-upstream.json ---' >&2
   cat "$TMP_DIR/admin-upstream.json" >&2 || true
   fail "register upstream expected 201 or 409, got $upstream_code"
+fi
+
+principal_id=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['id'])" "$TMP_DIR/admin-principal.json")
+curl -sS -o "$TMP_DIR/admin-key.json" -X POST \
+  -H 'Authorization: Bearer admin-token' \
+  -H 'content-type: application/json' \
+  --data '{"label":"real-client"}' \
+  "http://127.0.0.1:$admin_port/admin/v1/principals/$principal_id/keys"
+API_KEY=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['plaintext_key'])" "$TMP_DIR/admin-key.json")
+
+if [ -f "$TMP_DIR/senpi-agent/models.json" ]; then
+  python3 - "$TMP_DIR/senpi-agent/models.json" "$API_KEY" <<'PY'
+import json
+import sys
+
+path, api_key = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    config = json.load(handle)
+for provider in config.get("providers", {}).values():
+    if "apiKey" in provider:
+        provider["apiKey"] = api_key
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, separators=(",", ":"))
+PY
 fi
 
 set +e

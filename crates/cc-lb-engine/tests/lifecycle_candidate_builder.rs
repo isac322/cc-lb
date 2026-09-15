@@ -1,11 +1,11 @@
+use crate::common::{managed_api_key, managed_authn};
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
 };
@@ -218,15 +218,7 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
     );
     assert_eq!(candidate_ids(&built), vec![first, second, third]);
 
-    let authn = Arc::new(BuiltinAuthn::new(
-        DownstreamAuthMode::None,
-        Some(NoneModeConfig {
-            principal_id: "limited".to_owned(),
-            upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-        }),
-        None,
-        Arc::new(cc_lb_engine::SystemClock),
-    ));
+    let authn = managed_authn("limited");
     let lifecycle = Lifecycle::new_with_dynamic_view(
         authn,
         Arc::new(DynamicViewHolder::new(view)),
@@ -240,7 +232,7 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
             Request::builder()
                 .method("POST")
                 .uri("/v1/messages")
-                .header("x-api-key", "sk-ant-test")
+                .header("x-api-key", managed_api_key())
                 .body(Bytes::from_static(
                     br#"{"model":"claude-test","messages":[],"max_tokens":1}"#,
                 ))?,

@@ -8,8 +8,7 @@
       "default": {
         "auth": {
           "providers": []
-        },
-        "token_env": "CC_LB_ADMIN_TOKEN"
+        }
       }
     },
     "aead": {
@@ -18,23 +17,11 @@
         "key_env": "CC_LB_MASTER_KEY"
       }
     },
-    "api_keys": {
-      "$ref": "#/$defs/ApiKeysConfig",
-      "default": {
-        "price_catalog": {
-          "cache_path": "/var/lib/cc-lb/litellm.json",
-          "refresh_interval": "1h",
-          "url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
-        },
-        "usage_retention_days": 90
-      }
-    },
     "body": {
       "$ref": "#/$defs/BodyConfig",
       "default": {
         "files_cap_bytes": 104857600,
-        "messages_cap_bytes": 33554432,
-        "per_route_overrides": {}
+        "messages_cap_bytes": 33554432
       }
     },
     "bulkhead": {
@@ -55,26 +42,8 @@
     "cluster": {
       "$ref": "#/$defs/ClusterConfig",
       "default": {
-        "token_env": "CC_LB_CLUSTER_TOKEN",
-        "token_env_optional": true
+        "token_env": "CC_LB_CLUSTER_TOKEN"
       }
-    },
-    "dns": {
-      "$ref": "#/$defs/DnsConfig",
-      "default": {
-        "cache_ttl_ceiling_secs": 300,
-        "cache_ttl_floor_secs": 30
-      }
-    },
-    "downstream_auth": {
-      "$ref": "#/$defs/DownstreamAuthConfig",
-      "default": {
-        "mode": "api_key"
-      }
-    },
-    "egress": {
-      "$ref": "#/$defs/EgressConfig",
-      "default": {}
     },
     "event_bus": {
       "$ref": "#/$defs/EventBusConfig",
@@ -84,66 +53,6 @@
         "partial_retention_ttl_secs": 300,
         "pg_notify_channel": "cc_lb_events_partial",
         "storage_tail_poll_interval_ms": 250
-      }
-    },
-    "lifecycle_api_key_metrics_subscriber": {
-      "$ref": "#/$defs/LifecycleApiKeyMetricsSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_cache_hit_miss_subscriber": {
-      "$ref": "#/$defs/LifecycleCacheHitMissSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_cache_observation_subscriber": {
-      "$ref": "#/$defs/LifecycleCacheObservationSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_hook_adapter": {
-      "$ref": "#/$defs/LifecycleHookAdapterConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_limit_reconcile_subscriber": {
-      "$ref": "#/$defs/LifecycleLimitReconcileSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_limit_rejection_audit_subscriber": {
-      "$ref": "#/$defs/LifecycleLimitRejectionAuditSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_pricing_subscriber": {
-      "$ref": "#/$defs/LifecyclePricingSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_rate_limit_header_subscriber": {
-      "$ref": "#/$defs/LifecycleRateLimitHeaderSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_routing_tier_subscriber": {
-      "$ref": "#/$defs/LifecycleRoutingTierSubscriberConfig",
-      "default": {
-        "enabled": true
-      }
-    },
-    "lifecycle_subscription_quota_subscriber": {
-      "$ref": "#/$defs/LifecycleSubscriptionQuotaSubscriberConfig",
-      "default": {
-        "enabled": true
       }
     },
     "limit_reservation_ttl": {
@@ -173,6 +82,13 @@
         "user_prompt_redaction": false
       }
     },
+    "price_catalog": {
+      "$ref": "#/$defs/PriceCatalogConfig",
+      "default": {
+        "cache_path": "/var/lib/cc-lb/litellm.json",
+        "url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+      }
+    },
     "prompt_cache_shadow": {
       "$ref": "#/$defs/PromptCacheShadowConfig",
       "default": {
@@ -181,13 +97,18 @@
         "refresh_debounce_secs": 60
       }
     },
+    "request_event_retention_days": {
+      "type": "integer",
+      "format": "uint64",
+      "default": 90,
+      "minimum": 0
+    },
     "runtime": {
       "$ref": "#/$defs/RuntimeConfig",
       "default": {
         "wasmtime": {
           "allocation_strategy": "ondemand",
           "cookie_redaction": false,
-          "plugin_failure_policy": "pass_through",
           "shape_origin_policy": "unrestricted",
           "wire_bounds": {
             "max_header_value_bytes": 8192,
@@ -203,11 +124,7 @@
       "default": {
         "dlq_retention_days": 30,
         "entity_concurrency": 8,
-        "idempotency": {
-          "claim_ttl_secs": 60
-        },
         "keepalive_concurrency": 4,
-        "pgbouncer_transaction_mode": false,
         "recurring_jobs": {
           "anthropic_compat_refresh": {
             "enabled": true,
@@ -265,23 +182,6 @@
             "jitter_secs": 30
           }
         },
-        "retry_classes": {
-          "adaptive": {
-            "base_secs": 30,
-            "max_attempts": 5,
-            "max_secs": 600
-          },
-          "maintenance": {
-            "base_secs": 60,
-            "max_attempts": 1,
-            "max_secs": 60
-          },
-          "probe": {
-            "base_secs": 1,
-            "max_attempts": 3,
-            "max_secs": 5
-          }
-        },
         "separate_pool": {
           "acquire_timeout_secs": 5,
           "idle_timeout_secs": 600,
@@ -290,10 +190,7 @@
           "sslmode": "prefer",
           "statement_timeout_secs": 30
         },
-        "singleton_concurrency": 2,
-        "staleness": {
-          "warmup_effect_retention_days": 30
-        }
+        "singleton_concurrency": 2
       }
     },
     "storage": {
@@ -316,21 +213,8 @@
       "$ref": "#/$defs/TimeoutsConfig",
       "default": {
         "drain_secs": 60,
-        "idle_secs": 300,
-        "request_body_chunk_secs": 30,
-        "request_header_secs": 10,
         "upstream_total_secs": 600
       }
-    },
-    "tls": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/TlsConfig"
-        },
-        {
-          "type": "null"
-        }
-      ]
     },
     "upstream_affinity": {
       "$ref": "#/$defs/UpstreamAffinityConfig",
@@ -339,6 +223,7 @@
       }
     }
   },
+  "additionalProperties": false,
   "$defs": {
     "AdminAuthConfig": {
       "type": "object",
@@ -417,12 +302,9 @@
           "default": {
             "providers": []
           }
-        },
-        "token_env": {
-          "type": "string",
-          "default": "CC_LB_ADMIN_TOKEN"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "AeadConfig": {
       "type": "object",
@@ -431,7 +313,8 @@
           "type": "string",
           "default": "CC_LB_MASTER_KEY"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "AnthropicOAuthConfig": {
       "type": "object",
@@ -464,26 +347,6 @@
         }
       }
     },
-    "ApiKeysConfig": {
-      "type": "object",
-      "properties": {
-        "price_catalog": {
-          "$ref": "#/$defs/PriceCatalogConfig",
-          "default": {
-            "cache_path": "/var/lib/cc-lb/litellm.json",
-            "refresh_interval": "1h",
-            "url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
-          }
-        },
-        "usage_retention_days": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 90,
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false
-    },
     "BodyConfig": {
       "type": "object",
       "properties": {
@@ -498,17 +361,9 @@
           "format": "uint64",
           "default": 33554432,
           "minimum": 0
-        },
-        "per_route_overrides": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "default": {}
         }
-      }
+      },
+      "additionalProperties": false
     },
     "BulkheadConfig": {
       "type": "object",
@@ -562,90 +417,9 @@
         "token_env": {
           "type": "string",
           "default": "CC_LB_CLUSTER_TOKEN"
-        },
-        "token_env_optional": {
-          "type": "boolean",
-          "default": true
         }
       },
       "additionalProperties": false
-    },
-    "DnsConfig": {
-      "type": "object",
-      "properties": {
-        "cache_ttl_ceiling_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 300,
-          "minimum": 0
-        },
-        "cache_ttl_floor_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 30,
-          "minimum": 0
-        }
-      }
-    },
-    "DownstreamAuthConfig": {
-      "type": "object",
-      "properties": {
-        "mode": {
-          "$ref": "#/$defs/DownstreamAuthMode",
-          "default": "api_key"
-        },
-        "none_mode": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NoneModeConfig"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false
-    },
-    "DownstreamAuthMode": {
-      "type": "string",
-      "enum": [
-        "none",
-        "api_key"
-      ]
-    },
-    "Duration": {
-      "type": "object",
-      "properties": {
-        "nanos": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "secs": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "secs",
-        "nanos"
-      ]
-    },
-    "EgressConfig": {
-      "type": "object",
-      "properties": {
-        "allowed_hosts": {
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "type": "string"
-          }
-        }
-      }
     },
     "EventBusConfig": {
       "type": "object",
@@ -680,97 +454,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "LifecycleApiKeyMetricsSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleCacheHitMissSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleCacheObservationSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleHookAdapterConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleLimitReconcileSubscriberConfig": {
-      "description": "Post-response limit reservation reconciliation subscriber.\n\nDefault: `enabled=true` — subscriber reconciles reservations after the\nresponse lifecycle terminates. Set `enabled=false` to opt out entirely;\nreservations then reconcile only via TTL refund.",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleLimitRejectionAuditSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecyclePricingSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleRateLimitHeaderSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleRoutingTierSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
-    },
-    "LifecycleSubscriptionQuotaSubscriberConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        }
-      }
     },
     "LimitReservationTtlConfig": {
       "description": "Background TTL sweeper for stale limit reservations. The LimitEngine\nperiodically walks its reservation map and full-refunds any reservation\nolder than `ttl_secs`; the sweeper runs unconditionally because the\nsubscriber path is authoritative.",
@@ -814,35 +497,9 @@
               "type": "null"
             }
           ]
-        },
-        "unix_socket": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
-    },
-    "NoneModeConfig": {
-      "type": "object",
-      "properties": {
-        "principal_id": {
-          "type": "string",
-          "default": ""
-        },
-        "upstream_kind": {
-          "$ref": "#/$defs/NoneModeUpstreamKind",
-          "default": "anthropic_key"
         }
       },
       "additionalProperties": false
-    },
-    "NoneModeUpstreamKind": {
-      "type": "string",
-      "enum": [
-        "anthropic_key",
-        "anthropic_o_auth"
-      ]
     },
     "OAuthConfig": {
       "type": "object",
@@ -872,12 +529,6 @@
             "null"
           ]
         },
-        "prometheus_endpoint": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "tracing_level": {
           "type": "string",
           "default": "info"
@@ -886,15 +537,8 @@
           "type": "boolean",
           "default": false
         }
-      }
-    },
-    "PluginFailurePolicy": {
-      "description": "What to do when a filter or shape plugin fails at the runtime\nboundary (trap, pool saturation, invalid wire\noutput). `PassThrough` is the historical behaviour: filter treats\nthe failure as no-op and shape falls back to raw upstream\npassthrough. `FailClosed` returns 503 upstream unavailable — pick\nthis when the plugin enforces load-bearing authz / tenant policy\nand cannot silently degrade.",
-      "type": "string",
-      "enum": [
-        "pass_through",
-        "fail_closed"
-      ]
+      },
+      "additionalProperties": false
     },
     "PluginWireBounds": {
       "description": "Upper bounds enforced on plugin wire I/O. Defaults match current\nunbounded-ish behaviour by tracking the request body cap already\nenforced at the HTTP layer, so enabling this struct with defaults\nis a no-op. Tightening any field is opt-in.",
@@ -982,10 +626,6 @@
           "type": "string",
           "default": "/var/lib/cc-lb/litellm.json"
         },
-        "refresh_interval": {
-          "$ref": "#/$defs/Duration",
-          "default": "1h"
-        },
         "url": {
           "type": "string",
           "default": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -1015,7 +655,8 @@
           "default": 60,
           "minimum": 0
         }
-      }
+      },
+      "additionalProperties": false
     },
     "RecurringJobConfig": {
       "type": "object",
@@ -1053,7 +694,6 @@
           "default": {
             "allocation_strategy": "ondemand",
             "cookie_redaction": false,
-            "plugin_failure_policy": "pass_through",
             "shape_origin_policy": "unrestricted",
             "wire_bounds": {
               "max_header_value_bytes": 8192,
@@ -1080,21 +720,11 @@
           "default": 8,
           "minimum": 0
         },
-        "idempotency": {
-          "$ref": "#/$defs/SchedulerIdempotencyConfig",
-          "default": {
-            "claim_ttl_secs": 60
-          }
-        },
         "keepalive_concurrency": {
           "type": "integer",
           "format": "uint",
           "default": 4,
           "minimum": 0
-        },
-        "pgbouncer_transaction_mode": {
-          "type": "boolean",
-          "default": false
         },
         "recurring_jobs": {
           "type": "object",
@@ -1159,26 +789,6 @@
             }
           }
         },
-        "retry_classes": {
-          "$ref": "#/$defs/SchedulerRetryClasses",
-          "default": {
-            "adaptive": {
-              "base_secs": 30,
-              "max_attempts": 5,
-              "max_secs": 600
-            },
-            "maintenance": {
-              "base_secs": 60,
-              "max_attempts": 1,
-              "max_secs": 60
-            },
-            "probe": {
-              "base_secs": 1,
-              "max_attempts": 3,
-              "max_secs": 5
-            }
-          }
-        },
         "separate_pool": {
           "$ref": "#/$defs/SchedulerPoolConfig",
           "default": {
@@ -1194,24 +804,6 @@
           "type": "integer",
           "format": "uint",
           "default": 2,
-          "minimum": 0
-        },
-        "staleness": {
-          "$ref": "#/$defs/SchedulerStalenessConfig",
-          "default": {
-            "warmup_effect_retention_days": 30
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "SchedulerIdempotencyConfig": {
-      "type": "object",
-      "properties": {
-        "claim_ttl_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
           "minimum": 0
         }
       },
@@ -1257,72 +849,6 @@
       },
       "additionalProperties": false
     },
-    "SchedulerRetryClasses": {
-      "type": "object",
-      "properties": {
-        "adaptive": {
-          "$ref": "#/$defs/SchedulerRetryConfig",
-          "default": {
-            "base_secs": 30,
-            "max_attempts": 5,
-            "max_secs": 600
-          }
-        },
-        "maintenance": {
-          "$ref": "#/$defs/SchedulerRetryConfig",
-          "default": {
-            "base_secs": 60,
-            "max_attempts": 1,
-            "max_secs": 60
-          }
-        },
-        "probe": {
-          "$ref": "#/$defs/SchedulerRetryConfig",
-          "default": {
-            "base_secs": 1,
-            "max_attempts": 3,
-            "max_secs": 5
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "SchedulerRetryConfig": {
-      "type": "object",
-      "properties": {
-        "base_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1,
-          "minimum": 0
-        },
-        "max_attempts": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 3,
-          "minimum": 0
-        },
-        "max_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 5,
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false
-    },
-    "SchedulerStalenessConfig": {
-      "type": "object",
-      "properties": {
-        "warmup_effect_retention_days": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 30,
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false
-    },
     "ShapeOriginPolicy": {
       "description": "Whether a shape plugin may return a URL whose origin\n(scheme+host+port) differs from the selected upstream. Historical\nbehaviour is `Unrestricted`; deployments where a compromised or\nbuggy shape plugin misrouting to a wrong host is a concern can\nopt into `SelectedUpstreamOrigin` to reject any URL that does not\nmatch the selected upstream's `base_url` origin.",
       "type": "string",
@@ -1357,6 +883,7 @@
               "type": "string"
             }
           },
+          "additionalProperties": false,
           "required": [
             "kind",
             "url"
@@ -1373,6 +900,7 @@
               "type": "string"
             }
           },
+          "additionalProperties": false,
           "required": [
             "kind",
             "path"
@@ -1418,31 +946,14 @@
           "default": 60,
           "minimum": 0
         },
-        "idle_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 300,
-          "minimum": 0
-        },
-        "request_body_chunk_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 30,
-          "minimum": 0
-        },
-        "request_header_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 10,
-          "minimum": 0
-        },
         "upstream_total_secs": {
           "type": "integer",
           "format": "uint64",
           "default": 600,
           "minimum": 0
         }
-      }
+      },
+      "additionalProperties": false
     },
     "TlsConfig": {
       "type": "object",
@@ -1519,10 +1030,6 @@
           "format": "uint64",
           "minimum": 0
         },
-        "plugin_failure_policy": {
-          "$ref": "#/$defs/PluginFailurePolicy",
-          "default": "pass_through"
-        },
         "pool_total_core_instances": {
           "type": [
             "integer",
@@ -1552,7 +1059,8 @@
             "reason_bytes": 256
           }
         }
-      }
+      },
+      "additionalProperties": false
     }
   }
 }

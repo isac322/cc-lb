@@ -12,8 +12,6 @@ mod backward_compat_observe;
 mod bad_postgres_url_fatal;
 #[path = "build_metadata_present.rs"]
 mod build_metadata_present;
-#[path = "builtin_authn_smoke.rs"]
-mod builtin_authn_smoke;
 #[path = "cache_keepalive_server_wiring.rs"]
 mod cache_keepalive_server_wiring;
 #[path = "cache_memory_bound.rs"]

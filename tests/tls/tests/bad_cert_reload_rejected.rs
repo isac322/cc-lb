@@ -3,7 +3,7 @@ use crate::common;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bad_cert_reload_keeps_previous_certificate_serving() {
     let app = common::start_tls_app(1_048_576).await;
-    let before = common::tls_get(app.proxy_addr, &app.cert_path, "/v1/models")
+    let before = common::tls_get(app.proxy_addr, &app.cert_path, "/v1/models", &app.api_key)
         .await
         .expect("pre-reload request");
     assert_eq!(before.status, 200);
@@ -15,7 +15,7 @@ async fn bad_cert_reload_keeps_previous_certificate_serving() {
 
     std::fs::copy(&app.cert_a_path, &app.cert_path)
         .expect("restore trusted cert file for client roots");
-    let after = common::tls_get(app.proxy_addr, &app.cert_path, "/v1/models")
+    let after = common::tls_get(app.proxy_addr, &app.cert_path, "/v1/models", &app.api_key)
         .await
         .expect("post-failed-reload request");
     assert_eq!(after.status, 200);

@@ -1,9 +1,7 @@
 use std::env;
 use std::ffi::OsString;
 
-use cc_lb_config::{
-    Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
-};
+use cc_lb_config::{Config, StorageConfig};
 use cc_lb_server::app::{BuildError, build_app_with_path};
 use cc_lb_server::scheduler_factory::SchedulerFactoryError;
 
@@ -88,11 +86,6 @@ fn app_config(storage: StorageConfig) -> Config {
     // Postgres validates the cluster token before opening the scheduler pool.
     // Borrow an immutable harness variable instead of mutating process-wide env.
     config.cluster.token_env = crate::common::TEST_NONEMPTY_ENV.to_owned();
-    config.downstream_auth.mode = DownstreamAuthMode::None;
-    config.downstream_auth.none_mode = Some(NoneModeConfig {
-        principal_id: "task25-hard-fail".to_owned(),
-        upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-    });
     config.scheduler.separate_pool.min_connections = 0;
     config.scheduler.separate_pool.acquire_timeout_secs = 1;
     config

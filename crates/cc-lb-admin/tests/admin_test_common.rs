@@ -106,13 +106,54 @@ pub struct AdminClient {
     token: String,
 }
 
+pub fn static_token_provider(token: &str) -> Arc<dyn cc_lb_admin::auth::AdminAuthProvider> {
+    Arc::new(TestStaticTokenProvider {
+        token: token.to_owned(),
+    })
+}
+
 pub fn static_token_auth(token: &str) -> Arc<cc_lb_admin::auth::AdminAuthenticator> {
-    let providers = cc_lb_admin::auth::build_providers(
-        &cc_lb_config::AdminAuthConfig::default(),
-        Some(token.to_owned()),
-    )
-    .expect("legacy static token provider builds");
-    Arc::new(cc_lb_admin::auth::AdminAuthenticator::new(providers))
+    Arc::new(cc_lb_admin::auth::AdminAuthenticator::new(vec![
+        static_token_provider(token),
+    ]))
+}
+
+struct TestStaticTokenProvider {
+    token: String,
+}
+
+#[async_trait]
+impl cc_lb_admin::auth::AdminAuthProvider for TestStaticTokenProvider {
+    fn id(&self) -> &str {
+        "test-static-token"
+    }
+
+    fn is_static_token(&self) -> bool {
+        true
+    }
+
+    async fn authenticate(&self, headers: &HeaderMap) -> cc_lb_admin::auth::ProviderOutcome {
+        let Some(token) = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+        else {
+            return cc_lb_admin::auth::ProviderOutcome::NotPresent;
+        };
+        if token != self.token {
+            return cc_lb_admin::auth::ProviderOutcome::Rejected("static_token_mismatch");
+        }
+        cc_lb_admin::auth::ProviderOutcome::Verified(cc_lb_admin::auth::AdminIdentity {
+            authority: "static-token".to_owned(),
+            subject: self.id().to_owned(),
+            kind: cc_lb_admin::auth::AdminActorKind::BreakGlass,
+            provider_id: self.id().to_owned(),
+            email: None,
+            display_name: Some("Test admin token".to_owned()),
+            groups: Vec::new(),
+            expires_at_unix_secs: None,
+        })
+    }
 }
 
 pub async fn spawn_admin_server() -> SpawnedAdminServer {

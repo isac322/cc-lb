@@ -11,11 +11,9 @@ fn postgres_config_rendering() {
     // When: the managed-key replica configuration is rendered.
     let config = render_replica_config("postgres://cc_lb:stress@postgres:5432/cc_lb", ports);
 
-    // Then: it uses shared Postgres storage and managed API-key authentication.
+    // Then: it uses shared Postgres storage and the configured listener ports.
     assert!(config.contains("kind = \"postgres\""));
     assert!(config.contains("url = \"postgres://cc_lb:stress@postgres:5432/cc_lb\""));
-    assert!(config.contains("mode = \"api_key\""));
-    assert!(!config.contains("mode = \"none\""));
     assert!(config.contains("proxy_addr = \"0.0.0.0:31001\""));
     assert!(config.contains("admin_addr = \"0.0.0.0:31002\""));
     assert!(config.contains("metrics_addr = \"0.0.0.0:31003\""));
