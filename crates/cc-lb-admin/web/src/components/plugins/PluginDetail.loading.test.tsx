@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { PluginEntry, PluginReference } from '../../lib/queries';
 import * as queries from '../../lib/queries';
@@ -98,7 +104,7 @@ beforeEach(() => {
   vi.mocked(queries.useDeletePlugin).mockImplementation(
     () =>
       ({
-        mutate: deleteMutate,
+        mutateAsync: deleteMutate,
         isPending: deleteIsPending,
       }) as never,
   );
@@ -195,13 +201,13 @@ describe('PluginDetail loading geometry', () => {
     expect(deleteMutate).not.toHaveBeenCalled();
   });
 
-  test('keeps the delete dialog open until the mutation succeeds', () => {
+  test('keeps the delete dialog open until the mutation succeeds', async () => {
     const onClose = vi.fn();
     let completeDelete: (() => void) | undefined;
-    deleteMutate.mockImplementation(
-      (_variables: unknown, options: { onSuccess: () => void }) => {
-        completeDelete = options.onSuccess;
-      },
+    deleteMutate.mockReturnValue(
+      new Promise<void>((resolve) => {
+        completeDelete = resolve;
+      }),
     );
     setReferencesQuery(
       referencesQuery([
@@ -237,7 +243,7 @@ describe('PluginDetail loading geometry', () => {
     ).toBeDefined();
 
     completeDelete?.();
-    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   test('retains and locks the delete dialog while deletion is pending', () => {

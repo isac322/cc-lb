@@ -84,6 +84,7 @@ hex.workspace = true
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
+log.workspace = true
 metrics.workspace = true
 notify.workspace = true
 oauth2.workspace = true

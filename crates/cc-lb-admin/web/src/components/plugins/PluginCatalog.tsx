@@ -59,7 +59,7 @@ export function PluginCatalog({
   const gc = useGcPlugins();
   const { copy } = useCopyButton();
   const entries = reg.data?.entries ?? [];
-  const unusedUploadCount = entries.filter(
+  const unusedRegisteredCount = entries.filter(
     (p) => !p.is_builtin && p.refcount === 0,
   ).length;
   const [pendingDelete, setPendingDelete] = useState<{
@@ -80,7 +80,9 @@ export function PluginCatalog({
     gc.mutate(undefined, {
       onSuccess: (r) =>
         toast.success(
-          `Deleted ${r.count} unused upload${r.count === 1 ? '' : 's'}`,
+          r.count === 0
+            ? 'No orphaned upload blobs found'
+            : `Removed ${r.count} orphaned upload blob${r.count === 1 ? '' : 's'}`,
         ),
       // No local onError: the global MutationCache toast stays the single
       // failure surface, so the latch only releases the click here.
@@ -108,7 +110,7 @@ export function PluginCatalog({
                 <Skeleton as="span" className="block h-4 w-48" />
               ) : (
                 <span className="text-sm text-text-faint">
-                  {entries.length} available · {unusedUploadCount} not used
+                  {entries.length} available · {unusedRegisteredCount} not used
                   anywhere
                 </span>
               )}
@@ -124,18 +126,18 @@ export function PluginCatalog({
                   data-testid="plugin-gc-progress"
                 >
                   <Spinner className="w-3 h-3" />
-                  Deleting unused uploads — waiting for the server.
+                  Cleaning orphaned uploads — waiting for the server.
                 </span>
               ) : null}
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={unusedUploadCount === 0 || gcPending}
+                disabled={gcPending}
                 loading={gcPending}
-                title="Delete uploaded plugins that are not used anywhere. Built-in plugins stay."
+                title="Remove uploaded WASM blobs no longer referenced by any registered plugin. Registered plugins remain available, even when Used By is 0."
                 onClick={runGc}
               >
-                {gcPending ? 'Deleting...' : 'Delete unused uploads'}
+                {gcPending ? 'Cleaning...' : 'Clean orphaned uploads'}
               </Button>
             </>
           }
@@ -273,16 +275,10 @@ export function PluginCatalog({
                           <button
                             type="button"
                             aria-label="Delete plugin"
-                            // The sweep deletes exactly the refcount === 0
-                            // uploads this row targets, so opening a delete
-                            // dialog mid-sweep would aim at a vanishing row.
-                            disabled={gcPending}
                             title={
-                              gcPending
-                                ? 'Sweeping unused plugins...'
-                                : p.refcount > 0
-                                  ? `In use by ${p.refcount} reference(s)`
-                                  : 'Delete plugin'
+                              p.refcount > 0
+                                ? `In use by ${p.refcount} reference(s)`
+                                : 'Delete plugin'
                             }
                             className="transition-colors text-text-faint hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-text-faint"
                             onClick={(e) => {

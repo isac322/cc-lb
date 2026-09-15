@@ -195,6 +195,7 @@ async fn open_postgres_pool(
     let connect_options = connect_options.ssl_mode(ssl_mode);
 
     PgPoolOptions::new()
+        .acquire_time_level(log::LevelFilter::Debug)
         .max_connections(pool_config.max_connections)
         .min_connections(pool_config.min_connections)
         .acquire_timeout(Duration::from_secs(pool_config.acquire_timeout_secs))

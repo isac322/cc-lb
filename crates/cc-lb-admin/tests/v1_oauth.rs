@@ -132,6 +132,23 @@ impl Fixture {
         .await
     }
 
+    async fn create_from_draft_with_base_url(
+        &self,
+        state_token: &str,
+        name: &str,
+        base_url: &str,
+    ) -> (StatusCode, Value) {
+        self.post_json(
+            "/admin/v1/upstreams/from-oauth-draft",
+            json!({
+                "state_token": state_token,
+                "name": name,
+                "base_url": base_url
+            }),
+        )
+        .await
+    }
+
     async fn complete(
         &self,
         upstream_id: Uuid,
@@ -510,6 +527,42 @@ async fn create_from_completed_draft_with_active_name_returns_name_conflict() {
     assert_eq!(body["error"], "upstream_name_conflict");
     assert_eq!(body["name"], "draft-name-conflict");
     assert_eq!(body["existing_upstream_id"], existing.id.to_string());
+}
+
+#[tokio::test]
+async fn create_from_oauth_draft_returns_the_stored_base_url_without_secrets() {
+    let fixture = Fixture::new().await;
+    let (status, start) = fixture.start_draft().await;
+    assert_eq!(status, StatusCode::OK);
+    let state_token = start["state_token"].as_str().expect("state token");
+    let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
+    let (status, _) = fixture.complete_draft(state_token, &code).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let base_url = "https://oauth-gateway.example.com/v1/";
+    let (status, created) = fixture
+        .create_from_draft_with_base_url(state_token, "draft-base-url", base_url)
+        .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["base_url"], base_url);
+    assert!(created.get("api_key_value").is_none());
+    assert!(created.get("api_key_env").is_none());
+    assert!(created.get("access_token").is_none());
+    assert!(created.get("refresh_token").is_none());
+
+    let upstream_id = created["id"]
+        .as_str()
+        .expect("created upstream id")
+        .parse()
+        .expect("upstream id parses");
+    let stored = fixture
+        .storage
+        .get_by_id(upstream_id)
+        .await
+        .expect("load stored upstream")
+        .expect("stored upstream");
+    assert_eq!(stored.base_url.as_ref().map(Url::as_str), Some(base_url));
 }
 
 #[tokio::test]

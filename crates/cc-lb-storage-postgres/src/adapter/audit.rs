@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{AuditEntry, AuditStore, StorageResult};
+use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, StorageResult};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
@@ -13,6 +13,10 @@ use crate::{
 };
 
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
+
+const QUERY_RECENT_AUDIT_ALL: &str = "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) ORDER BY ts DESC, seq DESC LIMIT $3";
+const QUERY_RECENT_AUDIT_PRINCIPAL: &str = "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND principal_id = $3 ORDER BY ts DESC, seq DESC LIMIT $4";
+const QUERY_RECENT_AUDIT_ACTOR: &str = "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND actor_authority = $3 AND actor_subject = $4 ORDER BY ts DESC, seq DESC LIMIT $5";
 
 struct AuditInsertRow<'a> {
     ts: DateTime<Utc>,
@@ -184,6 +188,56 @@ impl AuditStore for PostgresStorage {
         .bind(u64_to_i64(limit as u64, "audit limit")?)
         .fetch_all(&self.pool)
         .await
+        .map_err(map_sqlx_error)?;
+
+        rows.into_iter().map(row_to_audit_entry).collect()
+    }
+
+    async fn query_recent_audit(
+        &self,
+        scope: AuditQueryScope<'_>,
+        since: u64,
+        until: u64,
+        limit: usize,
+    ) -> StorageResult<Vec<AuditEntry>> {
+        if limit == 0 || until < since {
+            return Ok(Vec::new());
+        }
+        let Some(since) = unix_secs_to_datetime_lower(since, "audit since")? else {
+            return Ok(Vec::new());
+        };
+        let until = unix_secs_to_datetime_upper(until, "audit until")?;
+        let limit = u64_to_i64(limit as u64, "audit limit")?;
+
+        let rows = match scope {
+            AuditQueryScope::All => {
+                sqlx::query(QUERY_RECENT_AUDIT_ALL)
+                    .bind(since)
+                    .bind(until)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await
+            }
+            AuditQueryScope::Principal(principal_id) => {
+                sqlx::query(QUERY_RECENT_AUDIT_PRINCIPAL)
+                    .bind(since)
+                    .bind(until)
+                    .bind(principal_id)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await
+            }
+            AuditQueryScope::Actor { authority, subject } => {
+                sqlx::query(QUERY_RECENT_AUDIT_ACTOR)
+                    .bind(since)
+                    .bind(until)
+                    .bind(authority)
+                    .bind(subject)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await
+            }
+        }
         .map_err(map_sqlx_error)?;
 
         rows.into_iter().map(row_to_audit_entry).collect()

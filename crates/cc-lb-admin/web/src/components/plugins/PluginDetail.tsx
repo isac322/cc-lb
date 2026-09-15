@@ -132,6 +132,7 @@ export function PluginDetail({
         onClose={() => {
           setPendingDelete(null);
         }}
+        onDeleted={onBack}
       />
     </div>
   );

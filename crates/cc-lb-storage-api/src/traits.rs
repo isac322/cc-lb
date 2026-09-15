@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::{
-    BackendKind, CacheKeepaliveDecisionRow, RequestEventHistogramBucket,
+    AuditQueryScope, BackendKind, CacheKeepaliveDecisionRow, RequestEventHistogramBucket,
     RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
     RequestEventKeyUsageBucket, RequestEventKeyUsageQuery, RequestEventPrincipalCostBucket,
     RequestEventPrincipalCostQuery, RequestEventProjections, RuntimeChangeNotifier, StorageError,
@@ -36,6 +36,15 @@ pub trait AuditStore: Send + Sync {
     async fn query_audit(
         &self,
         principal_id: Option<&str>,
+        since: u64,
+        until: u64,
+        limit: usize,
+    ) -> StorageResult<Vec<AuditEntry>>;
+
+    /// Returns matching entries newest first, with newer insertions first on timestamp ties.
+    async fn query_recent_audit(
+        &self,
+        scope: AuditQueryScope<'_>,
         since: u64,
         until: u64,
         limit: usize,
