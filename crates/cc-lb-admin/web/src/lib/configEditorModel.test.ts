@@ -1,19 +1,27 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { type ConfigEditorResponse, downloadConfigDraft } from './api';
+import type { ConfigEditorResponse } from './api';
+import { downloadConfigDraft } from './api';
 import {
   buildConfigEditorModel,
   CONFIG_EDITOR_CATEGORIES,
+  CONFIG_EDITOR_SECTIONS,
+  CONFIG_EDITOR_UNASSIGNED_SECTION_ID,
   type ConfigSchema,
+  classifyConfigLeaf,
   expandConfigSchema,
   getConfigSchemaVariants,
   getConfigValue,
+  humanizeConfigValue,
   isNullableConfigSchema,
+  matchConfigPath,
   normalizeConfigDraft,
   OPAQUE_STORAGE_URL_SENTINEL,
   parseConfigPath,
   resolveConfigValue,
+  searchConfigLeaves,
   setConfigValue,
   unsetConfigValue,
 } from './configEditorModel';
@@ -75,6 +83,7 @@ const schema = {
               type: 'object',
               properties: {
                 max_connections: { type: 'integer', default: 20 },
+                acquire_timeout_secs: { type: 'integer', default: 5 },
               },
             },
           },
@@ -101,9 +110,14 @@ const schema = {
     Admin: {
       type: 'object',
       properties: {
-        providers: {
-          type: 'array',
-          items: { $ref: '#/$defs/AdminProvider' },
+        auth: {
+          type: 'object',
+          properties: {
+            providers: {
+              type: 'array',
+              items: { $ref: '#/$defs/AdminProvider' },
+            },
+          },
         },
       },
     },
@@ -135,7 +149,17 @@ const schema = {
     OAuth: {
       type: 'object',
       properties: {
-        scopes: { type: 'array', items: { type: 'string' } },
+        anthropic: {
+          anyOf: [
+            {
+              type: 'object',
+              properties: {
+                scopes: { type: 'array', items: { type: 'string' } },
+              },
+            },
+            { type: 'null' },
+          ],
+        },
       },
     },
   },
@@ -149,8 +173,8 @@ const defaultConfig = {
       usage_rollup: { enabled: true, interval_secs: 3600, jitter_secs: 30 },
     },
   },
-  admin: { providers: [] },
-  oauth: null,
+  admin: { auth: { providers: [] } },
+  oauth: {},
 };
 
 const fileConfig = {
@@ -162,9 +186,11 @@ const fileConfig = {
     },
   },
   admin: {
-    providers: [
-      { kind: 'static_token', id: 'local', token_env: 'CC_LB_ADMIN_TOKEN' },
-    ],
+    auth: {
+      providers: [
+        { kind: 'static_token', id: 'local', token_env: 'CC_LB_ADMIN_TOKEN' },
+      ],
+    },
   },
   unknown_file_key: { preserved: 'yes' },
 };
@@ -235,15 +261,15 @@ describe('schema traversal', () => {
     const leaves = expandConfigSchema(schema, defaultConfig, fileConfig);
     const paths = leaves.map((leaf) => leaf.pathString);
     const expectedPaths = [
-      'admin.providers[0].audiences',
-      'admin.providers[0].id',
-      'admin.providers[0].kind',
-      'admin.providers[0].team_domain',
-      'admin.providers[0].token_env',
+      'admin.auth.providers[0].audiences',
+      'admin.auth.providers[0].id',
+      'admin.auth.providers[0].kind',
+      'admin.auth.providers[0].team_domain',
+      'admin.auth.providers[0].token_env',
       'listener.port',
       'listener.tls.cert_path',
       'listener.tls.key_path',
-      'oauth.scopes',
+      'oauth.anthropic.scopes',
       'scheduler.recurring_jobs.custom_job.enabled',
       'scheduler.recurring_jobs.custom_job.interval_secs',
       'scheduler.recurring_jobs.custom_job.jitter_secs',
@@ -252,6 +278,7 @@ describe('schema traversal', () => {
       'scheduler.recurring_jobs.usage_rollup.jitter_secs',
       'storage.kind',
       'storage.path',
+      'storage.pool.acquire_timeout_secs',
       'storage.pool.max_connections',
       'storage.url',
       'unknown_file_key.preserved',
@@ -286,11 +313,11 @@ describe('schema traversal', () => {
 
   it('uses wildcard paths when object arrays and maps have no instances', () => {
     const paths = expandConfigSchema(schema, {
-      admin: { providers: [] },
+      admin: { auth: { providers: [] } },
       scheduler: { recurring_jobs: {} },
     }).map((leaf) => leaf.pathString);
 
-    expect(paths).toContain('admin.providers.*.token_env');
+    expect(paths).toContain('admin.auth.providers.*.token_env');
     expect(paths).toContain('scheduler.recurring_jobs.*.enabled');
   });
 
@@ -346,12 +373,12 @@ describe('immutable paths and normalization', () => {
     expect(
       normalizeConfigDraft(schema, {
         listener: { port: 9000, tls: null },
-        oauth: { scopes: ['one', null, 'two'] },
+        oauth: { anthropic: { scopes: ['one', null, 'two'] } },
         unknown_file_key: { preserved: 'yes', removed: null },
       }),
     ).toEqual({
       listener: { port: 9000 },
-      oauth: { scopes: ['one', 'two'] },
+      oauth: { anthropic: { scopes: ['one', 'two'] } },
       unknown_file_key: { preserved: 'yes' },
     });
   });
@@ -380,14 +407,14 @@ describe('resolved editor model', () => {
   });
   it('matches a parent override to indexed array child fields', () => {
     const response = editorResponse();
-    const resolution = resolveConfigValue('admin.providers[0].token_env', {
+    const resolution = resolveConfigValue('admin.auth.providers[0].token_env', {
       draft: response.draft,
       file: response.file_config,
       defaults: response.default_config,
       effective: response.effective_config,
       overrides: [
         {
-          path: 'admin.providers',
+          path: 'admin.auth.providers',
           source: 'special_env',
           name: 'CC_LB_ADMIN_AUTH_PROVIDERS_JSON',
           sensitive: true,
@@ -397,7 +424,7 @@ describe('resolved editor model', () => {
     });
 
     expect(resolution.override).toMatchObject({
-      path: 'admin.providers',
+      path: 'admin.auth.providers',
       name: 'CC_LB_ADMIN_AUTH_PROVIDERS_JSON',
     });
   });
@@ -486,6 +513,218 @@ describe('resolved editor model', () => {
         'limit_reservation_ttl',
       ]),
     );
+  });
+});
+describe('config editor information architecture', () => {
+  it('matches glob path patterns against segments, indexes, and map keys', () => {
+    expect(matchConfigPath('listener.*', 'listener.port')).toBe(true);
+    expect(matchConfigPath('listener.*', 'listener.tls.cert_path')).toBe(false);
+    expect(matchConfigPath('listener.tls.**', 'listener.tls')).toBe(true);
+    expect(matchConfigPath('listener.tls.**', 'listener.tls.cert_path')).toBe(
+      true,
+    );
+    expect(
+      matchConfigPath('admin.**', 'admin.auth.providers[0].token_env'),
+    ).toBe(true);
+    expect(
+      matchConfigPath(
+        'scheduler.recurring_jobs.**',
+        'scheduler.recurring_jobs.custom_job.enabled',
+      ),
+    ).toBe(true);
+    expect(
+      matchConfigPath(
+        'scheduler.*_concurrency',
+        'scheduler.entity_concurrency',
+      ),
+    ).toBe(true);
+    expect(
+      matchConfigPath(
+        'scheduler.*_concurrency',
+        'scheduler.dlq_retention_days',
+      ),
+    ).toBe(false);
+    expect(matchConfigPath('**.*_secs', 'timeouts.drain_secs')).toBe(true);
+    expect(matchConfigPath('**.*_secs', 'timeouts')).toBe(false);
+  });
+
+  it('classifies leaves into sections with presentation and danger metadata', () => {
+    expect(classifyConfigLeaf('listener.proxy_addr', 'string')).toMatchObject({
+      categoryId: 'network',
+      sectionId: 'listener-endpoints',
+      advanced: false,
+      dangerous: true,
+      presentation: 'address',
+      unit: null,
+    });
+    expect(
+      classifyConfigLeaf('storage.pool.acquire_timeout_secs', 'integer'),
+    ).toMatchObject({
+      categoryId: 'data',
+      sectionId: 'database-pool',
+      advanced: true,
+      presentation: 'duration',
+      unit: 'secs',
+    });
+    expect(
+      classifyConfigLeaf('admin.auth.providers[0].token_env', 'string'),
+    ).toMatchObject({
+      categoryId: 'identity',
+      sectionId: 'admin-auth-providers',
+      dangerous: true,
+      presentation: 'env',
+    });
+    expect(
+      classifyConfigLeaf('body.messages_cap_bytes', 'integer'),
+    ).toMatchObject({
+      sectionId: 'request-body-limits',
+      presentation: 'bytes',
+      unit: 'bytes',
+    });
+    expect(classifyConfigLeaf('aead.key_env', 'string')).toMatchObject({
+      sectionId: 'encryption',
+      dangerous: true,
+      presentation: 'env',
+    });
+  });
+
+  it('sends unknown roots and unmatched paths to the unassigned fallback', () => {
+    expect(classifyConfigLeaf('unknown_file_key.preserved')).toMatchObject({
+      sectionId: null,
+      presentation: 'unknown',
+    });
+    expect(classifyConfigLeaf('storage')).toMatchObject({
+      categoryId: 'data',
+      sectionId: null,
+    });
+  });
+
+  it('humanizes durations and byte counts for display', () => {
+    expect(humanizeConfigValue(600, 'secs')).toBe('10 minutes');
+    expect(humanizeConfigValue(90, 'secs')).toBe('1 minute 30 seconds');
+    expect(humanizeConfigValue(250, 'ms')).toBe('250 ms');
+    expect(humanizeConfigValue(90, 'days')).toBe('90 days');
+    expect(humanizeConfigValue(33_554_432, 'bytes')).toBe('32 MiB');
+    expect(humanizeConfigValue(104_857_600, 'bytes')).toBe('100 MiB');
+    expect(humanizeConfigValue(512, 'bytes')).toBe('512 B');
+    expect(humanizeConfigValue('nope', 'secs')).toBeNull();
+    expect(humanizeConfigValue(10, null)).toBeNull();
+  });
+
+  it('groups model leaves into sections and counts advanced leaves from the active variant only', () => {
+    const model = buildConfigEditorModel(editorResponse());
+    const pool = model.sections.find(
+      (section) => section.id === 'database-pool',
+    );
+    const providers = model.sections.find(
+      (section) => section.id === 'admin-auth-providers',
+    );
+    const tls = model.sections.find((section) => section.id === 'tls');
+    // Draft selects the postgres storage variant: pool leaves are active.
+    expect(pool?.leaves.map((leaf) => leaf.pathString)).toEqual([
+      'storage.pool.max_connections',
+    ]);
+    expect(pool?.advancedLeaves.map((leaf) => leaf.pathString)).toEqual([
+      'storage.pool.acquire_timeout_secs',
+    ]);
+    // The draft's provider is static_token: cloudflare-only fields are inactive.
+    expect(providers?.leaves.map((leaf) => leaf.pathString)).toEqual([
+      'admin.auth.providers[0].id',
+      'admin.auth.providers[0].kind',
+      'admin.auth.providers[0].token_env',
+    ]);
+    expect(tls?.leaves.map((leaf) => leaf.pathString)).toEqual([
+      'listener.tls.cert_path',
+      'listener.tls.key_path',
+    ]);
+    expect(model.unassigned.id).toBe(CONFIG_EDITOR_UNASSIGNED_SECTION_ID);
+    expect(model.unassigned.leaves.map((leaf) => leaf.pathString)).toEqual([
+      'unknown_file_key.preserved',
+    ]);
+  });
+
+  it('drops variant leaves from sections when the draft selects another variant', () => {
+    const response = editorResponse();
+    const model = buildConfigEditorModel(response, {
+      ...response.file_config,
+      storage: { kind: 'sqlite', path: '/var/lib/cc-lb/storage.sqlite' },
+    });
+    const pool = model.sections.find(
+      (section) => section.id === 'database-pool',
+    );
+    const storage = model.sections.find(
+      (section) => section.id === 'primary-storage',
+    );
+
+    expect(pool?.leaves).toHaveLength(0);
+    expect(pool?.advancedLeaves).toHaveLength(0);
+    expect(pool?.matchedLeaves.length).toBeGreaterThan(0);
+    expect(storage?.leaves.map((leaf) => leaf.pathString)).toEqual(
+      expect.arrayContaining(['storage.kind', 'storage.path']),
+    );
+  });
+
+  it('searches active leaves by label, path, section, and description', () => {
+    const model = buildConfigEditorModel(editorResponse());
+
+    const byPath = searchConfigLeaves(model, 'cert_path');
+    expect(byPath.map((result) => result.path)).toEqual([
+      'listener.tls.cert_path',
+    ]);
+    expect(byPath[0]).toMatchObject({
+      sectionId: 'tls',
+      categoryId: 'network',
+      matched: 'path',
+    });
+    expect(byPath[0]?.breadcrumb).toContain('TLS');
+
+    const bySection = searchConfigLeaves(model, 'database pool');
+    expect(bySection.length).toBeGreaterThan(0);
+    expect(
+      bySection.every((result) => result.sectionId === 'database-pool'),
+    ).toBe(true);
+
+    // Inactive union-variant leaves never appear in results.
+    expect(
+      searchConfigLeaves(model, 'team_domain').map((result) => result.path),
+    ).toEqual([]);
+    expect(searchConfigLeaves(model, '   ')).toEqual([]);
+  });
+
+  it('assigns every real schema leaf to exactly one section or the unassigned fallback', () => {
+    const realSchema = JSON.parse(
+      readFileSync(
+        `${import.meta.dirname}/../../../../../config-schema.json`,
+        'utf-8',
+      ),
+    ) as ConfigSchema;
+    const leaves = expandConfigSchema(realSchema);
+    const sectionIds = new Set(
+      CONFIG_EDITOR_SECTIONS.map((section) => section.id),
+    );
+
+    expect(leaves.length).toBeGreaterThan(0);
+    for (const leaf of leaves) {
+      const memberships = CONFIG_EDITOR_SECTIONS.filter(
+        (section) =>
+          section.paths.some((pattern) =>
+            matchConfigPath(pattern, leaf.pathString),
+          ) ||
+          section.advancedPaths.some((pattern) =>
+            matchConfigPath(pattern, leaf.pathString),
+          ),
+      );
+      expect(
+        memberships.length,
+        `${leaf.pathString} must match at most one section`,
+      ).toBeLessThanOrEqual(1);
+      if (leaf.unknown) continue;
+      expect(
+        memberships.length,
+        `${leaf.pathString} is a schema leaf hidden from every section`,
+      ).toBe(1);
+      expect(sectionIds.has(memberships[0]?.id ?? '')).toBe(true);
+    }
   });
 });
 

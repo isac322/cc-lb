@@ -1,4 +1,4 @@
-import { createFileRoute } from '@tanstack/react-router';
+import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Download } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -189,6 +189,11 @@ function getAvailableLocales(
 }
 
 export const Route = createFileRoute('/settings')({
+  validateSearch: (search: Record<string, unknown>) => ({
+    category: typeof search.category === 'string' ? search.category : undefined,
+    field: typeof search.field === 'string' ? search.field : undefined,
+    q: typeof search.q === 'string' ? search.q : undefined,
+  }),
   component: SettingsPage,
 });
 
@@ -201,6 +206,8 @@ function SettingsPage() {
   const { locale, effective, setLocale } = useLocale();
   const { timezone, effective: effectiveTz, setTimezone } = useTimezone();
   const [now, setNow] = useState(new Date());
+  const search = Route.useSearch();
+  const navigate = useNavigate({ from: Route.fullPath });
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
@@ -370,7 +377,21 @@ function SettingsPage() {
           </CardBody>
         </Card>
 
-        <ConfigEditorSection history={configHistory} />
+        <ConfigEditorSection
+          history={configHistory}
+          category={search.category}
+          field={search.field}
+          query={search.q}
+          onNavigate={(next) =>
+            navigate({
+              search: {
+                category: next.category,
+                field: next.field,
+                q: next.q,
+              },
+            })
+          }
+        />
 
         {/* History */}
         <ConfigHistorySection history={configHistory} />

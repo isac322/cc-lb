@@ -78,11 +78,744 @@ export const CONFIG_EDITOR_CATEGORIES = [
     roots: ['runtime', 'observability'],
   },
 ] as const satisfies readonly ConfigEditorCategoryMetadata[];
+/**
+ * Glob-style path matcher. `*` matches exactly one path segment (including
+ * array indexes and map keys), `**` as a whole segment matches zero or more
+ * segments, and `*` inside a segment matches any characters (`*_secs`).
+ */
+export type ConfigPathMatcher = string;
+
+export interface ConfigEditorDanger {
+  path: ConfigPathMatcher;
+  impact: string;
+}
+
+export interface ConfigEditorSectionMetadata {
+  id: string;
+  categoryId: string;
+  label: string;
+  description: string;
+  paths: readonly ConfigPathMatcher[];
+  advancedPaths: readonly ConfigPathMatcher[];
+  danger: readonly ConfigEditorDanger[];
+}
+
+export const CONFIG_EDITOR_UNASSIGNED_SECTION_ID = 'other' as const;
+export const CONFIG_EDITOR_UNASSIGNED_LABEL = 'Other settings' as const;
+
+export const CONFIG_EDITOR_SECTIONS = [
+  {
+    id: 'listener-endpoints',
+    categoryId: 'network',
+    label: 'Listener endpoints',
+    description: 'Bind addresses for the proxy, admin, and metrics listeners.',
+    paths: ['listener.*'],
+    advancedPaths: [],
+    danger: [
+      {
+        path: 'listener.admin_addr',
+        impact:
+          'Changing the admin bind address can cut off access to this console.',
+      },
+      {
+        path: 'listener.proxy_addr',
+        impact:
+          'Changing the proxy bind address moves every client-facing endpoint.',
+      },
+    ],
+  },
+  {
+    id: 'tls',
+    categoryId: 'network',
+    label: 'TLS',
+    description: 'Certificate, key, and SIGHUP reload behavior.',
+    paths: ['listener.tls.**'],
+    advancedPaths: [],
+    danger: [
+      {
+        path: 'listener.tls.*_path',
+        impact:
+          'A wrong certificate or key path prevents the proxy listener from starting.',
+      },
+    ],
+  },
+  {
+    id: 'request-body-limits',
+    categoryId: 'network',
+    label: 'Request body limits',
+    description: 'Caps on inbound request payload sizes.',
+    paths: ['body.*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'timeouts',
+    categoryId: 'network',
+    label: 'Timeouts',
+    description: 'Upstream request and shutdown drain deadlines.',
+    paths: ['timeouts.*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'primary-storage',
+    categoryId: 'data',
+    label: 'Primary storage',
+    description: 'Storage backend, connection URL, and database file.',
+    paths: ['storage.*'],
+    advancedPaths: [],
+    danger: [
+      {
+        path: 'storage.kind',
+        impact:
+          'Switching the storage backend does not migrate data; existing state stays in the old backend.',
+      },
+      {
+        path: 'storage.url',
+        impact:
+          'A wrong storage URL prevents the proxy from reaching its state store.',
+      },
+      {
+        path: 'storage.path',
+        impact:
+          'A wrong database path prevents the proxy from finding its state store.',
+      },
+    ],
+  },
+  {
+    id: 'database-pool',
+    categoryId: 'data',
+    label: 'Database pool',
+    description: 'PostgreSQL connection pool sizing and lifecycle.',
+    paths: ['storage.pool.max_connections', 'storage.pool.min_connections'],
+    advancedPaths: ['storage.pool.**'],
+    danger: [],
+  },
+  {
+    id: 'encryption',
+    categoryId: 'data',
+    label: 'Encryption',
+    description: 'Key used to encrypt stored secrets.',
+    paths: ['aead.*'],
+    advancedPaths: [],
+    danger: [
+      {
+        path: 'aead.key_env',
+        impact:
+          'A wrong key variable makes previously stored secrets undecryptable.',
+      },
+    ],
+  },
+  {
+    id: 'event-transport',
+    categoryId: 'data',
+    label: 'Event transport',
+    description: 'How storage change events reach running instances.',
+    paths: [
+      'event_bus.broadcast_capacity',
+      'event_bus.pg_notify_channel',
+      'event_bus.storage_tail_poll_interval_ms',
+    ],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'retention',
+    categoryId: 'data',
+    label: 'Retention',
+    description: 'How long request events and partial records are kept.',
+    paths: [
+      'request_event_retention_days',
+      'event_bus.partial_retention_ttl_secs',
+      'event_bus.partial_retention_max_entries',
+    ],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'recurring-jobs',
+    categoryId: 'scheduling',
+    label: 'Recurring jobs',
+    description: 'Per-job enablement and cadence.',
+    paths: ['scheduler.recurring_jobs.**'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'concurrency',
+    categoryId: 'scheduling',
+    label: 'Concurrency',
+    description: 'Scheduler parallelism limits.',
+    paths: ['scheduler.*_concurrency'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'dead-letter-retention',
+    categoryId: 'scheduling',
+    label: 'Dead-letter retention',
+    description: 'How long dead-lettered work is kept.',
+    paths: ['scheduler.dlq_retention_days'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'separate-scheduler-pool',
+    categoryId: 'scheduling',
+    label: 'Separate scheduler pool',
+    description: 'Dedicated PostgreSQL pool for scheduled work.',
+    paths: [
+      'scheduler.separate_pool.max_connections',
+      'scheduler.separate_pool.min_connections',
+    ],
+    advancedPaths: ['scheduler.separate_pool.**'],
+    danger: [],
+  },
+  {
+    id: 'affinity',
+    categoryId: 'routing',
+    label: 'Affinity',
+    description: 'How long upstream affinity is remembered.',
+    paths: ['upstream_affinity.*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'circuit-breaker',
+    categoryId: 'routing',
+    label: 'Circuit breaker',
+    description: 'Failure thresholds that stop traffic to an upstream.',
+    paths: ['circuit_breaker.*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'bulkhead',
+    categoryId: 'routing',
+    label: 'Bulkhead',
+    description: 'Per-upstream concurrency isolation.',
+    paths: ['bulkhead.*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'prompt-cache-shadow',
+    categoryId: 'routing',
+    label: 'Prompt cache shadow',
+    description: 'Observation cache used for cache-aware routing.',
+    paths: ['prompt_cache_shadow.*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'limit-reservations',
+    categoryId: 'routing',
+    label: 'Limit reservations',
+    description: 'Sweeper that refunds stale limit reservations.',
+    paths: ['limit_reservation_ttl.*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'admin-auth-providers',
+    categoryId: 'identity',
+    label: 'Admin auth providers',
+    description: 'How administrators authenticate to this console.',
+    paths: ['admin.**'],
+    advancedPaths: [],
+    danger: [
+      {
+        path: 'admin.**',
+        impact:
+          'A broken provider list can lock every administrator out of this console.',
+      },
+    ],
+  },
+  {
+    id: 'anthropic-oauth',
+    categoryId: 'identity',
+    label: 'Anthropic OAuth',
+    description: 'OAuth client used for Anthropic sign-in.',
+    paths: ['oauth.**'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'cluster-identity',
+    categoryId: 'identity',
+    label: 'Cluster identity',
+    description: 'Instance URL and shared token for cluster membership.',
+    paths: ['cluster.*'],
+    advancedPaths: [],
+    danger: [
+      {
+        path: 'cluster.token_env',
+        impact:
+          'A wrong token variable breaks authentication between cluster instances.',
+      },
+    ],
+  },
+  {
+    id: 'price-catalog',
+    categoryId: 'quota',
+    label: 'Price catalog',
+    description: 'Model price catalog source and cache location.',
+    paths: ['price_catalog.*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'subscription-quota-freshness',
+    categoryId: 'quota',
+    label: 'Subscription quota freshness',
+    description: 'How fresh subscription quota data must be for routing.',
+    paths: ['subscription_quota.routing_max_staleness_secs'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'writer-pipeline',
+    categoryId: 'quota',
+    label: 'Writer pipeline',
+    description: 'Batching for the subscription quota writer.',
+    paths: ['subscription_quota.writer_*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'observability',
+    categoryId: 'runtime',
+    label: 'Observability',
+    description: 'Tracing level, telemetry endpoint, and log redaction.',
+    paths: ['observability.*'],
+    advancedPaths: [],
+    danger: [
+      {
+        path: 'observability.log_redaction',
+        impact:
+          'Disabling log redaction can write credentials and tokens to logs.',
+      },
+      {
+        path: 'observability.user_prompt_redaction',
+        impact:
+          'Disabling prompt redaction stores user prompt text in plain form.',
+      },
+    ],
+  },
+  {
+    id: 'runtime-paths',
+    categoryId: 'runtime',
+    label: 'Runtime paths',
+    description: 'Filesystem locations the runtime uses.',
+    paths: ['runtime.*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'wasmtime-behavior',
+    categoryId: 'runtime',
+    label: 'Wasmtime behavior',
+    description: 'Plugin allocation strategy and origin policy.',
+    paths: [
+      'runtime.wasmtime.allocation_strategy',
+      'runtime.wasmtime.shape_origin_policy',
+      'runtime.wasmtime.cookie_redaction',
+    ],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'wasmtime-memory',
+    categoryId: 'runtime',
+    label: 'Wasmtime memory',
+    description: 'Memory limits and pooling for plugin instances.',
+    paths: ['runtime.wasmtime.memory_*', 'runtime.wasmtime.pool_total_*'],
+    advancedPaths: [],
+    danger: [],
+  },
+  {
+    id: 'wire-bounds',
+    categoryId: 'runtime',
+    label: 'Wire bounds',
+    description: 'Upper bounds on plugin wire I/O.',
+    paths: ['runtime.wasmtime.wire_bounds.*'],
+    advancedPaths: [],
+    danger: [],
+  },
+] as const satisfies readonly ConfigEditorSectionMetadata[];
+
+const CONFIG_EDITOR_SECTION_LIST: readonly ConfigEditorSectionMetadata[] =
+  CONFIG_EDITOR_SECTIONS;
+
+function matchSegmentGlob(pattern: string, segment: string): boolean {
+  if (pattern === '*') return true;
+  if (!pattern.includes('*')) return pattern === segment;
+  const source = pattern
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[^.]*');
+  return new RegExp(`^${source}$`).test(segment);
+}
+
+function matchPathSegments(
+  pattern: readonly string[],
+  segments: readonly ConfigPathSegment[],
+): boolean {
+  if (pattern.length === 0) return segments.length === 0;
+  const [head, ...rest] = pattern;
+  if (head === '**') {
+    for (let skip = 0; skip <= segments.length; skip += 1) {
+      if (matchPathSegments(rest, segments.slice(skip))) return true;
+    }
+    return false;
+  }
+  const [segment, ...remaining] = segments;
+  if (segment === undefined) return false;
+  if (!matchSegmentGlob(head ?? '', String(segment))) return false;
+  return matchPathSegments(rest, remaining);
+}
+
+export function matchConfigPath(
+  pattern: ConfigPathMatcher,
+  path: string | ConfigPath,
+): boolean {
+  return matchPathSegments(pattern.split('.'), parseConfigPath(path));
+}
+
+export type ConfigLeafPresentation =
+  | 'boolean'
+  | 'enum'
+  | 'duration'
+  | 'bytes'
+  | 'count'
+  | 'address'
+  | 'url'
+  | 'path'
+  | 'env'
+  | 'string'
+  | 'array'
+  | 'unknown';
+
+export type ConfigLeafUnit = 'ms' | 'secs' | 'days' | 'bytes';
+
+export interface ConfigLeafClassification {
+  categoryId: string;
+  sectionId: string | null;
+  advanced: boolean;
+  dangerous: boolean;
+  dangerImpact: string | null;
+  presentation: ConfigLeafPresentation;
+  unit: ConfigLeafUnit | null;
+}
+
+const PRESENTATION_RULES: readonly {
+  pattern: ConfigPathMatcher;
+  kinds: readonly ConfigEditorLeafKind[];
+  presentation: ConfigLeafPresentation;
+  unit: ConfigLeafUnit | null;
+}[] = [
+  {
+    pattern: '**.*_addr',
+    kinds: ['string'],
+    presentation: 'address',
+    unit: null,
+  },
+  {
+    pattern: '**.*_env',
+    kinds: ['string'],
+    presentation: 'env',
+    unit: null,
+  },
+  {
+    pattern: '**.*_url',
+    kinds: ['string'],
+    presentation: 'url',
+    unit: null,
+  },
+  { pattern: '**.url', kinds: ['string'], presentation: 'url', unit: null },
+  {
+    pattern: '**.*_uri',
+    kinds: ['string'],
+    presentation: 'url',
+    unit: null,
+  },
+  {
+    pattern: '**.*_endpoint',
+    kinds: ['string'],
+    presentation: 'url',
+    unit: null,
+  },
+  {
+    pattern: '**.*_path',
+    kinds: ['string'],
+    presentation: 'path',
+    unit: null,
+  },
+  { pattern: '**.path', kinds: ['string'], presentation: 'path', unit: null },
+  {
+    pattern: '**.*_dir',
+    kinds: ['string'],
+    presentation: 'path',
+    unit: null,
+  },
+  {
+    pattern: '**.*_bytes',
+    kinds: ['integer', 'number'],
+    presentation: 'bytes',
+    unit: 'bytes',
+  },
+  {
+    pattern: '**.*_secs',
+    kinds: ['integer', 'number'],
+    presentation: 'duration',
+    unit: 'secs',
+  },
+  {
+    pattern: '**.*_ms',
+    kinds: ['integer', 'number'],
+    presentation: 'duration',
+    unit: 'ms',
+  },
+  {
+    pattern: '**.*_days',
+    kinds: ['integer', 'number'],
+    presentation: 'duration',
+    unit: 'days',
+  },
+];
+
+const KIND_PRESENTATION: Record<ConfigEditorLeafKind, ConfigLeafPresentation> =
+  {
+    boolean: 'boolean',
+    enum: 'enum',
+    integer: 'count',
+    number: 'count',
+    string: 'string',
+    array: 'array',
+    unknown: 'unknown',
+  };
+
+export function classifyConfigLeaf(
+  path: string | ConfigPath,
+  kind?: ConfigEditorLeafKind,
+): ConfigLeafClassification {
+  const segments = parseConfigPath(path);
+  let sectionId: string | null = null;
+  let advanced = false;
+  for (const section of CONFIG_EDITOR_SECTION_LIST) {
+    if (
+      section.paths.some((pattern) =>
+        matchPathSegments(pattern.split('.'), segments),
+      )
+    ) {
+      sectionId = section.id;
+      break;
+    }
+    if (
+      section.advancedPaths.some((pattern) =>
+        matchPathSegments(pattern.split('.'), segments),
+      )
+    ) {
+      sectionId = section.id;
+      advanced = true;
+      break;
+    }
+  }
+  const section = sectionId
+    ? CONFIG_EDITOR_SECTION_LIST.find((entry) => entry.id === sectionId)
+    : undefined;
+  const root = segments[0];
+  const categoryId =
+    section?.categoryId ??
+    (typeof root === 'string'
+      ? (CONFIG_EDITOR_CATEGORIES.find((category) =>
+          (category.roots as readonly string[]).includes(root),
+        )?.id ??
+        CONFIG_EDITOR_CATEGORIES.at(-1)?.id ??
+        'runtime')
+      : (CONFIG_EDITOR_CATEGORIES.at(-1)?.id ?? 'runtime'));
+  let dangerImpact: string | null = null;
+  for (const entry of CONFIG_EDITOR_SECTION_LIST) {
+    for (const danger of entry.danger) {
+      if (matchPathSegments(danger.path.split('.'), segments)) {
+        dangerImpact = danger.impact;
+        break;
+      }
+    }
+    if (dangerImpact !== null) break;
+  }
+  let presentation: ConfigLeafPresentation | null = null;
+  let unit: ConfigLeafUnit | null = null;
+  for (const rule of PRESENTATION_RULES) {
+    if (kind !== undefined && !rule.kinds.includes(kind)) continue;
+    if (matchPathSegments(rule.pattern.split('.'), segments)) {
+      presentation = rule.presentation;
+      unit = rule.unit;
+      break;
+    }
+  }
+  if (presentation === null) {
+    presentation = KIND_PRESENTATION[kind ?? 'unknown'];
+  }
+  return {
+    categoryId,
+    sectionId,
+    advanced,
+    dangerous: dangerImpact !== null,
+    dangerImpact,
+    presentation,
+    unit,
+  };
+}
+
+const DURATION_UNITS: readonly { label: string; ms: number }[] = [
+  { label: 'day', ms: 86_400_000 },
+  { label: 'hour', ms: 3_600_000 },
+  { label: 'minute', ms: 60_000 },
+  { label: 'second', ms: 1_000 },
+];
+
+const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB'] as const;
+
+function humanizeDuration(totalMs: number): string | null {
+  if (!Number.isFinite(totalMs) || totalMs < 0) return null;
+  if (totalMs < 1_000) return `${Math.round(totalMs)} ms`;
+  const parts: string[] = [];
+  let remaining = Math.round(totalMs);
+  for (const { label, ms } of DURATION_UNITS) {
+    if (parts.length === 2) break;
+    const amount = Math.floor(remaining / ms);
+    if (amount === 0) continue;
+    remaining -= amount * ms;
+    parts.push(`${amount} ${label}${amount === 1 ? '' : 's'}`);
+  }
+  if (parts.length === 0) return `${Math.round(totalMs)} ms`;
+  return parts.join(' ');
+}
+
+function humanizeBytes(bytes: number): string | null {
+  if (!Number.isFinite(bytes) || bytes < 0) return null;
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const rounded =
+    unitIndex === 0 ? Math.round(value) : Math.round(value * 10) / 10;
+  return `${rounded} ${BYTE_UNITS[unitIndex]}`;
+}
+
+export function humanizeConfigValue(
+  value: unknown,
+  unit: ConfigLeafUnit | null,
+): string | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || unit === null) {
+    return null;
+  }
+  switch (unit) {
+    case 'bytes':
+      return humanizeBytes(value);
+    case 'ms':
+      return humanizeDuration(value);
+    case 'secs':
+      return humanizeDuration(value * 1_000);
+    case 'days':
+      return humanizeDuration(value * 86_400_000);
+  }
+}
+
+export function isConfigLeafActive(
+  leaf: Pick<ConfigSchemaLeaf, 'variantAlternatives'>,
+  source: unknown,
+): boolean {
+  return leaf.variantAlternatives.some((alternative) =>
+    alternative.every((constraint) => {
+      const current = getConfigValue(source, constraint.path);
+      return current === undefined || current === constraint.value;
+    }),
+  );
+}
+
+export function configLeafLabel(
+  leaf: Pick<ConfigSchemaLeaf, 'path' | 'schema'>,
+): string {
+  const title = leaf.schema.title;
+  if (typeof title === 'string' && title) return title;
+  const segment = leaf.path.at(-1);
+  const text = String(segment ?? 'value').replaceAll('_', ' ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+export interface ConfigSearchResult {
+  leaf: ConfigEditorLeaf;
+  path: string;
+  label: string;
+  categoryId: string;
+  sectionId: string | null;
+  breadcrumb: string;
+  matched: 'label' | 'path' | 'section' | 'description';
+}
+
+export function searchConfigLeaves(
+  model: ConfigEditorModel,
+  query: string,
+): ConfigSearchResult[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+  const results: { result: ConfigSearchResult; rank: number }[] = [];
+  for (const leaf of model.leaves) {
+    if (!leaf.active) continue;
+    const label = configLeafLabel(leaf);
+    const section = leaf.sectionId
+      ? CONFIG_EDITOR_SECTION_LIST.find((entry) => entry.id === leaf.sectionId)
+      : undefined;
+    const category = CONFIG_EDITOR_CATEGORIES.find(
+      (entry) => entry.id === leaf.categoryId,
+    );
+    const description =
+      typeof leaf.schema.description === 'string'
+        ? leaf.schema.description
+        : '';
+    const breadcrumb = section
+      ? `${category?.label ?? leaf.categoryId} › ${section.label}`
+      : `${category?.label ?? leaf.categoryId} › ${CONFIG_EDITOR_UNASSIGNED_LABEL}`;
+    const base = {
+      leaf,
+      path: leaf.pathString,
+      label,
+      categoryId: leaf.categoryId,
+      sectionId: leaf.sectionId,
+      breadcrumb,
+    };
+    if (label.toLowerCase().includes(needle)) {
+      results.push({ result: { ...base, matched: 'label' }, rank: 0 });
+    } else if (leaf.pathString.toLowerCase().includes(needle)) {
+      results.push({ result: { ...base, matched: 'path' }, rank: 1 });
+    } else if (section?.label.toLowerCase().includes(needle)) {
+      results.push({ result: { ...base, matched: 'section' }, rank: 2 });
+    } else if (description.toLowerCase().includes(needle)) {
+      results.push({ result: { ...base, matched: 'description' }, rank: 3 });
+    }
+  }
+  return results
+    .sort(
+      (left, right) =>
+        left.rank - right.rank ||
+        left.result.path.localeCompare(right.result.path),
+    )
+    .map((entry) => entry.result);
+}
 
 export interface ConfigSchemaVariant {
   schema: ConfigSchema;
   label: string;
   tag: { property: string; value: string } | null;
+}
+
+export interface ConfigVariantConstraint {
+  path: ConfigPath;
+  value: string;
 }
 
 export interface ConfigSchemaLeaf {
@@ -93,6 +826,13 @@ export interface ConfigSchemaLeaf {
   required: boolean;
   nullable: boolean;
   unknown: boolean;
+  /**
+   * Discriminator constraints of the tagged-union variants this leaf was
+   * reached through. Each entry is one alternative (AND of constraints); the
+   * leaf is active when every constraint of at least one alternative matches
+   * the current editor source. An empty list means the leaf is unconditional.
+   */
+  variantAlternatives: readonly (readonly ConfigVariantConstraint[])[];
 }
 
 export interface ConfigValueResolution {
@@ -111,6 +851,16 @@ export interface ConfigEditorLeaf
   modified: boolean;
   overridden: boolean;
   issues: ConfigValidationIssue[];
+  /** Whether the leaf exists in the union variants active in the draft. */
+  active: boolean;
+  categoryId: string;
+  /** Owning section, or null when the leaf falls back to Other settings. */
+  sectionId: string | null;
+  advanced: boolean;
+  dangerous: boolean;
+  dangerImpact: string | null;
+  presentation: ConfigLeafPresentation;
+  unit: ConfigLeafUnit | null;
 }
 
 export interface ConfigEditorCounts {
@@ -120,7 +870,25 @@ export interface ConfigEditorCounts {
   warnings: number;
 }
 
+export interface ConfigEditorSection extends ConfigEditorSectionMetadata {
+  /** Active primary leaves rendered directly in the section card. */
+  leaves: ConfigEditorLeaf[];
+  /** Active advanced leaves rendered under the section's disclosure. */
+  advancedLeaves: ConfigEditorLeaf[];
+  /** Every leaf matched by this section, including inactive variants. */
+  matchedLeaves: ConfigEditorLeaf[];
+  counts: ConfigEditorCounts;
+}
+
 export interface ConfigEditorCategory extends ConfigEditorCategoryMetadata {
+  leaves: ConfigEditorLeaf[];
+  sections: ConfigEditorSection[];
+  counts: ConfigEditorCounts;
+}
+
+export interface ConfigEditorUnassigned {
+  id: typeof CONFIG_EDITOR_UNASSIGNED_SECTION_ID;
+  label: typeof CONFIG_EDITOR_UNASSIGNED_LABEL;
   leaves: ConfigEditorLeaf[];
   counts: ConfigEditorCounts;
 }
@@ -129,6 +897,8 @@ export interface ConfigEditorModel {
   source: Record<string, unknown>;
   leaves: ConfigEditorLeaf[];
   categories: ConfigEditorCategory[];
+  sections: ConfigEditorSection[];
+  unassigned: ConfigEditorUnassigned;
   counts: ConfigEditorCounts;
 }
 
@@ -137,6 +907,7 @@ type SchemaWalkContext = {
   sources: readonly unknown[];
   leaves: Map<string, ConfigSchemaLeaf>;
   resolving: ReadonlySet<string>;
+  variantConstraints: readonly ConfigVariantConstraint[];
 };
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -477,6 +1248,27 @@ function addLeaf(
   const existing = context.leaves.get(pathString);
   if (existing) {
     const schemas = schemaList(existing.schema.oneOf);
+    const alternatives = [...existing.variantAlternatives];
+    if (
+      !alternatives.some(
+        (alternative) =>
+          alternative.length === context.variantConstraints.length &&
+          alternative.every((constraint, index) => {
+            const current = context.variantConstraints[index];
+            return (
+              current !== undefined &&
+              current.value === constraint.value &&
+              current.path.length === constraint.path.length &&
+              current.path.every(
+                (segment, segmentIndex) =>
+                  segment === constraint.path[segmentIndex],
+              )
+            );
+          }),
+      )
+    ) {
+      alternatives.push(context.variantConstraints);
+    }
     context.leaves.set(pathString, {
       ...existing,
       schema: {
@@ -486,6 +1278,7 @@ function addLeaf(
       nullable:
         existing.nullable || isNullableConfigSchema(context.root, schema),
       unknown: existing.unknown && unknown,
+      variantAlternatives: alternatives,
     });
     return;
   }
@@ -497,6 +1290,7 @@ function addLeaf(
     required,
     nullable: isNullableConfigSchema(context.root, schema),
     unknown,
+    variantAlternatives: [context.variantConstraints],
   });
 }
 
@@ -556,7 +1350,17 @@ function walkSchema(
       return;
     }
     for (const variant of declaredVariants) {
-      walkSchema(activeContext, variant, path, required, unknown);
+      const tag = variantTag(activeContext.root, variant);
+      const variantContext: SchemaWalkContext = tag
+        ? {
+            ...activeContext,
+            variantConstraints: [
+              ...activeContext.variantConstraints,
+              { path: [...path, tag.property], value: tag.value },
+            ],
+          }
+        : activeContext;
+      walkSchema(variantContext, variant, path, required, unknown);
     }
     return;
   }
@@ -664,7 +1468,13 @@ export function expandConfigSchema(
 ): ConfigSchemaLeaf[] {
   const leaves = new Map<string, ConfigSchemaLeaf>();
   walkSchema(
-    { root: schema, sources, leaves, resolving: new Set() },
+    {
+      root: schema,
+      sources,
+      leaves,
+      resolving: new Set(),
+      variantConstraints: [],
+    },
     schema,
     [],
     true,
@@ -837,23 +1647,50 @@ export function buildConfigEditorModel(
       effective: response.effective_config,
       overrides: response.overrides,
     });
+    const classification = classifyConfigLeaf(leaf.pathString, leaf.kind);
     return {
       ...leaf,
       ...resolution,
       modified: !valuesEqual(resolution.editorValue, resolution.fileValue),
       overridden: resolution.override !== null,
       issues: issuesForPath(issues, leaf.pathString),
+      active: isConfigLeafActive(leaf, source),
+      ...classification,
     };
   });
+  const sections = CONFIG_EDITOR_SECTION_LIST.map<ConfigEditorSection>(
+    (metadata) => {
+      const matchedLeaves = leaves.filter(
+        (leaf) => leaf.sectionId === metadata.id,
+      );
+      const activeLeaves = matchedLeaves.filter((leaf) => leaf.active);
+      return {
+        ...metadata,
+        leaves: activeLeaves.filter((leaf) => !leaf.advanced),
+        advancedLeaves: activeLeaves.filter((leaf) => leaf.advanced),
+        matchedLeaves,
+        counts: countConfigEditorLeaves(matchedLeaves),
+      };
+    },
+  );
+  const unassignedLeaves = leaves.filter((leaf) => leaf.sectionId === null);
+  const unassigned: ConfigEditorUnassigned = {
+    id: CONFIG_EDITOR_UNASSIGNED_SECTION_ID,
+    label: CONFIG_EDITOR_UNASSIGNED_LABEL,
+    leaves: unassignedLeaves,
+    counts: countConfigEditorLeaves(unassignedLeaves),
+  };
   const categories = CONFIG_EDITOR_CATEGORIES.map((metadata) => {
-    const roots: readonly string[] = metadata.roots;
-    const categoryLeaves = leaves.filter(
-      (leaf) =>
-        typeof leaf.path[0] === 'string' && roots.includes(leaf.path[0]),
+    const categorySections = sections.filter(
+      (section) => section.categoryId === metadata.id,
+    );
+    const categoryLeaves = categorySections.flatMap(
+      (section) => section.matchedLeaves,
     );
     return {
       ...metadata,
       leaves: categoryLeaves,
+      sections: categorySections,
       counts: countConfigEditorLeaves(categoryLeaves),
     };
   });
@@ -863,6 +1700,8 @@ export function buildConfigEditorModel(
     source,
     leaves,
     categories,
+    sections,
+    unassigned,
     counts: {
       ...counts,
       overrides: new Set(response.overrides.map((override) => override.path))

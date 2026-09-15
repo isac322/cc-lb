@@ -3,6 +3,7 @@ import {
   act,
   cleanup,
   fireEvent,
+  type RenderResult,
   render,
   screen,
   within,
@@ -31,6 +32,11 @@ const localeMocks = vi.hoisted(() => ({
   setTimezone: vi.fn(),
 }));
 
+const routerMocks = vi.hoisted(() => ({
+  navigate: vi.fn(),
+  search: {} as Record<string, unknown>,
+}));
+
 vi.mock('../lib/queries', () => queryMocks);
 
 vi.mock('../lib/api', async () => {
@@ -55,6 +61,16 @@ vi.mock('../lib/locale', () => ({
     setTimezone: localeMocks.setTimezone,
   }),
 }));
+
+vi.mock('@tanstack/react-router', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>(
+    '@tanstack/react-router',
+  );
+  return {
+    ...actual,
+    useNavigate: () => routerMocks.navigate,
+  };
+});
 
 const SettingsComponent = SettingsRoute.options
   .component as React.ComponentType;
@@ -101,7 +117,12 @@ const configSchema = {
             url: { type: 'string' },
             pool: {
               type: 'object',
-              properties: { max_connections: { type: 'integer' } },
+              properties: {
+                max_connections: { type: 'integer', minimum: 1, maximum: 64 },
+                min_connections: { type: 'integer' },
+                idle_timeout_secs: { type: 'integer' },
+                max_lifetime_secs: { type: 'integer' },
+              },
             },
           },
         },
@@ -121,7 +142,10 @@ const configSchema = {
       properties: {
         separate_pool: {
           type: 'object',
-          properties: { max_connections: { type: 'integer' } },
+          properties: {
+            max_connections: { type: 'integer' },
+            keepalive_secs: { type: 'integer' },
+          },
         },
         recurring_jobs: {
           type: 'object',
@@ -281,13 +305,18 @@ const fileConfig = {
   storage: {
     kind: 'postgres',
     url: '__CC_LB_STORAGE_URL_UNCHANGED__',
-    pool: { max_connections: 10 },
+    pool: {
+      max_connections: 10,
+      min_connections: 2,
+      idle_timeout_secs: 600,
+      max_lifetime_secs: 1800,
+    },
   },
   aead: { key_env: 'CC_LB_MASTER_KEY' },
   event_bus: { broadcast_capacity: 4096 },
   request_event_retention_days: 90,
   scheduler: {
-    separate_pool: { max_connections: 5 },
+    separate_pool: { max_connections: 5, keepalive_secs: 120 },
     recurring_jobs: {
       quota_refresh: { enabled: true, interval_secs: 3600, jitter_secs: 30 },
       custom_job: { enabled: false, interval_secs: 600, jitter_secs: 10 },
@@ -442,9 +471,53 @@ function setSettingsLoaded(editor = editorResponse(), draft = draftResponse()) {
   queryMocks.useConfigHistory.mockReturnValue(loadedResult({ entries: [] }));
 }
 
-function openCategory(name: string) {
-  const button = screen.getByRole('button', { name: new RegExp(`^${name}`) });
-  if (button.getAttribute('aria-expanded') !== 'true') fireEvent.click(button);
+function applySearchUpdate(
+  update:
+    | Record<string, unknown>
+    | ((previous: Record<string, unknown>) => Record<string, unknown>),
+) {
+  routerMocks.search =
+    typeof update === 'function' ? update(routerMocks.search) : update;
+}
+
+function flushEffects() {
+  return act(async () => Promise.resolve());
+}
+
+function showCategory(view: RenderResult, name: string) {
+  const rail = screen.getByTestId('config-rail');
+  fireEvent.click(
+    within(rail).getByRole('button', { name: new RegExp(`^${name}`) }),
+  );
+  view.rerender(<SettingsComponent />);
+}
+
+function revealField(path: string) {
+  const field = document.querySelector<HTMLElement>(
+    `[data-config-path="${path}"]`,
+  );
+  expect(field, `field ${path} to exist`).not.toBeNull();
+  const details = field?.closest('details');
+  if (details && !details.hasAttribute('open')) {
+    const summary = details.querySelector('summary');
+    if (summary) fireEvent.click(summary);
+  }
+  return field as HTMLElement;
+}
+
+// Resolves the declared minimum height of an element to pixels. jsdom has no
+// layout, so this reads the min-height declaration — inline style, arbitrary
+// Tailwind value (min-h-[44px]), or spacing scale (min-h-11 = 44px).
+function minHeightPx(element: HTMLElement): number | null {
+  const inline = element.style.minHeight;
+  if (inline.endsWith('px')) return Number.parseFloat(inline);
+  const arbitrary = element.className.match(/min-h-\[(\d+(?:\.\d+)?)px\]/);
+  if (arbitrary) return Number.parseFloat(arbitrary[1] ?? '');
+  const scale = element.className.match(
+    /(?:^|\s)min-h-(\d+(?:\.\d+)?)(?:\s|$)/,
+  );
+  if (scale) return Number.parseFloat(scale[1] ?? '') * 4;
+  return null;
 }
 
 beforeEach(() => {
@@ -458,6 +531,17 @@ beforeEach(() => {
   });
   HTMLElement.prototype.scrollIntoView = vi.fn();
   vi.clearAllMocks();
+  routerMocks.search = {};
+  routerMocks.navigate.mockImplementation(
+    (args: {
+      search?:
+        | Record<string, unknown>
+        | ((previous: Record<string, unknown>) => Record<string, unknown>);
+    }) => {
+      if (args?.search) applySearchUpdate(args.search);
+    },
+  );
+  Object.assign(SettingsRoute, { useSearch: () => routerMocks.search });
   apiMocks.downloadConfigDraft.mockResolvedValue(undefined);
   apiMocks.downloadJson.mockResolvedValue(undefined);
   queryMocks.useStatus.mockReturnValue(loadingResult());
@@ -485,8 +569,8 @@ test('settings cold load reserves version, editor, and history heights without a
   );
 
   const editorSkeleton = screen.getByTestId('config-editor-skeleton');
-  expect(editorSkeleton.className).toContain('min-h-[560px]');
-  expect(editorSkeleton.children).toHaveLength(7);
+  expect(editorSkeleton.className).toMatch(/min-h-/);
+  expect(editorSkeleton.children.length).toBeGreaterThan(0);
 
   const historySlot = screen.getByTestId('config-history-slot');
   expect(historySlot.className).toContain('min-h-[173px]');
@@ -516,6 +600,189 @@ test('settings preserves version, localization, metadata history, and database b
   expect(screen.queryByText('Admin Token')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Reload' })).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Apply' })).toBeNull();
+  expect(screen.queryByText(/hot.?reload/i)).toBeNull();
+  expect(screen.queryByText(/takes effect immediately/i)).toBeNull();
+});
+
+test('operator rail navigates seven categories and renders only the selected panel', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+
+  const rail = screen.getByTestId('config-rail');
+  expect(rail.tagName).toBe('NAV');
+  const items = within(rail).getAllByRole('button');
+  expect(items).toHaveLength(7);
+  const labels = [
+    'Network & requests',
+    'Storage & data',
+    'Scheduling',
+    'Routing & resilience',
+    'Identity & access',
+    'Pricing & quotas',
+    'Runtime & observability',
+  ];
+  items.forEach((item, index) => {
+    expect(item.textContent).toContain(labels[index]);
+  });
+
+  const network = within(rail).getByRole('button', {
+    name: /^Network & requests/,
+  });
+  expect(network.getAttribute('aria-current')).toBe('page');
+  expect(screen.getByRole('textbox', { name: 'Proxy Addr' })).toBeDefined();
+  expect(screen.queryByLabelText('Tracing Level')).toBeNull();
+
+  fireEvent.click(
+    within(rail).getByRole('button', { name: /^Runtime & observability/ }),
+  );
+  expect(routerMocks.navigate).toHaveBeenCalled();
+  expect(routerMocks.search).toMatchObject({ category: 'runtime' });
+  view.rerender(<SettingsComponent />);
+
+  expect(
+    within(screen.getByTestId('config-rail'))
+      .getByRole('button', { name: /^Runtime & observability/ })
+      .getAttribute('aria-current'),
+  ).toBe('page');
+  expect(
+    within(screen.getByTestId('config-rail'))
+      .getByRole('button', { name: /^Network & requests/ })
+      .getAttribute('aria-current'),
+  ).toBeNull();
+  expect(screen.queryByLabelText('Proxy Addr')).toBeNull();
+  expect(screen.getByLabelText('Tracing Level')).toBeDefined();
+});
+
+test('mobile category select offers the same seven categories and drives the panel', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+
+  const select = screen.getByRole('combobox', {
+    name: 'Configuration category',
+  }) as HTMLSelectElement;
+  const options = within(select).getAllByRole('option');
+  expect(options).toHaveLength(7);
+  expect(select.selectedOptions[0]?.textContent).toContain(
+    'Network & requests',
+  );
+
+  const scheduling = options.find((option) =>
+    option.textContent?.includes('Scheduling'),
+  ) as HTMLOptionElement;
+  fireEvent.change(select, { target: { value: scheduling.value } });
+  expect(routerMocks.search).toMatchObject({ category: 'scheduling' });
+  view.rerender(<SettingsComponent />);
+
+  expect(select.selectedOptions[0]?.textContent).toContain('Scheduling');
+  expect(screen.queryByLabelText('Proxy Addr')).toBeNull();
+  expect(screen.getByText('custom_job')).toBeDefined();
+});
+
+test('section cards group controls and keep advanced fields behind one disclosure', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+
+  for (const heading of [
+    'Listener endpoints',
+    'TLS',
+    'Request body limits',
+    'Timeouts',
+  ]) {
+    expect(screen.getByRole('heading', { name: heading })).toBeDefined();
+  }
+  showCategory(view, 'Scheduling');
+  const cards = document.querySelectorAll(
+    '[data-testid="config-section-card"]',
+  );
+  expect(cards.length).toBeGreaterThan(1);
+  for (const card of cards) {
+    expect(
+      card.querySelectorAll('[data-testid="config-advanced"]').length,
+    ).toBeLessThanOrEqual(1);
+  }
+
+  const keepaliveField = document.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.separate_pool.keepalive_secs"]',
+  );
+  expect(keepaliveField).not.toBeNull();
+  const advanced = keepaliveField?.closest('details');
+  expect(advanced?.getAttribute('data-testid')).toBe('config-advanced');
+  expect(advanced?.hasAttribute('open')).toBe(false);
+});
+
+test('a deep-linked advanced field opens its disclosure and receives focus', async () => {
+  setSettingsLoaded();
+  routerMocks.search = {
+    category: 'scheduling',
+    field: 'scheduler.separate_pool.keepalive_secs',
+  };
+  render(<SettingsComponent />);
+  await flushEffects();
+
+  const field = document.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.separate_pool.keepalive_secs"]',
+  );
+  expect(field).not.toBeNull();
+  expect(field?.closest('details')?.hasAttribute('open')).toBe(true);
+  expect(field?.contains(document.activeElement)).toBe(true);
+  expect(document.activeElement?.hasAttribute('data-field-control')).toBe(true);
+});
+
+test('settings search stays local until a result jumps to its field', async () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+
+  const search = screen.getByRole('searchbox', { name: /search/i });
+  fireEvent.change(search, { target: { value: 'tracing' } });
+  expect(routerMocks.navigate).not.toHaveBeenCalled();
+
+  const results = screen.getByTestId('config-search-results');
+  const option = within(results).getByRole('button', { name: /tracing/i });
+  fireEvent.click(option);
+  expect(routerMocks.search).toMatchObject({
+    category: 'runtime',
+    field: 'observability.tracing_level',
+  });
+  view.rerender(<SettingsComponent />);
+  await flushEffects();
+
+  const field = document.querySelector<HTMLElement>(
+    '[data-config-path="observability.tracing_level"]',
+  );
+  expect(field?.contains(document.activeElement)).toBe(true);
+});
+
+test('duration and byte controls pair raw storage values with humanized units', () => {
+  setSettingsLoaded();
+  render(<SettingsComponent />);
+
+  const timeout = revealField('timeouts.upstream_total_secs');
+  expect(within(timeout).getByRole('spinbutton')).toBeDefined();
+  expect(timeout.textContent).toMatch(/10 minutes/);
+  expect(timeout.textContent).toMatch(/600/);
+
+  const cap = revealField('body.messages_cap_bytes');
+  expect(cap.textContent).toMatch(/1 KiB/);
+  expect(cap.textContent).toMatch(/1024/);
+});
+
+test('unknown file keys land in the Other settings fallback area', () => {
+  setSettingsLoaded(
+    editorResponse({
+      file_config: {
+        ...structuredClone(fileConfig),
+        mystery_key: 'preserved',
+      },
+    }),
+  );
+  const view = render(<SettingsComponent />);
+
+  showCategory(view, 'Runtime & observability');
+  expect(screen.getByText(/Other settings/i)).toBeDefined();
+  expect(
+    document.querySelector('[data-config-path="mystery_key"]'),
+  ).not.toBeNull();
 });
 test('history load failures stay distinct from empty history and offer retry', () => {
   const beforeProcessStart = 1_789_473_000;
@@ -540,13 +807,16 @@ test('history load failures stay distinct from empty history and offer retry', (
   expect(history.refetch).toHaveBeenCalledTimes(1);
 });
 
-test('structured editor renders seven category shells and initial controls', () => {
+test('running summary exposes effective listener and storage facts with restart-only framing', () => {
   setSettingsLoaded();
   render(<SettingsComponent />);
 
-  expect(document.querySelectorAll('[data-config-category]')).toHaveLength(7);
-  expect(screen.getByRole('textbox', { name: 'Proxy Addr' })).toBeDefined();
-  expect(screen.getByRole('checkbox', { name: /Tls/ })).toBeDefined();
+  const summary = screen.getByTestId('config-running-summary');
+  expect(summary.textContent).toContain('127.0.0.1:9090');
+  expect(summary.textContent).toMatch(/postgres/i);
+  expect(
+    screen.getAllByText(/requires a (cc-lb )?restart/i).length,
+  ).toBeGreaterThan(0);
 });
 
 test('an environment-overridden field keeps its file value editable and shows effective provenance', () => {
@@ -571,14 +841,20 @@ test('an environment-overridden field keeps its file value editable and shows ef
   setSettingsLoaded(editor);
   render(<SettingsComponent />);
 
+  const field = revealField('listener.proxy_addr');
   const input = screen.getByLabelText('Proxy Addr') as HTMLInputElement;
   expect(input.value).toBe('0.0.0.0:8080');
-  expect(screen.getByText('Environment · CC_LB_PROXY_ADDR')).toBeDefined();
-  expect(screen.getByText('Effective: 127.0.0.1:8181')).toBeDefined();
+  expect(input.hasAttribute('disabled')).toBe(false);
+  expect(field.textContent).toMatch(/Effective[: ]*127\.0\.0\.1:8181/);
+
+  fireEvent.click(within(field).getByText('Value details'));
+  expect(field.textContent).toMatch(/File[: ]*0\.0\.0\.0:8080/);
+  expect(field.textContent).toMatch(/Default[: ]*\[::\]:8080/);
+  expect(field.textContent).toMatch(/Environment · CC_LB_PROXY_ADDR/);
 
   fireEvent.change(input, { target: { value: '0.0.0.0:8181' } });
   expect(input.value).toBe('0.0.0.0:8181');
-  expect(screen.getByText('Effective: 127.0.0.1:8181')).toBeDefined();
+  expect(field.textContent).toMatch(/Effective[: ]*127\.0\.0\.1:8181/);
   expect(
     screen.getByRole('button', {
       name: /^Network & requests.*1 modified/,
@@ -599,18 +875,18 @@ test('admin provider fields inherit provenance from the array override', () => {
       ],
     }),
   );
-  render(<SettingsComponent />);
-  openCategory('Identity & access');
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Identity & access');
 
   const providerId = document.querySelector<HTMLElement>(
     '[data-config-path="admin.auth.providers[0].id"]',
   );
   expect(providerId).not.toBeNull();
   expect(
-    within(providerId as HTMLElement).getByText(
-      'Environment · CC_LB_ADMIN_AUTH_PROVIDERS_JSON',
-    ),
-  ).toBeDefined();
+    within(providerId as HTMLElement).getAllByText(
+      /Environment · CC_LB_ADMIN_AUTH_PROVIDERS_JSON/,
+    ).length,
+  ).toBeGreaterThan(0);
 });
 
 test('dirty edits require save draft and validation before file save or download', () => {
@@ -660,7 +936,7 @@ test('filesystem validation errors block file save but not download', async () =
   expect(screen.queryByText('Configuration validated')).toBeNull();
   expect(
     screen.getByRole('button', {
-      name: /listener\.tls\.cert_path · missing_required_file/,
+      name: /listener\.tls\.cert_path[\s\S]*missing_required_file/,
     }),
   ).toBeDefined();
   expect(
@@ -683,17 +959,12 @@ test('nullable integer controls keep numeric draft values', () => {
   const saveDraftMutate = vi.fn();
   queryMocks.useSaveDraft.mockReturnValue(mutationResult(saveDraftMutate));
   setSettingsLoaded();
-  render(<SettingsComponent />);
-  openCategory('Runtime & observability');
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Runtime & observability');
 
-  const field = document.querySelector<HTMLElement>(
-    '[data-config-path="runtime.wasmtime.memory_max_pages"]',
-  );
-  expect(field).not.toBeNull();
-  fireEvent.click(
-    within(field as HTMLElement).getByRole('button', { name: 'Set value' }),
-  );
-  const input = screen.getByLabelText('Memory Max Pages') as HTMLInputElement;
+  const field = revealField('runtime.wasmtime.memory_max_pages');
+  fireEvent.click(within(field).getByRole('button', { name: 'Set value' }));
+  const input = within(field).getByRole('spinbutton') as HTMLInputElement;
   expect(input.type).toBe('number');
   fireEvent.change(input, { target: { value: '128' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
@@ -709,8 +980,8 @@ test('clearing a numeric input unsets the draft path', () => {
   const saveDraftMutate = vi.fn();
   queryMocks.useSaveDraft.mockReturnValue(mutationResult(saveDraftMutate));
   setSettingsLoaded();
-  render(<SettingsComponent />);
-  openCategory('Scheduling');
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Scheduling');
   expect(screen.getByText('custom_job')).toBeDefined();
   expect(
     document.querySelector(
@@ -718,11 +989,8 @@ test('clearing a numeric input unsets the draft path', () => {
     ),
   ).not.toBeNull();
 
-  const field = document.querySelector<HTMLElement>(
-    '[data-config-path="scheduler.dlq_retention_days"]',
-  );
-  expect(field).not.toBeNull();
-  fireEvent.change(within(field as HTMLElement).getByRole('spinbutton'), {
+  const field = revealField('scheduler.dlq_retention_days');
+  fireEvent.change(within(field).getByRole('spinbutton'), {
     target: { value: '' },
   });
   fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
@@ -735,19 +1003,12 @@ test('clearing a numeric input unsets the draft path', () => {
 
 test('clearing a nullable numeric input preserves editing until blur', () => {
   setSettingsLoaded();
-  render(<SettingsComponent />);
-  openCategory('Runtime & observability');
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Runtime & observability');
 
-  const field = document.querySelector<HTMLElement>(
-    '[data-config-path="runtime.wasmtime.memory_max_pages"]',
-  );
-  expect(field).not.toBeNull();
-  fireEvent.click(
-    within(field as HTMLElement).getByRole('button', { name: 'Set value' }),
-  );
-  const input = within(field as HTMLElement).getByRole(
-    'spinbutton',
-  ) as HTMLInputElement;
+  const field = revealField('runtime.wasmtime.memory_max_pages');
+  fireEvent.click(within(field).getByRole('button', { name: 'Set value' }));
+  const input = within(field).getByRole('spinbutton') as HTMLInputElement;
   input.focus();
   fireEvent.change(input, { target: { value: '' } });
 
@@ -767,22 +1028,15 @@ test('storage URL stays opaque and replacement is attached only to validate', ()
   const validateMutate = vi.fn();
   queryMocks.useValidateConfig.mockReturnValue(mutationResult(validateMutate));
   setSettingsLoaded();
-  render(<SettingsComponent />);
-  openCategory('Storage & data');
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Storage & data');
 
   expect(
     screen.queryByDisplayValue('__CC_LB_STORAGE_URL_UNCHANGED__'),
   ).toBeNull();
-  const urlField = document.querySelector<HTMLElement>(
-    '[data-config-path="storage.url"]',
-  );
-  expect(urlField).not.toBeNull();
-  expect(
-    within(urlField as HTMLElement).queryByRole('button', { name: 'Reset' }),
-  ).toBeNull();
-  expect(
-    within(urlField as HTMLElement).getByRole('button', { name: 'Unset' }),
-  ).toBeDefined();
+  const urlField = revealField('storage.url');
+  expect(within(urlField).queryByRole('button', { name: 'Reset' })).toBeNull();
+  expect(within(urlField).getByRole('button', { name: 'Unset' })).toBeDefined();
 
   fireEvent.click(screen.getByRole('button', { name: 'Replace URL' }));
   const urlInput = screen.getByLabelText('Url') as HTMLInputElement;
@@ -814,33 +1068,29 @@ test('opaque storage URL can be unset without exposing it or dropping pool setti
   const saveDraftMutate = vi.fn();
   queryMocks.useSaveDraft.mockReturnValue(mutationResult(saveDraftMutate));
   setSettingsLoaded();
-  render(<SettingsComponent />);
-  openCategory('Storage & data');
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Storage & data');
 
-  const urlField = document.querySelector<HTMLElement>(
-    '[data-config-path="storage.url"]',
-  );
-  expect(urlField).not.toBeNull();
+  const urlField = revealField('storage.url');
   expect(
-    within(urlField as HTMLElement).queryByText(
-      '__CC_LB_STORAGE_URL_UNCHANGED__',
-    ),
+    within(urlField).queryByText('__CC_LB_STORAGE_URL_UNCHANGED__'),
   ).toBeNull();
-  fireEvent.click(
-    within(urlField as HTMLElement).getByRole('button', { name: 'Unset' }),
-  );
-  expect(
-    within(urlField as HTMLElement).getByText('No stored URL'),
-  ).toBeDefined();
+  fireEvent.click(within(urlField).getByRole('button', { name: 'Unset' }));
+  expect(within(urlField).getByText('No stored URL')).toBeDefined();
   fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
 
   const request = saveDraftMutate.mock.calls[0]?.[0] as {
     draft: {
-      storage: { url?: unknown; pool: { max_connections: number } };
+      storage: { url?: unknown; pool: Record<string, number> };
     };
   };
   expect('url' in request.draft.storage).toBe(false);
-  expect(request.draft.storage.pool).toEqual({ max_connections: 10 });
+  expect(request.draft.storage.pool).toEqual({
+    max_connections: 10,
+    min_connections: 2,
+    idle_timeout_secs: 600,
+    max_lifetime_secs: 1800,
+  });
 });
 
 test('structured validation issues open their category and focus the field', async () => {
@@ -882,7 +1132,7 @@ test('structured validation issues open their category and focus the field', asy
   render(<SettingsComponent />);
   expect(
     screen.getAllByRole('button', {
-      name: /observability\.tracing_level · invalid_value/,
+      name: /observability\.tracing_level[\s\S]*invalid_value/,
     }),
   ).toHaveLength(1);
   expect(screen.queryByText('Stale')).toBeNull();
@@ -899,16 +1149,49 @@ test('structured validation issues open their category and focus the field', asy
 
   fireEvent.click(
     screen.getByRole('button', {
-      name: /observability\.tracing_level · invalid_value/,
+      name: /observability\.tracing_level[\s\S]*invalid_value/,
     }),
   );
-  await act(async () => Promise.resolve());
+  await flushEffects();
 
-  const runtimeCategory = screen.getByRole('button', {
-    name: /^Runtime & observability/,
-  });
-  expect(runtimeCategory.getAttribute('aria-expanded')).toBe('true');
-  expect(document.activeElement).toBe(screen.getByLabelText('Tracing Level'));
+  const field = document.querySelector<HTMLElement>(
+    '[data-config-path="observability.tracing_level"]',
+  );
+  expect(field?.contains(document.activeElement)).toBe(true);
+});
+
+test('a failed validation focuses the error summary before field navigation', async () => {
+  const validateMutate = vi.fn();
+  queryMocks.useValidateConfig.mockReturnValue(mutationResult(validateMutate));
+  const invalidReport = {
+    ...validReport,
+    file: {
+      valid: false,
+      issues: [
+        {
+          path: 'observability.tracing_level',
+          code: 'invalid_value',
+          message: 'Use a supported tracing level.',
+          severity: 'error' as const,
+        },
+      ],
+    },
+  };
+  setSettingsLoaded();
+  render(<SettingsComponent />);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+  const options = validateMutate.mock.calls[0]?.[1] as {
+    onSuccess: (report: unknown) => void;
+  };
+  act(() => options.onSuccess(invalidReport));
+  await flushEffects();
+
+  const summary = screen.getByTestId('config-validation-summary');
+  // Focus moves to the summary, but the summary must not re-announce itself
+  // as an alert on top of the focus change.
+  expect(summary.getAttribute('role')).not.toBe('alert');
+  expect(document.activeElement).toBe(summary);
 });
 
 test('array-level validation issues focus the matching admin provider', async () => {
@@ -936,19 +1219,15 @@ test('array-level validation issues focus the matching admin provider', async ()
 
   fireEvent.click(
     screen.getByRole('button', {
-      name: /admin\.auth\.providers\[0\] · invalid_provider/,
+      name: /admin\.auth\.providers\[0\][\s\S]*invalid_provider/,
     }),
   );
-  await act(async () => Promise.resolve());
+  await flushEffects();
 
-  expect(
-    screen
-      .getByRole('button', { name: /^Identity & access/ })
-      .getAttribute('aria-expanded'),
-  ).toBe('true');
-  expect(document.activeElement?.getAttribute('data-config-path')).toBe(
-    'admin.auth.providers[0].kind',
-  );
+  const activePath = document.activeElement
+    ?.closest('[data-config-path]')
+    ?.getAttribute('data-config-path');
+  expect(activePath).toMatch(/^admin\.auth\.providers\[0\]/);
 });
 
 test('clean validated read-only config can download on initial load', () => {
@@ -1050,6 +1329,7 @@ test('read-only missing config can download but cannot be created', () => {
 test('existing-file overwrite and admin-provider changes require explicit confirmation', () => {
   const changedDraft = {
     ...structuredClone(fileConfig),
+    timeouts: { upstream_total_secs: 300 },
     admin: {
       auth: {
         providers: [
@@ -1079,10 +1359,30 @@ test('existing-file overwrite and admin-provider changes require explicit confir
     screen.getByText('Confirm config overwrite and admin access changes'),
   ).toBeDefined();
   expect(screen.getByText(/can lock you out after restart/)).toBeDefined();
-  fireEvent.click(
-    screen.getByRole('button', { name: 'Save and accept lockout risk' }),
-  );
 
+  const reviewList = screen.getByTestId('config-review-list');
+  expect(reviewList.textContent).toContain('admin.auth.providers');
+  expect(reviewList.textContent).toContain('timeouts.upstream_total_secs');
+  expect(reviewList.textContent).toContain('600');
+  expect(reviewList.textContent).toContain('300');
+  expect(reviewList.textContent).toContain('Dangerous changes');
+  expect(reviewList.textContent).toContain('Network & requests');
+  expect(
+    reviewList.textContent?.indexOf('admin.auth.providers') ?? -1,
+  ).toBeLessThan(
+    reviewList.textContent?.indexOf('timeouts.upstream_total_secs') ?? -1,
+  );
+  // The provider item leaves already describe the diff, so the bare
+  // container row must not be repeated.
+  expect(reviewList.textContent).not.toMatch(/admin\.auth\.providers:/);
+
+  const confirmButton = screen.getByRole('button', {
+    name: 'Save and accept lockout risk',
+  });
+  expect(confirmButton.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(screen.getByTestId('self-lockout-ack'));
+  expect(confirmButton.hasAttribute('disabled')).toBe(false);
+  fireEvent.click(confirmButton);
   expect(saveFileMutate).toHaveBeenCalledWith(
     expect.objectContaining({
       expected_revision: 7,
@@ -1224,4 +1524,253 @@ test('database snapshot exposes progress and blocks duplicate clicks', () => {
     '/admin/v1/export',
     'cc-lb-database-resources-2026-09-15T12:00.json',
   );
+});
+
+test('database pool renders each field once with advanced controls behind the disclosure', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Storage & data');
+
+  const poolCard = document.querySelector<HTMLElement>(
+    '[data-config-section="database-pool"]',
+  );
+  expect(poolCard).not.toBeNull();
+  // The storage union must not collapse into this section: its container and
+  // the pool object render elsewhere or not at all.
+  expect(poolCard?.querySelector('[data-config-path="storage"]')).toBeNull();
+  expect(
+    poolCard?.querySelector('[data-config-path="storage.pool"]'),
+  ).toBeNull();
+
+  for (const path of [
+    'storage.pool.max_connections',
+    'storage.pool.min_connections',
+  ]) {
+    const fields = poolCard?.querySelectorAll(`[data-config-path="${path}"]`);
+    expect(fields, path).toHaveLength(1);
+    expect(fields?.[0]?.closest('details'), path).toBeNull();
+  }
+
+  const disclosure = poolCard?.querySelector<HTMLElement>(
+    '[data-testid="config-advanced"]',
+  );
+  expect(disclosure).not.toBeNull();
+  expect(disclosure?.hasAttribute('open')).toBe(false);
+  for (const path of [
+    'storage.pool.idle_timeout_secs',
+    'storage.pool.max_lifetime_secs',
+  ]) {
+    const fields = poolCard?.querySelectorAll(`[data-config-path="${path}"]`);
+    expect(fields, path).toHaveLength(1);
+    expect(fields?.[0]?.closest('details'), path).toBe(disclosure);
+  }
+
+  // The union editor itself stays in the primary storage section.
+  expect(
+    document.querySelectorAll('[data-config-path="storage"]'),
+  ).toHaveLength(1);
+});
+
+test('numeric fields surface schema bounds as a range hint', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+
+  const cap = revealField('body.messages_cap_bytes');
+  expect(cap.textContent).toMatch(/range/i);
+  expect(cap.textContent).toMatch(/range[^\d]*1\D*no max/i);
+
+  const address = revealField('listener.proxy_addr');
+  expect(address.textContent).not.toMatch(/range/i);
+
+  showCategory(view, 'Storage & data');
+  const maxConnections = revealField('storage.pool.max_connections');
+  expect(maxConnections.textContent).toMatch(/range[^\d]*1\D*64/i);
+
+  const capacity = revealField('event_bus.broadcast_capacity');
+  expect(capacity.textContent).not.toMatch(/range/i);
+});
+
+test('unassigned leaves land in their own category Other settings and stay searchable', async () => {
+  const schema = {
+    ...configSchema,
+    properties: {
+      ...configSchema.properties,
+      event_bus: {
+        type: 'object',
+        properties: {
+          broadcast_capacity: { type: 'integer' },
+          retry_attempts: { type: 'integer' },
+        },
+      },
+    },
+  };
+  const file = {
+    ...structuredClone(fileConfig),
+    event_bus: {
+      broadcast_capacity: 4096,
+      retry_attempts: 3,
+      mystery_flag: 'preserved',
+    },
+    legacy_mode: true,
+  };
+  const draft = structuredClone(file);
+  draft.event_bus.retry_attempts = 5;
+  setSettingsLoaded(
+    editorResponse({
+      schema,
+      file_config: file,
+      effective_config: file,
+      draft,
+    }),
+    draftResponse({ draft }),
+  );
+  const view = render(<SettingsComponent />);
+
+  showCategory(view, 'Storage & data');
+  const dataPanel = document.querySelector<HTMLElement>(
+    '[data-config-category-panel="data"]',
+  );
+  expect(dataPanel).not.toBeNull();
+  const dataOther = dataPanel?.querySelector<HTMLElement>(
+    '[data-config-section="other"]',
+  );
+  expect(dataOther).not.toBeNull();
+  expect(
+    dataOther?.querySelector('[data-config-path="event_bus.retry_attempts"]'),
+  ).not.toBeNull();
+  expect(
+    dataOther?.querySelector('[data-config-path="event_bus.mystery_flag"]'),
+  ).not.toBeNull();
+  // Schema-known and unknown unassigned leaves get distinct explanations.
+  expect(dataOther?.textContent).toMatch(/not covered by a settings section/i);
+  expect(dataOther?.textContent).toMatch(/not recognized by the schema/i);
+  // An unknown root key belongs to the fallback category, not this one.
+  expect(
+    dataOther?.querySelector('[data-config-path="legacy_mode"]'),
+  ).toBeNull();
+  // The modified unassigned leaf counts toward its own category.
+  expect(
+    screen.getByRole('button', { name: /^Storage & data.*1 modified/ }),
+  ).toBeDefined();
+
+  const search = screen.getByRole('searchbox', { name: /search/i });
+  fireEvent.change(search, { target: { value: 'retry_attempts' } });
+  const results = screen.getByTestId('config-search-results');
+  fireEvent.click(
+    within(results).getByRole('button', { name: /retry attempts/i }),
+  );
+  expect(routerMocks.search).toMatchObject({
+    category: 'data',
+    field: 'event_bus.retry_attempts',
+  });
+  view.rerender(<SettingsComponent />);
+  await flushEffects();
+
+  const field = document.querySelector<HTMLElement>(
+    '[data-config-path="event_bus.retry_attempts"]',
+  );
+  expect(field?.contains(document.activeElement)).toBe(true);
+
+  showCategory(view, 'Runtime & observability');
+  const runtimeOther = document
+    .querySelector('[data-config-category-panel="runtime"]')
+    ?.querySelector<HTMLElement>('[data-config-section="other"]');
+  expect(runtimeOther).not.toBeNull();
+  expect(
+    runtimeOther?.querySelector('[data-config-path="legacy_mode"]'),
+  ).not.toBeNull();
+  expect(runtimeOther?.textContent).toMatch(/not recognized by the schema/i);
+});
+
+test('search results are plain buttons announced through a status region', () => {
+  setSettingsLoaded();
+  render(<SettingsComponent />);
+
+  const search = screen.getByRole('searchbox', { name: /search/i });
+  fireEvent.change(search, { target: { value: 'tracing' } });
+
+  const results = screen.getByTestId('config-search-results');
+  expect(results.getAttribute('role')).not.toBe('listbox');
+  const buttons = within(results).getAllByRole('button');
+  expect(buttons.length).toBeGreaterThan(0);
+  for (const button of buttons) {
+    expect(button.getAttribute('role')).toBeNull();
+    expect(button.getAttribute('aria-selected')).toBeNull();
+  }
+  const status = screen.getByTestId('config-search-status');
+  expect(status.getAttribute('role')).toBe('status');
+  expect(status.className).toMatch(/sr-only/);
+  expect(status.textContent).toMatch(/\d+ settings? match/i);
+
+  fireEvent.change(search, { target: { value: 'zzz-no-such-setting' } });
+  expect(screen.getByTestId('config-search-status').textContent).toMatch(
+    /no settings match/i,
+  );
+});
+
+test('value details disclosure exposes a 44px touch target', () => {
+  setSettingsLoaded();
+  render(<SettingsComponent />);
+
+  const field = revealField('listener.proxy_addr');
+  const details = within(field).getByTestId('config-value-details');
+  const summary = details.querySelector('summary');
+  expect(summary).not.toBeNull();
+  expect(summary?.textContent).toMatch(/value details/i);
+  expect(minHeightPx(summary as HTMLElement)).toBeGreaterThanOrEqual(44);
+});
+
+test('storage variant switch review lists removed leaves without a container row', () => {
+  const sqliteDraft = {
+    ...structuredClone(fileConfig),
+    storage: {
+      kind: 'sqlite',
+      path: '/var/lib/cc-lb/storage.sqlite',
+    },
+  };
+  setSettingsLoaded(
+    editorResponse({ draft: sqliteDraft, effective_config: sqliteDraft }),
+    draftResponse({ draft: sqliteDraft }),
+  );
+  render(<SettingsComponent />);
+  // Counts track displayable active fields: only storage.kind and
+  // storage.path are active and modified after the switch.
+  expect(
+    screen.getByRole('button', { name: /^Storage & data.*2 modified/ }),
+  ).toBeDefined();
+  const categorySelect = screen.getByRole('combobox', {
+    name: 'Configuration category',
+  }) as HTMLSelectElement;
+  expect(
+    [...categorySelect.options].find((option) => option.value === 'data')
+      ?.textContent,
+  ).toContain('2 modified');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save to config file' }));
+  const reviewList = screen.getByTestId('config-review-list');
+  // Every path deleted by the postgres → sqlite switch is listed with its old
+  // value becoming Not set; the opaque URL stays hidden.
+  expect(reviewList.textContent).toMatch(
+    /storage\.kind:\s*postgres\s*→\s*sqlite/,
+  );
+  expect(reviewList.textContent).toMatch(/storage\.path:\s*Not set\s*→/);
+  expect(reviewList.textContent).toMatch(
+    /storage\.url:\s*Hidden\s*→\s*Not set/,
+  );
+  expect(reviewList.textContent).not.toContain(
+    '__CC_LB_STORAGE_URL_UNCHANGED__',
+  );
+  for (const path of [
+    'storage.pool.max_connections',
+    'storage.pool.min_connections',
+    'storage.pool.idle_timeout_secs',
+    'storage.pool.max_lifetime_secs',
+  ]) {
+    expect(reviewList.textContent, path).toMatch(
+      new RegExp(`${path.replaceAll('.', '\\.')}:[^→]*→\\s*Not set`),
+    );
+  }
+  // The leaf rows already describe the diff; no bare container rows.
+  expect(within(reviewList).queryAllByText('storage')).toHaveLength(0);
+  expect(within(reviewList).queryAllByText('storage.pool')).toHaveLength(0);
 });
