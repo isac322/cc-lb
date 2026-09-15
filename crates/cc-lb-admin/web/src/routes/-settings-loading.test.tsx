@@ -711,6 +711,12 @@ test('clearing a numeric input unsets the draft path', () => {
   setSettingsLoaded();
   render(<SettingsComponent />);
   openCategory('Scheduling');
+  expect(screen.getByText('custom_job')).toBeDefined();
+  expect(
+    document.querySelector(
+      '[data-config-path="scheduler.recurring_jobs.custom_job.enabled"]',
+    ),
+  ).not.toBeNull();
 
   const field = document.querySelector<HTMLElement>(
     '[data-config-path="scheduler.dlq_retention_days"]',
