@@ -193,6 +193,7 @@ pub async fn spawn_admin_server_with_clock_and_auth(
         warmup_dialect_dispatcher: None,
         dynamic_view: dynamic_view.clone(),
         config: Arc::new(config),
+        dynamic_view_rebinder: None,
         scheduler: None,
         admin_auth,
         start_time: std::time::Instant::now(),

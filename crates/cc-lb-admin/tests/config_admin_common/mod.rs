@@ -125,6 +125,7 @@ pub fn test_state_with_clock(
         lifecycle: None,
         dynamic_view,
         config: Arc::new(config),
+        dynamic_view_rebinder: None,
         scheduler: None,
         admin_auth: crate::admin_test_common::static_token_auth(TOKEN),
         lazy_refresher: None,

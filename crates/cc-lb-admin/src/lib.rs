@@ -117,27 +117,14 @@ pub struct AdminState {
     pub data_dir: Option<PathBuf>,
     pub warmup_dialect_dispatcher: Option<Arc<dyn WarmupDialectDispatcher>>,
     pub dynamic_view: Arc<DynamicViewHolder>,
-    pub config: Arc<dyn CurrentConfig>,
+    pub config: Arc<Config>,
+    pub dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,
     pub scheduler: Option<cc_lb_scheduler::admin::SchedulerAdminHandle>,
     pub admin_auth: Arc<auth::AdminAuthenticator>,
     pub start_time: std::time::Instant,
     pub event_bus: Option<Arc<dyn RequestEventBus>>,
     pub storage_tail: tokio::sync::broadcast::Sender<events::StorageTailUpdate>,
     pub clock: ClockHandle,
-}
-
-pub trait CurrentConfig: Send + Sync {
-    fn current_config(&self) -> Arc<Config>;
-
-    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
-        None
-    }
-}
-
-impl CurrentConfig for Config {
-    fn current_config(&self) -> Arc<Config> {
-        Arc::new(self.clone())
-    }
 }
 
 pub fn router(state: AdminState) -> Router {

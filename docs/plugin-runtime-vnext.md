@@ -69,7 +69,6 @@ cc-lb의 plugin 호출은 모든 요청 핫패스에 있다. 현재 구조는 �
 - `cc-lb-engine/src/api_keys/principal_view.rs::PrincipalSpecCached`와 `resolved_pipeline / resolved_dialect / resolved_hooks`.
 - `cc-lb-server/src/dynamic_view_builder.rs::build_principal_chains`의 per-principal staging.
 - `cc-lb-server/src/reconcile.rs`의 DB polling + revision-hash 기반 rebuild.
-- `cc-lb-server/src/reload.rs::ConfigWatcher`의 ArcSwap 기반 config swap.
 - `data/plugins/wasm/cache/{sha256}.wasm` 디스크 캐시.
 - `crates/cc-lb-runtime-protocol/src/handshake.rs`가 담당하던 "plugin과 호스트의 스키마/버전 합의" **의도(semantic intent)**만 계승. 현 구현은 JSON `cc_lb_handshake` export를 실제로 실행하는 방식이고, 새 ABI는 wasm custom section `cc_lb_schema_hash`를 inspect하는 정적 비교로 완전히 다른 메커니즘. 코드는 폐기, 의도만 보존.
 
@@ -443,7 +442,6 @@ API:
 - `cc-lb-engine/src/api_keys/principal_view.rs::RouterPipelineCache`: 그대로.
 - `cc-lb-server/src/dynamic_view_builder.rs::build_principal_chains`: `runtime.instantiate_filter_for/...`를 `WasmtimeRuntime`로 호출 (trait 동일).
 - `cc-lb-server/src/reconcile.rs`: 변경 없음.
-- `cc-lb-server/src/reload.rs::ConfigWatcher`: 변경 없음.
 - `cc-lb-server/src/tls.rs`: 변경 없음.
 - `Cargo.toml`: `wasmtime = "47"` 직접 의존 추가. `extism = ...` 제거(transition 종료 후).
 

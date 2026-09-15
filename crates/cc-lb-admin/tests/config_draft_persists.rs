@@ -22,6 +22,7 @@ fn test_state() -> AdminState {
         lifecycle: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),
+        dynamic_view_rebinder: None,
         scheduler: None,
         admin_auth: crate::admin_test_common::static_token_auth("test-token"),
         lazy_refresher: None,

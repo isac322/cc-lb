@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use cc_lb_admin::{AdminState, CurrentConfig, DynamicViewRebinder, router};
+use cc_lb_admin::{AdminState, DynamicViewRebinder, router};
 use cc_lb_config::Config;
 use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_control::{
@@ -20,21 +20,6 @@ use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
-
-struct TestCurrentConfig {
-    config: Config,
-    rebinder: Arc<dyn DynamicViewRebinder>,
-}
-
-impl CurrentConfig for TestCurrentConfig {
-    fn current_config(&self) -> Arc<Config> {
-        Arc::new(self.config.clone())
-    }
-
-    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
-        Some(self.rebinder.clone())
-    }
-}
 
 struct SnapshotRebinder {
     storage: Arc<Storage>,
@@ -128,7 +113,7 @@ async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
     let storage = admin_test_common::sqlite_storage(dir.path(), "admin.sqlite").await;
     let config = Config::default();
     let holder = admin_test_common::dynamic_view_holder(&config);
-    let rebinder = Arc::new(SnapshotRebinder {
+    let rebinder: Arc<dyn DynamicViewRebinder> = Arc::new(SnapshotRebinder {
         storage: storage.clone(),
     });
     let state = AdminState {
@@ -140,7 +125,8 @@ async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
         limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         dynamic_view: holder.clone(),
-        config: Arc::new(TestCurrentConfig { config, rebinder }),
+        config: Arc::new(config),
+        dynamic_view_rebinder: Some(rebinder),
         scheduler: None,
         admin_auth: crate::admin_test_common::static_token_auth("test-token"),
         lazy_refresher: None,

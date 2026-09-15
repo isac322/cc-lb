@@ -41,8 +41,8 @@ pub fn admin_ctx(state: &AdminState) -> anyhow::Result<AdminCtx<'_>> {
 
 pub async fn apply_dynamic_view_after_mutation(state: &AdminState) -> anyhow::Result<u64> {
     let rebinder = state
-        .config
-        .dynamic_view_rebinder()
+        .dynamic_view_rebinder
+        .clone()
         .ok_or_else(|| anyhow::anyhow!("dynamic view rebinder unavailable"))?;
     let current_generation = state.dynamic_view.generation();
     let view = rebinder.rebuild_dynamic_view(current_generation).await?;

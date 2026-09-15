@@ -873,7 +873,7 @@ fn restore_storage_url(
 }
 
 fn effective_config_from_state(state: &AdminState) -> Config {
-    let mut effective = (*state.config.current_config()).clone();
+    let mut effective = (*state.config).clone();
     apply_startup_overrides(&mut effective, &state.startup_config_overrides);
     effective
 }

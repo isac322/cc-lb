@@ -83,7 +83,7 @@ use crate::subscription_quota_cache::SubscriptionQuotaCache;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::auth::{AdminAuthenticator, build_providers};
 use cc_lb_admin::{
-    AdminPorts, AdminState, CurrentConfig, DynamicViewRebinder, StartupConfigOverrides,
+    AdminPorts, AdminState, DynamicViewRebinder, StartupConfigOverrides,
     WarmupDialectDispatchError, WarmupDialectDispatchErrorKind, WarmupDialectDispatchOutcome,
     WarmupDialectDispatcher,
 };
@@ -1681,10 +1681,7 @@ async fn build_app_with_storage_inner(
         clock: clock.clone(),
     };
 
-    let admin_config: Arc<dyn CurrentConfig> = Arc::new(StartupCurrentConfig::new(
-        config.clone(),
-        admin_rebinder.clone(),
-    ));
+    let admin_config = Arc::new(config.clone());
     let admin_state = AdminState {
         storage: Some(storage.clone()),
         key_store: Some(key_store),
@@ -1715,6 +1712,7 @@ async fn build_app_with_storage_inner(
         }),
         dynamic_view: dynamic_view.clone(),
         config: admin_config,
+        dynamic_view_rebinder: Some(admin_rebinder),
         scheduler: Some(cc_lb_scheduler::admin::SchedulerAdminHandle::new(
             scheduler_lazy_handle.clone(),
         )),
@@ -2057,30 +2055,6 @@ fn load_cluster_token(config: &Config) -> Result<String, BuildError> {
         .ok_or_else(|| BuildError::ClusterTokenMissing {
             env: config.cluster.token_env.clone(),
         })
-}
-
-struct StartupCurrentConfig {
-    current: Arc<Config>,
-    dynamic_view_rebinder: Arc<dyn DynamicViewRebinder>,
-}
-
-impl StartupCurrentConfig {
-    fn new(config: Config, dynamic_view_rebinder: Arc<dyn DynamicViewRebinder>) -> Self {
-        Self {
-            current: Arc::new(config),
-            dynamic_view_rebinder,
-        }
-    }
-}
-
-impl CurrentConfig for StartupCurrentConfig {
-    fn current_config(&self) -> Arc<Config> {
-        self.current.clone()
-    }
-
-    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
-        Some(self.dynamic_view_rebinder.clone())
-    }
 }
 
 #[derive(Clone)]

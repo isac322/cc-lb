@@ -33,6 +33,7 @@ pub fn app_with_scheduler(scheduler: SchedulerAdminHandle) -> axum::Router {
         data_dir: None,
         warmup_dialect_dispatcher: None,
         dynamic_view: crate::admin_test_common::dynamic_view_holder(&config),
+        dynamic_view_rebinder: None,
         config: Arc::new(config),
         scheduler: Some(scheduler),
         admin_auth: crate::admin_test_common::static_token_auth("test-token"),

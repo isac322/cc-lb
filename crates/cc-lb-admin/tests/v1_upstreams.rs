@@ -33,6 +33,7 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
+        dynamic_view_rebinder: None,
         config: Arc::new(config),
         scheduler: None,
         admin_auth: crate::admin_test_common::static_token_auth("test-token"),

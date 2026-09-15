@@ -100,6 +100,7 @@ fn test_state(
         data_dir: None,
         warmup_dialect_dispatcher: None,
         dynamic_view: crate::admin_test_common::dynamic_view_holder(&config),
+        dynamic_view_rebinder: None,
         config: Arc::new(config),
         scheduler: Some(scheduler),
         admin_auth: crate::admin_test_common::static_token_auth(TEST_TOKEN),

@@ -2158,6 +2158,7 @@ mod tests {
             warmup_dialect_dispatcher: None,
             dynamic_view: Arc::new(DynamicViewHolder::new(test_view())),
             config: Arc::new(Config::default()),
+            dynamic_view_rebinder: None,
             scheduler: None,
             admin_auth: Arc::new(crate::auth::AdminAuthenticator::new(Vec::new())),
             start_time: std::time::Instant::now(),
