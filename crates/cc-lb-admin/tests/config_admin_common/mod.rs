@@ -80,6 +80,23 @@ pub fn config_value(default_requests_per_window: u64) -> Value {
     value
 }
 
+pub fn write_config_file(dir: &Path, config: &Config) -> std::path::PathBuf {
+    let path = dir.join("cc-lb.toml");
+    let value = serde_json::to_value(config).unwrap();
+    std::fs::write(&path, Config::partial_json_toml(value).unwrap()).unwrap();
+    path
+}
+
+pub fn test_state_with_config_path(
+    config: Config,
+    storage: Option<Arc<SqliteStorage>>,
+    config_path: std::path::PathBuf,
+) -> AdminState {
+    let mut state = test_state(config, storage);
+    state.config_path = Some(config_path);
+    state
+}
+
 pub fn test_state(config: Config, storage: Option<Arc<SqliteStorage>>) -> AdminState {
     test_state_with_clock(config, storage, system_clock())
 }
@@ -100,6 +117,7 @@ pub fn test_state_with_clock(
     });
     AdminState {
         config_path: None,
+        startup_config_overrides: Default::default(),
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),

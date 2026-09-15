@@ -781,6 +781,7 @@ dependencies = [
  "cc-lb-upstream",
  "chrono",
  "fake-anthropic",
+ "figment",
  "hex",
  "http",
  "http-body-util",

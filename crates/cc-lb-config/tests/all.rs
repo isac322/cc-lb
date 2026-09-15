@@ -1,4 +1,6 @@
 mod common;
+#[path = "editor_contract.rs"]
+mod editor_contract;
 
 #[path = "load_env_override.rs"]
 mod load_env_override;

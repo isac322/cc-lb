@@ -210,7 +210,7 @@ where
         let expected_draft = ConfigDraftState {
             revision,
             last_validated_revision: None,
-            last_validation_error: None,
+            last_validation: None,
             ..draft
         };
         let read_back = storage.get_config_draft().await?;

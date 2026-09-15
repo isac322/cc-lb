@@ -88,6 +88,7 @@ fn test_state(
     let config = Config::default();
     AdminState {
         config_path: None,
+        startup_config_overrides: Default::default(),
         storage: Some(storage.clone()),
         key_store: Some(crate::admin_test_common::key_store(storage)),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),

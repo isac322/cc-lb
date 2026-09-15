@@ -195,7 +195,20 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         })),
         revision: 7,
         last_validated_revision: Some(6),
-        last_validation_error: Some("plugin missing".to_owned()),
+        last_validation: Some(json!({
+            "file": {
+                "valid": false,
+                "issues": [{
+                    "path": "plugins.entries[0].kind",
+                    "code": "unknown_variant",
+                    "message": "plugin missing",
+                    "severity": "error"
+                }]
+            },
+            "effective": { "valid": false, "issues": [] },
+            "filesystem": [],
+            "overrides": []
+        })),
         saved_at_unix_secs: Some(1_716_000_004),
     });
 
@@ -360,6 +373,20 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
     });
     assert_json_roundtrip(CacheKeepaliveTerminalReason::UnsupportedProvider);
     assert_json_roundtrip(CacheTtl::Ttl1h);
+}
+
+#[test]
+fn config_draft_state_accepts_legacy_rows_without_validation_details() {
+    let state = serde_json::from_value::<ConfigDraftState>(json!({
+        "draft": { "timeouts": { "upstream_total_secs": 30 } },
+        "revision": 7,
+        "last_validated_revision": 6,
+        "saved_at_unix_secs": 1_716_000_004
+    }))
+    .unwrap();
+
+    assert_eq!(state.last_validation, None);
+    assert_eq!(state.last_validated_revision, Some(6));
 }
 
 #[test]

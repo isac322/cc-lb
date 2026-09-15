@@ -677,6 +677,7 @@ async fn build_admin_state(
     use std::sync::Arc;
     cc_lb_admin::AdminState {
         config_path: None,
+        startup_config_overrides: Default::default(),
         storage: Some(server.storage.clone()),
         key_store: Some(admin_test_common::key_store(server.storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),

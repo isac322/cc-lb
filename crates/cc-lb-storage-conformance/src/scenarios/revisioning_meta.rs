@@ -8,6 +8,7 @@ use cc_lb_storage_api::{
     BackendKind, CURRENT_CONTRACT_VERSION, ConfigDraftState, ConfigStore, HistoryEntry, MetaStore,
     StorageError, StorageResult,
 };
+use serde_json::json;
 
 use crate::harness::{ConformanceBackend, ConformanceFixture};
 
@@ -54,7 +55,20 @@ where
             ConfigDraftState {
                 saved_at_unix_secs: Some(1_800_000_000),
                 last_validated_revision: Some(99),
-                last_validation_error: Some("stale validation".to_owned()),
+                last_validation: Some(json!({
+                    "file": {
+                        "valid": false,
+                        "issues": [{
+                            "path": "upstreams.primary",
+                            "code": "missing_required",
+                            "message": "stale validation",
+                            "severity": "error"
+                        }]
+                    },
+                    "effective": { "valid": false, "issues": [] },
+                    "filesystem": [],
+                    "overrides": []
+                })),
                 ..ConfigDraftState::default()
             },
             0,
@@ -66,7 +80,7 @@ where
         assert_eq!(stored.revision, 1);
         assert_eq!(stored.saved_at_unix_secs, Some(1_800_000_000));
         assert_eq!(stored.last_validated_revision, None);
-        assert_eq!(stored.last_validation_error, None);
+        assert_eq!(stored.last_validation, None);
 
         let stale = ConfigStore::put_config_draft(
             storage.as_ref(),
@@ -157,24 +171,28 @@ where
         .await?;
         assert_eq!(revision, 1);
 
-        ConfigStore::set_last_validated_revision(
-            storage.as_ref(),
-            revision,
-            Some("missing upstream".to_owned()),
-        )
-        .await?;
+        let failure = json!({
+            "file": {"valid": false, "issues": [{"path": "upstreams.primary", "code": "missing_required", "message": "missing upstream", "severity": "error"}]},
+            "effective": {"valid": false, "issues": [{"path": "upstreams.primary", "code": "missing_required", "message": "missing upstream", "severity": "error"}]},
+            "filesystem": [{"path": "runtime.data_dir", "code": "not_writable", "message": "runtime data directory is not writable", "severity": "warning"}],
+            "overrides": []
+        });
+        ConfigStore::set_config_validation(storage.as_ref(), revision, false, failure.clone()).await?;
         let draft = ConfigStore::get_config_draft(storage.as_ref()).await?;
         assert_eq!(draft.revision, revision);
         assert_eq!(draft.last_validated_revision, None);
-        assert_eq!(
-            draft.last_validation_error,
-            Some("missing upstream".to_owned())
-        );
+        assert_eq!(draft.last_validation, Some(failure));
 
-        ConfigStore::set_last_validated_revision(storage.as_ref(), revision, None).await?;
+        let success_warning = json!({
+            "file": {"valid": true, "issues": []},
+            "effective": {"valid": true, "issues": []},
+            "filesystem": [{"path": "runtime.data_dir", "code": "deprecated", "message": "legacy directory", "severity": "warning"}],
+            "overrides": []
+        });
+        ConfigStore::set_config_validation(storage.as_ref(), revision, true, success_warning.clone()).await?;
         let draft = ConfigStore::get_config_draft(storage.as_ref()).await?;
         assert_eq!(draft.last_validated_revision, Some(revision));
-        assert_eq!(draft.last_validation_error, None);
+        assert_eq!(draft.last_validation, Some(success_warning));
 
         let next_revision = ConfigStore::put_config_draft(
             storage.as_ref(),
@@ -186,13 +204,14 @@ where
         )
         .await?;
         assert_eq!(next_revision, 2);
-        let draft = ConfigStore::get_config_draft(storage.as_ref()).await?;
-        assert_eq!(draft.last_validated_revision, None);
-        assert_eq!(draft.last_validation_error, None);
-
-        let stale = ConfigStore::set_last_validated_revision(storage.as_ref(), revision, None)
-            .await
-            .expect_err("validation must reject stale draft revisions");
+        let stale = ConfigStore::set_config_validation(
+            storage.as_ref(),
+            revision,
+            true,
+            json!({"stale": true}),
+        )
+        .await
+        .expect_err("validation must reject stale draft revisions");
         assert!(matches!(stale, StorageError::Conflict { .. }));
 
         Ok(())

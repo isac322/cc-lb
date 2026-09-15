@@ -83,8 +83,9 @@ use crate::subscription_quota_cache::SubscriptionQuotaCache;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::auth::{AdminAuthenticator, build_providers};
 use cc_lb_admin::{
-    AdminPorts, AdminState, CurrentConfig, DynamicViewRebinder, WarmupDialectDispatchError,
-    WarmupDialectDispatchErrorKind, WarmupDialectDispatchOutcome, WarmupDialectDispatcher,
+    AdminPorts, AdminState, CurrentConfig, DynamicViewRebinder, StartupConfigOverrides,
+    WarmupDialectDispatchError, WarmupDialectDispatchErrorKind, WarmupDialectDispatchOutcome,
+    WarmupDialectDispatcher,
 };
 
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
@@ -492,8 +493,11 @@ pub async fn run_serve(
     clock: ClockHandle,
 ) -> Result<(), ServeError> {
     let mut config = Config::load(config_path)?;
-    if let Some(data_dir) = data_dir {
-        config.runtime.data_dir = Some(data_dir.to_path_buf());
+    let startup_config_overrides = StartupConfigOverrides {
+        runtime_data_dir: data_dir.map(Path::to_path_buf),
+    };
+    if let Some(data_dir) = startup_config_overrides.runtime_data_dir.as_ref() {
+        config.runtime.data_dir = Some(data_dir.clone());
     }
     cc_lb_observability::install_panic_hook(cc_lb_observability::RedactionPolicy::new(
         config.observability.user_prompt_redaction,
@@ -502,6 +506,7 @@ pub async fn run_serve(
     let app = match build_app_with_path_inner(
         config,
         Some(config_path),
+        startup_config_overrides,
         Some(StartupPreflight { strict_preflight }),
         clock,
     )
@@ -576,6 +581,7 @@ pub async fn build_app_for_testing(
     build_app_with_storage_inner(
         config,
         None,
+        StartupConfigOverrides::default(),
         managed_store,
         storage,
         aead,
@@ -765,12 +771,20 @@ pub async fn build_app_with_path(
     config_path: Option<&Path>,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
-    build_app_with_path_inner(config, config_path, None, clock).await
+    build_app_with_path_inner(
+        config,
+        config_path,
+        StartupConfigOverrides::default(),
+        None,
+        clock,
+    )
+    .await
 }
 
 async fn build_app_with_path_inner(
     config: Config,
     config_path: Option<&Path>,
+    startup_config_overrides: StartupConfigOverrides,
     startup_preflight: Option<StartupPreflight>,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
@@ -788,6 +802,7 @@ async fn build_app_with_path_inner(
     build_app_with_storage_inner(
         config,
         config_path,
+        startup_config_overrides,
         managed_store,
         storage,
         aead,
@@ -847,6 +862,7 @@ pub async fn build_app_with_storage(
     build_app_with_storage_inner(
         config,
         config_path,
+        StartupConfigOverrides::default(),
         managed_store,
         storage,
         aead,
@@ -863,6 +879,7 @@ pub async fn build_app_with_storage(
 async fn build_app_with_storage_inner(
     config: Config,
     config_path: Option<&Path>,
+    startup_config_overrides: StartupConfigOverrides,
     managed_store: Arc<dyn ManagedKeyStore>,
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
@@ -1686,6 +1703,7 @@ async fn build_app_with_storage_inner(
         lazy_refresher: lazy_refresher.clone(),
         runtime: Some(runtime.clone()),
         config_path: config_path.map(Path::to_path_buf),
+        startup_config_overrides,
         data_dir: Some(data_dir.clone()),
         warmup_dialect_dispatcher: lazy_refresher_concrete.clone().map(|lazy_refresher| {
             Arc::new(ServerWarmupDialectDispatcher {

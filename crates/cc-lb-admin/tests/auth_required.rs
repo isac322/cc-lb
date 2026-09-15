@@ -22,6 +22,7 @@ fn test_state_with_auth(admin_auth: Arc<AdminAuthenticator>) -> AdminState {
     let config = Config::default();
     AdminState {
         config_path: None,
+        startup_config_overrides: Default::default(),
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
@@ -56,7 +57,13 @@ async fn test_auth_required() {
         ("/admin/principals/alice/keys/key-1/enable", "POST"),
         ("/admin/principals/alice/keys/key-1/usage", "GET"),
         ("/admin/audit", "GET"),
-        ("/admin/v1/config/current", "GET"),
+        ("/admin/v1/config/editor", "GET"),
+        ("/admin/v1/config/draft", "GET"),
+        ("/admin/v1/config/draft", "PUT"),
+        ("/admin/v1/config/draft/validate", "POST"),
+        ("/admin/v1/config/save", "POST"),
+        ("/admin/v1/config/draft/download", "POST"),
+        ("/admin/v1/config/history", "GET"),
         ("/admin/scheduler/status", "GET"),
         ("/admin/scheduler/failures", "GET"),
         ("/admin/v1/status", "GET"),
@@ -111,11 +118,15 @@ async fn test_auth_required() {
 
 #[tokio::test]
 async fn test_auth_success() {
-    let app = router(test_state());
+    let dir = tempfile::tempdir().unwrap();
+    let storage = admin_test_common::sqlite_storage(dir.path(), "auth-success.sqlite").await;
+    let mut state = test_state();
+    state.storage = Some(storage);
+    let app = router(state);
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/v1/config/current")
+        .uri("/admin/v1/config/editor")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();

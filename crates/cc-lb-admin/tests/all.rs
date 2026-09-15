@@ -16,12 +16,16 @@ mod cloudflare_access_auth;
 mod cache_keepalive_contracts;
 #[path = "config_admin_common/mod.rs"]
 mod config_admin_common;
+#[path = "config_download.rs"]
+mod config_download;
 #[path = "config_draft.rs"]
 mod config_draft;
 #[path = "config_draft_persists.rs"]
 mod config_draft_persists;
 #[path = "config_history.rs"]
 mod config_history;
+#[path = "config_save.rs"]
+mod config_save;
 #[path = "config_schema.rs"]
 mod config_schema;
 #[path = "config_validate.rs"]

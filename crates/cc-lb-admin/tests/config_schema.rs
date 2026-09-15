@@ -1,171 +1,135 @@
 use crate::config_admin_common;
 
+use std::fs;
+
 use axum::http::StatusCode;
-use config_admin_common::{app, authed_json, test_state_without_storage, unauthenticated_status};
+use config_admin_common::{
+    app, authed_json, temp_storage, test_state_with_config_path, unauthenticated_status,
+    write_config_file,
+};
 
 #[tokio::test]
-async fn authorized_schema_returns_schema_and_checklist() {
-    let app = app(test_state_without_storage());
-    let (status, _, json, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
+async fn editor_returns_schema_defaults_file_effective_and_metadata() {
+    let (dir, storage) = temp_storage().await;
+    let config = config_admin_common::minimal_config();
+    let path = write_config_file(dir.path(), &config);
+    let app = app(test_state_with_config_path(
+        config,
+        Some(storage),
+        path.clone(),
+    ));
+
+    let (status, headers, json, _) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert!(json.get("schema").is_some());
-    assert_eq!(json["coverage_checklist"].as_array().unwrap().len(), 20);
+    assert_eq!(headers.get("cache-control").unwrap(), "no-store");
+    assert!(json["schema"]["properties"].is_object());
+    assert!(json["default_config"].is_object());
+    assert!(json["file_config"].is_object());
+    assert!(json["effective_config"].is_object());
+    assert_eq!(json["draft"], serde_json::Value::Null);
+    assert_eq!(json["revision"], 0);
+    assert_eq!(json["last_validation"], serde_json::Value::Null);
+    assert_eq!(json["file"]["path"], path.display().to_string());
+    assert_eq!(json["file"]["exists"], true);
+    assert_eq!(json["file"]["mode"], "writable");
+    assert!(
+        json["file"]["fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(json["restart_required"], true);
 }
 
 #[tokio::test]
-async fn schema_excludes_database_owned_resources() {
-    let app = app(test_state_without_storage());
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
-    let properties = json["schema"]["properties"].as_object().unwrap();
+async fn editor_reports_missing_file_with_writable_parent() {
+    let (dir, storage) = temp_storage().await;
+    let path = dir.path().join("missing.toml");
+    let config = config_admin_common::minimal_config();
+    let app = app(test_state_with_config_path(config, Some(storage), path));
 
-    for resource in [
-        "principals",
-        "upstreams",
-        "plugins",
-        "plugin_chains",
-        "quotas",
-    ] {
-        assert!(
-            !properties.contains_key(resource),
-            "database-owned resource {resource} must not appear in config schema"
-        );
+    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
+
+    assert_eq!(json["file"]["exists"], false);
+    assert_eq!(json["file"]["mode"], "writable");
+    assert_eq!(json["file"]["fingerprint"], serde_json::Value::Null);
+    assert_eq!(json["file_config"], serde_json::json!({}));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn editor_reports_read_only_parent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, storage) = temp_storage().await;
+    let config_dir = dir.path().join("readonly");
+    fs::create_dir(&config_dir).unwrap();
+    fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let path = config_dir.join("cc-lb.toml");
+    let config = config_admin_common::minimal_config();
+    let app = app(test_state_with_config_path(config, Some(storage), path));
+
+    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
+
+    assert_eq!(json["file"]["mode"], "read_only");
+    assert!(
+        json["file"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("read-only")
+    );
+    fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[tokio::test]
+async fn editor_redacts_storage_url_as_whole_value() {
+    let (dir, storage) = temp_storage().await;
+    let secret = "postgres://secret-user:secret-password@localhost/secret-db";
+    let raw = format!(
+        "[storage]\nkind = \"postgres\"\nurl = \"{secret}\"\n\n[cluster]\ninstance_url = \"https://node.example\"\n"
+    );
+    let path = dir.path().join("cc-lb.toml");
+    fs::write(&path, &raw).unwrap();
+    let config = cc_lb_config::Config::from_stored_toml(&raw).unwrap();
+    let app = app(test_state_with_config_path(config, Some(storage), path));
+
+    let (_, _, json, bytes) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
+
+    assert_eq!(
+        json["file_config"]["storage"]["url"],
+        cc_lb_config::STORAGE_URL_REDACTION_SENTINEL
+    );
+    assert_eq!(
+        json["effective_config"]["storage"]["url"],
+        cc_lb_config::STORAGE_URL_REDACTION_SENTINEL
+    );
+    assert!(!String::from_utf8_lossy(&bytes).contains(secret));
+}
+
+#[tokio::test]
+async fn legacy_current_and_schema_routes_are_removed() {
+    let (dir, storage) = temp_storage().await;
+    let config = config_admin_common::minimal_config();
+    let path = write_config_file(dir.path(), &config);
+    let state = test_state_with_config_path(config, Some(storage), path);
+
+    for route in ["/admin/v1/config/current", "/admin/v1/config/schema"] {
+        let (status, _, _) =
+            config_admin_common::authed_bytes(app(state.clone()), "GET", route, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
 
 #[tokio::test]
-async fn schema_matches_runtime_owned_config_contract() {
-    let app = app(test_state_without_storage());
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
-    let properties = json["schema"]["properties"].as_object().unwrap();
-    let checklist = json["coverage_checklist"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| item.as_str().unwrap())
-        .collect::<Vec<_>>();
+async fn editor_requires_admin_auth() {
+    let (dir, storage) = temp_storage().await;
+    let config = config_admin_common::minimal_config();
+    let path = write_config_file(dir.path(), &config);
+    let app = app(test_state_with_config_path(config, Some(storage), path));
 
     assert_eq!(
-        checklist,
-        vec![
-            "listener",
-            "body",
-            "timeouts",
-            "request_event_retention_days",
-            "price_catalog",
-            "storage",
-            "scheduler",
-            "upstream_affinity",
-            "aead",
-            "observability",
-            "admin",
-            "event_bus",
-            "cluster",
-            "oauth",
-            "subscription_quota",
-            "runtime",
-            "circuit_breaker",
-            "bulkhead",
-            "prompt_cache_shadow",
-            "limit_reservation_ttl",
-        ]
+        unauthenticated_status(app, "GET", "/admin/v1/config/editor").await,
+        StatusCode::UNAUTHORIZED
     );
-    for removed in [
-        "tls",
-        "downstream_auth",
-        "api_keys",
-        "dns",
-        "egress",
-        "lifecycle_hook_adapter",
-        "lifecycle_pricing_subscriber",
-        "lifecycle_cache_observation_subscriber",
-        "lifecycle_rate_limit_header_subscriber",
-        "lifecycle_subscription_quota_subscriber",
-        "lifecycle_limit_rejection_audit_subscriber",
-        "lifecycle_api_key_metrics_subscriber",
-        "lifecycle_cache_hit_miss_subscriber",
-        "lifecycle_routing_tier_subscriber",
-        "lifecycle_limit_reconcile_subscriber",
-    ] {
-        assert!(
-            !properties.contains_key(removed),
-            "removed config property {removed} remains in the schema"
-        );
-    }
-    assert!(
-        !json["schema"]["$defs"]["PriceCatalogConfig"]["properties"]
-            .as_object()
-            .unwrap()
-            .contains_key("refresh_interval")
-    );
-    let listener_properties = json["schema"]["$defs"]["ListenerConfig"]["properties"]
-        .as_object()
-        .unwrap();
-    assert!(listener_properties.contains_key("tls"));
-    assert!(!listener_properties.contains_key("unix_socket"));
-    assert_eq!(
-        json["schema"]["$defs"]["AdminConfig"]["properties"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        vec!["auth"]
-    );
-}
-
-#[tokio::test]
-async fn schema_and_coverage_include_upstream_affinity() {
-    let app = app(test_state_without_storage());
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
-
-    assert!(
-        json["schema"]["properties"]
-            .as_object()
-            .unwrap()
-            .contains_key("upstream_affinity")
-    );
-    assert!(
-        json["coverage_checklist"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item == "upstream_affinity")
-    );
-    assert_eq!(
-        json["schema"]["$defs"]["UpstreamAffinityConfig"]["properties"]["ttl_days"]["minimum"],
-        1
-    );
-}
-
-#[tokio::test]
-async fn schema_contains_property_for_each_coverage_item() {
-    let app = app(test_state_without_storage());
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
-    let properties = json["schema"]["properties"].as_object().unwrap();
-
-    for item in json["coverage_checklist"].as_array().unwrap() {
-        let name = item.as_str().unwrap();
-        assert!(
-            properties.contains_key(name),
-            "missing schema property {name}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn schema_response_is_cacheable_for_sixty_seconds() {
-    let app = app(test_state_without_storage());
-    let (status, headers, _, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers.get("cache-control").unwrap(), "max-age=60");
-}
-
-#[tokio::test]
-async fn schema_requires_admin_auth() {
-    let app = app(test_state_without_storage());
-    let status = unauthenticated_status(app, "GET", "/admin/v1/config/schema").await;
-
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

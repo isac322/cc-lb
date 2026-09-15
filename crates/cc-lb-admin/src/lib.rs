@@ -97,9 +97,15 @@ pub struct AdminPorts {
     pub replica_identity: Option<ReplicaIdentity>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct StartupConfigOverrides {
+    pub runtime_data_dir: Option<PathBuf>,
+}
+
 #[derive(Clone)]
 pub struct AdminState {
     pub config_path: Option<PathBuf>,
+    pub startup_config_overrides: StartupConfigOverrides,
     pub storage: Option<Arc<dyn Storage>>,
     pub key_store: Option<Arc<KeyStore>>,
     pub aead: Arc<AeadService>,

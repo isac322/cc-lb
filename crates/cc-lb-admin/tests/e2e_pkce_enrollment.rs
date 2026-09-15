@@ -1,53 +1,35 @@
-use crate::admin_test_common;
+use crate::config_admin_common;
 
-use std::sync::Arc;
-
-use axum::{
-    body::Body,
-    http::{Request, StatusCode},
+use axum::http::StatusCode;
+use config_admin_common::{
+    app, authed_json, temp_storage, test_state_with_config_path, write_config_file,
 };
-use cc_lb_admin::{AdminState, router};
-use cc_lb_config::Config;
-use tower::ServiceExt;
-
-fn test_state() -> AdminState {
-    let config = Config::default();
-    AdminState {
-        config_path: None,
-        storage: None,
-        key_store: None,
-        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
-        lifecycle: None,
-        dynamic_view: admin_test_common::dynamic_view_holder(&config),
-        config: Arc::new(config),
-        scheduler: None,
-        admin_auth: crate::admin_test_common::static_token_auth("test-token"),
-        lazy_refresher: None,
-        runtime: None,
-        data_dir: None,
-        warmup_dialect_dispatcher: None,
-        subscription_metadata_hook: None,
-        start_time: std::time::Instant::now(),
-        event_bus: None,
-        storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock: Arc::new(cc_lb_clock::SystemClock),
-    }
-}
 
 #[tokio::test]
-async fn e2e_pkce_enrollment_current_admin_config_smoke() {
-    let response = router(test_state())
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/admin/v1/config/current")
-                .header("Authorization", "Bearer test-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+async fn e2e_pkce_enrollment_v1_config_editor_smoke() {
+    let (dir, storage) = temp_storage().await;
+    let config = config_admin_common::minimal_config();
+    let path = write_config_file(dir.path(), &config);
+    let app = app(test_state_with_config_path(
+        config,
+        Some(storage),
+        path.clone(),
+    ));
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let (status, _, json, _) = authed_json(app, "GET", "/admin/v1/config/editor", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(json["file_config"].is_object());
+    assert!(json["effective_config"].is_object());
+    assert_eq!(json["revision"], 0);
+    assert_eq!(json["draft"], serde_json::Value::Null);
+    assert_eq!(json["file"]["path"], path.display().to_string());
+    assert_eq!(json["file"]["exists"], true);
+    assert_eq!(json["file"]["mode"], "writable");
+    assert!(
+        json["file"]["fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
 }

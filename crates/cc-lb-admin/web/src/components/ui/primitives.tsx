@@ -8,6 +8,7 @@ import {
   cloneElement,
   type FocusEventHandler,
   type HTMLAttributes,
+  type InputHTMLAttributes,
   isValidElement,
   type MouseEventHandler,
   type PointerEventHandler,
@@ -843,6 +844,84 @@ export function Field({
         </span>
       ) : null}
     </label>
+  );
+}
+
+export function ToggleSwitch({
+  label,
+  description,
+  className,
+  ...rest
+}: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & {
+  label: ReactNode;
+  description?: ReactNode;
+}) {
+  return (
+    <label
+      className={cx(
+        'flex min-w-0 cursor-pointer items-start justify-between gap-4 rounded-sm border border-subtle bg-panel-strong/35 px-3 py-2.5',
+        rest.disabled ? 'cursor-not-allowed opacity-60' : undefined,
+        className,
+      )}
+    >
+      <span className="min-w-0">
+        <span className="block text-sm text-text">{label}</span>
+        {description ? (
+          <span className="mt-0.5 block text-xs leading-relaxed text-text-faint">
+            {description}
+          </span>
+        ) : null}
+      </span>
+      <span className="relative mt-0.5 inline-flex h-5 w-9 shrink-0">
+        <input {...rest} type="checkbox" className="peer sr-only" />
+        <span className="absolute inset-0 rounded-full border border-subtle-strong bg-overlay-10 transition-colors peer-checked:border-accent peer-checked:bg-accent/35 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-accent peer-focus-visible:outline-offset-2" />
+        <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-text-muted shadow-sm transition-transform peer-checked:translate-x-4 peer-checked:bg-accent" />
+      </span>
+    </label>
+  );
+}
+
+type NoticeTone = 'info' | 'success' | 'warning' | 'danger';
+
+const NOTICE_TONE_CLASS: Record<NoticeTone, string> = {
+  info: 'border-blue-500/30 bg-blue-500/10 text-blue-100',
+  success: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100',
+  warning: 'border-amber-500/35 bg-amber-500/10 text-amber-100',
+  danger: 'border-red-500/35 bg-red-500/10 text-red-100',
+};
+
+export function Notice({
+  tone = 'info',
+  title,
+  children,
+  action,
+  className,
+  role,
+}: {
+  tone?: NoticeTone;
+  title?: ReactNode;
+  children: ReactNode;
+  action?: ReactNode;
+  className?: string;
+  role?: 'alert' | 'status';
+}) {
+  return (
+    <div
+      className={cx(
+        'flex flex-col gap-3 rounded-sm border px-3 py-2.5 text-xs sm:flex-row sm:items-start sm:justify-between',
+        NOTICE_TONE_CLASS[tone],
+        className,
+      )}
+      role={role ?? (tone === 'danger' ? 'alert' : 'status')}
+    >
+      <div className="min-w-0 leading-relaxed">
+        {title ? (
+          <div className="mb-0.5 font-medium text-text">{title}</div>
+        ) : null}
+        <div>{children}</div>
+      </div>
+      {action ? <div className="shrink-0">{action}</div> : null}
+    </div>
   );
 }
 

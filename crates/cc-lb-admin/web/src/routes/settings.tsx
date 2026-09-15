@@ -1,35 +1,26 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { CheckCircle2, Download, Save } from 'lucide-react';
+import { Download } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { ConfigEditorSection } from '../components/settings-config';
 import {
   Button,
   Card,
   CardBody,
   CardHeader,
-  cx,
   Field,
   INPUT_CLASS,
   PageContainer,
   Section,
   Skeleton,
-  SkeletonRow,
-  Spinner,
 } from '../components/ui/primitives';
 import {
   RelativeOffsetTime,
   RelativeTime,
 } from '../components/ui/RelativeTime';
-import { downloadJson } from '../lib/api';
+import { type ConfigHistoryResponse, downloadJson } from '../lib/api';
 import { formatAbsolute, useLocale, useTimezone } from '../lib/locale';
-import {
-  useConfigCurrent,
-  useConfigDraft,
-  useConfigHistory,
-  useSaveDraft,
-  useStatus,
-  useValidateConfig,
-} from '../lib/queries';
+import { useConfigHistory, useStatus } from '../lib/queries';
 
 const ALL_BCP47_LOCALES = [
   'af-ZA',
@@ -203,6 +194,7 @@ export const Route = createFileRoute('/settings')({
 
 function SettingsPage() {
   const status = useStatus();
+  const configHistory = useConfigHistory();
   const [downloadingDatabaseSnapshot, setDownloadingDatabaseSnapshot] =
     useState(false);
   const downloadingDatabaseSnapshotRef = useRef(false);
@@ -378,11 +370,10 @@ function SettingsPage() {
           </CardBody>
         </Card>
 
-        {/* Config draft */}
-        <ConfigDraftSection />
+        <ConfigEditorSection history={configHistory} />
 
         {/* History */}
-        <ConfigHistorySection />
+        <ConfigHistorySection history={configHistory} />
 
         {/* Database export */}
         <Section
@@ -412,374 +403,85 @@ function SettingsPage() {
   );
 }
 
-function ConfigDraftSection() {
-  const draft = useConfigDraft();
-  const current = useConfigCurrent();
-  const save = useSaveDraft();
-  const validate = useValidateConfig();
-  const [editor, setEditor] = useState<{
-    text: string;
-    savedText: string;
-    revision: number;
-    savedAtUnixSecs: number | null;
-    hasSavedDraft: boolean;
-  } | null>(null);
-  const [localValidation, setLocalValidation] = useState<{
-    revision: number;
-    error: string | null;
-  } | null>(null);
-
-  useEffect(() => {
-    const draftData = draft.data;
-    if (!draftData) return;
-
-    const source = draftData.draft ?? current.data;
-    if (source === undefined) return;
-
-    const sourceText = JSON.stringify(source, null, 2);
-    if (sourceText === undefined) return;
-
-    setEditor((existing) => {
-      if (existing && existing.text !== existing.savedText) return existing;
-      // A successful save can advance the editor before an invalidated draft
-      // query finishes. Never replace that confirmed revision with stale data.
-      if (existing && existing.revision > draftData.revision) return existing;
-
-      const hasSavedDraft = draftData.draft != null;
-      const savedAtUnixSecs = hasSavedDraft
-        ? draftData.saved_at_unix_secs
-        : null;
-      if (
-        existing?.text === sourceText &&
-        existing.savedText === sourceText &&
-        existing.revision === draftData.revision &&
-        existing.savedAtUnixSecs === savedAtUnixSecs &&
-        existing.hasSavedDraft === hasSavedDraft
-      ) {
-        return existing;
-      }
-
-      return {
-        text: sourceText,
-        savedText: sourceText,
-        revision: draftData.revision,
-        savedAtUnixSecs,
-        hasSavedDraft,
-      };
-    });
-  }, [current.data, draft.data]);
-
-  const draftUnavailable = draft.data === undefined;
-  const currentConfigRequired = draft.data?.draft == null;
-  const currentUnavailable =
-    currentConfigRequired && current.data === undefined;
-  const editorPending =
-    editor == null &&
-    ((draftUnavailable && draft.isPending) ||
-      (currentUnavailable && current.isPending));
-  const editorLoadError =
-    editor == null &&
-    ((draftUnavailable && draft.isError) ||
-      (currentUnavailable && current.isError));
-  const editorRetrying =
-    (draftUnavailable && draft.isFetching) ||
-    (currentUnavailable && current.isFetching);
-
-  const draftRevision = draft.data?.revision ?? null;
-  const editorRevision = editor?.revision ?? null;
-  const editorDirty = editor ? editor.text !== editor.savedText : false;
-  const serverRevisionChanged =
-    draftRevision != null &&
-    editorRevision != null &&
-    draftRevision !== editorRevision;
-  const canSave =
-    editor != null &&
-    (editorDirty || (!editor.hasSavedDraft && !serverRevisionChanged));
-  const editorValidation =
-    localValidation?.revision === editorRevision ? localValidation : null;
-  const serverValidationMatchesEditor =
-    draftRevision != null && draftRevision === editorRevision;
-  const lastValidatedRevision = editorValidation
-    ? editorValidation.revision
-    : serverValidationMatchesEditor
-      ? (draft.data?.last_validated_revision ?? null)
-      : null;
-  const lastValidationError = editorValidation
-    ? editorValidation.error
-    : serverValidationMatchesEditor
-      ? (draft.data?.last_validation_error ?? null)
-      : null;
-  const canValidate =
-    editor?.hasSavedDraft === true && !editorDirty && !serverRevisionChanged;
-  const lastValidatedLabel = lastValidationError
-    ? `error @ rev ${lastValidatedRevision ?? '—'}`
-    : lastValidatedRevision != null
-      ? `rev ${lastValidatedRevision}`
-      : '—';
-
-  const savePending = save.isPending;
-  const validatePending = validate.isPending;
-  const draftMutationLabel = savePending
-    ? 'Saving draft...'
-    : validatePending
-      ? 'Validating draft...'
-      : null;
-  const editorGuidance = editorDirty
-    ? serverRevisionChanged
-      ? `The server draft is revision ${draftRevision}, while this editor started from revision ${editorRevision}. Save checks revision ${editorRevision}; Validate stays disabled until these changes are saved.`
-      : 'Save your editor changes before validating. Validate uses the saved server draft.'
-    : serverRevisionChanged
-      ? `Waiting for server draft revision ${draftRevision} to match editor revision ${editorRevision} before validating.`
-      : editor && !editor.hasSavedDraft
-        ? 'Save this configuration as a server draft before validating.'
-        : null;
-
-  const handleRetryEditor = () => {
-    if (draftUnavailable) void draft.refetch();
-    if (currentUnavailable) void current.refetch();
-  };
-
-  const handleSave = () => {
-    if (!editor || !canSave) return;
-
-    const savedText = editor.text;
-    const startRevision = editor.revision;
-    try {
-      const parsed = JSON.parse(savedText) as Record<string, unknown>;
-      save.mutate(
-        { draft: parsed, expected_revision: startRevision },
-        {
-          onSuccess: (response) => {
-            setEditor((active) => {
-              if (!active || active.revision !== startRevision) {
-                return active;
-              }
-              return {
-                ...active,
-                savedText,
-                revision: response.revision,
-                savedAtUnixSecs: response.saved_at_unix_secs,
-                hasSavedDraft: true,
-              };
-            });
-            setLocalValidation(null);
-            toast.success('Draft saved');
-          },
-        },
-      );
-    } catch {
-      toast.error('Draft is not valid JSON');
-    }
-  };
-
-  const handleValidate = () => {
-    if (!editor || !canValidate) return;
-
-    validate.mutate(editor.revision, {
-      onSuccess: (result) => {
-        const error = result.valid
-          ? null
-          : (result.error ?? 'Validation failed');
-        setLocalValidation({ revision: result.revision, error });
-        if (result.valid) {
-          toast.success('Draft valid');
-        } else {
-          toast.error(`Invalid: ${error}`);
-        }
-      },
-    });
-  };
-
-  return (
-    <Section
-      title="Configuration Draft"
-      subtitle="Edit and validate the saved configuration draft."
-    >
-      <Card>
-        <CardHeader
-          title="Draft"
-          action={
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                iconLeft={<Save className="w-3 h-3" />}
-                loading={savePending}
-                disabled={!canSave || !editor.text}
-                onClick={handleSave}
-              >
-                {savePending ? 'Saving...' : 'Save'}
-              </Button>
-              <Button
-                size="sm"
-                iconLeft={<CheckCircle2 className="w-3 h-3" />}
-                loading={validatePending}
-                disabled={!canValidate}
-                aria-describedby="config-pipeline-status"
-                onClick={handleValidate}
-              >
-                {validatePending ? 'Validating...' : 'Validate'}
-              </Button>
-            </div>
-          }
-        />
-        <CardBody className="space-y-3">
-          <div
-            data-testid="draft-metadata"
-            className="flex min-h-4 flex-wrap gap-4 text-xs text-text-faint"
-          >
-            <div className="inline-flex items-center gap-1">
-              Revision:
-              <div
-                data-testid="draft-revision-slot"
-                className="inline-flex h-4 min-w-8 items-center font-mono"
-              >
-                {editorPending ? (
-                  <Skeleton className="h-3 w-8" />
-                ) : (
-                  (editor?.revision ?? '—')
-                )}
-              </div>
-            </div>
-            <div className="inline-flex items-center gap-1">
-              Last validated:
-              <div
-                data-testid="draft-last-validated-slot"
-                className={cx(
-                  'inline-flex h-4 min-w-24 items-center font-mono',
-                  lastValidationError ? 'text-red-400' : undefined,
-                )}
-              >
-                {editorPending ? (
-                  <Skeleton className="h-3 w-20" />
-                ) : (
-                  lastValidatedLabel
-                )}
-              </div>
-            </div>
-            <div className="inline-flex items-center gap-1">
-              Saved at:
-              <div
-                data-testid="draft-saved-at-slot"
-                className="inline-flex h-4 min-w-24 items-center font-mono"
-              >
-                {editorPending ? (
-                  <Skeleton className="h-3 w-20" />
-                ) : editor?.savedAtUnixSecs ? (
-                  <RelativeTime ts={new Date(editor.savedAtUnixSecs * 1000)} />
-                ) : (
-                  '—'
-                )}
-              </div>
-            </div>
-          </div>
-          {editorLoadError ? (
-            <div
-              className="flex items-center justify-between gap-3 rounded-sm border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
-              role="alert"
-            >
-              <span>
-                {draftUnavailable && draft.isError
-                  ? 'Failed to load the configuration draft.'
-                  : 'Failed to load the current configuration.'}
-              </span>
-              <Button
-                size="sm"
-                loading={editorRetrying}
-                disabled={editorRetrying}
-                onClick={handleRetryEditor}
-              >
-                {editorRetrying ? 'Retrying...' : 'Retry'}
-              </Button>
-            </div>
-          ) : null}
-          <textarea
-            data-testid="config-draft-editor"
-            className="w-full min-h-[260px] p-3 text-xs font-mono bg-panel-strong border border-subtle rounded-sm placeholder:text-text-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-            style={{ lineHeight: 1.5 }}
-            value={editor?.text ?? ''}
-            disabled={!editor}
-            onChange={(event) =>
-              setEditor((active) =>
-                active ? { ...active, text: event.target.value } : active,
-              )
-            }
-            placeholder="JSON config draft…"
-          />
-          <div
-            id="config-pipeline-status"
-            data-testid="config-pipeline-status"
-            role="status"
-            aria-live="polite"
-            className="min-h-4 text-xs text-text-muted"
-          >
-            {draftMutationLabel ? (
-              <span className="inline-flex items-center gap-1.5">
-                <Spinner className="w-3 h-3 text-accent" />
-                {draftMutationLabel}
-              </span>
-            ) : (
-              editorGuidance
-            )}
-          </div>
-        </CardBody>
-      </Card>
-    </Section>
-  );
-}
-
-const HISTORY_CELL_CLASS_NAMES = ['px-4', 'px-4'] as const;
-const HISTORY_SKELETON_CLASS_NAMES = ['ml-auto w-8', 'w-24'] as const;
 const HISTORY_LOADING_ROW_IDS = [0, 1, 2, 3] as const;
 
-function ConfigHistorySection() {
-  const history = useConfigHistory();
+interface ConfigHistoryQueryResult {
+  data?: ConfigHistoryResponse;
+  isLoading: boolean;
+  isError: boolean;
+  isFetching: boolean;
+  refetch: () => unknown;
+}
+
+function ConfigHistorySection({
+  history,
+}: {
+  history: ConfigHistoryQueryResult;
+}) {
   return (
     <Section title="Saved Config History" subtitle="Last 20 saved revisions">
       <Card>
         <div
           data-testid="config-history-slot"
-          className="min-h-[173px] overflow-x-auto sm:min-h-[163px]"
+          className="min-h-[173px] sm:min-h-[163px]"
         >
-          <table className="min-w-[400px] w-full font-mono text-xs">
-            <thead className="table-header sticky top-0 z-10">
-              <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-right px-4 py-2">Rev</th>
-                <th className="text-left px-4 py-2">Saved</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.isLoading ? (
-                HISTORY_LOADING_ROW_IDS.map((id) => (
-                  <SkeletonRow
-                    key={id}
-                    cols={2}
-                    cellClassNames={HISTORY_CELL_CLASS_NAMES}
-                    skeletonClassNames={HISTORY_SKELETON_CLASS_NAMES}
-                  />
-                ))
-              ) : history.data?.history.length ? (
-                history.data.history.map((h) => (
-                  <tr key={h.revision} className="border-b border-row">
-                    <td className="px-4 py-2 text-right">{h.revision}</td>
-                    <td className="px-4 py-2">
-                      <RelativeTime
-                        ts={new Date(h.applied_at_unix_secs * 1000)}
-                      />
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td
-                    colSpan={2}
-                    className="px-4 py-12 text-center text-xs text-text-faint"
-                  >
-                    No saved config history available.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+          <div
+            className="grid grid-cols-[minmax(4rem,auto)_minmax(0,1fr)] border-b border-subtle px-4 py-2 text-[10px] uppercase tracking-wider text-text-faint"
+            role="row"
+          >
+            <span role="columnheader">Rev</span>
+            <span role="columnheader">Saved</span>
+          </div>
+          <div className="font-mono text-xs">
+            {history.isError ? (
+              <div
+                role="alert"
+                className="flex min-h-20 flex-col items-center justify-center gap-2 border-b border-row px-4 py-4 text-center"
+              >
+                <span className="text-text-muted">
+                  Saved config history could not be loaded. Restart status may
+                  be incomplete until this request succeeds.
+                </span>
+                <Button
+                  size="sm"
+                  loading={history.isFetching}
+                  onClick={() => void history.refetch()}
+                >
+                  Retry history
+                </Button>
+              </div>
+            ) : null}
+            {history.isLoading ? (
+              HISTORY_LOADING_ROW_IDS.map((id) => (
+                <div
+                  key={id}
+                  className="grid grid-cols-[minmax(4rem,auto)_minmax(0,1fr)] items-center gap-3 border-b border-row px-4 py-2"
+                >
+                  <Skeleton className="h-4 w-8" />
+                  <Skeleton className="h-4 w-24 max-w-full" />
+                </div>
+              ))
+            ) : history.data?.entries.length ? (
+              history.data.entries.map((entry) => (
+                <div
+                  key={entry.revision}
+                  className="grid grid-cols-[minmax(4rem,auto)_minmax(0,1fr)] items-center gap-3 border-b border-row px-4 py-2"
+                  role="row"
+                >
+                  <span role="cell">{entry.revision}</span>
+                  <span className="min-w-0" role="cell">
+                    <RelativeTime
+                      ts={new Date(entry.saved_at_unix_secs * 1000)}
+                    />
+                  </span>
+                </div>
+              ))
+            ) : !history.isError ? (
+              <div className="px-4 py-12 text-center text-xs text-text-faint">
+                No saved config history available.
+              </div>
+            ) : null}
+          </div>
         </div>
       </Card>
     </Section>

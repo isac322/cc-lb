@@ -17,6 +17,7 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
     let config = Config::default();
     AdminState {
         config_path: None,
+        startup_config_overrides: Default::default(),
         storage: Some(storage.clone()),
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),

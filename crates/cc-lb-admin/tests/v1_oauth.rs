@@ -56,6 +56,7 @@ impl Fixture {
         let config = test_config(oauth_addr);
         let state = AdminState {
             config_path: None,
+            startup_config_overrides: Default::default(),
             storage: Some(storage.clone()),
             key_store: Some(admin_test_common::key_store(storage.clone())),
             aead: Arc::clone(&aead),

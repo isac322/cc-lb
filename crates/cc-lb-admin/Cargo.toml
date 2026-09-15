@@ -50,6 +50,7 @@ cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 tracing.workspace = true
 http.workspace = true
 http-body-util.workspace = true
+figment.workspace = true
 hex.workspace = true
 humantime = "2.3"
 metrics.workspace = true
