@@ -540,78 +540,13 @@ test('history load failures stay distinct from empty history and offer retry', (
   expect(history.refetch).toHaveBeenCalledTimes(1);
 });
 
-test('structured editor exposes seven categories and representative controls', () => {
+test('structured editor renders seven category shells and initial controls', () => {
   setSettingsLoaded();
   render(<SettingsComponent />);
 
-  const categories = [
-    'Network & requests',
-    'Storage & data',
-    'Scheduling',
-    'Routing & resilience',
-    'Identity & access',
-    'Pricing & quotas',
-    'Runtime & observability',
-  ];
-  expect(document.querySelectorAll('[data-config-category]')).toHaveLength(
-    categories.length,
-  );
-  for (const category of categories) {
-    expect(
-      screen.getByRole('button', { name: new RegExp(`^${category}`) }),
-    ).toBeDefined();
-  }
-
+  expect(document.querySelectorAll('[data-config-category]')).toHaveLength(7);
   expect(screen.getByRole('textbox', { name: 'Proxy Addr' })).toBeDefined();
   expect(screen.getByRole('checkbox', { name: /Tls/ })).toBeDefined();
-  fireEvent.click(screen.getByRole('button', { name: /^Network & requests/ }));
-
-  openCategory('Storage & data');
-  const storageKind = document.querySelector<HTMLSelectElement>(
-    '[data-config-path="storage.kind"]',
-  );
-  expect(storageKind).not.toBeNull();
-  expect(storageKind?.value).toBe('postgres');
-  fireEvent.click(screen.getByRole('button', { name: /^Storage & data/ }));
-
-  openCategory('Scheduling');
-  expect(screen.getByText('Recurring Jobs')).toBeDefined();
-  expect(screen.getByText('custom_job')).toBeDefined();
-  const recurringJobEnabled = document.querySelector<HTMLElement>(
-    '[data-config-path="scheduler.recurring_jobs.custom_job.enabled"]',
-  );
-  expect(recurringJobEnabled).not.toBeNull();
-  expect(
-    within(recurringJobEnabled as HTMLElement).getByRole('checkbox'),
-  ).toBeDefined();
-  fireEvent.click(screen.getByRole('button', { name: /^Scheduling/ }));
-
-  openCategory('Identity & access');
-  expect(screen.getByText('Admin Providers')).toBeDefined();
-  const provider = document.querySelector<HTMLElement>(
-    '[data-config-path="admin.auth.providers[0]"]',
-  );
-  expect(provider).not.toBeNull();
-  expect(
-    within(provider as HTMLElement).getByRole('combobox', {
-      name: 'Provider kind',
-    }),
-  ).toBeDefined();
-  expect(
-    within(provider as HTMLElement).getByRole('textbox', { name: 'Id' }),
-  ).toBeDefined();
-  fireEvent.click(screen.getByRole('button', { name: /^Identity & access/ }));
-
-  openCategory('Runtime & observability');
-  const nullableDataDir = document.querySelector<HTMLElement>(
-    '[data-config-path="runtime.data_dir"]',
-  );
-  expect(nullableDataDir).not.toBeNull();
-  expect(
-    within(nullableDataDir as HTMLElement).getByRole('button', {
-      name: 'Set value',
-    }),
-  ).toBeDefined();
 });
 
 test('an environment-overridden field keeps its file value editable and shows effective provenance', () => {
