@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use cc_lb_storage_api::{
     BackendKind, CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow,
-    CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore,
-    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheKeepaliveTurnRow, CacheTtl,
-    MetaStore, RequestEvent, RequestEventProjections, RequestEventStore,
+    CacheKeepaliveSessionCursor, CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter,
+    CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore,
+    CacheKeepaliveTerminalReason, CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent,
+    RequestEventProjections, RequestEventStore, StorageError,
 };
+use sqlx::Row;
 use uuid::Uuid;
 
 const PRINCIPAL_ID: &str = "principal-a";
@@ -599,5 +601,664 @@ async fn batches_turn_reads_with_deduplication_principal_isolation_and_canonical
             .await
             .expect("empty session hash list returns no turns")
             .is_empty()
+    );
+}
+
+fn request_for_principal(
+    principal_id: &str,
+    session_key_hash: &str,
+    now_unix_secs: u64,
+) -> cc_lb_storage_api::CacheKeepaliveReplaceRequest {
+    let mut request = request(session_key_hash, now_unix_secs, "agent-in-turn");
+    request.principal_id = principal_id.to_owned();
+    request
+}
+
+async fn insert_decision(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    principal_id: &str,
+    source_ref_id: &str,
+    ts: u64,
+) {
+    let mut request_event = event(source_ref_id, ts);
+    request_event.principal_id = Some(principal_id.to_owned());
+    let mut projections = decision_projection(source_ref_id, ts, None);
+    projections.decision.principal_id = principal_id.to_owned();
+    storage
+        .append_request_event_with_projections(&request_event, &projections)
+        .await
+        .unwrap_or_else(|error| panic!("insert decision {source_ref_id}: {error}"));
+}
+
+async fn insert_turn_for_source(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    principal_id: &str,
+    source_ref_id: &str,
+) {
+    sqlx::query(
+        "INSERT INTO cache_keepalive_turns (
+            source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id,
+            model, input_tokens, output_tokens, cache_creation_input_tokens,
+            cache_creation_input_tokens_5m, cache_creation_input_tokens_1h,
+            cache_read_input_tokens, cost_micros, hit_miss, ts
+         ) VALUES (?, ?, ?, NULL, ?, ?, 1, 1, 0, 0, 0, 1, 1, 'hit', 1)",
+    )
+    .bind(source_ref_id)
+    .bind(format!("session-for-{source_ref_id}"))
+    .bind(principal_id)
+    .bind(UPSTREAM_ID.to_string())
+    .bind("claude-sonnet-4-5")
+    .execute(storage.pool())
+    .await
+    .unwrap_or_else(|error| panic!("insert turn {source_ref_id}: {error}"));
+}
+
+fn all_query(limit: u32) -> CacheKeepaliveSessionListQuery {
+    CacheKeepaliveSessionListQuery {
+        principal_id: PRINCIPAL_ID.to_owned(),
+        horizon_start_ms: None,
+        filter: CacheKeepaliveSessionFilter::All,
+        cursor: None,
+        limit,
+    }
+}
+
+fn prefixed_ids(page: &cc_lb_storage_api::CacheKeepaliveSessionPage) -> Vec<String> {
+    page.rows
+        .iter()
+        .map(|row| row.source.cursor_entry_id(&row.id))
+        .collect()
+}
+
+async fn legacy_ids_after_cursor(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    last_message_at_ms: i64,
+    entry_id: &str,
+) -> Vec<String> {
+    sqlx::query(
+        "WITH entries AS (
+            SELECT
+                'session:' || session_key_hash AS entry_id,
+                last_message_at_ms
+            FROM cache_keepalive_sessions
+            WHERE principal_id = ?
+            UNION ALL
+            SELECT
+                'decision:' || source_ref_id AS entry_id,
+                COALESCE(last_message_at_ms, ts * 1000) AS last_message_at_ms
+            FROM cache_keepalive_decisions
+            WHERE principal_id = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM cache_keepalive_turns turn_row
+                  WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id
+              )
+        )
+        SELECT entry_id
+        FROM entries
+        WHERE last_message_at_ms < ?
+           OR (last_message_at_ms = ? AND entry_id > ?)
+        ORDER BY last_message_at_ms DESC, entry_id ASC",
+    )
+    .bind(PRINCIPAL_ID)
+    .bind(PRINCIPAL_ID)
+    .bind(last_message_at_ms)
+    .bind(last_message_at_ms)
+    .bind(entry_id)
+    .fetch_all(storage.pool())
+    .await
+    .expect("run legacy cursor query")
+    .into_iter()
+    .map(|row| row.get("entry_id"))
+    .collect()
+}
+
+#[tokio::test]
+async fn direct_lookup_returns_exact_session() {
+    let (_temp_dir, storage) = storage().await;
+    let inserted = storage
+        .replace_from_real_request(&request("sess-100", 1_700_000_100, "agent-in-turn"))
+        .await
+        .expect("insert session");
+    storage
+        .reschedule_after_cache_hit(&cc_lb_storage_api::CacheKeepaliveHitRefreshRequest {
+            session_key_hash: inserted.session_key_hash,
+            generation: inserted.generation,
+            cache_anchor_at_unix_secs: 1_700_000_101,
+            run_at_unix_secs: 1_700_000_371,
+            expires_at_unix_secs: 1_700_000_401,
+            encrypted_payload: None,
+            now_unix_secs: 1_700_000_101,
+        })
+        .await
+        .expect("increment refresh count");
+
+    let item = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "sess-100")
+        .await
+        .expect("direct lookup")
+        .expect("session exists");
+    let legacy = storage
+        .list_cache_keepalive_sessions(&all_query(10))
+        .await
+        .expect("legacy-shaped list")
+        .rows
+        .into_iter()
+        .find(|row| row.id == "sess-100")
+        .expect("session in list");
+
+    assert_eq!(item, legacy);
+    assert_eq!(item.source, CacheKeepaliveSessionEntrySource::Session);
+    assert_eq!(item.refresh_count, Some(1));
+}
+
+#[tokio::test]
+async fn direct_lookup_returns_visible_decision() {
+    let (_temp_dir, storage) = storage().await;
+    insert_decision(&storage, PRINCIPAL_ID, "dec-200", 1_700_000_200).await;
+
+    let item = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "dec-200")
+        .await
+        .expect("direct lookup")
+        .expect("decision exists");
+
+    assert_eq!(item.source, CacheKeepaliveSessionEntrySource::Decision);
+    assert_eq!(item.id, "dec-200");
+    assert_eq!(item.last_message_at_ms, 1_700_000_200_000);
+    assert_eq!(item.refresh_count, None);
+    assert_eq!(item.status, None);
+}
+
+#[tokio::test]
+async fn direct_lookup_hides_decision_after_late_turn() {
+    let (_temp_dir, storage) = storage().await;
+    insert_decision(&storage, PRINCIPAL_ID, "dec-300", 1_700_000_300).await;
+    assert!(
+        storage
+            .get_cache_keepalive_list_item(PRINCIPAL_ID, "dec-300")
+            .await
+            .expect("lookup before turn")
+            .is_some()
+    );
+
+    insert_turn_for_source(&storage, PRINCIPAL_ID, "dec-300").await;
+
+    assert!(
+        storage
+            .get_cache_keepalive_list_item(PRINCIPAL_ID, "dec-300")
+            .await
+            .expect("lookup after turn")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn direct_lookup_uses_newest_collision_candidate() {
+    let (_temp_dir, storage) = storage().await;
+    storage
+        .replace_from_real_request(&request("clash-400", 2_000, "agent-in-turn"))
+        .await
+        .expect("insert collision session");
+    insert_decision(&storage, PRINCIPAL_ID, "clash-400", 1).await;
+
+    let session_newer = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "clash-400")
+        .await
+        .expect("lookup session-newer collision")
+        .expect("collision candidate");
+    assert_eq!(
+        session_newer.source,
+        CacheKeepaliveSessionEntrySource::Session
+    );
+
+    sqlx::query(
+        "UPDATE cache_keepalive_decisions SET last_message_at_ms = ? WHERE source_ref_id = ?",
+    )
+    .bind(3_000_000_i64)
+    .bind("clash-400")
+    .execute(storage.pool())
+    .await
+    .expect("make decision newer");
+    let decision_newer = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "clash-400")
+        .await
+        .expect("lookup decision-newer collision")
+        .expect("collision candidate");
+    assert_eq!(
+        decision_newer.source,
+        CacheKeepaliveSessionEntrySource::Decision
+    );
+}
+
+#[tokio::test]
+async fn direct_lookup_preserves_equal_timestamp_namespace_order() {
+    let (_temp_dir, storage) = storage().await;
+    storage
+        .replace_from_real_request(&request("clash-tie", 4_000, "agent-in-turn"))
+        .await
+        .expect("insert collision session");
+    insert_decision(&storage, PRINCIPAL_ID, "clash-tie", 4_000).await;
+
+    let item = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "clash-tie")
+        .await
+        .expect("lookup tied collision")
+        .expect("collision candidate");
+    let legacy = storage
+        .list_cache_keepalive_sessions(&all_query(10))
+        .await
+        .expect("list tied collision")
+        .rows
+        .into_iter()
+        .find(|row| row.id == "clash-tie")
+        .expect("legacy first match");
+
+    assert_eq!(item, legacy);
+    assert_eq!(item.source, CacheKeepaliveSessionEntrySource::Decision);
+}
+
+#[tokio::test]
+async fn direct_lookup_is_principal_scoped() {
+    let (_temp_dir, storage) = storage().await;
+    storage
+        .replace_from_real_request(&request_for_principal(
+            "principal-b",
+            "tenant-session",
+            5_000,
+        ))
+        .await
+        .expect("insert other-principal session");
+    insert_decision(&storage, "principal-b", "tenant-decision", 5_001).await;
+
+    for id in ["tenant-session", "tenant-decision"] {
+        assert!(
+            storage
+                .get_cache_keepalive_list_item(PRINCIPAL_ID, id)
+                .await
+                .expect("principal-a lookup")
+                .is_none()
+        );
+        assert!(
+            storage
+                .get_cache_keepalive_list_item("principal-b", id)
+                .await
+                .expect("principal-b lookup")
+                .is_some()
+        );
+    }
+}
+
+#[tokio::test]
+async fn summary_input_matches_legacy_full_scan() {
+    let (_temp_dir, storage) = storage().await;
+    for (id, ts) in [("summary-new", 7_000), ("summary-old", 6_000)] {
+        storage
+            .replace_from_real_request(&request(id, ts, "agent-in-turn"))
+            .await
+            .expect("insert summary session");
+    }
+    insert_decision(&storage, PRINCIPAL_ID, "recent-visible", 7_001).await;
+    insert_decision(&storage, PRINCIPAL_ID, "recent-joined", 7_002).await;
+    insert_turn_for_source(&storage, PRINCIPAL_ID, "recent-joined").await;
+    insert_decision(&storage, PRINCIPAL_ID, "old-visible", 5_000).await;
+
+    let summary = storage
+        .read_cache_keepalive_summary_input(PRINCIPAL_ID, 7_000_000)
+        .await
+        .expect("read narrow summary input");
+    let legacy_sessions = storage
+        .list_cache_keepalive_sessions(&all_query(100))
+        .await
+        .expect("read full visible list")
+        .rows
+        .into_iter()
+        .filter(|row| row.source == CacheKeepaliveSessionEntrySource::Session)
+        .collect::<Vec<_>>();
+
+    assert_eq!(summary.sessions, legacy_sessions);
+    assert_eq!(summary.recent_decisions, 1);
+}
+
+#[tokio::test]
+async fn summary_recent_decisions_applies_anti_join() {
+    let (_temp_dir, storage) = storage().await;
+    for id in [
+        "visible-a",
+        "visible-b",
+        "visible-c",
+        "joined-a",
+        "joined-b",
+    ] {
+        insert_decision(&storage, PRINCIPAL_ID, id, 8_000).await;
+    }
+    for id in ["joined-a", "joined-b"] {
+        insert_turn_for_source(&storage, PRINCIPAL_ID, id).await;
+    }
+
+    let summary = storage
+        .read_cache_keepalive_summary_input(PRINCIPAL_ID, 8_000_000)
+        .await
+        .expect("count visible decisions");
+    assert_eq!(summary.recent_decisions, 3);
+}
+
+#[tokio::test]
+async fn pagination_reaches_terminal_with_engine_parity() {
+    let (_temp_dir, storage) = storage().await;
+    for index in 0..85_u64 {
+        storage
+            .replace_from_real_request(&request(
+                &format!("many-page-{index:03}"),
+                20_000 - index / 3,
+                "agent-in-turn",
+            ))
+            .await
+            .expect("insert paginated session");
+    }
+
+    let expected = storage
+        .list_cache_keepalive_sessions(&all_query(100))
+        .await
+        .expect("read expected order")
+        .rows
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    let mut query = all_query(4);
+    let mut actual = Vec::new();
+    let mut page_count = 0;
+    loop {
+        let page = storage
+            .list_cache_keepalive_sessions(&query)
+            .await
+            .expect("read paginated page");
+        actual.extend(page.rows.into_iter().map(|row| row.id));
+        page_count += 1;
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        query.cursor = Some(cursor);
+    }
+
+    assert_eq!(actual, expected);
+    assert!(page_count > 20);
+}
+
+#[tokio::test]
+async fn single_source_filters_skip_unrelated_branch() {
+    let (_temp_dir, storage) = storage().await;
+    storage
+        .replace_from_real_request(&request("scheduled-safe", 9_000, "agent-in-turn"))
+        .await
+        .expect("insert scheduled session");
+    insert_decision(&storage, PRINCIPAL_ID, "decision-corrupt", 9_001).await;
+    sqlx::query(
+        "UPDATE cache_keepalive_decisions SET config_snapshot = '{' WHERE source_ref_id = ?",
+    )
+    .bind("decision-corrupt")
+    .execute(storage.pool())
+    .await
+    .expect("corrupt unrelated decision");
+
+    let scheduled = storage
+        .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+            filter: CacheKeepaliveSessionFilter::Scheduled,
+            ..all_query(10)
+        })
+        .await
+        .expect("session-only filter skips decision mapping");
+    assert_eq!(scheduled.rows[0].id, "scheduled-safe");
+
+    sqlx::query("UPDATE cache_keepalive_decisions SET config_snapshot = ? WHERE source_ref_id = ?")
+        .bind(serde_json::to_string(&snapshot()).expect("serialize snapshot"))
+        .bind("decision-corrupt")
+        .execute(storage.pool())
+        .await
+        .expect("restore decision snapshot");
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions SET config_snapshot = '{' WHERE session_key_hash = ?",
+    )
+    .bind("scheduled-safe")
+    .execute(storage.pool())
+    .await
+    .expect("corrupt unrelated session");
+    let not_tracked = storage
+        .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+            filter: CacheKeepaliveSessionFilter::NotTracked,
+            ..all_query(10)
+        })
+        .await
+        .expect("decision-only filter skips session mapping");
+    assert_eq!(not_tracked.rows[0].id, "decision-corrupt");
+}
+
+#[tokio::test]
+async fn cursor_mismatch_fails_before_query() {
+    let (_temp_dir, storage) = storage().await;
+    let error = storage
+        .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+            cursor: Some(CacheKeepaliveSessionCursor {
+                principal_id: "principal-b".to_owned(),
+                horizon_start_ms: None,
+                filter: CacheKeepaliveSessionFilter::All,
+                last_message_at_ms: 1,
+                entry_id: "session:x".to_owned(),
+            }),
+            ..all_query(1)
+        })
+        .await
+        .expect_err("reject mismatched cursor");
+    assert!(matches!(
+        error,
+        StorageError::InvalidInput {
+            ref field,
+            ref reason
+        } if field == "cache_keepalive_session_cursor"
+            && reason == "cursor does not match principal, horizon, or filter"
+    ));
+}
+
+#[tokio::test]
+async fn nullable_decision_timestamp_uses_ts_millis() {
+    let (_temp_dir, storage) = storage().await;
+    insert_decision(&storage, PRINCIPAL_ID, "nullable-ts", 1_700_000).await;
+    sqlx::query(
+        "UPDATE cache_keepalive_decisions SET last_message_at_ms = NULL WHERE source_ref_id = ?",
+    )
+    .bind("nullable-ts")
+    .execute(storage.pool())
+    .await
+    .expect("clear projected timestamp");
+
+    let list_item = storage
+        .list_cache_keepalive_sessions(&all_query(10))
+        .await
+        .expect("list nullable timestamp")
+        .rows
+        .into_iter()
+        .find(|row| row.id == "nullable-ts")
+        .expect("nullable decision in list");
+    let detail_item = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "nullable-ts")
+        .await
+        .expect("detail nullable timestamp")
+        .expect("nullable decision detail");
+    let summary = storage
+        .read_cache_keepalive_summary_input(PRINCIPAL_ID, 1_700_000_000)
+        .await
+        .expect("summary nullable timestamp");
+
+    assert_eq!(list_item.last_message_at_ms, 1_700_000_000);
+    assert_eq!(detail_item, list_item);
+    assert_eq!(summary.recent_decisions, 1);
+}
+
+#[tokio::test]
+async fn list_boundaries_preserve_invalid_input_contract() {
+    let (_temp_dir, storage) = storage().await;
+    for index in 0..3 {
+        storage
+            .replace_from_real_request(&request(
+                &format!("boundary-{index}"),
+                10_000 + index,
+                "agent-in-turn",
+            ))
+            .await
+            .expect("insert boundary session");
+    }
+
+    let empty = storage
+        .list_cache_keepalive_sessions(&all_query(0))
+        .await
+        .expect("zero limit");
+    assert!(empty.rows.is_empty());
+    assert!(empty.next_cursor.is_none());
+    for limit in [1, 50, 100, u32::MAX] {
+        let page = storage
+            .list_cache_keepalive_sessions(&all_query(limit))
+            .await
+            .expect("valid direct storage limit");
+        assert_eq!(page.rows.len(), (limit as usize).min(3));
+    }
+
+    let horizon_error = storage
+        .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+            horizon_start_ms: Some(u64::MAX),
+            ..all_query(1)
+        })
+        .await
+        .expect_err("oversized horizon");
+    assert!(matches!(
+        horizon_error,
+        StorageError::InvalidInput { ref field, .. }
+            if field == "cache_keepalive_horizon_start_ms"
+    ));
+    let cursor_error = storage
+        .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+            cursor: Some(CacheKeepaliveSessionCursor {
+                principal_id: PRINCIPAL_ID.to_owned(),
+                horizon_start_ms: None,
+                filter: CacheKeepaliveSessionFilter::All,
+                last_message_at_ms: u64::MAX,
+                entry_id: "session:x".to_owned(),
+            }),
+            ..all_query(1)
+        })
+        .await
+        .expect_err("oversized cursor timestamp");
+    assert!(matches!(
+        cursor_error,
+        StorageError::InvalidInput { ref field, .. }
+            if field == "cache_keepalive_session_cursor"
+    ));
+}
+
+#[tokio::test]
+async fn selected_corruption_is_not_silently_dropped() {
+    let (_temp_dir, storage) = storage().await;
+    storage
+        .replace_from_real_request(&request("corrupt-session", 11_000, "agent-in-turn"))
+        .await
+        .expect("insert corruptible session");
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions SET config_snapshot = '{' WHERE session_key_hash = ?",
+    )
+    .bind("corrupt-session")
+    .execute(storage.pool())
+    .await
+    .expect("corrupt selected session");
+
+    for error in [
+        storage
+            .get_cache_keepalive_list_item(PRINCIPAL_ID, "corrupt-session")
+            .await
+            .expect_err("direct lookup reports corruption"),
+        storage
+            .list_cache_keepalive_sessions(&all_query(10))
+            .await
+            .expect_err("list reports corruption"),
+        storage
+            .read_cache_keepalive_summary_input(PRINCIPAL_ID, 0)
+            .await
+            .expect_err("summary reports corruption"),
+    ] {
+        assert!(matches!(error, StorageError::Corrupted { .. }));
+    }
+}
+
+#[tokio::test]
+async fn cursor_entry_id_preserves_legacy_sql_comparison() {
+    let (_temp_dir, storage) = storage().await;
+    for id in ["a", "é", "Ω", "session::x"] {
+        storage
+            .replace_from_real_request(&request(id, 12_000, "agent-in-turn"))
+            .await
+            .expect("insert collation session");
+    }
+    for id in ["b", "é-decision", "Ω-decision"] {
+        insert_decision(&storage, PRINCIPAL_ID, id, 12_000).await;
+    }
+
+    for entry_id in ["x", "session::x", "decision:é", "Ω"] {
+        let candidate = storage
+            .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+                cursor: Some(CacheKeepaliveSessionCursor {
+                    principal_id: PRINCIPAL_ID.to_owned(),
+                    horizon_start_ms: None,
+                    filter: CacheKeepaliveSessionFilter::All,
+                    last_message_at_ms: 12_000_000,
+                    entry_id: entry_id.to_owned(),
+                }),
+                ..all_query(100)
+            })
+            .await
+            .expect("candidate cursor comparison");
+        let legacy = legacy_ids_after_cursor(&storage, 12_000_000, entry_id).await;
+        assert_eq!(prefixed_ids(&candidate), legacy, "cursor {entry_id}");
+    }
+}
+
+#[tokio::test]
+async fn list_and_detail_match_legacy_on_same_database_collation() {
+    let (_temp_dir, storage) = storage().await;
+    storage
+        .replace_from_real_request(&request("collation-clash", 13_000, "agent-in-turn"))
+        .await
+        .expect("insert collision session");
+    insert_decision(&storage, PRINCIPAL_ID, "collation-clash", 13_000).await;
+
+    let first = storage
+        .list_cache_keepalive_sessions(&all_query(1))
+        .await
+        .expect("read first collision row");
+    let detail = storage
+        .get_cache_keepalive_list_item(PRINCIPAL_ID, "collation-clash")
+        .await
+        .expect("read collision detail")
+        .expect("collision detail exists");
+    assert_eq!(first.rows[0], detail);
+    assert_eq!(detail.source, CacheKeepaliveSessionEntrySource::Decision);
+
+    let second = storage
+        .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
+            cursor: first.next_cursor.clone(),
+            ..all_query(1)
+        })
+        .await
+        .expect("read second collision row");
+    assert_eq!(
+        second.rows[0].source,
+        CacheKeepaliveSessionEntrySource::Session
+    );
+    assert!(second.next_cursor.is_none());
+
+    let collations = sqlx::query("PRAGMA collation_list")
+        .fetch_all(storage.pool())
+        .await
+        .expect("read SQLite collations");
+    assert!(
+        collations
+            .iter()
+            .any(|row| row.get::<String, _>("name") == "BINARY")
     );
 }

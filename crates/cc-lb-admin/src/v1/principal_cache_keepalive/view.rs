@@ -6,10 +6,9 @@ mod wire;
 use crate::cache_keepalive_view::{CacheKeepaliveActivitySource, derive_activity_view};
 use cc_lb_pricing::PriceCatalog;
 use cc_lb_storage_api::{
-    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListItem,
-    CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore, CacheKeepaliveSessionRecord,
-    CacheKeepaliveSessionStatus, CacheKeepaliveTurnRecord, Storage, StorageError, StorageResult,
-    UpstreamStore,
+    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem,
+    CacheKeepaliveSessionReadStore, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
+    CacheKeepaliveTurnRecord, Storage, StorageError, StorageResult, UpstreamStore,
 };
 use uuid::Uuid;
 
@@ -20,8 +19,7 @@ pub(crate) use wire::{
     CacheKeepaliveSummaryResponse,
 };
 
-const SUMMARY_PAGE_LIMIT: u32 = 1_000;
-const FIVE_MINUTES_MS: u64 = 5 * 60 * 1_000;
+pub(super) const FIVE_MINUTES_MS: u64 = 5 * 60 * 1_000;
 
 pub(super) struct CacheKeepaliveViewContext<'a> {
     pub(super) storage: &'a dyn Storage,
@@ -70,32 +68,6 @@ impl CacheKeepaliveActivityBatch {
             None => &[],
         };
         Ok(turns)
-    }
-}
-
-pub(super) async fn list_all(
-    storage: &dyn Storage,
-    principal_id: &str,
-) -> StorageResult<Vec<CacheKeepaliveSessionListItem>> {
-    let mut cursor = None;
-    let mut items = Vec::new();
-    loop {
-        let page = CacheKeepaliveSessionReadStore::list_cache_keepalive_sessions(
-            storage,
-            &CacheKeepaliveSessionListQuery {
-                principal_id: principal_id.to_owned(),
-                horizon_start_ms: None,
-                filter: CacheKeepaliveSessionFilter::All,
-                cursor,
-                limit: SUMMARY_PAGE_LIMIT,
-            },
-        )
-        .await?;
-        items.extend(page.rows);
-        let Some(next_cursor) = page.next_cursor else {
-            return Ok(items);
-        };
-        cursor = Some(next_cursor);
     }
 }
 
