@@ -2,10 +2,14 @@ use std::sync::Arc;
 
 use crate::config_admin_common;
 
+#[path = "cache_keepalive_contracts/cursor_window.rs"]
+mod cursor_window;
 #[path = "cache_keepalive_contracts/empty.rs"]
 mod empty;
 #[path = "cache_keepalive_contracts/fixtures.rs"]
 mod fixtures;
+#[path = "cache_keepalive_contracts/read_equivalence.rs"]
+mod read_equivalence;
 
 use axum::http::StatusCode;
 use cc_lb_clock::{ClockHandle, TestClock};

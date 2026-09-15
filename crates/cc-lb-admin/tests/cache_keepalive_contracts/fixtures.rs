@@ -1,7 +1,8 @@
 use cc_lb_storage_api::{
     CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow, CacheKeepaliveHitRefreshRequest,
-    CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
-    CacheKeepaliveTurnRow, CacheTtl, RequestEvent, RequestEventProjections, RequestEventStore,
+    CacheKeepaliveProjectionStore, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore,
+    CacheKeepaliveTerminalReason, CacheKeepaliveTurnRow, CacheTtl, RequestEvent,
+    RequestEventProjections, RequestEventStore,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -240,6 +241,100 @@ pub async fn seed_cache_keepalive_contract_rows(
         )
         .await
         .expect("seed not tracked cache keepalive decision");
+}
+pub fn cache_keepalive_replace_request(
+    principal_id: &str,
+    session_key_hash: &str,
+    cache_anchor_at_unix_secs: u64,
+    expires_at_unix_secs: u64,
+) -> CacheKeepaliveReplaceRequest {
+    CacheKeepaliveReplaceRequest {
+        session_key_hash: session_key_hash.to_owned(),
+        principal_id: principal_id.to_owned(),
+        accounting_key_id: None,
+        upstream_id: UPSTREAM_ID,
+        cache_anchor_at_unix_secs,
+        ttl: CacheTtl::Ttl5m,
+        run_at_unix_secs: cache_anchor_at_unix_secs.saturating_add(270),
+        expires_at_unix_secs,
+        encrypted_payload: vec![1],
+        display_reason: format!("fixture {session_key_hash}"),
+        config_snapshot: config_snapshot(),
+        now_unix_secs: cache_anchor_at_unix_secs,
+    }
+}
+
+pub fn cache_keepalive_decision(
+    principal_id: &str,
+    source_ref_id: &str,
+    last_message_at_ms: u64,
+) -> CacheKeepaliveDecisionRow {
+    CacheKeepaliveDecisionRow {
+        source_ref_id: source_ref_id.to_owned(),
+        principal_id: principal_id.to_owned(),
+        session_key_hash: None,
+        upstream_id: UPSTREAM_ID,
+        decision: "not_tracked".to_owned(),
+        reason: format!("fixture decision {source_ref_id}"),
+        error: None,
+        generation: 1,
+        ttl: CacheTtl::Ttl5m,
+        config_snapshot: Some(config_snapshot()),
+        last_message_at_ms,
+        ts: last_message_at_ms / 1_000,
+    }
+}
+
+pub async fn seed_cache_keepalive_decision(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    principal_id: &str,
+    source_ref_id: &str,
+    last_message_at_ms: u64,
+) {
+    storage
+        .append_cache_keepalive_decision(&cache_keepalive_decision(
+            principal_id,
+            source_ref_id,
+            last_message_at_ms,
+        ))
+        .await
+        .expect("seed cache keepalive decision");
+}
+
+pub async fn seed_cache_keepalive_turn(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    principal_id: &str,
+    session_key_hash: &str,
+    source_ref_id: &str,
+    ts: u64,
+    model: &str,
+    cache_read_input_tokens: u64,
+) {
+    sqlx::query(
+        "INSERT INTO cache_keepalive_turns (
+            source_ref_id, session_key_hash, principal_id, accounting_key_id, upstream_id, model,
+            input_tokens, output_tokens, cache_creation_input_tokens,
+            cache_creation_input_tokens_5m, cache_creation_input_tokens_1h,
+            cache_read_input_tokens, cost_micros, hit_miss, ts
+         ) VALUES (?, ?, ?, NULL, ?, ?, 0, 0, 0, 0, 0, ?, 0, 'hit', ?)",
+    )
+    .bind(source_ref_id)
+    .bind(session_key_hash)
+    .bind(principal_id)
+    .bind(UPSTREAM_ID.to_string())
+    .bind(model)
+    .bind(i64::try_from(cache_read_input_tokens).expect("fixture tokens fit i64"))
+    .bind(i64::try_from(ts).expect("fixture timestamp fits i64"))
+    .execute(storage.pool())
+    .await
+    .expect("seed cache keepalive turn");
+}
+
+pub fn principal_create_body_named(name: &str, enabled: bool) -> Value {
+    let mut body = principal_create_body();
+    body["name"] = json!(name);
+    body["cache_keepalive"]["enabled"] = json!(enabled);
+    body
 }
 
 pub fn principal_create_body() -> Value {

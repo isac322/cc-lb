@@ -121,6 +121,12 @@ impl CacheKeepaliveSessionListItem {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheKeepaliveSummaryInput {
+    pub sessions: Vec<CacheKeepaliveSessionListItem>,
+    pub recent_decisions: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheKeepaliveSessionPage {
     pub rows: Vec<CacheKeepaliveSessionListItem>,
@@ -168,6 +174,18 @@ pub trait CacheKeepaliveSessionReadStore: Send + Sync {
         &self,
         query: &CacheKeepaliveSessionListQuery,
     ) -> StorageResult<CacheKeepaliveSessionPage>;
+
+    async fn read_cache_keepalive_summary_input(
+        &self,
+        principal_id: &str,
+        cutoff_ms: u64,
+    ) -> StorageResult<CacheKeepaliveSummaryInput>;
+
+    async fn get_cache_keepalive_list_item(
+        &self,
+        principal_id: &str,
+        id: &str,
+    ) -> StorageResult<Option<CacheKeepaliveSessionListItem>>;
 
     async fn get_cache_keepalive_session_for_principal(
         &self,

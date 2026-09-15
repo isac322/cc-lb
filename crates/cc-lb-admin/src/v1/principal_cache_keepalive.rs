@@ -16,7 +16,7 @@ use crate::AdminState;
 use self::{
     query::parse_query,
     view::{
-        CacheKeepaliveViewContext, detail_for_item, list_all, list_upstream_names,
+        CacheKeepaliveViewContext, FIVE_MINUTES_MS, detail_for_item, list_upstream_names,
         load_activity_batch, row_for_item, summary_for_items,
     },
 };
@@ -69,8 +69,14 @@ async fn list_cache_keepalive(
         now_ms,
         max_attempts,
     };
-    let summary_items = match list_all(storage, &principal_id).await {
-        Ok(items) => items,
+    let summary_input = match CacheKeepaliveSessionReadStore::read_cache_keepalive_summary_input(
+        storage,
+        &principal_id,
+        now_ms.saturating_sub(FIVE_MINUTES_MS),
+    )
+    .await
+    {
+        Ok(input) => input,
         Err(error) => return storage_error(error),
     };
     let page = if query.limit == 0 {
@@ -83,22 +89,26 @@ async fn list_cache_keepalive(
             Err(error) => return storage_error(error),
         }
     };
-    let activity_items = summary_items
+    let activity_items = summary_input
+        .sessions
         .iter()
         .chain(page.as_ref().into_iter().flat_map(|page| page.rows.iter()));
     let activity_batch = match load_activity_batch(storage, &principal_id, activity_items).await {
         Ok(batch) => batch,
         Err(error) => return storage_error(error),
     };
-    let summary = match summary_for_items(
+    let mut summary = match summary_for_items(
         context.catalog,
         context.now_ms,
-        &summary_items,
+        &summary_input.sessions,
         &activity_batch,
     ) {
         Ok(summary) => summary,
         Err(error) => return storage_error(error),
     };
+    summary.sessions_last_5m = summary
+        .sessions_last_5m
+        .saturating_add(summary_input.recent_decisions);
     let Some(page) = page else {
         return Json(view::CacheKeepaliveListResponse {
             summary,
@@ -119,7 +129,7 @@ async fn list_cache_keepalive(
         }
     }
     let next_cursor = match page.next_cursor {
-        Some(cursor) => match query::encode_cursor(&cursor) {
+        Some(cursor) => match query::encode_cursor(&cursor, query.horizon) {
             Ok(cursor) => Some(cursor),
             Err(error) => return error.into_response(),
         },
@@ -144,12 +154,18 @@ async fn get_cache_keepalive_detail(
         Ok(principal) => principal,
         Err(response) => return response,
     };
-    let items = match list_all(storage, &principal_id).await {
-        Ok(items) => items,
+    let item = match CacheKeepaliveSessionReadStore::get_cache_keepalive_list_item(
+        storage,
+        &principal_id,
+        &session_or_decision_id,
+    )
+    .await
+    {
+        Ok(Some(item)) => item,
+        Ok(None) => {
+            return error_response(StatusCode::NOT_FOUND, "unknown_cache_keepalive_entry");
+        }
         Err(error) => return storage_error(error),
-    };
-    let Some(item) = items.iter().find(|item| item.id == session_or_decision_id) else {
-        return error_response(StatusCode::NOT_FOUND, "unknown_cache_keepalive_entry");
     };
     let now_ms = cc_lb_clock::unix_secs(state.clock.now()).saturating_mul(1_000);
     let max_attempts = principal
@@ -162,7 +178,7 @@ async fn get_cache_keepalive_detail(
         now_ms,
         max_attempts,
     };
-    match detail_for_item(&context, item).await {
+    match detail_for_item(&context, &item).await {
         Ok(detail) => Json(detail).into_response(),
         Err(error) => storage_error(error),
     }

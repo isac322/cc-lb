@@ -5,9 +5,9 @@ use super::{
 use crate::{SqliteStorage, map_sqlx_error};
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    CacheKeepaliveDecisionRecord, CacheKeepaliveSessionCursor, CacheKeepaliveSessionListQuery,
-    CacheKeepaliveSessionPage, CacheKeepaliveSessionReadStore, CacheKeepaliveTurnRecord,
-    StorageResult,
+    CacheKeepaliveDecisionRecord, CacheKeepaliveSessionCursor, CacheKeepaliveSessionFilter,
+    CacheKeepaliveSessionListQuery, CacheKeepaliveSessionPage, CacheKeepaliveSessionReadStore,
+    CacheKeepaliveSummaryInput, CacheKeepaliveTurnRecord, StorageError, StorageResult,
 };
 use sqlx::{QueryBuilder, Sqlite};
 
@@ -16,75 +16,51 @@ use sqlx::{QueryBuilder, Sqlite};
 // so sorted input makes concatenated chunk results globally ordered.
 const SESSION_HASH_BATCH_SIZE: usize = 900;
 
-const LIST_SQL: &str = "
-WITH entries AS (
-    SELECT
-        'session' AS entry_source,
-        'session:' || session_key_hash AS entry_id,
-        session_key_hash,
-        principal_id,
-        upstream_id,
-        last_message_at_ms,
-        ttl,
-        generation,
-        refresh_count,
-        status,
-        enqueue_state,
-        terminal_reason,
-        NULL AS decision,
-        CASE terminal_reason
-            WHEN 'max_refreshes' THEN 'max renewals reached'
-            WHEN 'max_duration' THEN 'max duration reached (4h)'
-            WHEN 'expired' THEN 'TTL expired before follow-up'
-            WHEN 'dispatch_error' THEN 'renewal dispatch unavailable'
-            ELSE display_reason
-        END AS reason,
-        error,
-        config_snapshot
-    FROM cache_keepalive_sessions
-    WHERE principal_id = ?
-    UNION ALL
-    SELECT
-        'decision' AS entry_source,
-        'decision:' || source_ref_id AS entry_id,
-        session_key_hash,
-        principal_id,
-        upstream_id,
-        COALESCE(last_message_at_ms, ts * 1000) AS last_message_at_ms,
-        ttl,
-        generation,
-        NULL AS refresh_count,
-        NULL AS status,
-        NULL AS enqueue_state,
-        NULL AS terminal_reason,
-        decision,
-        reason,
-        error,
-        config_snapshot
-    FROM cache_keepalive_decisions
-    WHERE principal_id = ?
-      AND NOT EXISTS (
-          SELECT 1 FROM cache_keepalive_turns turn_row
-          WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id
-      )
-)
-SELECT *
-FROM entries
-WHERE (? IS NULL OR last_message_at_ms >= ?)
-  AND CASE ?
-      WHEN 'all' THEN 1
-      WHEN 'renewed' THEN entry_source = 'session' AND status = 'active' AND refresh_count > 0
-      WHEN 'scheduled' THEN entry_source = 'session' AND status = 'active' AND refresh_count = 0
-      WHEN 'capped' THEN entry_source = 'session' AND terminal_reason IN ('max_refreshes', 'max_duration')
-      WHEN 'expired' THEN entry_source = 'session' AND terminal_reason = 'expired'
-      WHEN 'not_tracked' THEN entry_source = 'decision' AND decision = 'not_tracked'
-      WHEN 'error' THEN error IS NOT NULL
-      ELSE 0
-  END
-  AND (? IS NULL OR last_message_at_ms < ? OR (last_message_at_ms = ? AND entry_id > ?))
-ORDER BY last_message_at_ms DESC, entry_id ASC
-LIMIT ?
-";
+const SESSION_ENTRY_SELECT: &str = "
+SELECT
+    'session' AS entry_source,
+    'session:' || session_key_hash AS entry_id,
+    session_key_hash,
+    principal_id,
+    upstream_id,
+    last_message_at_ms,
+    ttl,
+    generation,
+    refresh_count,
+    status,
+    enqueue_state,
+    terminal_reason,
+    NULL AS decision,
+    CASE terminal_reason
+        WHEN 'max_refreshes' THEN 'max renewals reached'
+        WHEN 'max_duration' THEN 'max duration reached (4h)'
+        WHEN 'expired' THEN 'TTL expired before follow-up'
+        WHEN 'dispatch_error' THEN 'renewal dispatch unavailable'
+        ELSE display_reason
+    END AS reason,
+    error,
+    config_snapshot
+FROM cache_keepalive_sessions";
+
+const DECISION_ENTRY_SELECT: &str = "
+SELECT
+    'decision' AS entry_source,
+    'decision:' || source_ref_id AS entry_id,
+    session_key_hash,
+    principal_id,
+    upstream_id,
+    COALESCE(last_message_at_ms, ts * 1000) AS last_message_at_ms,
+    ttl,
+    generation,
+    NULL AS refresh_count,
+    NULL AS status,
+    NULL AS enqueue_state,
+    NULL AS terminal_reason,
+    decision,
+    reason,
+    error,
+    config_snapshot
+FROM cache_keepalive_decisions";
 
 #[async_trait]
 impl CacheKeepaliveSessionReadStore for SqliteStorage {
@@ -99,42 +75,82 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
                 next_cursor: None,
             });
         }
-        let limit = usize::try_from(query.limit).map_err(|_| {
-            cc_lb_storage_api::StorageError::InvalidInput {
-                field: "cache_keepalive_limit".to_owned(),
-                reason: "value cannot be represented as usize".to_owned(),
-            }
+        let limit = usize::try_from(query.limit).map_err(|_| StorageError::InvalidInput {
+            field: "cache_keepalive_limit".to_owned(),
+            reason: "value cannot be represented as usize".to_owned(),
         })?;
-
         let horizon_start_ms = query
             .horizon_start_ms
-            .map(i64::try_from)
-            .transpose()
-            .map_err(|_| cc_lb_storage_api::StorageError::InvalidInput {
-                field: "cache_keepalive_horizon_start_ms".to_owned(),
-                reason: "value exceeds i64::MAX".to_owned(),
-            })?;
+            .map(|value| {
+                u64_to_i64(
+                    value,
+                    "cache_keepalive_horizon_start_ms",
+                    "value exceeds i64::MAX",
+                )
+            })
+            .transpose()?;
         let cursor_last_message_at_ms = query
             .cursor
             .as_ref()
-            .map(|cursor| i64::try_from(cursor.last_message_at_ms))
-            .transpose()
-            .map_err(|_| cc_lb_storage_api::StorageError::InvalidInput {
-                field: "cache_keepalive_session_cursor".to_owned(),
-                reason: "last_message_at_ms exceeds i64::MAX".to_owned(),
-            })?;
-        let cursor_entry_id = query.cursor.as_ref().map(|cursor| cursor.entry_id.as_str());
-        let rows = sqlx::query(LIST_SQL)
-            .bind(&query.principal_id)
-            .bind(&query.principal_id)
-            .bind(horizon_start_ms)
-            .bind(horizon_start_ms)
-            .bind(query.filter.as_str())
-            .bind(cursor_last_message_at_ms)
-            .bind(cursor_last_message_at_ms)
-            .bind(cursor_last_message_at_ms)
-            .bind(cursor_entry_id)
-            .bind(i64::from(query.limit.saturating_add(1)))
+            .map(|cursor| {
+                u64_to_i64(
+                    cursor.last_message_at_ms,
+                    "cache_keepalive_session_cursor",
+                    "last_message_at_ms exceeds i64::MAX",
+                )
+            })
+            .transpose()?;
+        let branch_limit = i64::from(query.limit.saturating_add(1));
+
+        let include_sessions = !matches!(query.filter, CacheKeepaliveSessionFilter::NotTracked);
+        let include_decisions = matches!(
+            query.filter,
+            CacheKeepaliveSessionFilter::All
+                | CacheKeepaliveSessionFilter::NotTracked
+                | CacheKeepaliveSessionFilter::Error
+        );
+        let mut builder = QueryBuilder::<Sqlite>::new("WITH ");
+        if include_sessions {
+            builder.push("session_entries AS (");
+            push_session_branch(
+                &mut builder,
+                query,
+                horizon_start_ms,
+                cursor_last_message_at_ms,
+                branch_limit,
+            );
+            builder.push(")");
+        }
+        if include_decisions {
+            if include_sessions {
+                builder.push(", ");
+            }
+            builder.push("decision_entries AS (");
+            push_decision_branch(
+                &mut builder,
+                query,
+                horizon_start_ms,
+                cursor_last_message_at_ms,
+                branch_limit,
+            );
+            builder.push(")");
+        }
+        builder.push(" SELECT * FROM (");
+        if include_sessions {
+            builder.push("SELECT * FROM session_entries");
+        }
+        if include_sessions && include_decisions {
+            builder.push(" UNION ALL ");
+        }
+        if include_decisions {
+            builder.push("SELECT * FROM decision_entries");
+        }
+        builder
+            .push(") entries ORDER BY last_message_at_ms DESC, entry_id ASC LIMIT ")
+            .push_bind(branch_limit);
+
+        let rows = builder
+            .build()
             .fetch_all(self.pool())
             .await
             .map_err(map_sqlx_error)?;
@@ -157,6 +173,89 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             })
             .flatten();
         Ok(CacheKeepaliveSessionPage { rows, next_cursor })
+    }
+
+    async fn read_cache_keepalive_summary_input(
+        &self,
+        principal_id: &str,
+        cutoff_ms: u64,
+    ) -> StorageResult<CacheKeepaliveSummaryInput> {
+        let cutoff_ms = u64_to_i64(
+            cutoff_ms,
+            "cache_keepalive_summary_cutoff_ms",
+            "value exceeds i64::MAX",
+        )?;
+        let mut sessions_query = QueryBuilder::<Sqlite>::new(SESSION_ENTRY_SELECT);
+        sessions_query
+            .push(" WHERE principal_id = ")
+            .push_bind(principal_id)
+            .push(" ORDER BY last_message_at_ms DESC, entry_id ASC");
+        let sessions = sessions_query
+            .build()
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_sqlx_error)?
+            .into_iter()
+            .map(list_item_from_row)
+            .collect::<StorageResult<Vec<_>>>()?;
+
+        let recent_decisions = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM cache_keepalive_decisions
+             WHERE principal_id = ?
+               AND COALESCE(last_message_at_ms, ts * 1000) >= ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM cache_keepalive_turns turn_row
+                   WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id
+               )",
+        )
+        .bind(principal_id)
+        .bind(cutoff_ms)
+        .fetch_one(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+
+        Ok(CacheKeepaliveSummaryInput {
+            sessions,
+            recent_decisions: i64_to_u64_count(recent_decisions)?,
+        })
+    }
+
+    async fn get_cache_keepalive_list_item(
+        &self,
+        principal_id: &str,
+        id: &str,
+    ) -> StorageResult<Option<cc_lb_storage_api::CacheKeepaliveSessionListItem>> {
+        let mut builder = QueryBuilder::<Sqlite>::new("WITH candidates AS (");
+        builder
+            .push(SESSION_ENTRY_SELECT)
+            .push(" WHERE principal_id = ")
+            .push_bind(principal_id)
+            .push(" AND session_key_hash = ")
+            .push_bind(id)
+            .push(" UNION ALL ")
+            .push(DECISION_ENTRY_SELECT)
+            .push(" WHERE principal_id = ")
+            .push_bind(principal_id)
+            .push(" AND source_ref_id = ")
+            .push_bind(id)
+            .push(
+                " AND NOT EXISTS (
+                    SELECT 1 FROM cache_keepalive_turns turn_row
+                    WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id
+                )
+                )
+                SELECT * FROM candidates
+                ORDER BY last_message_at_ms DESC, entry_id ASC
+                LIMIT 1",
+            );
+        builder
+            .build()
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_sqlx_error)?
+            .map(list_item_from_row)
+            .transpose()
     }
 
     async fn get_cache_keepalive_session_for_principal(
@@ -250,4 +349,125 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
         .map_err(map_sqlx_error)?;
         row.map(decision_from_row).transpose()
     }
+}
+
+fn push_session_branch(
+    builder: &mut QueryBuilder<Sqlite>,
+    query: &CacheKeepaliveSessionListQuery,
+    horizon_start_ms: Option<i64>,
+    cursor_last_message_at_ms: Option<i64>,
+    limit: i64,
+) {
+    builder
+        .push(SESSION_ENTRY_SELECT)
+        .push(" WHERE principal_id = ")
+        .push_bind(&query.principal_id);
+    if let Some(horizon_start_ms) = horizon_start_ms {
+        builder
+            .push(" AND last_message_at_ms >= ")
+            .push_bind(horizon_start_ms);
+    }
+    match query.filter {
+        CacheKeepaliveSessionFilter::All => {}
+        CacheKeepaliveSessionFilter::Renewed => {
+            builder.push(" AND status = 'active' AND refresh_count > 0");
+        }
+        CacheKeepaliveSessionFilter::Scheduled => {
+            builder.push(" AND status = 'active' AND refresh_count = 0");
+        }
+        CacheKeepaliveSessionFilter::Capped => {
+            builder.push(" AND terminal_reason IN ('max_refreshes', 'max_duration')");
+        }
+        CacheKeepaliveSessionFilter::Expired => {
+            builder.push(" AND terminal_reason = 'expired'");
+        }
+        CacheKeepaliveSessionFilter::NotTracked => unreachable!("session branch is skipped"),
+        CacheKeepaliveSessionFilter::Error => {
+            builder.push(" AND error IS NOT NULL");
+        }
+    }
+    if let (Some(cursor), Some(cursor_last_message_at_ms)) =
+        (query.cursor.as_ref(), cursor_last_message_at_ms)
+    {
+        builder
+            .push(" AND last_message_at_ms <= ")
+            .push_bind(cursor_last_message_at_ms)
+            .push(" AND (last_message_at_ms < ")
+            .push_bind(cursor_last_message_at_ms)
+            .push(" OR (last_message_at_ms = ")
+            .push_bind(cursor_last_message_at_ms)
+            .push(" AND 'session:' || session_key_hash > ")
+            .push_bind(cursor.entry_id.as_str())
+            .push("))");
+    }
+    builder
+        .push(" ORDER BY last_message_at_ms DESC, entry_id ASC LIMIT ")
+        .push_bind(limit);
+}
+
+fn push_decision_branch(
+    builder: &mut QueryBuilder<Sqlite>,
+    query: &CacheKeepaliveSessionListQuery,
+    horizon_start_ms: Option<i64>,
+    cursor_last_message_at_ms: Option<i64>,
+    limit: i64,
+) {
+    builder
+        .push(DECISION_ENTRY_SELECT)
+        .push(" WHERE principal_id = ")
+        .push_bind(&query.principal_id)
+        .push(
+            " AND NOT EXISTS (
+                SELECT 1 FROM cache_keepalive_turns turn_row
+                WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id
+            )",
+        );
+    if let Some(horizon_start_ms) = horizon_start_ms {
+        builder
+            .push(" AND COALESCE(last_message_at_ms, ts * 1000) >= ")
+            .push_bind(horizon_start_ms);
+    }
+    match query.filter {
+        CacheKeepaliveSessionFilter::All => {}
+        CacheKeepaliveSessionFilter::NotTracked => {
+            builder.push(" AND decision = 'not_tracked'");
+        }
+        CacheKeepaliveSessionFilter::Error => {
+            builder.push(" AND error IS NOT NULL");
+        }
+        CacheKeepaliveSessionFilter::Renewed
+        | CacheKeepaliveSessionFilter::Scheduled
+        | CacheKeepaliveSessionFilter::Capped
+        | CacheKeepaliveSessionFilter::Expired => unreachable!("decision branch is skipped"),
+    }
+    if let (Some(cursor), Some(cursor_last_message_at_ms)) =
+        (query.cursor.as_ref(), cursor_last_message_at_ms)
+    {
+        builder
+            .push(" AND COALESCE(last_message_at_ms, ts * 1000) <= ")
+            .push_bind(cursor_last_message_at_ms)
+            .push(" AND (COALESCE(last_message_at_ms, ts * 1000) < ")
+            .push_bind(cursor_last_message_at_ms)
+            .push(" OR (COALESCE(last_message_at_ms, ts * 1000) = ")
+            .push_bind(cursor_last_message_at_ms)
+            .push(" AND 'decision:' || source_ref_id > ")
+            .push_bind(cursor.entry_id.as_str())
+            .push("))");
+    }
+    builder
+        .push(" ORDER BY last_message_at_ms DESC, entry_id ASC LIMIT ")
+        .push_bind(limit);
+}
+
+fn u64_to_i64(value: u64, field: &str, reason: &str) -> StorageResult<i64> {
+    i64::try_from(value).map_err(|_| StorageError::InvalidInput {
+        field: field.to_owned(),
+        reason: reason.to_owned(),
+    })
+}
+
+fn i64_to_u64_count(value: i64) -> StorageResult<u64> {
+    u64::try_from(value).map_err(|_| StorageError::Corrupted {
+        message: "negative cache keepalive recent decision count".to_owned(),
+    })
 }

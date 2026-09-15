@@ -6,7 +6,7 @@ use std::{
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
 use cc_lb_storage_api::{
     CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionListItem, CacheKeepaliveSessionStatus,
-    CacheKeepaliveTurnRecord, CacheTtl,
+    CacheKeepaliveTurnRecord, CacheTtl, StorageError,
 };
 use uuid::Uuid;
 
@@ -38,8 +38,7 @@ fn pnl_sum(inputs: &[CacheKeepaliveTurnPnlInput], rates: CacheKeepalivePnlRates)
         .sum()
 }
 
-fn priced_catalog() -> Arc<PriceCatalog> {
-    let catalog = PriceCatalog::new_empty();
+fn install_priced_snapshot(catalog: &PriceCatalog, payload_hash: &str) {
     let mut models = HashMap::new();
     models.insert(
         "claude-sonnet-4-5".to_owned(),
@@ -61,7 +60,7 @@ fn priced_catalog() -> Arc<PriceCatalog> {
         UsdPerMillion::from_micros_usd(CACHE_READ_MICROS_PER_MILLION),
     );
     catalog.install_snapshot(CatalogSnapshot {
-        payload_hash: "fixture".to_owned(),
+        payload_hash: payload_hash.to_owned(),
         fetched_at_ms: 1,
         models,
         raw_json: Vec::new(),
@@ -71,6 +70,11 @@ fn priced_catalog() -> Arc<PriceCatalog> {
         cache_read_per_million_usd_by_tier: HashMap::new(),
         status: CatalogStatus::Ok,
     });
+}
+
+fn priced_catalog() -> Arc<PriceCatalog> {
+    let catalog = PriceCatalog::new_empty();
+    install_priced_snapshot(catalog.as_ref(), "fixture");
     catalog
 }
 
@@ -106,19 +110,28 @@ fn summary_item(
 }
 
 fn summary_turn(source_ref_id: &str, ts: u64) -> CacheKeepaliveTurnRecord {
+    summary_turn_with(source_ref_id, ts, "claude-sonnet-4-5", 20_000)
+}
+
+fn summary_turn_with(
+    source_ref_id: &str,
+    ts: u64,
+    model: &str,
+    cache_read_input_tokens: u64,
+) -> CacheKeepaliveTurnRecord {
     CacheKeepaliveTurnRecord {
         source_ref_id: source_ref_id.to_owned(),
         session_key_hash: "session".to_owned(),
         principal_id: "principal".to_owned(),
         accounting_key_id: None,
         upstream_id: Uuid::nil(),
-        model: "claude-sonnet-4-5".to_owned(),
+        model: model.to_owned(),
         input_tokens: 0,
         output_tokens: 0,
         cache_creation_input_tokens: 0,
         cache_creation_input_tokens_5m: 0,
         cache_creation_input_tokens_1h: 0,
-        cache_read_input_tokens: 20_000,
+        cache_read_input_tokens,
         cost_micros: 0,
         hit_miss: "hit".to_owned(),
         ts,
@@ -281,4 +294,264 @@ fn batched_cache_keepalive_turns_preserve_serialized_summary_behavior() {
         serde_json::to_vec(&batched_summary).expect("serialize batched summary"),
         serde_json::to_vec(&legacy_summary).expect("serialize legacy summary"),
     );
+}
+#[test]
+fn unknown_pricing_stays_null_and_summary_skips_it() {
+    const NOW_MS: u64 = 1_730_000_100_000;
+    let catalog = PriceCatalog::new_empty();
+    let session = summary_item(CacheKeepaliveSessionEntrySource::Session, NOW_MS);
+    let turns = vec![summary_turn_with("unknown", 100, "missing-model", 20_000)];
+    let activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &session,
+            session: None,
+            turns: &turns,
+            now_ms: NOW_MS,
+        },
+        catalog.as_ref(),
+    );
+    assert!(activity.pnl.is_none());
+    assert_eq!(activity.net_pnl_display, "-");
+    assert!(activity.turns[0].pnl.is_none());
+
+    let partial_catalog = PriceCatalog::new_empty();
+    let mut partial_models = HashMap::new();
+    partial_models.insert(
+        "partial-model".to_owned(),
+        Pricing {
+            model: "partial-model".to_owned(),
+            input_per_million_usd: UsdPerMillion::from_whole_usd(1),
+            output_per_million_usd: UsdPerMillion::from_whole_usd(1),
+            by_tier: BTreeMap::new(),
+        },
+    );
+    let mut partial_read = HashMap::new();
+    partial_read.insert(
+        "partial-model".to_owned(),
+        UsdPerMillion::from_micros_usd(CACHE_READ_MICROS_PER_MILLION),
+    );
+    partial_catalog.install_snapshot(CatalogSnapshot {
+        payload_hash: "partial".to_owned(),
+        fetched_at_ms: 1,
+        models: partial_models,
+        raw_json: Vec::new(),
+        cache_creation_per_million_usd: HashMap::new(),
+        cache_read_per_million_usd: partial_read,
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
+        status: CatalogStatus::Ok,
+    });
+    let partial_turns = vec![summary_turn_with("partial", 100, "partial-model", 20_000)];
+    let partial_activity = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &session,
+            session: None,
+            turns: &partial_turns,
+            now_ms: NOW_MS,
+        },
+        partial_catalog.as_ref(),
+    );
+    assert!(partial_activity.pnl.is_none());
+    assert!(partial_activity.turns[0].pnl.is_none());
+
+    let batch = CacheKeepaliveActivityBatch::from_turns(turns);
+    let summary = summary_for_items(catalog.as_ref(), NOW_MS, &[session], &batch)
+        .expect("unknown pricing is tolerated");
+    assert_eq!(summary.renewing_now, 1);
+    assert_eq!(summary.sessions_last_5m, 1);
+    assert_eq!(summary.renewals_fired, 2);
+    assert_eq!(summary.cost_saved, 0.0);
+}
+
+#[test]
+fn pricing_preserves_per_turn_integer_truncation() {
+    let rates = rates(CACHE_CREATE_5M_MICROS_PER_MILLION);
+    let named = derive_turn_pnl(
+        CacheKeepaliveTurnPnlInput {
+            renewal_tokens: 20_000,
+            renewals: 3,
+            followed_up: false,
+            pending: true,
+        },
+        rates,
+    );
+    assert_eq!(named.spent_micros, 18_000);
+
+    let tiny_turns = [
+        derive_turn_pnl(
+            CacheKeepaliveTurnPnlInput {
+                renewal_tokens: 2,
+                renewals: 1,
+                followed_up: false,
+                pending: false,
+            },
+            rates,
+        ),
+        derive_turn_pnl(
+            CacheKeepaliveTurnPnlInput {
+                renewal_tokens: 2,
+                renewals: 1,
+                followed_up: false,
+                pending: false,
+            },
+            rates,
+        ),
+    ];
+    assert_eq!(tiny_turns[0].spent_micros, 0);
+    assert_eq!(tiny_turns[1].spent_micros, 0);
+    assert_eq!(super::economics::sum_turn_pnl(&tiny_turns).spent_micros, 0);
+    assert_eq!(
+        derive_turn_pnl(
+            CacheKeepaliveTurnPnlInput {
+                renewal_tokens: 4,
+                renewals: 1,
+                followed_up: false,
+                pending: false,
+            },
+            rates,
+        )
+        .spent_micros,
+        1,
+        "summing tokens before pricing would change the accounting result"
+    );
+}
+
+#[test]
+fn catalog_absence_and_replacement_reprice_without_storage_change() {
+    const NOW_MS: u64 = 1_730_000_100_000;
+    let catalog = PriceCatalog::new_empty();
+    let session = summary_item(CacheKeepaliveSessionEntrySource::Session, NOW_MS);
+    let turns = vec![summary_turn("same-stored-turn", 100)];
+    let before = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &session,
+            session: None,
+            turns: &turns,
+            now_ms: NOW_MS,
+        },
+        catalog.as_ref(),
+    );
+    assert!(before.pnl.is_none());
+
+    install_priced_snapshot(catalog.as_ref(), "replacement");
+    let after = derive_activity_view(
+        CacheKeepaliveActivitySource {
+            item: &session,
+            session: None,
+            turns: &turns,
+            now_ms: NOW_MS,
+        },
+        catalog.as_ref(),
+    );
+    assert_eq!(after.pnl.map(|pnl| pnl.net_micros), Some(-6_000));
+    assert_eq!(turns[0].source_ref_id, "same-stored-turn");
+    assert_eq!(turns[0].cache_read_input_tokens, 20_000);
+}
+
+#[test]
+fn pnl_format_rounding_does_not_change_micro_accounting() {
+    let exact = [
+        derive_turn_pnl(
+            CacheKeepaliveTurnPnlInput {
+                renewal_tokens: 1,
+                renewals: 1,
+                followed_up: false,
+                pending: false,
+            },
+            CacheKeepalivePnlRates {
+                cache_read_micros_per_million: 49_000_000,
+                avoided_create_micros_per_million: 0,
+            },
+        ),
+        derive_turn_pnl(
+            CacheKeepaliveTurnPnlInput {
+                renewal_tokens: 1,
+                renewals: 1,
+                followed_up: false,
+                pending: false,
+            },
+            CacheKeepalivePnlRates {
+                cache_read_micros_per_million: 50_000_000,
+                avoided_create_micros_per_million: 0,
+            },
+        ),
+    ];
+    assert_eq!(exact[0].net_micros, -49);
+    assert_eq!(exact[1].net_micros, -50);
+    assert_eq!(format_net_pnl(exact[0].net_micros), "−$0.000");
+    assert_eq!(format_net_pnl(exact[1].net_micros), "−$0.0001");
+    assert_eq!(super::economics::sum_turn_pnl(&exact).net_micros, -99);
+}
+
+#[test]
+fn pnl_saturates_then_dollar_converter_returns_invalid_input() {
+    const NOW_MS: u64 = 1_730_000_100_000;
+    let rates = CacheKeepalivePnlRates {
+        cache_read_micros_per_million: u64::MAX,
+        avoided_create_micros_per_million: u64::MAX,
+    };
+    let saturated_turn = derive_turn_pnl(
+        CacheKeepaliveTurnPnlInput {
+            renewal_tokens: u64::MAX,
+            renewals: u32::MAX,
+            followed_up: false,
+            pending: true,
+        },
+        rates,
+    );
+    assert_eq!(saturated_turn.spent_micros, i64::MAX);
+    assert_eq!(saturated_turn.net_micros, -i64::MAX);
+    assert_eq!(
+        super::economics::sum_turn_pnl(&[saturated_turn, saturated_turn]).net_micros,
+        i64::MIN
+    );
+
+    let catalog = PriceCatalog::new_empty();
+    let mut models = HashMap::new();
+    models.insert(
+        "overflow-model".to_owned(),
+        Pricing {
+            model: "overflow-model".to_owned(),
+            input_per_million_usd: UsdPerMillion::from_whole_usd(0),
+            output_per_million_usd: UsdPerMillion::from_whole_usd(0),
+            by_tier: BTreeMap::new(),
+        },
+    );
+    let mut cache_creation_per_million_usd = HashMap::new();
+    cache_creation_per_million_usd.insert(
+        "overflow-model".to_owned(),
+        UsdPerMillion::from_micros_usd(u64::MAX),
+    );
+    let mut cache_read_per_million_usd = HashMap::new();
+    cache_read_per_million_usd.insert(
+        "overflow-model".to_owned(),
+        UsdPerMillion::from_micros_usd(u64::MAX),
+    );
+    catalog.install_snapshot(CatalogSnapshot {
+        payload_hash: "overflow".to_owned(),
+        fetched_at_ms: 1,
+        models,
+        raw_json: Vec::new(),
+        cache_creation_per_million_usd,
+        cache_read_per_million_usd,
+        cache_creation_per_million_usd_by_tier: HashMap::new(),
+        cache_read_per_million_usd_by_tier: HashMap::new(),
+        status: CatalogStatus::Ok,
+    });
+    let session = summary_item(CacheKeepaliveSessionEntrySource::Session, NOW_MS);
+    let batch = CacheKeepaliveActivityBatch::from_turns(vec![summary_turn_with(
+        "overflow",
+        100,
+        "overflow-model",
+        u64::MAX,
+    )]);
+    let error = summary_for_items(catalog.as_ref(), NOW_MS, &[session], &batch)
+        .err()
+        .expect("API dollar converter rejects the saturated amount");
+    assert!(matches!(
+        error,
+        StorageError::InvalidInput { ref field, ref reason }
+            if field == "cache_keepalive_pnl"
+                && reason == "amount exceeds the API dollar range"
+    ));
 }
