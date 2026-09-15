@@ -132,6 +132,7 @@ async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
         storage: storage.clone(),
     });
     let state = AdminState {
+        config_path: None,
         storage: Some(storage.clone()),
         key_store: Some(admin_test_common::key_store(storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),

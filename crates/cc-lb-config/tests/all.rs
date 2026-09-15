@@ -1,7 +1,5 @@
 mod common;
 
-#[path = "hot_reload.rs"]
-mod hot_reload;
 #[path = "load_env_override.rs"]
 mod load_env_override;
 #[path = "load_minimal.rs"]

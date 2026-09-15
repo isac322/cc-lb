@@ -11,8 +11,8 @@ use cc_lb_storage_api::{
     ApiKeyRecord, AuditEntry, BackendKind, BucketKind, CacheKeepaliveConfig,
     CacheKeepaliveConfigSnapshot, CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord,
     CacheKeepaliveSessionStatus, CacheKeepaliveTerminalReason, CacheTtl, ClassifierConfig,
-    ConfigDraftState, HistoryEntry, HistorySummary, IssuedKey, JudgeResponseFormat, KeyStatus,
-    LlmJudgeConfig, OAuthCredentials, PrincipalCreate, PrincipalKind, PrincipalKindLite,
+    ConfigDraftState, HistoryEntry, IssuedKey, JudgeResponseFormat, KeyStatus, LlmJudgeConfig,
+    OAuthCredentials, PrincipalCreate, PrincipalKind, PrincipalKindLite,
     PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RequestCacheBreakpoint,
     RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventUpstream,
     StorageError, StoredApiKeyRecord, UsageRollup, UsageRollupKey, UsageRollupResolution,
@@ -199,14 +199,16 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         saved_at_unix_secs: Some(1_716_000_004),
     });
 
-    let summary = HistorySummary { tls_enabled: true };
-    assert_json_roundtrip(summary.clone());
-    assert_json_roundtrip(HistoryEntry {
-        revision: 8,
-        config_toml: "[timeouts]\nupstream_total_secs = 30".to_owned(),
-        applied_at_unix_secs: 1_716_000_005,
-        summary: summary.clone(),
-    });
+    assert_wire(
+        HistoryEntry {
+            revision: 8,
+            applied_at_unix_secs: 1_716_000_005,
+        },
+        json!({
+            "revision": 8,
+            "applied_at_unix_secs": 1_716_000_005
+        }),
+    );
 
     assert_json_roundtrip(UsageRollupKey {
         resolution: UsageRollupResolution::Hour,

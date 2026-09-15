@@ -99,6 +99,7 @@ pub struct AdminPorts {
 
 #[derive(Clone)]
 pub struct AdminState {
+    pub config_path: Option<PathBuf>,
     pub storage: Option<Arc<dyn Storage>>,
     pub key_store: Option<Arc<KeyStore>>,
     pub aead: Arc<AeadService>,
@@ -119,34 +120,12 @@ pub struct AdminState {
     pub clock: ClockHandle,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigDraftError {
-    #[error("config draft/apply is unavailable for this server configuration")]
-    Unavailable,
-    #[error("no config draft is pending")]
-    MissingDraft,
-    #[error("invalid draft config: {0}")]
-    Invalid(String),
-}
-
 pub trait CurrentConfig: Send + Sync {
     fn current_config(&self) -> Arc<Config>;
-
-    fn put_draft_config(&self, _config: Config) -> Result<(), ConfigDraftError> {
-        Err(ConfigDraftError::Unavailable)
-    }
-
-    fn apply_draft_config(&self) -> Result<Arc<Config>, ConfigDraftError> {
-        Err(ConfigDraftError::Unavailable)
-    }
 
     fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
         None
     }
-}
-
-pub trait ConfigReloader: Send + Sync {
-    fn reload_now(&self) -> Result<(), String>;
 }
 
 impl CurrentConfig for Config {

@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{
-    ConfigDraftState, ConfigStore, HistoryEntry, HistorySummary, StorageResult,
-};
+use cc_lb_storage_api::{ConfigDraftState, ConfigStore, HistoryEntry, StorageResult};
 use serde_json::Value;
 use sqlx::Row;
 
@@ -105,15 +103,11 @@ impl ConfigStore for PostgresStorage {
     async fn append_config_history(
         &self,
         revision: u64,
-        config_toml: String,
         applied_at_unix_secs: u64,
-        summary: HistorySummary,
     ) -> StorageResult<()> {
         let entry = HistoryEntry {
             revision,
-            config_toml,
             applied_at_unix_secs,
-            summary,
         };
         let config = serde_json::to_value(&entry)?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
@@ -153,20 +147,5 @@ impl ConfigStore for PostgresStorage {
         rows.into_iter()
             .map(|config| serde_json::from_value(config).map_err(Into::into))
             .collect()
-    }
-
-    async fn get_config_history(&self, revision: u64) -> StorageResult<Option<HistoryEntry>> {
-        let config = sqlx::query_scalar::<_, Value>(
-            "SELECT config FROM config_history_v1 WHERE revision = $1",
-        )
-        .bind(u64_to_i64(revision, "history revision")?)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        config
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(Into::into)
     }
 }

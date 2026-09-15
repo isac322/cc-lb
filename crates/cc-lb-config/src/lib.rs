@@ -1,7 +1,5 @@
 #![forbid(unsafe_code)]
 
-#[cfg(not(loom))]
-mod hot_reload;
 mod types;
 mod validation;
 
@@ -11,10 +9,6 @@ use std::path::Path;
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use thiserror::Error;
-#[cfg(not(loom))]
-use tokio::sync::mpsc;
-#[cfg(not(loom))]
-use tokio::task::JoinHandle;
 
 pub use types::{
     ADMIN_AUTH_PROVIDERS_JSON_ENV, AdminAuthConfig, AdminAuthProviderConfig, AdminConfig,
@@ -75,11 +69,6 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), ConfigError> {
         validation::validate_config(self)
-    }
-
-    #[cfg(not(loom))]
-    pub fn watch_for_reload(path: &Path, tx: mpsc::Sender<Config>) -> JoinHandle<()> {
-        hot_reload::watch_for_reload(path, tx)
     }
 
     pub fn json_schema() -> schemars::Schema {

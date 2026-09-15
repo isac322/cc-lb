@@ -676,6 +676,7 @@ async fn build_admin_state(
 ) -> cc_lb_admin::AdminState {
     use std::sync::Arc;
     cc_lb_admin::AdminState {
+        config_path: None,
         storage: Some(server.storage.clone()),
         key_store: Some(admin_test_common::key_store(server.storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),

@@ -15,7 +15,7 @@ async fn get_no_draft_returns_zero_revision_and_null_payload() {
         Some(storage),
     ));
 
-    let (status, _, json, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
+    let (status, _, json, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["draft"], serde_json::Value::Null);
@@ -37,7 +37,7 @@ async fn put_draft_from_zero_revision_saves_invalid_json_without_validation() {
     let (status, _, json, _) = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(draft.clone(), 0)),
     )
     .await;
@@ -46,7 +46,7 @@ async fn put_draft_from_zero_revision_saves_invalid_json_without_validation() {
     assert_eq!(json["revision"], 1);
     assert!(json["saved_at_unix_secs"].as_u64().unwrap() > 0);
 
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
+    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
     assert_eq!(json["draft"], draft);
     assert_eq!(json["revision"], 1);
 }
@@ -62,14 +62,14 @@ async fn stale_put_returns_current_revision_conflict() {
     let _ = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(json!({ "not_config": true }), 0)),
     )
     .await;
     let (status, _, json, _) = authed_json(
         app,
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(json!({ "other": true }), 0)),
     )
     .await;
@@ -90,7 +90,7 @@ async fn saving_new_draft_invalidates_last_validated_revision() {
     let (status, _, first, _) = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(config_value(100), 0)),
     )
     .await;
@@ -100,7 +100,7 @@ async fn saving_new_draft_invalidates_last_validated_revision() {
     let (status, _, validated, _) = authed_json(
         app.clone(),
         "POST",
-        "/admin/config/draft/validate",
+        "/admin/v1/config/draft/validate",
         Some(expected_revision_body(1)),
     )
     .await;
@@ -110,14 +110,14 @@ async fn saving_new_draft_invalidates_last_validated_revision() {
     let (status, _, second, _) = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(config_value(200), 1)),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(second["revision"], 2);
 
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
+    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
     assert_eq!(json["revision"], 2);
     assert_eq!(json["last_validated_revision"], serde_json::Value::Null);
     assert_eq!(json["last_validation_error"], serde_json::Value::Null);
@@ -144,7 +144,7 @@ async fn validate_rejects_database_owned_top_level_keys() {
         let (status, _, saved, _) = authed_json(
             app.clone(),
             "PUT",
-            "/admin/config/draft",
+            "/admin/v1/config/draft",
             Some(put_body(serde_json::Value::Object(draft), 0)),
         )
         .await;
@@ -153,7 +153,7 @@ async fn validate_rejects_database_owned_top_level_keys() {
         let (status, _, validated, _) = authed_json(
             app,
             "POST",
-            "/admin/config/draft/validate",
+            "/admin/v1/config/draft/validate",
             Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
         )
         .await;
@@ -181,14 +181,14 @@ async fn validate_accepts_top_level_retention_and_price_catalog() {
     let (_, _, saved, _) = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(draft, 0)),
     )
     .await;
     let (status, _, validated, _) = authed_json(
         app,
         "POST",
-        "/admin/config/draft/validate",
+        "/admin/v1/config/draft/validate",
         Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
     )
     .await;
@@ -211,14 +211,14 @@ async fn validate_rejects_removed_config_wrappers_and_price_refresh_interval() {
         let (_, _, saved, _) = authed_json(
             app.clone(),
             "PUT",
-            "/admin/config/draft",
+            "/admin/v1/config/draft",
             Some(put_body(draft, 0)),
         )
         .await;
         let (_, _, validated, _) = authed_json(
             app,
             "POST",
-            "/admin/config/draft/validate",
+            "/admin/v1/config/draft/validate",
             Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
         )
         .await;
@@ -239,14 +239,14 @@ async fn validate_rejects_removed_config_wrappers_and_price_refresh_interval() {
         let (_, _, saved, _) = authed_json(
             app.clone(),
             "PUT",
-            "/admin/config/draft",
+            "/admin/v1/config/draft",
             Some(put_body(draft, 0)),
         )
         .await;
         let (_, _, validated, _) = authed_json(
             app,
             "POST",
-            "/admin/config/draft/validate",
+            "/admin/v1/config/draft/validate",
             Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
         )
         .await;
@@ -265,14 +265,14 @@ async fn validate_rejects_removed_config_wrappers_and_price_refresh_interval() {
     let (_, _, saved, _) = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(draft, 0)),
     )
     .await;
     let (_, _, validated, _) = authed_json(
         app,
         "POST",
-        "/admin/config/draft/validate",
+        "/admin/v1/config/draft/validate",
         Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
     )
     .await;
@@ -311,7 +311,7 @@ async fn get_draft_purges_expired_invalid_draft() {
         Some(storage),
     ));
 
-    let (status, _, body, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
+    let (status, _, body, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["draft"], serde_json::Value::Null);

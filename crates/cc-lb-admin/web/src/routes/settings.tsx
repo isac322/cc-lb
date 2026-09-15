@@ -1,12 +1,5 @@
-import { Collapsible as BaseCollapsible } from '@base-ui/react/collapsible';
 import { createFileRoute } from '@tanstack/react-router';
-import {
-  CheckCircle2,
-  Download,
-  PlayCircle,
-  RefreshCw,
-  Save,
-} from 'lucide-react';
+import { CheckCircle2, Download, Save } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
@@ -22,22 +15,17 @@ import {
   Skeleton,
   SkeletonRow,
   Spinner,
-  StatusBadge,
 } from '../components/ui/primitives';
 import {
   RelativeOffsetTime,
   RelativeTime,
 } from '../components/ui/RelativeTime';
 import { downloadJson } from '../lib/api';
-import { useAuthSessionContext } from '../lib/authSession';
 import { formatAbsolute, useLocale, useTimezone } from '../lib/locale';
 import {
-  useApplyConfig,
   useConfigCurrent,
   useConfigDraft,
   useConfigHistory,
-  useConfigSchema,
-  useReloadConfig,
   useSaveDraft,
   useStatus,
   useValidateConfig,
@@ -214,10 +202,10 @@ export const Route = createFileRoute('/settings')({
 });
 
 function SettingsPage() {
-  const authSession = useAuthSessionContext();
   const status = useStatus();
-  const [exporting, setExporting] = useState(false);
-  const exportingRef = useRef(false);
+  const [downloadingDatabaseSnapshot, setDownloadingDatabaseSnapshot] =
+    useState(false);
+  const downloadingDatabaseSnapshotRef = useRef(false);
   const { locale, effective, setLocale } = useLocale();
   const { timezone, effective: effectiveTz, setTimezone } = useTimezone();
   const [now, setNow] = useState(new Date());
@@ -227,18 +215,18 @@ function SettingsPage() {
     return () => clearInterval(id);
   }, []);
 
-  // The export is a plain download rather than a mutation, so its in-flight
+  // The snapshot is a plain download rather than a mutation, so its in-flight
   // state is local. The ref rejects a second click landing in the same tick,
   // before React has re-rendered the Button as disabled.
-  const handleDownloadExport = async () => {
-    if (exportingRef.current) return;
-    exportingRef.current = true;
-    setExporting(true);
+  const handleDownloadDatabaseSnapshot = async () => {
+    if (downloadingDatabaseSnapshotRef.current) return;
+    downloadingDatabaseSnapshotRef.current = true;
+    setDownloadingDatabaseSnapshot(true);
     try {
-      await downloadExport();
+      await downloadDatabaseResourcesSnapshot();
     } finally {
-      exportingRef.current = false;
-      setExporting(false);
+      downloadingDatabaseSnapshotRef.current = false;
+      setDownloadingDatabaseSnapshot(false);
     }
   };
 
@@ -246,7 +234,7 @@ function SettingsPage() {
     <PageContainer>
       <Section
         title="Settings"
-        subtitle="Admin self-service, configuration draft pipeline, and exports."
+        subtitle="Version, localization, configuration drafts, and data backups."
       >
         {/* Version card */}
         <Card data-testid="version-card">
@@ -326,32 +314,6 @@ function SettingsPage() {
           </CardBody>
         </Card>
 
-        {authSession?.auth_mode === 'static_token' ? (
-          <Card data-testid="admin-token-card">
-            <CardHeader
-              title="Admin Token"
-              subtitle="The active static-token provider reads its bearer token from the environment when cc-lb starts."
-            />
-            <CardBody>
-              <p
-                data-testid="admin-token-guidance"
-                className="text-sm text-text-muted"
-              >
-                Update the secret named by the active{' '}
-                <code className="font-mono text-text">static_token</code>{' '}
-                provider&apos;s{' '}
-                <code className="font-mono text-text">token_env</code>, then
-                restart the cc-lb process. Admin authentication providers are
-                configured under{' '}
-                <code className="font-mono text-text">
-                  admin.auth.providers
-                </code>{' '}
-                and cannot be rotated from this dashboard.
-              </p>
-            </CardBody>
-          </Card>
-        ) : null}
-
         {/* Localization */}
         <Card>
           <CardHeader
@@ -416,31 +378,35 @@ function SettingsPage() {
           </CardBody>
         </Card>
 
-        {/* Config draft pipeline */}
+        {/* Config draft */}
         <ConfigDraftSection />
 
         {/* History */}
         <ConfigHistorySection />
 
-        {/* Restart-required matrix */}
-        <RestartRequiredMatrix />
-
-        {/* Export */}
-        <Card>
-          <CardHeader
-            title="Configuration Export"
-            subtitle="Download a JSON snapshot of all upstreams, principals, plugins, and chains."
-          />
-          <CardBody>
-            <Button
-              iconLeft={<Download className="w-4 h-4" />}
-              loading={exporting}
-              onClick={handleDownloadExport}
-            >
-              {exporting ? 'Downloading...' : 'Download export.json'}
-            </Button>
-          </CardBody>
-        </Card>
+        {/* Database export */}
+        <Section
+          title="Data & Backups"
+          subtitle="Export resources stored in the cc-lb database."
+        >
+          <Card>
+            <CardHeader
+              title="Database resources snapshot"
+              subtitle="Download a JSON snapshot of upstreams, principals, plugins, and chains stored in the database."
+            />
+            <CardBody>
+              <Button
+                iconLeft={<Download className="w-4 h-4" />}
+                loading={downloadingDatabaseSnapshot}
+                onClick={handleDownloadDatabaseSnapshot}
+              >
+                {downloadingDatabaseSnapshot
+                  ? 'Downloading...'
+                  : 'Download database snapshot'}
+              </Button>
+            </CardBody>
+          </Card>
+        </Section>
       </Section>
     </PageContainer>
   );
@@ -449,11 +415,8 @@ function SettingsPage() {
 function ConfigDraftSection() {
   const draft = useConfigDraft();
   const current = useConfigCurrent();
-  const schema = useConfigSchema();
   const save = useSaveDraft();
   const validate = useValidateConfig();
-  const apply = useApplyConfig();
-  const reload = useReloadConfig();
   const [editor, setEditor] = useState<{
     text: string;
     savedText: string;
@@ -548,44 +511,27 @@ function ConfigDraftSection() {
       : null;
   const canValidate =
     editor?.hasSavedDraft === true && !editorDirty && !serverRevisionChanged;
-  const canApply =
-    editor != null &&
-    canValidate &&
-    lastValidatedRevision != null &&
-    lastValidationError == null &&
-    lastValidatedRevision === editor.revision;
   const lastValidatedLabel = lastValidationError
     ? `error @ rev ${lastValidatedRevision ?? '—'}`
     : lastValidatedRevision != null
       ? `rev ${lastValidatedRevision}`
       : '—';
 
-  // Save, validate, apply and reload all mutate the same draft revision, so
-  // they share one lock: a second operation launched mid-flight would race on
-  // a revision it can no longer trust.
   const savePending = save.isPending;
   const validatePending = validate.isPending;
-  const applyPending = apply.isPending;
-  const reloadPending = reload.isPending;
-  const configPending =
-    savePending || validatePending || applyPending || reloadPending;
-  const configPendingLabel = savePending
+  const draftMutationLabel = savePending
     ? 'Saving draft...'
     : validatePending
       ? 'Validating draft...'
-      : applyPending
-        ? 'Applying revision...'
-        : reloadPending
-          ? 'Reloading configuration...'
-          : null;
+      : null;
   const editorGuidance = editorDirty
     ? serverRevisionChanged
-      ? `The server draft is revision ${draftRevision}, while this editor started from revision ${editorRevision}. Save checks revision ${editorRevision}; Validate and Apply stay disabled until these changes are saved.`
-      : 'Save your editor changes before validating or applying. Validate and Apply use the saved server draft.'
+      ? `The server draft is revision ${draftRevision}, while this editor started from revision ${editorRevision}. Save checks revision ${editorRevision}; Validate stays disabled until these changes are saved.`
+      : 'Save your editor changes before validating. Validate uses the saved server draft.'
     : serverRevisionChanged
-      ? `Waiting for server draft revision ${draftRevision} to match editor revision ${editorRevision} before validating or applying.`
+      ? `Waiting for server draft revision ${draftRevision} to match editor revision ${editorRevision} before validating.`
       : editor && !editor.hasSavedDraft
-        ? 'Save this configuration as a server draft before validating or applying.'
+        ? 'Save this configuration as a server draft before validating.'
         : null;
 
   const handleRetryEditor = () => {
@@ -605,11 +551,7 @@ function ConfigDraftSection() {
         {
           onSuccess: (response) => {
             setEditor((active) => {
-              if (
-                !active ||
-                active.text !== savedText ||
-                active.revision !== startRevision
-              ) {
+              if (!active || active.revision !== startRevision) {
                 return active;
               }
               return {
@@ -648,19 +590,10 @@ function ConfigDraftSection() {
     });
   };
 
-  const handleApply = () => {
-    if (!editor || !canApply) return;
-
-    apply.mutate(editor.revision, {
-      onSuccess: (result) =>
-        toast.success(`Applied revision ${result.applied_revision}`),
-    });
-  };
-
   return (
     <Section
       title="Configuration Draft"
-      subtitle="Edit → validate → apply pipeline"
+      subtitle="Edit and validate the saved configuration draft."
     >
       <Card>
         <CardHeader
@@ -671,7 +604,7 @@ function ConfigDraftSection() {
                 size="sm"
                 iconLeft={<Save className="w-3 h-3" />}
                 loading={savePending}
-                disabled={!canSave || !editor.text || configPending}
+                disabled={!canSave || !editor.text}
                 onClick={handleSave}
               >
                 {savePending ? 'Saving...' : 'Save'}
@@ -680,40 +613,16 @@ function ConfigDraftSection() {
                 size="sm"
                 iconLeft={<CheckCircle2 className="w-3 h-3" />}
                 loading={validatePending}
-                disabled={!canValidate || configPending}
+                disabled={!canValidate}
                 aria-describedby="config-pipeline-status"
                 onClick={handleValidate}
               >
                 {validatePending ? 'Validating...' : 'Validate'}
               </Button>
-              <Button
-                size="sm"
-                variant="primary"
-                iconLeft={<PlayCircle className="w-3 h-3" />}
-                loading={applyPending}
-                disabled={!canApply || configPending}
-                aria-describedby="config-pipeline-status"
-                onClick={handleApply}
-              >
-                {applyPending ? 'Applying...' : 'Apply'}
-              </Button>
-              <Button
-                size="sm"
-                iconLeft={<RefreshCw className="w-3 h-3" />}
-                loading={reloadPending}
-                disabled={configPending}
-                onClick={() =>
-                  reload.mutate(undefined, {
-                    onSuccess: () => toast.success('Reload triggered'),
-                  })
-                }
-              >
-                {reloadPending ? 'Reloading...' : 'Reload'}
-              </Button>
             </div>
           }
         />
-        <CardBody aria-busy={configPending} className="space-y-3">
+        <CardBody className="space-y-3">
           <div
             data-testid="draft-metadata"
             className="flex min-h-4 flex-wrap gap-4 text-xs text-text-faint"
@@ -776,7 +685,7 @@ function ConfigDraftSection() {
               <Button
                 size="sm"
                 loading={editorRetrying}
-                disabled={editorRetrying || configPending}
+                disabled={editorRetrying}
                 onClick={handleRetryEditor}
               >
                 {editorRetrying ? 'Retrying...' : 'Retry'}
@@ -788,7 +697,7 @@ function ConfigDraftSection() {
             className="w-full min-h-[260px] p-3 text-xs font-mono bg-panel-strong border border-subtle rounded-sm placeholder:text-text-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
             style={{ lineHeight: 1.5 }}
             value={editor?.text ?? ''}
-            disabled={configPending || !editor}
+            disabled={!editor}
             onChange={(event) =>
               setEditor((active) =>
                 active ? { ...active, text: event.target.value } : active,
@@ -803,33 +712,14 @@ function ConfigDraftSection() {
             aria-live="polite"
             className="min-h-4 text-xs text-text-muted"
           >
-            {configPendingLabel ? (
+            {draftMutationLabel ? (
               <span className="inline-flex items-center gap-1.5">
                 <Spinner className="w-3 h-3 text-accent" />
-                {configPendingLabel}
+                {draftMutationLabel}
               </span>
             ) : (
               editorGuidance
             )}
-          </div>
-          <div data-testid="config-checklist-slot" className="min-h-[20px]">
-            {schema.isLoading ? (
-              <Skeleton className="h-4 w-48" />
-            ) : schema.data ? (
-              <BaseCollapsible.Root className="text-xs">
-                <BaseCollapsible.Trigger className="cursor-pointer text-text-faint">
-                  Coverage checklist ({schema.data.coverage_checklist.length}{' '}
-                  fields)
-                </BaseCollapsible.Trigger>
-                <BaseCollapsible.Panel className="overflow-hidden h-[var(--collapsible-panel-height)] transition-[height] duration-150 ease-out data-[ending-style]:h-0 data-[starting-style]:h-0">
-                  <ul className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-1 font-mono">
-                    {schema.data.coverage_checklist.map((field) => (
-                      <li key={field}>· {field}</li>
-                    ))}
-                  </ul>
-                </BaseCollapsible.Panel>
-              </BaseCollapsible.Root>
-            ) : null}
           </div>
         </CardBody>
       </Card>
@@ -837,18 +727,14 @@ function ConfigDraftSection() {
   );
 }
 
-const HISTORY_CELL_CLASS_NAMES = ['px-4', 'px-4', 'px-4'] as const;
-const HISTORY_SKELETON_CLASS_NAMES = [
-  'ml-auto w-8',
-  'w-24',
-  'mx-auto w-12',
-] as const;
+const HISTORY_CELL_CLASS_NAMES = ['px-4', 'px-4'] as const;
+const HISTORY_SKELETON_CLASS_NAMES = ['ml-auto w-8', 'w-24'] as const;
 const HISTORY_LOADING_ROW_IDS = [0, 1, 2, 3] as const;
 
 function ConfigHistorySection() {
   const history = useConfigHistory();
   return (
-    <Section title="Configuration History" subtitle="Last 20 applied revisions">
+    <Section title="Saved Config History" subtitle="Last 20 saved revisions">
       <Card>
         <div
           data-testid="config-history-slot"
@@ -858,8 +744,7 @@ function ConfigHistorySection() {
             <thead className="table-header sticky top-0 z-10">
               <tr className="text-[10px] uppercase tracking-wider">
                 <th className="text-right px-4 py-2">Rev</th>
-                <th className="text-left px-4 py-2">Applied</th>
-                <th className="text-center px-4 py-2">TLS</th>
+                <th className="text-left px-4 py-2">Saved</th>
               </tr>
             </thead>
             <tbody>
@@ -867,7 +752,7 @@ function ConfigHistorySection() {
                 HISTORY_LOADING_ROW_IDS.map((id) => (
                   <SkeletonRow
                     key={id}
-                    cols={3}
+                    cols={2}
                     cellClassNames={HISTORY_CELL_CLASS_NAMES}
                     skeletonClassNames={HISTORY_SKELETON_CLASS_NAMES}
                   />
@@ -881,88 +766,18 @@ function ConfigHistorySection() {
                         ts={new Date(h.applied_at_unix_secs * 1000)}
                       />
                     </td>
-                    <td className="px-4 py-2 text-center">
-                      <StatusBadge
-                        tone={h.config_summary.tls_enabled ? 'ok' : 'neutral'}
-                        label={h.config_summary.tls_enabled ? 'on' : 'off'}
-                      />
-                    </td>
                   </tr>
                 ))
               ) : (
                 <tr>
                   <td
-                    colSpan={3}
+                    colSpan={2}
                     className="px-4 py-12 text-center text-xs text-text-faint"
                   >
-                    No history available.
+                    No saved config history available.
                   </td>
                 </tr>
               )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-    </Section>
-  );
-}
-
-const RESTART_MATRIX: { field: string; reason: string }[] = [
-  {
-    field: 'listener.proxy_addr',
-    reason: 'Socket bindings are fixed at process start',
-  },
-  {
-    field: 'listener.admin_addr',
-    reason: 'Socket bindings are fixed at process start',
-  },
-  {
-    field: 'listener.metrics_addr',
-    reason: 'Socket bindings are fixed at process start',
-  },
-  { field: 'listener.tls.cert_path', reason: 'Listener TLS certificate' },
-  { field: 'listener.tls.key_path', reason: 'Listener TLS key' },
-  { field: 'storage.path', reason: 'Storage backend' },
-  { field: 'storage.url', reason: 'Storage backend' },
-  { field: 'storage.pool', reason: 'Storage pool' },
-  { field: 'aead.key_env', reason: 'Storage encryption key env' },
-  {
-    field: 'admin.auth.providers',
-    reason: 'Admin authentication providers are built at process start',
-  },
-  { field: 'oauth.anthropic.client_id', reason: 'Anthropic OAuth client' },
-  { field: 'oauth.anthropic.auth_url', reason: 'Anthropic OAuth endpoint' },
-  { field: 'oauth.anthropic.token_url', reason: 'Anthropic OAuth endpoint' },
-  { field: 'oauth.anthropic.redirect_uri', reason: 'Anthropic OAuth redirect' },
-  { field: 'oauth.anthropic.scopes', reason: 'Anthropic OAuth scopes' },
-];
-
-function RestartRequiredMatrix() {
-  return (
-    <Section
-      title="Restart-Required Fields"
-      subtitle="cc-lb.toml fields that cannot be applied by hot reload."
-    >
-      <Card>
-        <div className="overflow-x-auto">
-          <table className="min-w-[640px] w-full font-mono text-xs">
-            <thead className="table-header sticky top-0 z-10">
-              <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-left px-4 py-2">Field</th>
-                <th className="text-center px-4 py-2">Hot reload</th>
-                <th className="text-left px-4 py-2">Reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              {RESTART_MATRIX.map((r) => (
-                <tr key={r.field} className="border-b border-row">
-                  <td className="px-4 py-2">{r.field}</td>
-                  <td className="px-4 py-2 text-center">
-                    <StatusBadge tone="danger" label="No" />
-                  </td>
-                  <td className="px-4 py-2 text-text-muted">{r.reason}</td>
-                </tr>
-              ))}
             </tbody>
           </table>
         </div>
@@ -980,14 +795,14 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-async function downloadExport() {
+async function downloadDatabaseResourcesSnapshot() {
   try {
     await downloadJson(
       '/admin/v1/export',
-      `cc-lb-export-${new Date().toISOString().slice(0, 16)}.json`,
+      `cc-lb-database-resources-${new Date().toISOString().slice(0, 16)}.json`,
     );
-    toast.success('Export downloaded');
+    toast.success('Database snapshot downloaded');
   } catch (e) {
-    toast.error(`Export failed: ${String(e)}`);
+    toast.error(`Database snapshot download failed: ${String(e)}`);
   }
 }

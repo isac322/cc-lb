@@ -15,6 +15,7 @@ use tower::ServiceExt;
 fn test_state(storage: Arc<Storage>) -> AdminState {
     let config = Config::default();
     AdminState {
+        config_path: None,
         storage: Some(storage.clone()),
         key_store: Some(Arc::new(KeyStore::new(storage.clone()))),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
@@ -50,7 +51,7 @@ async fn admin_401_sleeps_100ms() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/config/current")
+        .uri("/admin/v1/config/current")
         .header("Authorization", "Bearer wrong-token")
         .body(Body::empty())
         .unwrap();

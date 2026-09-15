@@ -84,7 +84,7 @@ async fn admin_json_extractor_rejections_use_json_envelope() {
     let server = spawn_admin_server().await;
     let (status, headers, body) = server
         .client
-        .post_raw("/admin/config/draft/validate", "application/json", "{")
+        .post_raw("/admin/v1/config/draft/validate", "application/json", "{")
         .await;
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json rejection body");
 

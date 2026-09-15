@@ -5,8 +5,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    BackendKind, CURRENT_CONTRACT_VERSION, ConfigDraftState, ConfigStore, HistoryEntry,
-    HistorySummary, MetaStore, StorageError, StorageResult,
+    BackendKind, CURRENT_CONTRACT_VERSION, ConfigDraftState, ConfigStore, HistoryEntry, MetaStore,
+    StorageError, StorageResult,
 };
 
 use crate::harness::{ConformanceBackend, ConformanceFixture};
@@ -30,7 +30,6 @@ where
 {
     config_draft_optimistic_revision(Arc::clone(&backend)).await?;
     config_history_cap_50(Arc::clone(&backend)).await?;
-    config_get_history_by_revision(Arc::clone(&backend)).await?;
     config_last_validated_revision(Arc::clone(&backend)).await?;
     meta_contract_version(Arc::clone(&backend)).await?;
     meta_backend_kind_stamp(Arc::clone(&backend)).await?;
@@ -116,76 +115,20 @@ where
             ConfigStore::append_config_history(
                 storage.as_ref(),
                 revision,
-                format!("[timeouts]\nupstream_total_secs = {revision}"),
                 1_800_000_000 + revision,
-                history_summary(revision),
             )
             .await?;
         }
 
         let entries = ConfigStore::list_config_history(storage.as_ref(), 100).await?;
-        let revisions = revisions(&entries);
-        let expected = (11..=60).rev().collect::<Vec<_>>();
-        assert_eq!(entries.len(), 50);
-        assert_eq!(revisions, expected);
-        assert!(
-            ConfigStore::get_config_history(storage.as_ref(), 10)
-                .await?
-                .is_none()
-        );
-        assert_eq!(
-            ConfigStore::get_config_history(storage.as_ref(), 11)
-                .await?
-                .map(|entry| entry.revision),
-            Some(11)
-        );
-
-        Ok(())
-    }
-    .await;
-    let teardown = fixture.teardown().await;
-    result?;
-    teardown
-}
-
-pub async fn config_get_history_by_revision<B>(backend: Arc<B>) -> Result<()>
-where
-    B: ConformanceBackend,
-{
-    let mut fixture = ConformanceFixture::new(backend).await?;
-    let result: Result<()> = async {
-        let storage = fixture.storage();
-        let summary = history_summary(7);
-
-        ConfigStore::append_config_history(
-            storage.as_ref(),
-            7,
-            "[timeouts]\nupstream_total_secs = 70".to_owned(),
-            1_800_000_007,
-            summary.clone(),
-        )
-        .await?;
-        ConfigStore::append_config_history(
-            storage.as_ref(),
-            3,
-            "[timeouts]\nupstream_total_secs = 30".to_owned(),
-            1_800_000_003,
-            history_summary(3),
-        )
-        .await?;
-
-        let entry = ConfigStore::get_config_history(storage.as_ref(), 7)
-            .await?
-            .expect("revision 7 should be present");
-        assert_eq!(entry.revision, 7);
-        assert_eq!(entry.config_toml, "[timeouts]\nupstream_total_secs = 70");
-        assert_eq!(entry.applied_at_unix_secs, 1_800_000_007);
-        assert_eq!(entry.summary, summary);
-        assert!(
-            ConfigStore::get_config_history(storage.as_ref(), 4)
-                .await?
-                .is_none()
-        );
+        let expected = (11..=60)
+            .rev()
+            .map(|revision| HistoryEntry {
+                revision,
+                applied_at_unix_secs: 1_800_000_000 + revision,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(entries, expected);
 
         Ok(())
     }
@@ -319,14 +262,4 @@ where
     ));
 
     Ok(())
-}
-
-fn history_summary(seed: u64) -> HistorySummary {
-    HistorySummary {
-        tls_enabled: seed.is_multiple_of(2),
-    }
-}
-
-fn revisions(entries: &[HistoryEntry]) -> Vec<u64> {
-    entries.iter().map(|entry| entry.revision).collect()
 }

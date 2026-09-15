@@ -756,7 +756,6 @@ export interface KeyListResponse {
 
 export interface ConfigSchemaResponse {
   schema: Record<string, unknown>;
-  coverage_checklist: string[];
 }
 
 export interface ConfigDraftResponse {
@@ -767,14 +766,9 @@ export interface ConfigDraftResponse {
   saved_at_unix_secs: number | null;
 }
 
-interface HistorySummary {
-  tls_enabled: boolean;
-}
-
 interface ConfigHistoryItem {
   revision: number;
   applied_at_unix_secs: number;
-  config_summary: HistorySummary;
 }
 
 export interface ConfigHistoryResponse {

@@ -18,14 +18,14 @@ async fn invalid_draft_validate_reports_false_and_keeps_last_validated_revision(
     let _ = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(json!({ "upstreams": "wrong-type" }), 0)),
     )
     .await;
     let (status, _, json, _) = authed_json(
         app.clone(),
         "POST",
-        "/admin/config/draft/validate",
+        "/admin/v1/config/draft/validate",
         Some(expected_revision_body(1)),
     )
     .await;
@@ -35,7 +35,7 @@ async fn invalid_draft_validate_reports_false_and_keeps_last_validated_revision(
     assert_eq!(json["revision"], 1);
     assert!(!json["error"].as_str().unwrap().is_empty());
 
-    let (_, _, draft, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
+    let (_, _, draft, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
     assert_eq!(draft["last_validated_revision"], serde_json::Value::Null);
     assert!(!draft["last_validation_error"].as_str().unwrap().is_empty());
 }
@@ -51,14 +51,14 @@ async fn valid_draft_validate_marks_current_revision_valid() {
     let _ = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(config_value(123), 0)),
     )
     .await;
     let (status, _, json, _) = authed_json(
         app.clone(),
         "POST",
-        "/admin/config/draft/validate",
+        "/admin/v1/config/draft/validate",
         Some(expected_revision_body(1)),
     )
     .await;
@@ -68,7 +68,7 @@ async fn valid_draft_validate_marks_current_revision_valid() {
     assert_eq!(json["revision"], 1);
     assert!(json.get("error").is_none());
 
-    let (_, _, draft, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
+    let (_, _, draft, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
     assert_eq!(draft["last_validated_revision"], 1);
     assert_eq!(draft["last_validation_error"], serde_json::Value::Null);
 }
@@ -86,14 +86,14 @@ async fn zero_upstream_affinity_ttl_reports_exact_validation_path() {
     let _ = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(draft, 0)),
     )
     .await;
     let (status, _, json, _) = authed_json(
         app,
         "POST",
-        "/admin/config/draft/validate",
+        "/admin/v1/config/draft/validate",
         Some(expected_revision_body(1)),
     )
     .await;
@@ -119,14 +119,14 @@ async fn stale_validate_revision_returns_conflict() {
     let _ = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(config_value(123), 0)),
     )
     .await;
     let (status, _, json, _) = authed_json(
         app,
         "POST",
-        "/admin/config/draft/validate",
+        "/admin/v1/config/draft/validate",
         Some(expected_revision_body(0)),
     )
     .await;
@@ -141,7 +141,7 @@ async fn validate_without_storage_returns_unavailable() {
     let (status, _, json, _) = authed_json(
         app,
         "POST",
-        "/admin/config/draft/validate",
+        "/admin/v1/config/draft/validate",
         Some(expected_revision_body(0)),
     )
     .await;

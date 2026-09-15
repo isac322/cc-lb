@@ -21,6 +21,7 @@ fn test_state() -> AdminState {
 fn test_state_with_auth(admin_auth: Arc<AdminAuthenticator>) -> AdminState {
     let config = Config::default();
     AdminState {
+        config_path: None,
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
@@ -55,8 +56,7 @@ async fn test_auth_required() {
         ("/admin/principals/alice/keys/key-1/enable", "POST"),
         ("/admin/principals/alice/keys/key-1/usage", "GET"),
         ("/admin/audit", "GET"),
-        ("/admin/config/current", "GET"),
-        ("/admin/config/reload", "POST"),
+        ("/admin/v1/config/current", "GET"),
         ("/admin/scheduler/status", "GET"),
         ("/admin/scheduler/failures", "GET"),
         ("/admin/v1/status", "GET"),
@@ -115,7 +115,7 @@ async fn test_auth_success() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/config/current")
+        .uri("/admin/v1/config/current")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();

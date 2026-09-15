@@ -68,11 +68,9 @@ tower.workspace = true
 thiserror.workspace = true
 ring.workspace = true
 sonic-rs.workspace = true
-toml.workspace = true
 url.workspace = true
 uuid = { workspace = true, features = ["v5"] }
 mime_guess = "2.0.5"
-nix = { version = "0.31.3", features = ["signal"] }
 
 [dev-dependencies]
 cc-lb-observability = { path = "../cc-lb-observability" }

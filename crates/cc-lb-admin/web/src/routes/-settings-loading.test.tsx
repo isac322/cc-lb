@@ -12,12 +12,9 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { Route as SettingsRoute } from './settings';
 
 const queryMocks = vi.hoisted(() => ({
-  useApplyConfig: vi.fn(),
   useConfigCurrent: vi.fn(),
   useConfigDraft: vi.fn(),
   useConfigHistory: vi.fn(),
-  useConfigSchema: vi.fn(),
-  useReloadConfig: vi.fn(),
   useSaveDraft: vi.fn(),
   useStatus: vi.fn(),
   useValidateConfig: vi.fn(),
@@ -56,18 +53,6 @@ vi.mock('../lib/locale', () => ({
   }),
 }));
 
-vi.mock('../lib/authSession', () => ({
-  useAuthSessionContext: () => ({
-    authority: 'static-token',
-    subject: 'legacy',
-    kind: 'break_glass',
-    provider_id: 'legacy',
-    email: null,
-    display_name: 'Shared admin token',
-    expires_at_unix_secs: null,
-    auth_mode: 'static_token',
-  }),
-}));
 const SettingsComponent = SettingsRoute.options
   .component as React.ComponentType;
 
@@ -117,9 +102,6 @@ function setSettingsLoaded() {
   queryMocks.useStatus.mockReturnValue(loadedResult(loadedStatus));
   queryMocks.useConfigCurrent.mockReturnValue(loadedResult({}));
   queryMocks.useConfigDraft.mockReturnValue(loadedResult(loadedDraft));
-  queryMocks.useConfigSchema.mockReturnValue(
-    loadedResult({ schema: {}, coverage_checklist: [] }),
-  );
   queryMocks.useConfigHistory.mockReturnValue(loadedResult({ history: [] }));
 }
 
@@ -134,11 +116,8 @@ beforeEach(() => {
   queryMocks.useStatus.mockReturnValue(loadingResult());
   queryMocks.useConfigCurrent.mockReturnValue(loadingResult());
   queryMocks.useConfigDraft.mockReturnValue(loadingResult());
-  queryMocks.useConfigSchema.mockReturnValue(loadingResult());
   queryMocks.useConfigHistory.mockReturnValue(loadingResult());
 
-  queryMocks.useApplyConfig.mockReturnValue(mutationResult());
-  queryMocks.useReloadConfig.mockReturnValue(mutationResult());
   queryMocks.useSaveDraft.mockReturnValue(mutationResult());
   queryMocks.useValidateConfig.mockReturnValue(mutationResult());
 });
@@ -148,7 +127,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-test('settings cold load skeletonizes fixed metadata, checklist, and history slots', () => {
+test('settings cold load reserves fixed metadata and history heights', () => {
   render(<SettingsComponent />);
 
   const versionCard = screen.getByTestId('version-card');
@@ -174,14 +153,10 @@ test('settings cold load skeletonizes fixed metadata, checklist, and history slo
   expect(draftMetadata.querySelectorAll('.skeleton')).toHaveLength(3);
   expect(draftMetadata.textContent).not.toContain('—');
 
-  const checklistSlot = screen.getByTestId('config-checklist-slot');
-  expect(checklistSlot.className).toContain('min-h-[20px]');
-  expect(checklistSlot.querySelector('.skeleton')).not.toBeNull();
-
   const historySlot = screen.getByTestId('config-history-slot');
   expect(historySlot.className).toContain('min-h-[173px]');
   expect(historySlot.className).toContain('sm:min-h-[163px]');
-  expect(historySlot.querySelectorAll('thead th')).toHaveLength(3);
+  expect(historySlot.querySelectorAll('thead th')).toHaveLength(2);
   expect(historySlot.querySelector('table')?.className).toContain(
     'min-w-[400px]',
   );
@@ -189,7 +164,7 @@ test('settings cold load skeletonizes fixed metadata, checklist, and history slo
   expect(historyRows).toHaveLength(4);
   for (const row of historyRows) {
     const cells = row.querySelectorAll('td');
-    expect(cells).toHaveLength(3);
+    expect(cells).toHaveLength(2);
     for (const cell of cells) {
       expect(cell.className).toContain('px-4');
       expect(cell.className).toContain('py-2');
@@ -197,69 +172,59 @@ test('settings cold load skeletonizes fixed metadata, checklist, and history slo
   }
 });
 
-test('settings empty and loaded checklist/history states retain their slots', () => {
+test('settings separates saved config history from database backups', () => {
   setSettingsLoaded();
 
   const { rerender } = render(<SettingsComponent />);
 
-  expect(screen.getByTestId('config-checklist-slot').className).toContain(
-    'min-h-[20px]',
-  );
-  expect(screen.getByText('Coverage checklist (0 fields)')).toBeDefined();
-  expect(screen.getByTestId('config-history-slot').className).toContain(
-    'min-h-[173px]',
-  );
-  expect(screen.getByTestId('config-history-slot').className).toContain(
-    'sm:min-h-[163px]',
-  );
-  expect(screen.getByText('No history available.')).toBeDefined();
+  const historySlot = screen.getByTestId('config-history-slot');
+  expect(historySlot.className).toContain('min-h-[173px]');
+  expect(historySlot.className).toContain('sm:min-h-[163px]');
+  expect(screen.getByText('Saved Config History')).toBeDefined();
+  expect(screen.getByText('Last 20 saved revisions')).toBeDefined();
+  expect(screen.getByText('No saved config history available.')).toBeDefined();
   expect(
-    within(screen.getByTestId('config-history-slot'))
+    within(historySlot)
       .getAllByRole('columnheader')
       .map((header) => header.textContent),
-  ).toEqual(['Rev', 'Applied', 'TLS']);
-  expect(
-    screen.queryByText('upstreams · principals · plugin chains'),
-  ).toBeNull();
-  expect(screen.getByText('Configuration Export')).toBeDefined();
+  ).toEqual(['Rev', 'Saved']);
+
+  expect(screen.getByText('Data & Backups')).toBeDefined();
+  expect(screen.getByText('Database resources snapshot')).toBeDefined();
   expect(
     screen.getByText(
-      'Download a JSON snapshot of all upstreams, principals, plugins, and chains.',
+      'Download a JSON snapshot of upstreams, principals, plugins, and chains stored in the database.',
     ),
   ).toBeDefined();
+  expect(screen.queryByText('Configuration Export')).toBeNull();
+  expect(screen.queryByText('Admin Token')).toBeNull();
+  expect(screen.queryByText('Coverage checklist')).toBeNull();
+  expect(screen.queryByText('Restart-Required Fields')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Reload' })).toBeNull();
 
-  queryMocks.useConfigSchema.mockReturnValue(
-    loadedResult({
-      schema: {},
-      coverage_checklist: ['listener.proxy_addr', 'storage.url'],
-    }),
-  );
   queryMocks.useConfigHistory.mockReturnValue(
     loadedResult({
       history: [
         {
           revision: 7,
           applied_at_unix_secs: 1_722_340_800,
-          config_summary: {
-            tls_enabled: true,
-          },
         },
       ],
     }),
   );
   rerender(<SettingsComponent />);
 
-  expect(screen.getByTestId('config-checklist-slot').className).toContain(
-    'min-h-[20px]',
-  );
-  expect(screen.getByText('Coverage checklist (2 fields)')).toBeDefined();
   const loadedHistorySlot = screen.getByTestId('config-history-slot');
   expect(loadedHistorySlot.className).toContain('min-h-[173px]');
-  expect(loadedHistorySlot.querySelectorAll('tbody td')).toHaveLength(3);
-  expect(within(loadedHistorySlot).getByText('on')).toBeDefined();
+  expect(loadedHistorySlot.querySelectorAll('tbody td')).toHaveLength(2);
+  expect(
+    within(loadedHistorySlot).getByTitle('Jul 30, 2026, 12:00:00 PM'),
+  ).toBeDefined();
+  expect(within(loadedHistorySlot).getByText('7')).toBeDefined();
 });
 
-test('settings editor loads the saved draft and documents static-token secret replacement', () => {
+test('settings editor loads the saved draft without deprecated settings views', () => {
   setSettingsLoaded();
   const savedDraft = {
     routing: { strategy: 'saved-draft' },
@@ -285,22 +250,11 @@ test('settings editor loads the saved draft and documents static-token secret re
   );
   expect(screen.getByTestId('draft-saved-at-slot').textContent).not.toBe('—');
 
-  const adminTokenCard = screen.getByTestId('admin-token-card');
-  expect(within(adminTokenCard).queryByRole('button')).toBeNull();
-  expect(adminTokenCard.textContent).not.toContain('Rotate token');
-  expect(screen.queryByText('Rotate admin token?')).toBeNull();
-  expect(screen.getByTestId('admin-token-guidance').textContent).toContain(
-    'static_token',
-  );
-  expect(screen.getByTestId('admin-token-guidance').textContent).toContain(
-    'token_env',
-  );
-  expect(screen.getByTestId('admin-token-guidance').textContent).toContain(
-    'configured under admin.auth.providers and cannot be rotated from this dashboard',
-  );
-  expect(screen.getByTestId('admin-token-guidance').textContent).toContain(
-    'restart the cc-lb process',
-  );
+  expect(screen.queryByText('Admin Token')).toBeNull();
+  expect(screen.queryByText('Coverage checklist')).toBeNull();
+  expect(screen.queryByText('Restart-Required Fields')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Reload' })).toBeNull();
 });
 
 test('settings editor initializes from current config when no saved draft exists', () => {
@@ -345,11 +299,8 @@ test('settings editor initializes from current config when no saved draft exists
   expect(
     screen.getByRole('button', { name: 'Validate' }).hasAttribute('disabled'),
   ).toBe(true);
-  expect(
-    screen.getByRole('button', { name: 'Apply' }).hasAttribute('disabled'),
-  ).toBe(true);
   expect(screen.getByTestId('config-pipeline-status').textContent).toBe(
-    'Save this configuration as a server draft before validating or applying.',
+    'Save this configuration as a server draft before validating.',
   );
 });
 
@@ -487,7 +438,7 @@ test('pristine editor follows an expired server draft at the new revision', () =
   expect(screen.getByTestId('draft-last-validated-slot').textContent).toBe('—');
   expect(screen.getByTestId('draft-saved-at-slot').textContent).toBe('—');
   expect(screen.getByTestId('config-pipeline-status').textContent).toBe(
-    'Save this configuration as a server draft before validating or applying.',
+    'Save this configuration as a server draft before validating.',
   );
 });
 
@@ -521,11 +472,8 @@ test('dirty editor survives background revisions and conflict mutation states wh
   expect(
     screen.getByRole('button', { name: 'Validate' }).hasAttribute('disabled'),
   ).toBe(true);
-  expect(
-    screen.getByRole('button', { name: 'Apply' }).hasAttribute('disabled'),
-  ).toBe(true);
   expect(screen.getByTestId('config-pipeline-status').textContent).toBe(
-    'Save your editor changes before validating or applying. Validate and Apply use the saved server draft.',
+    'Save your editor changes before validating. Validate uses the saved server draft.',
   );
 
   queryMocks.useConfigDraft.mockReturnValue(
@@ -565,11 +513,10 @@ test('dirty editor survives background revisions and conflict mutation states wh
   }
 });
 
-test('save response advances the editor revision used by validate and apply', () => {
+test('save response advances the editor revision used by validate', () => {
   setSettingsLoaded();
   const saveMutate = vi.fn();
   const validateMutate = vi.fn();
-  const applyMutate = vi.fn();
   queryMocks.useSaveDraft.mockReturnValue({
     mutate: saveMutate,
     isPending: false,
@@ -577,11 +524,6 @@ test('save response advances the editor revision used by validate and apply', ()
   });
   queryMocks.useValidateConfig.mockReturnValue({
     mutate: validateMutate,
-    isPending: false,
-    variables: undefined,
-  });
-  queryMocks.useApplyConfig.mockReturnValue({
-    mutate: applyMutate,
     isPending: false,
     variables: undefined,
   });
@@ -631,9 +573,6 @@ test('save response advances the editor revision used by validate and apply', ()
   expect(
     screen.getByRole('button', { name: 'Validate' }).hasAttribute('disabled'),
   ).toBe(false);
-  expect(
-    screen.getByRole('button', { name: 'Apply' }).hasAttribute('disabled'),
-  ).toBe(true);
 
   fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
   expect(validateMutate.mock.calls[0]?.[0]).toBe(8);
@@ -651,91 +590,73 @@ test('save response advances the editor revision used by validate and apply', ()
   expect(screen.getByTestId('draft-last-validated-slot').textContent).toBe(
     'rev 8',
   );
-  expect(
-    screen.getByRole('button', { name: 'Apply' }).hasAttribute('disabled'),
-  ).toBe(false);
-  fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
-  expect(applyMutate.mock.calls[0]?.[0]).toBe(8);
 });
 
-test('config mutations mutually lock the pipeline and retain the owning progress label', () => {
-  const cases = [
-    {
-      hook: queryMocks.useSaveDraft,
-      idleLabel: 'Save',
-      pendingLabel: 'Saving...',
-      statusLabel: 'Saving draft...',
-    },
-    {
-      hook: queryMocks.useValidateConfig,
-      idleLabel: 'Validate',
-      pendingLabel: 'Validating...',
-      statusLabel: 'Validating draft...',
-    },
-    {
-      hook: queryMocks.useApplyConfig,
-      idleLabel: 'Apply',
-      pendingLabel: 'Applying...',
-      statusLabel: 'Applying revision...',
-    },
-    {
-      hook: queryMocks.useReloadConfig,
-      idleLabel: 'Reload',
-      pendingLabel: 'Reloading...',
-      statusLabel: 'Reloading configuration...',
-    },
-  ];
+test('save completion advances revision while preserving edits made in flight', () => {
+  setSettingsLoaded();
+  const saveMutate = vi.fn();
+  queryMocks.useSaveDraft.mockReturnValue({
+    mutate: saveMutate,
+    isPending: false,
+    variables: undefined,
+  });
+  queryMocks.useConfigDraft.mockReturnValue(
+    loadedResult({
+      ...loadedDraft,
+      draft: { routing: { strategy: 'old' } },
+      revision: 7,
+    }),
+  );
 
-  for (const { hook, idleLabel, pendingLabel, statusLabel } of cases) {
-    setSettingsLoaded();
-    queryMocks.useApplyConfig.mockReturnValue(mutationResult());
-    queryMocks.useReloadConfig.mockReturnValue(mutationResult());
-    queryMocks.useSaveDraft.mockReturnValue(mutationResult());
-    queryMocks.useValidateConfig.mockReturnValue(mutationResult());
+  render(<SettingsComponent />);
+  const editor = screen.getByTestId(
+    'config-draft-editor',
+  ) as HTMLTextAreaElement;
+  const firstText = JSON.stringify(
+    { routing: { strategy: 'first-edit' } },
+    null,
+    2,
+  );
+  const secondText = JSON.stringify(
+    { routing: { strategy: 'second-edit' } },
+    null,
+    2,
+  );
 
-    const view = render(<SettingsComponent />);
-    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: '{}' } });
+  fireEvent.change(editor, { target: { value: firstText } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  fireEvent.change(editor, { target: { value: secondText } });
 
-    hook.mockReturnValue({
-      mutate: vi.fn(),
-      isPending: true,
-      variables: undefined,
+  const saveOptions = saveMutate.mock.calls[0]?.[1] as {
+    onSuccess: (response: {
+      revision: number;
+      saved_at_unix_secs: number;
+    }) => void;
+  };
+  act(() => {
+    saveOptions.onSuccess({
+      revision: 8,
+      saved_at_unix_secs: 1_722_340_900,
     });
-    view.rerender(<SettingsComponent />);
+  });
 
-    const pendingButton = screen.getByRole('button', {
-      name: pendingLabel,
-    });
-    expect(pendingButton.hasAttribute('disabled')).toBe(true);
-    expect(pendingButton.getAttribute('aria-busy')).toBe('true');
-    expect(pendingButton.querySelector('svg.animate-spin')).not.toBeNull();
-    expect(textarea.hasAttribute('disabled')).toBe(true);
-    expect(textarea.parentElement?.getAttribute('aria-busy')).toBe('true');
-    const progress = screen.getByTestId('config-pipeline-status');
-    expect(progress.getAttribute('role')).toBe('status');
-    expect(progress.getAttribute('aria-live')).toBe('polite');
-    expect(progress.className).toContain('min-h-4');
-    expect(within(progress).getByText(statusLabel)).toBeDefined();
-    expect(progress.querySelector('svg.animate-spin')).not.toBeNull();
-
-    for (const label of ['Save', 'Validate', 'Apply', 'Reload']) {
-      if (label === idleLabel) continue;
-      expect(
-        screen.getByRole('button', { name: label }).hasAttribute('disabled'),
-      ).toBe(true);
-    }
-
-    view.unmount();
-  }
+  expect(editor.value).toBe(secondText);
+  expect(screen.getByTestId('draft-revision-slot').textContent).toBe('8');
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  expect(saveMutate.mock.calls[1]?.[0]).toEqual({
+    draft: { routing: { strategy: 'second-edit' } },
+    expected_revision: 8,
+  });
 });
 
-test('configuration export exposes download progress and blocks duplicate clicks', () => {
+test('database snapshot exposes download progress and blocks duplicate clicks', () => {
   setSettingsLoaded();
   apiMocks.downloadJson.mockReturnValue(Promise.withResolvers<void>().promise);
   render(<SettingsComponent />);
 
-  fireEvent.click(screen.getByRole('button', { name: 'Download export.json' }));
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Download database snapshot' }),
+  );
 
   const downloading = screen.getByRole('button', { name: 'Downloading...' });
   expect(downloading.hasAttribute('disabled')).toBe(true);
@@ -744,4 +665,8 @@ test('configuration export exposes download progress and blocks duplicate clicks
 
   fireEvent.click(downloading);
   expect(apiMocks.downloadJson).toHaveBeenCalledTimes(1);
+  expect(apiMocks.downloadJson).toHaveBeenCalledWith(
+    '/admin/v1/export',
+    'cc-lb-database-resources-2026-06-18T00:00.json',
+  );
 });

@@ -10,12 +10,13 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
-use cc_lb_storage_api::{ConfigStore, HistorySummary};
+use cc_lb_storage_api::ConfigStore;
 use tower::ServiceExt;
 
 fn test_state() -> AdminState {
     let config = Config::default();
     AdminState {
+        config_path: None,
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
@@ -40,32 +41,21 @@ fn test_state() -> AdminState {
 #[tokio::test]
 async fn config_history_route_returns_applied_history() {
     let (_dir, storage) = config_admin_common::temp_storage().await;
-    let mut config = Config {
-        request_event_retention_days: 45,
-        ..Config::default()
-    };
-    config.price_catalog.url = "https://catalog.example/history.json".to_owned();
-    config.price_catalog.cache_path = "/tmp/history-catalog.json".into();
-    storage
-        .append_config_history(
-            7,
-            toml::to_string_pretty(&config).unwrap(),
-            1234,
-            HistorySummary { tls_enabled: false },
-        )
-        .await
-        .unwrap();
+    let config = Config::default();
+    storage.append_config_history(7, 1234).await.unwrap();
     let app = config_admin_common::app(config_admin_common::test_state(config, Some(storage)));
 
     let (status, _, json, _) =
-        config_admin_common::authed_json(app, "GET", "/admin/config/history?limit=1", None).await;
+        config_admin_common::authed_json(app, "GET", "/admin/v1/config/history?limit=1", None)
+            .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["history"][0]["revision"], 7);
-    assert_eq!(json["history"][0]["applied_at_unix_secs"], 1234);
     assert_eq!(
-        json["history"][0]["config_summary"],
-        serde_json::json!({ "tls_enabled": false })
+        json["history"][0],
+        serde_json::json!({
+            "revision": 7,
+            "applied_at_unix_secs": 1234,
+        })
     );
 }
 
@@ -75,7 +65,7 @@ async fn config_history_current_admin_config_smoke() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/admin/config/current")
+                .uri("/admin/v1/config/current")
                 .header("Authorization", "Bearer test-token")
                 .body(Body::empty())
                 .unwrap(),

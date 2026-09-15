@@ -159,16 +159,9 @@ pub struct ConfigDraftState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistorySummary {
-    pub tls_enabled: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub revision: u64,
-    pub config_toml: String,
     pub applied_at_unix_secs: u64,
-    pub summary: HistorySummary,
 }
 
 const UNKNOWN_USAGE_DIMENSION: &str = "unknown";

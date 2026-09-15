@@ -2138,6 +2138,7 @@ mod tests {
         let storage = Arc::new(storage);
         let aead = Arc::new(AeadService::from_master_key([8; 32]));
         let state = AdminState {
+            config_path: None,
             storage: Some(storage.clone()),
             key_store: None,
             aead: aead.clone(),

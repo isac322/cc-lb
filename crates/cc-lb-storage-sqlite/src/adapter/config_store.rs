@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{
-    ConfigDraftState, ConfigStore, HistoryEntry, HistorySummary, StorageError, StorageResult,
-};
+use cc_lb_storage_api::{ConfigDraftState, ConfigStore, HistoryEntry, StorageError, StorageResult};
 use sqlx::Row;
 
 use crate::{SqliteStorage, map_sqlx_error};
@@ -98,15 +96,11 @@ impl ConfigStore for SqliteStorage {
     async fn append_config_history(
         &self,
         revision: u64,
-        config_toml: String,
         applied_at_unix_secs: u64,
-        summary: HistorySummary,
     ) -> StorageResult<()> {
         let entry = HistoryEntry {
             revision,
-            config_toml,
             applied_at_unix_secs,
-            summary,
         };
         let payload = serde_json::to_string(&entry)?;
         let mut tx = self.begin_immediate().await?;
@@ -152,20 +146,6 @@ impl ConfigStore for SqliteStorage {
                 serde_json::from_str(&payload).map_err(Into::into)
             })
             .collect()
-    }
-
-    async fn get_config_history(&self, revision: u64) -> StorageResult<Option<HistoryEntry>> {
-        let payload: Option<String> =
-            sqlx::query_scalar("SELECT payload FROM config_history_v1 WHERE id = ?")
-                .bind(revision.to_string())
-                .fetch_optional(self.pool())
-                .await
-                .map_err(map_sqlx_error)?;
-
-        payload
-            .map(|payload| serde_json::from_str(&payload))
-            .transpose()
-            .map_err(Into::into)
     }
 }
 

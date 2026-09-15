@@ -6,7 +6,7 @@ use config_admin_common::{app, authed_json, test_state_without_storage, unauthen
 #[tokio::test]
 async fn authorized_schema_returns_schema_and_checklist() {
     let app = app(test_state_without_storage());
-    let (status, _, json, _) = authed_json(app, "GET", "/admin/config/schema", None).await;
+    let (status, _, json, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(json.get("schema").is_some());
@@ -16,7 +16,7 @@ async fn authorized_schema_returns_schema_and_checklist() {
 #[tokio::test]
 async fn schema_excludes_database_owned_resources() {
     let app = app(test_state_without_storage());
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/config/schema", None).await;
+    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
     let properties = json["schema"]["properties"].as_object().unwrap();
 
     for resource in [
@@ -36,7 +36,7 @@ async fn schema_excludes_database_owned_resources() {
 #[tokio::test]
 async fn schema_matches_runtime_owned_config_contract() {
     let app = app(test_state_without_storage());
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/config/schema", None).await;
+    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
     let properties = json["schema"]["properties"].as_object().unwrap();
     let checklist = json["coverage_checklist"]
         .as_array()
@@ -117,7 +117,7 @@ async fn schema_matches_runtime_owned_config_contract() {
 #[tokio::test]
 async fn schema_and_coverage_include_upstream_affinity() {
     let app = app(test_state_without_storage());
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/config/schema", None).await;
+    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
 
     assert!(
         json["schema"]["properties"]
@@ -141,7 +141,7 @@ async fn schema_and_coverage_include_upstream_affinity() {
 #[tokio::test]
 async fn schema_contains_property_for_each_coverage_item() {
     let app = app(test_state_without_storage());
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/config/schema", None).await;
+    let (_, _, json, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
     let properties = json["schema"]["properties"].as_object().unwrap();
 
     for item in json["coverage_checklist"].as_array().unwrap() {
@@ -156,7 +156,7 @@ async fn schema_contains_property_for_each_coverage_item() {
 #[tokio::test]
 async fn schema_response_is_cacheable_for_sixty_seconds() {
     let app = app(test_state_without_storage());
-    let (status, headers, _, _) = authed_json(app, "GET", "/admin/config/schema", None).await;
+    let (status, headers, _, _) = authed_json(app, "GET", "/admin/v1/config/schema", None).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers.get("cache-control").unwrap(), "max-age=60");
@@ -165,7 +165,7 @@ async fn schema_response_is_cacheable_for_sixty_seconds() {
 #[tokio::test]
 async fn schema_requires_admin_auth() {
     let app = app(test_state_without_storage());
-    let status = unauthenticated_status(app, "GET", "/admin/config/schema").await;
+    let status = unauthenticated_status(app, "GET", "/admin/v1/config/schema").await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

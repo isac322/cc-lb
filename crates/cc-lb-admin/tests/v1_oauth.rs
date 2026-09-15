@@ -55,6 +55,7 @@ impl Fixture {
         let aead = Arc::new(AeadService::from_master_key(MASTER_KEY));
         let config = test_config(oauth_addr);
         let state = AdminState {
+            config_path: None,
             storage: Some(storage.clone()),
             key_store: Some(admin_test_common::key_store(storage.clone())),
             aead: Arc::clone(&aead),

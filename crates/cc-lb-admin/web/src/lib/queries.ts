@@ -325,8 +325,6 @@ export const qk = {
   configSchema: ['config', 'schema'] as const,
   configDraft: ['config', 'draft'] as const,
   configHistory: ['config', 'history'] as const,
-  configDiff: (from: number, to: number) =>
-    ['config', 'diff', from, to] as const,
   subscriptionQuotaLatest: (params: Record<string, any>) =>
     ['subscription-quota', 'latest', params] as const,
   subscriptionQuotaSeries: (params: Record<string, any>) =>
@@ -786,26 +784,26 @@ export function useTriggerSubscriptionMetadataRefresh() {
 export function useConfigCurrent() {
   return useQuery({
     queryKey: qk.configCurrent,
-    queryFn: () => getJson<Record<string, unknown>>('/admin/config/current'),
+    queryFn: () => getJson<Record<string, unknown>>('/admin/v1/config/current'),
   });
 }
 export function useConfigSchema() {
   return useQuery({
     queryKey: qk.configSchema,
-    queryFn: () => getJson<ConfigSchemaResponse>('/admin/config/schema'),
+    queryFn: () => getJson<ConfigSchemaResponse>('/admin/v1/config/schema'),
   });
 }
 export function useConfigDraft() {
   return useQuery({
     queryKey: qk.configDraft,
-    queryFn: () => getJson<ConfigDraftResponse>('/admin/config/draft'),
+    queryFn: () => getJson<ConfigDraftResponse>('/admin/v1/config/draft'),
   });
 }
 export function useConfigHistory() {
   return useQuery({
     queryKey: qk.configHistory,
     queryFn: () =>
-      getJson<ConfigHistoryResponse>('/admin/config/history?limit=20'),
+      getJson<ConfigHistoryResponse>('/admin/v1/config/history?limit=20'),
   });
 }
 
@@ -1577,28 +1575,13 @@ export function useUpdateRouterTerminalStrategy() {
       qc.invalidateQueries({ queryKey: ['router-terminal', vars.id] }),
   });
 }
-export function useApplyConfig() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (expected_revision: number) =>
-      postJson<
-        { applied_revision: number; applied_at_unix_secs: number },
-        { expected_revision: number }
-      >('/admin/config/apply', { expected_revision }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.configDraft });
-      qc.invalidateQueries({ queryKey: qk.configHistory });
-      qc.invalidateQueries({ queryKey: qk.configCurrent });
-    },
-  });
-}
 export function useValidateConfig() {
   return useMutation({
     mutationFn: (expected_revision: number) =>
       postJson<
         { valid: boolean; revision: number; error?: string },
         { expected_revision: number }
-      >('/admin/config/draft/validate', { expected_revision }),
+      >('/admin/v1/config/draft/validate', { expected_revision }),
   });
 }
 export function useSaveDraft() {
@@ -1614,17 +1597,8 @@ export function useSaveDraft() {
       putJson<
         { revision: number; saved_at_unix_secs: number },
         { draft: Record<string, unknown>; expected_revision: number }
-      >('/admin/config/draft', { draft, expected_revision }),
+      >('/admin/v1/config/draft', { draft, expected_revision }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.configDraft }),
-  });
-}
-export function useReloadConfig() {
-  return useMutation({
-    mutationFn: () =>
-      postJson<{ status: string; reloading: boolean }, Record<string, never>>(
-        '/admin/config/reload',
-        {},
-      ),
   });
 }
 

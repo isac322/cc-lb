@@ -179,6 +179,7 @@ pub async fn spawn_admin_server_with_clock_and_auth(
     let config = Config::default();
     let dynamic_view = dynamic_view_holder(&config);
     let state = cc_lb_admin::AdminState {
+        config_path: None,
         storage: Some(storage.clone()),
         key_store: Some(key_store(storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),

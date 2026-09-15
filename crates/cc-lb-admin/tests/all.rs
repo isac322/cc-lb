@@ -16,10 +16,6 @@ mod cloudflare_access_auth;
 mod cache_keepalive_contracts;
 #[path = "config_admin_common/mod.rs"]
 mod config_admin_common;
-#[path = "config_apply.rs"]
-mod config_apply;
-#[path = "config_diff.rs"]
-mod config_diff;
 #[path = "config_draft.rs"]
 mod config_draft;
 #[path = "config_draft_persists.rs"]

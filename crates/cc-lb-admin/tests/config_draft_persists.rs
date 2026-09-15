@@ -13,6 +13,7 @@ use tower::ServiceExt;
 fn test_state() -> AdminState {
     let config = Config::default();
     AdminState {
+        config_path: None,
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),

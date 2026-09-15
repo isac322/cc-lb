@@ -353,14 +353,10 @@ pub trait ConfigStore: Send + Sync {
     async fn append_config_history(
         &self,
         revision: u64,
-        config_toml: String,
         applied_at_unix_secs: u64,
-        summary: HistorySummary,
     ) -> StorageResult<()>;
 
     async fn list_config_history(&self, limit: usize) -> StorageResult<Vec<HistoryEntry>>;
-
-    async fn get_config_history(&self, revision: u64) -> StorageResult<Option<HistoryEntry>>;
 }
 
 #[async_trait]

@@ -15,6 +15,7 @@ use tower::ServiceExt;
 fn test_state() -> AdminState {
     let config = Config::default();
     AdminState {
+        config_path: None,
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
@@ -42,7 +43,7 @@ async fn principal_keys_current_admin_principals_smoke() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/admin/config/current")
+                .uri("/admin/v1/config/current")
                 .header("Authorization", "Bearer test-token")
                 .body(Body::empty())
                 .unwrap(),
