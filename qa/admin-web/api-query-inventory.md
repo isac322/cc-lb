@@ -4158,7 +4158,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **Expected UI:** Populates draft editor, revision badges, and schema checklist
+- **Expected UI:** Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation.
 - **Runtime result:** `PENDING`
 
 ### [UI-SET-03B] Settings — Load Configuration Draft Pipeline Data — useConfigDraft
@@ -4177,9 +4177,9 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `get_config_draft`
 - **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Reads singleton config draft from DB
+- **Cache / no-query path:** Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query.
 - **Side effects:** Audit log write: record_admin_audit("config_draft_read", "/admin/v1/config/draft")
-- **Expected UI:** Populates draft editor, revision badges, and schema checklist
+- **Expected UI:** Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation.
 - **Runtime result:** `PENDING`
 
 ### [UI-SET-03A] Settings — Load Configuration Draft Pipeline Data — useConfigCurrent
@@ -4200,7 +4200,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Storage operations:** `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
 - **Cache / no-query path:** In-memory state.config.current_config() Arc clone; secrets are masked via mask_secret_like_values before serialization.
 - **Side effects:** Audit log write: record_admin_audit("config_read", "/admin/v1/config/current")
-- **Expected UI:** Populates draft editor, revision badges, and schema checklist
+- **Expected UI:** Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation.
 - **Runtime result:** `PENDING`
 
 ### [UI-SET-03C] Settings — Load Configuration Draft Pipeline Data — useConfigSchema
@@ -4221,14 +4221,14 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Storage operations:** None
 - **Cache / no-query path:** In-memory schemars schema generation; HTTP Cache-Control: max-age=60
 - **Side effects:** None
-- **Expected UI:** Populates draft editor, revision badges, and schema checklist
+- **Expected UI:** Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation.
 - **Runtime result:** `PENDING`
 
 ### [UI-SET-14] Settings — Edit Draft Textarea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:740#ConfigDraftSection`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:756#ConfigDraftSection`
 - **Preconditions:** Editor initialized and not locked by configPending
 - **Steps:** Type or paste in JSON config textarea
 - **Scope:** `once` — Equivalence classes: [valid JSON modification, invalid syntax string, empty string]
@@ -4242,7 +4242,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-SET-04`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:556#ConfigDraftSection`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:568#ConfigDraftSection`
 - **Preconditions:** canSave === true: editor != null && (editorDirty || (!editor.hasSavedDraft && !serverRevisionChanged)) && !configPending
 - **Steps:** Click Save button
 - **Scope:** `once` — Single execution per draft edit
@@ -4276,7 +4276,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-SET-05`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:593#ConfigDraftSection`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:605#ConfigDraftSection`
 - **Preconditions:** canValidate === true: editor.hasSavedDraft === true && !editorDirty && !serverRevisionChanged && !configPending
 - **Steps:** Click Validate button
 - **Scope:** `once` — Single execution per saved revision
@@ -4310,13 +4310,13 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-SET-06`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:610#ConfigDraftSection`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:622#ConfigDraftSection`
 - **Preconditions:** canApply === true: editor != null && canValidate && lastValidatedRevision != null && lastValidationError == null && lastValidatedRevision === editor.revision && !configPending
 - **Steps:** Click Apply button
 - **Scope:** `once` — Single execution per validated revision
 - **Risk:** `reversible_write`
 - **Production applicability:** `available`
-- **Expected UI:** Displays applying spinner; toast 'Applied revision {n}'; history and current config queries refresh
+- **Expected UI:** Unsupported or unconfirmed provider capability disables Apply without disabling Save or Validate. Apply-only guidance is outside the aria-live pipeline and referenced only by Apply. Supported mode retains its existing request and refresh behavior; success-revision metadata compatibility is a separately recorded pre-existing limitation.
 - **Runtime result:** `PENDING`
 
 ### [UI-SET-06] Settings — Apply Draft Revision — useApplyConfig
@@ -4337,14 +4337,14 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Storage operations:** `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
 - **Cache / no-query path:** Atomically swaps DynamicView and CurrentConfig; clears in-memory draft; invalidates TanStack queryKey ['config', 'draft'], ['config', 'current']
 - **Side effects:** Audit event `config_apply`; activates new runtime proxy state in memory without database entity mutation QA restore: Re-apply previous configuration draft or reload original config.
-- **Expected UI:** Displays applying spinner; toast 'Applied revision {n}'; history and current config queries refresh
+- **Expected UI:** Unsupported or unconfirmed provider capability disables Apply without disabling Save or Validate. Apply-only guidance is outside the aria-live pipeline and referenced only by Apply. Supported mode retains its existing request and refresh behavior; success-revision metadata compatibility is a separately recorded pre-existing limitation.
 - **Runtime result:** `PENDING`
 
 ### [UI-SRC-EA3DE5874C4D] Settings — Trigger Daemon Configuration Hot Reload
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-SET-07`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:660#ConfigDraftSection`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:672#ConfigDraftSection`
 - **Preconditions:** !configPending
 - **Steps:** Click Reload button
 - **Scope:** `once` — Single execution
@@ -4391,7 +4391,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SET-12`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:551#handleRetryEditor`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:562#handleRetryEditor`
 - **Preconditions:** editorLoadError === true (either draft or current failed) && !editorRetrying && !configPending
 - **Steps:** Click Retry button in error banner
 - **Scope:** `once` — Single execution upon error
@@ -4403,7 +4403,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `get_config_draft`
 - **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Reads singleton config draft from DB
+- **Cache / no-query path:** Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query.
 - **Side effects:** Audit log write: record_admin_audit("config_draft_read", "/admin/v1/config/draft")
 - **Expected UI:** Banner displays 'Retrying...'; triggers refetch of failed queries
 - **Runtime result:** `PENDING`
@@ -4412,7 +4412,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SET-12`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:552#handleRetryEditor`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:564#handleRetryEditor`
 - **Preconditions:** editorLoadError === true (either draft or current failed) && !editorRetrying && !configPending
 - **Steps:** Click Retry button in error banner
 - **Scope:** `once` — Single execution upon error
@@ -4433,7 +4433,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:756#ConfigDraftSection`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:772#ConfigDraftSection`
 - **Preconditions:** schema.data available
 - **Steps:** Click Coverage checklist trigger
 - **Scope:** `once` — Toggle action
@@ -4447,7 +4447,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-SET-08`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:785#ConfigHistorySection`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:801#ConfigHistorySection`
 - **Preconditions:** Authenticated session
 - **Steps:** Mount ConfigHistorySection
 - **Scope:** `once` — Single execution
@@ -4481,7 +4481,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:871#RestartRequiredMatrix`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:892#RestartRequiredMatrix`
 - **Preconditions:** SettingsPage mounted
 - **Steps:** Mount SettingsPage
 - **Scope:** `once` — 15 static field definitions
@@ -6799,7 +6799,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-7A787CD5C3CF] Backend-Only — GET /admin/health/state
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-server/src/app.rs:2367`
+- **Source:** `crates/cc-lb-server/src/app.rs:2371`
 - **Preconditions:** None (Unauthenticated listener state check)
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -6891,7 +6891,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `get_config_draft`
 - **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Reads singleton config draft from DB
+- **Cache / no-query path:** Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query.
 - **Side effects:** Audit log write: record_admin_audit("config_draft_read", "/admin/v1/config/draft")
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`

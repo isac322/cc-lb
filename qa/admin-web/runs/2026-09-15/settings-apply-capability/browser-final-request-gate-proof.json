@@ -1,0 +1,230 @@
+{
+  "request_heads": [
+    {
+      "route": "/admin/v1/config/draft",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a86f-df41-7e93-83ab-09d2b5edc5a4"
+    },
+    {
+      "route": "/",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-8827-7f90-aae4-273aeb37188b"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a057-71d0-b154-f5ba26f3c20f"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a069-7431-be1c-5b33ff5a1fc5"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a075-76f3-b4f4-b620a84ce96b"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a075-76f3-b4f4-b6386f01f9c9"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a076-7403-98e3-285c7aed05f8"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a076-7403-98e3-286a7a311798"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a076-7403-98e3-2849e759d155"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a076-7403-98e3-287612ec1978"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a076-7403-98e3-2884fa60c8d2"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a077-7211-9c1a-eeae4b689e65"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a077-7211-9c1a-eeb0c2751efc"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a075-76f3-b4f4-b64f1194cbaa"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0ad-70f0-84fc-f9c185405804"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0ae-7b03-9d66-37c2261fd02c"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0ae-7b03-9d66-37ddb7ac77bd"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0ae-7b03-9d66-37e67d3aa7bd"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0b2-7373-ae47-c6754ca33d5b"
+    },
+    {
+      "route": "/admin/v1/auth/session",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0b2-7373-ae47-c68bed467957"
+    },
+    {
+      "route": "/admin/health",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0c4-7040-95d1-e0f1432e51ae"
+    },
+    {
+      "route": "/admin/config/current",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0c4-7040-95d1-e0d1dda67588"
+    },
+    {
+      "route": "/admin/v1/status",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0c4-7040-95d1-e1282468475e"
+    },
+    {
+      "route": "/admin/config/draft",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0c3-7750-a7d1-1532e05e3714"
+    },
+    {
+      "route": "/admin/config/schema",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0c4-7040-95d1-e11e6932f89f"
+    },
+    {
+      "route": "/admin/v1/principals",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0c6-7091-b5fc-c56c86b78cea"
+    },
+    {
+      "route": "/admin/v1/upstreams",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0c6-7091-b5fc-c55679bfebbf"
+    },
+    {
+      "route": "/admin/config/history",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a0c4-7040-95d1-e1012cdb5bec"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a106-7712-937e-65e9ea2e10f8"
+    },
+    {
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-a107-7650-9520-4a4ed644e078"
+    },
+    {
+      "route": "/admin/v1/auth/session",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-b677-7793-951b-2c2ee6b3d55e"
+    },
+    {
+      "route": "/admin/v1/status",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-f162-7071-a5f3-46a8bb818ceb"
+    },
+    {
+      "route": "/admin/health",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a870-f163-7a50-95d2-7c9530a2ee00"
+    },
+    {
+      "route": "/admin/v1/upstreams",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a871-2bf2-7fa3-8b93-0dab9b580b3f"
+    },
+    {
+      "route": "/admin/health",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a871-2c20-7070-a54e-e37134011267"
+    },
+    {
+      "route": "/admin/v1/status",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a871-2c21-7f80-88b3-a72dfd0671a8"
+    },
+    {
+      "route": "/admin/v1/config/draft",
+      "method": "GET",
+      "status": 200,
+      "rid": "req_admin_01a0a871-2f7a-7c52-9c14-f1217c8493c3"
+    }
+  ],
+  "apply_requests": 0,
+  "binary_sha256": "253cc5105cebfe759c76a4848a7b224da4cef272a9210e8106420b4a09ffff4f",
+  "spa_index_sha256": "9d1f2b21eb548a969ecbb6f6011c42f1c4ec6d49a800e38ed92d2a2f114a9d55",
+  "scope": "Final unsupported-provider UI and accessible description; no direct Apply probe issued."
+}

@@ -85,7 +85,7 @@
 
 ## 5. 상세 TODO와 완료 조건
 
-체크박스는 실행 증거가 있을 때만 갱신한다. TODO 도구와 아래 70개 항목의 이름을 동일하게 유지한다. 발견된 추가 의무는 원래 항목을 지우지 않고 새 ID로 추가한다.
+체크박스는 실행 증거가 있을 때만 갱신한다. TODO 도구와 아래 75개 항목의 이름을 동일하게 유지한다. 발견된 추가 의무는 원래 항목을 지우지 않고 새 ID로 추가한다.
 
 ### 문서와 기준선
 
@@ -272,8 +272,23 @@
 
 - [x] BASEURL-05 초기화 수정 후 카탈로그 문서 최종 검증
   - formatter, 영향 Rust target의 all-features Clippy, source inventory check와 표준 YAML 파싱을 확인했다. 두 DB의 실제 SQL 및 bind 정보와 UI·API 삼상태 계약을 함께 갱신했다.
-- [ ] BASEURL-06 Base URL 수정 커밋과 PR CI 검증
+- [x] BASEURL-06 Base URL 수정 커밋과 PR CI 검증
   - 추가 승인 수정과 격리 증거를 별도 커밋으로 기존 draft PR에 반영하고 새 head의 CI를 확인한다. 이전 head의 통과를 새 head에 적용하지 않으며 머지 보류는 유지한다.
+  - 후속 커밋 `80e1180f0bedd2054450fb68e57444e035c59ef2`를 draft PR #793에 반영했다. 해당 head의 Rust·Web·publish-check 및 상태 검사 11개 성공, release-artifact 조건부 제외 1개를 확인했다. 사용자 머지 보류는 유지하며 ready 전환·머지·배포는 하지 않았다.
+
+### 승인된 Settings 지원 표시
+
+- [x] SETTINGS-01 설정 제공자 capability와 소비자 범위 확정
+  - 2026-09-16 사용자가 지원 여부 표시 수정을 승인했다. 실제 Apply 구현이 있는 InMemoryCurrentConfig와 TestReloader만 지원을 선언하고, ConfigWatcher·Config·기본 제공자는 미지원이다.
+- [x] SETTINGS-02 API 지원 여부와 Apply 비활성화 구현
+  - CurrentConfig의 명시적 capability를 draft 응답의 필수 `apply_supported`로 전달한다. UI는 값이 정확히 true일 때만 기존 검증·revision 조건과 함께 Apply를 허용하고, false·미확인에는 비활성화 이유를 표시한다.
+- [x] SETTINGS-03 지원 미지원 및 상태 전이 회귀 검증
+  - 수정 전 미지원인데 Apply가 활성화되는 실패를 재현했다. 미지원 제공자의 저장·검증 유지와 직접 Apply 501, 지원 제공자의 기존 200, UI의 false→true→unknown 전이를 검증한다.
+- [x] SETTINGS-04 실제 브라우저 안내와 요청 차단 검증
+  - 실제 파일 기반 서버에서 유효한 draft의 Save·Validate 후에도 Apply가 비활성화되고 안내가 보이며 Apply 요청이 발생하지 않는지 확인한다. 사전 기대 상태·독립 DOM·원본 PNG·서버 로그를 보존한다.
+  - 실제 파일 제공자에서 Save 1건·Validate 1건 성공 후에도 Apply가 비활성화됐고 서버 로그의 Apply 요청은 0건이었다. 최종 문구·Apply 전용 접근성 설명·Validate 설명 분리와 변경 컨트롤이 보이는 원본 PNG를 확인했다.
+- [ ] SETTINGS-05 설정 capability 문서 인벤토리 및 PR 검증
+  - API·UI 계약과 정확한 source 참조를 갱신하고 영향 게이트 및 독립 리뷰를 수행한다. 새 head CI를 확인하되 기존 머지 보류를 해제하거나 운영에 적용하지 않는다.
 
 ## 6. 진행 및 증거 기록
 
@@ -320,7 +335,7 @@
 | 격리 Admin 요청 계측 | Admin 전용 ID/span, 양 DB acquire 로그, 필요한 직접 의존성 선언 및 격리 검증 | 사용자 `격리 계측 구현 승인` 선택 | 명시한 세 runtime 파일과 지원 metadata만 변경. Proxy 처리·운영 설정·배포는 제외 |
 | 운영 쓰기 또는 운영 설정 변경 | 필요 시 대상·부작용·복구 방법별 요청 | 미승인 | 변경 없음 |
 | 최신 Audit 기록 누락 수정 | Admin Audit용 최근 제한 조회 추가, 기존 append-order 계약 유지, 양 DB/handler/회귀 검증 | 사용자 ask에서 `Audit 오류 수정 승인` 선택 | 위 AUDIT-01~04 범위만 구현 가능. 머지·운영 반영 미승인 |
-| Settings Apply 501 | 파일 기반 ConfigWatcher가 apply를 지원하지 않으나 UI에서 Apply를 제공하는 문제 | 수정 방향 미승인 | 재현/지원 조건과 실패 기록만 보존. 동적 설정 기능 구현 금지 |
+| Settings Apply 지원 표시 | provider capability를 draft API에 노출하고 UI에서 명시적 true만 Apply 허용; 미지원·로딩·오류·unknown 안내 구분 | 2026-09-16 사용자 `지원 여부 표시 수정 승인` 선택 | API/700 Web·23 backend 회귀와 실제 file-provider UI 검증 완료. 기존 apply/reload 실행·startup-fixed 정책은 변경하지 않음 |
 | 추가 다섯 앱 오류 수정 | FIX-01~05: 중복 이름 저장/Base URL/선택 라벨/Router revision/Plugins 삭제·GC 표시 | 사용자 다중 선택으로 다섯 항목 모두 승인 | 해당 UI/API/양 DB/회귀 범위만 수정. 별도 계측·Settings Apply·배포·머지 미승인 |
 | Server-Timing ID 전달 | `app.rs`에서 기존 x-request-id와 동일한 ID만 rid.description으로 전달하고 QA 수집기에 연결 | 사용자 `격리 환경 추가 승인` 선택 | 새 시간값·본문·credential 노출 없음. 운영 설정·배포는 별도 승인 |
 | Base URL 명시적 null 제거 | Upstream update의 생략/명시적 null/URL을 삼상태로 구분하고 양 DB·기존 호출부·UI·프록시 목적지 검증 | 2026-09-16 사용자 `명시적 null로 제거 승인` 선택 | 격리 구현·검증 완료. 키·토큰 null 계약과 운영 데이터·머지 보류는 유지 |

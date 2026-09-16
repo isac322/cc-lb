@@ -19,7 +19,7 @@
     "span": "admin.request"
     "event": "admin_response_head_ready"
     "handler_timing": "response_head_generation"
-    "source": "crates/cc-lb-server/src/app.rs:2818-2869"
+    "source": "crates/cc-lb-server/src/app.rs:2822-2873"
   "source_reconciled": true
   "runtime_status": "runtime_pending"
   "production_applicability": "reconciled_from_deployed_delta"
@@ -10713,7 +10713,7 @@
       - "UI-SET-03A"
       - "UI-SET-03C"
     "risk_tier": "read"
-    "expected_ui": "Populates draft editor, revision badges, and schema checklist"
+    "expected_ui": "Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation."
     "polling": "not_applicable"
     "client_only_reason": null
     "source":
@@ -10745,7 +10745,7 @@
     "scope": "once"
     "iteration_source": "Single execution"
     "risk_tier": "read_with_audit"
-    "expected_ui": "Populates draft editor, revision badges, and schema checklist"
+    "expected_ui": "Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation."
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
@@ -10767,7 +10767,7 @@
       - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Reads singleton config draft from DB"
+    "cache_or_no_query": "Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query."
     "side_effects": "Audit log write: record_admin_audit(\"config_draft_read\", \"/admin/v1/config/draft\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -10794,7 +10794,7 @@
     "scope": "once"
     "iteration_source": "Single execution"
     "risk_tier": "read_with_audit"
-    "expected_ui": "Populates draft editor, revision badges, and schema checklist"
+    "expected_ui": "Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation."
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
@@ -10841,7 +10841,7 @@
     "scope": "once"
     "iteration_source": "Single execution"
     "risk_tier": "read"
-    "expected_ui": "Populates draft editor, revision badges, and schema checklist"
+    "expected_ui": "Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation."
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
@@ -10900,7 +10900,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "ConfigDraftSection"
-      "line": 740
+      "line": 756
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -10941,7 +10941,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "ConfigDraftSection"
-      "line": 556
+      "line": 568
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11036,7 +11036,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "ConfigDraftSection"
-      "line": 593
+      "line": 605
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11109,25 +11109,31 @@
     "preconditions":
       - "canApply === true: editor != null && canValidate && lastValidatedRevision != null && lastValidationError == null && lastValidatedRevision === editor.revision && !configPending"
     "variants":
-      - "success -> { applied_revision, applied_at_unix_secs }, invalidates configDraft, configHistory, configCurrent, toast 'Applied revision {n}'"
-      - "conflict / validation stale -> error toast"
+      - "provider apply_supported=false -> Apply disabled with a provider-specific unsupported explanation; no request"
+      - "capability loading, unavailable, or unconfirmed -> Apply disabled; explanation distinguishes loading from query errors"
+      - "provider apply_supported=true with matching validated revision -> existing Apply request path"
+      - "supported-provider response remains {status: applied}; revision-labelled success toast expects fields not supplied by this handler (pre-existing contract mismatch)"
+      - "conflict / validation stale -> existing error handling"
     "scope": "once"
     "iteration_source": "Single execution per validated revision"
     "coverage":
       "kind": "state_branches"
       "variants":
-        - "success -> { applied_revision, applied_at_unix_secs }, invalidates configDraft, configHistory, configCurrent, toast 'Applied revision {n}'"
-        - "conflict / validation stale -> error toast"
+        - "provider apply_supported=false -> Apply disabled with a provider-specific unsupported explanation; no request"
+        - "capability loading, unavailable, or unconfirmed -> Apply disabled; explanation distinguishes loading from query errors"
+        - "provider apply_supported=true with matching validated revision -> existing Apply request path"
+        - "supported-provider response remains {status: applied}; revision-labelled success toast expects fields not supplied by this handler (pre-existing contract mismatch)"
+        - "conflict / validation stale -> existing error handling"
     "atomic_request_ids":
       - "UI-SET-06"
     "risk_tier": "reversible_write"
-    "expected_ui": "Displays applying spinner; toast 'Applied revision {n}'; history and current config queries refresh"
+    "expected_ui": "Unsupported or unconfirmed provider capability disables Apply without disabling Save or Validate. Apply-only guidance is outside the aria-live pipeline and referenced only by Apply. Supported mode retains its existing request and refresh behavior; success-revision metadata compatibility is a separately recorded pre-existing limitation."
     "polling": "not_applicable"
     "client_only_reason": null
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "ConfigDraftSection"
-      "line": 610
+      "line": 622
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11147,12 +11153,15 @@
     "preconditions":
       - "canApply === true: editor != null && canValidate && lastValidatedRevision != null && lastValidationError == null && lastValidatedRevision === editor.revision && !configPending"
     "variants":
-      - "success -> { applied_revision, applied_at_unix_secs }, invalidates configDraft, configHistory, configCurrent, toast 'Applied revision {n}'"
-      - "conflict / validation stale -> error toast"
+      - "provider apply_supported=false -> Apply disabled with a provider-specific unsupported explanation; no request"
+      - "capability loading, unavailable, or unconfirmed -> Apply disabled; explanation distinguishes loading from query errors"
+      - "provider apply_supported=true with matching validated revision -> existing Apply request path"
+      - "supported-provider response remains {status: applied}; revision-labelled success toast expects fields not supplied by this handler (pre-existing contract mismatch)"
+      - "conflict / validation stale -> existing error handling"
     "scope": "once"
     "iteration_source": "Single execution per validated revision"
     "risk_tier": "destructive_write"
-    "expected_ui": "Displays applying spinner; toast 'Applied revision {n}'; history and current config queries refresh"
+    "expected_ui": "Unsupported or unconfirmed provider capability disables Apply without disabling Save or Validate. Apply-only guidance is outside the aria-live pipeline and referenced only by Apply. Supported mode retains its existing request and refresh behavior; success-revision metadata compatibility is a separately recorded pre-existing limitation."
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
@@ -11212,7 +11221,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "ConfigDraftSection"
-      "line": 660
+      "line": 672
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11330,7 +11339,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "handleRetryEditor"
-      "line": 551
+      "line": 562
     "http":
       "method": "GET"
       "path": "/admin/config/draft"
@@ -11347,7 +11356,7 @@
       - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Reads singleton config draft from DB"
+    "cache_or_no_query": "Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query."
     "side_effects": "Audit log write: record_admin_audit(\"config_draft_read\", \"/admin/v1/config/draft\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -11379,7 +11388,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "handleRetryEditor"
-      "line": 552
+      "line": 564
     "http":
       "method": "GET"
       "path": "/admin/config/current"
@@ -11431,7 +11440,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "ConfigDraftSection"
-      "line": 756
+      "line": 772
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11470,7 +11479,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "ConfigHistorySection"
-      "line": 785
+      "line": 801
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11554,7 +11563,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "RestartRequiredMatrix"
-      "line": 871
+      "line": 892
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -17800,7 +17809,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-server/src/app.rs:2367"
+    "source": "crates/cc-lb-server/src/app.rs:2371"
     "api_handler": "admin_server_state"
     "auth": "None (Unauthenticated listener state check)"
     "storage_operation_ids": []
@@ -17952,7 +17961,7 @@
       - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Reads singleton config draft from DB"
+    "cache_or_no_query": "Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query."
     "side_effects": "Audit log write: record_admin_audit(\"config_draft_read\", \"/admin/v1/config/draft\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -27361,6 +27370,14 @@
     "production_applicability": false
     "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-162"
     "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
+  - "classification": "changed_since_deploy"
+    "type": "api_and_ui_capability"
+    "name": "Provider-aware configuration draft Apply availability"
+    "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04"
+    "candidate_uncommitted": true
+    "production_applicability": false
+    "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551"
+    "description": "Approved on 2026-09-16: draft responses expose required apply_supported from the real provider. Only explicit true may enable Apply alongside existing validation/revision checks. Unsupported and unconfirmed states show Apply-specific accessible guidance. Existing apply/reload implementations are unchanged; file-backed provider remains unsupported."
   - "classification": "removed_since_deploy"
     "type": "route"
     "path": "crates/cc-lb-admin/web/src/routes/credentials.tsx"

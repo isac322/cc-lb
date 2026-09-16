@@ -132,6 +132,12 @@ pub enum ConfigDraftError {
 pub trait CurrentConfig: Send + Sync {
     fn current_config(&self) -> Arc<Config>;
 
+    /// Whether this provider supports applying saved drafts. Validation and
+    /// authorization requirements still apply independently.
+    fn supports_apply(&self) -> bool {
+        false
+    }
+
     fn put_draft_config(&self, _config: Config) -> Result<(), ConfigDraftError> {
         Err(ConfigDraftError::Unavailable)
     }

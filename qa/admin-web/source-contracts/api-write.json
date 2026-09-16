@@ -17,11 +17,11 @@
     },
     {
       "path": "crates/cc-lb-admin/src/routes.rs",
-      "sha256": "454c2252c1948835cf946f2522607edc3efee6473f0bf4bd08f9702c58bd04b5"
+      "sha256": "f6334eef2a574416b8228735b9ec5a513c1157b1f539078d4b37a2d62a29617b"
     },
     {
       "path": "crates/cc-lb-admin/src/settings.rs",
-      "sha256": "de01234299021f1d311bc1828a74ebc8aea28843be7f7e5113cc942ea01e923e"
+      "sha256": "5e20de6cd410ed0b55c212f92bb4fe7f0363b6fe6ded36ddfe1a5c562b4b7b81"
     },
     {
       "path": "crates/cc-lb-admin/src/v1/keys.rs",
@@ -73,7 +73,7 @@
     },
     {
       "path": "crates/cc-lb-server/src/app.rs",
-      "sha256": "3988fa04d8606ec73b06de90e814fb9e67ffbf70cd5de79d80a1c3afa520a0af"
+      "sha256": "094d8af664467d9ff02b62d64d981f8c87cbc1e0166331839660b2508aeb7180"
     },
     {
       "path": "crates/cc-lb-storage-api/src/plugin_registry_models.rs",
@@ -710,7 +710,7 @@
       "handler": "start_oauth_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "startOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1111) / useStartOauthDraft (queries.ts:1637) in New Upstream modal"
+        "startOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1112) / useStartOauthDraft (queries.ts:1637) in New Upstream modal"
       ],
       "storage_operation_ids": [
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
@@ -740,7 +740,7 @@
       "handler": "complete_oauth_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "completeOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1118) / useCompleteOauthDraft (queries.ts:1644) in New Upstream modal"
+        "completeOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1119) / useCompleteOauthDraft (queries.ts:1644) in New Upstream modal"
       ],
       "storage_operation_ids": [
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
@@ -789,7 +789,7 @@
       "handler": "create_upstream_from_oauth_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "createUpstreamFromOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1125) / useCreateFromOauthDraft (queries.ts:1652) in New Upstream modal"
+        "createUpstreamFromOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1126) / useCreateFromOauthDraft (queries.ts:1652) in New Upstream modal"
       ],
       "storage_operation_ids": [
         "sqlite:UpstreamStore::create:SqliteStorage::create",
@@ -2351,7 +2351,7 @@
       "handler": "refresh_upstream_subscription_metadata",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "triggerSubscriptionMetadataRefresh (crates/cc-lb-admin/web/src/lib/api.ts:860) / useTriggerSubscriptionMetadataRefresh (queries.ts:768) in Upstream Quota/Subscription card"
+        "triggerSubscriptionMetadataRefresh (crates/cc-lb-admin/web/src/lib/api.ts:861) / useTriggerSubscriptionMetadataRefresh (queries.ts:768) in Upstream Quota/Subscription card"
       ],
       "storage_operation_ids": [
         "sqlite:UpstreamStore::complete_refresh:SqliteStorage::complete_refresh",

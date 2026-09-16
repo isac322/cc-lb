@@ -201,14 +201,14 @@
     {
       "type": "middleware",
       "name": "admin_request_trace_middleware",
-      "scope": "Admin router only: applied in admin_router() at crates/cc-lb-server/src/app.rs:2362 after with_browser_security_headers; covers cc_lb_admin::router, server_state_router and internal_partials routes; proxy_router unchanged",
-      "reference": "crates/cc-lb-server/src/app.rs:2818",
+      "scope": "Admin router only: applied in admin_router() at crates/cc-lb-server/src/app.rs:2366 after with_browser_security_headers; covers cc_lb_admin::router, server_state_router and internal_partials routes; proxy_router unchanged",
+      "reference": "crates/cc-lb-server/src/app.rs:2822",
       "source": {
         "file": "crates/cc-lb-server/src/app.rs",
         "symbol": "admin_request_trace_middleware",
-        "line_start": 2818,
-        "line_end": 2869,
-        "sha256": "3988fa04d8606ec73b06de90e814fb9e67ffbf70cd5de79d80a1c3afa520a0af"
+        "line_start": 2822,
+        "line_end": 2873,
+        "sha256": "094d8af664467d9ff02b62d64d981f8c87cbc1e0166331839660b2508aeb7180"
       },
       "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
       "candidate_uncommitted": true,
@@ -433,6 +433,15 @@
       "production_applicability": false,
       "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-162",
       "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
+    },
+    {
+      "type": "api_and_ui_capability",
+      "name": "Provider-aware configuration draft Apply availability",
+      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551",
+      "description": "Approved on 2026-09-16: draft responses expose required apply_supported from the real provider. Only explicit true may enable Apply alongside existing validation/revision checks. Unsupported and unconfirmed states show Apply-specific accessible guidance. Existing apply/reload implementations are unchanged; file-backed provider remains unsupported."
     }
   ],
   "deployed_only_items": [

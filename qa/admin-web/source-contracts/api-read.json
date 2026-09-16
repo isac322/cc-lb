@@ -16,7 +16,7 @@
     "span": "admin.request",
     "event": "admin_response_head_ready",
     "handler_timing": "response_head_generation",
-    "source": "crates/cc-lb-server/src/app.rs:2818-2869"
+    "source": "crates/cc-lb-server/src/app.rs:2822-2873"
   },
   "source_files": [
     {
@@ -52,12 +52,16 @@
       "sha256": "f8b283b846ee96bb950ff046f738ad3c36ff2c2531c40fce0ba287b5aeb3bdc4"
     },
     {
+      "path": "crates/cc-lb-admin/src/lib.rs",
+      "sha256": "32094f1e6df42d5daf23d153b26270df7c6e4c12b328daae8065476a1fbe564a"
+    },
+    {
       "path": "crates/cc-lb-admin/src/principals.rs",
       "sha256": "2b6b277f98f0b18f5381dce6f844e2562d2a4517e9357f19d1f70eb4f3250c39"
     },
     {
       "path": "crates/cc-lb-admin/src/routes.rs",
-      "sha256": "454c2252c1948835cf946f2522607edc3efee6473f0bf4bd08f9702c58bd04b5"
+      "sha256": "f6334eef2a574416b8228735b9ec5a513c1157b1f539078d4b37a2d62a29617b"
     },
     {
       "path": "crates/cc-lb-admin/src/scheduler.rs",
@@ -65,7 +69,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/settings.rs",
-      "sha256": "de01234299021f1d311bc1828a74ebc8aea28843be7f7e5113cc942ea01e923e"
+      "sha256": "5e20de6cd410ed0b55c212f92bb4fe7f0363b6fe6ded36ddfe1a5c562b4b7b81"
     },
     {
       "path": "crates/cc-lb-admin/src/static_assets.rs",
@@ -125,7 +129,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/api.ts",
-      "sha256": "832908daee7187680ee64e1cfce785c803592d56fb6181faa3638316e3162aae"
+      "sha256": "7b235dec905c24ee5094c57e7e565731e6ab0ad3452328f90a5ebb6a14bfa3a0"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/cacheKeepaliveApi.ts",
@@ -141,7 +145,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-      "sha256": "3ed77005478802c575b372de9133675e01d4be73bb3d7b28eff569088fe7c23f"
+      "sha256": "00d0717b7beb91420319c656ee1845af3e9815e81ed76395aa4e50e86a4d0fe5"
     },
     {
       "path": "crates/cc-lb-scheduler/src/admin.rs",
@@ -149,7 +153,7 @@
     },
     {
       "path": "crates/cc-lb-server/src/app.rs",
-      "sha256": "3988fa04d8606ec73b06de90e814fb9e67ffbf70cd5de79d80a1c3afa520a0af"
+      "sha256": "094d8af664467d9ff02b62d64d981f8c87cbc1e0166331839660b2508aeb7180"
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
@@ -378,7 +382,7 @@
     {
       "method": "GET",
       "path": "/admin/health/state",
-      "source": "crates/cc-lb-server/src/app.rs:2367",
+      "source": "crates/cc-lb-server/src/app.rs:2371",
       "handler": "admin_server_state",
       "auth": "None (Unauthenticated listener state check)",
       "ui_clients": [
@@ -469,7 +473,7 @@
       "handler": "export",
       "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
       "ui_clients": [
-        "crates/cc-lb-admin/web/src/routes/settings.tsx:986"
+        "crates/cc-lb-admin/web/src/routes/settings.tsx:1007"
       ],
       "cache_or_no_query": "Database-backed export: paginates all upstreams, principals, plugin registry entries, blob bytes, and each principal plugin-chain slot; then appends an audit record.",
       "side_effects": "Audit log write: record_admin_audit(\"config_export\", \"/admin/v1/export\")",
@@ -590,7 +594,7 @@
       "ui_clients": [
         "crates/cc-lb-admin/web/src/lib/queries.ts:796"
       ],
-      "cache_or_no_query": "Reads singleton config draft from DB",
+      "cache_or_no_query": "Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query.",
       "side_effects": "Audit log write: record_admin_audit(\"config_draft_read\", \"/admin/v1/config/draft\")",
       "storage_operation_ids": [
         "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
@@ -615,7 +619,7 @@
       "ui_clients": [
         "backend-only: compatibility alias; built-in admin web calls /admin/config/draft."
       ],
-      "cache_or_no_query": "Reads singleton config draft from DB",
+      "cache_or_no_query": "Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query.",
       "side_effects": "Audit log write: record_admin_audit(\"config_draft_read\", \"/admin/v1/config/draft\")",
       "storage_operation_ids": [
         "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",

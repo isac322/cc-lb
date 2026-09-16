@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-16T04:25:43.228Z",
+  "environment": "local_fixture_only",
+  "origin": "http://127.0.0.1:56452",
+  "page": "/settings",
+  "viewport": {
+    "innerWidth": 1440,
+    "innerHeight": 691,
+    "scrollY": 666
+  },
+  "elements": {
+    "apply_button": {
+      "text": "Apply",
+      "disabled": true,
+      "has_disabled_attribute": true,
+      "aria_describedby": "config-pipeline-status config-apply-support",
+      "rect": {
+        "top": 40.83332824707031,
+        "bottom": 68.83332824707031,
+        "left": 1241.61669921875,
+        "right": 1311.7666931152344,
+        "width": 70.14999389648438,
+        "height": 28,
+        "in_viewport_vertical": true,
+        "in_viewport_horizontal": true
+      }
+    },
+    "validate_button": {
+      "text": "Validate",
+      "disabled": false,
+      "aria_describedby": "config-pipeline-status",
+      "rect": {
+        "top": 40.83332824707031,
+        "bottom": 68.83332824707031,
+        "left": 1147.9666748046875,
+        "right": 1233.616683959961,
+        "width": 85.65000915527344,
+        "height": 28,
+        "in_viewport_vertical": true,
+        "in_viewport_horizontal": true
+      }
+    },
+    "config_apply_support_notice": {
+      "id": "config-apply-support",
+      "text": "This server does not support applying saved drafts. Changes to startup-fixed settings must be made through the deployment configuration and restart workflow.",
+      "is_outside_pipeline_status": true,
+      "has_aria_live": false,
+      "rect": {
+        "top": 426.83331298828125,
+        "bottom": 442.83331298828125,
+        "left": 265,
+        "right": 1399,
+        "width": 1134,
+        "height": 16,
+        "in_viewport_vertical": true,
+        "in_viewport_horizontal": true
+      }
+    }
+  },
+  "ui_metadata": {
+    "revision": "1",
+    "last_validated": "rev 1"
+  },
+  "api_metadata": {
+    "revision": 1,
+    "last_validated_revision": 1,
+    "apply_supported": false
+  },
+  "validations": {
+    "apply_in_viewport": true,
+    "validate_in_viewport": true,
+    "apply_support_in_viewport": true,
+    "apply_is_disabled": true,
+    "apply_support_outside_pipeline": true,
+    "apply_support_no_aria_live": true,
+    "apply_describedby_matches": true,
+    "validate_describedby_matches": true,
+    "text_contains_new_wording": true,
+    "api_apply_supported_is_false": true
+  }
+}

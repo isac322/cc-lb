@@ -41,7 +41,7 @@
 
 ## 6. Known bug (미수정)
 
-- `SettingsApply`: 미지원 동작에 대한 수정 방향은 아직 승인되지 않았다.
+- `SettingsApply` 미지원 제공자의 잘못된 버튼 활성화는 2026-09-16 별도 승인한 capability 표시로 수정·검증했다. 실제 Apply 실행 구현과 아래의 기존 지원 모드 응답 계약 문제는 변경하지 않았다.
 - `clearBaseURL`: 2026-09-16 명시적 null 제거 계약을 별도로 승인받아 로컬 후보에서 수정·검증했다. 과거 관측은 보존하며 운영에 반영됐다고 주장하지 않는다.
 
 ## 7. Source catalog 상태
@@ -65,3 +65,11 @@
 - 기존 HTTP 회귀는 수정 전 `String(previous_url) != Null`로 실패했다. 수정 후 SQLite·PostgreSQL conformance, signer 및 실제 Lifecycle→RecordingDispatcher 기본 목적지 검증을 포함한 33개 검사가 모두 통과했다.
 - 실제 SettingsCard에서 입력 비우기→저장→독립 GET→새로고침을 수행했다. DB의 base_url NULL, 화면의 `—`, 기본 endpoint 메타데이터를 확인했다. 사용자에게 보이는 입력 동작과 저장된 상태가 이제 일치한다.
 - 격리 fixture는 원래 loopback override로 복원하고 서버·브라우저를 종료했다. revision과 audit 기록은 정상적으로 증가했으므로 byte-identical 복원으로 표기하지 않는다. 외부 Anthropic 요청과 운영 변경은 없었다.
+
+## 10. Settings Apply 지원 여부
+
+- 실제 제공자의 `apply_supported`를 draft 응답에 추가했다. true일 때만 기존 검증·revision 조건과 함께 Apply를 활성화하며, false·아직 확인되지 않은 상태에서는 비활성화한다. Save·Validate는 유지한다.
+- 지원/미지원 HTTP 경로를 포함한 backend 회귀 23개와 Web 700개가 통과했다. 실제 파일 기반 서버에서 Save·Validate 성공 후에도 Apply가 비활성화됐고, 해당 관측 구간의 서버 Apply 요청은 0건이었다.
+- Apply 전용 안내는 공유 aria-live pipeline 밖에 두고 Apply만 설명 대상으로 연결했다. Validate 설명은 그대로 유지했다. 초기 로딩·조회 오류·미확인 상태의 안내도 구분한다.
+- 최종 로컬 typecheck의 package-script 실행은 shell의 명령 검색 문제로 tsgo를 찾지 못했다. 설치된 동일 버전 tsgo를 절대경로로 실행한 `-b --noEmit` 검사는 통과했다. 전역 shell 설정이나 의존성을 변경하지 않았다.
+- **별도 기존 계약 제한:** 지원 모드 Apply handler는 `{status: applied}`를 반환하지만 client는 `applied_revision` 등을 기대한다. 성공 토스트의 잘못된 revision 표시는 소스 추론이며 이 브라우저 run에서 실행한 결과가 아니다. client의 `expected_revision`도 해당 handler가 추출하지 않는다. history 재조회는 있으나 새 이력 생성은 별도 미검증이다. 이번 capability 승인 범위 밖이므로 고치지 않았다.

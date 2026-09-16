@@ -429,6 +429,16 @@
         "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
       },
       {
+        "classification": "changed_since_deploy",
+        "type": "api_and_ui_capability",
+        "name": "Provider-aware configuration draft Apply availability",
+        "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+        "candidate_uncommitted": true,
+        "production_applicability": false,
+        "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551",
+        "description": "Approved on 2026-09-16: draft responses expose required apply_supported from the real provider. Only explicit true may enable Apply alongside existing validation/revision checks. Unsupported and unconfirmed states show Apply-specific accessible guidance. Existing apply/reload implementations are unchanged; file-backed provider remains unsupported."
+      },
+      {
         "classification": "removed_since_deploy",
         "type": "route",
         "path": "crates/cc-lb-admin/web/src/routes/credentials.tsx",
@@ -2534,6 +2544,16 @@
       "production_applicability": false,
       "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-162",
       "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
+    },
+    {
+      "classification": "changed_since_deploy",
+      "type": "api_and_ui_capability",
+      "name": "Provider-aware configuration draft Apply availability",
+      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551",
+      "description": "Approved on 2026-09-16: draft responses expose required apply_supported from the real provider. Only explicit true may enable Apply alongside existing validation/revision checks. Unsupported and unconfirmed states show Apply-specific accessible guidance. Existing apply/reload implementations are unchanged; file-backed provider remains unsupported."
     },
     {
       "classification": "removed_since_deploy",

@@ -268,7 +268,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/api.ts",
-      "sha256": "832908daee7187680ee64e1cfce785c803592d56fb6181faa3638316e3162aae"
+      "sha256": "7b235dec905c24ee5094c57e7e565731e6ab0ad3452328f90a5ebb6a14bfa3a0"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/auth.ts",
@@ -396,7 +396,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-      "sha256": "3ed77005478802c575b372de9133675e01d4be73bb3d7b28eff569088fe7c23f"
+      "sha256": "00d0717b7beb91420319c656ee1845af3e9815e81ed76395aa4e50e86a4d0fe5"
     },
     {
       "path": "crates/cc-lb-admin/web/src/routes/upstreams.tsx",
@@ -437,7 +437,7 @@
     {
       "path": "crates/cc-lb-admin/web/src/routes/settings.tsx",
       "route": "/settings",
-      "sha256": "3ed77005478802c575b372de9133675e01d4be73bb3d7b28eff569088fe7c23f"
+      "sha256": "00d0717b7beb91420319c656ee1845af3e9815e81ed76395aa4e50e86a4d0fe5"
     },
     {
       "path": "crates/cc-lb-admin/web/src/routes/upstreams.tsx",
@@ -11836,7 +11836,7 @@
         ]
       },
       "risk_tier": "read",
-      "expected_ui": "Populates draft editor, revision badges, and schema checklist",
+      "expected_ui": "Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation.",
       "polling": "not_applicable",
       "client_only_reason": null,
       "atomic_request_ids": [
@@ -11927,7 +11927,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "ConfigDraftSection",
-        "line": 740
+        "line": 756
       },
       "name": "Edit Draft Textarea",
       "trigger_steps": [
@@ -11977,7 +11977,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "ConfigDraftSection",
-        "line": 556
+        "line": 568
       },
       "name": "Save Draft",
       "trigger_steps": [
@@ -12054,7 +12054,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "ConfigDraftSection",
-        "line": 593
+        "line": 605
       },
       "name": "Validate Draft",
       "trigger_steps": [
@@ -12128,7 +12128,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "ConfigDraftSection",
-        "line": 610
+        "line": 622
       },
       "name": "Apply Draft Revision",
       "trigger_steps": [
@@ -12138,20 +12138,26 @@
         "canApply === true: editor != null && canValidate && lastValidatedRevision != null && lastValidationError == null && lastValidatedRevision === editor.revision && !configPending"
       ],
       "variants": [
-        "success -> { applied_revision, applied_at_unix_secs }, invalidates configDraft, configHistory, configCurrent, toast 'Applied revision {n}'",
-        "conflict / validation stale -> error toast"
+        "provider apply_supported=false -> Apply disabled with a provider-specific unsupported explanation; no request",
+        "capability loading, unavailable, or unconfirmed -> Apply disabled; explanation distinguishes loading from query errors",
+        "provider apply_supported=true with matching validated revision -> existing Apply request path",
+        "supported-provider response remains {status: applied}; revision-labelled success toast expects fields not supplied by this handler (pre-existing contract mismatch)",
+        "conflict / validation stale -> existing error handling"
       ],
       "scope": "once",
       "iteration_source": "Single execution per validated revision",
       "coverage": {
         "kind": "state_branches",
         "variants": [
-          "success -> { applied_revision, applied_at_unix_secs }, invalidates configDraft, configHistory, configCurrent, toast 'Applied revision {n}'",
-          "conflict / validation stale -> error toast"
+          "provider apply_supported=false -> Apply disabled with a provider-specific unsupported explanation; no request",
+          "capability loading, unavailable, or unconfirmed -> Apply disabled; explanation distinguishes loading from query errors",
+          "provider apply_supported=true with matching validated revision -> existing Apply request path",
+          "supported-provider response remains {status: applied}; revision-labelled success toast expects fields not supplied by this handler (pre-existing contract mismatch)",
+          "conflict / validation stale -> existing error handling"
         ]
       },
       "risk_tier": "reversible_write",
-      "expected_ui": "Displays applying spinner; toast 'Applied revision {n}'; history and current config queries refresh",
+      "expected_ui": "Unsupported or unconfirmed provider capability disables Apply without disabling Save or Validate. Apply-only guidance is outside the aria-live pipeline and referenced only by Apply. Supported mode retains its existing request and refresh behavior; success-revision metadata compatibility is a separately recorded pre-existing limitation.",
       "polling": "not_applicable",
       "client_only_reason": null,
       "atomic_request_ids": [
@@ -12200,7 +12206,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "ConfigDraftSection",
-        "line": 660
+        "line": 672
       },
       "name": "Trigger Daemon Configuration Hot Reload",
       "trigger_steps": [
@@ -12314,7 +12320,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
             "symbol": "handleRetryEditor",
-            "line": 551
+            "line": 562
           },
           "side_effect_notes": "None",
           "id": "UI-SET-12B",
@@ -12335,7 +12341,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
             "symbol": "handleRetryEditor",
-            "line": 552
+            "line": 564
           },
           "side_effect_notes": "None",
           "id": "UI-SET-12A",
@@ -12366,7 +12372,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "ConfigDraftSection",
-        "line": 756
+        "line": 772
       },
       "name": "Toggle Schema Coverage Checklist",
       "trigger_steps": [
@@ -12412,7 +12418,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "ConfigHistorySection",
-        "line": 785
+        "line": 801
       },
       "name": "Load Configuration History",
       "trigger_steps": [
@@ -12484,7 +12490,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "RestartRequiredMatrix",
-        "line": 871
+        "line": 892
       },
       "name": "Restart-Required Fields Matrix View",
       "trigger_steps": [

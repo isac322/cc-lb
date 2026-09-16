@@ -1,0 +1,30 @@
+{
+  "schema": "cc-lb-settings-apply-known-contract-limit/v1",
+  "classification": "pre_existing_out_of_approved_capability_scope",
+  "source_findings": [
+    {
+      "file": "crates/cc-lb-admin/src/routes.rs",
+      "symbol": "apply_config_draft",
+      "fact": "Successful response contains status: applied; the handler does not extract the client expected_revision body."
+    },
+    {
+      "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+      "symbol": "useApplyConfig",
+      "fact": "The client sends expected_revision and types the response as applied_revision/applied_at_unix_secs."
+    },
+    {
+      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
+      "symbol": "ConfigDraftSection.handleApply",
+      "fact": "The success toast reads result.applied_revision; an undefined revision label is a static inference from the mismatched response, not a browser observation in this run."
+    },
+    {
+      "file": "crates/cc-lb-server/src/app.rs",
+      "symbol": "InMemoryCurrentConfig::apply_draft_config",
+      "fact": "The inspected implementation validates and replaces in-memory configuration and the dynamic view; no history store write was observed in this method."
+    }
+  ],
+  "history_claim_boundary": "Client query invalidation/refetch exists. It does not prove a new applied-history row was persisted; that transition remains unverified.",
+  "approved_change_boundary": "Only capability reporting and UI gating were approved. Existing apply/reload execution semantics were left unchanged.",
+  "unsupported_file_provider_ui": "Verified separately: Apply disabled after successful Save/Validate, no Apply requests observed.",
+  "full_runtime_qa_complete": false
+}
