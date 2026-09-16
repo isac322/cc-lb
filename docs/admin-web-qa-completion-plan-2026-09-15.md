@@ -323,8 +323,9 @@
   - 구버전에서 열린 폼을 유지한 배포 전환 후 무편집 저장, 현재 UI의 명시적 초기화, 429 기록 뒤의 관리자 작업 조회, 양 DB 결과/정렬/쓰기 비용, 권한·CAS·자격증명 보존을 확인한다.
   - 최종 바이너리 `f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8`에서 old UI→new backend 무편집 저장은 URL/revision을 그대로 유지했고, current UI의 의도적 초기화는 DB NULL을 저장했다. new UI→old backend에서 무시된 초기화(PUT 200 한 건)는 오류·편집 유지로 표시되며 성공을 가장하지 않았다. Audit의 숨겨졌던 관리자 작업은 실제 UI에 표시됐다.
   - Rust 112개·Web 706개·타입 검사·빌드·영향 target Clippy 및 formatter를 확인했다. 실제 PG HTTP에서도 보존/명시적 초기화/400 충돌/409 CAS/복원 및 두 Audit 모드를 확인했다. 표준 YAML 파싱과 inventory 생성·check는 433행으로 통과했다. 원시 증거의 한계와 초기 PG fixture 오류(token NULL)를 별도 기록했다.
-- [ ] SAFETYFIX-06 독립 리뷰와 안전성 보고 및 PR 갱신
+- [x] SAFETYFIX-06 독립 리뷰와 안전성 보고 및 PR 갱신
   - 세 결함의 수정과 재검증을 독립 리뷰한다. 필요한 저장소 게이트와 새 head CI를 확인하되 머지·운영 배포·운영 DB 변경은 하지 않는다.
+  - 앱 수정 커밋 `e993e2393b6a3b5774afd0f85a9a881fdb2f0955`를 draft PR #793에 반영했다. 해당 commit의 CI·Web·publish-check 및 상태 검사 11개 성공, release-artifact 조건부 제외 1개를 확인했다. `application-safety/ci-source-commit.json`에 exact-head 근거를 고정했다. 이후 문서 갱신의 CI는 그 head에서 별도로 확인하며, 머지와 운영 반영은 계속 보류한다.
 
 ## 6. 진행 및 증거 기록
 

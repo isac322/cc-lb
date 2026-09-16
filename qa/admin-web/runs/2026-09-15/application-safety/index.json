@@ -150,6 +150,11 @@
       "path": "qa/admin-web/runs/2026-09-15/application-safety/local-gates.json",
       "sha256": "0fc3e79992299286dfd03e72c97781c763bdae626a82bb0eb587ecf011015dd7",
       "bytes": 549
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/ci-source-commit.json",
+      "sha256": "f0616710490899565ae65dd8c25c789538283554292a7b01546171fb291b639c",
+      "bytes": 380
     }
   ],
   "full_raw_logs_and_credentials_published": false,
