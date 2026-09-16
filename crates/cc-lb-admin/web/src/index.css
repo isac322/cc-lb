@@ -33,12 +33,17 @@
     --color-border-row: rgba(255, 255, 255, 0.04);
     --color-text: #ededed;
     --color-text-muted: #9ca3af;
-    --color-text-faint: #6b7280;
+    --color-text-faint: #7d858f;
     --color-accent: #00d4ff;
     --color-accent-dim: rgba(0, 212, 255, 0.12);
+    --color-accent-text: #00d4ff;
     --color-ok: #10b981;
     --color-warn: #f59e0b;
     --color-danger: #ef4444;
+    --color-info-text: #93c5fd;
+    --color-success-text: #6ee7b7;
+    --color-warn-text: #fcd34d;
+    --color-danger-text: #fca5a5;
     --color-neutral: #6b7280;
     --color-scrollbar: rgba(255, 255, 255, 0.08);
     --color-scrollbar-hover: rgba(255, 255, 255, 0.18);
@@ -69,12 +74,17 @@
     --color-border-row: rgba(0, 0, 0, 0.05);
     --color-text: #0a0a0a;
     --color-text-muted: #4b5563;
-    --color-text-faint: #6b7280;
+    --color-text-faint: #5b636f;
     --color-accent: #0086d4;
     --color-accent-dim: rgba(0, 134, 212, 0.10);
+    --color-accent-text: #00629b;
     --color-ok: #059669;
     --color-warn: #d97706;
     --color-danger: #dc2626;
+    --color-info-text: #1d4ed8;
+    --color-success-text: #046049;
+    --color-warn-text: #92400e;
+    --color-danger-text: #b91c1c;
     --color-neutral: #6b7280;
     --color-scrollbar: rgba(0, 0, 0, 0.12);
     --color-scrollbar-hover: rgba(0, 0, 0, 0.22);
@@ -106,12 +116,17 @@
       --color-border-row: rgba(0, 0, 0, 0.05);
       --color-text: #0a0a0a;
       --color-text-muted: #4b5563;
-      --color-text-faint: #6b7280;
+      --color-text-faint: #5b636f;
       --color-accent: #0086d4;
       --color-accent-dim: rgba(0, 134, 212, 0.10);
+      --color-accent-text: #00629b;
       --color-ok: #059669;
       --color-warn: #d97706;
       --color-danger: #dc2626;
+      --color-info-text: #1d4ed8;
+      --color-success-text: #046049;
+      --color-warn-text: #92400e;
+      --color-danger-text: #b91c1c;
       --color-neutral: #6b7280;
       --color-scrollbar: rgba(0, 0, 0, 0.12);
       --color-scrollbar-hover: rgba(0, 0, 0, 0.22);
@@ -211,6 +226,7 @@
     box-shadow: inset 0 0 0 1px var(--color-progress-track-border);
   }
   .hover\:bg-overlay-3:hover { background-color: var(--color-overlay-3); }
+  .hover\:bg-bg-sub:hover { background-color: var(--color-bg-sub); }
   .hover\:bg-overlay-5:hover { background-color: var(--color-overlay-5); }
   .bg-modal-backdrop { background-color: var(--color-modal-backdrop); }
   .bg-drawer-backdrop { background-color: var(--color-drawer-backdrop); }

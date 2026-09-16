@@ -278,6 +278,56 @@ export async function downloadJson(
   URL.revokeObjectURL(url);
 }
 
+let pendingConfigDraftDownload: Promise<void> | null = null;
+
+function attachmentFilename(response: Response): string {
+  const disposition = response.headers.get('Content-Disposition');
+  if (!disposition) return 'cc-lb.toml';
+
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      // Fall through to the plain filename.
+    }
+  }
+
+  return disposition.match(/filename="?([^";]+)"?/i)?.[1] ?? 'cc-lb.toml';
+}
+
+export function downloadConfigDraft(
+  expectedRevision: number,
+  storageUrlReplacement?: string,
+): Promise<void> {
+  if (pendingConfigDraftDownload) return pendingConfigDraftDownload;
+
+  pendingConfigDraftDownload = (async () => {
+    const response = await fetchWithAuth('/admin/v1/config/draft/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_revision: expectedRevision,
+        storage_url_replacement: storageUrlReplacement,
+      }),
+    });
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = attachmentFilename(response);
+      anchor.click();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  })().finally(() => {
+    pendingConfigDraftDownload = null;
+  });
+
+  return pendingConfigDraftDownload;
+}
+
 export interface SummaryTotals {
   request_count: number;
   input_tokens: number;
@@ -754,31 +804,84 @@ export interface KeyListResponse {
   keys: ApiKeyRecord[];
 }
 
-export interface ConfigSchemaResponse {
+export interface ConfigValidationIssue {
+  path: string;
+  code: string;
+  message: string;
+  severity: 'error' | 'warning';
+}
+
+export interface ConfigValidationResult {
+  valid: boolean;
+  issues: ConfigValidationIssue[];
+}
+
+export interface ConfigValidationReport {
+  revision: number;
+  file: ConfigValidationResult;
+  effective: ConfigValidationResult;
+  filesystem: ConfigValidationIssue[];
+  overrides: ConfigValidationIssue[];
+}
+
+export interface ConfigOverrideInfo {
+  path: string;
+  source: 'env' | 'special_env' | 'cli';
+  name: string;
+  sensitive: boolean;
+  effective_value?: unknown;
+}
+
+export interface ConfigFileInfo {
+  path: string;
+  exists: boolean;
+  mode: 'writable' | 'read_only';
+  reason: string | null;
+  fingerprint: string | null;
+}
+
+export interface ConfigEditorResponse {
   schema: Record<string, unknown>;
-  coverage_checklist: string[];
+  default_config: Record<string, unknown>;
+  file_config: Record<string, unknown>;
+  effective_config: Record<string, unknown>;
+  draft: Record<string, unknown> | null;
+  revision: number;
+  last_validated_revision: number | null;
+  last_validation: ConfigValidationReport | null;
+  saved_at_unix_secs: number | null;
+  file: ConfigFileInfo;
+  overrides: ConfigOverrideInfo[];
+  restart_required: boolean;
 }
 
 export interface ConfigDraftResponse {
   draft: Record<string, unknown> | null;
   revision: number;
   last_validated_revision: number | null;
-  last_validation_error: string | null;
+  last_validation: ConfigValidationReport | null;
   saved_at_unix_secs: number | null;
 }
 
-interface HistorySummary {
-  tls_enabled: boolean;
+export interface ConfigDraftSavedResponse {
+  revision: number;
+  saved_at_unix_secs: number;
 }
 
-interface ConfigHistoryItem {
+export interface ConfigFileSavedResponse {
   revision: number;
-  applied_at_unix_secs: number;
-  config_summary: HistorySummary;
+  saved_at_unix_secs: number;
+  restart_required: boolean;
+  fingerprint: string;
+}
+
+export interface ConfigHistoryItem {
+  revision: number;
+  saved_at_unix_secs: number;
 }
 
 export interface ConfigHistoryResponse {
-  history: ConfigHistoryItem[];
+  entries: ConfigHistoryItem[];
 }
 
 export interface UpstreamOAuthStatusResponse {

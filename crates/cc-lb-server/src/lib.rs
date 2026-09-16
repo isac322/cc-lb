@@ -26,7 +26,6 @@ pub mod prompt_cache_observation_cache;
 pub mod prompt_cache_observation_sink;
 pub mod reconcile;
 pub mod refresh;
-pub mod reload;
 pub mod replica;
 pub(crate) mod revision_hash;
 pub(crate) mod scheduler_dispatch;

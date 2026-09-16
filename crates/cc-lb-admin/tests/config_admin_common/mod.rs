@@ -1,14 +1,13 @@
 #![allow(dead_code, deprecated)]
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use bytes::Bytes;
-use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, router};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_clock::{ClockHandle, SystemClock};
 use cc_lb_config::Config;
 use cc_lb_control::api_keys::{
@@ -81,6 +80,23 @@ pub fn config_value(default_requests_per_window: u64) -> Value {
     value
 }
 
+pub fn write_config_file(dir: &Path, config: &Config) -> std::path::PathBuf {
+    let path = dir.join("cc-lb.toml");
+    let value = serde_json::to_value(config).unwrap();
+    std::fs::write(&path, Config::partial_json_toml(value).unwrap()).unwrap();
+    path
+}
+
+pub fn test_state_with_config_path(
+    config: Config,
+    storage: Option<Arc<SqliteStorage>>,
+    config_path: std::path::PathBuf,
+) -> AdminState {
+    let mut state = test_state(config, storage);
+    state.config_path = Some(config_path);
+    state
+}
+
 pub fn test_state(config: Config, storage: Option<Arc<SqliteStorage>>) -> AdminState {
     test_state_with_clock(config, storage, system_clock())
 }
@@ -100,6 +116,8 @@ pub fn test_state_with_clock(
         Arc::new(cc_lb_control::InMemoryBus::new()) as Arc<dyn cc_lb_control::RequestEventBus>
     });
     AdminState {
+        config_path: None,
+        startup_config_overrides: Default::default(),
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
@@ -107,6 +125,7 @@ pub fn test_state_with_clock(
         lifecycle: None,
         dynamic_view,
         config: Arc::new(config),
+        dynamic_view_rebinder: None,
         scheduler: None,
         admin_auth: crate::admin_test_common::static_token_auth(TOKEN),
         lazy_refresher: None,
@@ -127,48 +146,6 @@ fn system_clock() -> ClockHandle {
 
 pub fn test_state_without_storage() -> AdminState {
     test_state(minimal_config(), None)
-}
-
-pub async fn apply_state(
-    _storage: Arc<SqliteStorage>,
-    _config_path: PathBuf,
-    reloader: Arc<TestReloader>,
-) -> AdminState {
-    apply_state_with_clock(_storage, _config_path, reloader, system_clock()).await
-}
-
-pub async fn apply_state_with_clock(
-    _storage: Arc<SqliteStorage>,
-    _config_path: PathBuf,
-    reloader: Arc<TestReloader>,
-    clock: ClockHandle,
-) -> AdminState {
-    let principal_view = Arc::new(PrincipalView::from_db(
-        &[],
-        std::collections::HashMap::new(),
-    ));
-    let dynamic_view = dynamic_view_holder(principal_view);
-    let storage = test_storage_with_clock(clock.clone()).await;
-    AdminState {
-        storage: Some(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>),
-        key_store: Some(key_store(storage)),
-        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone()),
-        lifecycle: None,
-        dynamic_view,
-        config: reloader,
-        scheduler: None,
-        admin_auth: crate::admin_test_common::static_token_auth(TOKEN),
-        lazy_refresher: None,
-        runtime: None,
-        data_dir: None,
-        warmup_dialect_dispatcher: None,
-        subscription_metadata_hook: None,
-        start_time: std::time::Instant::now(),
-        event_bus: None,
-        storage_tail: cc_lb_admin::events::storage_tail_channel(),
-        clock,
-    }
 }
 
 fn dynamic_view_holder(principal_view: Arc<PrincipalView>) -> Arc<DynamicViewHolder> {
@@ -305,55 +282,4 @@ pub fn put_body(draft: Value, expected_revision: u64) -> Value {
 
 pub fn expected_revision_body(expected_revision: u64) -> Value {
     json!({ "expected_revision": expected_revision })
-}
-
-pub fn write_config(path: &Path, config: &Config) {
-    std::fs::write(path, toml::to_string_pretty(config).unwrap()).unwrap();
-}
-
-pub struct TestReloader {
-    current: Arc<RwLock<Config>>,
-    draft: Arc<RwLock<Option<Config>>>,
-    reloads: AtomicUsize,
-}
-
-impl TestReloader {
-    pub fn new(_path: PathBuf, initial: Config) -> Self {
-        Self {
-            current: Arc::new(RwLock::new(initial)),
-            draft: Arc::new(RwLock::new(None)),
-            reloads: AtomicUsize::new(0),
-        }
-    }
-
-    pub fn current(&self) -> Config {
-        self.current.read().unwrap().clone()
-    }
-
-    pub fn reloads(&self) -> usize {
-        self.reloads.load(Ordering::Acquire)
-    }
-}
-
-impl CurrentConfig for TestReloader {
-    fn current_config(&self) -> Arc<Config> {
-        Arc::new(self.current())
-    }
-
-    fn put_draft_config(&self, config: Config) -> Result<(), ConfigDraftError> {
-        *self.draft.write().unwrap() = Some(config);
-        Ok(())
-    }
-
-    fn apply_draft_config(&self) -> Result<Arc<Config>, ConfigDraftError> {
-        let config = self
-            .draft
-            .write()
-            .unwrap()
-            .take()
-            .ok_or(ConfigDraftError::MissingDraft)?;
-        *self.current.write().unwrap() = config.clone();
-        self.reloads.fetch_add(1, Ordering::AcqRel);
-        Ok(Arc::new(config))
-    }
 }

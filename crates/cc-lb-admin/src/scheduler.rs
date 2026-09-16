@@ -50,8 +50,7 @@ async fn status(State(state): State<AdminState>) -> Response {
     let Some(scheduler) = state.scheduler.as_ref() else {
         return scheduler_unavailable();
     };
-    let config = state.config.current_config();
-    match scheduler.status(&config.scheduler).await {
+    match scheduler.status(&state.config.scheduler).await {
         Ok(snapshot) => Json(SchedulerStatusResponse {
             schedule_version: SCHEDULE_VERSION,
             recurring_jobs: snapshot.recurring_jobs,

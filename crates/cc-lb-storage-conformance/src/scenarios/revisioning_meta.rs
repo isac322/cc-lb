@@ -5,9 +5,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    BackendKind, CURRENT_CONTRACT_VERSION, ConfigDraftState, ConfigStore, HistoryEntry,
-    HistorySummary, MetaStore, StorageError, StorageResult,
+    BackendKind, CURRENT_CONTRACT_VERSION, ConfigDraftState, ConfigStore, HistoryEntry, MetaStore,
+    StorageError, StorageResult,
 };
+use serde_json::json;
 
 use crate::harness::{ConformanceBackend, ConformanceFixture};
 
@@ -30,7 +31,6 @@ where
 {
     config_draft_optimistic_revision(Arc::clone(&backend)).await?;
     config_history_cap_50(Arc::clone(&backend)).await?;
-    config_get_history_by_revision(Arc::clone(&backend)).await?;
     config_last_validated_revision(Arc::clone(&backend)).await?;
     meta_contract_version(Arc::clone(&backend)).await?;
     meta_backend_kind_stamp(Arc::clone(&backend)).await?;
@@ -55,7 +55,20 @@ where
             ConfigDraftState {
                 saved_at_unix_secs: Some(1_800_000_000),
                 last_validated_revision: Some(99),
-                last_validation_error: Some("stale validation".to_owned()),
+                last_validation: Some(json!({
+                    "file": {
+                        "valid": false,
+                        "issues": [{
+                            "path": "upstreams.primary",
+                            "code": "missing_required",
+                            "message": "stale validation",
+                            "severity": "error"
+                        }]
+                    },
+                    "effective": { "valid": false, "issues": [] },
+                    "filesystem": [],
+                    "overrides": []
+                })),
                 ..ConfigDraftState::default()
             },
             0,
@@ -67,7 +80,7 @@ where
         assert_eq!(stored.revision, 1);
         assert_eq!(stored.saved_at_unix_secs, Some(1_800_000_000));
         assert_eq!(stored.last_validated_revision, None);
-        assert_eq!(stored.last_validation_error, None);
+        assert_eq!(stored.last_validation, None);
 
         let stale = ConfigStore::put_config_draft(
             storage.as_ref(),
@@ -116,76 +129,20 @@ where
             ConfigStore::append_config_history(
                 storage.as_ref(),
                 revision,
-                format!("[timeouts]\nupstream_total_secs = {revision}"),
                 1_800_000_000 + revision,
-                history_summary(revision),
             )
             .await?;
         }
 
         let entries = ConfigStore::list_config_history(storage.as_ref(), 100).await?;
-        let revisions = revisions(&entries);
-        let expected = (11..=60).rev().collect::<Vec<_>>();
-        assert_eq!(entries.len(), 50);
-        assert_eq!(revisions, expected);
-        assert!(
-            ConfigStore::get_config_history(storage.as_ref(), 10)
-                .await?
-                .is_none()
-        );
-        assert_eq!(
-            ConfigStore::get_config_history(storage.as_ref(), 11)
-                .await?
-                .map(|entry| entry.revision),
-            Some(11)
-        );
-
-        Ok(())
-    }
-    .await;
-    let teardown = fixture.teardown().await;
-    result?;
-    teardown
-}
-
-pub async fn config_get_history_by_revision<B>(backend: Arc<B>) -> Result<()>
-where
-    B: ConformanceBackend,
-{
-    let mut fixture = ConformanceFixture::new(backend).await?;
-    let result: Result<()> = async {
-        let storage = fixture.storage();
-        let summary = history_summary(7);
-
-        ConfigStore::append_config_history(
-            storage.as_ref(),
-            7,
-            "[timeouts]\nupstream_total_secs = 70".to_owned(),
-            1_800_000_007,
-            summary.clone(),
-        )
-        .await?;
-        ConfigStore::append_config_history(
-            storage.as_ref(),
-            3,
-            "[timeouts]\nupstream_total_secs = 30".to_owned(),
-            1_800_000_003,
-            history_summary(3),
-        )
-        .await?;
-
-        let entry = ConfigStore::get_config_history(storage.as_ref(), 7)
-            .await?
-            .expect("revision 7 should be present");
-        assert_eq!(entry.revision, 7);
-        assert_eq!(entry.config_toml, "[timeouts]\nupstream_total_secs = 70");
-        assert_eq!(entry.applied_at_unix_secs, 1_800_000_007);
-        assert_eq!(entry.summary, summary);
-        assert!(
-            ConfigStore::get_config_history(storage.as_ref(), 4)
-                .await?
-                .is_none()
-        );
+        let expected = (11..=60)
+            .rev()
+            .map(|revision| HistoryEntry {
+                revision,
+                applied_at_unix_secs: 1_800_000_000 + revision,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(entries, expected);
 
         Ok(())
     }
@@ -214,24 +171,28 @@ where
         .await?;
         assert_eq!(revision, 1);
 
-        ConfigStore::set_last_validated_revision(
-            storage.as_ref(),
-            revision,
-            Some("missing upstream".to_owned()),
-        )
-        .await?;
+        let failure = json!({
+            "file": {"valid": false, "issues": [{"path": "upstreams.primary", "code": "missing_required", "message": "missing upstream", "severity": "error"}]},
+            "effective": {"valid": false, "issues": [{"path": "upstreams.primary", "code": "missing_required", "message": "missing upstream", "severity": "error"}]},
+            "filesystem": [{"path": "runtime.data_dir", "code": "not_writable", "message": "runtime data directory is not writable", "severity": "warning"}],
+            "overrides": []
+        });
+        ConfigStore::set_config_validation(storage.as_ref(), revision, false, failure.clone()).await?;
         let draft = ConfigStore::get_config_draft(storage.as_ref()).await?;
         assert_eq!(draft.revision, revision);
         assert_eq!(draft.last_validated_revision, None);
-        assert_eq!(
-            draft.last_validation_error,
-            Some("missing upstream".to_owned())
-        );
+        assert_eq!(draft.last_validation, Some(failure));
 
-        ConfigStore::set_last_validated_revision(storage.as_ref(), revision, None).await?;
+        let success_warning = json!({
+            "file": {"valid": true, "issues": []},
+            "effective": {"valid": true, "issues": []},
+            "filesystem": [{"path": "runtime.data_dir", "code": "deprecated", "message": "legacy directory", "severity": "warning"}],
+            "overrides": []
+        });
+        ConfigStore::set_config_validation(storage.as_ref(), revision, true, success_warning.clone()).await?;
         let draft = ConfigStore::get_config_draft(storage.as_ref()).await?;
         assert_eq!(draft.last_validated_revision, Some(revision));
-        assert_eq!(draft.last_validation_error, None);
+        assert_eq!(draft.last_validation, Some(success_warning));
 
         let next_revision = ConfigStore::put_config_draft(
             storage.as_ref(),
@@ -243,13 +204,14 @@ where
         )
         .await?;
         assert_eq!(next_revision, 2);
-        let draft = ConfigStore::get_config_draft(storage.as_ref()).await?;
-        assert_eq!(draft.last_validated_revision, None);
-        assert_eq!(draft.last_validation_error, None);
-
-        let stale = ConfigStore::set_last_validated_revision(storage.as_ref(), revision, None)
-            .await
-            .expect_err("validation must reject stale draft revisions");
+        let stale = ConfigStore::set_config_validation(
+            storage.as_ref(),
+            revision,
+            true,
+            json!({"stale": true}),
+        )
+        .await
+        .expect_err("validation must reject stale draft revisions");
         assert!(matches!(stale, StorageError::Conflict { .. }));
 
         Ok(())
@@ -319,14 +281,4 @@ where
     ));
 
     Ok(())
-}
-
-fn history_summary(seed: u64) -> HistorySummary {
-    HistorySummary {
-        tls_enabled: seed.is_multiple_of(2),
-    }
-}
-
-fn revisions(entries: &[HistoryEntry]) -> Vec<u64> {
-    entries.iter().map(|entry| entry.revision).collect()
 }

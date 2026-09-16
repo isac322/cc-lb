@@ -210,23 +210,27 @@ impl storage_api::ConfigStore for TestStorage {
         Ok(draft.revision)
     }
 
-    async fn set_last_validated_revision(
+    async fn set_config_validation(
         &self,
         revision: u64,
-        error: Option<String>,
+        valid: bool,
+        validation: serde_json::Value,
     ) -> storage_api::StorageResult<()> {
         let mut draft = lock_or_storage_error(&self.config_draft)?;
-        draft.last_validated_revision = Some(revision);
-        draft.last_validation_error = error;
+        if draft.revision != revision {
+            return Err(storage_api::StorageError::Conflict {
+                message: "stale config draft revision".to_string(),
+            });
+        }
+        draft.last_validated_revision = valid.then_some(revision);
+        draft.last_validation = Some(validation);
         Ok(())
     }
 
     async fn append_config_history(
         &self,
         _revision: u64,
-        _config_toml: String,
         _applied_at_unix_secs: u64,
-        _summary: storage_api::HistorySummary,
     ) -> storage_api::StorageResult<()> {
         Ok(())
     }
@@ -236,13 +240,6 @@ impl storage_api::ConfigStore for TestStorage {
         _limit: usize,
     ) -> storage_api::StorageResult<Vec<storage_api::HistoryEntry>> {
         Ok(Vec::new())
-    }
-
-    async fn get_config_history(
-        &self,
-        _revision: u64,
-    ) -> storage_api::StorageResult<Option<storage_api::HistoryEntry>> {
-        Ok(None)
     }
 }
 

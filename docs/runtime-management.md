@@ -316,29 +316,13 @@ In multi-replica deployments, replicas coordinate configuration updates and back
 - **Status Monitoring**: You can monitor the status of all replicas and check for partial-failure states via the `/admin/v1/status` endpoint.
 - **Storage Backend**: Use Postgres for multi-replica deployments.
 
-## Restart-Required Matrix
+## Configuration Restarts and TLS Reloads
 
-Some configuration changes in `cc-lb.toml` cannot be applied via hot-reload and require a process restart.
+Every change to `cc-lb.toml` requires a process restart. cc-lb does not hot-reload the configuration file or any individual field.
 
-| Field | Hot | RestartRequired | Reason |
-|---|---|---|---|
-| `listener.proxy_addr` | No | Yes | Socket bindings are fixed at process start |
-| `listener.admin_addr` | No | Yes | Socket bindings are fixed at process start |
-| `listener.metrics_addr` | No | Yes | Socket bindings are fixed at process start |
-| `listener.tls.cert_path` | No | Yes | Listener TLS certificate changes require a process restart |
-| `listener.tls.key_path` | No | Yes | Listener TLS key changes require a process restart |
-| `storage.path` | No | Yes | Storage backend changes require a process restart |
-| `storage.url` | No | Yes | Storage backend changes require a process restart |
-| `storage.pool` | No | Yes | Storage pool changes require a process restart |
-| `aead.key_env` | No | Yes | Storage encryption key environment changes require a process restart |
-| `admin.auth.providers` | No | Yes | Admin authentication providers are built at process start |
-| `oauth.anthropic.client_id` | No | Yes | Anthropic OAuth client changes require a process restart |
-| `oauth.anthropic.auth_url` | No | Yes | Anthropic OAuth endpoint changes require a process restart |
-| `oauth.anthropic.token_url` | No | Yes | Anthropic OAuth endpoint changes require a process restart |
-| `oauth.anthropic.redirect_uri` | No | Yes | Anthropic OAuth redirect changes require a process restart |
-| `oauth.anthropic.scopes` | No | Yes | Anthropic OAuth scope changes require a process restart |
+`SIGHUP` reloads only the contents of the TLS certificate and key files at the paths already configured by `listener.tls.cert_path` and `listener.tls.key_path`. Keep both paths unchanged. Changing either path, or changing any other `cc-lb.toml` setting, requires a process restart.
 
-All upstreams, principals, and plugin chains are fully dynamic (Hot: Yes, RestartRequired: No) because they are stored in the database and loaded dynamically.
+Upstreams, principals, and plugin chains remain dynamic because they are stored in the database rather than `cc-lb.toml`.
 
 ## Audit and Redaction Guarantees
 

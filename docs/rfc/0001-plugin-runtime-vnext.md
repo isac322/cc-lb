@@ -343,7 +343,6 @@ Under cc-lb's pre-launch state and first-party trusted plugin assumption, baking
 - `cc-lb-engine/src/api_keys/principal_view.rs::PrincipalSpecCached` and its `resolved_pipeline / resolved_dialect / resolved_hooks`.
 - Per-principal staging in `cc-lb-server/src/dynamic_view_builder.rs::build_principal_chains`.
 - DB polling and revision-hash rebuild in `cc-lb-server/src/reconcile.rs`.
-- `ArcSwap` config swap in `cc-lb-server/src/reload.rs::ConfigWatcher`.
 - The `data/plugins/wasm/cache/{sha256}.wasm` disk cache.
 - The **semantic intent of "plugin/host schema and version agreement"** previously handled by `crates/cc-lb-runtime-protocol/src/handshake.rs` — only the intent is inherited. The current implementation actually executes the JSON `cc_lb_handshake` export, whereas the new ABI inspects the wasm custom section `cc_lb_schema_hash` for a fully static comparison — a completely different mechanism. The code is discarded; only the intent is preserved.
 
@@ -385,7 +384,7 @@ Under cc-lb's pre-launch state and first-party trusted plugin assumption, baking
 - The host-facing trait module: the trait changes proposed here were superseded by the later split across `cc-lb-routing`, `cc-lb-upstream`, and `cc-lb-observability`.
 - `cc-lb-engine/src/lifecycle.rs::execute_filter_pipeline`: call-site identical. Traps handled by the existing branch.
 - `cc-lb-server/src/dynamic_view_builder.rs::build_principal_chains`: only the runtime call goes through `WasmtimeRuntime` (trait identical).
-- `cc-lb-server/src/reconcile.rs`, `reload.rs`, `tls.rs`: unchanged.
+- `cc-lb-server/src/reconcile.rs`, `tls.rs`: unchanged.
 - `Cargo.toml`: add `wasmtime = "46"` dependency; once the transition is complete, remove `extism = ...`.
 
 ## Drawbacks
