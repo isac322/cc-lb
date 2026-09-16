@@ -513,6 +513,34 @@ function categoryNavItems(nav: HTMLElement) {
   );
 }
 
+// Resolves whether a section element effectively renders a top separator.
+// Sections carry `border-t`/`pt-*` with `first:`-resets so the panel's first
+// child sits flush under the card header; a `divide-y` parent would supply
+// the separator instead. Returns what the reader actually sees.
+function sectionTopSeparator(
+  section: HTMLElement,
+): 'border' | 'padding' | 'divide' | 'none' {
+  const isFirst = section.parentElement?.firstElementChild === section;
+  const tokens = section.className.split(/\s+/);
+  const hasToken = (re: RegExp) => tokens.some((token) => re.test(token));
+  const firstReset = (suffix: string) =>
+    tokens.some((token) => token.includes('first') && token.endsWith(suffix));
+  const border = hasToken(/^border-t$/) || hasToken(/^border-t-(?!0\b)/);
+  const padding = hasToken(/^pt-(?!0\b)/);
+  if (border && !(isFirst && firstReset(':border-t-0'))) return 'border';
+  if (padding && !(isFirst && firstReset(':pt-0'))) return 'padding';
+  if (
+    !isFirst &&
+    (section.parentElement?.className
+      .split(/\s+/)
+      .some((token) => /^divide-y/.test(token)) ??
+      false)
+  ) {
+    return 'divide';
+  }
+  return 'none';
+}
+
 function revealField(path: string) {
   const field = document.querySelector<HTMLElement>(
     `[data-config-path="${path}"]`,
@@ -627,18 +655,32 @@ test('settings cold load reserves version, editor, and history heights without a
   expect(navGrid?.className).toContain('grid-cols-2');
   expect(navGrid?.className).toContain('sm:grid-cols-3');
   expect(navGrid?.className).toContain('lg:grid-cols-4');
+  expect(navGrid?.className).toContain('gap-px');
   expect(navGrid?.className).not.toMatch(/(^|\s)hidden(\s|$)/);
   expect(navGrid?.querySelectorAll('.skeleton')).toHaveLength(
     CONFIG_EDITOR_CATEGORIES.length,
   );
-  const skeletonSections = editorSkeleton.querySelectorAll<HTMLElement>(
-    '[class~="border-t"]',
+  // The last tile mirrors the real nav's last cell: it spans the leftover
+  // columns at each breakpoint so the skeleton grid never leaves a gap.
+  const lastTile = navGrid?.lastElementChild as HTMLElement | null;
+  expect(lastTile?.className).toContain('last:col-span-2');
+  expect(lastTile?.className).toContain('sm:last:col-span-3');
+  expect(lastTile?.className).toContain('lg:last:col-span-2');
+  expect(lastTile?.className).toContain('xl:last:col-span-1');
+  const skeletonSectionWrap = editorSkeleton.querySelector<HTMLElement>(
+    '[class~="space-y-6"]',
   );
+  const skeletonSections = Array.from(
+    skeletonSectionWrap?.children ?? [],
+  ).slice(1) as HTMLElement[];
   expect(skeletonSections.length).toBeGreaterThan(0);
-  for (const section of skeletonSections) {
+  skeletonSections.forEach((section, index) => {
+    // Mirrors the loaded contract: the first section is flush (no top
+    // border/padding), later siblings carry the divider.
+    expect(sectionTopSeparator(section)).toBe(index === 0 ? 'none' : 'border');
     expect(section.className).not.toMatch(/(^|\s)rounded/);
     expect(section.className).not.toMatch(/(^|\s)bg-/);
-  }
+  });
 
   const historySlot = screen.getByTestId('config-history-slot');
   expect(historySlot.className).toContain('min-h-[173px]');
@@ -713,10 +755,13 @@ test('category navigation landmark lists seven categories and renders only the s
 
   // The nav is the editor card's immediate previous sibling — attached above
   // it, not inside it or below the header — and the two surfaces join: the
-  // nav carries the top rounding/border/background while the card drops its
-  // top corners. The card header still owns the active category: its h3
-  // names the panel (via aria-labelledby) and the description sits under it
-  // exactly once — the panel itself repeats no heading or description.
+  // nav carries the top rounding and border while the card drops its top
+  // corners and its own top border so the seam renders a single line. The
+  // nav wrapper itself stays off the strong panel surface — the cells and
+  // the gap-px separator grid own the backgrounds.
+  // The card header still owns the active category: its h3 names the panel
+  // (via aria-labelledby) and the description sits under it exactly once —
+  // the panel itself repeats no heading or description.
   const editorCard = screen.getByTestId('config-editor-card');
   const panel = screen.getByRole('region', { name: 'Network & requests' });
   expect(editorCard.contains(nav)).toBe(false);
@@ -729,8 +774,11 @@ test('category navigation landmark lists seven categories and renders only the s
   ).toBe(true);
   expect(nav.className).toMatch(/(^|\s)rounded-t/);
   expect(nav.className).toMatch(/(^|\s)border(\s|$|-)/);
-  expect(nav.className).toMatch(/(^|\s)bg-/);
+  expect(nav.className).not.toMatch(/(^|\s)bg-panel-strong(\s|$)/);
   expect(editorCard.className).toContain('rounded-t-none');
+  // No double border at the seam: the card drops its top edge (the nav
+  // already drops its bottom edge).
+  expect(editorCard.className).toMatch(/(^|\s)border-t-0/);
   expect(
     (nav.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING) !==
       0,
@@ -823,41 +871,81 @@ test('one inline category grid serves every viewport — no drawer or select', (
     screen.queryByRole('combobox', { name: 'Configuration category' }),
   ).toBeNull();
 
-  // The grid is always rendered — no hidden/breakpoint-gated copy — and
-  // reflows 2 → 3 → 4 → 7 columns so all seven categories stay visible.
+  // The nav strip is a full-bleed surface: it carries the outer border but
+  // no padding of its own — each button is the whole tab surface, edge to
+  // edge.
   const nav = screen.getByTestId('config-category-nav');
   expect(nav.className).not.toMatch(/(^|\s)hidden(\s|$)/);
+  expect(nav.className).not.toMatch(/(^|\s|:)p[xytrbl]?-/);
+  // The strip clips to its rounded top corners, so a button's focus outline
+  // would be cut off at the cell edges unless it draws inside the cell.
+  expect(nav.className).toContain('overflow-hidden');
+
+  // The grid is always rendered — no hidden/breakpoint-gated copy — and
+  // reflows 2 → 3 → 4 → 7 columns so all seven categories stay visible.
+  // Cells share 1px separators: a gap-px grid whose own background is the
+  // separator color, never a multi-pixel gap.
   const grid = nav.querySelector('ul');
   expect(grid).not.toBeNull();
   expect(grid?.className).toContain('grid-cols-2');
   expect(grid?.className).toContain('sm:grid-cols-3');
   expect(grid?.className).toContain('lg:grid-cols-4');
   expect(grid?.className).toContain('xl:grid-cols-7');
+  expect(grid?.className).toContain('gap-px');
+  expect(grid?.className).not.toMatch(/(^|\s)gap-[xy]?-[1-9]/);
+  expect(grid?.className).toMatch(/(^|\s)bg-/);
+  const lastCell = grid?.lastElementChild as HTMLElement | null;
+  expect(lastCell?.className).toMatch(/(^|\s)last:col-span-/);
   for (const item of categoryNavItems(nav)) {
     expect(item.className).not.toMatch(/(^|\s)hidden(\s|$)/);
     expect(item.className).not.toMatch(/(^|\s)[a-z0-9]+:hidden(\s|$)/);
-    // Cells are flat rows — no card or pill chrome — with a touch-sized
-    // target and an accent marker on the active category.
-    expect(item.className).not.toMatch(/(^|\s)rounded/);
+    // Each button is the whole tab surface — it fills its cell, carries its
+    // own background, and keeps a touch-sized target. No card chrome (ring,
+    // shadow) beyond the flat surface.
     expect(item.className).not.toMatch(/(^|\s)shadow/);
     expect(item.className).not.toMatch(/(^|\s)ring-/);
     expect(minHeightPx(item)).toBeGreaterThanOrEqual(44);
     expect(item.className).toContain('h-full');
+    expect(item.className).toContain('w-full');
+    expect(item.className).toMatch(/(^|\s)bg-/);
+    // …so the focus ring uses a negative outline-offset to stay fully
+    // visible inside the clipped cell instead of overflowing it.
+    expect(item.className).toContain('focus-visible:outline-2');
+    expect(item.className).toMatch(
+      /focus-visible:(-outline-offset-\d|outline-offset-\[-)/,
+    );
   }
-  const active = categoryNavItems(nav).find(
+  const items = categoryNavItems(nav);
+  const active = items.find(
     (item) => item.getAttribute('aria-current') === 'page',
   );
-  expect(active?.className).toContain('accent');
+  const inactive = items.filter(
+    (item) => item.getAttribute('aria-current') !== 'page',
+  );
+  expect(inactive.length).toBeGreaterThan(0);
+  // The nav wrapper itself carries no panel surface — the gap-px grid's own
+  // background supplies the 1px separators. The active tab sits on the
+  // subdued surface with an accent top edge; inactive tabs rest on the base
+  // background and lift to the subdued surface on hover.
+  expect(nav.className).not.toMatch(/(^|\s)bg-panel-strong(\s|$)/);
+  expect(active?.className).toMatch(/(^|\s)bg-bg-sub(\s|$)/);
+  expect(active?.className).toContain('border-accent');
+  for (const item of inactive) {
+    expect(item.className).toMatch(/(^|\s)bg-bg(\s|$)/);
+    expect(item.className).not.toMatch(/(^|\s)bg-bg-sub(\s|$)/);
+    expect(item.className).toContain('hover:bg-bg-sub');
+  }
 
   // The nav is attached to the top of the editor card as its previous
   // sibling — same width, shared border, no gap — rather than living inside
-  // the card or floating free.
+  // the card or floating free. The seam renders one border, not two.
   const editorCard = screen.getByTestId('config-editor-card');
   expect(editorCard.contains(nav)).toBe(false);
   expect(editorCard.previousElementSibling).toBe(nav);
   expect(nav.className).toMatch(/(^|\s)rounded-t/);
   expect(nav.className).toMatch(/(^|\s)border-b-0(\s|$)/);
   expect(editorCard.className).toContain('rounded-t-none');
+  expect(editorCard.className).toMatch(/(^|\s)border-t-0/);
 
   // The same nav drives the panel directly — no intermediate disclosure.
   fireEvent.click(within(nav).getByRole('button', { name: /^Scheduling/ }));
@@ -917,22 +1005,28 @@ test('sections stay flat on the category canvas and keep advanced fields behind 
     ).toBeDefined();
   }
   showCategory(view, 'Scheduling');
-  const cards = document.querySelectorAll(
-    '[data-testid="config-section-card"]',
+  const cards = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      '[data-testid="config-section-card"]',
+    ),
   );
   expect(cards.length).toBeGreaterThan(1);
-  for (const card of cards) {
-    // Sections are separated by a top divider and spacing only — the outer
-    // wrapper carries no card chrome (rounded border, tinted background, or
-    // inset padding).
-    expect(card.className).toContain('border-t');
+  cards.forEach((card, index) => {
+    // The first section sits flush under the card header — no top border or
+    // top padding. Every later sibling is separated by a top divider and
+    // spacing only; the wrapper itself carries no card chrome (rounded
+    // border, tinted background, or inset padding).
+    expect(
+      sectionTopSeparator(card),
+      `section ${card.getAttribute('data-config-section')} separator`,
+    ).toBe(index === 0 ? 'none' : 'border');
     expect(card.className).not.toMatch(/(^|\s)rounded/);
     expect(card.className).not.toMatch(/(^|\s)bg-/);
     expect(card.className).not.toMatch(/(^|\s)p[xy]?-\d/);
     expect(
       card.querySelectorAll('[data-testid="config-advanced"]').length,
     ).toBeLessThanOrEqual(1);
-  }
+  });
 
   const keepaliveField = document.querySelector<HTMLElement>(
     '[data-config-path="scheduler.separate_pool.keepalive_secs"]',
@@ -983,13 +1077,36 @@ test('single-root compound sections let the section heading own the label', () =
     }
   };
 
-  // Network: the TLS section is just the nullable listener.tls object — the
-  // Enabled switch stays without a "Tls" heading above it.
+  // Network: the TLS section is just the nullable listener.tls object. Its
+  // Enabled switch is hoisted into the section header row — the same
+  // items-center flex row that holds the h4 and its description — and the
+  // root itself renders no duplicate toggle header.
   expectSingleRootSection('tls', 'listener.tls');
-  const tlsRoot = document.querySelector<HTMLElement>(
-    '[data-config-path="listener.tls"]',
+  const tlsSection = document.querySelector<HTMLElement>(
+    '[data-config-section="tls"]',
+  ) as HTMLElement;
+  const tlsSwitch = within(tlsSection).getByRole('checkbox', {
+    name: 'Enabled',
+  });
+  // The hoisted switch carries the root's own path so focusConfigPath can
+  // resolve it as the exact target for listener.tls deep-links.
+  expect(tlsSwitch.getAttribute('data-config-path')).toBe('listener.tls');
+  expect(tlsSwitch.hasAttribute('data-field-control')).toBe(true);
+  const tlsHeaderRow = tlsSwitch.closest('div.flex') as HTMLElement;
+  expect(tlsHeaderRow.className).toContain('items-center');
+  expect(
+    within(tlsHeaderRow).getByRole('heading', { level: 4, name: 'TLS' }),
+  ).toBeDefined();
+  expect(tlsHeaderRow.textContent).toContain(
+    'Certificate, key, and SIGHUP reload behavior.',
   );
-  expect(within(tlsRoot as HTMLElement).getByRole('checkbox')).toBeDefined();
+  expect(tlsHeaderRow.parentElement).toBe(tlsSection);
+  const tlsRoot = document.querySelector<HTMLElement>(
+    'div[data-config-path="listener.tls"]',
+  ) as HTMLElement;
+  expect(tlsRoot).not.toBeNull();
+  expect(within(tlsRoot).queryByRole('checkbox')).toBeNull();
+  expect(tlsRoot.querySelector('div.flex')).toBeNull();
 
   // Storage & data: the storage union is the whole Primary storage section —
   // the segmented backend selector stays without a "Storage" heading or the
@@ -1108,6 +1225,28 @@ test('a deep-linked advanced field opens its disclosure and receives focus', asy
   expect(field?.closest('details')?.hasAttribute('open')).toBe(true);
   expect(field?.contains(document.activeElement)).toBe(true);
   expect(document.activeElement?.hasAttribute('data-field-control')).toBe(true);
+});
+
+test('a deep link into a disabled TLS object focuses its hoisted enable switch', async () => {
+  // listener.tls is null in the fixture, so no cert_path leaf renders — the
+  // deep-link falls back to the listener.tls container, whose only control
+  // is the Enabled switch hoisted into the TLS section header.
+  setSettingsLoaded();
+  routerMocks.search = {
+    category: 'network',
+    field: 'listener.tls.cert_path',
+  };
+  render(<SettingsComponent />);
+  await flushEffects();
+
+  expect(
+    document.querySelector('[data-config-path="listener.tls.cert_path"]'),
+  ).toBeNull();
+  const tlsSwitch = document.querySelector<HTMLElement>(
+    'input[data-config-path="listener.tls"]',
+  );
+  expect(tlsSwitch).not.toBeNull();
+  expect(document.activeElement).toBe(tlsSwitch);
 });
 
 test('settings search lives in the card header and overlays results without shifting the panel', async () => {
@@ -1597,6 +1736,75 @@ test('admin provider fields inherit provenance from the array override', () => {
       /Environment · CC_LB_ADMIN_AUTH_PROVIDERS_JSON/,
     ).length,
   ).toBeGreaterThan(0);
+});
+
+test('admin providers flatten to one neutral surface per provider', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Identity & access');
+
+  // The outer editor container is chromeless — no border, background, or
+  // padding of its own; it only spans the section grid and stacks its rows.
+  const providers = document.querySelector<HTMLElement>(
+    '[data-config-path="admin.auth.providers"]',
+  ) as HTMLElement;
+  expect(providers).not.toBeNull();
+  expect(providers.className).toContain('col-span-full');
+  expect(providers.className).not.toMatch(/(^|\s)border/);
+  expect(providers.className).not.toMatch(/(^|\s)bg-/);
+  expect(providers.className).not.toMatch(/(^|\s)p[xytrbl]?-\d/);
+  // The header row (note + Add provider) sits directly on the section canvas.
+  expect(
+    within(providers).getByRole('button', { name: 'Add provider' }),
+  ).toBeDefined();
+  expect(providers.textContent).toContain(
+    'Environment-backed tokens are referenced by name and never displayed.',
+  );
+
+  // Each provider is one neutral surface — and the only boxed surface inside
+  // the editor. Nested field containers render embedded, without their own
+  // field-card chrome.
+  const provider = document.querySelector<HTMLElement>(
+    '[data-config-path="admin.auth.providers[0]"]',
+  ) as HTMLElement;
+  expect(provider).not.toBeNull();
+  expect(provider.className).toContain('rounded-sm');
+  expect(provider.className).toContain('border-subtle');
+  expect(provider.className).toContain('bg-panel-strong');
+  const boxed = Array.from(
+    providers.querySelectorAll<HTMLElement>('div[data-config-path]'),
+  ).filter(
+    (element) =>
+      /(^|\s)border/.test(element.className) &&
+      /(^|\s)bg-/.test(element.className),
+  );
+  expect(boxed).toEqual([provider]);
+  const nestedFieldContainers = Array.from(
+    provider.querySelectorAll<HTMLElement>('div[data-config-path]'),
+  );
+  expect(nestedFieldContainers.length).toBeGreaterThan(0);
+  for (const field of nestedFieldContainers) {
+    expect(field.hasAttribute('data-field-embedded')).toBe(true);
+    expect(field.className).not.toMatch(/(^|\s)border/);
+    expect(field.className).not.toMatch(/(^|\s)bg-/);
+    expect(field.className).not.toMatch(/(^|\s)p[xytrbl]?-\d/);
+  }
+  // The leaf controls themselves still render and stay editable.
+  expect(within(provider).getByLabelText('Id')).toBeDefined();
+  // Embedded drops only the outer chrome — the leaf keeps its own Reset/Unset
+  // actions (suppression is a separate contract owned by row headers).
+  const idField = provider.querySelector<HTMLElement>(
+    '[data-config-path="admin.auth.providers[0].id"]',
+  ) as HTMLElement;
+  const tokenEnvField = provider.querySelector<HTMLElement>(
+    '[data-config-path="admin.auth.providers[0].token_env"]',
+  ) as HTMLElement;
+  for (const field of [idField, tokenEnvField]) {
+    expect(field).not.toBeNull();
+    expect(field.hasAttribute('data-field-embedded')).toBe(true);
+    expect(within(field).getByRole('button', { name: 'Reset' })).toBeDefined();
+    expect(within(field).getByRole('button', { name: 'Unset' })).toBeDefined();
+  }
 });
 
 test('dirty edits require save draft and validation before file save or download', () => {
@@ -2485,9 +2693,14 @@ test('unassigned leaves land in their own category Other settings and stay searc
   ).not.toBeNull();
   // The unassigned section is flattened like every other section: a subtle
   // top divider, no card chrome, and no amber warning border — the warning
-  // lives in a badge/text instead.
-  expect(dataOther?.className).toContain('border-t');
-  expect(dataOther?.className).toContain('border-subtle');
+  // lives in a badge/text instead. As a non-first sibling it keeps its
+  // separator; the panel's first section carries none.
+  expect(sectionTopSeparator(dataOther as HTMLElement)).toBe('border');
+  const dataSections = Array.from(
+    dataPanel?.querySelectorAll<HTMLElement>('[data-config-section]') ?? [],
+  );
+  expect(dataSections[0]).not.toBe(dataOther);
+  expect(sectionTopSeparator(dataSections[0] as HTMLElement)).toBe('none');
   expect(dataOther?.className).not.toMatch(/amber/);
   expect(dataOther?.className).not.toMatch(/(^|\s)rounded/);
   expect(dataOther?.className).not.toMatch(/(^|\s)bg-/);
@@ -2769,6 +2982,18 @@ test('recurring jobs render one flat card per key with the enabled switch in the
   // Embedded fields keep their guidance: purpose plus Lower/Higher trade-offs.
   expect(within(interval as HTMLElement).getByText('Lower')).toBeDefined();
   expect(within(interval as HTMLElement).getByText('Higher')).toBeDefined();
+  // The job header owns Reset/Unset for the whole job — embedded leaves
+  // suppress their own copies so the actions never duplicate.
+  expect(within(job).getAllByRole('button', { name: 'Reset' })).toHaveLength(1);
+  expect(within(job).getAllByRole('button', { name: 'Unset' })).toHaveLength(1);
+  for (const field of [interval, jitter]) {
+    expect(
+      within(field as HTMLElement).queryByRole('button', { name: 'Reset' }),
+    ).toBeNull();
+    expect(
+      within(field as HTMLElement).queryByRole('button', { name: 'Unset' }),
+    ).toBeNull();
+  }
   // The enabled switch is self-explanatory: no On/Off effect rows repeat the
   // obvious enqueue/stop outcome anywhere in the job card.
   expect(enabledGuidance.enabled).toBeFalsy();
@@ -2976,13 +3201,15 @@ test('section grids use the 1/2/3-column contract with full-span composite edito
   const networkGrid = proxyAddr?.parentElement;
   expectGridContract(networkGrid, 'listener-endpoints');
   expect(proxyAddr?.className).not.toContain('col-span-full');
-  // The optional TLS object is a composite: it renders as a full-span toggle
-  // inside its own section's grid.
+  // The optional TLS object is a composite: its root container spans the
+  // section grid even while the Enabled switch is hoisted into the section
+  // header (the switch input carries the same data-config-path, so the
+  // container is matched by tag).
   const tlsSection = document.querySelector<HTMLElement>(
     '[data-config-section="tls"]',
   );
   const tlsToggle = tlsSection?.querySelector<HTMLElement>(
-    '[data-config-path="listener.tls"]',
+    'div[data-config-path="listener.tls"]',
   );
   expect(tlsToggle).not.toBeNull();
   expect(tlsToggle?.className).toContain('col-span-full');
@@ -3039,60 +3266,92 @@ test('nullable objects keep one compact switch in both enabled and disabled stat
   const view = render(<SettingsComponent />);
 
   // Disabled: listener.tls is null — the object control is a switch, not an
-  // enable-only affordance.
+  // enable-only affordance. The single-root section hoists it into the
+  // section header row, so it lives on the section, not inside the root.
+  const tlsSection = document.querySelector<HTMLElement>(
+    '[data-config-section="tls"]',
+  ) as HTMLElement;
   const tls = document.querySelector<HTMLElement>(
     '[data-config-path="listener.tls"]',
   );
   expect(tls).not.toBeNull();
-  const tlsSwitch = within(tls as HTMLElement).getByRole('checkbox');
+  const tlsSwitch = within(tlsSection).getByRole('checkbox', {
+    name: 'Enabled',
+  });
   expect(tlsSwitch.hasAttribute('data-field-control')).toBe(true);
   expect((tlsSwitch as HTMLInputElement).checked).toBe(false);
   expect(
-    within(tls as HTMLElement).queryByRole('button', { name: /disable/i }),
+    within(tlsSection).queryByRole('button', { name: /disable/i }),
   ).toBeNull();
   expect(
     document.querySelector('[data-config-path="listener.tls.cert_path"]'),
   ).toBeNull();
 
+  // The compact switch is a bare inline track — no card chrome and no top
+  // offset — so it centers on the header row instead of aligning to a card.
+  const tlsTrack = tlsSwitch
+    .closest('label')
+    ?.querySelector<HTMLElement>('span.relative');
+  expect(tlsTrack?.className).toContain('h-5');
+  expect(tlsTrack?.className).toContain('w-9');
+  expect(tlsTrack?.className).not.toMatch(/(^|\s)(mt|pt|top)-/);
+  const tlsLabel = tlsSwitch.closest('label');
+  expect(tlsLabel?.className).not.toMatch(/(^|\s)border/);
+  expect(tlsLabel?.className).not.toMatch(/(^|\s)bg-/);
+
   // Switching on creates the object in place — the same switch stays put and
   // now reads checked; no Disable button appears.
   fireEvent.click(tlsSwitch);
   view.rerender(<SettingsComponent />);
-  const tlsOn = document.querySelector<HTMLElement>(
-    '[data-config-path="listener.tls"]',
-  );
-  expect(tlsOn).not.toBeNull();
-  const tlsSwitches = within(tlsOn as HTMLElement).getAllByRole('checkbox');
-  expect((tlsSwitches[0] as HTMLInputElement).checked).toBe(true);
+  const tlsSectionOn = document.querySelector<HTMLElement>(
+    '[data-config-section="tls"]',
+  ) as HTMLElement;
+  const tlsSwitchOn = within(tlsSectionOn).getByRole('checkbox', {
+    name: 'Enabled',
+  }) as HTMLInputElement;
+  expect(tlsSwitchOn.checked).toBe(true);
   expect(
-    within(tlsOn as HTMLElement).queryByRole('button', { name: /disable/i }),
+    within(tlsSectionOn).queryByRole('button', { name: /disable/i }),
   ).toBeNull();
   expect(
     document.querySelector('[data-config-path="listener.tls.cert_path"]'),
   ).not.toBeNull();
 
   // Switching back off unsets the object — the same control, same position.
-  fireEvent.click(tlsSwitches[0] as HTMLElement);
+  fireEvent.click(tlsSwitchOn);
   view.rerender(<SettingsComponent />);
-  const tlsOff = document.querySelector<HTMLElement>(
-    '[data-config-path="listener.tls"]',
-  );
+  const tlsSectionOff = document.querySelector<HTMLElement>(
+    '[data-config-section="tls"]',
+  ) as HTMLElement;
   expect(
-    (within(tlsOff as HTMLElement).getByRole('checkbox') as HTMLInputElement)
-      .checked,
+    (
+      within(tlsSectionOff).getByRole('checkbox', {
+        name: 'Enabled',
+      }) as HTMLInputElement
+    ).checked,
   ).toBe(false);
   expect(
     document.querySelector('[data-config-path="listener.tls.cert_path"]'),
   ).toBeNull();
 
-  // oauth.anthropic follows the same contract in Identity & access.
+  // oauth.anthropic follows the same contract in Identity & access. As a
+  // multi-root sibling it keeps its own header: the h5/description block and
+  // the switch share one items-center row inside the root.
   showCategory(view, 'Identity & access');
   const oauth = document.querySelector<HTMLElement>(
     '[data-config-path="oauth.anthropic"]',
   );
   expect(oauth).not.toBeNull();
-  const oauthSwitch = within(oauth as HTMLElement).getByRole('checkbox');
+  const oauthSwitch = within(oauth as HTMLElement).getByRole('checkbox', {
+    name: 'Enabled',
+  });
   expect((oauthSwitch as HTMLInputElement).checked).toBe(false);
+  const oauthHeaderRow = oauthSwitch.closest('div.flex') as HTMLElement;
+  expect(oauthHeaderRow.className).toContain('items-center');
+  expect(
+    within(oauthHeaderRow).getByRole('heading', { name: 'Anthropic' }),
+  ).toBeDefined();
+  expect(oauthHeaderRow.parentElement).toBe(oauth);
   expect(
     within(oauth as HTMLElement).queryByRole('button', { name: /disable/i }),
   ).toBeNull();
@@ -3104,9 +3363,9 @@ test('nullable objects keep one compact switch in both enabled and disabled stat
   expect(oauthOn).not.toBeNull();
   expect(
     (
-      within(oauthOn as HTMLElement).getAllByRole(
-        'checkbox',
-      )[0] as HTMLInputElement
+      within(oauthOn as HTMLElement).getByRole('checkbox', {
+        name: 'Enabled',
+      }) as HTMLInputElement
     ).checked,
   ).toBe(true);
   expect(

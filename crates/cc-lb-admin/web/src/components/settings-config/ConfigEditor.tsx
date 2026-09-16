@@ -1354,7 +1354,7 @@ export function ConfigEditorSection({
           <nav
             aria-label="Configuration categories"
             data-testid="config-category-nav"
-            className="rounded-t-sm border border-subtle border-b-0 bg-panel-strong px-4 py-2"
+            className="overflow-hidden rounded-t-sm border border-subtle border-b-0"
           >
             <CategoryNavList
               categories={categories}
@@ -1365,7 +1365,7 @@ export function ConfigEditorSection({
         ) : null}
         <Card
           data-testid="config-editor-card"
-          className={activeCategory ? 'rounded-t-none' : undefined}
+          className={activeCategory ? 'rounded-t-none border-t-0!' : undefined}
         >
           <CardHeader
             titleId={CONFIG_CATEGORY_HEADING_ID}
@@ -1909,7 +1909,7 @@ function CategoryNavList({
   onSelect: (id: string) => void;
 }) {
   return (
-    <ul className="grid grid-cols-2 gap-x-1 gap-y-1 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
+    <ul className="grid grid-cols-2 gap-px bg-[color:var(--color-border)] sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
       {categories.map((entry) => {
         const active = entry.id === activeCategoryId;
         const statusSummary = [
@@ -1922,17 +1922,20 @@ function CategoryNavList({
           .filter(Boolean)
           .join(', ');
         return (
-          <li key={entry.id} className="min-w-0">
+          <li
+            key={entry.id}
+            className="min-w-0 last:col-span-2 sm:last:col-span-3 lg:last:col-span-2 xl:last:col-span-1"
+          >
             <button
               type="button"
               data-config-category={entry.id}
               aria-current={active ? 'page' : undefined}
               title={statusSummary || undefined}
               className={cx(
-                'flex h-full min-h-[44px] w-full min-w-0 items-start border-b-2 px-2 py-2 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]',
+                'flex h-full min-h-[44px] w-full min-w-0 items-start border-t-2 px-3 py-2.5 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[color:var(--color-accent)]',
                 active
-                  ? 'border-accent bg-[color:var(--color-accent-dim)] font-medium text-text'
-                  : 'border-transparent text-text-muted hover:bg-overlay-5 hover:text-[color:var(--color-text)]',
+                  ? 'border-accent bg-bg-sub font-medium text-text'
+                  : 'border-transparent bg-bg text-text-muted hover:bg-bg-sub hover:text-[color:var(--color-text)]',
               )}
               onClick={() => onSelect(entry.id)}
             >
@@ -2215,9 +2218,12 @@ function ConfigEditorSkeleton() {
       aria-hidden="true"
     >
       <Skeleton className="h-9 w-full" />
-      <div className="grid grid-cols-2 gap-x-1 gap-y-1 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
+      <div className="grid grid-cols-2 gap-px bg-[color:var(--color-border)] sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
         {CONFIG_EDITOR_CATEGORIES.map((category) => (
-          <Skeleton key={category.id} className="h-14 w-full" />
+          <Skeleton
+            key={category.id}
+            className="h-14 w-full last:col-span-2 sm:last:col-span-3 lg:last:col-span-2 xl:last:col-span-1"
+          />
         ))}
       </div>
       <div className="space-y-6">
@@ -2226,7 +2232,10 @@ function ConfigEditorSkeleton() {
           <Skeleton className="h-3 w-64" />
         </div>
         {[0, 1, 2].map((index) => (
-          <div key={index} className="border-t border-subtle pt-5">
+          <div
+            key={index}
+            className={index === 0 ? undefined : 'border-t border-subtle pt-5'}
+          >
             <Skeleton className={cx('h-4', index % 2 ? 'w-36' : 'w-44')} />
             <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
               <Skeleton className="h-16 w-full" />
@@ -2297,7 +2306,7 @@ function CategoryPanel({
         <section
           data-testid="config-section-card"
           data-config-section={CONFIG_EDITOR_UNASSIGNED_SECTION_ID}
-          className="border-t border-subtle pt-5"
+          className="border-t border-subtle pt-5 first:border-t-0 first:pt-0"
         >
           <div className="flex flex-wrap items-center gap-2">
             <h4 className="text-sm font-medium text-text">
@@ -2373,6 +2382,18 @@ function SectionCard({
   // the section owns the label. Multi-root sections keep per-root headings.
   const hideRootHeading =
     primaryRoots.length === 1 && advancedRoots.length === 0;
+  // A lone nullable root (e.g. listener.tls) hoists its enable switch into the
+  // section header row so the h4/description and the switch share one line.
+  const singleNullableRoot = hideRootHeading ? (primaryRoots[0] ?? null) : null;
+  const singleNullablePath =
+    singleNullableRoot &&
+    compoundKindAt(
+      rootSchema,
+      singleNullableRoot.schema,
+      singleNullableRoot.path,
+    ) === 'nullable-object'
+      ? singleNullableRoot.path
+      : null;
   const renderRoot = (root: RenderRoot) => (
     <ConfigNode
       key={root.path}
@@ -2388,18 +2409,46 @@ function SectionCard({
       depth={0}
       childKeys={root.childKeys}
       hideHeading={hideRootHeading}
+      suppressNullableToggle={root.path === singleNullablePath}
     />
   );
   return (
     <section
       data-testid="config-section-card"
       data-config-section={section.id}
-      className="border-t border-subtle pt-5"
+      className="border-t border-subtle pt-5 first:border-t-0 first:pt-0"
     >
-      <h4 className="text-sm font-medium text-text">{section.label}</h4>
-      {section.description ? (
-        <p className="mt-0.5 text-xs text-text-faint">{section.description}</p>
-      ) : null}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+        <div className="min-w-0">
+          <h4 className="text-sm font-medium text-text">{section.label}</h4>
+          {section.description ? (
+            <p className="mt-0.5 text-xs text-text-faint">
+              {section.description}
+            </p>
+          ) : null}
+        </div>
+        {singleNullablePath ? (
+          <ToggleSwitch
+            variant="compact"
+            className="shrink-0"
+            data-field-control
+            data-config-path={singleNullablePath}
+            checked={isJsonObject(getConfigValue(value, singleNullablePath))}
+            label="Enabled"
+            onChange={(event) => {
+              onChange(
+                event.target.checked
+                  ? (setConfigValue(
+                      value,
+                      singleNullablePath,
+                      {},
+                    ) as JsonObject)
+                  : (unsetConfigValue(value, singleNullablePath) as JsonObject),
+              );
+            }}
+          />
+        ) : null}
+      </div>
       {primaryRoots.length ? (
         <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
           {primaryRoots.map(renderRoot)}
@@ -2443,6 +2492,8 @@ function ConfigNode({
   depth,
   childKeys,
   hideHeading = false,
+  suppressNullableToggle = false,
+  embedded = false,
 }: {
   rootSchema: ConfigSchema;
   schema: ConfigSchema;
@@ -2457,6 +2508,10 @@ function ConfigNode({
   childKeys?: Set<string>;
   /** Suppress the root h5/description when the section h4 already names it. */
   hideHeading?: boolean;
+  /** Drop the in-root nullable switch when the section header owns it. */
+  suppressNullableToggle?: boolean;
+  /** Render scalar leaves without their card chrome (inside a provider card). */
+  embedded?: boolean;
 }) {
   const resolvedSchema = resolveConfigSchema(rootSchema, inputSchema);
   const nullable = isNullableConfigSchema(rootSchema, inputSchema);
@@ -2523,6 +2578,7 @@ function ConfigNode({
   if (Object.keys(properties).length) {
     const configured = isJsonObject(currentValue);
     const showChildren = !nullable || configured;
+    const showNullableToggle = nullable && !suppressNullableToggle;
     return (
       <div
         className={cx(
@@ -2534,15 +2590,15 @@ function ConfigNode({
         data-config-path={path}
         tabIndex={-1}
       >
-        {!hideHeading || nullable ? (
+        {!hideHeading || showNullableToggle ? (
           <div
             className={cx(
-              'flex min-w-0 items-start gap-3',
+              'flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2',
               hideHeading ? 'justify-end' : 'justify-between',
             )}
           >
             {!hideHeading ? (
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <h5
                   className={cx(
                     'font-medium text-text',
@@ -2558,9 +2614,10 @@ function ConfigNode({
                 ) : null}
               </div>
             ) : null}
-            {nullable ? (
+            {showNullableToggle ? (
               <ToggleSwitch
                 variant="compact"
+                className="shrink-0"
                 data-field-control
                 checked={configured}
                 label="Enabled"
@@ -2591,6 +2648,7 @@ function ConfigNode({
                   issues={issues}
                   onChange={onChange}
                   depth={depth + 1}
+                  embedded={embedded}
                 />
               ),
             )}
@@ -2614,6 +2672,7 @@ function ConfigNode({
         (issue) => issue.path === path || issue.path.startsWith(`${path}.`),
       )}
       onChange={onChange}
+      embedded={embedded}
     />
   );
 }
@@ -2662,6 +2721,7 @@ function ScalarField({
   issues,
   onChange,
   embedded = false,
+  suppressActions = false,
 }: {
   rootSchema: ConfigSchema;
   schema: ConfigSchema;
@@ -2675,6 +2735,8 @@ function ScalarField({
   onChange: (value: unknown) => void;
   /** Render without the outer card chrome for use inside a composite row. */
   embedded?: boolean;
+  /** Hide the Reset/Unset actions when a parent row header owns them. */
+  suppressActions?: boolean;
 }) {
   const { fileConfig } = useContext(ConfigSourcesContext);
   const storageUrlReplacement = useContext(StorageUrlReplacementContext);
@@ -2808,7 +2870,7 @@ function ScalarField({
             <Badge tone="warn">Operational risk</Badge>
           ) : null}
         </div>
-        {embedded ? null : (
+        {suppressActions ? null : (
           <div className="flex shrink-0 flex-wrap justify-end gap-1">
             {path === OPAQUE_STORAGE_URL_PATH ? (
               <>
@@ -3384,7 +3446,7 @@ function AdminProvidersEditor({
 
   return (
     <div
-      className="col-span-full space-y-3 rounded-sm border border-subtle bg-panel-strong p-3"
+      className="col-span-full space-y-3"
       data-config-path={path}
       tabIndex={-1}
     >
@@ -3549,6 +3611,7 @@ function AdminProvidersEditor({
                         issues={issues}
                         onChange={onChange}
                         depth={2}
+                        embedded
                       />
                     ),
                   )}
@@ -3802,6 +3865,7 @@ function RecurringJobRow({
               <ScalarField
                 key={field}
                 embedded
+                suppressActions
                 rootSchema={rootSchema}
                 schema={child}
                 nullable={isNullableConfigSchema(rootSchema, child)}

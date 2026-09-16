@@ -891,7 +891,12 @@ export function ToggleSwitch({
           </span>
         ) : null}
       </span>
-      <span className="relative mt-0.5 inline-flex h-5 w-9 shrink-0">
+      <span
+        className={cx(
+          'relative inline-flex h-5 w-9 shrink-0',
+          compact ? undefined : 'mt-0.5',
+        )}
+      >
         <input {...rest} type="checkbox" className="peer sr-only" />
         <span className="absolute inset-0 rounded-full border border-subtle-strong bg-overlay-6 transition-colors peer-checked:border-[color:var(--color-accent)] peer-checked:bg-[color:var(--color-accent)]/35 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[color:var(--color-accent)] peer-focus-visible:outline-offset-2" />
         <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-[color:var(--color-text-muted)] shadow-sm transition-transform peer-checked:translate-x-4 peer-checked:bg-[color:var(--color-accent)]" />
