@@ -85,7 +85,7 @@
 
 ## 5. 상세 TODO와 완료 조건
 
-체크박스는 실행 증거가 있을 때만 갱신한다. TODO 도구와 아래 75개 항목의 이름을 동일하게 유지한다. 발견된 추가 의무는 원래 항목을 지우지 않고 새 ID로 추가한다.
+체크박스는 실행 증거가 있을 때만 갱신한다. TODO 도구와 아래 76개 항목의 이름을 동일하게 유지한다. 발견된 추가 의무는 원래 항목을 지우지 않고 새 ID로 추가한다.
 
 ### 문서와 기준선
 
@@ -141,6 +141,10 @@
   - 기존 관측 기능으로 요청별 SQL 횟수/시간/pool 대기를 얻을 수 있는지 확인한다. 부족하면 필요한 정확한 instrumentation 범위를 승인 요청한다. 별도 EXPLAIN만으로 실제 요청 시간을 채우지 않는다.
 - [x] MEASURE-04 브라우저 독립 원시 기록 수집기 검증
   - 실제 클릭과 network capture를 연결하고 원시 시각·response hash·render 결과를 수집한다. direct fetch 복사값 및 누락값을 성공으로 판정하지 않는 음성 검증을 수행한다.
+
+- [x] MEASURE-05 Admin 요청에 한정한 SQL 로그 필터 검증
+  - 격리 SQLite·PostgreSQL에서 `info,[admin.request]=debug`를 시험했다. 각 3개 Admin 조회의 SQL·acquire 이벤트를 유지하면서 Admin span 밖 SQL DEBUG는 0건이었다. 같은 소규모 broad-filter 대조에서는 각각 99·144건이었다. 일반 INFO와 Proxy 401 제어 결과는 유지했다.
+  - 이 설정은 Admin span 내부의 모든 DEBUG를 허용하므로 SQL-only 필터나 모든 endpoint의 비밀 안전성 검증이 아니다. 운영 설정·앱 코드·provider 계정은 변경하지 않았으며 로그량·성능 수치를 운영 전체로 외삽하지 않는다.
 
 ### 전수 실측
 
