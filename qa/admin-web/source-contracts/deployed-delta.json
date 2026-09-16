@@ -1,16 +1,16 @@
 {
   "deployed_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
-  "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+  "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
   "source_state": {
     "kind": "approved_uncommitted_candidate",
-    "base_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
     "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
   },
   "candidate": {
     "status": "uncommitted_approved_candidate",
-    "source_base": "ef70b347790c46fa9956435a820a51b60c547d04",
+    "source_base": "19b055708f3b9814b517158bfbb196aabb5dea81",
     "candidate_uncommitted": true,
-    "scope": "Audit latest + approved FIX01..05 + admin observability instrumentation",
+    "scope": "Audit latest + approved FIX01..05 + admin observability instrumentation + safety fixes: explicit clear_base_url upstream reset, admin_only audit filter before LIMIT, audit read-order index migrations",
     "production_applicability": false,
     "note": "Approved local candidate only; not committed and not deployed to production. Entries marked candidate_uncommitted describe candidate-vs-deployed behavior and must not be read as production state. Binary verification is recorded separately per candidate under qa/admin-web/runs; source_files hashes define this source catalog."
   },
@@ -23,7 +23,7 @@
       "auth": "AdminAuth (any authenticated identity)",
       "storage": "None (Memory/Context)",
       "reference": "crates/cc-lb-admin/src/v1/router.rs:36",
-      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
       "production_applicability": false,
       "description": "Returns authenticated admin identity and mode (static_token or external)"
     },
@@ -111,7 +111,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/audit.tsx",
         "symbol": "AuditPage",
-        "line": 519
+        "line": 520
       },
       "name": "Audit Actor Metadata Rows",
       "trigger_steps": [
@@ -168,9 +168,9 @@
         "sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit",
         "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
       ],
-      "scope_type": "AuditQueryScope (All | Principal | Actor{authority,subject})",
+      "scope_type": "AuditQueryScope (All | Principal | Actor{authority,subject}) plus admin_only: bool",
       "ordering": "Newest first: ORDER BY ts DESC, id DESC (sqlite) / ts DESC, seq DESC (postgres); newer insertions first on timestamp ties",
-      "reference": "crates/cc-lb-storage-api/src/traits.rs:45",
+      "reference": "crates/cc-lb-storage-api/src/traits.rs:47",
       "implementations": [
         {
           "engine": "sqlite",
@@ -178,8 +178,8 @@
             "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
             "symbol": "SqliteStorage::query_recent_audit",
             "line_start": 94,
-            "line_end": 165,
-            "sha256": "cce41d81a0d72a0c74ab8c4e08feb5653bfc9640766f091532cb3d5a54ad5d5a"
+            "line_end": 146,
+            "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
           }
         },
         {
@@ -187,16 +187,16 @@
           "source": {
             "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
             "symbol": "PostgresStorage::query_recent_audit",
-            "line_start": 196,
-            "line_end": 244,
-            "sha256": "e80dac50c03b90e3e90f7fbbb3859068389bd72286a9245826b1d04866fd8426"
+            "line_start": 194,
+            "line_end": 246,
+            "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
           }
         }
       ],
-      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
       "candidate_uncommitted": true,
       "production_applicability": false,
-      "description": "Newest-first audit query with scope filtering applied before LIMIT; backs GET /admin/audit and GET /admin/v1/audit in the candidate. Existing ascending AuditStore::query_audit and query_audit_by_actor definitions are preserved but are no longer mapped by the HTTP audit handler."
+      "description": "Newest-first audit query with scope filtering applied before LIMIT; backs GET /admin/audit and GET /admin/v1/audit in the candidate. The new admin_only parameter (API default false; the audit page sends admin_only=true) appends the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT on both engines; both implementations now build the statement with sqlx QueryBuilder (Postgres binds until twice). Existing ascending AuditStore::query_audit and query_audit_by_actor definitions are preserved but are no longer mapped by the HTTP audit handler."
     },
     {
       "type": "middleware",
@@ -210,7 +210,7 @@
         "line_end": 2873,
         "sha256": "094d8af664467d9ff02b62d64d981f8c87cbc1e0166331839660b2508aeb7180"
       },
-      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
       "candidate_uncommitted": true,
       "production_applicability": false,
       "description": "Generates req_admin_{uuidv7} per admin request, opens tracing span 'admin.request' (request_id, http.request.method, http.route, http.response.status_code, handler_ms), inserts 'x-request-id' and appends 'Server-Timing: rid;desc=<same opaque ID>' without a duration, and logs 'admin_response_head_ready'. handler_ms measures response-head generation only; the body is not read or buffered. Resource Timing IDs require external backend joining; cached responses can retain an earlier ID."
@@ -235,10 +235,62 @@
           "sha256": "84b15eb7402be9bc6866ea7f905a945e6af7cb8496cb1b0d5284a753b9bdd207"
         }
       ],
-      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
       "candidate_uncommitted": true,
       "production_applicability": false,
       "description": "Sets .acquire_time_level(log::LevelFilter::Debug) on PgPoolOptions and SqlitePoolOptions so sqlx logs pool acquisition timing at DEBUG. Acquire elapsed covers the whole acquire call (checkout wait plus connect and test_before_acquire work), not pure pool wait; query elapsed is not pure DB time."
+    },
+    {
+      "type": "migration",
+      "name": "audit_log_v1 read-order indexes for query_recent_audit",
+      "sources": [
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0119_audit_log_principal_ts_seq_index.sql",
+          "symbol": "0119_audit_log_principal_ts_seq_index.sql",
+          "line_start": 1,
+          "line_end": 26,
+          "sha256": "7f3181b425f9de504eca701eb923e18babddad1ec0823aff17c693a064996d4f"
+        },
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0120_audit_log_actor_ts_seq_index.sql",
+          "symbol": "0120_audit_log_actor_ts_seq_index.sql",
+          "line_start": 1,
+          "line_end": 19,
+          "sha256": "0434b91ff5f1418c2f8ce5fd9876b7801f2b72fc40e59f7e269358c83dea711b"
+        },
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0121_audit_log_admin_ts_seq_index.sql",
+          "symbol": "0121_audit_log_admin_ts_seq_index.sql",
+          "line_start": 1,
+          "line_end": 19,
+          "sha256": "749c51d59b91d0aa26004dd400b9f5d71edcc18ac4eee8e05bf74277b363ce3a"
+        },
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0122_audit_log_admin_principal_ts_seq_index.sql",
+          "symbol": "0122_audit_log_admin_principal_ts_seq_index.sql",
+          "line_start": 1,
+          "line_end": 17,
+          "sha256": "c8df8207c0b924a8d560dfe8e911b38fb7c9de52813e6958c5ec1ebc2911c724"
+        },
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_actor_ts_seq_index.sql",
+          "symbol": "0123_audit_log_admin_actor_ts_seq_index.sql",
+          "line_start": 1,
+          "line_end": 15,
+          "sha256": "166f9165fbde0383851df9d1db72ae096afeec788ae5aca2e3844b2ba5e86bfb"
+        },
+        {
+          "file": "crates/cc-lb-storage-sqlite/migrations/0087_audit_log_read_order_indexes.sql",
+          "symbol": "0087_audit_log_read_order_indexes.sql",
+          "line_start": 1,
+          "line_end": 39,
+          "sha256": "3b8653f193766ff684abd20012a1d44aecd464bae35072017925102c8580d88f"
+        }
+      ],
+      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "Five new indexes per engine serve ORDER BY ts DESC, id/seq DESC inside each scope: scoped (principal, actor) plus partial admin_only indexes carrying the identical (admin_action IS NOT NULL OR kind IS NOT NULL) predicate; the Postgres actor index is partial on actor_authority IS NOT NULL. Postgres migrations are plain CREATE INDEX (one per file, lock_timeout 1s): each build holds a SHARE lock that blocks writes to audit_log_v1 for its duration, so a large live deployment MUST stay blocked until an operator pre-creates the indexes with CREATE INDEX CONCURRENTLY using identical definitions and verifies pg_index.indisvalid; no production DDL is authorized. SQLite migration 0087 creates all five indexes in one file. Both engines add real write amplification and WAL/index-build cost; this is not a zero-overhead change."
     }
   ],
   "removed_since_deploy": [
@@ -332,7 +384,7 @@
     {
       "target": "GET /admin/audit and GET /admin/v1/audit",
       "deployed_behavior": "Accepts query params: since, until, limit, principal_id. No actor filtering. No SensitiveRead authorization enforcement.",
-      "latest_behavior": "Accepts additional query params: actor_authority, actor_subject. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. Enforces SensitiveRead authorization.",
+      "latest_behavior": "Accepts additional query params: actor_authority, actor_subject, admin_only. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. admin_only (default false) filters to entries with an admin action or kind before LIMIT. Enforces SensitiveRead authorization.",
       "impact": "In deployed, querying by actor_authority or actor_subject is ignored/not supported. In latest, missing permissions return 403 Forbidden."
     },
     {
@@ -386,7 +438,7 @@
     {
       "target": "GET /admin/audit and GET /admin/v1/audit (result ordering)",
       "deployed_behavior": "Returns audit entries oldest first (ORDER BY id/seq ASC) via AuditStore::query_audit / query_audit_by_actor.",
-      "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor); scope filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler.",
+      "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor) and an admin_only flag; scope and admin_only filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler.",
       "impact": "Entry order reverses vs deployed; clients paging by position see newest-first pages. Candidate only - not committed or deployed.",
       "candidate_uncommitted": true
     },
@@ -427,17 +479,17 @@
     },
     {
       "type": "api_contract",
-      "name": "Explicit-null Base URL override clearing",
-      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "name": "Explicit clear_base_url Base URL override reset",
+      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
       "candidate_uncommitted": true,
       "production_applicability": false,
-      "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-162",
-      "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
+      "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-160",
+      "description": "Approved on 2026-09-16: PUT/PATCH omission or explicit null preserves base_url, a URL sets it, and clear_base_url: true clears it; sending a non-null base_url together with clear_base_url returns 400 conflicting_base_url (a stale If-Match still wins with 409). The SettingsCard form captures the Base URL baseline when editing begins so a mid-edit props refetch cannot turn an untouched field into a clear, and treats a clear as unconfirmed (error toast, editor stays open) when the response base_url is not null. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
     },
     {
       "type": "api_and_ui_capability",
       "name": "Provider-aware configuration draft Apply availability",
-      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
       "candidate_uncommitted": true,
       "production_applicability": false,
       "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551",
@@ -1170,7 +1222,13 @@
     "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
     "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
     "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
-    "crates/cc-lb-storage-sqlite/src/lib.rs"
+    "crates/cc-lb-storage-sqlite/src/lib.rs",
+    "crates/cc-lb-storage-postgres/migrations/0119_audit_log_principal_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0120_audit_log_actor_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0121_audit_log_admin_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0122_audit_log_admin_principal_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_actor_ts_seq_index.sql",
+    "crates/cc-lb-storage-sqlite/migrations/0087_audit_log_read_order_indexes.sql"
   ],
   "unread_files": [],
   "gaps": []

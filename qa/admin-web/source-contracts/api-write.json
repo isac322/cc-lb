@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "source_commit": "ef70b347",
+  "source_commit": "19b05570",
   "source_state": {
     "kind": "approved_uncommitted_candidate",
-    "base_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
     "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
   },
   "source_files": [
@@ -17,7 +17,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/routes.rs",
-      "sha256": "f6334eef2a574416b8228735b9ec5a513c1157b1f539078d4b37a2d62a29617b"
+      "sha256": "cd879a0c93c7680cb4f290388f42c073693940e850813011686082f7394932ed"
     },
     {
       "path": "crates/cc-lb-admin/src/settings.rs",
@@ -25,7 +25,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/v1/keys.rs",
-      "sha256": "146b33a801efb795c60eb5cc0e87912a1c0644c56f70a3a57f2f0fd0ce6eb36e"
+      "sha256": "400c2639eb5cb1baa30b0f93f450b0cb23e85bae37d8e3f06648b1c7ae22fc62"
     },
     {
       "path": "crates/cc-lb-admin/src/v1/oauth.rs",
@@ -49,7 +49,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/v1/upstreams.rs",
-      "sha256": "02051ceddfe34c2eab0eaf21964b8b6b6047bdb42ffac590cc3297cec9b79405"
+      "sha256": "6cbbe2930c93838f4aff3421580c7924974c8d41d91cb7f7bf0a69205bc75aff"
     },
     {
       "path": "crates/cc-lb-control/src/api_keys/key_store.rs",
@@ -81,7 +81,7 @@
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
-      "sha256": "8d9d30e633dd1eca194667614c7edd6e70f6b0978df3b19eae84b31fcf873eec"
+      "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
@@ -117,7 +117,7 @@
     },
     {
       "path": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
-      "sha256": "96c806a556378343b7c71618c378b26799e883650cad2b26e924731e1a040c13"
+      "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
     },
     {
       "path": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
@@ -291,7 +291,7 @@
       "handler": "put_config_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useSaveDraft (crates/cc-lb-admin/web/src/lib/queries.ts:1610) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:453)"
+        "useSaveDraft (crates/cc-lb-admin/web/src/lib/queries.ts:1611) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:453)"
       ],
       "storage_operation_ids": [
         "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
@@ -344,7 +344,7 @@
       "handler": "put_config_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useSaveDraft (crates/cc-lb-admin/web/src/lib/queries.ts:1610) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:453)"
+        "useSaveDraft (crates/cc-lb-admin/web/src/lib/queries.ts:1611) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:453)"
       ],
       "storage_operation_ids": [
         "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
@@ -397,7 +397,7 @@
       "handler": "validate_config_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useValidateConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1601) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:454)"
+        "useValidateConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1602) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:454)"
       ],
       "storage_operation_ids": [
         "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
@@ -444,7 +444,7 @@
       "handler": "validate_config_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useValidateConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1601) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:454)"
+        "useValidateConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1602) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:454)"
       ],
       "storage_operation_ids": [
         "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
@@ -491,7 +491,7 @@
       "handler": "apply_config_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useApplyConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1586) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:455)"
+        "useApplyConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1587) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:455)"
       ],
       "storage_operation_ids": [
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
@@ -521,7 +521,7 @@
       "handler": "apply_config_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useApplyConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1586) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:455)"
+        "useApplyConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1587) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:455)"
       ],
       "storage_operation_ids": [
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
@@ -551,7 +551,7 @@
       "handler": "reload_config",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useReloadConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1627) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:456)"
+        "useReloadConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1628) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:456)"
       ],
       "storage_operation_ids": [
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
@@ -581,7 +581,7 @@
       "handler": "reload_config",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useReloadConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1627) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:456)"
+        "useReloadConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1628) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:456)"
       ],
       "storage_operation_ids": [
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
@@ -611,7 +611,7 @@
       "handler": "issue_key",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useIssueKey (crates/cc-lb-admin/web/src/lib/queries.ts:1337) in Principals page / Key management dialog"
+        "useIssueKey (crates/cc-lb-admin/web/src/lib/queries.ts:1338) in Principals page / Key management dialog"
       ],
       "storage_operation_ids": [
         "sqlite:ManagedKeyStore::issue:SqliteStorage::issue",
@@ -665,7 +665,7 @@
       "handler": "revoke_key",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useRevokeKey (crates/cc-lb-admin/web/src/lib/queries.ts:1349) in Principals page / Key management dialog"
+        "useRevokeKey (crates/cc-lb-admin/web/src/lib/queries.ts:1350) in Principals page / Key management dialog"
       ],
       "storage_operation_ids": [
         "sqlite:ManagedKeyStore::revoke_zero_secrets:SqliteStorage::revoke_zero_secrets",
@@ -710,7 +710,7 @@
       "handler": "start_oauth_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "startOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1112) / useStartOauthDraft (queries.ts:1637) in New Upstream modal"
+        "startOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1112) / useStartOauthDraft (queries.ts:1638) in New Upstream modal"
       ],
       "storage_operation_ids": [
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
@@ -740,7 +740,7 @@
       "handler": "complete_oauth_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "completeOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1119) / useCompleteOauthDraft (queries.ts:1644) in New Upstream modal"
+        "completeOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1119) / useCompleteOauthDraft (queries.ts:1645) in New Upstream modal"
       ],
       "storage_operation_ids": [
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
@@ -789,7 +789,7 @@
       "handler": "create_upstream_from_oauth_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "createUpstreamFromOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1126) / useCreateFromOauthDraft (queries.ts:1652) in New Upstream modal"
+        "createUpstreamFromOauthDraft (crates/cc-lb-admin/web/src/lib/api.ts:1126) / useCreateFromOauthDraft (queries.ts:1653) in New Upstream modal"
       ],
       "storage_operation_ids": [
         "sqlite:UpstreamStore::create:SqliteStorage::create",
@@ -854,7 +854,7 @@
       "handler": "start_oauth",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useOAuthStart (crates/cc-lb-admin/web/src/lib/queries.ts:1153) in Upstream detail settings"
+        "useOAuthStart (crates/cc-lb-admin/web/src/lib/queries.ts:1154) in Upstream detail settings"
       ],
       "storage_operation_ids": [
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
@@ -897,7 +897,7 @@
       "handler": "complete_oauth",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useOAuthComplete (crates/cc-lb-admin/web/src/lib/queries.ts:1162) in Upstream detail settings"
+        "useOAuthComplete (crates/cc-lb-admin/web/src/lib/queries.ts:1163) in Upstream detail settings"
       ],
       "storage_operation_ids": [
         "sqlite:UpstreamStore::store_oauth_tokens:SqliteStorage::store_oauth_tokens",
@@ -955,7 +955,7 @@
       "handler": "patch_registry",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "usePatchPlugin (crates/cc-lb-admin/web/src/lib/queries.ts:1483) in Plugin detail/operate (crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx:4,14)"
+        "usePatchPlugin (crates/cc-lb-admin/web/src/lib/queries.ts:1484) in Plugin detail/operate (crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx:4,14)"
       ],
       "storage_operation_ids": [
         "sqlite:PluginRegistryStore::update_registry_label:SqliteStorage::update_registry_label",
@@ -1011,7 +1011,7 @@
       "handler": "delete_registry",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useDeletePlugin (crates/cc-lb-admin/web/src/lib/queries.ts:1434) in Plugin delete dialog (crates/cc-lb-admin/web/src/components/plugins/PluginDeleteDialog.tsx:2,19)"
+        "useDeletePlugin (crates/cc-lb-admin/web/src/lib/queries.ts:1435) in Plugin delete dialog (crates/cc-lb-admin/web/src/components/plugins/PluginDeleteDialog.tsx:2,19)"
       ],
       "storage_operation_ids": [
         "sqlite:PluginRegistryStore::delete_registry_entry:SqliteStorage::delete_registry_entry",
@@ -1071,7 +1071,7 @@
       "handler": "insert_chain",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useInsertChainEntry (crates/cc-lb-admin/web/src/lib/queries.ts:1514) in Plugin pipeline tab (crates/cc-lb-admin/web/src/routes/principals.tsx:75,1435)"
+        "useInsertChainEntry (crates/cc-lb-admin/web/src/lib/queries.ts:1515) in Plugin pipeline tab (crates/cc-lb-admin/web/src/routes/principals.tsx:75,1435)"
       ],
       "storage_operation_ids": [
         "sqlite:PluginRegistryStore::insert_chain_entry:SqliteStorage::insert_chain_entry",
@@ -1159,7 +1159,7 @@
       "handler": "reorder_chain",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useReorderChain (crates/cc-lb-admin/web/src/lib/queries.ts:1540) in Plugin pipeline drag-and-drop (crates/cc-lb-admin/web/src/routes/principals.tsx:84,1434)"
+        "useReorderChain (crates/cc-lb-admin/web/src/lib/queries.ts:1541) in Plugin pipeline drag-and-drop (crates/cc-lb-admin/web/src/routes/principals.tsx:84,1434)"
       ],
       "storage_operation_ids": [
         "sqlite:PluginRegistryStore::reorder_chain:SqliteStorage::reorder_chain",
@@ -1329,7 +1329,7 @@
       "handler": "delete_chain",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useDeleteChainEntry (crates/cc-lb-admin/web/src/lib/queries.ts:1555) in Plugin pipeline tab (crates/cc-lb-admin/web/src/routes/principals.tsx:73,1436)"
+        "useDeleteChainEntry (crates/cc-lb-admin/web/src/lib/queries.ts:1556) in Plugin pipeline tab (crates/cc-lb-admin/web/src/routes/principals.tsx:73,1436)"
       ],
       "storage_operation_ids": [
         "sqlite:PluginRegistryStore::delete_chain_entry:SqliteStorage::delete_chain_entry",
@@ -1374,7 +1374,7 @@
       "handler": "upload_wasm",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useUploadWasm (crates/cc-lb-admin/web/src/lib/queries.ts:1368) in PluginsPage (crates/cc-lb-admin/web/src/components/plugins/PluginsPage.tsx:4,138)"
+        "useUploadWasm (crates/cc-lb-admin/web/src/lib/queries.ts:1369) in PluginsPage (crates/cc-lb-admin/web/src/components/plugins/PluginsPage.tsx:4,138)"
       ],
       "storage_operation_ids": [
         "sqlite:PluginRegistryStore::persist_wasm_upload:SqliteStorage::persist_wasm_upload",
@@ -1459,7 +1459,7 @@
       "handler": "gc_wasm",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useGcPlugins (crates/cc-lb-admin/web/src/lib/queries.ts:1503) in Plugin catalog maintenance (crates/cc-lb-admin/web/src/components/plugins/PluginCatalog.tsx:4,59)"
+        "useGcPlugins (crates/cc-lb-admin/web/src/lib/queries.ts:1504) in Plugin catalog maintenance (crates/cc-lb-admin/web/src/components/plugins/PluginCatalog.tsx:4,59)"
       ],
       "storage_operation_ids": [
         "sqlite:PluginRegistryStore::list_orphan_blobs:SqliteStorage::list_orphan_blobs",
@@ -1491,7 +1491,7 @@
       "handler": "create_principal",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useCreatePrincipal (crates/cc-lb-admin/web/src/lib/queries.ts:1206) in New Principal dialog (principals.tsx)"
+        "useCreatePrincipal (crates/cc-lb-admin/web/src/lib/queries.ts:1207) in New Principal dialog (principals.tsx)"
       ],
       "storage_operation_ids": [
         "sqlite:PrincipalStore::create:SqliteStorage::create",
@@ -1648,7 +1648,7 @@
       "handler": "update_principal",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useUpdatePrincipalDefaultLimits (crates/cc-lb-admin/web/src/lib/queries.ts:1289), useUpdatePrincipalCacheKeepalive (queries.ts:1313) in Principals drawer/dialogs"
+        "useUpdatePrincipalDefaultLimits (crates/cc-lb-admin/web/src/lib/queries.ts:1290), useUpdatePrincipalCacheKeepalive (queries.ts:1314) in Principals drawer/dialogs"
       ],
       "storage_operation_ids": [
         "sqlite:PrincipalStore::update:SqliteStorage::update",
@@ -1730,7 +1730,7 @@
       "handler": "delete_principal",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useDeletePrincipal (crates/cc-lb-admin/web/src/lib/queries.ts:1231) in Principal delete confirmation dialog"
+        "useDeletePrincipal (crates/cc-lb-admin/web/src/lib/queries.ts:1232) in Principal delete confirmation dialog"
       ],
       "storage_operation_ids": [
         "sqlite:PrincipalStore::soft_delete:SqliteStorage::soft_delete",
@@ -1775,7 +1775,7 @@
       "handler": "enable_principal",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useTogglePrincipal (crates/cc-lb-admin/web/src/lib/queries.ts:1244) in Principals table toggle"
+        "useTogglePrincipal (crates/cc-lb-admin/web/src/lib/queries.ts:1245) in Principals table toggle"
       ],
       "storage_operation_ids": [
         "sqlite:PrincipalStore::set_enabled:SqliteStorage::set_enabled",
@@ -1820,7 +1820,7 @@
       "handler": "disable_principal",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useTogglePrincipal (crates/cc-lb-admin/web/src/lib/queries.ts:1244) in Principals table toggle"
+        "useTogglePrincipal (crates/cc-lb-admin/web/src/lib/queries.ts:1245) in Principals table toggle"
       ],
       "storage_operation_ids": [
         "sqlite:PrincipalStore::set_enabled:SqliteStorage::set_enabled",
@@ -1865,7 +1865,7 @@
       "handler": "update_router_terminal",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useUpdateRouterTerminalStrategy (crates/cc-lb-admin/web/src/lib/queries.ts:1563) in Principal router strategy selector"
+        "useUpdateRouterTerminalStrategy (crates/cc-lb-admin/web/src/lib/queries.ts:1564) in Principal router strategy selector"
       ],
       "storage_operation_ids": [
         "sqlite:PrincipalStore::update:SqliteStorage::update",
@@ -1923,7 +1923,7 @@
       "handler": "update_allowed_models",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useSetAllowedModels (crates/cc-lb-admin/web/src/lib/queries.ts:1267) in Principal allowed models editor"
+        "useSetAllowedModels (crates/cc-lb-admin/web/src/lib/queries.ts:1268) in Principal allowed models editor"
       ],
       "storage_operation_ids": [
         "sqlite:PrincipalStore::update:SqliteStorage::update",
@@ -2045,7 +2045,7 @@
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
         "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
       ],
-      "cache_or_no_query": "DynamicView rebinding; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
+      "cache_or_no_query": "DynamicView rebinding; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
       "side_effects": "Audit event `upstream_create`; creates new upstream target for proxy load balancing; encrypts API key via AEAD QA restore: DELETE the created upstream using its returned ETag.",
       "risk_tier": "reversible_write",
       "parameters": {
@@ -2118,7 +2118,7 @@
       "handler": "update_upstream",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useUpdateUpstream (crates/cc-lb-admin/web/src/lib/queries.ts:1052) in Upstream Settings card"
+        "useUpdateUpstream (crates/cc-lb-admin/web/src/lib/queries.ts:1053) in Upstream Settings card"
       ],
       "storage_operation_ids": [
         "sqlite:UpstreamStore::update:SqliteStorage::update",
@@ -2126,8 +2126,8 @@
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
         "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
       ],
-      "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
-      "side_effects": "Audit event `upstream_update`; replaces upstream base_url, warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision.",
+      "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
+      "side_effects": "Audit event `upstream_update`; replaces upstream base_url (set via base_url, cleared via clear_base_url), warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision.",
       "risk_tier": "reversible_write",
       "parameters": {
         "path": [
@@ -2168,9 +2168,15 @@
           },
           {
             "name": "base_url",
-            "type": "Option<Option<Url>>",
+            "type": "Option<Url>",
             "required": false,
-            "description": "Absent: preserve the existing override. Explicit null: clear it to the provider default. URL string: set the override. If-Match still guards every change."
+            "description": "Absent or explicit null: preserve the existing override. URL string: set the override. Clearing requires clear_base_url; sending a non-null base_url together with clear_base_url: true returns 400 conflicting_base_url. If-Match still guards every change."
+          },
+          {
+            "name": "clear_base_url",
+            "type": "bool",
+            "required": false,
+            "description": "Explicitly clears the base_url override (maps to Some(None) in storage). Mutually exclusive with a non-null base_url: both together return 400 conflicting_base_url. Default false."
           },
           {
             "name": "api_key_env",
@@ -2212,7 +2218,7 @@
       "handler": "update_upstream",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useUpdateUpstreamWarmupSettings (crates/cc-lb-admin/web/src/lib/queries.ts:1128) in WarmupConfigModal"
+        "useUpdateUpstreamWarmupSettings (crates/cc-lb-admin/web/src/lib/queries.ts:1129) in WarmupConfigModal"
       ],
       "storage_operation_ids": [
         "sqlite:UpstreamStore::update:SqliteStorage::update",
@@ -2220,7 +2226,7 @@
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
         "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
       ],
-      "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
+      "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
       "side_effects": "Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision.",
       "risk_tier": "reversible_write",
       "parameters": {
@@ -2262,9 +2268,15 @@
           },
           {
             "name": "base_url",
-            "type": "Option<Option<Url>>",
+            "type": "Option<Url>",
             "required": false,
-            "description": "Absent: preserve the existing override. Explicit null: clear it to the provider default. URL string: set the override. If-Match still guards every change."
+            "description": "Absent or explicit null: preserve the existing override. URL string: set the override. Clearing requires clear_base_url; sending a non-null base_url together with clear_base_url: true returns 400 conflicting_base_url. If-Match still guards every change."
+          },
+          {
+            "name": "clear_base_url",
+            "type": "bool",
+            "required": false,
+            "description": "Explicitly clears the base_url override (maps to Some(None) in storage). Mutually exclusive with a non-null base_url: both together return 400 conflicting_base_url. Default false."
           },
           {
             "name": "api_key_env",
@@ -2394,7 +2406,7 @@
       "handler": "fire_now_upstream_warmup",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useFireNowUpstreamWarmup (crates/cc-lb-admin/web/src/lib/queries.ts:1075) in WarmupCardMinimal and WarmupHistoryDrawer"
+        "useFireNowUpstreamWarmup (crates/cc-lb-admin/web/src/lib/queries.ts:1076) in WarmupCardMinimal and WarmupHistoryDrawer"
       ],
       "storage_operation_ids": [
         "sqlite:UpstreamWarmupAttemptStore::insert_warmup_attempt:SqliteStorage::insert_warmup_attempt",
@@ -2435,7 +2447,7 @@
       "handler": "delete_upstream_warmup_dialect_plugin",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useClearUpstreamWarmupDialectPlugin (crates/cc-lb-admin/web/src/lib/queries.ts:1107) in WarmupConfigModal"
+        "useClearUpstreamWarmupDialectPlugin (crates/cc-lb-admin/web/src/lib/queries.ts:1108) in WarmupConfigModal"
       ],
       "storage_operation_ids": [
         "sqlite:UpstreamStore::clear_warmup_dialect_plugin:SqliteStorage::clear_warmup_dialect_plugin",
@@ -2443,7 +2455,7 @@
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
         "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
       ],
-      "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
+      "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
       "side_effects": "Audit event `upstream_update` (warmup_dialect_plugin); disassociates dialect plugin so default HTTP warmup is used QA restore: PUT the prior warmup_dialect_plugin with the returned revision.",
       "risk_tier": "reversible_write",
       "parameters": {
@@ -2480,7 +2492,7 @@
       "handler": "enable_upstream",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useUpdateUpstream (queries.ts:1052 via PUT /admin/v1/upstreams/{id}) or direct API / CLI"
+        "useUpdateUpstream (queries.ts:1053 via PUT /admin/v1/upstreams/{id}) or direct API / CLI"
       ],
       "storage_operation_ids": [
         "sqlite:UpstreamStore::set_enabled:SqliteStorage::set_enabled",
@@ -2488,7 +2500,7 @@
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
         "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
       ],
-      "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
+      "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
       "side_effects": "Audit event `upstream_enable`; activates upstream so load balancer can route requests to it QA restore: POST the disable endpoint with the returned revision.",
       "risk_tier": "reversible_write",
       "parameters": {
@@ -2525,7 +2537,7 @@
       "handler": "disable_upstream",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useUpdateUpstream (queries.ts:1052 via PUT /admin/v1/upstreams/{id}) or direct API / CLI"
+        "useUpdateUpstream (queries.ts:1053 via PUT /admin/v1/upstreams/{id}) or direct API / CLI"
       ],
       "storage_operation_ids": [
         "sqlite:UpstreamStore::set_enabled:SqliteStorage::set_enabled",
@@ -2533,7 +2545,7 @@
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
         "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
       ],
-      "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
+      "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.",
       "side_effects": "Audit event `upstream_disable`; disables upstream from proxy candidate pool QA restore: POST the enable endpoint with the returned revision.",
       "risk_tier": "reversible_write",
       "parameters": {
@@ -2572,9 +2584,9 @@
       "source": {
         "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
         "symbol": "PostgresStorage::append_audit",
-        "line_start": 48,
-        "line_end": 86,
-        "sha256": "8d9d30e633dd1eca194667614c7edd6e70f6b0978df3b19eae84b31fcf873eec"
+        "line_start": 46,
+        "line_end": 84,
+        "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
       },
       "statements": [
         {
@@ -2583,33 +2595,33 @@
           "source": {
             "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
             "symbol": "PostgresStorage::append_audit",
-            "line_start": 52,
-            "line_end": 83
+            "line_start": 50,
+            "line_end": 81
           },
           "branches": [],
           "bind_parameters": [
-            "54: .bind(unix_secs_to_datetime(entry.ts, \"audit ts\")?)",
-            "55: .bind(&entry.request_id)",
-            "56: .bind(&entry.principal_id)",
-            "57: .bind(&entry.route)",
-            "58: .bind(&entry.upstream)",
-            "59: .bind(entry.model.as_deref())",
-            "60: .bind(i32::from(entry.status))",
-            "61: .bind(u64_to_i64(entry.input_tokens.unwrap_or(0), \"audit input_tokens\")?)",
-            "62: .bind(u64_to_i64(entry.output_tokens.unwrap_or(0), \"audit output_tokens\")?)",
-            "63: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)",
-            "64: .bind(entry.agent_label.as_deref())",
-            "65: .bind(entry.api_key_id.as_deref())",
-            "66: .bind(",
-            "72: .bind(entry.limit_violation.as_deref())",
-            "73: .bind(entry.admin_action.as_deref())",
-            "74: .bind(entry.actor.as_deref())",
-            "75: .bind(entry.actor_authority.as_deref())",
-            "76: .bind(entry.actor_subject.as_deref())",
-            "77: .bind(entry.actor_kind.as_deref())",
-            "78: .bind(entry.actor_email.as_deref())",
-            "79: .bind(entry.kind.as_deref())",
-            "80: .bind(payload)"
+            "52: .bind(unix_secs_to_datetime(entry.ts, \"audit ts\")?)",
+            "53: .bind(&entry.request_id)",
+            "54: .bind(&entry.principal_id)",
+            "55: .bind(&entry.route)",
+            "56: .bind(&entry.upstream)",
+            "57: .bind(entry.model.as_deref())",
+            "58: .bind(i32::from(entry.status))",
+            "59: .bind(u64_to_i64(entry.input_tokens.unwrap_or(0), \"audit input_tokens\")?)",
+            "60: .bind(u64_to_i64(entry.output_tokens.unwrap_or(0), \"audit output_tokens\")?)",
+            "61: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)",
+            "62: .bind(entry.agent_label.as_deref())",
+            "63: .bind(entry.api_key_id.as_deref())",
+            "64: .bind(",
+            "70: .bind(entry.limit_violation.as_deref())",
+            "71: .bind(entry.admin_action.as_deref())",
+            "72: .bind(entry.actor.as_deref())",
+            "73: .bind(entry.actor_authority.as_deref())",
+            "74: .bind(entry.actor_subject.as_deref())",
+            "75: .bind(entry.actor_kind.as_deref())",
+            "76: .bind(entry.actor_email.as_deref())",
+            "77: .bind(entry.kind.as_deref())",
+            "78: .bind(payload)"
           ]
         }
       ]
@@ -4974,7 +4986,7 @@
         "symbol": "SqliteStorage::append_audit",
         "line_start": 12,
         "line_end": 14,
-        "sha256": "96c806a556378343b7c71618c378b26799e883650cad2b26e924731e1a040c13"
+        "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
       },
       "statements": [
         {
@@ -4983,33 +4995,33 @@
           "source": {
             "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
             "symbol": "insert_audit_entry",
-            "line_start": 219,
-            "line_end": 257
+            "line_start": 200,
+            "line_end": 238
           },
           "branches": [],
           "bind_parameters": [
-            "227: .bind(u64_to_i64(entry.ts, \"audit ts\")?)",
-            "228: .bind(&entry.request_id)",
-            "229: .bind(&entry.principal_id)",
-            "230: .bind(&entry.route)",
-            "231: .bind(&entry.upstream)",
-            "232: .bind(entry.model.as_deref())",
-            "233: .bind(i64::from(entry.status))",
-            "234: .bind(option_u64_to_i64(entry.input_tokens, \"audit input_tokens\")?)",
-            "235: .bind(option_u64_to_i64(",
-            "239: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)",
-            "240: .bind(entry.agent_label.as_deref())",
-            "241: .bind(entry.api_key_id.as_deref())",
-            "242: .bind(option_u64_to_i64(",
-            "246: .bind(entry.limit_violation.as_deref())",
-            "247: .bind(entry.admin_action.as_deref())",
-            "248: .bind(entry.actor.as_deref())",
-            "249: .bind(entry.actor_authority.as_deref())",
-            "250: .bind(entry.actor_subject.as_deref())",
-            "251: .bind(entry.actor_kind.as_deref())",
-            "252: .bind(entry.actor_email.as_deref())",
-            "253: .bind(entry.kind.as_deref())",
-            "254: .bind(payload.as_deref())"
+            "208: .bind(u64_to_i64(entry.ts, \"audit ts\")?)",
+            "209: .bind(&entry.request_id)",
+            "210: .bind(&entry.principal_id)",
+            "211: .bind(&entry.route)",
+            "212: .bind(&entry.upstream)",
+            "213: .bind(entry.model.as_deref())",
+            "214: .bind(i64::from(entry.status))",
+            "215: .bind(option_u64_to_i64(entry.input_tokens, \"audit input_tokens\")?)",
+            "216: .bind(option_u64_to_i64(",
+            "220: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)",
+            "221: .bind(entry.agent_label.as_deref())",
+            "222: .bind(entry.api_key_id.as_deref())",
+            "223: .bind(option_u64_to_i64(",
+            "227: .bind(entry.limit_violation.as_deref())",
+            "228: .bind(entry.admin_action.as_deref())",
+            "229: .bind(entry.actor.as_deref())",
+            "230: .bind(entry.actor_authority.as_deref())",
+            "231: .bind(entry.actor_subject.as_deref())",
+            "232: .bind(entry.actor_kind.as_deref())",
+            "233: .bind(entry.actor_email.as_deref())",
+            "234: .bind(entry.kind.as_deref())",
+            "235: .bind(payload.as_deref())"
           ]
         }
       ]

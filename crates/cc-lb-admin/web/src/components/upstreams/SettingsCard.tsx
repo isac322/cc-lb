@@ -1,6 +1,6 @@
 import { Radio as BaseRadio } from '@base-ui/react/radio';
 import { RadioGroup as BaseRadioGroup } from '@base-ui/react/radio-group';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../../lib/constants';
 import {
@@ -27,6 +27,10 @@ export function SettingsCard({ upstream }: Props) {
   const [useLiteral, setUseLiteral] = useState(!upstream.api_key_env);
   const [envVar, setEnvVar] = useState(upstream.api_key_env || '');
   const [literalKey, setLiteralKey] = useState('');
+  // Base URL value captured when editing began. Save intent is judged
+  // against this baseline, not live props, so a background refetch can
+  // never turn an untouched field into a clear.
+  const baseUrlBaseline = useRef(upstream.base_url || '');
 
   const update = useUpdateUpstream();
 
@@ -39,13 +43,18 @@ export function SettingsCard({ upstream }: Props) {
     const trimmedEnv = envVar.trim();
     const trimmedLiteral = literalKey.trim();
 
-    const body: UpdateUpstreamRequest = {
-      base_url: trimmedBase === '' ? null : trimmedBase,
-      ...(upstream.kind === 'anthropic_api_key' && {
-        api_key_value: useLiteral ? trimmedLiteral || null : null,
-        api_key_env: !useLiteral ? trimmedEnv || null : null,
-      }),
-    };
+    const body: UpdateUpstreamRequest = {};
+    if (trimmedBase !== baseUrlBaseline.current) {
+      if (trimmedBase === '') {
+        body.clear_base_url = true;
+      } else {
+        body.base_url = trimmedBase;
+      }
+    }
+    if (upstream.kind === 'anthropic_api_key') {
+      body.api_key_value = useLiteral ? trimmedLiteral || null : null;
+      body.api_key_env = !useLiteral ? trimmedEnv || null : null;
+    }
 
     update.mutate(
       {
@@ -54,12 +63,31 @@ export function SettingsCard({ upstream }: Props) {
         spec_revision: upstream.spec_revision,
       },
       {
-        onSuccess: () => {
+        onSuccess: (updated) => {
+          // An explicit clear is only done when the server confirms
+          // base_url is null. Older backends ignore clear_base_url and
+          // still return the stored URL (or omit the field); treat that
+          // as unconfirmed and keep the editor open.
+          if (body.clear_base_url === true && updated.base_url !== null) {
+            toast.error(
+              'Server did not confirm the Base URL clear; the stored URL may still be set.',
+            );
+            return;
+          }
           toast.success('Settings updated');
           setEditing(false);
         },
       },
     );
+  };
+
+  const handleEdit = () => {
+    setBaseUrl(upstream.base_url || '');
+    baseUrlBaseline.current = upstream.base_url || '';
+    setUseLiteral(!upstream.api_key_env);
+    setEnvVar(upstream.api_key_env || '');
+    setLiteralKey('');
+    setEditing(true);
   };
 
   const handleCancel = () => {
@@ -76,7 +104,7 @@ export function SettingsCard({ upstream }: Props) {
         title="Settings"
         action={
           !editing && (
-            <Button size="sm" onClick={() => setEditing(true)}>
+            <Button size="sm" onClick={handleEdit}>
               Edit
             </Button>
           )

@@ -50,6 +50,7 @@ impl storage_api::AuditStore for TestStorage {
         _since: u64,
         _until: u64,
         _limit: usize,
+        _admin_only: bool,
     ) -> storage_api::StorageResult<Vec<storage_api::AuditEntry>> {
         Ok(Vec::new())
     }

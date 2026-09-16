@@ -1,6 +1,6 @@
 # cc-lb Admin Web & API/Query QA Inventory
 
-> **Source base commit:** `ef70b347`  
+> **Source base commit:** `19b05570`  
 > **Source state:** `approved_uncommitted_candidate` — Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment.  
 > **Source reconciliation:** `source_reconciled`  
 > **Runtime status:** `runtime_pending`  
@@ -785,7 +785,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `list_upstreams`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** Populates Upstreams command group in palette
 - **Runtime result:** `PENDING`
@@ -1079,7 +1079,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `list_upstreams`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** Translates upstream IDs into display names across Recent Requests table and Pool Quota Popovers
 - **Runtime result:** `PENDING`
@@ -2318,7 +2318,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `list_upstreams`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** Populates Upstream dropdown filter options and upstream name column in logs table
 - **Runtime result:** `PENDING`
@@ -2630,7 +2630,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-E9A473CD5D19`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1206#useCreatePrincipal`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1207#useCreatePrincipal`
 - **Preconditions:** name.trim() !== ''; createInFlight.current === false
 - **Steps:** Fill Name input → Select Kind → Optionally add default limits → Click 'Create' submit button
 - **Scope:** `once` — Operator input form
@@ -2664,7 +2664,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-03`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1244#useTogglePrincipal`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1245#useTogglePrincipal`
 - **Preconditions:** Principal selected; del.isPending === false; principalWritePending === false
 - **Steps:** Click 'Enable' or 'Disable' button in detail header
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[]
@@ -2686,7 +2686,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-03`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1244#useTogglePrincipal`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1245#useTogglePrincipal`
 - **Preconditions:** Principal selected; del.isPending === false; principalWritePending === false
 - **Steps:** Click 'Enable' or 'Disable' button in detail header
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[]
@@ -2721,7 +2721,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-B1990946C344`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1231#useDeletePrincipal`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1232#useDeletePrincipal`
 - **Preconditions:** Principal selected; toggle.isPending === false; principalWritePending === false
 - **Steps:** Click 'Delete' button in detail header → Confirm in dialog
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[]
@@ -2769,7 +2769,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-74652446E668`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1267#useSetAllowedModels`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1268#useSetAllowedModels`
 - **Preconditions:** Principal selected; editing === true; editRevision !== null; principalWritePending === false
 - **Steps:** Click 'Edit' on Allowed Models card → Type or modify comma-separated model names in textarea → Click 'Save'
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[].allowed_models
@@ -2803,7 +2803,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-D74A22B571BC`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1289#useUpdatePrincipalDefaultLimits`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1290#useUpdatePrincipalDefaultLimits`
 - **Preconditions:** Principal selected; editing === true; editRevision !== null; principalWritePending === false
 - **Steps:** Click 'Edit' on Default Limits card → Add/modify/remove limits in LimitsEditor → Click 'Save'
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[].default_limits
@@ -2953,7 +2953,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-72D80A37A7FC`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1514#useInsertChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1515#useInsertChainEntry`
 - **Preconditions:** Basic tab active; routerWriteBlocked === false
 - **Steps:** In Basic tab, toggle 'Keep prompt cache warm by reusing upstreams' switch
 - **Scope:** `each_principal` — Selected principal ID
@@ -2974,7 +2974,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-72D80A37A7FC`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1555#useDeleteChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1556#useDeleteChainEntry`
 - **Preconditions:** Basic tab active; routerWriteBlocked === false
 - **Steps:** In Basic tab, toggle 'Keep prompt cache warm by reusing upstreams' switch
 - **Scope:** `each_principal` — Selected principal ID
@@ -3008,7 +3008,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-12BD8F041AC6`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1563#useUpdateRouterTerminalStrategy`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1564#useUpdateRouterTerminalStrategy`
 - **Preconditions:** terminalStrategy.data exists; routerWriteBlocked === false
 - **Steps:** Click a radio card in TerminalStrategyRadioGroup ('first-pick', 'round-robin', 'least-latency', 'cheapest')
 - **Scope:** `each_principal` — Selected principal ID
@@ -3042,7 +3042,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-D4D3CDAFC561`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1514#useInsertChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1515#useInsertChainEntry`
 - **Preconditions:** Advanced tab active; routerWriteBlocked === false; plugin not already in chain
 - **Steps:** Click '+ Add filter' trigger → Select a plugin from the popover list
 - **Scope:** `each_principal` — GET /admin/v1/plugins/registry
@@ -3076,7 +3076,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-C4E25AD91ABF`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1540#useReorderChain`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1541#useReorderChain`
 - **Preconditions:** index > 0 for up, index < entries.length - 1 for down; routerWriteBlocked === false
 - **Steps:** Click 'Move filter up' or 'Move filter down' arrow button on a filter step
 - **Scope:** `each_principal` — Router filter entries
@@ -3110,7 +3110,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-797468122201`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1555#useDeleteChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1556#useDeleteChainEntry`
 - **Preconditions:** routerWriteBlocked === false
 - **Steps:** Click Trash icon on a filter step
 - **Scope:** `each_principal` — Router filter entries
@@ -3158,7 +3158,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-18`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1555#useDeleteChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1556#useDeleteChainEntry`
 - **Preconditions:** shapeWriteBlocked === false; pluginId !== currentPluginId
 - **Steps:** Click a radio card in Shape slot editor ('None' or any compatible plugin)
 - **Scope:** `each_principal` — GET /admin/v1/plugins/registry filtered by pluginSupportsSlot(p, 'shape')
@@ -3179,7 +3179,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-18`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1514#useInsertChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1515#useInsertChainEntry`
 - **Preconditions:** shapeWriteBlocked === false; pluginId !== currentPluginId
 - **Steps:** Click a radio card in Shape slot editor ('None' or any compatible plugin)
 - **Scope:** `each_principal` — GET /admin/v1/plugins/registry filtered by pluginSupportsSlot(p, 'shape')
@@ -3213,7 +3213,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-4A31DF64FCC2`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1540#useReorderChain`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1541#useReorderChain`
 - **Preconditions:** chainBusy === false; entries.length > 1
 - **Steps:** Drag an observability hook item and drop at a new index
 - **Scope:** `each_principal` — Observability hook chain entries
@@ -3247,7 +3247,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-8AE44ADD2C3E`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1555#useDeleteChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1556#useDeleteChainEntry`
 - **Preconditions:** chainBusy === false
 - **Steps:** Click Trash icon on hook item → Confirm in removal modal
 - **Scope:** `each_principal` — Observability hook chain entries
@@ -3315,7 +3315,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-911C0971EF03`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1337#useIssueKey`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1338#useIssueKey`
 - **Preconditions:** issueInFlight.current === false; issuePending === false
 - **Steps:** Click 'Issue Key' button → Optionally enter Label in modal → Click 'Issue' button
 - **Scope:** `each_principal` — Selected principal ID
@@ -3349,7 +3349,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-B4272A92476E`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1349#useRevokeKey`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1350#useRevokeKey`
 - **Preconditions:** Key is active (revoked_at_unix_secs === null); revokeInFlight.current === false
 - **Steps:** Click Trash icon on an active API key row → Confirm in Revoke API key? dialog
 - **Scope:** `each_key` — GET /admin/v1/principals/${id}/keys -> data.keys[]
@@ -3383,7 +3383,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-A3E7AE6357CE`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1830#useCacheKeepaliveSummary`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1831#useCacheKeepaliveSummary`
 - **Preconditions:** Principal selected
 - **Steps:** Mount CacheKeepaliveCard for selected principal → Initial load and continuous polling every 5,000ms
 - **Scope:** `each_principal` — Selected principal ID
@@ -3417,7 +3417,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-921EE69973B8`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1313#useUpdatePrincipalCacheKeepalive`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1314#useUpdatePrincipalCacheKeepalive`
 - **Preconditions:** toggleLocked === false (togglePending === false && principalWritePending === false)
 - **Steps:** Click switch in CacheKeepaliveCard header
 - **Scope:** `each_principal` — Selected principal ID
@@ -3451,7 +3451,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-09A`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1313#useUpdatePrincipalCacheKeepalive`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1314#useUpdatePrincipalCacheKeepalive`
 - **Preconditions:** busy === false; all numeric fields >= 0 and finite
 - **Steps:** Click 'Settings' on card → Modify lead times, max renewals, max duration, snapshot bytes, extra tools, or ambiguous flag → Click 'Save changes'
 - **Scope:** `each_principal` — Selected principal ID
@@ -3485,7 +3485,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-10`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1808#useCacheKeepaliveSessions`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1809#useCacheKeepaliveSessions`
 - **Preconditions:** open === true; principalId non-empty
 - **Steps:** Click 'Sessions' button on CacheKeepaliveCard → Drawer opens and initializes infinite query → Polls every 5,000ms when tab is visible
 - **Scope:** `each_principal` — Selected principal ID
@@ -3587,7 +3587,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-B75FF5FEE2B9`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1808#useCacheKeepaliveSessions`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1809#useCacheKeepaliveSessions`
 - **Preconditions:** query.hasNextPage === true; query.isFetchingNextPage === false
 - **Steps:** Scroll to bottom of sessions list → Click 'Loading older sessions...' button
 - **Scope:** `each_principal` — Infinite query pages[].next_cursor
@@ -3621,7 +3621,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-BACAC4FD9C6A`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1842#useCacheKeepaliveSessionDetail`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1843#useCacheKeepaliveSessionDetail`
 - **Preconditions:** Session selected (sessionId !== null)
 - **Steps:** Click a session row in CacheKeepaliveSessionsDrawer → SessionDetailPane mounts and polls every 5,000ms
 - **Scope:** `each_session` — GET /admin/v1/principals/${id}/cache-keepalive -> rows[].id
@@ -3745,7 +3745,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-42AEDACD7B73`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1503#useGcPlugins`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1504#useGcPlugins`
 - **Preconditions:** !gcPending; !gcInFlight.current
 - **Steps:** Click 'Clean orphaned uploads' button in card header (enabled even when every registered plugin is in use)
 - **Scope:** `once` — Catalog header action
@@ -3779,7 +3779,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-F8C17F59AB34`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1368#useUploadWasm`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1369#useUploadWasm`
 - **Preconditions:** !upload.isPending
 - **Steps:** Click dropzone button (or press Enter/Space while focused) to open file browser, OR drag & drop .wasm file onto dropzone → Select valid .wasm file (<= 32 MiB)
 - **Scope:** `each_plugin` — Each plugin upload action
@@ -3813,7 +3813,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-19B510951607`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1368#useUploadWasm`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1369#useUploadWasm`
 - **Preconditions:** Upload failed with 409 replacement_confirmation_required; pendingReplacement state contains replaceRegistryId and expectedRevision
 - **Steps:** Trigger upload of a plugin whose name exists with lower/same semver → Observe 'Confirm Plugin Replacement' modal showing current vs incoming versions and hashes → Click 'Replace' button
 - **Scope:** `each_plugin` — Each duplicate replacement conflict
@@ -3875,7 +3875,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-FBE359698524`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1422#usePluginReferences`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1423#usePluginReferences`
 - **Preconditions:** pendingDelete != null; pendingDelete.refcount > 0
 - **Steps:** Open delete dialog for a plugin that has refcount > 0
 - **Scope:** `each_plugin` — Each referenced plugin deletion attempt
@@ -3909,7 +3909,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-9693EBA2D460`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1434#useDeletePlugin`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1435#useDeletePlugin`
 - **Preconditions:** pendingDelete != null; !del.isPending; !fingerprintPending
 - **Steps:** In delete dialog, wait for fingerprint if referenced → Click 'Delete plugin' (if zero refs) or 'Delete and remove uses' (if referenced)
 - **Scope:** `each_plugin` — Each plugin deletion execution
@@ -3999,7 +3999,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-824B79F88848`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1483#usePatchPlugin`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1484#usePatchPlugin`
 - **Preconditions:** !plugin.is_builtin; isEditingLabel === true; !patch.isPending
 - **Steps:** In inline label edit form, enter new label string (or clear for null) → Click 'Save' button
 - **Scope:** `each_plugin` — Each label update action
@@ -4255,7 +4255,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-67C497520AA2`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1610#useSaveDraft`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1611#useSaveDraft`
 - **Preconditions:** canSave === true: editor != null && (editorDirty || (!editor.hasSavedDraft && !serverRevisionChanged)) && !configPending
 - **Steps:** Click Save button
 - **Scope:** `once` — Single execution per draft edit
@@ -4289,7 +4289,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-BFD8C956C3C5`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1601#useValidateConfig`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1602#useValidateConfig`
 - **Preconditions:** canValidate === true: editor.hasSavedDraft === true && !editorDirty && !serverRevisionChanged && !configPending
 - **Steps:** Click Validate button
 - **Scope:** `once` — Single execution per saved revision
@@ -4323,7 +4323,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-EDE5449D42BD`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1586#useApplyConfig`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1587#useApplyConfig`
 - **Preconditions:** canApply === true: editor != null && canValidate && lastValidatedRevision != null && lastValidationError == null && lastValidatedRevision === editor.revision && !configPending
 - **Steps:** Click Apply button
 - **Scope:** `once` — Single execution per validated revision
@@ -4357,7 +4357,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-EA3DE5874C4D`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1627#useReloadConfig`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1628#useReloadConfig`
 - **Preconditions:** !configPending
 - **Steps:** Click Reload button
 - **Scope:** `once` — Single execution
@@ -4549,12 +4549,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
 - **HTTP:** `GET /admin/audit`
-  - Query: `limit=200`, `principal_id`, `since`, `until`
+  - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
 - **Handler:** `query_audit`
 - **Storage operations:** `sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit`, `postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
+- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
 - **Side effects:** Audit log write: record_admin_audit("audit_query", "/admin/v1/audit")
 - **Expected UI:** Renders audit table with 9 columns (Timestamp, Principal, Actor, Route, Upstream, Action, Kind, Status, Detail)
 - **Runtime result:** `PENDING`
@@ -4596,7 +4596,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `list_upstreams`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** Renders audit table with 9 columns (Timestamp, Principal, Actor, Route, Upstream, Action, Kind, Status, Detail)
 - **Runtime result:** `PENDING`
@@ -4605,7 +4605,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-AUD-05`
-- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:204#refreshAudit`
+- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:205#refreshAudit`
 - **Preconditions:** AuditPage mounted && !refreshInFlightRef.current
 - **Steps:** Click Refresh button
 - **Scope:** `once` — Single execution
@@ -4618,19 +4618,19 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-8A3FB89087F5`
-- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:209#refreshAudit`
+- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:210#refreshAudit`
 - **Preconditions:** AuditPage mounted && !refreshInFlightRef.current
 - **Steps:** Click Refresh button
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
 - **HTTP:** `GET /admin/audit`
-  - Query: `limit=200`, `principal_id`, `since`, `until`
+  - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
 - **Handler:** `query_audit`
 - **Storage operations:** `sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit`, `postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
+- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
 - **Side effects:** Audit log write: record_admin_audit("audit_query", "/admin/v1/audit")
 - **Expected UI:** Re-queries GET /admin/audit with current search parameters
 - **Runtime result:** `PENDING`
@@ -4639,7 +4639,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-AUD-02`
-- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:155#setPrincipalFilter`
+- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:156#setPrincipalFilter`
 - **Preconditions:** Principals query loaded
 - **Steps:** Select principal from dropdown or select 'All principals'
 - **Scope:** `each_principal` — Principals list + empty option
@@ -4659,12 +4659,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
 - **HTTP:** `GET /admin/audit`
-  - Query: `limit=200`, `principal_id`, `since`, `until`
+  - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
 - **Handler:** `query_audit`
 - **Storage operations:** `sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit`, `postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
+- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
 - **Side effects:** Audit log write: record_admin_audit("audit_query", "/admin/v1/audit")
 - **Expected UI:** Updates URL search param principal_id and re-runs audit query with filter
 - **Runtime result:** `PENDING`
@@ -4721,12 +4721,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
 - **HTTP:** `GET /admin/audit`
-  - Query: `limit=200`, `principal_id`, `since`, `until`
+  - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
 - **Handler:** `query_audit`
 - **Storage operations:** `sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit`, `postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
+- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
 - **Side effects:** Audit log write: record_admin_audit("audit_query", "/admin/v1/audit")
 - **Expected UI:** Merges picked date with existing time (or 00:00) into sinceStr, closes popover, commits bounds
 - **Runtime result:** `PENDING`
@@ -4755,12 +4755,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
 - **HTTP:** `GET /admin/audit`
-  - Query: `limit=200`, `principal_id`, `since`, `until`
+  - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
 - **Handler:** `query_audit`
 - **Storage operations:** `sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit`, `postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
+- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
 - **Side effects:** Audit log write: record_admin_audit("audit_query", "/admin/v1/audit")
 - **Expected UI:** Merges picked date with existing time (or 23:59) into untilStr, closes popover, commits bounds
 - **Runtime result:** `PENDING`
@@ -4789,12 +4789,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
 - **HTTP:** `GET /admin/audit`
-  - Query: `limit=200`, `principal_id`, `since`, `until`
+  - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
 - **Handler:** `query_audit`
 - **Storage operations:** `sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit`, `postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
+- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
 - **Side effects:** Audit log write: record_admin_audit("audit_query", "/admin/v1/audit")
 - **Expected UI:** Updates URL search params since and until and re-runs audit query
 - **Runtime result:** `PENDING`
@@ -4803,7 +4803,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `REQ-SRC-CAE9CDF1B8F6`
-- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:279#AuditPage`
+- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:280#AuditPage`
 - **Preconditions:** activeFilterCount > 0 (principal_id, since, or until set)
 - **Steps:** Click Clear button when activeFilterCount > 0
 - **Scope:** `once` — Single execution
@@ -4823,12 +4823,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
 - **HTTP:** `GET /admin/audit`
-  - Query: `limit=200`
+  - Query: `limit=200`, `admin_only=true`
   - Body: None
   - Headers: None
 - **Handler:** `query_audit`
 - **Storage operations:** `sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit`, `postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
+- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
 - **Side effects:** Audit log write: record_admin_audit("audit_query", "/admin/v1/audit")
 - **Expected UI:** Resets all search parameters, returns to unfiltered state, re-runs query
 - **Runtime result:** `PENDING`
@@ -4837,7 +4837,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `REQ-SRC-91FBA8F4830F`
-- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:432#AuditPage`
+- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:433#AuditPage`
 - **Preconditions:** audit.data loaded with 0 rows && activeFilterCount > 0
 - **Steps:** Click 'Clear filters' primary button in EmptyState
 - **Scope:** `once` — Single execution
@@ -4857,12 +4857,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
 - **HTTP:** `GET /admin/audit`
-  - Query: `limit=200`
+  - Query: `limit=200`, `admin_only=true`
   - Body: None
   - Headers: None
 - **Handler:** `query_audit`
 - **Storage operations:** `sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit`, `postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
+- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
 - **Side effects:** Audit log write: record_admin_audit("audit_query", "/admin/v1/audit")
 - **Expected UI:** Clears filters and reloads unfiltered audit entries
 - **Runtime result:** `PENDING`
@@ -4871,7 +4871,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:360#AuditPage`
+- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:361#AuditPage`
 - **Preconditions:** Table has rendered rows
 - **Steps:** Click any row in the audit table
 - **Scope:** `each_row` — Each rendered audit row
@@ -4885,7 +4885,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:455#AuditPage`
+- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:456#AuditPage`
 - **Preconditions:** Audit detail modal is open (selected != null)
 - **Steps:** Click Close button, press Escape, or click backdrop
 - **Scope:** `each_row` — Each opened modal
@@ -4924,7 +4924,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `list_upstreams`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** Renders upstream sidebar items with name, kind badge, status dot, and quota/usage summaries
 - **Runtime result:** `PENDING`
@@ -5267,7 +5267,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-0D929B471D7A`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1052#useUpdateUpstream`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1053#useUpdateUpstream`
 - **Preconditions:** Upstream detail pane open
 - **Steps:** Click upstream name in DetailView header to enter editing mode (resets the save latch and seeds the input with the current name) → Type new unique name → Press Enter or blur the input to submit once (saveStartedRef latch makes Enter+blur a single mutation) → Or press Escape to cancel without a request
 - **Scope:** `each_upstream` — Each upstream
@@ -5279,8 +5279,8 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`, `content-type`
 - **Handler:** `update_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::update:SqliteStorage::update`, `postgres:UpstreamStore::update:PostgresStorage::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
-- **Side effects:** Audit event `upstream_update`; replaces upstream base_url, warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Side effects:** Audit event `upstream_update`; replaces upstream base_url (set via base_url, cleared via clear_base_url), warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision.
 - **Expected UI:** Updates upstream name across sidebar and header; shows success toast 'Name updated'; on error (e.g. 409 stale revision or name conflict) the name reverts and editing exits
 - **Runtime result:** `PENDING`
 
@@ -5301,7 +5301,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-C72B3D4F216B`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1128#useUpdateUpstreamWarmupSettings`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1129#useUpdateUpstreamWarmupSettings`
 - **Preconditions:** Upstream detail pane open
 - **Steps:** Click the Enabled/Disabled switch in DetailView header
 - **Scope:** `each_upstream` — Each upstream
@@ -5313,7 +5313,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`, `content-type`
 - **Handler:** `update_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::update:SqliteStorage::update`, `postgres:UpstreamStore::update:PostgresStorage::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision.
 - **Expected UI:** Toggles upstream status; shows success toast; triggers dynamic rebind in proxy engine
 - **Runtime result:** `PENDING`
@@ -5322,7 +5322,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-UP-13`
-- **Source:** `crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx:34#SettingsCard`
+- **Source:** `crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx:41#SettingsCard`
 - **Preconditions:** Non-OAuth upstream selected
 - **Steps:** Click 'Edit' in SettingsCard → Modify Base URL or toggle API Key mode (env var vs literal value) → Click 'Save'
 - **Scope:** `each_upstream` — Each non-OAuth upstream
@@ -5335,7 +5335,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-9FD3FEC04C3D`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1052#useUpdateUpstream`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1053#useUpdateUpstream`
 - **Preconditions:** Non-OAuth upstream selected
 - **Steps:** Click 'Edit' in SettingsCard → Modify Base URL or toggle API Key mode (env var vs literal value) → Click 'Save'
 - **Scope:** `each_upstream` — Each non-OAuth upstream
@@ -5343,12 +5343,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Production applicability:** `available`
 - **HTTP:** `PUT /admin/v1/upstreams/{id}`
   - Query: None
-  - Body: `base_url`, `api_key_value`, `api_key_env`
+  - Body: `base_url`, `clear_base_url`, `api_key_value`, `api_key_env`
   - Headers: `authorization`, `if-match`, `content-type`
 - **Handler:** `update_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::update:SqliteStorage::update`, `postgres:UpstreamStore::update:PostgresStorage::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
-- **Side effects:** Audit event `upstream_update`; replaces upstream base_url, warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Side effects:** Audit event `upstream_update`; replaces upstream base_url (set via base_url, cleared via clear_base_url), warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision.
 - **Expected UI:** Exits edit mode and shows success toast; displays updated Base URL ('—' when base_url is null) and API Key source. In practice the API Key row always reads 'literal value (stored)': the 'env:{name}' branch is source-only/unreachable because UpstreamResponse omits api_key_env.
 - **Runtime result:** `PENDING`
 
@@ -5403,7 +5403,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-6D1976AC76E2`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1128#useUpdateUpstreamWarmupSettings`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1129#useUpdateUpstreamWarmupSettings`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Click the Warmup switch in WarmupCardMinimal header, or click 'Enable warmup' button in disabled banner
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5415,7 +5415,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`, `content-type`
 - **Handler:** `update_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::update:SqliteStorage::update`, `postgres:UpstreamStore::update:PostgresStorage::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision.
 - **Expected UI:** Updates warmup_enabled; displays success toast; schedules or deschedules background warmup loop
 - **Runtime result:** `PENDING`
@@ -5437,7 +5437,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-1B467A3726A3`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1128#useUpdateUpstreamWarmupSettings`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1129#useUpdateUpstreamWarmupSettings`
 - **Preconditions:** OAuth upstream selected; Registered shape plugins available
 - **Steps:** Select a shape plugin from the Shape plugin dropdown
 - **Scope:** `each_upstream` — Each OAuth upstream × shape plugins
@@ -5449,7 +5449,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`, `content-type`
 - **Handler:** `update_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::update:SqliteStorage::update`, `postgres:UpstreamStore::update:PostgresStorage::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision.
 - **Expected UI:** Associates plugin wasm registry ID with upstream warmup; shows success toast
 - **Runtime result:** `PENDING`
@@ -5471,7 +5471,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-329B12DA3BC3`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1107#useClearUpstreamWarmupDialectPlugin`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1108#useClearUpstreamWarmupDialectPlugin`
 - **Preconditions:** Shape plugin currently attached
 - **Steps:** Select 'None (default request shape)' in plugin dropdown → Confirm deletion in ConfirmDialog
 - **Scope:** `each_upstream` — Each OAuth upstream with attached plugin
@@ -5483,7 +5483,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`
 - **Handler:** `delete_upstream_warmup_dialect_plugin`
 - **Storage operations:** `sqlite:UpstreamStore::clear_warmup_dialect_plugin:SqliteStorage::clear_warmup_dialect_plugin`, `postgres:UpstreamStore::clear_warmup_dialect_plugin:PostgresStorage::clear_warmup_dialect_plugin`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_update` (warmup_dialect_plugin); disassociates dialect plugin so default HTTP warmup is used QA restore: PUT the prior warmup_dialect_plugin with the returned revision.
 - **Expected UI:** Removes warmup dialect plugin; dropdown resets to None; shows success toast
 - **Runtime result:** `PENDING`
@@ -5505,7 +5505,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-C41372BCA4B0`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1075#useFireNowUpstreamWarmup`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1076#useFireNowUpstreamWarmup`
 - **Preconditions:** Warmup enabled on upstream; Cooldown not active
 - **Steps:** Click 'Fire now' button in WarmupCardMinimal → Click 'Fire now' in ConfirmDialog
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5539,7 +5539,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-4851B3D30282`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1782#useWarmupAttempts`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1783#useWarmupAttempts`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Click 'History' button in WarmupCardMinimal, or click 'Last run' attempt outcome badge
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5587,7 +5587,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-49171C2D2202`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1153#useOAuthStart`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1154#useOAuthStart`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Click 'Connect' or 'Reconnect' button in OAuth Status card
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5621,7 +5621,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-0D6108CB1DBC`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1162#useOAuthComplete`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1163#useOAuthComplete`
 - **Preconditions:** OAuth Authorization Modal open with valid state token
 - **Steps:** Click 'Open authorization URL' to authenticate with Anthropic → Paste authorization code into modal input → Click 'Complete'
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5715,7 +5715,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `content-type`
 - **Handler:** `create_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::create:SqliteStorage::create`, `postgres:UpstreamStore::create:PostgresStorage::create`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** DynamicView rebinding; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** DynamicView rebinding; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_create`; creates new upstream target for proxy load balancing; encrypts API key via AEAD QA restore: DELETE the created upstream using its returned ETag.
 - **Expected UI:** Creates upstream in DB, closes modal, shows success toast, and refreshes upstream list
 - **Runtime result:** `PENDING`
@@ -5737,7 +5737,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-427756CE86BB`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1637#useStartOauthDraft`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1638#useStartOauthDraft`
 - **Preconditions:** Create modal on step 'oauth_handshake'
 - **Steps:** In CreateUpstreamModal, select Anthropic OAuth and click Continue → Click 'Authorize with Anthropic'
 - **Scope:** `once` — Single execution per OAuth creation
@@ -5771,7 +5771,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-CB056EC17B20`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1644#useCompleteOauthDraft`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1645#useCompleteOauthDraft`
 - **Preconditions:** Draft state token present; Code non-empty
 - **Steps:** Paste authorization code returned from Anthropic into textarea → Click 'Verify and fetch account'
 - **Scope:** `once` — Single execution per OAuth creation
@@ -5805,7 +5805,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-2533F30C81A8`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1652#useCreateFromOauthDraft`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1653#useCreateFromOauthDraft`
 - **Preconditions:** Draft verified, on step 'oauth_confirm'
 - **Steps:** Review Account Preview (Plan, Rate, Org, Role, etc.) → Edit or accept prefilled Upstream Name → Click 'Save'
 - **Scope:** `once` — Single execution per OAuth creation
@@ -5873,7 +5873,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-83D0030A34AF`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1769#useWarmupSummary`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1770#useWarmupSummary`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Mount WarmupCardMinimal on OAuth upstream selection
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5975,7 +5975,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-9CDF9EE839AE`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1782#useWarmupAttempts`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1783#useWarmupAttempts`
 - **Preconditions:** Warmup history drawer open
 - **Steps:** Click filter chip: All, Success, Retrying, Failed, or Skipped
 - **Scope:** `each_filter_combination` — Each selected upstream × 5 status filters
@@ -6009,7 +6009,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-35D5E99A460E`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1782#useWarmupAttempts`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1783#useWarmupAttempts`
 - **Preconditions:** query.hasNextPage is true
 - **Steps:** Scroll to bottom of attempts list in WarmupHistoryDrawer → Click 'Load older' button
 - **Scope:** `each_upstream` — Each upstream with next_cursor
@@ -6155,7 +6155,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-D61F3782A082`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1422#usePluginReferences`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1423#usePluginReferences`
 - **Preconditions:** Authenticated admin session; A registry plugin is selected
 - **Steps:** Select a plugin from the catalog → PluginDetail mounts → usePluginReferences(plugin.id) executes
 - **Scope:** `each_plugin` — GET /admin/v1/plugins/registry response entries
@@ -6189,7 +6189,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-7BDECC53787E`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1514#useInsertChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1515#useInsertChainEntry`
 - **Preconditions:** Principal selected; Plugin registry loaded; No conflicting write is pending
 - **Steps:** Select an observability-capable plugin → Click Add
 - **Scope:** `each_plugin` — GET /admin/v1/plugins/registry entries supporting slot 'observability_hook'
@@ -6326,7 +6326,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:401#AuditPage`
+- **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:402#AuditPage`
 - **Preconditions:** Audit query returned a row
 - **Steps:** Audit rows render actor in the table → Open a row → Inspect authority, subject, kind, and email in the detail modal
 - **Scope:** `each_row` — Every row returned by GET /admin/audit
@@ -6966,12 +6966,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/audit`
-  - Query: `principal_id`, `since`, `after`, `until`, `limit`, `actor_authority`, `actor_subject`
+  - Query: `principal_id`, `since`, `after`, `until`, `limit`, `actor_authority`, `actor_subject`, `admin_only`
   - Body: None
   - Headers: None
 - **Handler:** `query_audit`
 - **Storage operations:** `sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit`, `postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
+- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
 - **Side effects:** Audit log write: record_admin_audit("audit_query", "/admin/v1/audit")
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
@@ -7471,7 +7471,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `get_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
@@ -7711,7 +7711,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`
 - **Handler:** `enable_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::set_enabled:SqliteStorage::set_enabled`, `postgres:UpstreamStore::set_enabled:PostgresStorage::set_enabled`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_enable`; activates upstream so load balancer can route requests to it QA restore: POST the disable endpoint with the returned revision.
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
@@ -7731,7 +7731,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`
 - **Handler:** `disable_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::set_enabled:SqliteStorage::set_enabled`, `postgres:UpstreamStore::set_enabled:PostgresStorage::set_enabled`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_disable`; disables upstream from proxy candidate pool QA restore: POST the enable endpoint with the returned revision.
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
@@ -7907,7 +7907,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **GAP-BACKEND-ONLY-CONFIG-DIFF** (backend_only): GET /admin/config/diff exists but has no Admin Web caller.
 - **GAP-NONEXISTENT-CONFIG-DOWNLOAD** (nonexistent): The UI downloads a database export from GET /admin/v1/export; it has no standalone config download action.
 - **GAP-NONEXISTENT-WASM-DOWNLOAD** (nonexistent): Neither frontend nor backend exposes uploaded WASM bytecode download.
-- **GAP-UPSTREAMS-4** (documented): The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL null-clear contract is now implemented and is recorded in SettingsCard variants; historical null-as-no-change evidence remains a baseline limitation.
+- **GAP-UPSTREAMS-4** (documented): The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL clear contract is now implemented via explicit clear_base_url: true (omitted or null base_url preserves the override); the form captures the edit-time baseline so a mid-edit refetch cannot fabricate a clear, and an unconfirmed clear keeps the editor open with an error toast. Historical null-as-clear evidence remains a baseline limitation.
 
 ## 6. Legacy ID Mapping
 

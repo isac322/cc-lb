@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, StorageError, StorageResult};
 use serde_json::Value;
-use sqlx::{Row, sqlite::SqliteRow};
+use sqlx::{QueryBuilder, Row, Sqlite, sqlite::SqliteRow};
 
 use crate::{SqliteStorage, map_sqlx_error};
 
@@ -97,6 +97,7 @@ impl AuditStore for SqliteStorage {
         since: u64,
         until: u64,
         limit: usize,
+        admin_only: bool,
     ) -> StorageResult<Vec<AuditEntry>> {
         if limit == 0 || until < since {
             return Ok(Vec::new());
@@ -105,61 +106,41 @@ impl AuditStore for SqliteStorage {
         let since = u64_to_i64(since, "audit since")?;
         let until = u64_to_i64_upper(until);
         let limit = u64_to_i64(limit as u64, "audit limit")?;
-        let rows = match scope {
-            AuditQueryScope::All => {
-                sqlx::query(
-                    "SELECT ts, request_id, principal_id, route, upstream, model, status, \
-                     input_tokens, output_tokens, duration_ms, agent_label, api_key_id, \
-                     cost_usd_micros, limit_violation, admin_action, actor, actor_authority, \
-                     actor_subject, actor_kind, actor_email, kind, payload \
-                     FROM audit_log_v1 \
-                     WHERE ts >= ? AND ts <= ? \
-                     ORDER BY ts DESC, id DESC LIMIT ?",
-                )
-                .bind(since)
-                .bind(until)
-                .bind(limit)
-                .fetch_all(self.pool())
-                .await
-            }
+
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT ts, request_id, principal_id, route, upstream, model, status, \
+             input_tokens, output_tokens, duration_ms, agent_label, api_key_id, \
+             cost_usd_micros, limit_violation, admin_action, actor, actor_authority, \
+             actor_subject, actor_kind, actor_email, kind, payload \
+             FROM audit_log_v1 \
+             WHERE ts >= ",
+        );
+        query.push_bind(since).push(" AND ts <= ").push_bind(until);
+        match scope {
+            AuditQueryScope::All => {}
             AuditQueryScope::Principal(principal_id) => {
-                sqlx::query(
-                    "SELECT ts, request_id, principal_id, route, upstream, model, status, \
-                     input_tokens, output_tokens, duration_ms, agent_label, api_key_id, \
-                     cost_usd_micros, limit_violation, admin_action, actor, actor_authority, \
-                     actor_subject, actor_kind, actor_email, kind, payload \
-                     FROM audit_log_v1 \
-                     WHERE ts >= ? AND ts <= ? AND principal_id = ? \
-                     ORDER BY ts DESC, id DESC LIMIT ?",
-                )
-                .bind(since)
-                .bind(until)
-                .bind(principal_id)
-                .bind(limit)
-                .fetch_all(self.pool())
-                .await
+                query.push(" AND principal_id = ").push_bind(principal_id);
             }
             AuditQueryScope::Actor { authority, subject } => {
-                sqlx::query(
-                    "SELECT ts, request_id, principal_id, route, upstream, model, status, \
-                     input_tokens, output_tokens, duration_ms, agent_label, api_key_id, \
-                     cost_usd_micros, limit_violation, admin_action, actor, actor_authority, \
-                     actor_subject, actor_kind, actor_email, kind, payload \
-                     FROM audit_log_v1 \
-                     WHERE ts >= ? AND ts <= ? \
-                     AND actor_authority = ? AND actor_subject = ? \
-                     ORDER BY ts DESC, id DESC LIMIT ?",
-                )
-                .bind(since)
-                .bind(until)
-                .bind(authority)
-                .bind(subject)
-                .bind(limit)
-                .fetch_all(self.pool())
-                .await
+                query
+                    .push(" AND actor_authority = ")
+                    .push_bind(authority)
+                    .push(" AND actor_subject = ")
+                    .push_bind(subject);
             }
         }
-        .map_err(map_sqlx_error)?;
+        if admin_only {
+            query.push(" AND (admin_action IS NOT NULL OR kind IS NOT NULL)");
+        }
+        query
+            .push(" ORDER BY ts DESC, id DESC LIMIT ")
+            .push_bind(limit);
+
+        let rows = query
+            .build()
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_sqlx_error)?;
 
         rows.into_iter().map(row_to_audit_entry).collect()
     }

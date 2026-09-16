@@ -88198,5 +88198,29 @@
       "fake_success_substitution": false,
       "credential_access_or_external_calls_authorized_by_last_reply": false
     }
+  },
+  "application_safety_fixes_overlay": {
+    "as_of_date": "2026-09-16",
+    "candidate_source_base": "19b055708f3b9814b517158bfbb196aabb5dea81",
+    "candidate_binary_sha256": "f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8",
+    "verification": "qa/admin-web/runs/2026-09-15/application-safety/verification.json",
+    "findings_at_previous_head": [
+      "Unedited old-browser save cleared BaseURL afterupgrade",
+      "Audit admin rows hidden behind latest nonadmin window",
+      "Scoped recent Audit lookup added sorting/filter scans"
+    ],
+    "verified_fixes": [
+      "Explicit clear_base_url and edit-entry baseline; old/new version directions verified",
+      "admin_only filter beforeLIMIT while general API default preserves allentries",
+      "Five indexes perDB, actororderedpartialnonnull; actual plans/migration/readwrite costs checked"
+    ],
+    "current_source_snapshot": {
+      "actions": 205,
+      "declared_variant_labels": 597,
+      "runtime_denominator": false
+    },
+    "deployment_gate": "Large live PG must have separately approved online indexes prepared and exactdefinition/valid/ready checked before deployment; merge hold remains.",
+    "runtime_complete": false,
+    "overall_pass": false
   }
 }

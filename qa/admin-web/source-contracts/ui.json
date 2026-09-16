@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "source_commit": "ef70b347",
+  "source_commit": "19b05570",
   "source_state": {
     "kind": "approved_uncommitted_candidate",
-    "base_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
     "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
   },
   "metadata": {
@@ -224,7 +224,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx",
-      "sha256": "cdafe23a33e1dda702220df12365aeb546a488e6ec9be72c52d0efbfd2c822d1"
+      "sha256": "b2781bfaa52254b6c169b5fb361a945f8241183a0eb6cc5a2afcdbf476b56afe"
     },
     {
       "path": "crates/cc-lb-admin/web/src/components/upstreams/buildQuotaChartData.ts",
@@ -316,7 +316,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/queries.ts",
-      "sha256": "f66a86d9738bce30d002aa2997ee796896f1e182db88fccd97e27a56ae5a1d56"
+      "sha256": "e485c94f9ab3258a2bdc3f0d95f390beb1c813306ff545ce7b1b329106f8937e"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/queryClient.ts",
@@ -376,7 +376,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/routes/audit.tsx",
-      "sha256": "33fd60c0b501f74d790ecfd526fd9fb93087cf3d86544fcaae369ab077043cc8"
+      "sha256": "df6677922451b89c15b4045d798305e07f41fb59361e923fc1c235cdcb52bcf9"
     },
     {
       "path": "crates/cc-lb-admin/web/src/routes/index.tsx",
@@ -412,7 +412,7 @@
     {
       "path": "crates/cc-lb-admin/web/src/routes/audit.tsx",
       "route": "/audit",
-      "sha256": "33fd60c0b501f74d790ecfd526fd9fb93087cf3d86544fcaae369ab077043cc8"
+      "sha256": "df6677922451b89c15b4045d798305e07f41fb59361e923fc1c235cdcb52bcf9"
     },
     {
       "path": "crates/cc-lb-admin/web/src/routes/index.tsx",
@@ -7896,7 +7896,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCreatePrincipal",
-            "line": 1206
+            "line": 1207
           },
           "side_effect_notes": "Invalidates query key ['principals']",
           "id": "UI-PR-23",
@@ -7972,7 +7972,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useTogglePrincipal",
-            "line": 1244
+            "line": 1245
           },
           "side_effect_notes": "Sends ifMatch: revision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "condition": "target_enabled === true",
@@ -8001,7 +8001,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useTogglePrincipal",
-            "line": 1244
+            "line": 1245
           },
           "side_effect_notes": "Sends ifMatch: revision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "condition": "target_enabled === false",
@@ -8085,7 +8085,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeletePrincipal",
-            "line": 1231
+            "line": 1232
           },
           "side_effect_notes": "Sends ifMatch: revision header. Invalidates ['principals'], ['status'], ['plugin-chain', id]",
           "id": "UI-PR-04",
@@ -8218,7 +8218,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useSetAllowedModels",
-            "line": 1267
+            "line": 1268
           },
           "side_effect_notes": "Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "id": "UI-PR-05",
@@ -8314,7 +8314,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdatePrincipalDefaultLimits",
-            "line": 1289
+            "line": 1290
           },
           "side_effect_notes": "Sends ifMatch: expected_revision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "id": "UI-PR-06",
@@ -8689,7 +8689,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useInsertChainEntry",
-            "line": 1514
+            "line": 1515
           },
           "side_effect_notes": "Executed when enabling. Invalidates ['plugin-chain', id]",
           "id": "UI-PR-15",
@@ -8716,7 +8716,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeleteChainEntry",
-            "line": 1555
+            "line": 1556
           },
           "side_effect_notes": "Executed when disabling, sends ifMatch: revision header. Invalidates ['plugin-chain']",
           "id": "UI-PR-15B",
@@ -8802,7 +8802,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateRouterTerminalStrategy",
-            "line": 1563
+            "line": 1564
           },
           "side_effect_notes": "Sends ifMatch: revision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "id": "UI-PR-14",
@@ -8888,7 +8888,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useInsertChainEntry",
-            "line": 1514
+            "line": 1515
           },
           "side_effect_notes": "order is calculated as (entries.length + 1) * 100. Invalidates ['plugin-chain', id]",
           "id": "UI-PR-16B",
@@ -8972,7 +8972,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useReorderChain",
-            "line": 1540
+            "line": 1541
           },
           "side_effect_notes": "Sends array of { id, order: (i + 1) * 100, expected_revision }. Invalidates ['plugin-chain', id]",
           "id": "UI-PR-16",
@@ -9049,7 +9049,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeleteChainEntry",
-            "line": 1555
+            "line": 1556
           },
           "side_effect_notes": "Sends ifMatch: revision header. Invalidates ['plugin-chain']",
           "id": "UI-PR-16C",
@@ -9180,7 +9180,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeleteChainEntry",
-            "line": 1555
+            "line": 1556
           },
           "side_effect_notes": "Deletes existing entry with ifMatch: revision",
           "id": "UI-PR-18A",
@@ -9211,7 +9211,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useInsertChainEntry",
-            "line": 1514
+            "line": 1515
           },
           "side_effect_notes": "slot='shape', order=100. Retries on 409 conflict after refetching chain",
           "id": "UI-PR-18B",
@@ -9293,7 +9293,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useReorderChain",
-            "line": 1540
+            "line": 1541
           },
           "side_effect_notes": "Submits { id, order: (i + 1) * 100, expected_revision } for each item",
           "id": "UI-PR-19B",
@@ -9371,7 +9371,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeleteChainEntry",
-            "line": 1555
+            "line": 1556
           },
           "side_effect_notes": "Sends ifMatch: revision header. Invalidates ['plugin-chain']",
           "id": "UI-PR-19C",
@@ -9539,7 +9539,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useIssueKey",
-            "line": 1337
+            "line": 1338
           },
           "side_effect_notes": "Invalidates ['principal-keys', id]. Label is optional; an empty label is sent as label: ''.",
           "id": "UI-PR-21",
@@ -9622,7 +9622,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useRevokeKey",
-            "line": 1349
+            "line": 1350
           },
           "side_effect_notes": "Invalidates ['principal-keys', id]",
           "id": "UI-PR-22",
@@ -9713,7 +9713,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCacheKeepaliveSummary",
-            "line": 1830
+            "line": 1831
           },
           "side_effect_notes": "Explicitly passes limit: 0 to fetch only the summary block without session rows. Polled every 5,000ms.",
           "id": "UI-PR-07",
@@ -9796,7 +9796,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdatePrincipalCacheKeepalive",
-            "line": 1313
+            "line": 1314
           },
           "side_effect_notes": "Sends ifMatch: principal.revision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "id": "UI-PR-08",
@@ -9887,7 +9887,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdatePrincipalCacheKeepalive",
-            "line": 1313
+            "line": 1314
           },
           "side_effect_notes": "Sends ifMatch: editingRevision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "id": "UI-PR-09",
@@ -9985,7 +9985,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCacheKeepaliveSessions",
-            "line": 1808
+            "line": 1809
           },
           "side_effect_notes": "NOTICE: limit parameter is OMITTED (backend default limit applied). Query key is ['cache-keepalive', 'sessions', id, filters]. Polled every 5,000ms.",
           "id": "UI-PR-10A",
@@ -10235,7 +10235,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCacheKeepaliveSessions",
-            "line": 1808
+            "line": 1809
           },
           "side_effect_notes": "Passes cursor=next_cursor returned from preceding page. Next cursor encodes last_message_at_ms and session_key_hash ASC.",
           "id": "UI-PR-11B",
@@ -10325,7 +10325,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCacheKeepaliveSessionDetail",
-            "line": 1842
+            "line": 1843
           },
           "side_effect_notes": "Polled every 5,000ms via POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS",
           "id": "UI-PR-12",
@@ -10674,7 +10674,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useGcPlugins",
-            "line": 1503
+            "line": 1504
           },
           "side_effect_notes": "Removes uploaded WASM blobs no longer referenced by any registered plugin; registered plugins remain available even when Used By is 0; invalidates plugin registry query",
           "id": "UI-PLUG-04",
@@ -10757,7 +10757,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUploadWasm",
-            "line": 1368
+            "line": 1369
           },
           "side_effect_notes": "Writes wasm blob to storage, compiles cwasm to disk cache, inserts wasm_registry row, appends audit log",
           "id": "UI-PLUG-02",
@@ -10839,7 +10839,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUploadWasm",
-            "line": 1368
+            "line": 1369
           },
           "side_effect_notes": "Overwrites registry entry in place with same ID, increments revision, recompiles/caches cwasm, triggers proxy runtime rebind",
           "id": "UI-PLUG-03",
@@ -11009,7 +11009,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "usePluginReferences",
-            "line": 1422
+            "line": 1423
           },
           "side_effect_notes": "Read query returning reference list and concurrency fingerprint; gcTime: 0 keeps reference data uncached between dialog openings; no write side effects",
           "id": "UI-PLUG-09",
@@ -11102,7 +11102,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeletePlugin",
-            "line": 1434
+            "line": 1435
           },
           "side_effect_notes": "Deletes wasm_registry record and cwasm cache file. In cascade mode, also deletes plugin_chains rows, clears upstream warmup_dialect_plugin, bumps upstream revisions. onMutate cancels the in-flight plugin-references query; onSuccess awaits registry (+plugin-chain/upstreams on cascade) invalidation, then removes the deleted plugin's inactive plugin-references cache entry.",
           "id": "UI-PLUG-08",
@@ -11376,7 +11376,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "usePatchPlugin",
-            "line": 1483
+            "line": 1484
           },
           "side_effect_notes": "Updates label column in wasm_registry, increments revision, appends audit log",
           "id": "UI-PLUG-07",
@@ -12023,7 +12023,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useSaveDraft",
-            "line": 1610
+            "line": 1611
           },
           "side_effect_notes": "Updates config_draft table in DB; appends audit entry; increments revision",
           "id": "UI-SET-04",
@@ -12097,7 +12097,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useValidateConfig",
-            "line": 1601
+            "line": 1602
           },
           "side_effect_notes": "Parses draft TOML and validates against schema; updates last_validated_revision and last_validation_error in DB; appends audit entry",
           "id": "UI-SET-05",
@@ -12175,7 +12175,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useApplyConfig",
-            "line": 1586
+            "line": 1587
           },
           "side_effect_notes": "Writes config to disk file; inserts into config_history; appends audit entry; triggers runtime reconfig",
           "id": "UI-SET-06",
@@ -12245,7 +12245,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useReloadConfig",
-            "line": 1627
+            "line": 1628
           },
           "side_effect_notes": "Sends SIGHUP to the cc-lb process for hot-reload; appends audit entry",
           "id": "UI-SET-07",
@@ -12649,6 +12649,7 @@
           "path": "/admin/audit",
           "query_fields": [
             "limit=200",
+            "admin_only=true",
             "principal_id",
             "since",
             "until"
@@ -12731,7 +12732,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/audit.tsx",
         "symbol": "refreshAudit",
-        "line": 204
+        "line": 205
       },
       "name": "Refresh Audit Trail",
       "trigger_steps": [
@@ -12764,6 +12765,7 @@
           "path": "/admin/audit",
           "query_fields": [
             "limit=200",
+            "admin_only=true",
             "principal_id",
             "since",
             "until"
@@ -12773,7 +12775,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/routes/audit.tsx",
             "symbol": "refreshAudit",
-            "line": 209
+            "line": 210
           },
           "side_effect_notes": "None",
           "id": "UI-AUD-05",
@@ -12804,7 +12806,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/audit.tsx",
         "symbol": "setPrincipalFilter",
-        "line": 155
+        "line": 156
       },
       "name": "Filter by Principal ID",
       "trigger_steps": [
@@ -12840,6 +12842,7 @@
           "path": "/admin/audit",
           "query_fields": [
             "limit=200",
+            "admin_only=true",
             "principal_id",
             "since",
             "until"
@@ -13014,6 +13017,7 @@
           "path": "/admin/audit",
           "query_fields": [
             "limit=200",
+            "admin_only=true",
             "principal_id",
             "since",
             "until"
@@ -13090,6 +13094,7 @@
           "path": "/admin/audit",
           "query_fields": [
             "limit=200",
+            "admin_only=true",
             "principal_id",
             "since",
             "until"
@@ -13169,6 +13174,7 @@
           "path": "/admin/audit",
           "query_fields": [
             "limit=200",
+            "admin_only=true",
             "principal_id",
             "since",
             "until"
@@ -13209,7 +13215,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/audit.tsx",
         "symbol": "AuditPage",
-        "line": 279
+        "line": 280
       },
       "name": "Clear Filter Bar Filters",
       "trigger_steps": [
@@ -13241,7 +13247,8 @@
           "method": "GET",
           "path": "/admin/audit",
           "query_fields": [
-            "limit=200"
+            "limit=200",
+            "admin_only=true"
           ],
           "body_fields": [],
           "client_symbol": "useAudit",
@@ -13279,7 +13286,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/audit.tsx",
         "symbol": "AuditPage",
-        "line": 432
+        "line": 433
       },
       "name": "Clear Filters from Empty State Action",
       "trigger_steps": [
@@ -13311,7 +13318,8 @@
           "method": "GET",
           "path": "/admin/audit",
           "query_fields": [
-            "limit=200"
+            "limit=200",
+            "admin_only=true"
           ],
           "body_fields": [],
           "client_symbol": "useAudit",
@@ -13349,7 +13357,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/audit.tsx",
         "symbol": "AuditPage",
-        "line": 360
+        "line": 361
       },
       "name": "Open Audit Detail Modal",
       "trigger_steps": [
@@ -13394,7 +13402,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/audit.tsx",
         "symbol": "AuditPage",
-        "line": 455
+        "line": 456
       },
       "name": "Close Audit Detail Modal",
       "trigger_steps": [
@@ -14335,7 +14343,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateUpstream",
-            "line": 1052
+            "line": 1053
           },
           "side_effect_notes": "Updates database record with If-Match: spec_revision header (server returns 409 stale_revision or upstream_name_conflict on conflict); invalidates ['upstreams'] and ['upstream', id]",
           "id": "UI-UP-11",
@@ -14417,7 +14425,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateUpstreamWarmupSettings",
-            "line": 1128
+            "line": 1129
           },
           "side_effect_notes": "Updates enabled flag in database; triggers engine reconfiguration",
           "id": "UI-UP-12",
@@ -14454,7 +14462,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx",
         "symbol": "SettingsCard",
-        "line": 34
+        "line": 41
       },
       "name": "Update Non-OAuth Upstream Settings",
       "trigger_steps": [
@@ -14467,8 +14475,10 @@
       ],
       "variants": [
         "Cancel edit",
-        "Save with custom Base URL",
-        "Save with blank Base URL (sends explicit base_url: null, removes the override, and retains the default endpoint after a fresh GET and page reload)",
+        "Save with custom Base URL (sends base_url: <url>)",
+        "Save with blank Base URL (sends clear_base_url: true, removes the override, and retains the default endpoint after a fresh GET and page reload)",
+        "Save without touching Base URL (field unchanged from the baseline captured on Edit; sends neither base_url nor clear_base_url, so a mid-edit props refetch cannot turn an untouched field into a clear)",
+        "Save with blank Base URL against a backend that does not confirm the clear (response base_url is not null; shows error toast and keeps the editor open instead of reporting success)",
         "Save with env var key (sends api_key_env, api_key_value: null; server resolves the env var to ciphertext — the env name itself is never stored or returned)",
         "Save with literal key (sends api_key_value, api_key_env: null)",
         "Save with blank literal key field (sends api_key_value: null; treated as no-change, retaining the stored key; the stored secret is never rendered or restored into the form)"
@@ -14480,8 +14490,10 @@
         "source": "Each non-OAuth upstream",
         "variants": [
           "Cancel edit",
-          "Save with custom Base URL",
-          "Save with blank Base URL (sends explicit base_url: null, removes the override, and retains the default endpoint after a fresh GET and page reload)",
+          "Save with custom Base URL (sends base_url: <url>)",
+          "Save with blank Base URL (sends clear_base_url: true, removes the override, and retains the default endpoint after a fresh GET and page reload)",
+          "Save without touching Base URL (field unchanged from the baseline captured on Edit; sends neither base_url nor clear_base_url, so a mid-edit props refetch cannot turn an untouched field into a clear)",
+          "Save with blank Base URL against a backend that does not confirm the clear (response base_url is not null; shows error toast and keeps the editor open instead of reporting success)",
           "Save with env var key (sends api_key_env, api_key_value: null; server resolves the env var to ciphertext — the env name itself is never stored or returned)",
           "Save with literal key (sends api_key_value, api_key_env: null)",
           "Save with blank literal key field (sends api_key_value: null; treated as no-change, retaining the stored key; the stored secret is never rendered or restored into the form)"
@@ -14501,6 +14513,7 @@
           "query_fields": [],
           "body_fields": [
             "base_url",
+            "clear_base_url",
             "api_key_value",
             "api_key_env"
           ],
@@ -14508,9 +14521,9 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateUpstream",
-            "line": 1052
+            "line": 1053
           },
-          "side_effect_notes": "Updates the spec with If-Match revision protection and invalidates upstream queries. An omitted base_url preserves the override; explicit null removes it; a URL sets it. Blank API-key inputs remain no-change and secrets are never repopulated; api_key_env provenance is not persisted or returned.",
+          "side_effect_notes": "Updates the spec with If-Match revision protection and invalidates upstream queries. base_url omitted or explicit null preserves the override; a URL string sets it; clear_base_url: true clears it (the server rejects base_url plus clear_base_url together with 400 conflicting_base_url). The form captures the Base URL baseline when editing begins, so a mid-edit props refetch cannot turn an untouched field into a clear; on success the editor closes only when a requested clear is confirmed by response base_url === null. Blank API-key inputs remain no-change and secrets are never repopulated; api_key_env provenance is not persisted or returned.",
           "id": "UI-UP-13",
           "parent_action_id": "UI-SRC-9FD3FEC04C3D",
           "path_bindings": [
@@ -14665,7 +14678,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateUpstreamWarmupSettings",
-            "line": 1128
+            "line": 1129
           },
           "side_effect_notes": "Updates warmup_enabled flag in database with If-Match revision header",
           "id": "UI-UP-15",
@@ -14745,7 +14758,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateUpstreamWarmupSettings",
-            "line": 1128
+            "line": 1129
           },
           "side_effect_notes": "Attaches dialect plugin config in database with If-Match revision check",
           "id": "UI-UP-16",
@@ -14823,7 +14836,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useClearUpstreamWarmupDialectPlugin",
-            "line": 1107
+            "line": 1108
           },
           "side_effect_notes": "Deletes plugin attachment from upstream record with If-Match revision check",
           "id": "UI-UP-17",
@@ -14904,7 +14917,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useFireNowUpstreamWarmup",
-            "line": 1075
+            "line": 1076
           },
           "side_effect_notes": "CRITICAL / MUTATION & EXTERNAL BILLING: Sends live /messages request to Anthropic upstream; consumes real quota tokens; creates attempt record in DB; resets warmup schedule",
           "id": "UI-UP-18",
@@ -14985,7 +14998,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useWarmupAttempts",
-            "line": 1782
+            "line": 1783
           },
           "side_effect_notes": "None (read-only)",
           "id": "UI-UP-19",
@@ -15107,7 +15120,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useOAuthStart",
-            "line": 1153
+            "line": 1154
           },
           "side_effect_notes": "Generates PKCE state in memory; returns authorize URL",
           "id": "UI-UP-22",
@@ -15189,7 +15202,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useOAuthComplete",
-            "line": 1162
+            "line": 1163
           },
           "side_effect_notes": "Exchanges code with Anthropic upstream; writes encrypted OAuth credentials to database; updates spec revision",
           "id": "UI-UP-23",
@@ -15470,7 +15483,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useStartOauthDraft",
-            "line": 1637
+            "line": 1638
           },
           "side_effect_notes": "Creates draft OAuth state in memory",
           "id": "UI-UP-27",
@@ -15545,7 +15558,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCompleteOauthDraft",
-            "line": 1644
+            "line": 1645
           },
           "side_effect_notes": "Exchanges code for Anthropic tokens; queries metadata; caches draft credentials",
           "id": "UI-UP-28",
@@ -15618,7 +15631,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCreateFromOauthDraft",
-            "line": 1652
+            "line": 1653
           },
           "side_effect_notes": "Creates new upstream row and commits bound OAuth credentials to database; response is parsed through UpstreamSchema (base_url nullable, api_key_env optional) before the upstreams query is invalidated",
           "id": "UI-UP-29",
@@ -15777,7 +15790,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useWarmupSummary",
-            "line": 1769
+            "line": 1770
           },
           "side_effect_notes": "None (read-only)",
           "id": "UI-UP-31",
@@ -16014,7 +16027,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useWarmupAttempts",
-            "line": 1782
+            "line": 1783
           },
           "side_effect_notes": "None",
           "id": "UI-UP-34",
@@ -16096,7 +16109,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useWarmupAttempts",
-            "line": 1782
+            "line": 1783
           },
           "side_effect_notes": "None",
           "id": "UI-UP-35",
@@ -16548,7 +16561,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "usePluginReferences",
-            "line": 1422
+            "line": 1423
           },
           "side_effect_notes": "Query is enabled only while a plugin id is selected; gcTime: 0 keeps reference data uncached between selections.",
           "id": "UI-PLUG-06",
@@ -16633,7 +16646,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useInsertChainEntry",
-            "line": 1514
+            "line": 1515
           },
           "side_effect_notes": "slot='observability_hook'; invalidates the principal plugin-chain query.",
           "id": "UI-PR-19",
@@ -16959,7 +16972,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/audit.tsx",
         "symbol": "AuditPage",
-        "line": 401
+        "line": 402
       },
       "name": "Render Audit Actor Metadata",
       "trigger_steps": [
@@ -17268,9 +17281,9 @@
       "type": "source_only_unreachable_branch",
       "component": "SettingsCard",
       "file": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx",
-      "line": 179,
-      "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL null-clear contract is now implemented and is recorded in SettingsCard variants; historical null-as-no-change evidence remains a baseline limitation.",
-      "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:171-179 (UpstreamResponse fields), :1748 (base_url update gated on is_some)"
+      "line": 209,
+      "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL clear contract is now implemented via explicit clear_base_url: true (omitted or null base_url preserves the override); the form captures the edit-time baseline so a mid-edit refetch cannot fabricate a clear, and an unconfirmed clear keeps the editor open with an error toast. Historical null-as-clear evidence remains a baseline limitation.",
+      "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:169-179 (UpstreamResponse fields), :1203-1207 (clear_base_url maps to Some(None); base_url maps to Some(url))"
     }
   ]
 }

@@ -1,0 +1,22 @@
+{
+  "candidate_sha256": "f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8",
+  "after_explicit_clear": [
+    null,
+    5,
+    0,
+    0
+  ],
+  "restored_for_reverse_check": [
+    "http://127.0.0.1:19991/",
+    6,
+    0,
+    0
+  ],
+  "column_order": [
+    "base_url",
+    "spec_revision",
+    "enabled",
+    "warmup_enabled"
+  ],
+  "reverse_fixture_note": "Separate pre-index snapshot, same targeted upstream URL/revision copied only in disposable DB so old-server replay does not fail CAS or downgrade migrated schema."
+}

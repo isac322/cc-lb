@@ -1,0 +1,16 @@
+{
+  "principal id ASC": [
+    "SEARCH audit_log_v1 USING INDEX idx_audit_log_principal_seq (principal_id=?)"
+  ],
+  "principal ts DESC, id DESC": [
+    "SEARCH audit_log_v1 USING INDEX idx_audit_log_principal_seq (principal_id=?)",
+    "USE TEMP B-TREE FOR ORDER BY"
+  ],
+  "actor id ASC": [
+    "SEARCH audit_log_v1 USING INDEX idx_audit_log_actor_subject (actor_authority=? AND actor_subject=?)"
+  ],
+  "actor ts DESC, id DESC": [
+    "SEARCH audit_log_v1 USING INDEX idx_audit_log_actor_subject (actor_authority=? AND actor_subject=?)",
+    "USE TEMP B-TREE FOR ORDER BY"
+  ]
+}

@@ -1029,6 +1029,7 @@ export function useDeleteUpstream() {
 export interface UpdateUpstreamRequest {
   name?: string | null;
   base_url?: string | null;
+  clear_base_url?: boolean;
   api_key_env?: string | null;
   api_key_value?: string | null;
 }

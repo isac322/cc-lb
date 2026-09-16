@@ -144,7 +144,7 @@ async fn query_recent_audit_limits_after_latest_ordering() {
         .expect("append audit entries");
 
     let rows = storage
-        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 202, 200)
+        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 202, 200, false)
         .await
         .expect("query recent audit");
 
@@ -195,6 +195,7 @@ async fn query_recent_audit_filters_before_limit() {
             NOW,
             NOW + 5,
             2,
+            false,
         )
         .await
         .expect("query recent audit by principal");
@@ -212,6 +213,7 @@ async fn query_recent_audit_filters_before_limit() {
             NOW,
             NOW + 5,
             2,
+            false,
         )
         .await
         .expect("query recent audit by actor");
@@ -230,14 +232,129 @@ async fn query_recent_audit_returns_empty_for_zero_limit_or_inverted_range() {
         .expect("append audit");
 
     let zero_limit = storage
-        .query_recent_audit(AuditQueryScope::All, u64::MAX, u64::MAX, 0)
+        .query_recent_audit(AuditQueryScope::All, u64::MAX, u64::MAX, 0, true)
         .await
         .expect("query recent audit with zero limit");
     assert!(zero_limit.is_empty());
 
     let inverted = storage
-        .query_recent_audit(AuditQueryScope::All, NOW + 1, NOW, 10)
+        .query_recent_audit(AuditQueryScope::All, NOW + 1, NOW, 10, true)
         .await
         .expect("query recent audit with inverted range");
     assert!(inverted.is_empty());
+}
+
+#[tokio::test]
+async fn query_recent_audit_admin_only_filters_before_limit() {
+    let (_directory, storage) = storage().await;
+
+    // Reproduces the observed failure: one older admin action followed by more
+    // newer non-admin rows than the query limit.
+    let mut admin_old = audit_entry("admin-action-old", NOW, AUTHORITY, SUBJECT);
+    admin_old.admin_action = Some("principal_update".to_owned());
+    let mut admin_new = audit_entry("admin-action-new", NOW + 300, AUTHORITY, SUBJECT);
+    admin_new.admin_action = Some("config_apply".to_owned());
+    let mut kind_only = audit_entry("kind-only", NOW + 299, AUTHORITY, "bob");
+    kind_only.kind = Some("admin".to_owned());
+    let mut other_principal_admin =
+        audit_entry("other-principal-admin", NOW + 298, AUTHORITY, SUBJECT);
+    other_principal_admin.principal_id = "other-principal".to_owned();
+    other_principal_admin.admin_action = Some("principal_disable".to_owned());
+
+    let mut entries = vec![admin_old];
+    for index in 0..250 {
+        entries.push(audit_entry(
+            &format!("nonadmin-{index:03}"),
+            NOW + 1 + index,
+            AUTHORITY,
+            SUBJECT,
+        ));
+    }
+    entries.push(kind_only);
+    entries.push(other_principal_admin);
+    entries.push(admin_new);
+    storage
+        .append_audit_entries(&entries)
+        .await
+        .expect("append audit entries");
+
+    // Default queries keep returning non-admin rows.
+    let default_rows = storage
+        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 300, 200, false)
+        .await
+        .expect("query recent audit default");
+    assert_eq!(default_rows.len(), 200);
+    // The older admin action is pushed past the limit by newer non-admin rows.
+    assert!(
+        default_rows
+            .iter()
+            .all(|entry| entry.request_id != "admin-action-old")
+    );
+    assert!(
+        default_rows
+            .iter()
+            .any(|entry| { entry.admin_action.is_none() && entry.kind.is_none() })
+    );
+    // The older admin action survives the limit once admin_only filters first.
+    let admin_rows = storage
+        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 300, 200, true)
+        .await
+        .expect("query recent audit admin only");
+    assert_eq!(
+        request_ids(&admin_rows),
+        [
+            "admin-action-new",
+            "kind-only",
+            "other-principal-admin",
+            "admin-action-old"
+        ]
+    );
+
+    // Scope filters still apply on top of the admin predicate.
+    let principal_admin_rows = storage
+        .query_recent_audit(
+            AuditQueryScope::Principal("target-principal"),
+            NOW,
+            NOW + 300,
+            200,
+            true,
+        )
+        .await
+        .expect("query recent audit admin only by principal");
+    assert_eq!(
+        request_ids(&principal_admin_rows),
+        ["admin-action-new", "kind-only", "admin-action-old"]
+    );
+
+    let actor_admin_rows = storage
+        .query_recent_audit(
+            AuditQueryScope::Actor {
+                authority: AUTHORITY,
+                subject: SUBJECT,
+            },
+            NOW,
+            NOW + 300,
+            200,
+            true,
+        )
+        .await
+        .expect("query recent audit admin only by actor");
+    assert_eq!(
+        request_ids(&actor_admin_rows),
+        [
+            "admin-action-new",
+            "other-principal-admin",
+            "admin-action-old"
+        ]
+    );
+
+    // Time bounds still apply on top of the admin predicate.
+    let bounded_admin_rows = storage
+        .query_recent_audit(AuditQueryScope::All, NOW + 1, NOW + 299, 200, true)
+        .await
+        .expect("query recent audit admin only bounded");
+    assert_eq!(
+        request_ids(&bounded_admin_rows),
+        ["kind-only", "other-principal-admin"]
+    );
 }

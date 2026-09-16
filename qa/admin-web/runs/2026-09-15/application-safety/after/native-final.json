@@ -1,0 +1,72 @@
+{
+  "precreated_concurrently": false,
+  "seed_rows": 100000,
+  "startup_to_ready_ms": 922.0663750020321,
+  "online_create_ms": [],
+  "migrations": [
+    {
+      "version": 119,
+      "success": true,
+      "execution_time": 116324292
+    },
+    {
+      "version": 120,
+      "success": true,
+      "execution_time": 33847166
+    },
+    {
+      "version": 121,
+      "success": true,
+      "execution_time": 40775125
+    },
+    {
+      "version": 122,
+      "success": true,
+      "execution_time": 34074834
+    },
+    {
+      "version": 123,
+      "success": true,
+      "execution_time": 45541709
+    }
+  ],
+  "indexes": [
+    {
+      "name": "audit_log_v1_actor_ts_seq",
+      "valid": true,
+      "ready": true,
+      "definition": "CREATE INDEX audit_log_v1_actor_ts_seq ON public.audit_log_v1 USING btree (actor_authority, actor_subject, ts DESC, seq DESC) WHERE (actor_authority IS NOT NULL)",
+      "predicate": "(actor_authority IS NOT NULL)"
+    },
+    {
+      "name": "audit_log_v1_admin_actor_ts_seq",
+      "valid": true,
+      "ready": true,
+      "definition": "CREATE INDEX audit_log_v1_admin_actor_ts_seq ON public.audit_log_v1 USING btree (actor_authority, actor_subject, ts DESC, seq DESC) WHERE ((admin_action IS NOT NULL) OR (kind IS NOT NULL))",
+      "predicate": "((admin_action IS NOT NULL) OR (kind IS NOT NULL))"
+    },
+    {
+      "name": "audit_log_v1_admin_principal_ts_seq",
+      "valid": true,
+      "ready": true,
+      "definition": "CREATE INDEX audit_log_v1_admin_principal_ts_seq ON public.audit_log_v1 USING btree (principal_id, ts DESC, seq DESC) WHERE ((admin_action IS NOT NULL) OR (kind IS NOT NULL))",
+      "predicate": "((admin_action IS NOT NULL) OR (kind IS NOT NULL))"
+    },
+    {
+      "name": "audit_log_v1_admin_ts_seq",
+      "valid": true,
+      "ready": true,
+      "definition": "CREATE INDEX audit_log_v1_admin_ts_seq ON public.audit_log_v1 USING btree (ts DESC, seq DESC) WHERE ((admin_action IS NOT NULL) OR (kind IS NOT NULL))",
+      "predicate": "((admin_action IS NOT NULL) OR (kind IS NOT NULL))"
+    },
+    {
+      "name": "audit_log_v1_principal_ts_seq",
+      "valid": true,
+      "ready": true,
+      "definition": "CREATE INDEX audit_log_v1_principal_ts_seq ON public.audit_log_v1 USING btree (principal_id, ts DESC, seq DESC)",
+      "predicate": null
+    }
+  ],
+  "remaining_rows": 100000,
+  "limits": "Disposable rehearsal only. Large live tables require separate approved online preparation and exact index-definition/validity checks; lock_timeout bounds acquisition, not build duration."
+}

@@ -1,0 +1,135 @@
+{
+  "schema": "cc-lb-approved-application-safety-fixes/v1",
+  "source_base": "19b055708f3b9814b517158bfbb196aabb5dea81",
+  "candidate_uncommitted_at_capture": true,
+  "candidate_binary_sha256": "f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8",
+  "scope_verdict": "verified_in_isolation_deployment_held",
+  "source_files": [
+    {
+      "path": "crates/cc-lb-admin/src/routes.rs",
+      "sha256": "cd879a0c93c7680cb4f290388f42c073693940e850813011686082f7394932ed"
+    },
+    {
+      "path": "crates/cc-lb-admin/src/v1/keys.rs",
+      "sha256": "400c2639eb5cb1baa30b0f93f450b0cb23e85bae37d8e3f06648b1c7ae22fc62"
+    },
+    {
+      "path": "crates/cc-lb-admin/src/v1/upstreams.rs",
+      "sha256": "6cbbe2930c93838f4aff3421580c7924974c8d41d91cb7f7bf0a69205bc75aff"
+    },
+    {
+      "path": "crates/cc-lb-admin/tests/audit_pagination.rs",
+      "sha256": "c43c0e519e38b23f6661cae73597ef191f50a3f3b883aeee2a8e0f96bc93186a"
+    },
+    {
+      "path": "crates/cc-lb-admin/tests/v1_upstreams.rs",
+      "sha256": "f7358826987f96b75519366c97f3c8eed8b2d718d8375d0768e4237dbdf7cef6"
+    },
+    {
+      "path": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.test.tsx",
+      "sha256": "33cc4868619427189554077d30770579e9b67f9a0f2036bf501bf7a28f07f21c"
+    },
+    {
+      "path": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx",
+      "sha256": "b2781bfaa52254b6c169b5fb361a945f8241183a0eb6cc5a2afcdbf476b56afe"
+    },
+    {
+      "path": "crates/cc-lb-admin/web/src/lib/queries.ts",
+      "sha256": "e485c94f9ab3258a2bdc3f0d95f390beb1c813306ff545ce7b1b329106f8937e"
+    },
+    {
+      "path": "crates/cc-lb-admin/web/src/routes/-audit-loading.test.tsx",
+      "sha256": "d0eaa3943261753a43e4e6ee25abd4b3aeb994cd9d0c90afa3ae4f0f6f074d72"
+    },
+    {
+      "path": "crates/cc-lb-admin/web/src/routes/audit.tsx",
+      "sha256": "df6677922451b89c15b4045d798305e07f41fb59361e923fc1c235cdcb52bcf9"
+    },
+    {
+      "path": "crates/cc-lb-engine/src/lifecycle_limit_rejection_audit_subscriber.rs",
+      "sha256": "6dd93d3039227b6cd2b63da5b4f70b9e1aa33f4e69ad019243b13b56a3697f34"
+    },
+    {
+      "path": "crates/cc-lb-engine/tests/storage_support/mod.rs",
+      "sha256": "ad340f4655e855c352dd60740b99ed9252891032d3ed1a26859d65dce56313fc"
+    },
+    {
+      "path": "crates/cc-lb-storage-api/src/traits.rs",
+      "sha256": "8fd85591ac4dbba23c35f29d057b1deb05df1694e5d24e34a11466ef926df119"
+    },
+    {
+      "path": "crates/cc-lb-storage-postgres/migrations/0119_audit_log_principal_ts_seq_index.sql",
+      "sha256": "7f3181b425f9de504eca701eb923e18babddad1ec0823aff17c693a064996d4f"
+    },
+    {
+      "path": "crates/cc-lb-storage-postgres/migrations/0120_audit_log_actor_ts_seq_index.sql",
+      "sha256": "0434b91ff5f1418c2f8ce5fd9876b7801f2b72fc40e59f7e269358c83dea711b"
+    },
+    {
+      "path": "crates/cc-lb-storage-postgres/migrations/0121_audit_log_admin_ts_seq_index.sql",
+      "sha256": "749c51d59b91d0aa26004dd400b9f5d71edcc18ac4eee8e05bf74277b363ce3a"
+    },
+    {
+      "path": "crates/cc-lb-storage-postgres/migrations/0122_audit_log_admin_principal_ts_seq_index.sql",
+      "sha256": "c8df8207c0b924a8d560dfe8e911b38fb7c9de52813e6958c5ec1ebc2911c724"
+    },
+    {
+      "path": "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_actor_ts_seq_index.sql",
+      "sha256": "166f9165fbde0383851df9d1db72ae096afeec788ae5aca2e3844b2ba5e86bfb"
+    },
+    {
+      "path": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+      "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
+    },
+    {
+      "path": "crates/cc-lb-storage-postgres/tests/audit.rs",
+      "sha256": "dc424f357df83a79a8f46db009c4571763999f25ea7f62336670b17c7e235ffc"
+    },
+    {
+      "path": "crates/cc-lb-storage-sqlite/migrations/0087_audit_log_read_order_indexes.sql",
+      "sha256": "3b8653f193766ff684abd20012a1d44aecd464bae35072017925102c8580d88f"
+    },
+    {
+      "path": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+      "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
+    },
+    {
+      "path": "crates/cc-lb-storage-sqlite/tests/audit.rs",
+      "sha256": "13d8ccbbadbbc6ce3e34b3032a2d738ee71d9dd529fb0b4de9ccdf77a0083ec7"
+    }
+  ],
+  "checks": {
+    "rust_contract_tests": 112,
+    "rust_deselected": 1651,
+    "web_tests": 706,
+    "web_test_files": 72,
+    "typecheck": "pinned installed tsgo -b --noEmit passed",
+    "affected_rust_all_targets_all_features_clippy": "passed",
+    "cargo_fmt_check": "passed",
+    "source_inventory": "433 rows /205 UI actions /149 atomic request occurrences /115 endpoints; source_reconciled, runtime_pending"
+  },
+  "review": {
+    "base_url": "no remaining findings after precedence and clear-confirmation checks",
+    "audit_indexes": "no remaining findings after lock timeout, discriminatory PG limits and nullable-actor index corrections"
+  },
+  "browser": {
+    "old_ui_to_new_backend": "unchanged Save preserves override and revision",
+    "new_ui_explicit_clear": "persists NULL and increments revision",
+    "new_ui_to_old_backend": "one PUT200 does not clear; error shown/editor retained/no success; stored URL/revision unchanged",
+    "audit": "older admin action visible behind250 newer nonadmin rows",
+    "limits": "Audit request query string was not captured in browser ResourceTiming; source + API/regression + actual visible row establish functional result, not per-request performance correlation."
+  },
+  "postgres_http": {
+    "expected_contract_cases": 9,
+    "fixture_error_preserved": 1,
+    "fixture_error_reason": "NULL token columns in raw synthetic seed were invalid for existing Pg decoder; corrected only owned fixture to writer-compatible0, no app change"
+  },
+  "deployment_gates": [
+    "User merge hold remains",
+    "No production deployment or configuration/DDL approval",
+    "Large existing PostgreSQL tables require approved online precreation and exact definition/indisvalid/indisready checks before deploying migrations"
+  ],
+  "full_runtime_qa_complete": false,
+  "production_changes": 0,
+  "cleanup": "Owned app ports and browser tabs closed; five new PostgreSQL DBs/three DSN files removed; old fixtures preserved"
+}

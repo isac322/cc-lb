@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "source_commit": "ef70b347",
+  "source_commit": "19b05570",
   "source_state": {
     "kind": "approved_uncommitted_candidate",
-    "base_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
     "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
   },
   "deployed_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
@@ -75,7 +75,7 @@
       {
         "method": "GET",
         "path": "/admin/v1/audit",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/audit."
+        "reason": "API catalog declares non-UI clients: crates/cc-lb-admin/web/src/lib/queries.ts:730"
       },
       {
         "method": "GET",
@@ -220,22 +220,22 @@
       {
         "method": "PUT",
         "path": "/admin/v1/config/draft",
-        "reason": "API catalog declares non-UI clients: useSaveDraft (crates/cc-lb-admin/web/src/lib/queries.ts:1610) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:453)"
+        "reason": "API catalog declares non-UI clients: useSaveDraft (crates/cc-lb-admin/web/src/lib/queries.ts:1611) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:453)"
       },
       {
         "method": "POST",
         "path": "/admin/v1/config/draft/validate",
-        "reason": "API catalog declares non-UI clients: useValidateConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1601) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:454)"
+        "reason": "API catalog declares non-UI clients: useValidateConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1602) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:454)"
       },
       {
         "method": "POST",
         "path": "/admin/v1/config/apply",
-        "reason": "API catalog declares non-UI clients: useApplyConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1586) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:455)"
+        "reason": "API catalog declares non-UI clients: useApplyConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1587) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:455)"
       },
       {
         "method": "POST",
         "path": "/admin/v1/config/reload",
-        "reason": "API catalog declares non-UI clients: useReloadConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1627) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:456)"
+        "reason": "API catalog declares non-UI clients: useReloadConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1628) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:456)"
       },
       {
         "method": "POST",
@@ -260,12 +260,12 @@
       {
         "method": "POST",
         "path": "/admin/v1/upstreams/{id}/enable",
-        "reason": "API catalog declares non-UI clients: useUpdateUpstream (queries.ts:1052 via PUT /admin/v1/upstreams/{id}) or direct API / CLI"
+        "reason": "API catalog declares non-UI clients: useUpdateUpstream (queries.ts:1053 via PUT /admin/v1/upstreams/{id}) or direct API / CLI"
       },
       {
         "method": "POST",
         "path": "/admin/v1/upstreams/{id}/disable",
-        "reason": "API catalog declares non-UI clients: useUpdateUpstream (queries.ts:1052 via PUT /admin/v1/upstreams/{id}) or direct API / CLI"
+        "reason": "API catalog declares non-UI clients: useUpdateUpstream (queries.ts:1053 via PUT /admin/v1/upstreams/{id}) or direct API / CLI"
       }
     ],
     "api_contract_gaps": [],
@@ -311,7 +311,7 @@
         "classification": "changed_since_deploy",
         "target": "GET /admin/audit and GET /admin/v1/audit",
         "deployed_behavior": "Accepts query params: since, until, limit, principal_id. No actor filtering. No SensitiveRead authorization enforcement.",
-        "latest_behavior": "Accepts additional query params: actor_authority, actor_subject. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. Enforces SensitiveRead authorization.",
+        "latest_behavior": "Accepts additional query params: actor_authority, actor_subject, admin_only. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. admin_only (default false) filters to entries with an admin action or kind before LIMIT. Enforces SensitiveRead authorization.",
         "impact": "In deployed, querying by actor_authority or actor_subject is ignored/not supported. In latest, missing permissions return 403 Forbidden."
       },
       {
@@ -374,7 +374,7 @@
         "classification": "changed_since_deploy",
         "target": "GET /admin/audit and GET /admin/v1/audit (result ordering)",
         "deployed_behavior": "Returns audit entries oldest first (ORDER BY id/seq ASC) via AuditStore::query_audit / query_audit_by_actor.",
-        "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor); scope filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler.",
+        "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor) and an admin_only flag; scope and admin_only filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler.",
         "impact": "Entry order reverses vs deployed; clients paging by position see newest-first pages. Candidate only - not committed or deployed.",
         "candidate_uncommitted": true
       },
@@ -421,18 +421,18 @@
       {
         "classification": "changed_since_deploy",
         "type": "api_contract",
-        "name": "Explicit-null Base URL override clearing",
-        "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+        "name": "Explicit clear_base_url Base URL override reset",
+        "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
         "candidate_uncommitted": true,
         "production_applicability": false,
-        "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-162",
-        "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
+        "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-160",
+        "description": "Approved on 2026-09-16: PUT/PATCH omission or explicit null preserves base_url, a URL sets it, and clear_base_url: true clears it; sending a non-null base_url together with clear_base_url returns 400 conflicting_base_url (a stale If-Match still wins with 409). The SettingsCard form captures the Base URL baseline when editing begins so a mid-edit props refetch cannot turn an untouched field into a clear, and treats a clear as unconfirmed (error toast, editor stays open) when the response base_url is not null. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
       },
       {
         "classification": "changed_since_deploy",
         "type": "api_and_ui_capability",
         "name": "Provider-aware configuration draft Apply availability",
-        "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+        "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
         "candidate_uncommitted": true,
         "production_applicability": false,
         "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551",
@@ -2428,7 +2428,7 @@
       "classification": "changed_since_deploy",
       "target": "GET /admin/audit and GET /admin/v1/audit",
       "deployed_behavior": "Accepts query params: since, until, limit, principal_id. No actor filtering. No SensitiveRead authorization enforcement.",
-      "latest_behavior": "Accepts additional query params: actor_authority, actor_subject. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. Enforces SensitiveRead authorization.",
+      "latest_behavior": "Accepts additional query params: actor_authority, actor_subject, admin_only. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. admin_only (default false) filters to entries with an admin action or kind before LIMIT. Enforces SensitiveRead authorization.",
       "impact": "In deployed, querying by actor_authority or actor_subject is ignored/not supported. In latest, missing permissions return 403 Forbidden."
     },
     {
@@ -2491,7 +2491,7 @@
       "classification": "changed_since_deploy",
       "target": "GET /admin/audit and GET /admin/v1/audit (result ordering)",
       "deployed_behavior": "Returns audit entries oldest first (ORDER BY id/seq ASC) via AuditStore::query_audit / query_audit_by_actor.",
-      "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor); scope filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler.",
+      "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor) and an admin_only flag; scope and admin_only filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler.",
       "impact": "Entry order reverses vs deployed; clients paging by position see newest-first pages. Candidate only - not committed or deployed.",
       "candidate_uncommitted": true
     },
@@ -2538,18 +2538,18 @@
     {
       "classification": "changed_since_deploy",
       "type": "api_contract",
-      "name": "Explicit-null Base URL override clearing",
-      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "name": "Explicit clear_base_url Base URL override reset",
+      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
       "candidate_uncommitted": true,
       "production_applicability": false,
-      "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-162",
-      "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
+      "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-160",
+      "description": "Approved on 2026-09-16: PUT/PATCH omission or explicit null preserves base_url, a URL sets it, and clear_base_url: true clears it; sending a non-null base_url together with clear_base_url returns 400 conflicting_base_url (a stale If-Match still wins with 409). The SettingsCard form captures the Base URL baseline when editing begins so a mid-edit props refetch cannot turn an untouched field into a clear, and treats a clear as unconfirmed (error toast, editor stays open) when the response base_url is not null. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
     },
     {
       "classification": "changed_since_deploy",
       "type": "api_and_ui_capability",
       "name": "Provider-aware configuration draft Apply availability",
-      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
       "candidate_uncommitted": true,
       "production_applicability": false,
       "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551",
@@ -2862,9 +2862,9 @@
       "type": "source_only_unreachable_branch",
       "component": "SettingsCard",
       "file": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx",
-      "line": 179,
-      "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL null-clear contract is now implemented and is recorded in SettingsCard variants; historical null-as-no-change evidence remains a baseline limitation.",
-      "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:171-179 (UpstreamResponse fields), :1748 (base_url update gated on is_some)"
+      "line": 209,
+      "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL clear contract is now implemented via explicit clear_base_url: true (omitted or null base_url preserves the override); the form captures the edit-time baseline so a mid-edit refetch cannot fabricate a clear, and an unconfirmed clear keeps the editor open with an error toast. Historical null-as-clear evidence remains a baseline limitation.",
+      "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:169-179 (UpstreamResponse fields), :1203-1207 (clear_base_url maps to Some(None); base_url maps to Some(url))"
     }
   ]
 }

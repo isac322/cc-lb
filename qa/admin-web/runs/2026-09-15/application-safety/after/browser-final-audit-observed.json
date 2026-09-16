@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-16T08:44:28.729Z",
+  "stage": "stage3_current_ui_audit_admin_only",
+  "ui_observation": {
+    "url": "http://127.0.0.1:56152/audit?principal_id=qa-safety-principal",
+    "subtitle": "1admin actions · 1 filter active",
+    "table_row_count": 2,
+    "row_details": [
+      [
+        "2h ago",
+        "qa-safety-principal",
+        "—",
+        "/admin/v1/principals",
+        "",
+        "principal_update",
+        "—",
+        "200",
+        "view"
+      ],
+      [
+        "No more entries"
+      ]
+    ],
+    "audit_request_urls": [],
+    "has_admin_only_param": false
+  },
+  "explanation": "Under current UI with admin_only=true filter applied, the older principal_update admin action is correctly returned and visible in the Audit table despite the presence of 250 newer non-admin 429 records.",
+  "validations": {
+    "shows_admin_action": true,
+    "admin_action_found": true,
+    "admin_only_param_observed": false
+  }
+}

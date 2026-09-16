@@ -155,3 +155,83 @@ async fn audit_http_aliases_return_the_most_recent_200_matching_entries() {
         assert_eq!(entries.last().unwrap()["request_id"], "bulk-63");
     }
 }
+
+#[tokio::test]
+async fn audit_admin_only_keeps_older_admin_actions_visible() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = admin_test_common::sqlite_storage(temp_dir.path(), "admin_only.sqlite").await;
+
+    // Reproduces the observed window failure: one older admin action followed
+    // by more newer non-admin rows than the query limit.
+    storage
+        .append_audit(&AuditEntry {
+            ts: 10_000,
+            request_id: "older-admin-action".to_owned(),
+            principal_id: "qa-safety-principal".to_owned(),
+            route: "/admin/v1/principals".to_owned(),
+            upstream: "admin".to_owned(),
+            status: 200,
+            admin_action: Some("principal_update".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for i in 0..250 {
+        storage
+            .append_audit(&AuditEntry {
+                ts: 10_001 + i,
+                request_id: format!("nonadmin-{i}"),
+                principal_id: "qa-safety-principal".to_owned(),
+                route: "/v1/messages".to_owned(),
+                upstream: "upstream".to_owned(),
+                status: 429,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    let app = router(test_state(storage));
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/admin/audit?principal_id=qa-safety-principal&admin_only=true&limit=200")
+        .header("Authorization", "Bearer test-token")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["request_id"] == "older-admin-action"),
+        "admin_only must surface the older admin action past newer non-admin rows"
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|entry| { !entry["admin_action"].is_null() || !entry["kind"].is_null() })
+    );
+
+    // The default query keeps returning non-admin rows.
+    let request = Request::builder()
+        .method("GET")
+        .uri("/admin/audit?principal_id=qa-safety-principal&limit=200")
+        .header("Authorization", "Bearer test-token")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 200);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["admin_action"].is_null() && entry["kind"].is_null())
+    );
+}

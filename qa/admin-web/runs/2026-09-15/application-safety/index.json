@@ -1,0 +1,157 @@
+{
+  "schema": "cc-lb-application-safety-evidence-index/v1",
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/before/safety-summary.json",
+      "sha256": "31252d18358d9c1e6f682c5d61203ced6185eb942abf4fffba725d7f99595135",
+      "bytes": 3417
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/before/sqlite-audit-query-plans.json",
+      "sha256": "9fdac4f47259c3dbd867a037a0bc99148440451c3fbcd4913e6b3ce4d4ea1846",
+      "bytes": 581
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/before/postgres-audit-query-plans.json",
+      "sha256": "9c9605ce8c87b533fc9e24bb4f8cca296a5e865b328dd97d6ca3332d41573201",
+      "bytes": 13515
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/before/browser-audit-observed.json",
+      "sha256": "6b3a3471b4ceef8747c2133775a1ca2ab1264793ff64f8af6c6da78f17edc08e",
+      "bytes": 1253
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/before/browser-audit-screen.png",
+      "sha256": "0934f582993fbab095cc980f93efd4d3326c669122265bc6ab30d4d45bd96910",
+      "bytes": 67172
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/before/browser-upgrade-after-observed.json",
+      "sha256": "8f018d83104499d7b86197c455bb9ca95deb3b6fdce494eebbdea164efab92b2",
+      "bytes": 1109
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/before/browser-upgrade-after-screen.png",
+      "sha256": "62b93eea0c4a897fba881dcb87e1ecc4d681c55a0393d667dc67feef91f91731",
+      "bytes": 100477
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/before/upgrade-storage-proof.json",
+      "sha256": "5251d079980e1bb10e011210003481bac8737a15e4269e59efe4f42f0dfadc98",
+      "bytes": 414
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/browser-final-baseline-observed.json",
+      "sha256": "04c8fd1b43d47e9c34b78ddd324c19c0341be35d44075943f16e07acaa82bdd3",
+      "bytes": 1213
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/browser-final-preserve-observed.json",
+      "sha256": "3843c65277d926d95e0fab45cbd530ad29009a09e31a1c9a6149a73ea5c28643",
+      "bytes": 1295
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/browser-final-preserve-screen.png",
+      "sha256": "adb4fd27c4570cd1466431ef4757f0a87e8371b59e11b67ce93e16790a1ffaac",
+      "bytes": 103516
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/browser-final-clear-observed.json",
+      "sha256": "00db5e0b302a10b8e20f864c0aec041b2451a71bf7e6bec11164398ab215164a",
+      "bytes": 1180
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/browser-final-clear-screen.png",
+      "sha256": "6004641723f512ed9569ced95c2d2624330d6997fd29b295830b92065e98009f",
+      "bytes": 100451
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/browser-final-audit-observed.json",
+      "sha256": "e1e410c84a0f4b3d79b08a79d8e090971a2ed75015fb74c3473f4fec1b03fe45",
+      "bytes": 988
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/browser-final-audit-screen.png",
+      "sha256": "cec058232f4e193c0306e12f83c2adb7d32bf0240abe6c6dc003b885b4185811",
+      "bytes": 67717
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/browser-final-reverse-baseline-observed.json",
+      "sha256": "ebcdb98b7425f129af64139af9dcae4b51bf8198bb21fb071f99b3e9ee462f1e",
+      "bytes": 992
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/browser-final-reverse-after-observed.json",
+      "sha256": "ab474420811a841c40e66026d51cfd05ed025abc5ede867384a81c08cdfeb135",
+      "bytes": 1339
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/browser-final-reverse-after-screen.png",
+      "sha256": "2c4daea96d463fa590d3c55fa2c9f42056e950bfe3c62f40e4b52ae0563b8a26",
+      "bytes": 105032
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/final-preserve-storage.json",
+      "sha256": "e623c37b6f9421a3fa9967ccc47348bff23bf43146de0446d2a707105b987b99",
+      "bytes": 377
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/final-clear-storage.json",
+      "sha256": "04e1c5eea5e5ad3a438c22993dd202450f96511475295f6694150da2ce409838",
+      "bytes": 536
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/final-browser-storage-and-cleanup.json",
+      "sha256": "b7980e7debb4fd8f520f24954111034ef1330a80d90c2ef6f136786e919b9c33",
+      "bytes": 712
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/final-postgres-http-contracts.json",
+      "sha256": "9eff7da4d2097531ad3c9630292d8242f8335cd5a9b7a8a509990c1541883170",
+      "bytes": 1858
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/sqlite-final-index-cost.json",
+      "sha256": "87fc72ae3029cb786770f3743780684e6e3b2ae53c29ee3f1b07efaa5acd9864",
+      "bytes": 7447
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/postgres-final-writer-compatible-index-cost.json",
+      "sha256": "d8283c192e37738d70bf65bcd0aaa303904f3ac933aba4f23b25fcafb8ed55c6",
+      "bytes": 105502
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/index-tradeoff-summary.json",
+      "sha256": "1e05a81c0c26e9dd7cad644408505e1a3c3f191a24a342287357ca200c3f646d",
+      "bytes": 1305
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/native-final.json",
+      "sha256": "b16a553a995a65babe1b9c89c58ac612ba6ed66eb80e33db2d2a361a76f76cd5",
+      "bytes": 2564
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/online-final.json",
+      "sha256": "2bc9659e7e017a86915a511f01c9ab3f1448f071d926dfa230097c863e7cbcaa",
+      "bytes": 2684
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/after/owned-cleanup.json",
+      "sha256": "1e2b0fc4c6cd6e3843b675d1d0401f75b4fac9d3f2a8d1153a2e6574089fdbe9",
+      "bytes": 274
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/verification.json",
+      "sha256": "37a5a5b0dcb4deaaa4ce4d6d9729b8a49d48ed4e42f6e2f46c970953f3808eea",
+      "bytes": 6218
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/application-safety/local-gates.json",
+      "sha256": "0fc3e79992299286dfd03e72c97781c763bdae626a82bb0eb587ecf011015dd7",
+      "bytes": 549
+    }
+  ],
+  "full_raw_logs_and_credentials_published": false,
+  "historical_failure_evidence_preserved": true
+}

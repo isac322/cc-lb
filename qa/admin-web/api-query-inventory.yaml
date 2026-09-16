@@ -3,11 +3,11 @@
 
 "version": "3.0.0"
 "system": "cc-lb Admin Web & API Surface"
-"source_commit": "ef70b347"
+"source_commit": "19b05570"
 "metadata":
   "source_state":
     "kind": "approved_uncommitted_candidate"
-    "base_commit": "ef70b347790c46fa9956435a820a51b60c547d04"
+    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81"
     "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
   "response_observability":
     "scope": "server_admin_listener"
@@ -1273,7 +1273,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -2105,7 +2105,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -5375,7 +5375,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -6270,7 +6270,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCreatePrincipal"
-      "line": 1206
+      "line": 1207
     "http":
       "method": "POST"
       "path": "/admin/v1/principals"
@@ -6369,7 +6369,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useTogglePrincipal"
-      "line": 1244
+      "line": 1245
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/enable"
@@ -6425,7 +6425,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useTogglePrincipal"
-      "line": 1244
+      "line": 1245
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/disable"
@@ -6525,7 +6525,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeletePrincipal"
-      "line": 1231
+      "line": 1232
     "http":
       "method": "DELETE"
       "path": "/admin/v1/principals/{id}"
@@ -6668,7 +6668,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useSetAllowedModels"
-      "line": 1267
+      "line": 1268
     "http":
       "method": "PUT"
       "path": "/admin/v1/principals/{id}/allowed_models"
@@ -6789,7 +6789,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdatePrincipalDefaultLimits"
-      "line": 1289
+      "line": 1290
     "http":
       "method": "PATCH"
       "path": "/admin/v1/principals/{id}"
@@ -7207,7 +7207,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useInsertChainEntry"
-      "line": 1514
+      "line": 1515
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain"
@@ -7264,7 +7264,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeleteChainEntry"
-      "line": 1555
+      "line": 1556
     "http":
       "method": "DELETE"
       "path": "/admin/v1/plugin-chain-entries/{id}"
@@ -7366,7 +7366,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateRouterTerminalStrategy"
-      "line": 1563
+      "line": 1564
     "http":
       "method": "PUT"
       "path": "/admin/v1/principals/{id}/router-terminal"
@@ -7468,7 +7468,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useInsertChainEntry"
-      "line": 1514
+      "line": 1515
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain"
@@ -7570,7 +7570,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useReorderChain"
-      "line": 1540
+      "line": 1541
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain/reorder"
@@ -7662,7 +7662,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeleteChainEntry"
-      "line": 1555
+      "line": 1556
     "http":
       "method": "DELETE"
       "path": "/admin/v1/plugin-chain-entries/{id}"
@@ -7800,7 +7800,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeleteChainEntry"
-      "line": 1555
+      "line": 1556
     "http":
       "method": "DELETE"
       "path": "/admin/v1/plugin-chain-entries/{id}"
@@ -7856,7 +7856,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useInsertChainEntry"
-      "line": 1514
+      "line": 1515
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain"
@@ -7955,7 +7955,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useReorderChain"
-      "line": 1540
+      "line": 1541
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain/reorder"
@@ -8049,7 +8049,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeleteChainEntry"
-      "line": 1555
+      "line": 1556
     "http":
       "method": "DELETE"
       "path": "/admin/v1/plugin-chain-entries/{id}"
@@ -8251,7 +8251,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useIssueKey"
-      "line": 1337
+      "line": 1338
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/keys"
@@ -8355,7 +8355,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useRevokeKey"
-      "line": 1349
+      "line": 1350
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/keys/{key_id}/revoke"
@@ -8458,7 +8458,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCacheKeepaliveSummary"
-      "line": 1830
+      "line": 1831
     "http":
       "method": "GET"
       "path": "/admin/v1/principals/{id}/cache-keepalive"
@@ -8560,7 +8560,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdatePrincipalCacheKeepalive"
-      "line": 1313
+      "line": 1314
     "http":
       "method": "PATCH"
       "path": "/admin/v1/principals/{id}"
@@ -8671,7 +8671,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdatePrincipalCacheKeepalive"
-      "line": 1313
+      "line": 1314
     "http":
       "method": "PATCH"
       "path": "/admin/v1/principals/{id}"
@@ -8786,7 +8786,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCacheKeepaliveSessions"
-      "line": 1808
+      "line": 1809
     "http":
       "method": "GET"
       "path": "/admin/v1/principals/{id}/cache-keepalive"
@@ -9100,7 +9100,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCacheKeepaliveSessions"
-      "line": 1808
+      "line": 1809
     "http":
       "method": "GET"
       "path": "/admin/v1/principals/{id}/cache-keepalive"
@@ -9215,7 +9215,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCacheKeepaliveSessionDetail"
-      "line": 1842
+      "line": 1843
     "http":
       "method": "GET"
       "path": "/admin/v1/principals/{id}/cache-keepalive/{session_id}"
@@ -9562,7 +9562,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useGcPlugins"
-      "line": 1503
+      "line": 1504
     "http":
       "method": "POST"
       "path": "/admin/v1/plugins/wasm/gc"
@@ -9663,7 +9663,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUploadWasm"
-      "line": 1368
+      "line": 1369
     "http":
       "method": "POST"
       "path": "/admin/v1/plugins/wasm"
@@ -9766,7 +9766,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUploadWasm"
-      "line": 1368
+      "line": 1369
     "http":
       "method": "POST"
       "path": "/admin/v1/plugins/wasm"
@@ -9944,7 +9944,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "usePluginReferences"
-      "line": 1422
+      "line": 1423
     "http":
       "method": "GET"
       "path": "/admin/v1/plugins/registry/{id}/references"
@@ -10057,7 +10057,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeletePlugin"
-      "line": 1434
+      "line": 1435
     "http":
       "method": "DELETE"
       "path": "/admin/v1/plugins/registry/{id}"
@@ -10312,7 +10312,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "usePatchPlugin"
-      "line": 1483
+      "line": 1484
     "http":
       "method": "PATCH"
       "path": "/admin/v1/plugins/registry/{id}"
@@ -10973,7 +10973,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useSaveDraft"
-      "line": 1610
+      "line": 1611
     "http":
       "method": "PUT"
       "path": "/admin/config/draft"
@@ -11067,7 +11067,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useValidateConfig"
-      "line": 1601
+      "line": 1602
     "http":
       "method": "POST"
       "path": "/admin/config/draft/validate"
@@ -11166,7 +11166,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useApplyConfig"
-      "line": 1586
+      "line": 1587
     "http":
       "method": "POST"
       "path": "/admin/config/apply"
@@ -11251,7 +11251,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useReloadConfig"
-      "line": 1627
+      "line": 1628
     "http":
       "method": "POST"
       "path": "/admin/config/reload"
@@ -11741,6 +11741,7 @@
       "path_bindings": []
       "query_fields":
         - "limit=200"
+        - "admin_only=true"
         - "principal_id"
         - "since"
         - "until"
@@ -11755,7 +11756,7 @@
       - "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
+    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
     "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -11851,7 +11852,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -11887,7 +11888,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/audit.tsx"
       "symbol": "refreshAudit"
-      "line": 204
+      "line": 205
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11916,13 +11917,14 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/audit.tsx"
       "symbol": "refreshAudit"
-      "line": 209
+      "line": 210
     "http":
       "method": "GET"
       "path": "/admin/audit"
       "path_bindings": []
       "query_fields":
         - "limit=200"
+        - "admin_only=true"
         - "principal_id"
         - "since"
         - "until"
@@ -11937,7 +11939,7 @@
       - "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
+    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
     "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -11976,7 +11978,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/audit.tsx"
       "symbol": "setPrincipalFilter"
-      "line": 155
+      "line": 156
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -12013,6 +12015,7 @@
       "path_bindings": []
       "query_fields":
         - "limit=200"
+        - "admin_only=true"
         - "principal_id"
         - "since"
         - "until"
@@ -12027,7 +12030,7 @@
       - "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
+    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
     "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -12189,6 +12192,7 @@
       "path_bindings": []
       "query_fields":
         - "limit=200"
+        - "admin_only=true"
         - "principal_id"
         - "since"
         - "until"
@@ -12203,7 +12207,7 @@
       - "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
+    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
     "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -12283,6 +12287,7 @@
       "path_bindings": []
       "query_fields":
         - "limit=200"
+        - "admin_only=true"
         - "principal_id"
         - "since"
         - "until"
@@ -12297,7 +12302,7 @@
       - "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
+    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
     "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -12378,6 +12383,7 @@
       "path_bindings": []
       "query_fields":
         - "limit=200"
+        - "admin_only=true"
         - "principal_id"
         - "since"
         - "until"
@@ -12392,7 +12398,7 @@
       - "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
+    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
     "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -12428,7 +12434,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/audit.tsx"
       "symbol": "AuditPage"
-      "line": 279
+      "line": 280
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -12464,6 +12470,7 @@
       "path_bindings": []
       "query_fields":
         - "limit=200"
+        - "admin_only=true"
       "body_fields": []
       "header_fields": []
       "condition": null
@@ -12475,7 +12482,7 @@
       - "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
+    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
     "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -12511,7 +12518,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/audit.tsx"
       "symbol": "AuditPage"
-      "line": 432
+      "line": 433
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -12547,6 +12554,7 @@
       "path_bindings": []
       "query_fields":
         - "limit=200"
+        - "admin_only=true"
       "body_fields": []
       "header_fields": []
       "condition": null
@@ -12558,7 +12566,7 @@
       - "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
+    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
     "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -12594,7 +12602,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/audit.tsx"
       "symbol": "AuditPage"
-      "line": 360
+      "line": 361
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -12629,7 +12637,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/audit.tsx"
       "symbol": "AuditPage"
-      "line": 455
+      "line": 456
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -12720,7 +12728,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -13716,7 +13724,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateUpstream"
-      "line": 1052
+      "line": 1053
     "http":
       "method": "PUT"
       "path": "/admin/v1/upstreams/{id}"
@@ -13740,8 +13748,8 @@
       - "postgres:UpstreamStore::update:PostgresStorage::update"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
-    "side_effects": "Audit event `upstream_update`; replaces upstream base_url, warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "side_effects": "Audit event `upstream_update`; replaces upstream base_url (set via base_url, cleared via clear_base_url), warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -13812,7 +13820,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateUpstreamWarmupSettings"
-      "line": 1128
+      "line": 1129
     "http":
       "method": "PATCH"
       "path": "/admin/v1/upstreams/{id}"
@@ -13837,7 +13845,7 @@
       - "postgres:UpstreamStore::update:PostgresStorage::update"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -13860,8 +13868,10 @@
       - "Non-OAuth upstream selected"
     "variants":
       - "Cancel edit"
-      - "Save with custom Base URL"
-      - "Save with blank Base URL (sends explicit base_url: null, removes the override, and retains the default endpoint after a fresh GET and page reload)"
+      - "Save with custom Base URL (sends base_url: <url>)"
+      - "Save with blank Base URL (sends clear_base_url: true, removes the override, and retains the default endpoint after a fresh GET and page reload)"
+      - "Save without touching Base URL (field unchanged from the baseline captured on Edit; sends neither base_url nor clear_base_url, so a mid-edit props refetch cannot turn an untouched field into a clear)"
+      - "Save with blank Base URL against a backend that does not confirm the clear (response base_url is not null; shows error toast and keeps the editor open instead of reporting success)"
       - "Save with env var key (sends api_key_env, api_key_value: null; server resolves the env var to ciphertext — the env name itself is never stored or returned)"
       - "Save with literal key (sends api_key_value, api_key_env: null)"
       - "Save with blank literal key field (sends api_key_value: null; treated as no-change, retaining the stored key; the stored secret is never rendered or restored into the form)"
@@ -13872,8 +13882,10 @@
       "source": "Each non-OAuth upstream"
       "variants":
         - "Cancel edit"
-        - "Save with custom Base URL"
-        - "Save with blank Base URL (sends explicit base_url: null, removes the override, and retains the default endpoint after a fresh GET and page reload)"
+        - "Save with custom Base URL (sends base_url: <url>)"
+        - "Save with blank Base URL (sends clear_base_url: true, removes the override, and retains the default endpoint after a fresh GET and page reload)"
+        - "Save without touching Base URL (field unchanged from the baseline captured on Edit; sends neither base_url nor clear_base_url, so a mid-edit props refetch cannot turn an untouched field into a clear)"
+        - "Save with blank Base URL against a backend that does not confirm the clear (response base_url is not null; shows error toast and keeps the editor open instead of reporting success)"
         - "Save with env var key (sends api_key_env, api_key_value: null; server resolves the env var to ciphertext — the env name itself is never stored or returned)"
         - "Save with literal key (sends api_key_value, api_key_env: null)"
         - "Save with blank literal key field (sends api_key_value: null; treated as no-change, retaining the stored key; the stored secret is never rendered or restored into the form)"
@@ -13886,7 +13898,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx"
       "symbol": "SettingsCard"
-      "line": 34
+      "line": 41
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -13909,8 +13921,10 @@
       - "Non-OAuth upstream selected"
     "variants":
       - "Cancel edit"
-      - "Save with custom Base URL"
-      - "Save with blank Base URL (sends explicit base_url: null, removes the override, and retains the default endpoint after a fresh GET and page reload)"
+      - "Save with custom Base URL (sends base_url: <url>)"
+      - "Save with blank Base URL (sends clear_base_url: true, removes the override, and retains the default endpoint after a fresh GET and page reload)"
+      - "Save without touching Base URL (field unchanged from the baseline captured on Edit; sends neither base_url nor clear_base_url, so a mid-edit props refetch cannot turn an untouched field into a clear)"
+      - "Save with blank Base URL against a backend that does not confirm the clear (response base_url is not null; shows error toast and keeps the editor open instead of reporting success)"
       - "Save with env var key (sends api_key_env, api_key_value: null; server resolves the env var to ciphertext — the env name itself is never stored or returned)"
       - "Save with literal key (sends api_key_value, api_key_env: null)"
       - "Save with blank literal key field (sends api_key_value: null; treated as no-change, retaining the stored key; the stored secret is never rendered or restored into the form)"
@@ -13922,7 +13936,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateUpstream"
-      "line": 1052
+      "line": 1053
     "http":
       "method": "PUT"
       "path": "/admin/v1/upstreams/{id}"
@@ -13933,6 +13947,7 @@
       "query_fields": []
       "body_fields":
         - "base_url"
+        - "clear_base_url"
         - "api_key_value"
         - "api_key_env"
       "header_fields":
@@ -13948,8 +13963,8 @@
       - "postgres:UpstreamStore::update:PostgresStorage::update"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
-    "side_effects": "Audit event `upstream_update`; replaces upstream base_url, warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "side_effects": "Audit event `upstream_update`; replaces upstream base_url (set via base_url, cleared via clear_base_url), warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -14113,7 +14128,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateUpstreamWarmupSettings"
-      "line": 1128
+      "line": 1129
     "http":
       "method": "PATCH"
       "path": "/admin/v1/upstreams/{id}"
@@ -14137,7 +14152,7 @@
       - "postgres:UpstreamStore::update:PostgresStorage::update"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -14208,7 +14223,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateUpstreamWarmupSettings"
-      "line": 1128
+      "line": 1129
     "http":
       "method": "PATCH"
       "path": "/admin/v1/upstreams/{id}"
@@ -14232,7 +14247,7 @@
       - "postgres:UpstreamStore::update:PostgresStorage::update"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -14303,7 +14318,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useClearUpstreamWarmupDialectPlugin"
-      "line": 1107
+      "line": 1108
     "http":
       "method": "DELETE"
       "path": "/admin/v1/upstreams/{id}/warmup-dialect-plugin"
@@ -14325,7 +14340,7 @@
       - "postgres:UpstreamStore::clear_warmup_dialect_plugin:PostgresStorage::clear_warmup_dialect_plugin"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_update` (warmup_dialect_plugin); disassociates dialect plugin so default HTTP warmup is used QA restore: PUT the prior warmup_dialect_plugin with the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -14401,7 +14416,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useFireNowUpstreamWarmup"
-      "line": 1075
+      "line": 1076
     "http":
       "method": "POST"
       "path": "/admin/v1/upstreams/{id}/warmup/fire-now"
@@ -14493,7 +14508,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useWarmupAttempts"
-      "line": 1782
+      "line": 1783
     "http":
       "method": "GET"
       "path": "/admin/v1/upstreams/{id}/warmup/attempts"
@@ -14620,7 +14635,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useOAuthStart"
-      "line": 1153
+      "line": 1154
     "http":
       "method": "POST"
       "path": "/admin/v1/upstreams/{id}/oauth/start"
@@ -14713,7 +14728,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useOAuthComplete"
-      "line": 1162
+      "line": 1163
     "http":
       "method": "POST"
       "path": "/admin/v1/upstreams/{id}/oauth/complete"
@@ -14965,7 +14980,7 @@
       - "postgres:UpstreamStore::create:PostgresStorage::create"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "DynamicView rebinding; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "DynamicView rebinding; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_create`; creates new upstream target for proxy load balancing; encrypts API key via AEAD QA restore: DELETE the created upstream using its returned ETag."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -15035,7 +15050,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useStartOauthDraft"
-      "line": 1637
+      "line": 1638
     "http":
       "method": "POST"
       "path": "/admin/v1/oauth/draft/start"
@@ -15123,7 +15138,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCompleteOauthDraft"
-      "line": 1644
+      "line": 1645
     "http":
       "method": "POST"
       "path": "/admin/v1/oauth/draft/complete"
@@ -15211,7 +15226,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCreateFromOauthDraft"
-      "line": 1652
+      "line": 1653
     "http":
       "method": "POST"
       "path": "/admin/v1/upstreams/from-oauth-draft"
@@ -15412,7 +15427,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useWarmupSummary"
-      "line": 1769
+      "line": 1770
     "http":
       "method": "GET"
       "path": "/admin/v1/upstreams/{id}/warmup"
@@ -15697,7 +15712,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useWarmupAttempts"
-      "line": 1782
+      "line": 1783
     "http":
       "method": "GET"
       "path": "/admin/v1/upstreams/{id}/warmup/attempts"
@@ -15790,7 +15805,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useWarmupAttempts"
-      "line": 1782
+      "line": 1783
     "http":
       "method": "GET"
       "path": "/admin/v1/upstreams/{id}/warmup/attempts"
@@ -16188,7 +16203,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "usePluginReferences"
-      "line": 1422
+      "line": 1423
     "http":
       "method": "GET"
       "path": "/admin/v1/plugins/registry/{id}/references"
@@ -16288,7 +16303,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useInsertChainEntry"
-      "line": 1514
+      "line": 1515
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain"
@@ -16678,7 +16693,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/audit.tsx"
       "symbol": "AuditPage"
-      "line": 401
+      "line": 402
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -18110,6 +18125,7 @@
           - "limit"
           - "actor_authority"
           - "actor_subject"
+          - "admin_only"
         "header": []
         "body": []
     "trigger_steps":
@@ -18129,7 +18145,7 @@
       - "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
+    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
     "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -19194,7 +19210,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -19848,7 +19864,7 @@
       - "postgres:UpstreamStore::set_enabled:PostgresStorage::set_enabled"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_enable`; activates upstream so load balancer can route requests to it QA restore: POST the disable endpoint with the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -19899,7 +19915,7 @@
       - "postgres:UpstreamStore::set_enabled:PostgresStorage::set_enabled"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_disable`; disables upstream from proxy candidate pool QA restore: POST the enable endpoint with the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -20567,137 +20583,171 @@
     "source":
       "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
       "symbol": "PostgresStorage::append_audit"
-      "line_start": 48
-      "line_end": 86
-      "sha256": "8d9d30e633dd1eca194667614c7edd6e70f6b0978df3b19eae84b31fcf873eec"
+      "line_start": 46
+      "line_end": 84
+      "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
     "statements":
       - "kind": "literal"
         "text": "INSERT INTO audit_log_v1 (ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
           "symbol": "PostgresStorage::append_audit"
-          "line_start": 52
-          "line_end": 83
+          "line_start": 50
+          "line_end": 81
         "branches": []
         "bind_parameters":
-          - "54: .bind(unix_secs_to_datetime(entry.ts, \"audit ts\")?)"
-          - "55: .bind(&entry.request_id)"
-          - "56: .bind(&entry.principal_id)"
-          - "57: .bind(&entry.route)"
-          - "58: .bind(&entry.upstream)"
-          - "59: .bind(entry.model.as_deref())"
-          - "60: .bind(i32::from(entry.status))"
-          - "61: .bind(u64_to_i64(entry.input_tokens.unwrap_or(0), \"audit input_tokens\")?)"
-          - "62: .bind(u64_to_i64(entry.output_tokens.unwrap_or(0), \"audit output_tokens\")?)"
-          - "63: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)"
-          - "64: .bind(entry.agent_label.as_deref())"
-          - "65: .bind(entry.api_key_id.as_deref())"
-          - "66: .bind("
-          - "72: .bind(entry.limit_violation.as_deref())"
-          - "73: .bind(entry.admin_action.as_deref())"
-          - "74: .bind(entry.actor.as_deref())"
-          - "75: .bind(entry.actor_authority.as_deref())"
-          - "76: .bind(entry.actor_subject.as_deref())"
-          - "77: .bind(entry.actor_kind.as_deref())"
-          - "78: .bind(entry.actor_email.as_deref())"
-          - "79: .bind(entry.kind.as_deref())"
-          - "80: .bind(payload)"
+          - "52: .bind(unix_secs_to_datetime(entry.ts, \"audit ts\")?)"
+          - "53: .bind(&entry.request_id)"
+          - "54: .bind(&entry.principal_id)"
+          - "55: .bind(&entry.route)"
+          - "56: .bind(&entry.upstream)"
+          - "57: .bind(entry.model.as_deref())"
+          - "58: .bind(i32::from(entry.status))"
+          - "59: .bind(u64_to_i64(entry.input_tokens.unwrap_or(0), \"audit input_tokens\")?)"
+          - "60: .bind(u64_to_i64(entry.output_tokens.unwrap_or(0), \"audit output_tokens\")?)"
+          - "61: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)"
+          - "62: .bind(entry.agent_label.as_deref())"
+          - "63: .bind(entry.api_key_id.as_deref())"
+          - "64: .bind("
+          - "70: .bind(entry.limit_violation.as_deref())"
+          - "71: .bind(entry.admin_action.as_deref())"
+          - "72: .bind(entry.actor.as_deref())"
+          - "73: .bind(entry.actor_authority.as_deref())"
+          - "74: .bind(entry.actor_subject.as_deref())"
+          - "75: .bind(entry.actor_kind.as_deref())"
+          - "76: .bind(entry.actor_email.as_deref())"
+          - "77: .bind(entry.kind.as_deref())"
+          - "78: .bind(payload)"
   - "id": "postgres:AuditStore::query_audit:PostgresStorage::query_audit"
     "engine": "postgres"
     "trait_method": "AuditStore::query_audit"
     "source":
       "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
       "symbol": "PostgresStorage::query_audit"
-      "line_start": 136
-      "line_end": 163
-      "sha256": "8d9d30e633dd1eca194667614c7edd6e70f6b0978df3b19eae84b31fcf873eec"
+      "line_start": 134
+      "line_end": 161
+      "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
     "statements":
       - "kind": "literal"
         "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND ($3::text IS NULL OR principal_id = $3) ORDER BY seq ASC LIMIT $4"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
           "symbol": "query_audit"
-          "line_start": 152
-          "line_end": 152
+          "line_start": 150
+          "line_end": 150
         "branches": []
         "bind_parameters":
-          - "154: .bind(since)"
-          - "155: .bind(until)"
-          - "156: .bind(principal_id)"
-          - "157: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
+          - "152: .bind(since)"
+          - "153: .bind(until)"
+          - "154: .bind(principal_id)"
+          - "155: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
   - "id": "postgres:AuditStore::query_audit_by_actor:PostgresStorage::query_audit_by_actor"
     "engine": "postgres"
     "trait_method": "AuditStore::query_audit_by_actor"
     "source":
       "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
       "symbol": "PostgresStorage::query_audit_by_actor"
-      "line_start": 165
-      "line_end": 194
-      "sha256": "8d9d30e633dd1eca194667614c7edd6e70f6b0978df3b19eae84b31fcf873eec"
+      "line_start": 163
+      "line_end": 192
+      "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
     "statements":
       - "kind": "literal"
         "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND actor_authority = $3 AND actor_subject = $4 ORDER BY seq ASC LIMIT $5"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
           "symbol": "query_audit_by_actor"
-          "line_start": 182
-          "line_end": 182
+          "line_start": 180
+          "line_end": 180
         "branches": []
         "bind_parameters":
-          - "184: .bind(since)"
-          - "185: .bind(until)"
-          - "186: .bind(authority)"
-          - "187: .bind(subject)"
-          - "188: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
+          - "182: .bind(since)"
+          - "183: .bind(until)"
+          - "184: .bind(authority)"
+          - "185: .bind(subject)"
+          - "186: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
   - "id": "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
     "engine": "postgres"
     "trait_method": "AuditStore::query_recent_audit"
     "source":
       "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
       "symbol": "PostgresStorage::query_recent_audit"
-      "line_start": 196
-      "line_end": 244
-      "sha256": "8d9d30e633dd1eca194667614c7edd6e70f6b0978df3b19eae84b31fcf873eec"
+      "line_start": 194
+      "line_end": 246
+      "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
     "statements":
-      - "kind": "literal"
-        "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) ORDER BY ts DESC, seq DESC LIMIT $3"
+      - "kind": "builder"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
-          "symbol": "QUERY_RECENT_AUDIT_ALL"
-          "line_start": 17
-          "line_end": 17
-        "branches": []
+          "symbol": "PostgresStorage::query_recent_audit"
+          "line_start": 211
+          "line_end": 243
+        "branches":
+          - "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= "
+            "source":
+              "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
+              "symbol": "RECENT_AUDIT_SELECT"
+              "line_start": 17
+              "line_end": 17
+          - "text": " AND ("
+            "source":
+              "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 214
+              "line_end": 214
+          - "text": "::timestamptz IS NULL OR ts <= "
+            "source":
+              "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 216
+              "line_end": 216
+          - "text": ")"
+            "source":
+              "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 218
+              "line_end": 218
+          - "text": " AND principal_id = "
+            "condition": "scope == AuditQueryScope::Principal"
+            "source":
+              "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 222
+              "line_end": 222
+          - "text": " AND actor_authority = "
+            "condition": "scope == AuditQueryScope::Actor"
+            "source":
+              "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 226
+              "line_end": 226
+          - "text": " AND actor_subject = "
+            "condition": "scope == AuditQueryScope::Actor"
+            "source":
+              "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 228
+              "line_end": 228
+          - "text": " AND (admin_action IS NOT NULL OR kind IS NOT NULL)"
+            "condition": "admin_only == true; literal predicate applied before ORDER BY/LIMIT"
+            "source":
+              "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 233
+              "line_end": 233
+          - "text": " ORDER BY ts DESC, seq DESC LIMIT "
+            "source":
+              "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 236
+              "line_end": 236
         "bind_parameters":
-          - "215: .bind(since)"
-          - "216: .bind(until)"
-          - "217: .bind(limit)"
-      - "kind": "literal"
-        "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND principal_id = $3 ORDER BY ts DESC, seq DESC LIMIT $4"
-        "source":
-          "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
-          "symbol": "QUERY_RECENT_AUDIT_PRINCIPAL"
-          "line_start": 18
-          "line_end": 18
-        "branches": []
-        "bind_parameters":
-          - "223: .bind(since)"
-          - "224: .bind(until)"
-          - "225: .bind(principal_id)"
-          - "226: .bind(limit)"
-      - "kind": "literal"
-        "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND actor_authority = $3 AND actor_subject = $4 ORDER BY ts DESC, seq DESC LIMIT $5"
-        "source":
-          "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs"
-          "symbol": "QUERY_RECENT_AUDIT_ACTOR"
-          "line_start": 19
-          "line_end": 19
-        "branches": []
-        "bind_parameters":
-          - "232: .bind(since)"
-          - "233: .bind(until)"
-          - "234: .bind(authority)"
-          - "235: .bind(subject)"
-          - "236: .bind(limit)"
+          - "213: .push_bind(since)"
+          - "215: .push_bind(until)"
+          - "217: .push_bind(until) — bound twice: NULL check and upper bound"
+          - "222: .push_bind(principal_id) — AuditQueryScope::Principal only"
+          - "227: .push_bind(authority) — AuditQueryScope::Actor only"
+          - "229: .push_bind(subject) — AuditQueryScope::Actor only"
+          - "237: .push_bind(limit)"
   - "id": "postgres:CacheKeepaliveSessionReadStore::get_cache_keepalive_list_item:PostgresStorage::get_cache_keepalive_list_item"
     "engine": "postgres"
     "trait_method": "CacheKeepaliveSessionReadStore::get_cache_keepalive_list_item"
@@ -22457,39 +22507,39 @@
       "symbol": "SqliteStorage::append_audit"
       "line_start": 12
       "line_end": 14
-      "sha256": "96c806a556378343b7c71618c378b26799e883650cad2b26e924731e1a040c13"
+      "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
     "statements":
       - "kind": "literal"
         "text": "INSERT INTO audit_log_v1 (ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
           "symbol": "insert_audit_entry"
-          "line_start": 219
-          "line_end": 257
+          "line_start": 200
+          "line_end": 238
         "branches": []
         "bind_parameters":
-          - "227: .bind(u64_to_i64(entry.ts, \"audit ts\")?)"
-          - "228: .bind(&entry.request_id)"
-          - "229: .bind(&entry.principal_id)"
-          - "230: .bind(&entry.route)"
-          - "231: .bind(&entry.upstream)"
-          - "232: .bind(entry.model.as_deref())"
-          - "233: .bind(i64::from(entry.status))"
-          - "234: .bind(option_u64_to_i64(entry.input_tokens, \"audit input_tokens\")?)"
-          - "235: .bind(option_u64_to_i64("
-          - "239: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)"
-          - "240: .bind(entry.agent_label.as_deref())"
-          - "241: .bind(entry.api_key_id.as_deref())"
-          - "242: .bind(option_u64_to_i64("
-          - "246: .bind(entry.limit_violation.as_deref())"
-          - "247: .bind(entry.admin_action.as_deref())"
-          - "248: .bind(entry.actor.as_deref())"
-          - "249: .bind(entry.actor_authority.as_deref())"
-          - "250: .bind(entry.actor_subject.as_deref())"
-          - "251: .bind(entry.actor_kind.as_deref())"
-          - "252: .bind(entry.actor_email.as_deref())"
-          - "253: .bind(entry.kind.as_deref())"
-          - "254: .bind(payload.as_deref())"
+          - "208: .bind(u64_to_i64(entry.ts, \"audit ts\")?)"
+          - "209: .bind(&entry.request_id)"
+          - "210: .bind(&entry.principal_id)"
+          - "211: .bind(&entry.route)"
+          - "212: .bind(&entry.upstream)"
+          - "213: .bind(entry.model.as_deref())"
+          - "214: .bind(i64::from(entry.status))"
+          - "215: .bind(option_u64_to_i64(entry.input_tokens, \"audit input_tokens\")?)"
+          - "216: .bind(option_u64_to_i64("
+          - "220: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)"
+          - "221: .bind(entry.agent_label.as_deref())"
+          - "222: .bind(entry.api_key_id.as_deref())"
+          - "223: .bind(option_u64_to_i64("
+          - "227: .bind(entry.limit_violation.as_deref())"
+          - "228: .bind(entry.admin_action.as_deref())"
+          - "229: .bind(entry.actor.as_deref())"
+          - "230: .bind(entry.actor_authority.as_deref())"
+          - "231: .bind(entry.actor_subject.as_deref())"
+          - "232: .bind(entry.actor_kind.as_deref())"
+          - "233: .bind(entry.actor_email.as_deref())"
+          - "234: .bind(entry.kind.as_deref())"
+          - "235: .bind(payload.as_deref())"
   - "id": "sqlite:AuditStore::query_audit:SqliteStorage::query_audit"
     "engine": "sqlite"
     "trait_method": "AuditStore::query_audit"
@@ -22498,7 +22548,7 @@
       "symbol": "SqliteStorage::query_audit"
       "line_start": 29
       "line_end": 59
-      "sha256": "96c806a556378343b7c71618c378b26799e883650cad2b26e924731e1a040c13"
+      "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
     "statements":
       - "kind": "literal"
         "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ? AND ts <= ? AND (? IS NULL OR principal_id = ?) ORDER BY id ASC LIMIT ?"
@@ -22522,7 +22572,7 @@
       "symbol": "SqliteStorage::query_audit_by_actor"
       "line_start": 61
       "line_end": 92
-      "sha256": "96c806a556378343b7c71618c378b26799e883650cad2b26e924731e1a040c13"
+      "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
     "statements":
       - "kind": "literal"
         "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ? AND ts <= ? AND actor_authority = ? AND actor_subject = ? ORDER BY id ASC LIMIT ?"
@@ -22545,48 +22595,69 @@
       "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
       "symbol": "SqliteStorage::query_recent_audit"
       "line_start": 94
-      "line_end": 165
-      "sha256": "96c806a556378343b7c71618c378b26799e883650cad2b26e924731e1a040c13"
+      "line_end": 146
+      "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
     "statements":
-      - "kind": "literal"
-        "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ? AND ts <= ? ORDER BY ts DESC, id DESC LIMIT ?"
+      - "kind": "builder"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
-          "symbol": "query_recent_audit"
-          "line_start": 111
-          "line_end": 117
-        "branches": []
+          "symbol": "SqliteStorage::query_recent_audit"
+          "line_start": 110
+          "line_end": 143
+        "branches":
+          - "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= "
+            "source":
+              "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 111
+              "line_end": 116
+          - "text": " AND ts <= "
+            "source":
+              "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 118
+              "line_end": 118
+          - "text": " AND principal_id = "
+            "condition": "scope == AuditQueryScope::Principal"
+            "source":
+              "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 122
+              "line_end": 122
+          - "text": " AND actor_authority = "
+            "condition": "scope == AuditQueryScope::Actor"
+            "source":
+              "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 126
+              "line_end": 126
+          - "text": " AND actor_subject = "
+            "condition": "scope == AuditQueryScope::Actor"
+            "source":
+              "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 128
+              "line_end": 128
+          - "text": " AND (admin_action IS NOT NULL OR kind IS NOT NULL)"
+            "condition": "admin_only == true; literal predicate applied before ORDER BY/LIMIT"
+            "source":
+              "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 133
+              "line_end": 133
+          - "text": " ORDER BY ts DESC, id DESC LIMIT "
+            "source":
+              "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
+              "symbol": "query_recent_audit"
+              "line_start": 136
+              "line_end": 136
         "bind_parameters":
-          - "119: .bind(since)"
-          - "120: .bind(until)"
-          - "121: .bind(limit)"
-      - "kind": "literal"
-        "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ? AND ts <= ? AND principal_id = ? ORDER BY ts DESC, id DESC LIMIT ?"
-        "source":
-          "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
-          "symbol": "query_recent_audit"
-          "line_start": 127
-          "line_end": 133
-        "branches": []
-        "bind_parameters":
-          - "135: .bind(since)"
-          - "136: .bind(until)"
-          - "137: .bind(principal_id)"
-          - "138: .bind(limit)"
-      - "kind": "literal"
-        "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ? AND ts <= ? AND actor_authority = ? AND actor_subject = ? ORDER BY ts DESC, id DESC LIMIT ?"
-        "source":
-          "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs"
-          "symbol": "query_recent_audit"
-          "line_start": 144
-          "line_end": 151
-        "branches": []
-        "bind_parameters":
-          - "153: .bind(since)"
-          - "154: .bind(until)"
-          - "155: .bind(authority)"
-          - "156: .bind(subject)"
-          - "157: .bind(limit)"
+          - "118: .push_bind(since)"
+          - "118: .push_bind(until)"
+          - "122: .push_bind(principal_id) — AuditQueryScope::Principal only"
+          - "127: .push_bind(authority) — AuditQueryScope::Actor only"
+          - "129: .push_bind(subject) — AuditQueryScope::Actor only"
+          - "137: .push_bind(limit)"
   - "id": "sqlite:CacheKeepaliveSessionReadStore::get_cache_keepalive_list_item:SqliteStorage::get_cache_keepalive_list_item"
     "engine": "sqlite"
     "trait_method": "CacheKeepaliveSessionReadStore::get_cache_keepalive_list_item"
@@ -27284,7 +27355,7 @@
   - "classification": "changed_since_deploy"
     "target": "GET /admin/audit and GET /admin/v1/audit"
     "deployed_behavior": "Accepts query params: since, until, limit, principal_id. No actor filtering. No SensitiveRead authorization enforcement."
-    "latest_behavior": "Accepts additional query params: actor_authority, actor_subject. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. Enforces SensitiveRead authorization."
+    "latest_behavior": "Accepts additional query params: actor_authority, actor_subject, admin_only. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. admin_only (default false) filters to entries with an admin action or kind before LIMIT. Enforces SensitiveRead authorization."
     "impact": "In deployed, querying by actor_authority or actor_subject is ignored/not supported. In latest, missing permissions return 403 Forbidden."
   - "classification": "changed_since_deploy"
     "target": "GET /admin/v1/events/detail/{event_id}"
@@ -27329,7 +27400,7 @@
   - "classification": "changed_since_deploy"
     "target": "GET /admin/audit and GET /admin/v1/audit (result ordering)"
     "deployed_behavior": "Returns audit entries oldest first (ORDER BY id/seq ASC) via AuditStore::query_audit / query_audit_by_actor."
-    "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor); scope filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler."
+    "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor) and an admin_only flag; scope and admin_only filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler."
     "impact": "Entry order reverses vs deployed; clients paging by position see newest-first pages. Candidate only - not committed or deployed."
     "candidate_uncommitted": true
   - "classification": "changed_since_deploy"
@@ -27364,16 +27435,16 @@
     "candidate_uncommitted": true
   - "classification": "changed_since_deploy"
     "type": "api_contract"
-    "name": "Explicit-null Base URL override clearing"
-    "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04"
+    "name": "Explicit clear_base_url Base URL override reset"
+    "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81"
     "candidate_uncommitted": true
     "production_applicability": false
-    "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-162"
-    "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
+    "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-160"
+    "description": "Approved on 2026-09-16: PUT/PATCH omission or explicit null preserves base_url, a URL sets it, and clear_base_url: true clears it; sending a non-null base_url together with clear_base_url returns 400 conflicting_base_url (a stale If-Match still wins with 409). The SettingsCard form captures the Base URL baseline when editing begins so a mid-edit props refetch cannot turn an untouched field into a clear, and treats a clear as unconfirmed (error toast, editor stays open) when the response base_url is not null. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
   - "classification": "changed_since_deploy"
     "type": "api_and_ui_capability"
     "name": "Provider-aware configuration draft Apply availability"
-    "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04"
+    "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81"
     "candidate_uncommitted": true
     "production_applicability": false
     "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551"
@@ -27600,6 +27671,6 @@
     "type": "source_only_unreachable_branch"
     "component": "SettingsCard"
     "file": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx"
-    "line": 179
-    "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL null-clear contract is now implemented and is recorded in SettingsCard variants; historical null-as-no-change evidence remains a baseline limitation."
-    "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:171-179 (UpstreamResponse fields), :1748 (base_url update gated on is_some)"
+    "line": 209
+    "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL clear contract is now implemented via explicit clear_base_url: true (omitted or null base_url preserves the override); the form captures the edit-time baseline so a mid-edit refetch cannot fabricate a clear, and an unconfirmed clear keeps the editor open with an error toast. Historical null-as-clear evidence remains a baseline limitation."
+    "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:169-179 (UpstreamResponse fields), :1203-1207 (clear_base_url maps to Some(None); base_url maps to Some(url))"

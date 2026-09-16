@@ -377,7 +377,7 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 
 ## 후속 승인·검증 overlay
 
-- 현재 source snapshot: 205 actions, 595 declared variant labels, 149 request occurrences. runtime entity·page·poll 곱의 완전한 분모는 여전히 미확정이다.
+- 이 overlay 작성 시 source snapshot: 205 actions, 595 declared variant labels, 149 request occurrences. 후속 안전성 수정의 현재 labels는 아래 별도 overlay에 기록한다. runtime entity·page·poll 곱의 완전한 분모는 여전히 미확정이다.
 - Native source mapping: 보존된 245행 중 정식 ID 244행, 근거가 확인된 Escape 취소 별칭 1행. 원래 실행·측정 상태는 바꾸지 않았다.
 - `post-hold-reassessment/independent-page-oracle-check.json`: 로컬 PostgreSQL 한 페이지 탐색에서 사전 기대와 실제 DOM을 별도 비교하고 원본 PNG·종료된 window·서버 연결을 확인했다. 과거 열린 window나 유실 자료를 복구한 것은 아니다.
 - `post-hold-usage-status/verification.json`: `UPSTREAM-004` 사용량 표시와 `UPSTREAM-006` 오류 상태의 새 격리 SQLite 기능·상태 전이 증거. 운영 coverage나 모든 timing 필드 완료를 뜻하지 않는다.
@@ -386,3 +386,12 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 - 마지막 검증 PR head는 `91cd5219bd9047d1339ff40e9aec11142867a36e`이며 11개 검사 성공, 조건부 1개 제외를 확인했다. PR #793은 draft이고 사용자 머지 보류가 유지된다. 이 값은 확인한 시점의 기록이며 자동으로 미래 head에 적용하지 않는다.
 - 후속 후보의 운영 활성화, 전체 운영 UI 행렬, 실제 비운영 OAuth 성공 경로, 순수 DB 실행·pool queue wait는 아직 충족되지 않았다. `runtime_complete=false`, `overall_pass=false`를 유지한다.
 - 사용자는 2026-09-16 비운영 OAuth 테스트 계정이 현재 없다고 확인했다. 실제 성공 경로는 차단 상태로 유지하며 운영 토큰·임의 계정·가짜 응답으로 대체하지 않는다. 이 답변으로 자격증명 접근이나 외부 호출이 승인된 것은 아니다.
+
+## 승인된 애플리케이션 안전성 수정 overlay
+
+- `application-safety/verification.json`과 `index.json`에 세 안전성 결함의 수정 전/후 자료를 연결했다. 과거 1,511개 관측 행·분류 계수·미해결 목록은 수정하거나 성공으로 다시 분류하지 않았다.
+- HTTP Base URL의 생략/null은 유지이며 명시적 `clear_base_url`만 초기화한다. 최종 브라우저에서 구 UI→새 서버의 무편집 저장 보존, 새 UI의 초기화, 새 UI→구 서버의 미확인 초기화 오류·편집 유지, Audit의 숨겨진 관리자 작업 표시를 확인했다. 원본 `base-url-clear`의 null 초기화는 이전 계약의 검증 이력이다.
+- 두 DB의 Audit 관리자 조건은 LIMIT 전에 적용되며 일반 API의 전체 기록 기본값은 유지된다. 최종 인덱스의 6개 조회 결과·generic plan·실제 migration runner와 읽기/쓰기 비용을 검증했다. 인덱스의 쓰기·WAL 비용 증가를 숨기지 않으며 큰 운영 PG에는 별도 승인된 온라인 사전 준비가 필요하다.
+- 현재 source는 205 actions / 597 declared variant labels / 149 request occurrences / 115 API endpoints / 433 inventory rows다. 실행 행렬 분모나 운영 완료율이 아니다.
+- 최종 로컬 검사는 Rust 112개, Web 706개, 타입 검사·빌드·영향 Rust Clippy·formatter·inventory check·표준 YAML 파싱이다. 이후 CI는 각 실제 PR head에 대해 별도로 확인하며 이 로컬 결과를 운영 전수 QA나 미래 head CI에 대신 쓰지 않는다.
+- 기존 머지 보류·운영 계측/배포 승인·OAuth 테스트 계정·전체 운영 행렬·순수 DB/queue wait 차단은 유지한다.

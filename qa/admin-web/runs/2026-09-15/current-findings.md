@@ -59,7 +59,7 @@
 - RT 수집 스크립트의 `/admin/v1` 전용 필터가 `/admin/usage`를 누락시킨 문제를 확인했다. 새 same-origin `/admin/` 관측에서 실제 UI 사용량 요청 3건을 각각 SQL 2개·acquire 2개에 연결했다. 과거 누락 구간을 새 측정값으로 채우지 않았다.
 - 이 결과는 두 로컬 변형의 기능·상태 전이 검증이며, 운영 전수 실행·순수 DB 시간·순수 pool wait·전체 QA PASS를 의미하지 않는다.
 
-## 9. 승인된 Base URL 초기화 수정
+## 9. 이전 Base URL 초기화 수정 — 후속 계약 변경은 §12 참조
 
 - update에서 필드 생략은 유지, URL은 설정, 명시적 null은 override 제거로 구현했다. create/response nullable 표현과 API 키·OAuth 토큰 처리는 유지했다.
 - 기존 HTTP 회귀는 수정 전 `String(previous_url) != Null`로 실패했다. 수정 후 SQLite·PostgreSQL conformance, signer 및 실제 Lifecycle→RecordingDispatcher 기본 목적지 검증을 포함한 33개 검사가 모두 통과했다.
@@ -77,6 +77,17 @@
 ## 11. 현재 보고와 과거 관측의 구분
 
 - `runtime-progress.json`과 `.md`는 2026-09-16 후속 overlay를 포함한다. 원래 정규화 1,511행·분류 계수·미해결 135항목은 과거 snapshot으로 보존하며 현재 남은 작업 수로 오인하지 않는다.
-- 최신 source에는 205 actions와 595 variant labels가 있다. label 수는 entity·page·poll을 전개한 실행 분모가 아니며 실행률 계산에 사용하지 않는다.
+- 앞선 보고 snapshot에는 205 actions와 595 variant labels가 있었다. 승인된 안전성 수정 후 현재 source는 205 actions와 597 labels다. label 수는 entity·page·poll을 전개한 실행 분모가 아니며 실행률 계산에 사용하지 않는다.
 - Base URL 초기화, file-provider Apply 비활성화, 두 로컬 usage/status 전이는 각각의 제한된 해결 범위를 갖는다. 전체 운영 행렬과 순수 DB/queue wait, 비운영 OAuth 성공 경로, 운영 계측 적용·머지는 여전히 미완료다.
 - 사용자가 비운영 OAuth 테스트 계정을 현재 제공할 수 없다고 확인했다. 실제 성공 경로만 외부 전제조건 차단으로 남기고, 이미 검증된 실패·취소·격리 기능 결과와 분리한다. 운영 토큰이나 임의 계정을 대신 사용하지 않는다.
+
+## 12. 승인된 애플리케이션 안전성 수정
+
+- head `19b05570` 재검증에서 실제 회귀를 발견했다. 구버전에서 열어둔 폼의 무편집 저장이 Base URL을 지웠고, 최신 비관리자 기록 250건 뒤의 관리자 작업은 Audit 화면에서 사라졌다. 변경된 범위별 Audit 정렬의 추가 스캔·정렬도 확인했다. 실패 자료는 `application-safety/before/`에 보존했다.
+- 사용자의 명시적 승인 후 HTTP `base_url` 생략/null을 유지로 되돌리고 `clear_base_url: true`만 초기화하도록 수정했다. UI는 편집 진입 시 기준값과 비교하고, 초기화 응답의 `base_url === null`이 확인되지 않으면 성공으로 표시하거나 폼을 닫지 않는다. 키·토큰 null 의미와 CAS는 유지한다.
+- 최종 바이너리 `f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8`로 두 버전 방향을 실제 브라우저에서 검증했다. 구 UI→새 서버의 무편집 저장은 URL/revision을 유지했고, 새 UI의 의도한 초기화는 DB NULL을 저장했다. 새 UI→구 서버의 무시된 초기화(PUT 200 한 건)는 오류·편집 유지로 표시되고 DB URL은 보존됐다.
+- Audit UI는 `admin_only=true`를 사용하고 양 DB는 관리자 대상 조건을 LIMIT 전에 적용한다. 일반 API 기본 조회는 비관리자 기록을 계속 반환한다. 실제 UI에서 기존의 빈 목록이 관리자 작업 1건으로 바뀌었다. 브라우저 ResourceTiming에서 query string을 직접 포착하지 못한 한계는 원본 관측에 남겼으며 요청별 성능 상관 증거로 대체하지 않는다.
+- 두 DB에 각각 5개의 정렬/부분 인덱스를 추가했다. 6개 조회 결과의 A/B/A 일치, SQLite 임시 정렬 제거, PG 강제 generic actor plan의 부분 인덱스 사용, 10만 합성 행의 실제 migration runner와 concurrent 사전 생성 경로를 확인했다.
+- 인덱스 쓰기 비용은 증가했다. `application-safety/after/index-tradeoff-summary.json`에 SQLite autocommit 삽입 및 PG DB 실행/WAL 증가와 측정 한계를 기록했다. 원시 seed의 PG token NULL은 실제 writer와 달라 HTTP 500을 만들었으므로 테스트 데이터만 token 0으로 고쳤다. 이 fixture 오류를 앱 오류로 분류하거나 decoder를 완화하지 않았다.
+- **운영 배포 조건:** 큰 운영 PG 테이블에서는 별도 승인된 온라인 사전 인덱스 생성과 정확한 정의·valid/ready 확인이 필요하다. plain startup 생성은 쓰기를 막으며 `lock_timeout`은 생성 시간을 제한하지 않는다. 운영 DDL·배포·머지는 수행하지 않았다.
+- 최종 Rust 회귀 112개, Web 706개, 타입 검사·빌드·영향 Rust all-targets/all-features Clippy 및 formatter가 통과했다. Source inventory 433행 검사도 통과했다. 두 독립 리뷰의 실제 수정 요구를 처리했고 원시 증거·정리 결과는 `application-safety/verification.json`과 `index.json`에 연결했다. 이는 세 승인 수정의 격리 검증이지 전체 운영 QA 완료가 아니다.

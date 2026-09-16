@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "source_commit": "ef70b347",
+  "source_commit": "19b05570",
   "source_state": {
     "kind": "approved_uncommitted_candidate",
-    "base_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
     "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
   },
   "response_observability": {
@@ -61,7 +61,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/routes.rs",
-      "sha256": "f6334eef2a574416b8228735b9ec5a513c1157b1f539078d4b37a2d62a29617b"
+      "sha256": "cd879a0c93c7680cb4f290388f42c073693940e850813011686082f7394932ed"
     },
     {
       "path": "crates/cc-lb-admin/src/scheduler.rs",
@@ -85,7 +85,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/v1/keys.rs",
-      "sha256": "146b33a801efb795c60eb5cc0e87912a1c0644c56f70a3a57f2f0fd0ce6eb36e"
+      "sha256": "400c2639eb5cb1baa30b0f93f450b0cb23e85bae37d8e3f06648b1c7ae22fc62"
     },
     {
       "path": "crates/cc-lb-admin/src/v1/oauth.rs",
@@ -125,7 +125,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/v1/upstreams.rs",
-      "sha256": "02051ceddfe34c2eab0eaf21964b8b6b6047bdb42ffac590cc3297cec9b79405"
+      "sha256": "6cbbe2930c93838f4aff3421580c7924974c8d41d91cb7f7bf0a69205bc75aff"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/api.ts",
@@ -137,7 +137,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/queries.ts",
-      "sha256": "f66a86d9738bce30d002aa2997ee796896f1e182db88fccd97e27a56ae5a1d56"
+      "sha256": "e485c94f9ab3258a2bdc3f0d95f390beb1c813306ff545ce7b1b329106f8937e"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts",
@@ -157,7 +157,7 @@
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
-      "sha256": "8d9d30e633dd1eca194667614c7edd6e70f6b0978df3b19eae84b31fcf873eec"
+      "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/cache_keepalive_session_reads.rs",
@@ -249,7 +249,7 @@
     },
     {
       "path": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
-      "sha256": "96c806a556378343b7c71618c378b26799e883650cad2b26e924731e1a040c13"
+      "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
     },
     {
       "path": "crates/cc-lb-storage-sqlite/src/adapter/cache_keepalive_session_reads.rs",
@@ -754,7 +754,7 @@
       "ui_clients": [
         "crates/cc-lb-admin/web/src/lib/queries.ts:730"
       ],
-      "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.",
+      "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.",
       "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")",
       "storage_operation_ids": [
         "sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit",
@@ -771,7 +771,8 @@
           "until",
           "limit",
           "actor_authority",
-          "actor_subject"
+          "actor_subject",
+          "admin_only"
         ],
         "header": [],
         "body": []
@@ -785,9 +786,9 @@
       "handler": "query_audit",
       "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
       "ui_clients": [
-        "backend-only: compatibility alias; built-in admin web calls /admin/audit."
+        "crates/cc-lb-admin/web/src/lib/queries.ts:730"
       ],
-      "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit, which applies the scope filter and since/until bounds before LIMIT. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.",
+      "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.",
       "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")",
       "storage_operation_ids": [
         "sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit",
@@ -804,7 +805,8 @@
           "until",
           "limit",
           "actor_authority",
-          "actor_subject"
+          "actor_subject",
+          "admin_only"
         ],
         "header": [],
         "body": []
@@ -1725,7 +1727,7 @@
       "handler": "get_registry_references",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
-        "crates/cc-lb-admin/web/src/lib/queries.ts:1427"
+        "crates/cc-lb-admin/web/src/lib/queries.ts:1428"
       ],
       "cache_or_no_query": "Reads registry entry and blob bytes, then queries principal-chain and upstream warmup-dialect references in a transaction.",
       "side_effects": "None",
@@ -2203,7 +2205,7 @@
       "ui_clients": [
         "crates/cc-lb-admin/web/src/lib/queries.ts:422"
       ],
-      "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.",
+      "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL.",
       "side_effects": "None",
       "storage_operation_ids": [
         "sqlite:UpstreamStore::list:SqliteStorage::list",
@@ -2229,7 +2231,7 @@
       "ui_clients": [
         "backend-only: single upstream read endpoint; built-in UI reads the upstream collection."
       ],
-      "cache_or_no_query": "Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.",
+      "cache_or_no_query": "Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:173,1602), so the field is present and null when the upstream has no custom base URL.",
       "side_effects": "None",
       "storage_operation_ids": [
         "sqlite:UpstreamStore::list:SqliteStorage::list",
@@ -2277,7 +2279,7 @@
       "handler": "super::upstream_warmup::get_upstream_warmup",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
-        "crates/cc-lb-admin/web/src/lib/queries.ts:1774"
+        "crates/cc-lb-admin/web/src/lib/queries.ts:1775"
       ],
       "cache_or_no_query": "Reads the upstream (including dialect_plugin), latest attempt, recent 10 attempts, and 7-day summary. The scheduler next-run query executes only when state.scheduler is attached; otherwise next_scheduled_at_unix_secs is null without scheduler SQL.",
       "side_effects": "None",
@@ -2310,7 +2312,7 @@
       "handler": "super::upstream_warmup::list_upstream_warmup_attempts",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
-        "crates/cc-lb-admin/web/src/lib/queries.ts:1798"
+        "crates/cc-lb-admin/web/src/lib/queries.ts:1799"
       ],
       "cache_or_no_query": "Cursor-based pagination (?before=cursor) and status filtering (?outcome/status)",
       "side_effects": "None",
@@ -2344,9 +2346,9 @@
       "source": {
         "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
         "symbol": "PostgresStorage::append_audit",
-        "line_start": 48,
-        "line_end": 86,
-        "sha256": "8d9d30e633dd1eca194667614c7edd6e70f6b0978df3b19eae84b31fcf873eec"
+        "line_start": 46,
+        "line_end": 84,
+        "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
       },
       "statements": [
         {
@@ -2355,33 +2357,33 @@
           "source": {
             "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
             "symbol": "PostgresStorage::append_audit",
-            "line_start": 52,
-            "line_end": 83
+            "line_start": 50,
+            "line_end": 81
           },
           "branches": [],
           "bind_parameters": [
-            "54: .bind(unix_secs_to_datetime(entry.ts, \"audit ts\")?)",
-            "55: .bind(&entry.request_id)",
-            "56: .bind(&entry.principal_id)",
-            "57: .bind(&entry.route)",
-            "58: .bind(&entry.upstream)",
-            "59: .bind(entry.model.as_deref())",
-            "60: .bind(i32::from(entry.status))",
-            "61: .bind(u64_to_i64(entry.input_tokens.unwrap_or(0), \"audit input_tokens\")?)",
-            "62: .bind(u64_to_i64(entry.output_tokens.unwrap_or(0), \"audit output_tokens\")?)",
-            "63: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)",
-            "64: .bind(entry.agent_label.as_deref())",
-            "65: .bind(entry.api_key_id.as_deref())",
-            "66: .bind(",
-            "72: .bind(entry.limit_violation.as_deref())",
-            "73: .bind(entry.admin_action.as_deref())",
-            "74: .bind(entry.actor.as_deref())",
-            "75: .bind(entry.actor_authority.as_deref())",
-            "76: .bind(entry.actor_subject.as_deref())",
-            "77: .bind(entry.actor_kind.as_deref())",
-            "78: .bind(entry.actor_email.as_deref())",
-            "79: .bind(entry.kind.as_deref())",
-            "80: .bind(payload)"
+            "52: .bind(unix_secs_to_datetime(entry.ts, \"audit ts\")?)",
+            "53: .bind(&entry.request_id)",
+            "54: .bind(&entry.principal_id)",
+            "55: .bind(&entry.route)",
+            "56: .bind(&entry.upstream)",
+            "57: .bind(entry.model.as_deref())",
+            "58: .bind(i32::from(entry.status))",
+            "59: .bind(u64_to_i64(entry.input_tokens.unwrap_or(0), \"audit input_tokens\")?)",
+            "60: .bind(u64_to_i64(entry.output_tokens.unwrap_or(0), \"audit output_tokens\")?)",
+            "61: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)",
+            "62: .bind(entry.agent_label.as_deref())",
+            "63: .bind(entry.api_key_id.as_deref())",
+            "64: .bind(",
+            "70: .bind(entry.limit_violation.as_deref())",
+            "71: .bind(entry.admin_action.as_deref())",
+            "72: .bind(entry.actor.as_deref())",
+            "73: .bind(entry.actor_authority.as_deref())",
+            "74: .bind(entry.actor_subject.as_deref())",
+            "75: .bind(entry.actor_kind.as_deref())",
+            "76: .bind(entry.actor_email.as_deref())",
+            "77: .bind(entry.kind.as_deref())",
+            "78: .bind(payload)"
           ]
         }
       ]
@@ -2393,9 +2395,9 @@
       "source": {
         "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
         "symbol": "PostgresStorage::query_audit",
-        "line_start": 136,
-        "line_end": 163,
-        "sha256": "8d9d30e633dd1eca194667614c7edd6e70f6b0978df3b19eae84b31fcf873eec"
+        "line_start": 134,
+        "line_end": 161,
+        "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
       },
       "statements": [
         {
@@ -2404,15 +2406,15 @@
           "source": {
             "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
             "symbol": "query_audit",
-            "line_start": 152,
-            "line_end": 152
+            "line_start": 150,
+            "line_end": 150
           },
           "branches": [],
           "bind_parameters": [
-            "154: .bind(since)",
-            "155: .bind(until)",
-            "156: .bind(principal_id)",
-            "157: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
+            "152: .bind(since)",
+            "153: .bind(until)",
+            "154: .bind(principal_id)",
+            "155: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
           ]
         }
       ]
@@ -2424,9 +2426,9 @@
       "source": {
         "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
         "symbol": "PostgresStorage::query_audit_by_actor",
-        "line_start": 165,
-        "line_end": 194,
-        "sha256": "8d9d30e633dd1eca194667614c7edd6e70f6b0978df3b19eae84b31fcf873eec"
+        "line_start": 163,
+        "line_end": 192,
+        "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
       },
       "statements": [
         {
@@ -2435,16 +2437,16 @@
           "source": {
             "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
             "symbol": "query_audit_by_actor",
-            "line_start": 182,
-            "line_end": 182
+            "line_start": 180,
+            "line_end": 180
           },
           "branches": [],
           "bind_parameters": [
-            "184: .bind(since)",
-            "185: .bind(until)",
-            "186: .bind(authority)",
-            "187: .bind(subject)",
-            "188: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
+            "182: .bind(since)",
+            "183: .bind(until)",
+            "184: .bind(authority)",
+            "185: .bind(subject)",
+            "186: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
           ]
         }
       ]
@@ -2456,60 +2458,114 @@
       "source": {
         "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
         "symbol": "PostgresStorage::query_recent_audit",
-        "line_start": 196,
-        "line_end": 244,
-        "sha256": "8d9d30e633dd1eca194667614c7edd6e70f6b0978df3b19eae84b31fcf873eec"
+        "line_start": 194,
+        "line_end": 246,
+        "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
       },
       "statements": [
         {
-          "kind": "literal",
-          "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) ORDER BY ts DESC, seq DESC LIMIT $3",
+          "kind": "builder",
           "source": {
             "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
-            "symbol": "QUERY_RECENT_AUDIT_ALL",
-            "line_start": 17,
-            "line_end": 17
+            "symbol": "PostgresStorage::query_recent_audit",
+            "line_start": 211,
+            "line_end": 243
           },
-          "branches": [],
+          "branches": [
+            {
+              "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ",
+              "source": {
+                "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+                "symbol": "RECENT_AUDIT_SELECT",
+                "line_start": 17,
+                "line_end": 17
+              }
+            },
+            {
+              "text": " AND (",
+              "source": {
+                "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 214,
+                "line_end": 214
+              }
+            },
+            {
+              "text": "::timestamptz IS NULL OR ts <= ",
+              "source": {
+                "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 216,
+                "line_end": 216
+              }
+            },
+            {
+              "text": ")",
+              "source": {
+                "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 218,
+                "line_end": 218
+              }
+            },
+            {
+              "text": " AND principal_id = ",
+              "condition": "scope == AuditQueryScope::Principal",
+              "source": {
+                "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 222,
+                "line_end": 222
+              }
+            },
+            {
+              "text": " AND actor_authority = ",
+              "condition": "scope == AuditQueryScope::Actor",
+              "source": {
+                "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 226,
+                "line_end": 226
+              }
+            },
+            {
+              "text": " AND actor_subject = ",
+              "condition": "scope == AuditQueryScope::Actor",
+              "source": {
+                "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 228,
+                "line_end": 228
+              }
+            },
+            {
+              "text": " AND (admin_action IS NOT NULL OR kind IS NOT NULL)",
+              "condition": "admin_only == true; literal predicate applied before ORDER BY/LIMIT",
+              "source": {
+                "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 233,
+                "line_end": 233
+              }
+            },
+            {
+              "text": " ORDER BY ts DESC, seq DESC LIMIT ",
+              "source": {
+                "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 236,
+                "line_end": 236
+              }
+            }
+          ],
           "bind_parameters": [
-            "215: .bind(since)",
-            "216: .bind(until)",
-            "217: .bind(limit)"
-          ]
-        },
-        {
-          "kind": "literal",
-          "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND principal_id = $3 ORDER BY ts DESC, seq DESC LIMIT $4",
-          "source": {
-            "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
-            "symbol": "QUERY_RECENT_AUDIT_PRINCIPAL",
-            "line_start": 18,
-            "line_end": 18
-          },
-          "branches": [],
-          "bind_parameters": [
-            "223: .bind(since)",
-            "224: .bind(until)",
-            "225: .bind(principal_id)",
-            "226: .bind(limit)"
-          ]
-        },
-        {
-          "kind": "literal",
-          "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND actor_authority = $3 AND actor_subject = $4 ORDER BY ts DESC, seq DESC LIMIT $5",
-          "source": {
-            "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
-            "symbol": "QUERY_RECENT_AUDIT_ACTOR",
-            "line_start": 19,
-            "line_end": 19
-          },
-          "branches": [],
-          "bind_parameters": [
-            "232: .bind(since)",
-            "233: .bind(until)",
-            "234: .bind(authority)",
-            "235: .bind(subject)",
-            "236: .bind(limit)"
+            "213: .push_bind(since)",
+            "215: .push_bind(until)",
+            "217: .push_bind(until) — bound twice: NULL check and upper bound",
+            "222: .push_bind(principal_id) — AuditQueryScope::Principal only",
+            "227: .push_bind(authority) — AuditQueryScope::Actor only",
+            "229: .push_bind(subject) — AuditQueryScope::Actor only",
+            "237: .push_bind(limit)"
           ]
         }
       ]
@@ -4976,7 +5032,7 @@
         "symbol": "SqliteStorage::append_audit",
         "line_start": 12,
         "line_end": 14,
-        "sha256": "96c806a556378343b7c71618c378b26799e883650cad2b26e924731e1a040c13"
+        "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
       },
       "statements": [
         {
@@ -4985,33 +5041,33 @@
           "source": {
             "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
             "symbol": "insert_audit_entry",
-            "line_start": 219,
-            "line_end": 257
+            "line_start": 200,
+            "line_end": 238
           },
           "branches": [],
           "bind_parameters": [
-            "227: .bind(u64_to_i64(entry.ts, \"audit ts\")?)",
-            "228: .bind(&entry.request_id)",
-            "229: .bind(&entry.principal_id)",
-            "230: .bind(&entry.route)",
-            "231: .bind(&entry.upstream)",
-            "232: .bind(entry.model.as_deref())",
-            "233: .bind(i64::from(entry.status))",
-            "234: .bind(option_u64_to_i64(entry.input_tokens, \"audit input_tokens\")?)",
-            "235: .bind(option_u64_to_i64(",
-            "239: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)",
-            "240: .bind(entry.agent_label.as_deref())",
-            "241: .bind(entry.api_key_id.as_deref())",
-            "242: .bind(option_u64_to_i64(",
-            "246: .bind(entry.limit_violation.as_deref())",
-            "247: .bind(entry.admin_action.as_deref())",
-            "248: .bind(entry.actor.as_deref())",
-            "249: .bind(entry.actor_authority.as_deref())",
-            "250: .bind(entry.actor_subject.as_deref())",
-            "251: .bind(entry.actor_kind.as_deref())",
-            "252: .bind(entry.actor_email.as_deref())",
-            "253: .bind(entry.kind.as_deref())",
-            "254: .bind(payload.as_deref())"
+            "208: .bind(u64_to_i64(entry.ts, \"audit ts\")?)",
+            "209: .bind(&entry.request_id)",
+            "210: .bind(&entry.principal_id)",
+            "211: .bind(&entry.route)",
+            "212: .bind(&entry.upstream)",
+            "213: .bind(entry.model.as_deref())",
+            "214: .bind(i64::from(entry.status))",
+            "215: .bind(option_u64_to_i64(entry.input_tokens, \"audit input_tokens\")?)",
+            "216: .bind(option_u64_to_i64(",
+            "220: .bind(u64_to_i64(entry.duration_ms, \"audit duration_ms\")?)",
+            "221: .bind(entry.agent_label.as_deref())",
+            "222: .bind(entry.api_key_id.as_deref())",
+            "223: .bind(option_u64_to_i64(",
+            "227: .bind(entry.limit_violation.as_deref())",
+            "228: .bind(entry.admin_action.as_deref())",
+            "229: .bind(entry.actor.as_deref())",
+            "230: .bind(entry.actor_authority.as_deref())",
+            "231: .bind(entry.actor_subject.as_deref())",
+            "232: .bind(entry.actor_kind.as_deref())",
+            "233: .bind(entry.actor_email.as_deref())",
+            "234: .bind(entry.kind.as_deref())",
+            "235: .bind(payload.as_deref())"
           ]
         }
       ]
@@ -5025,7 +5081,7 @@
         "symbol": "SqliteStorage::query_audit",
         "line_start": 29,
         "line_end": 59,
-        "sha256": "96c806a556378343b7c71618c378b26799e883650cad2b26e924731e1a040c13"
+        "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
       },
       "statements": [
         {
@@ -5057,7 +5113,7 @@
         "symbol": "SqliteStorage::query_audit_by_actor",
         "line_start": 61,
         "line_end": 92,
-        "sha256": "96c806a556378343b7c71618c378b26799e883650cad2b26e924731e1a040c13"
+        "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
       },
       "statements": [
         {
@@ -5088,59 +5144,94 @@
         "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
         "symbol": "SqliteStorage::query_recent_audit",
         "line_start": 94,
-        "line_end": 165,
-        "sha256": "96c806a556378343b7c71618c378b26799e883650cad2b26e924731e1a040c13"
+        "line_end": 146,
+        "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
       },
       "statements": [
         {
-          "kind": "literal",
-          "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ? AND ts <= ? ORDER BY ts DESC, id DESC LIMIT ?",
+          "kind": "builder",
           "source": {
             "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
-            "symbol": "query_recent_audit",
-            "line_start": 111,
-            "line_end": 117
+            "symbol": "SqliteStorage::query_recent_audit",
+            "line_start": 110,
+            "line_end": 143
           },
-          "branches": [],
+          "branches": [
+            {
+              "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ",
+              "source": {
+                "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 111,
+                "line_end": 116
+              }
+            },
+            {
+              "text": " AND ts <= ",
+              "source": {
+                "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 118,
+                "line_end": 118
+              }
+            },
+            {
+              "text": " AND principal_id = ",
+              "condition": "scope == AuditQueryScope::Principal",
+              "source": {
+                "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 122,
+                "line_end": 122
+              }
+            },
+            {
+              "text": " AND actor_authority = ",
+              "condition": "scope == AuditQueryScope::Actor",
+              "source": {
+                "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 126,
+                "line_end": 126
+              }
+            },
+            {
+              "text": " AND actor_subject = ",
+              "condition": "scope == AuditQueryScope::Actor",
+              "source": {
+                "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 128,
+                "line_end": 128
+              }
+            },
+            {
+              "text": " AND (admin_action IS NOT NULL OR kind IS NOT NULL)",
+              "condition": "admin_only == true; literal predicate applied before ORDER BY/LIMIT",
+              "source": {
+                "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 133,
+                "line_end": 133
+              }
+            },
+            {
+              "text": " ORDER BY ts DESC, id DESC LIMIT ",
+              "source": {
+                "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+                "symbol": "query_recent_audit",
+                "line_start": 136,
+                "line_end": 136
+              }
+            }
+          ],
           "bind_parameters": [
-            "119: .bind(since)",
-            "120: .bind(until)",
-            "121: .bind(limit)"
-          ]
-        },
-        {
-          "kind": "literal",
-          "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ? AND ts <= ? AND principal_id = ? ORDER BY ts DESC, id DESC LIMIT ?",
-          "source": {
-            "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
-            "symbol": "query_recent_audit",
-            "line_start": 127,
-            "line_end": 133
-          },
-          "branches": [],
-          "bind_parameters": [
-            "135: .bind(since)",
-            "136: .bind(until)",
-            "137: .bind(principal_id)",
-            "138: .bind(limit)"
-          ]
-        },
-        {
-          "kind": "literal",
-          "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ? AND ts <= ? AND actor_authority = ? AND actor_subject = ? ORDER BY ts DESC, id DESC LIMIT ?",
-          "source": {
-            "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
-            "symbol": "query_recent_audit",
-            "line_start": 144,
-            "line_end": 151
-          },
-          "branches": [],
-          "bind_parameters": [
-            "153: .bind(since)",
-            "154: .bind(until)",
-            "155: .bind(authority)",
-            "156: .bind(subject)",
-            "157: .bind(limit)"
+            "118: .push_bind(since)",
+            "118: .push_bind(until)",
+            "122: .push_bind(principal_id) — AuditQueryScope::Principal only",
+            "127: .push_bind(authority) — AuditQueryScope::Actor only",
+            "129: .push_bind(subject) — AuditQueryScope::Actor only",
+            "137: .push_bind(limit)"
           ]
         }
       ]

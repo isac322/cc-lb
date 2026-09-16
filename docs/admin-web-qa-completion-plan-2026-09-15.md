@@ -85,7 +85,7 @@
 
 ## 5. 상세 TODO와 완료 조건
 
-체크박스는 실행 증거가 있을 때만 갱신한다. TODO 도구와 아래 76개 항목의 이름을 동일하게 유지한다. 발견된 추가 의무는 원래 항목을 지우지 않고 새 ID로 추가한다.
+체크박스는 실행 증거가 있을 때만 갱신한다. TODO 도구와 아래 86개 항목의 이름을 동일하게 유지한다. 발견된 추가 의무는 원래 항목을 지우지 않고 새 ID로 추가한다.
 
 ### 문서와 기준선
 
@@ -296,6 +296,36 @@
   - API·UI 계약과 정확한 source 참조를 갱신하고 영향 게이트 및 독립 리뷰를 수행한다. 새 head CI를 확인하되 기존 머지 보류를 해제하거나 운영에 적용하지 않는다.
   - 커밋 `91cd5219bd9047d1339ff40e9aec11142867a36e`를 draft PR #793에 반영했다. 해당 head의 Rust·Web·publish-check 및 상태 검사 11개 성공, release-artifact 조건부 제외 1개를 확인했다. 기존 지원 모드의 응답 revision·요청 CAS·이력 생성 제한은 별도 미검증 사항으로 남겼으며 머지·운영 반영은 하지 않았다.
 
+### 애플리케이션 안전성 재검증
+
+- [x] SAFETY-01 앱 변경을 목적별로 분류하고 영향 범위 확정
+  - head `19b05570`의 소스 파일 27개 중 2개는 cfg(test) 내부 변경이고 25개는 런타임 변경이다. QA 도구와 의도한 기능 수정·관측 변경을 구분했다.
+- [x] SAFETY-02 독립 리뷰로 의도하지 않은 동작 변경 점검
+  - 계측·백엔드/저장소·프런트엔드를 독립 검토했다. 근거가 부족했던 Plugins 이중 삭제 추정은 알림/탐색 순서를 대조한 뒤 철회했다.
+- [x] SAFETY-03 누락된 동작 비교를 실행하고 안전성 근거 보고
+  - 현재 head 빌드로 Rust 104개·웹 53개 검사, SQLite/PG HTTP 22쌍(44요청), 성공한 합성 키 등록의 로그 비노출 검사를 수행했다. Audit 빈 화면과 구버전에서 열린 Base URL 폼의 변경 없는 저장에 의한 DB NULL을 실제 브라우저로 재현했다. Audit 범위별 추가 정렬/스캔을 두 DB의 실행 계획으로 확인했다. 운영 영향 없음.
+- [x] SAFETY-04 수정 승인 후 앱 회귀 세 항목 재검증
+  - 2026-09-16 사용자가 아래 세 수정 범위를 명시적으로 승인했다. 기존 CI/리뷰 완료 체크는 당시 검사 이력이며 새로 발견된 안전성 결함의 해결을 뜻하지 않는다.
+
+### 승인된 앱 안전성 수정
+
+- [x] SAFETYFIX-01 Base URL 명시적 초기화 계약과 폼 수정
+  - HTTP의 생략·null은 유지, URL은 설정, `clear_base_url: true`만 초기화로 구분한다. URL과 초기화가 동시에 전달되면 변경 전에 거절한다. 기존 BASEURL-01~06의 null 초기화는 과거 검증 이력으로 보존하고 현재 계약은 이 항목으로 대체한다. 자격증명 의미와 revision 보호를 유지한다.
+- [x] SAFETYFIX-02 Audit 관리자 필터를 조회 제한 전에 적용
+  - API 기본값은 전체 기록을 유지하고 UI는 `admin_only=true`를 명시한다. 양 DB에서 관리자 대상 조건을 LIMIT 전에 적용하며 principal/actor/time 범위와 최신 순서를 유지한다.
+- [x] SAFETYFIX-03 Audit 정렬 인덱스와 쓰기 비용 검증
+  - 새 SQLite/PG 마이그레이션으로 실제 필터·정렬을 지원한다. 기존 마이그레이션을 고치거나 운영 DB에 실행하지 않는다. 조회 계획과 추가 쓰기 비용을 격리 데이터로 검증한다.
+  - 최종 인덱스는 두 DB 각각 5개이며 actor 정렬 인덱스는 `actor_authority IS NOT NULL` 부분 인덱스다. 6개 조회 형태의 A/B/A 결과가 같았고 SQLite 임시 정렬 제거와 PostgreSQL generic actor plan의 부분 인덱스 사용을 확인했다. 10만 합성 행의 실제 앱 migration runner에서 직접 생성 및 별도 concurrent 사전 생성 경로 모두 성공하고 행 수·정의·valid/ready 상태가 보존됐다.
+  - 쓰기 비용은 0이 아니다. 합성 데이터의 SQLite 2천 autocommit 삽입은 평균 기준 대비 비관리자 약 33%, 관리자 약 126% 증가했다. 실제 writer처럼 token 0을 저장한 PostgreSQL 1만 행 INSERT의 DB 실행 시간은 약 73%·151%, WAL은 약 27%·116% 증가했다. PG 값은 commit/client/pool 시간을 제외한 실행·WAL 수치이며 운영 지연·처리량으로 외삽하지 않는다. token NULL을 넣었던 초기 SQL 전용 fixture 비용은 최종 비용 근거로 사용하지 않는다.
+- [x] SAFETYFIX-04 공용 API 타입과 모든 소비자 통합
+  - 새 초기화 필드와 Audit 조회 옵션의 타입·호출부·mock·카탈로그를 함께 이관한다. 과거 실행 증거는 현재 계약으로 덮어쓰지 않는다.
+- [x] SAFETYFIX-05 기존 실패 재현과 양 DB 회귀 검증
+  - 구버전에서 열린 폼을 유지한 배포 전환 후 무편집 저장, 현재 UI의 명시적 초기화, 429 기록 뒤의 관리자 작업 조회, 양 DB 결과/정렬/쓰기 비용, 권한·CAS·자격증명 보존을 확인한다.
+  - 최종 바이너리 `f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8`에서 old UI→new backend 무편집 저장은 URL/revision을 그대로 유지했고, current UI의 의도적 초기화는 DB NULL을 저장했다. new UI→old backend에서 무시된 초기화(PUT 200 한 건)는 오류·편집 유지로 표시되며 성공을 가장하지 않았다. Audit의 숨겨졌던 관리자 작업은 실제 UI에 표시됐다.
+  - Rust 112개·Web 706개·타입 검사·빌드·영향 target Clippy 및 formatter를 확인했다. 실제 PG HTTP에서도 보존/명시적 초기화/400 충돌/409 CAS/복원 및 두 Audit 모드를 확인했다. 표준 YAML 파싱과 inventory 생성·check는 433행으로 통과했다. 원시 증거의 한계와 초기 PG fixture 오류(token NULL)를 별도 기록했다.
+- [ ] SAFETYFIX-06 독립 리뷰와 안전성 보고 및 PR 갱신
+  - 세 결함의 수정과 재검증을 독립 리뷰한다. 필요한 저장소 게이트와 새 head CI를 확인하되 머지·운영 배포·운영 DB 변경은 하지 않는다.
+
 ## 6. 진행 및 증거 기록
 
 | 시점 | 항목 | 실제 수행/증거 | 남은 조건 |
@@ -345,6 +375,8 @@
 | 추가 다섯 앱 오류 수정 | FIX-01~05: 중복 이름 저장/Base URL/선택 라벨/Router revision/Plugins 삭제·GC 표시 | 사용자 다중 선택으로 다섯 항목 모두 승인 | 해당 UI/API/양 DB/회귀 범위만 수정. 별도 계측·Settings Apply·배포·머지 미승인 |
 | Server-Timing ID 전달 | `app.rs`에서 기존 x-request-id와 동일한 ID만 rid.description으로 전달하고 QA 수집기에 연결 | 사용자 `격리 환경 추가 승인` 선택 | 새 시간값·본문·credential 노출 없음. 운영 설정·배포는 별도 승인 |
 | Base URL 명시적 null 제거 | Upstream update의 생략/명시적 null/URL을 삼상태로 구분하고 양 DB·기존 호출부·UI·프록시 목적지 검증 | 2026-09-16 사용자 `명시적 null로 제거 승인` 선택 | 격리 구현·검증 완료. 키·토큰 null 계약과 운영 데이터·머지 보류는 유지 |
+| 앱 안전성 세 항목 수정 | 명시적 `clear_base_url`, LIMIT 전 `admin_only`, Audit 필터·정렬 인덱스와 읽기/쓰기 검증 | 2026-09-16 사용자 `세 문제 수정 승인` 선택 | 이 범위의 앱/API/새 migration 및 격리 검증만 승인. 기존 null 초기화 HTTP 계약을 대체. 머지·운영 배포·운영 DB 실행은 미승인 |
+| 대용량 운영 PG 인덱스 준비 | 운영 배포 전 동일한 5개 인덱스를 별도 승인된 온라인 작업으로 생성하고 정의·valid/ready 확인 | 미승인 | 직접 startup 생성은 쓰기를 막을 수 있으므로 사전 준비와 승인 전 배포 차단. 격리 리허설만 수행 |
 
 문서의 TODO가 모두 체크되고, 실제 증거의 필수 항목이 모두 충족되고, 승인 필요한 작업까지 완료되기 전에는 goal을 완료 처리하지 않는다.
 
@@ -359,3 +391,11 @@
 - SQLx의 `acquired_after_secs`는 세마포어 대기 외에 ping·연결 생성·인증·hook·재시도 등을 포함하는 **acquire 전체 시간**이다. 순수 `pool_wait_ms`를 분리하는 기본 hook은 확인되지 않았다. acquire 값을 pool wait에 복사하지 않는다.
 - 위 HTTP span과 pool 옵션은 격리 구현·검증만 승인되었다. 실제 운영 로그 필터와 배포는 별도 사용자 승인 전에는 실행하지 않는다. 격리 요청에서 상관 ID·driver 시간·acquire 시간·비밀 비노출을 먼저 증명해야 하며, 순수 DB 실행과 pool wait가 여전히 없으면 해당 필드는 계속 차단 상태다.
 - 계측 CPU·메모리·로그량 비용은 아직 측정하지 않았다. 무시할 수 있는 비용이라고 가정하거나 전체 요청의 귀속이 이미 증명됐다고 보고하지 않는다.
+
+### 7.2 Audit 인덱스의 운영 배포 조건
+
+PostgreSQL의 plain `CREATE INDEX`는 생성하는 동안 해당 테이블의 쓰기를 막는다. 새 migration의 `lock_timeout = '1s'`는 잠금 획득 대기만 제한하며 생성 중 잠금 보유 시간을 제한하지 않는다. statement timeout도 성공이나 무중단을 보장하지 않는다.
+
+따라서 대용량 운영 `audit_log_v1`에서는 새 앱 배포보다 먼저, 별도로 승인받은 작업에서 새 migration과 동일한 인덱스 이름·키 순서·조건으로 `CREATE INDEX CONCURRENTLY`를 한 문장씩 transaction 밖에서 실행해야 한다. 앱 migration 경로 안에서 concurrent 생성을 실행하거나 timeout을 해제하지 않는다. 생성 후 대상 테이블, 전체 정의, `indisvalid`, `indisready`를 확인한다. 이름만 같은 잘못된/invalid 인덱스는 `IF NOT EXISTS`만으로 검증되지 않는다.
+
+올바른 사전 생성이 확인되면 앱의 새 migration은 인덱스 생성을 건너뛴다. 이 경로도 짧은 잠금과 migration 기록 작업까지 없어진다는 뜻은 아니다. 격리 10만 행 리허설은 운영 무중단 증명이나 운영 DDL 승인으로 간주하지 않는다. SQLite 검증은 별도 writer가 없는 격리 startup에서 수행했으며 인덱스 생성이 다른 writer에 영향을 주지 않는다고 주장하지 않는다.
