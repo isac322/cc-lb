@@ -575,9 +575,18 @@ test('settings cold load reserves version, editor, and history heights without a
 
   const versionCard = screen.getByTestId('version-card');
   expect(versionCard.querySelectorAll('.skeleton')).toHaveLength(5);
-  expect(screen.getByTestId('config-editor-metadata').className).toContain(
-    'min-h-12',
-  );
+  // The compact status zone sits above the editor card and reserves the
+  // metadata strip height while loading.
+  const statusZone = screen.getByTestId('config-status-zone');
+  const editorCard = screen.getByTestId('config-editor-card');
+  expect(
+    (statusZone.compareDocumentPosition(editorCard) &
+      Node.DOCUMENT_POSITION_FOLLOWING) !==
+      0,
+  ).toBe(true);
+  expect(
+    within(statusZone).getByTestId('config-editor-metadata').className,
+  ).toContain('min-h-12');
 
   const editorSkeleton = screen.getByTestId('config-editor-skeleton');
   expect(editorSkeleton.className).toMatch(/min-h-/);
@@ -658,7 +667,7 @@ test('category navigation landmark lists seven categories and renders only the s
     const meta = CONFIG_EDITOR_CATEGORIES[index];
     expect(item.textContent).toContain(meta?.label);
     // The full description stays accessible as sr-only text on the button;
-    // the visible copy lives in the active panel header.
+    // the visible copy lives once in the editor card header.
     const description = item.querySelector('.sr-only');
     expect(description?.textContent).toBe(meta?.description);
     expect(item.getAttribute('role')).toBeNull();
@@ -670,18 +679,34 @@ test('category navigation landmark lists seven categories and renders only the s
   });
   expect(network.getAttribute('aria-current')).toBe('page');
 
-  // The active panel is a labelled region: its h3 names it and the category
-  // description sits under the heading.
+  // The editor card header owns the active category: its h3 names the panel
+  // (via aria-labelledby) and the description sits under it exactly once —
+  // the panel itself repeats no heading or description.
+  const editorCard = screen.getByTestId('config-editor-card');
   const panel = screen.getByRole('region', { name: 'Network & requests' });
+  expect(editorCard.contains(nav)).toBe(true);
   expect(
-    within(panel).getByRole('heading', {
-      level: 3,
-      name: 'Network & requests',
-    }),
-  ).toBeDefined();
-  expect(panel.textContent).toContain(
+    (nav.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING) !==
+      0,
+  ).toBe(true);
+  const heading = within(editorCard).getByRole('heading', {
+    level: 3,
+    name: 'Network & requests',
+  });
+  const labelTarget = document.getElementById(
+    panel.getAttribute('aria-labelledby') ?? '',
+  );
+  expect(labelTarget).not.toBeNull();
+  expect(heading.contains(labelTarget)).toBe(true);
+  expect(within(panel).queryByRole('heading', { level: 3 })).toBeNull();
+  expect(panel.textContent).not.toContain(
     'Listeners, request bodies, and request deadlines.',
   );
+  const visibleDescriptions = screen
+    .getAllByText('Listeners, request bodies, and request deadlines.')
+    .filter((element) => element.closest('.sr-only') === null);
+  expect(visibleDescriptions).toHaveLength(1);
+  expect(editorCard.contains(visibleDescriptions[0] as Node)).toBe(true);
   expect(
     within(panel).getByRole('textbox', { name: 'Proxy Addr' }),
   ).toBeDefined();
@@ -724,12 +749,14 @@ test('category navigation landmark lists seven categories and renders only the s
   const runtimePanel = screen.getByRole('region', {
     name: 'Runtime & observability',
   });
-  expect(
-    within(runtimePanel).getByRole('heading', {
-      level: 3,
-      name: 'Runtime & observability',
-    }),
-  ).toBeDefined();
+  const runtimeHeading = within(
+    screen.getByTestId('config-editor-card'),
+  ).getByRole('heading', { level: 3, name: 'Runtime & observability' });
+  const runtimeLabelTarget = document.getElementById(
+    runtimePanel.getAttribute('aria-labelledby') ?? '',
+  );
+  expect(runtimeHeading.contains(runtimeLabelTarget)).toBe(true);
+  expect(within(runtimePanel).queryByRole('heading', { level: 3 })).toBeNull();
   expect(screen.queryByLabelText('Proxy Addr')).toBeNull();
   expect(screen.getByLabelText('Tracing Level')).toBeDefined();
 });
@@ -792,12 +819,17 @@ test('one inline category grid serves every viewport — no drawer or select', (
   expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
   view.rerender(<SettingsComponent />);
 
+  const schedulingPanel = screen.getByRole('region', { name: 'Scheduling' });
+  const schedulingHeading = within(
+    screen.getByTestId('config-editor-card'),
+  ).getByRole('heading', { level: 3, name: 'Scheduling' });
+  const schedulingLabelTarget = document.getElementById(
+    schedulingPanel.getAttribute('aria-labelledby') ?? '',
+  );
+  expect(schedulingHeading.contains(schedulingLabelTarget)).toBe(true);
   expect(
-    within(screen.getByRole('region', { name: 'Scheduling' })).getByRole(
-      'heading',
-      { level: 3, name: 'Scheduling' },
-    ),
-  ).toBeDefined();
+    within(schedulingPanel).queryByRole('heading', { level: 3 }),
+  ).toBeNull();
   expect(screen.queryByLabelText('Proxy Addr')).toBeNull();
   expect(screen.getByText('custom_job')).toBeDefined();
 });
@@ -806,18 +838,23 @@ test('sections stay flat on the category canvas and keep advanced fields behind 
   setSettingsLoaded();
   const view = render(<SettingsComponent />);
 
-  // The category heading owns the panel; flat sections sit one level below.
+  // The card header owns the single category h3; flat sections sit one level
+  // below inside the panel, which carries no heading of its own.
   const networkPanel = screen.getByRole('region', {
     name: 'Network & requests',
   });
+  const networkHeading = within(
+    screen.getByTestId('config-editor-card'),
+  ).getByRole('heading', { level: 3, name: 'Network & requests' });
+  const networkLabelTarget = document.getElementById(
+    networkPanel.getAttribute('aria-labelledby') ?? '',
+  );
+  expect(networkHeading.contains(networkLabelTarget)).toBe(true);
+  expect(within(networkPanel).queryByRole('heading', { level: 3 })).toBeNull();
   expect(
-    within(networkPanel).getByRole('heading', {
+    within(screen.getByTestId('config-editor-card')).getAllByRole('heading', {
       level: 3,
-      name: 'Network & requests',
     }),
-  ).toBeDefined();
-  expect(
-    within(networkPanel).getAllByRole('heading', { level: 3 }),
   ).toHaveLength(1);
   for (const heading of [
     'Listener endpoints',
@@ -949,9 +986,13 @@ test('history load failures stay distinct from empty history and offer retry', (
   render(<SettingsComponent />);
 
   expect(screen.queryByText('No saved config history available.')).toBeNull();
-  expect(screen.getByText('Restart status may be incomplete')).toBeDefined();
+  // The history failure is an abnormal alert inside the status zone.
+  const zone = screen.getByTestId('config-status-zone');
   expect(
-    screen.getByText(
+    within(zone).getByText('Restart status may be incomplete'),
+  ).toBeDefined();
+  expect(
+    within(zone).getByText(
       /cannot confirm whether a saved revision is still waiting/,
     ),
   ).toBeDefined();
@@ -960,16 +1001,38 @@ test('history load failures stay distinct from empty history and offer retry', (
   expect(history.refetch).toHaveBeenCalledTimes(1);
 });
 
-test('running summary exposes effective listener and storage facts with restart-only framing', () => {
+test('status zone gathers metadata, running facts, and only abnormal alerts', () => {
   setSettingsLoaded();
   render(<SettingsComponent />);
 
-  const summary = screen.getByTestId('config-running-summary');
+  // One compact zone above the editor card carries the metadata strip, the
+  // running-facts row, and the alerts that actually apply.
+  const zone = screen.getByTestId('config-status-zone');
+  const editorCard = screen.getByTestId('config-editor-card');
+  expect(
+    (zone.compareDocumentPosition(editorCard) &
+      Node.DOCUMENT_POSITION_FOLLOWING) !==
+      0,
+  ).toBe(true);
+  const metadata = within(zone).getByTestId('config-editor-metadata');
+  expect(metadata.textContent).toContain('/etc/cc-lb/cc-lb.toml');
+  const summary = within(zone).getByTestId('config-running-summary');
   expect(summary.textContent).toContain('127.0.0.1:9090');
   expect(summary.textContent).toMatch(/postgres/i);
+  // The fixture saved after process start, so the pending-restart drift
+  // banner is a real abnormal alert and lives in the zone. It is announced
+  // once by that timestamped notice — there is no separate
+  // "saved changes pending restart" badge copy.
+  expect(within(zone).getByTestId('restart-drift-banner')).toBeDefined();
+  expect(screen.queryByText(/saved changes pending restart/i)).toBeNull();
+  // Unconditional restart explainers are gone: nothing claims a restart is
+  // needed when none is pending, and the old static subtitle is removed.
+  expect(screen.queryByText('Structured config editor')).toBeNull();
+  expect(screen.queryByText('Startup-fixed configuration')).toBeNull();
+  expect(screen.queryByText('Restart required after saving')).toBeNull();
   expect(
-    screen.getAllByText(/requires a (cc-lb )?restart/i).length,
-  ).toBeGreaterThan(0);
+    screen.queryByText(/Every config-file change requires a (cc-lb )?restart/i),
+  ).toBeNull();
 });
 
 test('an environment-overridden field keeps its file value editable and shows effective provenance', () => {
@@ -1001,9 +1064,21 @@ test('an environment-overridden field keeps its file value editable and shows ef
   expect(field.textContent).toMatch(/Effective[: ]*127\.0\.0\.1:8181/);
 
   fireEvent.click(within(field).getByText('Value details'));
-  expect(field.textContent).toMatch(/File[: ]*0\.0\.0\.0:8080/);
-  expect(field.textContent).toMatch(/Default[: ]*\[::\]:8080/);
-  expect(field.textContent).toMatch(/Environment · CC_LB_PROXY_ADDR/);
+  const details = within(field).getByTestId('config-value-details');
+  // The details list provenance only — File, Default, Source — and never
+  // repeats the Effective value already shown beside the control.
+  expect(details.textContent).toMatch(/File[: ]*0\.0\.0\.0:8080/);
+  expect(details.textContent).toMatch(/Default[: ]*\[::\]:8080/);
+  expect(details.textContent).toMatch(/Source[: ]*Environment/);
+  expect(details.textContent).toContain('CC_LB_PROXY_ADDR');
+  expect(details.textContent).not.toMatch(/Effective/);
+  // Provenance is informational, not a warning: the note under the control
+  // uses neutral muted text, not amber/warn styling.
+  const provenance = within(field).getByText(
+    /Effective value comes from Environment/,
+  );
+  expect(provenance.className).toContain('text-text-muted');
+  expect(provenance.className).not.toMatch(/amber|warn/);
 
   fireEvent.change(input, { target: { value: '0.0.0.0:8181' } });
   expect(input.value).toBe('0.0.0.0:8181');
@@ -1398,7 +1473,13 @@ test('clean validated read-only config can download on initial load', () => {
   );
   render(<SettingsComponent />);
 
-  expect(screen.getByText('Config file is read-only')).toBeDefined();
+  // The read-only state is a compact chip in the status zone; the reason is
+  // visible text beside it — readable by keyboard and touch, not hover-only.
+  const zone = screen.getByTestId('config-status-zone');
+  const summary = within(zone).getByTestId('config-running-summary');
+  expect(within(summary).getByText('Config file read-only')).toBeDefined();
+  expect(within(summary).getByText('Bind mount is read-only.')).toBeDefined();
+  expect(screen.queryByTitle(/Bind mount is read-only/)).toBeNull();
   expect(screen.getByText('Configuration validated')).toBeDefined();
   expect(
     screen
@@ -1431,7 +1512,11 @@ test('writable missing config can be created directly on initial load', () => {
   );
   render(<SettingsComponent />);
 
-  expect(screen.getByText('Config file is missing')).toBeDefined();
+  expect(
+    within(screen.getByTestId('config-status-zone')).getByText(
+      'Config file missing',
+    ),
+  ).toBeDefined();
   const saveFileButton = screen.getByRole('button', {
     name: 'Save to config file',
   });
@@ -1464,9 +1549,15 @@ test('read-only missing config can download but cannot be created', () => {
   );
   render(<SettingsComponent />);
 
+  const zone = screen.getByTestId('config-status-zone');
+  const summary = within(zone).getByTestId('config-running-summary');
   expect(
-    screen.getByText('Config file is missing and cannot be created'),
+    within(summary).getByText('Config file missing — read-only'),
   ).toBeDefined();
+  expect(
+    within(summary).getByText('Parent directory is not writable.'),
+  ).toBeDefined();
+  expect(screen.queryByTitle(/Parent directory is not writable/)).toBeNull();
   expect(
     screen
       .getByRole('button', { name: 'Save to config file' })
@@ -1579,11 +1670,15 @@ test('restart drift, pending download, and failed download fallback stay visible
   setSettingsLoaded(editorResponse({ restart_required: true }));
   render(<SettingsComponent />);
 
-  expect(screen.getByText('Restart required after saving')).toBeDefined();
+  // restart_required is always true server-side, so the old unconditional
+  // notice is gone; the drift banner is the real pending-restart signal and
+  // lives in the status zone.
+  const zone = screen.getByTestId('config-status-zone');
+  expect(screen.queryByText('Restart required after saving')).toBeNull();
   const downloadButton = screen.getByRole('button', { name: 'Download TOML' });
   fireEvent.click(downloadButton);
   expect(downloadButton.getAttribute('aria-busy')).toBe('true');
-  expect(screen.getByTestId('restart-drift-banner')).toBeDefined();
+  expect(within(zone).getByTestId('restart-drift-banner')).toBeDefined();
   expect(downloadButton.hasAttribute('disabled')).toBe(true);
 
   await act(async () => pending.reject(new Error('network offline')));
@@ -1753,6 +1848,7 @@ test('unassigned leaves land in their own category Other settings and stay searc
         properties: {
           broadcast_capacity: { type: 'integer' },
           retry_attempts: { type: 'integer' },
+          canary_flag: { type: 'boolean' },
         },
       },
     },
@@ -1762,6 +1858,7 @@ test('unassigned leaves land in their own category Other settings and stay searc
     event_bus: {
       broadcast_capacity: 4096,
       retry_attempts: 3,
+      canary_flag: true,
       mystery_flag: 'preserved',
     },
     legacy_mode: true,
@@ -1794,11 +1891,15 @@ test('unassigned leaves land in their own category Other settings and stay searc
   expect(
     dataOther?.querySelector('[data-config-path="event_bus.mystery_flag"]'),
   ).not.toBeNull();
-  // The unassigned section is flattened like every other section: a top
-  // divider, no card chrome.
+  // The unassigned section is flattened like every other section: a subtle
+  // top divider, no card chrome, and no amber warning border — the warning
+  // lives in a badge/text instead.
   expect(dataOther?.className).toContain('border-t');
+  expect(dataOther?.className).toContain('border-subtle');
+  expect(dataOther?.className).not.toMatch(/amber/);
   expect(dataOther?.className).not.toMatch(/(^|\s)rounded/);
   expect(dataOther?.className).not.toMatch(/(^|\s)bg-/);
+  expect(dataOther?.innerHTML).toMatch(/--color-warn/);
   // Schema-known and unknown unassigned leaves get distinct explanations.
   expect(dataOther?.textContent).toMatch(/not covered by a settings section/i);
   expect(dataOther?.textContent).toMatch(/not recognized by the schema/i);
@@ -1806,6 +1907,22 @@ test('unassigned leaves land in their own category Other settings and stay searc
   expect(
     dataOther?.querySelector('[data-config-path="legacy_mode"]'),
   ).toBeNull();
+  // A schema-known boolean leaf without path-specific guidance renders a
+  // switch with no tautological On/Off effect rows.
+  const canary = dataOther?.querySelector<HTMLElement>(
+    '[data-config-path="event_bus.canary_flag"]',
+  );
+  expect(canary).not.toBeNull();
+  expect(within(canary as HTMLElement).getByRole('checkbox')).toBeDefined();
+  expect(within(canary as HTMLElement).queryByText('On')).toBeNull();
+  expect(within(canary as HTMLElement).queryByText('Off')).toBeNull();
+  const canaryGuidance = resolveConfigFieldGuidance(
+    'event_bus.canary_flag',
+    undefined,
+    'boolean',
+  );
+  expect(canaryGuidance.enabled).toBeFalsy();
+  expect(canaryGuidance.disabled).toBeFalsy();
   // The modified unassigned leaf counts toward its own category.
   expect(
     within(screen.getByTestId('config-category-nav')).getByRole('button', {
@@ -1868,7 +1985,7 @@ test('search results are plain buttons announced through a status region', () =>
   );
 });
 
-test('value details disclosure exposes a 44px touch target', () => {
+test('value details is a quiet chevron disclosure listing provenance only', () => {
   setSettingsLoaded();
   render(<SettingsComponent />);
 
@@ -1878,6 +1995,21 @@ test('value details disclosure exposes a 44px touch target', () => {
   expect(summary).not.toBeNull();
   expect(summary?.textContent).toMatch(/value details/i);
   expect(minHeightPx(summary as HTMLElement)).toBeGreaterThanOrEqual(44);
+  // Quiet affordance: the summary hugs its label instead of spanning the
+  // field, and carries no button chrome (border, background, or padding).
+  expect(summary?.className).toContain('w-fit');
+  expect(summary?.className).not.toMatch(/(^|\s)(border|bg-|p[xy]?-\d)/);
+  // A chevron marks the disclosure and carries the open-state rotation class.
+  const chevron = summary?.querySelector('svg');
+  expect(chevron).not.toBeNull();
+  fireEvent.click(summary as HTMLElement);
+  expect(chevron?.getAttribute('class')).toContain('rotate-90');
+  // Provenance only: File, Default, and Source — the Effective value already
+  // visible beside the control is not repeated inside.
+  expect(details.textContent).toMatch(/File[: ]/);
+  expect(details.textContent).toMatch(/Default[: ]/);
+  expect(details.textContent).toMatch(/Source[: ]/);
+  expect(details.textContent).not.toMatch(/Effective/);
 });
 
 test('storage variant switch review lists removed leaves without a container row', () => {
@@ -2036,12 +2168,12 @@ test('recurring jobs render one flat card per key with the enabled switch in the
   // Embedded fields keep their guidance: purpose plus Lower/Higher trade-offs.
   expect(within(interval as HTMLElement).getByText('Lower')).toBeDefined();
   expect(within(interval as HTMLElement).getByText('Higher')).toBeDefined();
-  // The On/Off effect guidance stays in the row body — it is not folded into
-  // the header switch label.
-  expect(within(job).getByText('On')).toBeDefined();
-  expect(within(job).getByText('Off')).toBeDefined();
-  expect(job.textContent).toContain(enabledGuidance.enabled ?? 'missing');
-  expect(job.textContent).toContain(enabledGuidance.disabled ?? 'missing');
+  // The enabled switch is self-explanatory: no On/Off effect rows repeat the
+  // obvious enqueue/stop outcome anywhere in the job card.
+  expect(enabledGuidance.enabled).toBeFalsy();
+  expect(enabledGuidance.disabled).toBeFalsy();
+  expect(within(job).queryByText('On')).toBeNull();
+  expect(within(job).queryByText('Off')).toBeNull();
 
   // Unknown keys stay visible and marked, with their fields still editable.
   const unknown = document.querySelector<HTMLElement>(
@@ -2203,10 +2335,17 @@ test('scalar fields show purpose and trade-off guidance across every category', 
     ['lower', 'higher'],
   );
 
-  // Runtime & observability — boolean field shows On/Off effects.
+  // Runtime & observability — booleans with asymmetric operational risk keep
+  // meaningful On/Off effects; generic booleans no longer carry them.
   showCategory(view, 'Runtime & observability');
   expectGuidance(
     'observability.log_redaction',
+    'boolean',
+    ['On', 'Off'],
+    ['enabled', 'disabled'],
+  );
+  expectGuidance(
+    'runtime.wasmtime.cookie_redaction',
     'boolean',
     ['On', 'Off'],
     ['enabled', 'disabled'],
@@ -2292,4 +2431,173 @@ test('section grids use the 1/2/3-column contract with full-span composite edito
     '[data-config-path="cluster.token_env"]',
   );
   expectGridContract(clusterChild?.parentElement, 'cluster');
+});
+
+test('nullable objects keep one compact switch in both enabled and disabled states', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+
+  // Disabled: listener.tls is null — the object control is a switch, not an
+  // enable-only affordance.
+  const tls = document.querySelector<HTMLElement>(
+    '[data-config-path="listener.tls"]',
+  );
+  expect(tls).not.toBeNull();
+  const tlsSwitch = within(tls as HTMLElement).getByRole('checkbox');
+  expect(tlsSwitch.hasAttribute('data-field-control')).toBe(true);
+  expect((tlsSwitch as HTMLInputElement).checked).toBe(false);
+  expect(
+    within(tls as HTMLElement).queryByRole('button', { name: /disable/i }),
+  ).toBeNull();
+  expect(
+    document.querySelector('[data-config-path="listener.tls.cert_path"]'),
+  ).toBeNull();
+
+  // Switching on creates the object in place — the same switch stays put and
+  // now reads checked; no Disable button appears.
+  fireEvent.click(tlsSwitch);
+  view.rerender(<SettingsComponent />);
+  const tlsOn = document.querySelector<HTMLElement>(
+    '[data-config-path="listener.tls"]',
+  );
+  expect(tlsOn).not.toBeNull();
+  const tlsSwitches = within(tlsOn as HTMLElement).getAllByRole('checkbox');
+  expect((tlsSwitches[0] as HTMLInputElement).checked).toBe(true);
+  expect(
+    within(tlsOn as HTMLElement).queryByRole('button', { name: /disable/i }),
+  ).toBeNull();
+  expect(
+    document.querySelector('[data-config-path="listener.tls.cert_path"]'),
+  ).not.toBeNull();
+
+  // Switching back off unsets the object — the same control, same position.
+  fireEvent.click(tlsSwitches[0] as HTMLElement);
+  view.rerender(<SettingsComponent />);
+  const tlsOff = document.querySelector<HTMLElement>(
+    '[data-config-path="listener.tls"]',
+  );
+  expect(
+    (within(tlsOff as HTMLElement).getByRole('checkbox') as HTMLInputElement)
+      .checked,
+  ).toBe(false);
+  expect(
+    document.querySelector('[data-config-path="listener.tls.cert_path"]'),
+  ).toBeNull();
+
+  // oauth.anthropic follows the same contract in Identity & access.
+  showCategory(view, 'Identity & access');
+  const oauth = document.querySelector<HTMLElement>(
+    '[data-config-path="oauth.anthropic"]',
+  );
+  expect(oauth).not.toBeNull();
+  const oauthSwitch = within(oauth as HTMLElement).getByRole('checkbox');
+  expect((oauthSwitch as HTMLInputElement).checked).toBe(false);
+  expect(
+    within(oauth as HTMLElement).queryByRole('button', { name: /disable/i }),
+  ).toBeNull();
+  fireEvent.click(oauthSwitch);
+  view.rerender(<SettingsComponent />);
+  const oauthOn = document.querySelector<HTMLElement>(
+    '[data-config-path="oauth.anthropic"]',
+  );
+  expect(oauthOn).not.toBeNull();
+  expect(
+    (
+      within(oauthOn as HTMLElement).getAllByRole(
+        'checkbox',
+      )[0] as HTMLInputElement
+    ).checked,
+  ).toBe(true);
+  expect(
+    within(oauthOn as HTMLElement).queryByRole('button', { name: /disable/i }),
+  ).toBeNull();
+});
+
+test('field chrome reserves red for errors and marks risk with badge and warn text', () => {
+  const issueReport = {
+    ...validReport,
+    file: {
+      valid: false,
+      issues: [
+        {
+          path: 'body.messages_cap_bytes',
+          code: 'too_small',
+          message: 'Cap is below the minimum.',
+          severity: 'error' as const,
+        },
+      ],
+    },
+  };
+  setSettingsLoaded(
+    editorResponse({ last_validation: issueReport }),
+    draftResponse({ last_validation: issueReport }),
+  );
+  const view = render(<SettingsComponent />);
+
+  // Only the field with a validation error gets a red border; its issue text
+  // uses the theme-aware danger token, not a raw palette shade.
+  const cap = document.querySelector<HTMLElement>(
+    '[data-config-path="body.messages_cap_bytes"]',
+  );
+  expect(cap?.className).toMatch(/border-red/);
+  const issueText = within(cap as HTMLElement).getByText(
+    'Cap is below the minimum.',
+  );
+  expect(issueText.className).toContain('--color-danger-text');
+  expect(issueText.className).not.toMatch(/text-red-\d/);
+
+  // Dangerous fields keep the same subtle border as normal fields; the risk
+  // is communicated by a badge plus warn-token impact text, not amber chrome.
+  const proxy = document.querySelector<HTMLElement>(
+    '[data-config-path="listener.proxy_addr"]',
+  );
+  expect(proxy?.className).toContain('border-subtle');
+  expect(proxy?.className).not.toMatch(/amber|border-red/);
+  const riskBadge = within(proxy as HTMLElement).getByText(/operational risk/i);
+  // Badge text sits on a tinted surface, so it uses the semantic text token
+  // that keeps ≥4.5:1 contrast — never a raw palette shade.
+  expect(riskBadge.className).toContain('--color-warn-text');
+  expect(riskBadge.className).not.toMatch(/text-amber-\d/);
+  const impact = within(proxy as HTMLElement).getByText(
+    /moves every client-facing endpoint/,
+  );
+  expect(impact.className).toContain('--color-warn-text');
+  expect(impact.className).not.toMatch(/text-amber-\d/);
+
+  // A normal field: subtle border, no risk badge, no amber anywhere.
+  const metrics = document.querySelector<HTMLElement>(
+    '[data-config-path="listener.metrics_addr"]',
+  );
+  expect(metrics?.className).toContain('border-subtle');
+  expect(metrics?.className).not.toMatch(/amber|border-red/);
+  expect(
+    within(metrics as HTMLElement).queryByText(/operational risk/i),
+  ).toBeNull();
+
+  // The validation summary's error/ok badges follow the same rule: semantic
+  // text tokens on their tinted surfaces, no raw palette shades.
+  const summary = screen.getByTestId('config-validation-summary');
+  const errorBadge = within(summary).getByText('1 errors');
+  expect(errorBadge.className).toContain('--color-danger-text');
+  expect(errorBadge.className).not.toMatch(/text-red-\d/);
+  const okBadge = within(summary).getByText('Effective valid');
+  expect(okBadge.className).toContain('--color-success-text');
+  expect(okBadge.className).not.toMatch(/text-emerald-\d/);
+
+  // A dirty field marks itself with a Modified badge whose text uses the
+  // accent text token on the accent-tinted surface.
+  fireEvent.change(screen.getByLabelText('Proxy Addr'), {
+    target: { value: '0.0.0.0:8181' },
+  });
+  const modifiedBadge = within(proxy as HTMLElement).getByText('Modified');
+  expect(modifiedBadge.className).toContain('--color-accent-text');
+  expect(modifiedBadge.className).not.toMatch(/text-cyan-\d/);
+
+  // Composite containers share one neutral surface — no black-tinted variant.
+  showCategory(view, 'Storage & data');
+  const storage = document.querySelector<HTMLElement>(
+    '[data-config-path="storage"]',
+  );
+  expect(storage?.className).toContain('bg-panel-strong');
+  expect(storage?.className).not.toMatch(/(^|\s)bg-bg/);
 });

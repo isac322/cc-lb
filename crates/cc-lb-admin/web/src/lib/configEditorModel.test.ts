@@ -787,8 +787,8 @@ describe('config field guidance', () => {
       'boolean',
     );
     expect(toggle.description).toBeTruthy();
-    expect(toggle.enabled).toBeTruthy();
-    expect(toggle.disabled).toBeTruthy();
+    expect(toggle.enabled).toBeUndefined();
+    expect(toggle.disabled).toBeUndefined();
   });
 
   it('synthesizes recurring job guidance from the catalog and wildcard fields', () => {
@@ -811,8 +811,9 @@ describe('config field guidance', () => {
       undefined,
       'boolean',
     );
-    expect(enabled.enabled).toBeTruthy();
-    expect(enabled.disabled).toBeTruthy();
+    expect(enabled.description).toContain('Usage rollup');
+    expect(enabled.enabled).toBeUndefined();
+    expect(enabled.disabled).toBeUndefined();
   });
 
   it('describes unknown recurring job keys without built-in purposes', () => {
@@ -827,7 +828,7 @@ describe('config field guidance', () => {
       'boolean',
     );
     expect(field.description).toContain('this recurring job');
-    expect(field.enabled).toBeTruthy();
+    expect(field.enabled).toBeUndefined();
   });
 
   it('catalogs every built-in recurring job', () => {
@@ -875,16 +876,6 @@ describe('config field guidance', () => {
         expect(
           guidance.higher,
           `${leaf.pathString} must describe raising the value`,
-        ).toBeTruthy();
-      }
-      if (leaf.kind === 'boolean') {
-        expect(
-          guidance.enabled,
-          `${leaf.pathString} must describe enabling`,
-        ).toBeTruthy();
-        expect(
-          guidance.disabled,
-          `${leaf.pathString} must describe disabling`,
         ).toBeTruthy();
       }
     }

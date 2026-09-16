@@ -1,5 +1,6 @@
 import {
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Copy,
   Download,
@@ -119,11 +120,11 @@ const INPUT_WITH_ERROR_CLASS = `${INPUT_CLASS} aria-[invalid=true]:border-red-40
 const OPAQUE_STORAGE_URL_PATH = 'storage.url';
 const ADMIN_PROVIDERS_PATH = 'admin.auth.providers';
 const RECURRING_JOBS_PATH = 'scheduler.recurring_jobs';
+const CONFIG_CATEGORY_HEADING_ID = 'config-category-heading';
 const DESTRUCTIVE_ACTION_LABELS = [
   'Reset',
   'Unset',
   'Remove',
-  'Disable',
   'Cancel replacement',
 ];
 
@@ -1199,10 +1200,147 @@ export function ConfigEditorSection({
       title="Configuration"
       subtitle="Edit the startup configuration, validate it, then save or download TOML."
     >
+      <div data-testid="config-status-zone" className="space-y-2">
+        <div className="rounded-sm border border-subtle bg-panel-strong px-3 py-2">
+          <EditorMetadata
+            loading={loading}
+            revision={state?.revision ?? null}
+            savedAtUnixSecs={state?.savedAtUnixSecs ?? null}
+            validatedRevision={validatedRevision}
+            filePath={editorData?.file.path}
+          />
+          {editorData ? (
+            <>
+              <div className="my-2 border-t border-subtle" />
+              <RunningSummary data={editorData} />
+            </>
+          ) : null}
+        </div>
+
+        {loadError ? (
+          <Notice
+            tone="danger"
+            title="Configuration editor unavailable"
+            action={
+              <Button
+                size="sm"
+                loading={editorQuery.isFetching || draftQuery.isFetching}
+                onClick={() => {
+                  if (!editorData) void editorQuery.refetch();
+                  if (!draftData) void draftQuery.refetch();
+                }}
+              >
+                Retry
+              </Button>
+            }
+          >
+            The editor or saved draft could not be loaded. Existing runtime
+            configuration is unchanged.
+          </Notice>
+        ) : null}
+
+        {savedAfterStart ? (
+          <Notice
+            tone="warning"
+            title={
+              <span data-testid="restart-drift-banner">
+                Saved at{' '}
+                <RelativeTime ts={new Date(latestSavedAtUnixSecs * 1000)} />,
+                not applied yet — restart cc-lb
+              </span>
+            }
+          >
+            cc-lb is still using its startup configuration. If this is only a
+            draft, validate and save it to the config file before restarting.
+          </Notice>
+        ) : null}
+        {history.isError ? (
+          <Notice tone="warning" title="Restart status may be incomplete">
+            Saved config history could not be loaded, so the editor cannot
+            confirm whether a saved revision is still waiting for a restart.
+            Retry the history request below.
+          </Notice>
+        ) : null}
+        {stale ? (
+          <Notice tone="danger" title="Draft revision changed">
+            This editor is pinned to revision {state?.revision}, but the latest
+            draft on the server is revision {serverRevision}. Copy any unsaved
+            values, then refresh the page to load the latest draft before
+            saving.
+          </Notice>
+        ) : null}
+
+        {dirty ? (
+          <Notice tone="warning" title="Draft has unsaved changes">
+            Save the draft before validation. The config file and download
+            actions remain locked until this exact revision passes validation.
+          </Notice>
+        ) : !state?.hasSavedDraft && state ? (
+          <Notice tone="info" title="Start with a saved draft">
+            Save this file configuration as a draft before validating it.
+          </Notice>
+        ) : null}
+
+        {actionError ? (
+          <Notice tone="danger" title="Configuration action failed">
+            {actionError}
+          </Notice>
+        ) : null}
+
+        {downloadError ? (
+          <Notice
+            tone="danger"
+            title="Download failed"
+            action={
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  iconLeft={<Copy className="h-3.5 w-3.5" />}
+                  onClick={() => {
+                    if (!state) return;
+                    void navigator.clipboard
+                      ?.writeText(JSON.stringify(state.value, null, 2))
+                      .then(() => toast.success('Draft JSON copied'))
+                      .catch(() => toast.error('Could not copy draft JSON'));
+                  }}
+                >
+                  Copy draft JSON
+                </Button>
+                <Button size="sm" onClick={() => void handleDownload()}>
+                  Retry
+                </Button>
+              </div>
+            }
+          >
+            {downloadError} The validated draft remains stored on the server;
+            retry the TOML download or copy the draft JSON as a recovery
+            fallback.
+          </Notice>
+        ) : null}
+
+        <ValidationSummary
+          ref={validationSummaryRef}
+          report={validation}
+          current={validationReportCurrent}
+          issues={issues}
+          onIssueClick={revealConfigPath}
+        />
+      </div>
+
       <Card data-testid="config-editor-card">
         <CardHeader
-          title="Structured config editor"
-          subtitle="Every config-file change requires a cc-lb restart to take effect. Environment and CLI overrides stay effective after file edits."
+          titleId={CONFIG_CATEGORY_HEADING_ID}
+          title={activeCategory?.label ?? 'Configuration'}
+          subtitle={
+            activeCategory ? (
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span>{activeCategory.description}</span>
+                <CategoryStatusBadges counts={activeCategory.counts} />
+              </span>
+            ) : (
+              <Skeleton className="h-3 w-56 max-w-full" />
+            )
+          }
           action={
             <div className="flex flex-wrap items-center justify-end gap-2">
               <Button
@@ -1245,133 +1383,20 @@ export function ConfigEditorSection({
             </div>
           }
         />
-        <CardBody className="space-y-4">
-          <EditorMetadata
-            loading={loading}
-            revision={state?.revision ?? null}
-            savedAtUnixSecs={state?.savedAtUnixSecs ?? null}
-            validatedRevision={validatedRevision}
-            filePath={editorData?.file.path}
-          />
-
-          {loadError ? (
-            <Notice
-              tone="danger"
-              title="Configuration editor unavailable"
-              action={
-                <Button
-                  size="sm"
-                  loading={editorQuery.isFetching || draftQuery.isFetching}
-                  onClick={() => {
-                    if (!editorData) void editorQuery.refetch();
-                    if (!draftData) void draftQuery.refetch();
-                  }}
-                >
-                  Retry
-                </Button>
-              }
-            >
-              The editor or saved draft could not be loaded. Existing runtime
-              configuration is unchanged.
-            </Notice>
-          ) : null}
-
-          {editorData ? <FileCapabilityNotices data={editorData} /> : null}
-
-          {editorData ? (
-            <RunningSummary
-              data={editorData}
-              savedAfterStart={savedAfterStart}
+        {activeCategory ? (
+          <nav
+            aria-label="Configuration categories"
+            data-testid="config-category-nav"
+            className="border-b border-subtle px-4 py-2 xl:sticky xl:top-12 xl:z-10 xl:bg-[color:var(--color-bg-sub)] xl:backdrop-blur-sm"
+          >
+            <CategoryNavList
+              categories={categories}
+              activeCategoryId={activeCategory.id}
+              onSelect={selectCategory}
             />
-          ) : null}
-
-          {savedAfterStart ? (
-            <Notice
-              tone="warning"
-              title={
-                <span data-testid="restart-drift-banner">
-                  Saved at{' '}
-                  <RelativeTime ts={new Date(latestSavedAtUnixSecs * 1000)} />,
-                  not applied yet — restart cc-lb
-                </span>
-              }
-            >
-              cc-lb is still using its startup configuration. If this is only a
-              draft, validate and save it to the config file before restarting.
-            </Notice>
-          ) : null}
-          {history.isError ? (
-            <Notice tone="warning" title="Restart status may be incomplete">
-              Saved config history could not be loaded, so the editor cannot
-              confirm whether a saved revision is still waiting for a restart.
-              Retry the history request below.
-            </Notice>
-          ) : null}
-          {stale ? (
-            <Notice tone="danger" title="Draft revision changed">
-              This editor is pinned to revision {state?.revision}, but the
-              latest draft on the server is revision {serverRevision}. Copy any
-              unsaved values, then refresh the page to load the latest draft
-              before saving.
-            </Notice>
-          ) : null}
-
-          {dirty ? (
-            <Notice tone="warning" title="Draft has unsaved changes">
-              Save the draft before validation. The config file and download
-              actions remain locked until this exact revision passes validation.
-            </Notice>
-          ) : !state?.hasSavedDraft && state ? (
-            <Notice tone="info" title="Start with a saved draft">
-              Save this file configuration as a draft before validating it.
-            </Notice>
-          ) : null}
-
-          {actionError ? (
-            <Notice tone="danger" title="Configuration action failed">
-              {actionError}
-            </Notice>
-          ) : null}
-
-          {downloadError ? (
-            <Notice
-              tone="danger"
-              title="Download failed"
-              action={
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    iconLeft={<Copy className="h-3.5 w-3.5" />}
-                    onClick={() => {
-                      if (!state) return;
-                      void navigator.clipboard
-                        ?.writeText(JSON.stringify(state.value, null, 2))
-                        .then(() => toast.success('Draft JSON copied'))
-                        .catch(() => toast.error('Could not copy draft JSON'));
-                    }}
-                  >
-                    Copy draft JSON
-                  </Button>
-                  <Button size="sm" onClick={() => void handleDownload()}>
-                    Retry
-                  </Button>
-                </div>
-              }
-            >
-              {downloadError} The validated draft remains stored on the server;
-              retry the TOML download or copy the draft JSON as a recovery
-              fallback.
-            </Notice>
-          ) : null}
-
-          <ValidationSummary
-            ref={validationSummaryRef}
-            report={validation}
-            current={validationReportCurrent}
-            issues={issues}
-            onIssueClick={revealConfigPath}
-          />
-
+          </nav>
+        ) : null}
+        <CardBody className="space-y-4">
           {loading ? (
             <ConfigEditorSkeleton />
           ) : editorData && state && model && activeCategory ? (
@@ -1416,14 +1441,14 @@ export function ConfigEditorSection({
                         </div>
                         <div
                           data-testid="config-search-results"
-                          className="mt-1 max-h-72 overflow-y-auto rounded-sm border border-subtle bg-panel"
+                          className="mt-1 max-h-72 overflow-y-auto rounded-sm border border-subtle bg-panel-strong"
                         >
                           {searchResults.length ? (
                             searchResults.map((result) => (
                               <button
                                 key={result.path}
                                 type="button"
-                                className="flex min-h-[44px] w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                                className="flex min-h-[44px] w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]"
                                 onClick={() =>
                                   activateSearchResult(result.path)
                                 }
@@ -1453,18 +1478,6 @@ export function ConfigEditorSection({
                       </>
                     ) : null}
                   </div>
-
-                  <nav
-                    aria-label="Configuration categories"
-                    data-testid="config-category-nav"
-                    className="xl:sticky xl:top-12 xl:z-10 xl:bg-bg-sub xl:backdrop-blur-sm"
-                  >
-                    <CategoryNavList
-                      categories={categories}
-                      activeCategoryId={activeCategory.id}
-                      onSelect={selectCategory}
-                    />
-                  </nav>
 
                   <CategoryPanel
                     category={activeCategory}
@@ -1566,7 +1579,7 @@ export function ConfigEditorSection({
                           className={cx(
                             'block break-all py-0.5 text-xs',
                             entry.dangerous
-                              ? 'text-amber-200'
+                              ? 'text-[color:var(--color-warn-text)]'
                               : 'text-text-muted',
                           )}
                         >
@@ -1587,7 +1600,7 @@ export function ConfigEditorSection({
             ) : null}
             {requiresSelfLockoutConfirmation ? (
               <span className="block space-y-2">
-                <span className="block font-medium text-amber-200">
+                <span className="block font-medium text-[color:var(--color-warn-text)]">
                   Admin authentication providers changed. A wrong provider kind,
                   ID, token environment variable, domain, or audience can lock
                   you out after restart.
@@ -1628,23 +1641,20 @@ export function ConfigEditorSection({
   );
 }
 
-function RunningSummary({
-  data,
-  savedAfterStart,
-}: {
-  data: ConfigEditorResponse;
-  savedAfterStart: boolean;
-}) {
+function RunningSummary({ data }: { data: ConfigEditorResponse }) {
   const effective = data.effective_config;
   const proxyAddr = getConfigValue(effective, 'listener.proxy_addr');
   const adminAddr = getConfigValue(effective, 'listener.admin_addr');
   const storageKind = getConfigValue(effective, 'storage.kind');
   const providers = getConfigValue(effective, ADMIN_PROVIDERS_PATH);
   const providerCount = Array.isArray(providers) ? providers.length : 0;
+  const fileReason =
+    data.file.reason ??
+    'This process cannot atomically replace the config file. You can still save and validate a draft, then download TOML for manual deployment.';
   return (
     <div
       data-testid="config-running-summary"
-      className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-sm border border-subtle bg-panel/30 px-3 py-2 text-xs text-text-muted"
+      className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-muted"
     >
       <span className="font-medium text-text">Running configuration</span>
       <span>
@@ -1668,11 +1678,23 @@ function RunningSummary({
       <span>
         {providerCount} admin provider{providerCount === 1 ? '' : 's'}
       </span>
-      {savedAfterStart ? (
-        <Badge tone="warn">saved changes pending restart</Badge>
-      ) : (
-        <Badge tone="neutral">no pending restart</Badge>
-      )}
+      {data.file.mode === 'read_only' ? (
+        <>
+          <Badge tone="warn">
+            {data.file.exists
+              ? 'Config file read-only'
+              : 'Config file missing — read-only'}
+          </Badge>
+          <span className="basis-full">{fileReason}</span>
+        </>
+      ) : !data.file.exists ? (
+        <>
+          <Badge tone="neutral">Config file missing</Badge>
+          <span className="basis-full">
+            Saving will create {data.file.path}.
+          </span>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -1744,41 +1766,6 @@ function MetadataValue({
   );
 }
 
-function FileCapabilityNotices({ data }: { data: ConfigEditorResponse }) {
-  return (
-    <div className="space-y-2">
-      {data.restart_required ? (
-        <Notice tone="warning" title="Restart required after saving">
-          cc-lb keeps its startup configuration fixed. After saving this draft
-          to the config file, restart the process to run the new values.
-        </Notice>
-      ) : (
-        <Notice tone="info" title="Startup-fixed configuration">
-          File edits do not change the running process. Restart cc-lb after
-          saving to apply the new configuration.
-        </Notice>
-      )}
-      {data.file.mode === 'read_only' ? (
-        <Notice
-          tone="warning"
-          title={
-            data.file.exists
-              ? 'Config file is read-only'
-              : 'Config file is missing and cannot be created'
-          }
-        >
-          {data.file.reason ??
-            'This process cannot atomically replace the config file. You can still save and validate a draft, then download TOML for manual deployment.'}
-        </Notice>
-      ) : !data.file.exists ? (
-        <Notice tone="info" title="Config file is missing">
-          Saving will create {data.file.path} using an atomic replace.
-        </Notice>
-      ) : null}
-    </div>
-  );
-}
-
 function ValidationSummary({
   ref,
   report,
@@ -1809,7 +1796,7 @@ function ValidationSummary({
       ref={ref}
       tabIndex={-1}
       data-testid="config-validation-summary"
-      className="outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+      className="outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent)]/60"
     >
       <details
         open={errors.length > 0}
@@ -1817,15 +1804,15 @@ function ValidationSummary({
           'rounded-sm border',
           errors.length
             ? 'border-red-500/35 bg-red-500/5'
-            : 'border-subtle bg-panel/30',
+            : 'border-subtle bg-panel-strong',
         )}
       >
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-2">
           <span className="inline-flex items-center gap-2">
             {errors.length ? (
-              <FileWarning className="h-4 w-4 text-red-300" />
+              <FileWarning className="h-4 w-4 text-[color:var(--color-danger-text)]" />
             ) : (
-              <FileCheck2 className="h-4 w-4 text-emerald-300" />
+              <FileCheck2 className="h-4 w-4 text-[color:var(--color-ok)]" />
             )}
             Validation summary
           </span>
@@ -1851,7 +1838,7 @@ function ValidationSummary({
               <button
                 key={`${issue.path}-${issue.code}-${index}`}
                 type="button"
-                className="flex w-full min-w-0 items-start gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                className="flex w-full min-w-0 items-start gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]"
                 onClick={() => issue.path && onIssueClick(issue.path)}
               >
                 <Badge tone={validationTone(issue)}>{issue.severity}</Badge>
@@ -1875,9 +1862,9 @@ function ValidationSummary({
 }
 
 /**
- * Full status badges for the active category panel header. Counts come from
- * the visible-leaf tally computed for each category; the nav grid uses the
- * compact CategoryStatusDots instead.
+ * Full status badges shown in the CardHeader subtitle for the active
+ * category. Counts come from the visible-leaf tally computed for each
+ * category; the nav grid uses the compact CategoryStatusDots instead.
  */
 function CategoryStatusBadges({ counts }: { counts: ConfigEditorCounts }) {
   if (!counts.modified && !counts.overrides && !counts.errors) return null;
@@ -1969,10 +1956,10 @@ function CategoryNavList({
               aria-current={active ? 'page' : undefined}
               title={statusSummary || undefined}
               className={cx(
-                'flex h-full min-h-[44px] w-full min-w-0 items-start border-b-2 px-2 py-2 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
+                'flex h-full min-h-[44px] w-full min-w-0 items-start border-b-2 px-2 py-2 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]',
                 active
                   ? 'border-accent bg-[color:var(--color-accent-dim)] font-medium text-text'
-                  : 'border-transparent text-text-muted hover:bg-overlay-5 hover:text-text',
+                  : 'border-transparent text-text-muted hover:bg-overlay-5 hover:text-[color:var(--color-text)]',
               )}
               onClick={() => onSelect(entry.id)}
             >
@@ -2055,20 +2042,12 @@ function CategoryPanel({
   );
   const hasUnknownKeys = unassignedLeaves.some((leaf) => leaf.unknown);
   const hasSchemaKnown = unassignedLeaves.some((leaf) => !leaf.unknown);
-  const headingId = `config-category-heading-${category.id}`;
   return (
     <section
       className="space-y-6"
       data-config-category-panel={category.id}
-      aria-labelledby={headingId}
+      aria-labelledby={CONFIG_CATEGORY_HEADING_ID}
     >
-      <header className="space-y-1">
-        <h3 id={headingId} className="text-base font-medium text-text">
-          {category.label}
-        </h3>
-        <p className="text-xs text-text-faint">{category.description}</p>
-        <CategoryStatusBadges counts={category.counts} />
-      </header>
       {category.sections.map((section) => (
         <SectionCard
           key={section.id}
@@ -2089,11 +2068,16 @@ function CategoryPanel({
         <section
           data-testid="config-section-card"
           data-config-section={CONFIG_EDITOR_UNASSIGNED_SECTION_ID}
-          className="border-t border-amber-500/40 pt-5"
+          className="border-t border-subtle pt-5"
         >
-          <h4 className="text-sm font-medium text-amber-100">
-            {CONFIG_EDITOR_UNASSIGNED_LABEL}
-          </h4>
+          <div className="flex flex-wrap items-center gap-2">
+            <h4 className="text-sm font-medium text-text">
+              {CONFIG_EDITOR_UNASSIGNED_LABEL}
+            </h4>
+            <Badge tone="warn">
+              {hasUnknownKeys ? 'Unknown keys' : 'Unassigned'}
+            </Badge>
+          </div>
           {hasUnknownKeys ? (
             <p className="mt-0.5 text-xs text-text-faint">
               These file keys are not recognized by the schema. They are
@@ -2192,13 +2176,13 @@ function SectionCard({
           data-testid="config-advanced"
           open={open}
           onToggle={(event) => onToggleAdvanced(event.currentTarget.open)}
-          className="mt-3 rounded-sm border border-subtle/70 bg-bg/20"
+          className="mt-3 rounded-sm border border-subtle bg-panel-strong"
         >
-          <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+          <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]">
             <ChevronDown className="h-3.5 w-3.5" />
             Advanced ({advancedRoots.length})
           </summary>
-          <div className="grid grid-cols-1 gap-3 border-t border-subtle/70 px-3 py-3 md:grid-cols-2 2xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 border-t border-subtle px-3 py-3 md:grid-cols-2 2xl:grid-cols-3">
             {advancedRoots.map(renderRoot)}
           </div>
         </details>
@@ -2299,27 +2283,14 @@ function ConfigNode({
   }
   if (Object.keys(properties).length) {
     const configured = isJsonObject(currentValue);
-    if (nullable && !configured) {
-      return (
-        <OptionalObjectToggle
-          path={path}
-          description={
-            typeof schema.description === 'string'
-              ? schema.description
-              : undefined
-          }
-          enabled={false}
-          onEnable={() => {
-            onChange(setConfigValue(value, path, {}) as JsonObject);
-          }}
-        />
-      );
-    }
+    const showChildren = !nullable || configured;
     return (
       <div
         className={cx(
           'col-span-full space-y-3',
-          depth === 0 ? '' : 'rounded-sm border border-subtle/70 bg-bg/25 p-3',
+          depth === 0
+            ? ''
+            : 'rounded-sm border border-subtle bg-panel-strong p-3',
         )}
         data-config-path={path}
         tabIndex={-1}
@@ -2341,37 +2312,42 @@ function ConfigNode({
             ) : null}
           </div>
           {nullable ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              iconLeft={<X className="h-3 w-3" />}
-              onClick={() =>
-                onChange(unsetConfigValue(value, path) as JsonObject)
-              }
-            >
-              Disable
-            </Button>
+            <ToggleSwitch
+              variant="compact"
+              data-field-control
+              checked={configured}
+              label="Enabled"
+              onChange={(event) => {
+                onChange(
+                  event.target.checked
+                    ? (setConfigValue(value, path, {}) as JsonObject)
+                    : (unsetConfigValue(value, path) as JsonObject),
+                );
+              }}
+            />
           ) : null}
         </div>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
-          {Object.entries(properties).map(([key, childSchema]) =>
-            childKeys && !childKeys.has(key) ? null : (
-              <ConfigNode
-                key={key}
-                rootSchema={rootSchema}
-                schema={childSchema}
-                path={`${path}.${key}`}
-                value={value}
-                defaultConfig={defaultConfig}
-                effectiveConfig={effectiveConfig}
-                overrides={overrides}
-                issues={issues}
-                onChange={onChange}
-                depth={depth + 1}
-              />
-            ),
-          )}
-        </div>
+        {showChildren ? (
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
+            {Object.entries(properties).map(([key, childSchema]) =>
+              childKeys && !childKeys.has(key) ? null : (
+                <ConfigNode
+                  key={key}
+                  rootSchema={rootSchema}
+                  schema={childSchema}
+                  path={`${path}.${key}`}
+                  value={value}
+                  defaultConfig={defaultConfig}
+                  effectiveConfig={effectiveConfig}
+                  overrides={overrides}
+                  issues={issues}
+                  onChange={onChange}
+                  depth={depth + 1}
+                />
+              ),
+            )}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -2391,38 +2367,6 @@ function ConfigNode({
       )}
       onChange={onChange}
     />
-  );
-}
-
-function OptionalObjectToggle({
-  path,
-  description,
-  enabled,
-  onEnable,
-}: {
-  path: string;
-  description?: string;
-  enabled: boolean;
-  onEnable: () => void;
-}) {
-  return (
-    <div
-      data-config-path={path}
-      tabIndex={-1}
-      className="col-span-full rounded-sm"
-    >
-      <ToggleSwitch
-        checked={enabled}
-        label={titleForKey(path.split('.').at(-1) ?? path)}
-        description={
-          description ??
-          'Optional configuration group. Enable it to write its fields to the file.'
-        }
-        onChange={(event) => {
-          if (event.target.checked) onEnable();
-        }}
-      />
-    </div>
   );
 }
 
@@ -2593,32 +2537,29 @@ function ScalarField({
       data-field-embedded={embedded ? '' : undefined}
       tabIndex={-1}
       className={cx(
-        'min-w-0 outline-none focus:ring-2 focus:ring-accent/60',
+        'min-w-0 outline-none focus:ring-2 focus:ring-[color:var(--color-accent)]/60',
         isStringArray ? 'col-span-full' : undefined,
         embedded
           ? 'rounded-sm'
           : cx(
-              'rounded-sm border bg-panel-strong/25 p-3',
-              error
-                ? 'border-red-500/45'
-                : classification.dangerous
-                  ? 'border-amber-500/50'
-                  : 'border-subtle/70',
+              'rounded-sm border bg-panel-strong p-3',
+              error ? 'border-red-500/45' : 'border-subtle',
             ),
       )}
     >
       <div className="mb-2 flex min-w-0 flex-wrap items-start justify-between gap-2">
-        <label
-          htmlFor={inputId}
-          className="min-w-0 text-xs font-medium text-text"
-        >
-          {label}
-          {modified ? (
-            <Badge tone="accent" className="ml-1.5 align-middle">
-              Modified
-            </Badge>
+        <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1">
+          <label
+            htmlFor={inputId}
+            className="min-w-0 text-xs font-medium text-text"
+          >
+            {label}
+          </label>
+          {modified ? <Badge tone="accent">Modified</Badge> : null}
+          {classification.dangerous ? (
+            <Badge tone="warn">Operational risk</Badge>
           ) : null}
-        </label>
+        </div>
         {embedded ? null : (
           <div className="flex shrink-0 flex-wrap justify-end gap-1">
             {path === OPAQUE_STORAGE_URL_PATH ? (
@@ -2865,14 +2806,14 @@ function ScalarField({
         <span>Effective: {displayValue(effectiveValue, isSensitive)}</span>
         {!configured ? <Badge tone="neutral">Inherited</Badge> : null}
       </div>
-      <details data-testid="config-value-details" className="mt-1.5">
-        <summary className="flex min-h-[44px] cursor-pointer list-none items-center text-[10px] text-text-faint focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+      <details data-testid="config-value-details" className="group mt-1.5">
+        <summary className="inline-flex min-h-[44px] w-fit cursor-pointer list-none items-center gap-1 text-[10px] text-text-faint focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]">
+          <ChevronRight className="h-3 w-3 transition-transform group-open:rotate-90" />
           Value details
         </summary>
         <div className="mt-1 space-y-0.5 text-[10px] text-text-faint">
           <div>File: {displayValue(fileValue, isSensitive)}</div>
           <div>Default: {displayValue(defaultValue, isSensitive)}</div>
-          <div>Effective: {displayValue(effectiveValue, isSensitive)}</div>
           <div>
             Source:{' '}
             {override
@@ -2882,13 +2823,13 @@ function ScalarField({
         </div>
       </details>
       {override ? (
-        <div className="mt-1.5 text-[10px] leading-relaxed text-amber-200/90">
+        <div className="mt-1.5 text-[10px] leading-relaxed text-text-muted">
           Effective value comes from {sourceLabel(override)} · {override.name}.
           The file value applies only if the override is removed.
         </div>
       ) : null}
       {classification.dangerous && classification.dangerImpact ? (
-        <div className="mt-1.5 text-[10px] leading-relaxed text-amber-200">
+        <div className="mt-1.5 text-[10px] leading-relaxed text-[color:var(--color-warn-text)]">
           {classification.dangerImpact}
         </div>
       ) : null}
@@ -2897,7 +2838,9 @@ function ScalarField({
           key={`${issue.code}-${index}`}
           className={cx(
             'mt-1.5 text-[11px]',
-            issue.severity === 'error' ? 'text-red-300' : 'text-amber-200',
+            issue.severity === 'error'
+              ? 'text-[color:var(--color-danger-text)]'
+              : 'text-[color:var(--color-warn-text)]',
           )}
         >
           {issue.message}
@@ -3040,7 +2983,7 @@ function TaggedUnionEditor({
   const showDiscriminator = !childKeys || childKeys.has(selected.property);
   return (
     <div
-      className="col-span-full space-y-3 rounded-sm border border-subtle/70 bg-bg/25 p-3"
+      className="col-span-full space-y-3 rounded-sm border border-subtle bg-panel-strong p-3"
       data-config-path={path}
       tabIndex={-1}
     >
@@ -3155,7 +3098,7 @@ function AdminProvidersEditor({
 
   return (
     <div
-      className="col-span-full space-y-3 rounded-sm border border-subtle/70 bg-bg/25 p-3"
+      className="col-span-full space-y-3 rounded-sm border border-subtle bg-panel-strong p-3"
       data-config-path={path}
       tabIndex={-1}
     >
@@ -3202,7 +3145,7 @@ function AdminProvidersEditor({
                 key={providerKeys.current[index]}
                 data-config-path={providerRoot}
                 tabIndex={-1}
-                className="rounded-sm border border-subtle bg-panel-strong/30 p-3"
+                className="rounded-sm border border-subtle bg-panel-strong p-3"
               >
                 <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
                   <label className="min-w-44 text-[10px] uppercase tracking-wider text-text-faint">
@@ -3478,7 +3421,7 @@ function RecurringJobRow({
   ).filter(([field]) => field !== 'enabled');
   return (
     <div
-      className="rounded-sm border border-subtle bg-panel-strong/30 p-3"
+      className="rounded-sm border border-subtle bg-panel-strong p-3"
       data-config-path={jobPath}
       tabIndex={-1}
     >
@@ -3491,7 +3434,7 @@ function RecurringJobRow({
             {jobKey}
           </span>
           {!hasDefault ? <Badge tone="warn">Unknown key</Badge> : null}
-          {dangerous ? <Badge tone="warn">Danger</Badge> : null}
+          {dangerous ? <Badge tone="warn">Operational risk</Badge> : null}
           {jobModified ? <Badge tone="accent">Modified</Badge> : null}
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1">
@@ -3544,7 +3487,7 @@ function RecurringJobRow({
         {!enabledConfigured ? <Badge tone="neutral">Inherited</Badge> : null}
       </div>
       {enabledOverride ? (
-        <div className="mt-1 text-[10px] leading-relaxed text-amber-200/90">
+        <div className="mt-1 text-[10px] leading-relaxed text-text-muted">
           Enabled state comes from {sourceLabel(enabledOverride)} ·{' '}
           {enabledOverride.name}. The file value applies only if the override is
           removed.
@@ -3555,7 +3498,9 @@ function RecurringJobRow({
           key={`${issue.code}-${index}`}
           className={cx(
             'mt-1.5 text-[11px]',
-            issue.severity === 'error' ? 'text-red-300' : 'text-amber-200',
+            issue.severity === 'error'
+              ? 'text-[color:var(--color-danger-text)]'
+              : 'text-[color:var(--color-warn-text)]',
           )}
         >
           {issue.message}

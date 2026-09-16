@@ -806,8 +806,6 @@ function recurringJobFieldGuidance(
       case 'enabled':
         return {
           description: `Whether ${label} runs on its schedule.`,
-          enabled: `${label} is enqueued every interval.`,
-          disabled: `${label} is never enqueued; its work stops until re-enabled.`,
           impactDimensions: ['availability'],
         };
       case 'interval_secs':
@@ -1764,9 +1762,7 @@ const GENERIC_LEAF_GUIDANCE: Record<
   ConfigFieldGuidanceOverride & { description: string }
 > = {
   boolean: {
-    description: 'Toggle for this behavior.',
-    enabled: 'Enables this behavior.',
-    disabled: 'Disables this behavior.',
+    description: 'Boolean flag.',
   },
   enum: {
     description: 'Selects one of the supported modes.',
@@ -1820,7 +1816,9 @@ const GENERIC_LEAF_GUIDANCE: Record<
  * wins first; the schema description is used when the table entry omits one;
  * presentation-based generic text backfills anything still missing, so every
  * leaf — including schema fields added later — resolves to a non-empty
- * description, and numeric/boolean leaves always carry trade-off text.
+ * description, and numeric leaves always carry trade-off text. Boolean
+ * leaves carry enabled/disabled effects only when the table spells out
+ * asymmetric operational consequences.
  *
  * Recurring job paths (`scheduler.recurring_jobs.<name>` and its fields) are
  * synthesized from {@link CONFIG_RECURRING_JOBS} plus wildcard field guidance.
