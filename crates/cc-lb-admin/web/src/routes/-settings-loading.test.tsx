@@ -2,6 +2,7 @@
 import {
   act,
   cleanup,
+  createEvent,
   fireEvent,
   type RenderResult,
   render,
@@ -105,6 +106,7 @@ const configSchema = {
       properties: { upstream_total_secs: { type: 'integer', minimum: 1 } },
     },
     storage: {
+      description: 'Primary state store backend and connection.',
       oneOf: [
         {
           title: 'SQLite',
@@ -222,6 +224,13 @@ const configSchema = {
         anthropic: {
           anyOf: [{ $ref: '#/$defs/AnthropicOAuth' }, { type: 'null' }],
         },
+        github: {
+          type: 'object',
+          properties: {
+            client_id: { type: 'string' },
+            scopes: { type: 'array', items: { type: 'string' } },
+          },
+        },
       },
     },
     cluster: {
@@ -254,6 +263,7 @@ const configSchema = {
       },
     },
     observability: {
+      description: 'Tracing, telemetry, and log redaction.',
       type: 'object',
       properties: {
         tracing_level: { type: 'string' },
@@ -340,7 +350,7 @@ const fileConfig = {
       ],
     },
   },
-  oauth: { anthropic: null },
+  oauth: { anthropic: null, github: { client_id: 'gh-client', scopes: [] } },
   cluster: { instance_url: null, token_env: 'CC_LB_CLUSTER_TOKEN' },
   price_catalog: {
     url: 'https://example.com/prices.json',
@@ -531,6 +541,20 @@ function minHeightPx(element: HTMLElement): number | null {
   return null;
 }
 
+// Resolves a declared fixed height/width to pixels — arbitrary Tailwind value
+// (h-[32px]) or spacing scale (h-8 = 32px). Used for touch-target checks.
+function dimensionPx(element: HTMLElement, axis: 'h' | 'w'): number | null {
+  const arbitrary = element.className.match(
+    new RegExp(`(?:^|\\s)${axis}-\\[(\\d+(?:\\.\\d+)?)px\\]`),
+  );
+  if (arbitrary) return Number.parseFloat(arbitrary[1] ?? '');
+  const scale = element.className.match(
+    new RegExp(`(?:^|\\s)${axis}-(\\d+(?:\\.\\d+)?)(?:\\s|$)`),
+  );
+  if (scale) return Number.parseFloat(scale[1] ?? '') * 4;
+  return null;
+}
+
 beforeEach(() => {
   vi.useFakeTimers({
     toFake: ['Date'],
@@ -575,8 +599,9 @@ test('settings cold load reserves version, editor, and history heights without a
 
   const versionCard = screen.getByTestId('version-card');
   expect(versionCard.querySelectorAll('.skeleton')).toHaveLength(5);
-  // The compact status zone sits above the editor card and reserves the
-  // metadata strip height while loading.
+  // The status zone sits above the editor card; its facts strip is a
+  // borderless, low-emphasis inline row — no panel chrome, divider, or
+  // reserved min-height.
   const statusZone = screen.getByTestId('config-status-zone');
   const editorCard = screen.getByTestId('config-editor-card');
   expect(
@@ -584,10 +609,9 @@ test('settings cold load reserves version, editor, and history heights without a
       Node.DOCUMENT_POSITION_FOLLOWING) !==
       0,
   ).toBe(true);
-  expect(
-    within(statusZone).getByTestId('config-editor-metadata').className,
-  ).toContain('min-h-12');
-
+  const metadata = within(statusZone).getByTestId('config-editor-metadata');
+  const factsStrip = metadata.parentElement as HTMLElement;
+  expect(factsStrip.className).not.toMatch(/(^|\s)(border|bg-|rounded|min-h-)/);
   const editorSkeleton = screen.getByTestId('config-editor-skeleton');
   expect(editorSkeleton.className).toMatch(/min-h-/);
   expect(editorSkeleton.children.length).toBeGreaterThan(0);
@@ -679,12 +703,34 @@ test('category navigation landmark lists seven categories and renders only the s
   });
   expect(network.getAttribute('aria-current')).toBe('page');
 
-  // The editor card header owns the active category: its h3 names the panel
-  // (via aria-labelledby) and the description sits under it exactly once —
-  // the panel itself repeats no heading or description.
+  // A q deep-link restores the query text without opening the overlay.
+  const searchInput = screen.getByRole('combobox', {
+    name: /search/i,
+  }) as HTMLInputElement;
+  expect(searchInput.value).toBe('tracing');
+  expect(screen.queryByTestId('config-search-results')).toBeNull();
+  expect(searchInput.getAttribute('aria-expanded')).toBe('false');
+
+  // The nav is the editor card's immediate previous sibling — attached above
+  // it, not inside it or below the header — and the two surfaces join: the
+  // nav carries the top rounding/border/background while the card drops its
+  // top corners. The card header still owns the active category: its h3
+  // names the panel (via aria-labelledby) and the description sits under it
+  // exactly once — the panel itself repeats no heading or description.
   const editorCard = screen.getByTestId('config-editor-card');
   const panel = screen.getByRole('region', { name: 'Network & requests' });
-  expect(editorCard.contains(nav)).toBe(true);
+  expect(editorCard.contains(nav)).toBe(false);
+  expect(editorCard.previousElementSibling).toBe(nav);
+  // DOM order is status zone → category nav → editor card.
+  expect(
+    (screen.getByTestId('config-status-zone').compareDocumentPosition(nav) &
+      Node.DOCUMENT_POSITION_FOLLOWING) !==
+      0,
+  ).toBe(true);
+  expect(nav.className).toMatch(/(^|\s)rounded-t/);
+  expect(nav.className).toMatch(/(^|\s)border(\s|$|-)/);
+  expect(nav.className).toMatch(/(^|\s)bg-/);
+  expect(editorCard.className).toContain('rounded-t-none');
   expect(
     (nav.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING) !==
       0,
@@ -803,11 +849,15 @@ test('one inline category grid serves every viewport — no drawer or select', (
   );
   expect(active?.className).toContain('accent');
 
-  // Sticky is wide-desktop only, where the grid is a single row; the
-  // multi-row mobile/tablet grid scrolls with the page.
-  expect(nav.className).toContain('xl:sticky');
-  expect(nav.className).toContain('xl:top-12');
-  expect(nav.className).not.toMatch(/(^|\s)sticky(\s|$)/);
+  // The nav is attached to the top of the editor card as its previous
+  // sibling — same width, shared border, no gap — rather than living inside
+  // the card or floating free.
+  const editorCard = screen.getByTestId('config-editor-card');
+  expect(editorCard.contains(nav)).toBe(false);
+  expect(editorCard.previousElementSibling).toBe(nav);
+  expect(nav.className).toMatch(/(^|\s)rounded-t/);
+  expect(nav.className).toMatch(/(^|\s)border-b-0(\s|$)/);
+  expect(editorCard.className).toContain('rounded-t-none');
 
   // The same nav drives the panel directly — no intermediate disclosure.
   fireEvent.click(within(nav).getByRole('button', { name: /^Scheduling/ }));
@@ -892,6 +942,155 @@ test('sections stay flat on the category canvas and keep advanced fields behind 
   expect(advanced?.getAttribute('data-testid')).toBe('config-advanced');
   expect(advanced?.hasAttribute('open')).toBe(false);
 });
+test('single-root compound sections let the section heading own the label', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+
+  // When a section's whole body is one compound root, the section h4 owns
+  // the label and the root's own heading and schema description are
+  // suppressed — controls (switches, segmented selectors, add buttons) stay
+  // untitled. Multi-root sections keep per-root headings so siblings stay
+  // distinguishable, and field labels are never affected.
+  const expectSingleRootSection = (
+    sectionId: string,
+    rootPath: string,
+    hiddenDescription?: string,
+  ) => {
+    const card = document.querySelector<HTMLElement>(
+      `[data-config-section="${sectionId}"]`,
+    );
+    expect(card, `${sectionId} section`).not.toBeNull();
+    const root = card?.querySelector<HTMLElement>(
+      `:scope > div > [data-config-path="${rootPath}"]`,
+    );
+    expect(root, `${sectionId} root ${rootPath}`).not.toBeNull();
+    // Exactly one root-level element in the primary grid.
+    const roots = Array.from(
+      card?.querySelectorAll<HTMLElement>(
+        ':scope > div > [data-config-path]',
+      ) ?? [],
+    );
+    expect(roots, `${sectionId} single root`).toHaveLength(1);
+    expect(roots[0]).toBe(root);
+    // No heading belongs to the root container — nested containers may keep
+    // theirs, but this fixture's single roots have none.
+    const rootHeadings = Array.from(
+      root?.querySelectorAll('h1, h2, h3, h4, h5, h6') ?? [],
+    ).filter((heading) => heading.closest('[data-config-path]') === root);
+    expect(rootHeadings, `${sectionId} root heading`).toHaveLength(0);
+    if (hiddenDescription) {
+      expect(card?.textContent).not.toContain(hiddenDescription);
+    }
+  };
+
+  // Network: the TLS section is just the nullable listener.tls object — the
+  // Enabled switch stays without a "Tls" heading above it.
+  expectSingleRootSection('tls', 'listener.tls');
+  const tlsRoot = document.querySelector<HTMLElement>(
+    '[data-config-path="listener.tls"]',
+  );
+  expect(within(tlsRoot as HTMLElement).getByRole('checkbox')).toBeDefined();
+
+  // Storage & data: the storage union is the whole Primary storage section —
+  // the segmented backend selector stays without a "Storage" heading or the
+  // schema description.
+  showCategory(view, 'Storage & data');
+  expectSingleRootSection(
+    'primary-storage',
+    'storage',
+    'Primary state store backend and connection.',
+  );
+  const storageRoot = document.querySelector<HTMLElement>(
+    '[data-config-path="storage"]',
+  );
+  expect(
+    within(storageRoot as HTMLElement).getByRole('radiogroup', {
+      name: 'Storage backend',
+    }),
+  ).toBeDefined();
+
+  // Scheduling: the recurring-jobs editor is the whole section.
+  showCategory(view, 'Scheduling');
+  expectSingleRootSection('recurring-jobs', 'scheduler.recurring_jobs');
+
+  // Identity & access: the providers editor keeps "Add provider" untitled.
+  // Heading suppression drops only the duplicate h5 — the token-handling
+  // note stays visible under the section heading.
+  showCategory(view, 'Identity & access');
+  expectSingleRootSection('admin-auth-providers', 'admin.auth.providers');
+  const providersSection = document.querySelector<HTMLElement>(
+    '[data-config-section="admin-auth-providers"]',
+  );
+  expect(providersSection?.textContent).toContain(
+    'Environment-backed tokens are referenced by name and never displayed.',
+  );
+  const providersRoot = document.querySelector<HTMLElement>(
+    '[data-config-path="admin.auth.providers"]',
+  );
+  expect(
+    within(providersRoot as HTMLElement).getByRole('button', {
+      name: 'Add provider',
+    }),
+  ).toBeDefined();
+  expectSingleRootSection('cluster-identity', 'cluster');
+
+  // Pricing & quotas.
+  showCategory(view, 'Pricing & quotas');
+  expectSingleRootSection('price-catalog', 'price_catalog');
+
+  // Runtime & observability: the observability object drops its heading and
+  // schema description under the section h4.
+  showCategory(view, 'Runtime & observability');
+  expectSingleRootSection(
+    'observability',
+    'observability',
+    'Tracing, telemetry, and log redaction.',
+  );
+
+  // Multi-root sections keep per-root headings: the OAuth section renders
+  // the nullable anthropic object and the github object side by side, each
+  // with its own heading so the siblings stay distinguishable.
+  showCategory(view, 'Identity & access');
+  const oauthSection = document.querySelector<HTMLElement>(
+    '[data-config-section="anthropic-oauth"]',
+  );
+  expect(oauthSection).not.toBeNull();
+  expect(
+    within(oauthSection as HTMLElement).getByRole('heading', {
+      name: 'Anthropic',
+    }),
+  ).toBeDefined();
+  expect(
+    within(oauthSection as HTMLElement).getByRole('heading', {
+      name: 'Github',
+    }),
+  ).toBeDefined();
+
+  // Sweep every category: any section whose primary grid holds exactly one
+  // root element keeps that root free of its own heading — the section h4
+  // owns the label. Sections that also render an Advanced disclosure keep
+  // per-root headings, matching the implementation's suppression condition.
+  for (const category of CONFIG_EDITOR_CATEGORIES) {
+    showCategory(view, category.label);
+    for (const card of document.querySelectorAll('[data-config-section]')) {
+      const roots = card.querySelectorAll(':scope > div > [data-config-path]');
+      if (roots.length !== 1) continue;
+      if (card.querySelector('[data-testid="config-advanced"]')) continue;
+      const root = roots[0] as HTMLElement;
+      const ownHeadings = Array.from(
+        root.querySelectorAll('h1, h2, h3, h4, h5, h6'),
+      ).filter((heading) => heading.closest('[data-config-path]') === root);
+      expect(
+        ownHeadings,
+        `${card.getAttribute('data-config-section')} root heading`,
+      ).toHaveLength(0);
+    }
+  }
+
+  // Field labels are always kept — scalar roots still show their labels.
+  showCategory(view, 'Network & requests');
+  expect(screen.getByLabelText('Proxy Addr')).toBeDefined();
+});
 
 test('a deep-linked advanced field opens its disclosure and receives focus', async () => {
   setSettingsLoaded();
@@ -911,20 +1110,85 @@ test('a deep-linked advanced field opens its disclosure and receives focus', asy
   expect(document.activeElement?.hasAttribute('data-field-control')).toBe(true);
 });
 
-test('settings search stays local until a result jumps to its field', async () => {
+test('settings search lives in the card header and overlays results without shifting the panel', async () => {
   setSettingsLoaded();
   const view = render(<SettingsComponent />);
 
-  const search = screen.getByRole('searchbox', { name: /search/i });
+  // The search control is the first action in the editor card header —
+  // before the save/validate/download buttons — not a field inside the
+  // panel. It spans the header row on mobile and a 256–320px column on
+  // larger screens.
+  const editorCard = screen.getByTestId('config-editor-card');
+  const search = screen.getByRole('combobox', { name: /search/i });
+  expect(editorCard.contains(search)).toBe(true);
+  const panel = screen.getByRole('region', { name: 'Network & requests' });
+  expect(panel.contains(search)).toBe(false);
+  const searchWrapper = search.parentElement as HTMLElement;
+  const saveDraftButton = screen.getByRole('button', { name: 'Save draft' });
+  const innerActionRow = searchWrapper.parentElement as HTMLElement;
+  const cardHeaderActionWrapper = innerActionRow.parentElement as HTMLElement;
+  expect(innerActionRow).toBe(saveDraftButton.parentElement);
+  expect(
+    searchWrapper.compareDocumentPosition(saveDraftButton) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(searchWrapper.className).toContain('w-full');
+  expect(searchWrapper.className).toMatch(
+    /(?:sm|md|lg|xl|2xl):w-(?:64|72|80|\[(?:2[5-9]\d|3[0-2]\d)px\])/,
+  );
+
+  // The header stacks its title block above the action wrapper below the sm
+  // breakpoint. The CardHeader action wrapper can shrink and wrap, while
+  // the inner custom action row owns the controls.
+  const headerRow = cardHeaderActionWrapper.parentElement as HTMLElement;
+  expect(headerRow.className).toContain('flex-col');
+  expect(headerRow.className).toContain('sm:flex-row');
+  expect(cardHeaderActionWrapper.className).toContain('flex-wrap');
+  expect(cardHeaderActionWrapper.className).toContain('min-w-0');
+  expect(cardHeaderActionWrapper.className).not.toMatch(
+    /(?:^|\s)(?:\w+:)?shrink-0(?:\s|$)/,
+  );
+
+  // Combobox semantics: the input autocompletes against a listbox popup.
+  expect(search.getAttribute('aria-autocomplete')).toBe('list');
+  expect(search.getAttribute('aria-haspopup')).toBe('listbox');
+
+  // Closed state: the input advertises a collapsed overlay with no popup
+  // relationship — aria-controls and the status region only exist while the
+  // overlay is mounted.
+  expect(search.getAttribute('aria-expanded')).toBe('false');
+  expect(search.getAttribute('aria-controls')).toBeNull();
+  expect(screen.queryByTestId('config-search-results')).toBeNull();
+  expect(screen.queryByTestId('config-search-status')).toBeNull();
+
+  // Typing stays local — no navigation — and the results render as an
+  // absolute overlay anchored to the search wrapper, so the panel's
+  // document flow and geometry never change.
+  const panelHtml = panel.innerHTML;
   fireEvent.change(search, { target: { value: 'tracing' } });
   expect(routerMocks.navigate).not.toHaveBeenCalled();
+  expect(panel.innerHTML).toBe(panelHtml);
 
   const results = screen.getByTestId('config-search-results');
-  const option = within(results).getByRole('button', { name: /tracing/i });
+  expect(results.getAttribute('role')).toBe('listbox');
+  expect(results.className).toContain('absolute');
+  expect(results.className).toContain('top-full');
+  expect(searchWrapper.className).toContain('relative');
+  expect(results.parentElement).toBe(searchWrapper);
+  expect(search.getAttribute('aria-expanded')).toBe('true');
+  expect(search.getAttribute('aria-controls')).toBe(results.id);
+  expect(screen.getByTestId('config-search-status')).toBeDefined();
+
+  // Selecting a result closes the overlay and keeps the existing
+  // category/field/q URL navigation plus field focus.
+  const option = within(results).getByRole('option', { name: /tracing/i });
   fireEvent.click(option);
+
+  expect(screen.queryByTestId('config-search-results')).toBeNull();
   expect(routerMocks.search).toMatchObject({
     category: 'runtime',
     field: 'observability.tracing_level',
+    q: 'tracing',
   });
   // Jumping to a result still keeps the page scroll: the route opts out of
   // scroll restoration and only the target field is centered and focused.
@@ -941,6 +1205,213 @@ test('settings search stays local until a result jumps to its field', async () =
   expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledWith(
     expect.objectContaining({ block: 'center' }),
   );
+});
+
+test('search overlay dismiss keeps the query while clear resets both', async () => {
+  setSettingsLoaded();
+  render(<SettingsComponent />);
+
+  const search = screen.getByRole('combobox', {
+    name: /search/i,
+  }) as HTMLInputElement;
+  fireEvent.change(search, { target: { value: 'tracing' } });
+  const results = screen.getByTestId('config-search-results');
+
+  // Escape is handled once on the wrapper: pressing it on a result option
+  // closes the overlay and returns focus to the input — the query stays.
+  const option = within(results).getByRole('option', { name: /tracing/i });
+  fireEvent.keyDown(option, { key: 'Escape' });
+  expect(screen.queryByTestId('config-search-results')).toBeNull();
+  expect(search.value).toBe('tracing');
+  expect(search.getAttribute('aria-expanded')).toBe('false');
+  expect(document.activeElement).toBe(search);
+
+  // Escape on the input itself takes the same path.
+  fireEvent.focusIn(search);
+  expect(screen.getByTestId('config-search-results')).toBeDefined();
+  fireEvent.keyDown(search, { key: 'Escape' });
+  expect(screen.queryByTestId('config-search-results')).toBeNull();
+  expect(search.value).toBe('tracing');
+  expect(document.activeElement).toBe(search);
+
+  // Focus moving inside the wrapper keeps the overlay; focus leaving the
+  // wrapper closes it while keeping the query.
+  fireEvent.focusIn(search);
+  const reopened = screen.getByTestId('config-search-results');
+  const clearButton = screen.getByRole('button', { name: 'Clear search' });
+  fireEvent.focusOut(search, { relatedTarget: clearButton });
+  expect(screen.getByTestId('config-search-results')).toBe(reopened);
+  fireEvent.focusOut(clearButton, { relatedTarget: document.body });
+  expect(screen.queryByTestId('config-search-results')).toBeNull();
+  expect(search.value).toBe('tracing');
+
+  // An outside pointerdown dismisses the overlay the same way — query kept.
+  fireEvent.focusIn(search);
+  expect(screen.getByTestId('config-search-results')).toBeDefined();
+  fireEvent.pointerDown(document.body);
+  expect(screen.queryByTestId('config-search-results')).toBeNull();
+  expect(search.value).toBe('tracing');
+
+  // The clear button is a ≥32px target that empties the query, dismisses the
+  // overlay, and returns focus to the input.
+  fireEvent.focusIn(search);
+  const clear = screen.getByRole('button', { name: 'Clear search' });
+  expect(dimensionPx(clear, 'h')).toBeGreaterThanOrEqual(32);
+  expect(dimensionPx(clear, 'w')).toBeGreaterThanOrEqual(32);
+  fireEvent.click(clear);
+  await flushEffects();
+  expect(search.value).toBe('');
+  expect(screen.queryByTestId('config-search-results')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Clear search' })).toBeNull();
+  expect(document.activeElement).toBe(search);
+});
+
+test('search combobox moves the active option with arrow keys while the input keeps focus', async () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+  const search = screen.getByRole('combobox', {
+    name: /search/i,
+  }) as HTMLInputElement;
+  act(() => search.focus());
+  fireEvent.change(search, { target: { value: 'pool' } });
+  const results = screen.getByTestId('config-search-results');
+  const options = within(results).getAllByRole('option');
+  expect(options.length).toBeGreaterThan(2);
+  const activeOption = () =>
+    options.find((option) => option.getAttribute('aria-selected') === 'true');
+
+  // No option is active until the operator arrows into the list.
+  expect(search.getAttribute('aria-activedescendant')).toBeNull();
+  expect(activeOption()).toBeUndefined();
+
+  // ArrowDown activates the first option and scrolls it into view without
+  // stealing focus from the input.
+  fireEvent.keyDown(search, { key: 'ArrowDown' });
+  expect(search.getAttribute('aria-activedescendant')).toBe(options[0]?.id);
+  expect(activeOption()).toBe(options[0]);
+  expect(document.activeElement).toBe(search);
+  expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
+  expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledWith({
+    block: 'nearest',
+  });
+
+  // Pointer hover only changes the highlighted option; it must not move the
+  // results list's scroll position.
+  fireEvent.mouseMove(options[2]);
+  expect(activeOption()).toBe(options[2]);
+  expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
+  fireEvent.keyDown(search, { key: 'ArrowDown' });
+  expect(search.getAttribute('aria-activedescendant')).toBe(options[3]?.id);
+  expect(activeOption()).toBe(options[3]);
+  expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledTimes(2);
+
+  // ArrowUp steps back from the current highlighted option. Hovering the
+  // first option remains highlight-only; ArrowUp from there wraps to last.
+  fireEvent.keyDown(search, { key: 'ArrowUp' });
+  expect(search.getAttribute('aria-activedescendant')).toBe(options[2]?.id);
+  fireEvent.mouseMove(options[0]);
+  expect(activeOption()).toBe(options[0]);
+  expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledTimes(3);
+  fireEvent.keyDown(search, { key: 'ArrowUp' });
+  const last = options[options.length - 1];
+  expect(search.getAttribute('aria-activedescendant')).toBe(last?.id);
+  expect(activeOption()).toBe(last);
+
+  // Home/End remain native text editing keys and must not be intercepted.
+  for (const key of ['Home', 'End']) {
+    const event = createEvent.keyDown(search, { key });
+    fireEvent(search, event);
+    expect(event.defaultPrevented).toBe(false);
+  }
+  for (const key of ['Home', 'End']) {
+    const event = createEvent.keyDown(search, {
+      key,
+      shiftKey: true,
+    });
+    fireEvent(search, event);
+    expect(event.defaultPrevented).toBe(false);
+  }
+
+  // A new query resets the active option — no stale activedescendant.
+  fireEvent.change(search, { target: { value: 'max_connections' } });
+  expect(search.getAttribute('aria-activedescendant')).toBeNull();
+  const narrowed = within(
+    screen.getByTestId('config-search-results'),
+  ).getAllByRole('option');
+  expect(narrowed.length).toBeGreaterThan(1);
+  for (const option of narrowed) {
+    expect(option.getAttribute('aria-selected')).toBe('false');
+  }
+
+  // Enter with no active option is a no-op — no navigation, overlay stays.
+  fireEvent.keyDown(search, { key: 'Enter' });
+  expect(routerMocks.navigate).not.toHaveBeenCalled();
+  expect(screen.getByTestId('config-search-results')).toBeDefined();
+
+  // Escape closes the overlay and clears the active option; ArrowDown
+  // reopens it and starts again from the first option.
+  fireEvent.keyDown(search, { key: 'Escape' });
+  expect(screen.queryByTestId('config-search-results')).toBeNull();
+  expect(search.getAttribute('aria-activedescendant')).toBeNull();
+  fireEvent.keyDown(search, { key: 'ArrowDown' });
+  const reopened = within(
+    screen.getByTestId('config-search-results'),
+  ).getAllByRole('option');
+  expect(search.getAttribute('aria-activedescendant')).toBe(reopened[0]?.id);
+
+  // Enter activates the active option exactly like a click: the overlay
+  // closes, the URL gains category/field/q, and the field receives focus.
+  fireEvent.keyDown(search, { key: 'Enter' });
+  expect(screen.queryByTestId('config-search-results')).toBeNull();
+  expect(routerMocks.search).toMatchObject({
+    category: 'scheduling',
+    field: 'scheduler.separate_pool.max_connections',
+    q: 'max_connections',
+  });
+  expect(routerMocks.navigate).toHaveBeenCalledWith(
+    expect.objectContaining({ resetScroll: false }),
+  );
+  view.rerender(<SettingsComponent />);
+  await flushEffects();
+
+  const field = document.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.separate_pool.max_connections"]',
+  );
+  expect(field?.contains(document.activeElement)).toBe(true);
+});
+
+test('search option pointer selection survives the input blur race', () => {
+  setSettingsLoaded();
+  render(<SettingsComponent />);
+
+  const search = screen.getByRole('combobox', {
+    name: /search/i,
+  }) as HTMLInputElement;
+  act(() => search.focus());
+  fireEvent.change(search, { target: { value: 'tracing' } });
+  const results = screen.getByTestId('config-search-results');
+  const option = within(results).getByRole('option', { name: /tracing/i });
+
+  // The option's mousedown prevents the native focus shift, so a real
+  // pointer press never blurs the input before the click lands.
+  const mouseDown = createEvent.mouseDown(option);
+  fireEvent(option, mouseDown);
+  expect(mouseDown.defaultPrevented).toBe(true);
+
+  // Even if a blur still slips through — a focusout whose relatedTarget is
+  // null means focus went nowhere, which only pointer presses produce — the
+  // option must stay mounted so the click can activate it.
+  fireEvent.focusOut(search, { relatedTarget: null });
+  expect(screen.getByTestId('config-search-results')).toBe(results);
+  expect(option.isConnected).toBe(true);
+
+  fireEvent.click(option);
+  expect(screen.queryByTestId('config-search-results')).toBeNull();
+  expect(routerMocks.search).toMatchObject({
+    category: 'runtime',
+    field: 'observability.tracing_level',
+    q: 'tracing',
+  });
 });
 
 test('duration and byte controls pair raw storage values with humanized units', () => {
@@ -1005,8 +1476,9 @@ test('status zone gathers metadata, running facts, and only abnormal alerts', ()
   setSettingsLoaded();
   render(<SettingsComponent />);
 
-  // One compact zone above the editor card carries the metadata strip, the
-  // running-facts row, and the alerts that actually apply.
+  // One compact zone above the editor card carries a single borderless
+  // low-emphasis facts strip — metadata and running facts as inline
+  // label/value pairs — plus the alerts that actually apply.
   const zone = screen.getByTestId('config-status-zone');
   const editorCard = screen.getByTestId('config-editor-card');
   expect(
@@ -1016,9 +1488,19 @@ test('status zone gathers metadata, running facts, and only abnormal alerts', ()
   ).toBe(true);
   const metadata = within(zone).getByTestId('config-editor-metadata');
   expect(metadata.textContent).toContain('/etc/cc-lb/cc-lb.toml');
+  expect(metadata.textContent).toContain('Draft revision');
   const summary = within(zone).getByTestId('config-running-summary');
   expect(summary.textContent).toContain('127.0.0.1:9090');
   expect(summary.textContent).toMatch(/postgres/i);
+  // Metadata and running facts share one strip element directly inside the
+  // zone — no panel chrome, no metadata/run divider, no reserved height,
+  // no uppercase label styling.
+  const strip = metadata.parentElement as HTMLElement;
+  expect(strip.parentElement).toBe(zone);
+  expect(strip.contains(summary)).toBe(true);
+  expect(strip.className).not.toMatch(/(^|\s)(border|bg-|rounded|min-h-)/);
+  expect(strip.querySelector('.border-t')).toBeNull();
+  expect(strip.querySelector('.uppercase')).toBeNull();
   // The fixture saved after process start, so the pending-restart drift
   // banner is a real abnormal alert and lives in the zone. It is announced
   // once by that timestamped notice — there is no separate
@@ -1319,6 +1801,116 @@ test('opaque storage URL can be unset without exposing it or dropping pool setti
     idle_timeout_secs: 600,
     max_lifetime_secs: 1800,
   });
+});
+test('storage backend is a required two-option segmented selector, not a combobox', () => {
+  const saveDraftMutate = vi.fn();
+  queryMocks.useSaveDraft.mockReturnValue(mutationResult(saveDraftMutate));
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Storage & data');
+
+  // The storage.kind discriminator is a segmented radiogroup inside the
+  // storage union container — no native select or combobox stands in for it.
+  const storage = document.querySelector<HTMLElement>(
+    '[data-config-path="storage"]',
+  ) as HTMLElement;
+  const group = within(storage).getByRole('radiogroup', {
+    name: 'Storage backend',
+  });
+  expect(group.getAttribute('data-config-path')).toBe('storage.kind');
+  expect(within(storage).queryByRole('combobox')).toBeNull();
+  const radios = within(group).getAllByRole('radio');
+  expect(radios.map((radio) => radio.textContent)).toEqual([
+    'SQLite',
+    'PostgreSQL',
+  ]);
+
+  // The saved postgres draft selects PostgreSQL; the selection is required
+  // and single — clicking the checked option never deselects it.
+  const sqlite = within(group).getByRole('radio', { name: 'SQLite' });
+  const postgres = within(group).getByRole('radio', { name: 'PostgreSQL' });
+  expect(postgres.getAttribute('aria-checked')).toBe('true');
+  expect(sqlite.getAttribute('aria-checked')).toBe('false');
+  fireEvent.click(postgres);
+  expect(postgres.getAttribute('aria-checked')).toBe('true');
+  expect(
+    document.querySelector('[data-config-path="storage.url"]'),
+  ).not.toBeNull();
+  expect(
+    document.querySelector('[data-config-path="storage.path"]'),
+  ).toBeNull();
+
+  // Switching to SQLite cuts the draft over to { kind: 'sqlite' } and swaps
+  // the rendered variant fields.
+  fireEvent.click(sqlite);
+  view.rerender(<SettingsComponent />);
+  const storageAfter = document.querySelector<HTMLElement>(
+    '[data-config-path="storage"]',
+  ) as HTMLElement;
+  const groupAfter = within(storageAfter).getByRole('radiogroup', {
+    name: 'Storage backend',
+  });
+  expect(
+    within(groupAfter)
+      .getByRole('radio', { name: 'SQLite' })
+      .getAttribute('aria-checked'),
+  ).toBe('true');
+  expect(
+    within(groupAfter)
+      .getByRole('radio', { name: 'PostgreSQL' })
+      .getAttribute('aria-checked'),
+  ).toBe('false');
+  expect(
+    document.querySelector('[data-config-path="storage.path"]'),
+  ).not.toBeNull();
+  // Only the selected variant's fields render — the postgres URL and pool
+  // leaves are hidden under sqlite.
+  expect(document.querySelector('[data-config-path="storage.url"]')).toBeNull();
+  expect(
+    document.querySelector('[data-config-path="storage.pool.max_connections"]'),
+  ).toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+  const request = saveDraftMutate.mock.calls[0]?.[0] as {
+    draft: { storage: Record<string, unknown> };
+  };
+  expect(request.draft.storage).toEqual({ kind: 'sqlite' });
+});
+
+test('switching storage backend clears a pending URL replacement', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Storage & data');
+
+  // Start a replacement on the postgres variant, then switch away and back:
+  // the variant cutover drops the pending replacement, so the URL field
+  // returns to its opaque badge state instead of the password input.
+  fireEvent.click(screen.getByRole('button', { name: 'Replace URL' }));
+  const urlInput = screen.getByLabelText('Url') as HTMLInputElement;
+  fireEvent.change(urlInput, {
+    target: { value: 'postgres://new-secret@db/cc_lb' },
+  });
+  expect(urlInput.value).toBe('postgres://new-secret@db/cc_lb');
+
+  const group = screen.getByRole('radiogroup', { name: 'Storage backend' });
+  fireEvent.click(within(group).getByRole('radio', { name: 'SQLite' }));
+  view.rerender(<SettingsComponent />);
+  const groupAfter = screen.getByRole('radiogroup', {
+    name: 'Storage backend',
+  });
+  fireEvent.click(
+    within(groupAfter).getByRole('radio', { name: 'PostgreSQL' }),
+  );
+  view.rerender(<SettingsComponent />);
+
+  const urlField = document.querySelector<HTMLElement>(
+    '[data-config-path="storage.url"]',
+  ) as HTMLElement;
+  expect(within(urlField).getByText('No stored URL')).toBeDefined();
+  expect(
+    within(urlField).getByRole('button', { name: 'Replace URL' }),
+  ).toBeDefined();
+  expect(urlField.querySelector('input')).toBeNull();
 });
 
 test('structured validation issues open their category and focus the field', async () => {
@@ -1930,11 +2522,11 @@ test('unassigned leaves land in their own category Other settings and stay searc
     }),
   ).toBeDefined();
 
-  const search = screen.getByRole('searchbox', { name: /search/i });
+  const search = screen.getByRole('combobox', { name: /search/i });
   fireEvent.change(search, { target: { value: 'retry_attempts' } });
   const results = screen.getByTestId('config-search-results');
   fireEvent.click(
-    within(results).getByRole('button', { name: /retry attempts/i }),
+    within(results).getByRole('option', { name: /retry attempts/i }),
   );
   expect(routerMocks.search).toMatchObject({
     category: 'data',
@@ -1959,20 +2551,25 @@ test('unassigned leaves land in their own category Other settings and stay searc
   expect(runtimeOther?.textContent).toMatch(/not recognized by the schema/i);
 });
 
-test('search results are plain buttons announced through a status region', () => {
+test('search results are listbox options announced through a status region', () => {
   setSettingsLoaded();
   render(<SettingsComponent />);
 
-  const search = screen.getByRole('searchbox', { name: /search/i });
+  const search = screen.getByRole('combobox', { name: /search/i });
   fireEvent.change(search, { target: { value: 'tracing' } });
 
+  // The overlay is a real listbox: each result is an option, and the empty
+  // state is a disabled option rather than a dead-end message.
   const results = screen.getByTestId('config-search-results');
-  expect(results.getAttribute('role')).not.toBe('listbox');
-  const buttons = within(results).getAllByRole('button');
-  expect(buttons.length).toBeGreaterThan(0);
-  for (const button of buttons) {
-    expect(button.getAttribute('role')).toBeNull();
-    expect(button.getAttribute('aria-selected')).toBeNull();
+  expect(results.getAttribute('role')).toBe('listbox');
+  const options = within(results).getAllByRole('option');
+  expect(options.length).toBeGreaterThan(0);
+  for (const option of options) {
+    expect(option.getAttribute('role')).toBe('option');
+    expect(option.getAttribute('aria-selected')).toBe('false');
+    // Options are reached through the combobox's activedescendant, never
+    // through Tab — they stay out of the tab order.
+    expect(option.tabIndex).toBe(-1);
   }
   const status = screen.getByTestId('config-search-status');
   expect(status.getAttribute('role')).toBe('status');
@@ -1983,6 +2580,10 @@ test('search results are plain buttons announced through a status region', () =>
   expect(screen.getByTestId('config-search-status').textContent).toMatch(
     /no settings match/i,
   );
+  const emptyOption = within(
+    screen.getByTestId('config-search-results'),
+  ).getByRole('option');
+  expect(emptyOption.getAttribute('aria-disabled')).toBe('true');
 });
 
 test('value details is a quiet chevron disclosure listing provenance only', () => {

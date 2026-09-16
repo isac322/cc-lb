@@ -1,3 +1,5 @@
+import { Radio as BaseRadio } from '@base-ui/react/radio';
+import { RadioGroup as BaseRadioGroup } from '@base-ui/react/radio-group';
 import {
   ChevronDown,
   ChevronRight,
@@ -9,6 +11,7 @@ import {
   Plus,
   RotateCcw,
   Save,
+  Search,
   Trash2,
   X,
 } from 'lucide-react';
@@ -43,6 +46,7 @@ import {
   type ConfigEditorSection as ConfigEditorSectionModel,
   type ConfigFieldGuidance,
   type ConfigSchema,
+  type ConfigSearchResult,
   classifyConfigLeaf,
   configPathToString,
   countConfigEditorLeaves,
@@ -121,6 +125,11 @@ const OPAQUE_STORAGE_URL_PATH = 'storage.url';
 const ADMIN_PROVIDERS_PATH = 'admin.auth.providers';
 const RECURRING_JOBS_PATH = 'scheduler.recurring_jobs';
 const CONFIG_CATEGORY_HEADING_ID = 'config-category-heading';
+const CONFIG_SEARCH_RESULTS_ID = 'config-search-results';
+const STORAGE_KIND_LABELS: Record<string, string> = {
+  sqlite: 'SQLite',
+  postgres: 'PostgreSQL',
+};
 const DESTRUCTIVE_ACTION_LABELS = [
   'Reset',
   'Unset',
@@ -738,6 +747,8 @@ export function ConfigEditorSection({
       ? (category as string)
       : 'network',
   );
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchWrapperRef = useRef<HTMLDivElement | null>(null);
   const [openAdvanced, setOpenAdvanced] = useState<Record<string, boolean>>({});
   const [searchText, setSearchText] = useState(query ?? '');
   const [confirmationOpen, setConfirmationOpen] = useState(false);
@@ -799,6 +810,22 @@ export function ConfigEditorSection({
   useEffect(() => {
     setSearchText(query ?? '');
   }, [query]);
+
+  // The search overlay is a floating panel: outside pointerdown closes it
+  // without clearing the query, matching the Escape behavior on the input.
+  useEffect(() => {
+    if (!searchOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node &&
+        !searchWrapperRef.current?.contains(event.target)
+      ) {
+        setSearchOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [searchOpen]);
 
   const dirty = state ? !isSameJson(state.value, state.saved) : false;
   const serverRevision = draftData?.revision ?? null;
@@ -1201,7 +1228,7 @@ export function ConfigEditorSection({
       subtitle="Edit the startup configuration, validate it, then save or download TOML."
     >
       <div data-testid="config-status-zone" className="space-y-2">
-        <div className="rounded-sm border border-subtle bg-panel-strong px-3 py-2">
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs text-text-faint">
           <EditorMetadata
             loading={loading}
             revision={state?.revision ?? null}
@@ -1209,12 +1236,7 @@ export function ConfigEditorSection({
             validatedRevision={validatedRevision}
             filePath={editorData?.file.path}
           />
-          {editorData ? (
-            <>
-              <div className="my-2 border-t border-subtle" />
-              <RunningSummary data={editorData} />
-            </>
-          ) : null}
+          {editorData ? <RunningSummary data={editorData} /> : null}
         </div>
 
         {loadError ? (
@@ -1327,67 +1349,12 @@ export function ConfigEditorSection({
         />
       </div>
 
-      <Card data-testid="config-editor-card">
-        <CardHeader
-          titleId={CONFIG_CATEGORY_HEADING_ID}
-          title={activeCategory?.label ?? 'Configuration'}
-          subtitle={
-            activeCategory ? (
-              <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span>{activeCategory.description}</span>
-                <CategoryStatusBadges counts={activeCategory.counts} />
-              </span>
-            ) : (
-              <Skeleton className="h-3 w-56 max-w-full" />
-            )
-          }
-          action={
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              <Button
-                size="sm"
-                iconLeft={<Save className="h-3.5 w-3.5" />}
-                loading={saveDraft.isPending}
-                disabled={!canSaveDraft}
-                onClick={handleSaveDraft}
-              >
-                Save draft
-              </Button>
-              <Button
-                size="sm"
-                iconLeft={<FileCheck2 className="h-3.5 w-3.5" />}
-                loading={validate.isPending}
-                disabled={!canValidate}
-                onClick={handleValidate}
-              >
-                Validate
-              </Button>
-              <Button
-                size="sm"
-                variant="primary"
-                iconLeft={<Save className="h-3.5 w-3.5" />}
-                loading={saveFile.isPending}
-                disabled={!canSaveFile}
-                onClick={handleSaveFileRequest}
-              >
-                Save to config file
-              </Button>
-              <Button
-                size="sm"
-                iconLeft={<Download className="h-3.5 w-3.5" />}
-                loading={downloadPending}
-                disabled={!canDownload}
-                onClick={() => void handleDownload()}
-              >
-                Download TOML
-              </Button>
-            </div>
-          }
-        />
+      <div>
         {activeCategory ? (
           <nav
             aria-label="Configuration categories"
             data-testid="config-category-nav"
-            className="border-b border-subtle px-4 py-2 xl:sticky xl:top-12 xl:z-10 xl:bg-[color:var(--color-bg-sub)] xl:backdrop-blur-sm"
+            className="rounded-t-sm border border-subtle border-b-0 bg-panel-strong px-4 py-2"
           >
             <CategoryNavList
               categories={categories}
@@ -1396,118 +1363,126 @@ export function ConfigEditorSection({
             />
           </nav>
         ) : null}
-        <CardBody className="space-y-4">
-          {loading ? (
-            <ConfigEditorSkeleton />
-          ) : editorData && state && model && activeCategory ? (
-            <StorageUrlReplacementContext.Provider
-              value={{
-                value: storageUrlReplacement,
-                onChange: (next) => {
-                  setStorageUrlReplacement(next);
-                  setLocalValidation(null);
-                  setActionError(null);
-                  setDownloadError(null);
-                },
-              }}
-            >
-              <ConfigSourcesContext.Provider
-                value={{ fileConfig: editorData.file_config }}
-              >
-                <div
-                  className="space-y-3"
-                  data-testid="structured-config-editor"
+        <Card
+          data-testid="config-editor-card"
+          className={activeCategory ? 'rounded-t-none' : undefined}
+        >
+          <CardHeader
+            titleId={CONFIG_CATEGORY_HEADING_ID}
+            title={activeCategory?.label ?? 'Configuration'}
+            subtitle={
+              activeCategory ? (
+                <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span>{activeCategory.description}</span>
+                  <CategoryStatusBadges counts={activeCategory.counts} />
+                </span>
+              ) : (
+                <Skeleton className="h-3 w-56 max-w-full" />
+              )
+            }
+            action={
+              <div className="flex w-full flex-wrap items-center justify-end gap-2">
+                <ConfigSearch
+                  searchText={searchText}
+                  results={searchResults}
+                  open={searchOpen}
+                  wrapperRef={searchWrapperRef}
+                  onOpenChange={setSearchOpen}
+                  onSearchTextChange={setSearchText}
+                  onActivate={activateSearchResult}
+                />
+                <Button
+                  size="sm"
+                  iconLeft={<Save className="h-3.5 w-3.5" />}
+                  loading={saveDraft.isPending}
+                  disabled={!canSaveDraft}
+                  onClick={handleSaveDraft}
                 >
-                  <div>
-                    <input
-                      type="search"
-                      aria-label="Search settings"
-                      data-testid="config-search"
-                      className={INPUT_CLASS}
-                      placeholder="Search settings by name, path, or description"
-                      value={searchText}
-                      onChange={(event) => setSearchText(event.target.value)}
+                  Save draft
+                </Button>
+                <Button
+                  size="sm"
+                  iconLeft={<FileCheck2 className="h-3.5 w-3.5" />}
+                  loading={validate.isPending}
+                  disabled={!canValidate}
+                  onClick={handleValidate}
+                >
+                  Validate
+                </Button>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  iconLeft={<Save className="h-3.5 w-3.5" />}
+                  loading={saveFile.isPending}
+                  disabled={!canSaveFile}
+                  onClick={handleSaveFileRequest}
+                >
+                  Save to config file
+                </Button>
+                <Button
+                  size="sm"
+                  iconLeft={<Download className="h-3.5 w-3.5" />}
+                  loading={downloadPending}
+                  disabled={!canDownload}
+                  onClick={() => void handleDownload()}
+                >
+                  Download TOML
+                </Button>
+              </div>
+            }
+          />
+          <CardBody className="space-y-4">
+            {loading ? (
+              <ConfigEditorSkeleton />
+            ) : editorData && state && model && activeCategory ? (
+              <StorageUrlReplacementContext.Provider
+                value={{
+                  value: storageUrlReplacement,
+                  onChange: (next) => {
+                    setStorageUrlReplacement(next);
+                    setLocalValidation(null);
+                    setActionError(null);
+                    setDownloadError(null);
+                  },
+                }}
+              >
+                <ConfigSourcesContext.Provider
+                  value={{ fileConfig: editorData.file_config }}
+                >
+                  <div
+                    className="space-y-3"
+                    data-testid="structured-config-editor"
+                  >
+                    <CategoryPanel
+                      category={activeCategory}
+                      model={model}
+                      rootSchema={editorData.schema as ConfigSchema}
+                      value={state.value}
+                      defaultConfig={editorData.default_config}
+                      effectiveConfig={editorData.effective_config}
+                      overrides={editorData.overrides ?? []}
+                      issues={issues}
+                      openAdvanced={openAdvanced}
+                      onToggleAdvanced={(sectionId, open) =>
+                        setOpenAdvanced((current) => ({
+                          ...current,
+                          [sectionId]: open,
+                        }))
+                      }
+                      onChange={updateValue}
                     />
-                    {searchText.trim() ? (
-                      <>
-                        <div
-                          role="status"
-                          className="sr-only"
-                          data-testid="config-search-status"
-                        >
-                          {searchResults.length
-                            ? `${searchResults.length} ${searchResults.length === 1 ? 'setting matches' : 'settings match'} this search.`
-                            : 'No settings match this search.'}
-                        </div>
-                        <div
-                          data-testid="config-search-results"
-                          className="mt-1 max-h-72 overflow-y-auto rounded-sm border border-subtle bg-panel-strong"
-                        >
-                          {searchResults.length ? (
-                            searchResults.map((result) => (
-                              <button
-                                key={result.path}
-                                type="button"
-                                className="flex min-h-[44px] w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]"
-                                onClick={() =>
-                                  activateSearchResult(result.path)
-                                }
-                              >
-                                <span className="min-w-0">
-                                  <span className="block truncate text-sm text-text">
-                                    {result.label}
-                                  </span>
-                                  <span className="block truncate text-[10px] text-text-faint">
-                                    {result.breadcrumb} ·{' '}
-                                    <span className="font-mono">
-                                      {result.path}
-                                    </span>
-                                  </span>
-                                </span>
-                                {result.leaf.advanced ? (
-                                  <Badge tone="neutral">Advanced</Badge>
-                                ) : null}
-                              </button>
-                            ))
-                          ) : (
-                            <div className="px-3 py-2 text-xs text-text-faint">
-                              No settings match this search.
-                            </div>
-                          )}
-                        </div>
-                      </>
-                    ) : null}
                   </div>
-
-                  <CategoryPanel
-                    category={activeCategory}
-                    model={model}
-                    rootSchema={editorData.schema as ConfigSchema}
-                    value={state.value}
-                    defaultConfig={editorData.default_config}
-                    effectiveConfig={editorData.effective_config}
-                    overrides={editorData.overrides ?? []}
-                    issues={issues}
-                    openAdvanced={openAdvanced}
-                    onToggleAdvanced={(sectionId, open) =>
-                      setOpenAdvanced((current) => ({
-                        ...current,
-                        [sectionId]: open,
-                      }))
-                    }
-                    onChange={updateValue}
-                  />
-                </div>
-              </ConfigSourcesContext.Provider>
-            </StorageUrlReplacementContext.Provider>
-          ) : (
-            <div
-              className="min-h-[420px]"
-              data-testid="config-editor-reserved"
-            />
-          )}
-        </CardBody>
-      </Card>
+                </ConfigSourcesContext.Provider>
+              </StorageUrlReplacementContext.Provider>
+            ) : (
+              <div
+                className="min-h-[420px]"
+                data-testid="config-editor-reserved"
+              />
+            )}
+          </CardBody>
+        </Card>
+      </div>
 
       <ConfirmDialog
         open={confirmationOpen}
@@ -1652,11 +1627,8 @@ function RunningSummary({ data }: { data: ConfigEditorResponse }) {
     data.file.reason ??
     'This process cannot atomically replace the config file. You can still save and validate a draft, then download TOML for manual deployment.';
   return (
-    <div
-      data-testid="config-running-summary"
-      className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-muted"
-    >
-      <span className="font-medium text-text">Running configuration</span>
+    <div data-testid="config-running-summary" className="contents">
+      <span className="font-medium text-text-muted">Running configuration</span>
       <span>
         proxy{' '}
         <span className="font-mono text-text">
@@ -1713,10 +1685,7 @@ function EditorMetadata({
   filePath?: string;
 }) {
   return (
-    <div
-      data-testid="config-editor-metadata"
-      className="grid min-h-12 grid-cols-2 gap-x-4 gap-y-2 text-xs text-text-faint sm:grid-cols-4"
-    >
+    <div data-testid="config-editor-metadata" className="contents">
       <MetadataValue
         label="Draft revision"
         loading={loading}
@@ -1757,12 +1726,16 @@ function MetadataValue({
   value: ReactNode;
 }) {
   return (
-    <div className="min-w-0">
-      <div className="mb-0.5 text-[10px] uppercase tracking-wider">{label}</div>
-      <div className="min-h-4 text-text-muted">
-        {loading ? <Skeleton className="h-4 w-20 max-w-full" /> : value}
-      </div>
-    </div>
+    <span className="inline-flex min-w-0 items-baseline gap-1.5">
+      <span>{label}</span>
+      <span className="min-w-0 text-text-muted">
+        {loading ? (
+          <Skeleton as="span" className="inline-block h-3 w-16 max-w-full" />
+        ) : (
+          value
+        )}
+      </span>
+    </span>
   );
 }
 
@@ -1978,6 +1951,262 @@ function CategoryNavList({
   );
 }
 
+/**
+ * Compact header search: the input lives in the CardHeader action row and the
+ * result list is an absolute overlay anchored to the wrapper, so opening or
+ * closing it never changes the panel's document flow or height. Escape,
+ * outside pointerdown, and focus leaving the wrapper close the overlay but
+ * keep the query; the clear button resets both and returns focus to the input.
+ */
+function ConfigSearch({
+  searchText,
+  results,
+  open,
+  wrapperRef,
+  onOpenChange,
+  onSearchTextChange,
+  onActivate,
+}: {
+  searchText: string;
+  results: ConfigSearchResult[];
+  open: boolean;
+  wrapperRef: Ref<HTMLDivElement>;
+  onOpenChange: (open: boolean) => void;
+  onSearchTextChange: (text: string) => void;
+  onActivate: (path: string) => void;
+}) {
+  const hasQuery = Boolean(searchText.trim());
+  const showOverlay = open && hasQuery;
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  // Programmatic focus returns (Escape, clear) must not reopen the overlay:
+  // the next focus event after one is suppressed exactly once.
+  const suppressNextFocusOpenRef = useRef(false);
+  const returnFocusToInput = () => {
+    const input = inputRef.current;
+    if (!input) return;
+    // Suppress only when focus actually moves — a no-op focus() emits no
+    // focus event, so an unconsumed flag would swallow a later genuine focus.
+    if (document.activeElement !== input)
+      suppressNextFocusOpenRef.current = true;
+    input.focus();
+  };
+  // Combobox active descendant: index into `results`, or null when no option
+  // is active. Kept in state so ArrowUp/ArrowDown moves re-render the highlight.
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const keyboardNavigationRef = useRef(false);
+  const optionId = (path: string) =>
+    `${CONFIG_SEARCH_RESULTS_ID}-option-${path}`;
+  // Render-clamped index: a results update can shrink the list before the
+  // reset effect below runs, so aria-activedescendant never sees a stale id.
+  const activeOptionIndex =
+    showOverlay && activeIndex !== null && activeIndex < results.length
+      ? activeIndex
+      : null;
+  const activeOptionId =
+    activeOptionIndex !== null
+      ? optionId(results[activeOptionIndex].path)
+      : null;
+  // Close or any results change drops the active option — a new query must not
+  // leave a highlight (or a stale descendant id) on a different result set.
+  // Arrow-key/hover updates only touch activeIndex, which is not a dep here,
+  // so they never trigger the reset.
+  const prevResultsRef = useRef(results);
+  useEffect(() => {
+    const resultsChanged = prevResultsRef.current !== results;
+    prevResultsRef.current = results;
+    if (!showOverlay || resultsChanged) setActiveIndex(null);
+  }, [showOverlay, results]);
+  // Keep the active option visible only after keyboard navigation. Pointer hover
+  // updates the highlight without changing the list's scroll position.
+  // scrollIntoView is absent in jsdom, so guard the call itself.
+  useEffect(() => {
+    if (!keyboardNavigationRef.current) return;
+    keyboardNavigationRef.current = false;
+    if (activeOptionId === null) return;
+    document
+      .getElementById(activeOptionId)
+      ?.scrollIntoView?.({ block: 'nearest' });
+  }, [activeOptionId]);
+  const moveActive = (delta: 1 | -1) => {
+    if (!hasQuery) return;
+    if (!open) onOpenChange(true);
+    if (!results.length) return;
+    keyboardNavigationRef.current = true;
+    setActiveIndex((current) =>
+      current === null
+        ? delta === 1
+          ? 0
+          : results.length - 1
+        : (current + delta + results.length) % results.length,
+    );
+  };
+  const activateOption = (index: number) => {
+    const result = results[index];
+    if (!result) return;
+    onOpenChange(false);
+    onActivate(result.path);
+  };
+  return (
+    <div
+      ref={wrapperRef}
+      className="relative w-full sm:w-64 lg:w-80"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          onOpenChange(false);
+          returnFocusToInput();
+        }
+      }}
+      onBlurCapture={(event) => {
+        // relatedTarget null means focus went nowhere — only pointer-induced
+        // blurs produce it (Tab-out always has a real target, and outside
+        // clicks already close via the document pointerdown listener). Keep
+        // the overlay mounted so a pending option click can still land.
+        if (event.relatedTarget === null) return;
+        const next = event.relatedTarget;
+        if (!(next instanceof Node && event.currentTarget.contains(next))) {
+          onOpenChange(false);
+        }
+      }}
+    >
+      <Search
+        aria-hidden="true"
+        className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-faint"
+      />
+      <input
+        ref={inputRef}
+        type="search"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-haspopup="listbox"
+        aria-expanded={showOverlay}
+        aria-controls={showOverlay ? CONFIG_SEARCH_RESULTS_ID : undefined}
+        aria-activedescendant={activeOptionId ?? undefined}
+        aria-label="Search settings"
+        data-testid="config-search"
+        className={cx(
+          INPUT_CLASS,
+          '!h-8 pl-8 pr-9 [&::-webkit-search-cancel-button]:appearance-none',
+        )}
+        placeholder="Search settings"
+        value={searchText}
+        onChange={(event) => {
+          onSearchTextChange(event.target.value);
+          onOpenChange(Boolean(event.target.value.trim()));
+        }}
+        onFocus={() => {
+          if (suppressNextFocusOpenRef.current) {
+            suppressNextFocusOpenRef.current = false;
+            return;
+          }
+          if (hasQuery) onOpenChange(true);
+        }}
+        onKeyDown={(event) => {
+          switch (event.key) {
+            case 'ArrowDown':
+              event.preventDefault();
+              moveActive(1);
+              break;
+            case 'ArrowUp':
+              event.preventDefault();
+              moveActive(-1);
+              break;
+            case 'Enter':
+              if (activeOptionIndex !== null) {
+                event.preventDefault();
+                activateOption(activeOptionIndex);
+              }
+              break;
+          }
+        }}
+      />
+      {hasQuery ? (
+        <button
+          type="button"
+          aria-label="Clear search"
+          className="absolute right-0.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-sm text-text-faint hover:bg-overlay-5 hover:text-[color:var(--color-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]"
+          onClick={() => {
+            onSearchTextChange('');
+            onOpenChange(false);
+            requestAnimationFrame(returnFocusToInput);
+          }}
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+      {showOverlay ? (
+        <div
+          role="status"
+          className="sr-only"
+          data-testid="config-search-status"
+        >
+          {results.length
+            ? `${results.length} ${results.length === 1 ? 'setting matches' : 'settings match'} this search.`
+            : 'No settings match this search.'}
+        </div>
+      ) : null}
+      {showOverlay ? (
+        <div
+          id={CONFIG_SEARCH_RESULTS_ID}
+          role="listbox"
+          aria-label="Search results"
+          data-testid="config-search-results"
+          className="glass-strong absolute left-0 right-0 top-full z-50 mt-1 max-h-72 overflow-y-auto rounded-sm shadow-2xl"
+        >
+          {results.length ? (
+            results.map((result, index) => (
+              <button
+                key={result.path}
+                id={optionId(result.path)}
+                type="button"
+                role="option"
+                aria-selected={index === activeOptionIndex}
+                tabIndex={-1}
+                className={cx(
+                  'flex min-h-[44px] w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]',
+                  index === activeOptionIndex && 'bg-overlay-5',
+                )}
+                // Keep focus on the input: preventing the default mousedown
+                // focus shift means the option is still mounted when the
+                // click arrives, so pointer selection never races a
+                // focusout-driven unmount.
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseMove={() => {
+                  if (index !== activeIndex) setActiveIndex(index);
+                }}
+                onClick={() => activateOption(index)}
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-sm text-text">
+                    {result.label}
+                  </span>
+                  <span className="block truncate text-[10px] text-text-faint">
+                    {result.breadcrumb} ·{' '}
+                    <span className="font-mono">{result.path}</span>
+                  </span>
+                </span>
+                {result.leaf.advanced ? (
+                  <Badge tone="neutral">Advanced</Badge>
+                ) : null}
+              </button>
+            ))
+          ) : (
+            <div
+              role="option"
+              aria-selected={false}
+              aria-disabled="true"
+              className="px-3 py-2 text-xs text-text-faint"
+              onMouseDown={(event) => event.preventDefault()}
+            >
+              No settings match this search.
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ConfigEditorSkeleton() {
   return (
     <div
@@ -2140,6 +2369,10 @@ function SectionCard({
 }) {
   const primaryRoots = sectionRenderRoots(section, false, model, rootSchema);
   const advancedRoots = sectionRenderRoots(section, true, model, rootSchema);
+  // A lone primary root repeats the section h4 — suppress its own heading so
+  // the section owns the label. Multi-root sections keep per-root headings.
+  const hideRootHeading =
+    primaryRoots.length === 1 && advancedRoots.length === 0;
   const renderRoot = (root: RenderRoot) => (
     <ConfigNode
       key={root.path}
@@ -2154,6 +2387,7 @@ function SectionCard({
       onChange={onChange}
       depth={0}
       childKeys={root.childKeys}
+      hideHeading={hideRootHeading}
     />
   );
   return (
@@ -2208,6 +2442,7 @@ function ConfigNode({
   onChange,
   depth,
   childKeys,
+  hideHeading = false,
 }: {
   rootSchema: ConfigSchema;
   schema: ConfigSchema;
@@ -2220,6 +2455,8 @@ function ConfigNode({
   onChange: (value: unknown) => void;
   depth: number;
   childKeys?: Set<string>;
+  /** Suppress the root h5/description when the section h4 already names it. */
+  hideHeading?: boolean;
 }) {
   const resolvedSchema = resolveConfigSchema(rootSchema, inputSchema);
   const nullable = isNullableConfigSchema(rootSchema, inputSchema);
@@ -2246,6 +2483,7 @@ function ConfigNode({
         overrides={overrides}
         issues={issues}
         onChange={onChange}
+        hideHeading={hideHeading}
       />
     );
   }
@@ -2278,6 +2516,7 @@ function ConfigNode({
         onChange={onChange}
         depth={depth}
         childKeys={childKeys}
+        hideHeading={hideHeading}
       />
     );
   }
@@ -2295,38 +2534,47 @@ function ConfigNode({
         data-config-path={path}
         tabIndex={-1}
       >
-        <div className="flex min-w-0 items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h5
-              className={cx(
-                'font-medium text-text',
-                depth === 0 ? 'text-sm' : 'text-xs',
-              )}
-            >
-              {titleForKey(path.split('.').at(-1) ?? path)}
-            </h5>
-            {typeof schema.description === 'string' ? (
-              <p className="mt-0.5 text-xs leading-relaxed text-text-faint">
-                {schema.description}
-              </p>
+        {!hideHeading || nullable ? (
+          <div
+            className={cx(
+              'flex min-w-0 items-start gap-3',
+              hideHeading ? 'justify-end' : 'justify-between',
+            )}
+          >
+            {!hideHeading ? (
+              <div className="min-w-0">
+                <h5
+                  className={cx(
+                    'font-medium text-text',
+                    depth === 0 ? 'text-sm' : 'text-xs',
+                  )}
+                >
+                  {titleForKey(path.split('.').at(-1) ?? path)}
+                </h5>
+                {typeof schema.description === 'string' ? (
+                  <p className="mt-0.5 text-xs leading-relaxed text-text-faint">
+                    {schema.description}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+            {nullable ? (
+              <ToggleSwitch
+                variant="compact"
+                data-field-control
+                checked={configured}
+                label="Enabled"
+                onChange={(event) => {
+                  onChange(
+                    event.target.checked
+                      ? (setConfigValue(value, path, {}) as JsonObject)
+                      : (unsetConfigValue(value, path) as JsonObject),
+                  );
+                }}
+              />
             ) : null}
           </div>
-          {nullable ? (
-            <ToggleSwitch
-              variant="compact"
-              data-field-control
-              checked={configured}
-              label="Enabled"
-              onChange={(event) => {
-                onChange(
-                  event.target.checked
-                    ? (setConfigValue(value, path, {}) as JsonObject)
-                    : (unsetConfigValue(value, path) as JsonObject),
-                );
-              }}
-            />
-          ) : null}
-        </div>
+        ) : null}
         {showChildren ? (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
             {Object.entries(properties).map(([key, childSchema]) =>
@@ -2938,6 +3186,7 @@ function TaggedUnionEditor({
   onChange,
   depth,
   childKeys,
+  hideHeading = false,
 }: {
   rootSchema: ConfigSchema;
   schema: ConfigSchema;
@@ -2950,6 +3199,8 @@ function TaggedUnionEditor({
   onChange: (value: unknown) => void;
   depth: number;
   childKeys?: Set<string>;
+  /** Suppress the root h5/description when the section h4 already names it. */
+  hideHeading?: boolean;
 }) {
   const storageUrlReplacement = useContext(StorageUrlReplacementContext);
   const variants = taggedVariants(rootSchema, schema);
@@ -2981,59 +3232,91 @@ function TaggedUnionEditor({
   }
   const properties = objectProperties(rootSchema, selected.schema);
   const showDiscriminator = !childKeys || childKeys.has(selected.property);
+  const selectKind = (kind: string) => {
+    const nextVariant = variants.find((variant) => variant.kind === kind);
+    if (!nextVariant) return;
+    const nextValue = {
+      [nextVariant.property]: nextVariant.kind,
+    };
+    if (path === 'storage') {
+      storageUrlReplacement.onChange(null);
+    }
+    onChange(setConfigValue(value, path, nextValue));
+  };
   return (
     <div
       className="col-span-full space-y-3 rounded-sm border border-subtle bg-panel-strong p-3"
       data-config-path={path}
       tabIndex={-1}
     >
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-        <div className="min-w-0">
-          <h5
-            className={cx(
-              'font-medium text-text',
-              depth === 0 ? 'text-sm' : 'text-xs',
-            )}
-          >
-            {titleForKey(path.split('.').at(-1) ?? path)}
-          </h5>
-          {typeof schema.description === 'string' ? (
-            <p className="mt-0.5 text-xs text-text-faint">
-              {schema.description}
-            </p>
+      {!hideHeading || showDiscriminator ? (
+        <div
+          className={cx(
+            'flex flex-col gap-2 sm:flex-row',
+            hideHeading
+              ? 'sm:items-center sm:justify-end'
+              : 'sm:items-end sm:justify-between',
+          )}
+        >
+          {!hideHeading ? (
+            <div className="min-w-0">
+              <h5
+                className={cx(
+                  'font-medium text-text',
+                  depth === 0 ? 'text-sm' : 'text-xs',
+                )}
+              >
+                {titleForKey(path.split('.').at(-1) ?? path)}
+              </h5>
+              {typeof schema.description === 'string' ? (
+                <p className="mt-0.5 text-xs text-text-faint">
+                  {schema.description}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          {showDiscriminator ? (
+            path === 'storage' ? (
+              <BaseRadioGroup
+                aria-label="Storage backend"
+                data-config-path={`${path}.${selected.property}`}
+                required
+                className="inline-flex w-fit items-center gap-0.5 rounded-sm border border-subtle bg-bg p-0.5"
+                value={selected.kind}
+                onValueChange={(kind) => selectKind(kind)}
+              >
+                {variants.map((variant) => (
+                  <BaseRadio.Root
+                    key={variant.kind}
+                    value={variant.kind}
+                    className="cursor-pointer rounded-sm px-2.5 py-1 text-xs text-text-muted transition-colors hover:text-[color:var(--color-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] data-[checked]:bg-[color:var(--color-panel-strong)] data-[checked]:font-medium data-[checked]:text-[color:var(--color-text)]"
+                  >
+                    {STORAGE_KIND_LABELS[variant.kind] ??
+                      titleForKey(variant.kind)}
+                  </BaseRadio.Root>
+                ))}
+              </BaseRadioGroup>
+            ) : (
+              <label className="min-w-40 text-[10px] uppercase tracking-wider text-text-faint">
+                Kind
+                <select
+                  data-config-path={`${path}.${selected.property}`}
+                  data-field-control
+                  className={cx(INPUT_CLASS, 'mt-1')}
+                  value={selected.kind}
+                  onChange={(event) => selectKind(event.target.value)}
+                >
+                  {variants.map((variant) => (
+                    <option key={variant.kind} value={variant.kind}>
+                      {titleForKey(variant.kind)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )
           ) : null}
         </div>
-        {showDiscriminator ? (
-          <label className="min-w-40 text-[10px] uppercase tracking-wider text-text-faint">
-            Kind
-            <select
-              data-config-path={`${path}.${selected.property}`}
-              data-field-control
-              className={cx(INPUT_CLASS, 'mt-1')}
-              value={selected.kind}
-              onChange={(event) => {
-                const nextVariant = variants.find(
-                  (variant) => variant.kind === event.target.value,
-                );
-                if (!nextVariant) return;
-                const nextValue = {
-                  [nextVariant.property]: nextVariant.kind,
-                };
-                if (path === 'storage') {
-                  storageUrlReplacement.onChange(null);
-                }
-                onChange(setConfigValue(value, path, nextValue));
-              }}
-            >
-              {variants.map((variant) => (
-                <option key={variant.kind} value={variant.kind}>
-                  {titleForKey(variant.kind)}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-      </div>
+      ) : null}
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
         {Object.entries(properties).map(([key, child]) =>
           key === selected.property ||
@@ -3068,6 +3351,7 @@ function AdminProvidersEditor({
   overrides,
   issues,
   onChange,
+  hideHeading = false,
 }: {
   rootSchema: ConfigSchema;
   schema: ConfigSchema;
@@ -3078,6 +3362,8 @@ function AdminProvidersEditor({
   overrides: ConfigOverrideInfo[];
   issues: ConfigValidationIssue[];
   onChange: (value: unknown) => void;
+  /** Suppress the root h5 when the section h4 already names it; the token-handling note always renders. */
+  hideHeading?: boolean;
 }) {
   const itemSchema = isJsonObject(schema.items)
     ? resolveConfigSchema(rootSchema, schema.items)
@@ -3103,8 +3389,10 @@ function AdminProvidersEditor({
       tabIndex={-1}
     >
       <div className="flex items-start justify-between gap-3">
-        <div>
-          <h5 className="text-xs font-medium text-text">Admin Providers</h5>
+        <div className="min-w-0">
+          {!hideHeading ? (
+            <h5 className="text-xs font-medium text-text">Admin Providers</h5>
+          ) : null}
           <p className="mt-0.5 text-xs text-text-faint">
             Provider order is stable. Environment-backed tokens are referenced
             by name and never displayed.
@@ -3564,12 +3852,16 @@ function focusConfigPath(path: string) {
       ? target
       : target?.querySelector<HTMLElement>('[data-field-control]');
     const fieldControlSelector =
-      'input:not([type="hidden"]):not(:disabled), select:not(:disabled), textarea:not(:disabled), [role="switch"]:not([aria-disabled="true"])';
+      'input:not([type="hidden"]):not(:disabled), select:not(:disabled), textarea:not(:disabled), [role="switch"]:not([aria-disabled="true"]), [role="radio"]:not([aria-disabled="true"])';
     const fieldControl =
       explicit ??
+      // A checked radio is the meaningful control inside a segmented group;
+      // fall back to the first enabled radio when nothing is checked yet.
       (target?.matches(fieldControlSelector)
         ? target
-        : target?.querySelector<HTMLElement>(fieldControlSelector));
+        : (target?.querySelector<HTMLElement>(
+            '[role="radio"][aria-checked="true"]',
+          ) ?? target?.querySelector<HTMLElement>(fieldControlSelector)));
     const actions = target?.matches('button:not(:disabled)')
       ? [target]
       : [
