@@ -354,13 +354,19 @@ async fn update_split_spec_in_tx(
     expected_revision: u64,
     update: UpstreamUpdate,
 ) -> StorageResult<()> {
+    let base_url_present = update.base_url.is_some();
+    let base_url = update
+        .base_url
+        .as_ref()
+        .and_then(Option::as_ref)
+        .map(Url::as_str);
     let row = sqlx::query(
         "UPDATE upstream_spec_v1
            SET name = COALESCE($3, name),
-               base_url = COALESCE($4, base_url),
-               enabled = COALESCE($5, enabled),
-               warmup_enabled = COALESCE($6, warmup_enabled),
-               warmup_dialect_plugin = COALESCE($7, warmup_dialect_plugin),
+               base_url = CASE WHEN $4 THEN $5 ELSE base_url END,
+               enabled = COALESCE($6, enabled),
+               warmup_enabled = COALESCE($7, warmup_enabled),
+               warmup_dialect_plugin = COALESCE($8, warmup_dialect_plugin),
                spec_revision = spec_revision + 1,
                updated_at = NOW()
          WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL
@@ -369,7 +375,8 @@ async fn update_split_spec_in_tx(
     .bind(id)
     .bind(u64_to_i64(expected_revision, "upstream spec revision")?)
     .bind(update.name)
-    .bind(update.base_url.as_ref().map(ToString::to_string))
+    .bind(base_url_present)
+    .bind(base_url)
     .bind(update.enabled)
     .bind(update.warmup_enabled)
     .bind(

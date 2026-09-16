@@ -252,7 +252,7 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
     );
     assert!(!body(&reloaded).to_string().contains(secret));
 
-    let reloaded_list = request(app, "GET", "/admin/v1/upstreams", None, None).await;
+    let reloaded_list = request(app.clone(), "GET", "/admin/v1/upstreams", None, None).await;
     assert_eq!(reloaded_list.status, StatusCode::OK);
     let reloaded_listed = body(&reloaded_list)["upstreams"]
         .as_array()
@@ -265,6 +265,64 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
         "https://replacement.example.com/api/"
     );
     assert!(!reloaded_listed.to_string().contains(secret));
+
+    let renamed = request(
+        app.clone(),
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "name": "base-url-renamed" })),
+        Some("W/\"2\""),
+    )
+    .await;
+    assert_eq!(renamed.status, StatusCode::OK);
+    assert_eq!(
+        body(&renamed)["base_url"],
+        "https://replacement.example.com/api/"
+    );
+
+    let stale_clear = request(
+        app.clone(),
+        "PUT",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "base_url": null })),
+        Some("W/\"2\""),
+    )
+    .await;
+    assert_eq!(stale_clear.status, StatusCode::CONFLICT);
+
+    let cleared = request(
+        app.clone(),
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "base_url": null })),
+        Some("W/\"3\""),
+    )
+    .await;
+    assert_eq!(cleared.status, StatusCode::OK);
+    assert_eq!(body(&cleared)["base_url"], Value::Null);
+    assert!(!body(&cleared).to_string().contains(secret));
+
+    let cleared_detail = request(
+        app.clone(),
+        "GET",
+        &format!("/admin/v1/upstreams/{id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(cleared_detail.status, StatusCode::OK);
+    assert_eq!(body(&cleared_detail)["base_url"], Value::Null);
+
+    let restored = request(
+        app,
+        "PUT",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "base_url": "https://restored.example.com/" })),
+        Some("W/\"4\""),
+    )
+    .await;
+    assert_eq!(restored.status, StatusCode::OK);
+    assert_eq!(body(&restored)["base_url"], "https://restored.example.com/");
 }
 
 #[tokio::test]
