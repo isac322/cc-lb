@@ -439,9 +439,10 @@ mod tests {
             since: u64,
             until: u64,
             limit: usize,
+            admin_only: bool,
         ) -> StorageResult<Vec<AuditEntry>> {
             self.inner
-                .query_recent_audit(scope, since, until, limit)
+                .query_recent_audit(scope, since, until, limit, admin_only)
                 .await
         }
 

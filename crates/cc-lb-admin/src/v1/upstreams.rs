@@ -139,8 +139,14 @@ struct UpstreamCreateBody {
 struct UpstreamUpdateBody {
     #[serde(default)]
     name: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_double_option")]
-    base_url: Option<Option<Url>>,
+    /// Missing or explicit `null` preserves the override; a non-null
+    /// value sets it. Clearing requires `clear_base_url`.
+    #[serde(default)]
+    base_url: Option<Url>,
+    /// Explicitly clears the `base_url` override. Mutually exclusive
+    /// with a non-null `base_url`.
+    #[serde(default)]
+    clear_base_url: bool,
     #[serde(default)]
     api_key_env: Option<String>,
     #[serde(default)]
@@ -151,14 +157,6 @@ struct UpstreamUpdateBody {
     warmup_enabled: Option<bool>,
     #[serde(default)]
     warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
-}
-
-fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: serde::Deserializer<'de>,
-{
-    Deserialize::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1177,6 +1175,12 @@ async fn update_upstream(
             current_revision: current.revision,
         });
     }
+    if body.clear_base_url && body.base_url.is_some() {
+        return Err(UpstreamError::BadRequest {
+            error: "conflicting_base_url",
+            detail: "provide either base_url or clear_base_url, not both".to_owned(),
+        });
+    }
 
     let fields_changed = changed_fields(&body);
     let api_key_ciphertext = api_key_ciphertext_for_update(&state, &current, &body)?;
@@ -1196,7 +1200,11 @@ async fn update_upstream(
         expected_revision,
         UpstreamUpdate {
             name: body.name,
-            base_url: body.base_url,
+            base_url: if body.clear_base_url {
+                Some(None)
+            } else {
+                body.base_url.map(Some)
+            },
             api_key_ciphertext,
             oauth_token_generation: None,
             enabled: body.enabled,
@@ -1753,7 +1761,7 @@ fn changed_fields(body: &UpstreamUpdateBody) -> Vec<&'static str> {
     if body.name.is_some() {
         fields.push("name");
     }
-    if body.base_url.is_some() {
+    if body.base_url.is_some() || body.clear_base_url {
         fields.push("base_url");
     }
     if body.api_key_env.is_some() || body.api_key_value.is_some() {

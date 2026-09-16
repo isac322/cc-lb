@@ -204,6 +204,7 @@ mod tests {
             _since: u64,
             _until: u64,
             _limit: usize,
+            _admin_only: bool,
         ) -> StorageResult<Vec<StoredAuditEntry>> {
             Err(StorageError::Fatal {
                 message: "query_recent_audit is not used by subscriber tests".to_owned(),

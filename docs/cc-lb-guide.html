@@ -821,9 +821,9 @@ curl -s http://127.0.0.1:8080/v1/messages \
       <tr><td><code>GET /admin/health</code></td><td>비인증 헬스</td></tr>
       <tr><td><code>GET /admin/v1/principals</code></td><td>DB principal 목록</td></tr>
       <tr><td><code>GET /admin/v1/principals/{id}/limits</code></td><td>principal의 DB 저장 기본 한도</td></tr>
-      <tr><td><code>GET /admin/v1/audit?since=&amp;until=&amp;limit=&amp;principal_id=</code></td><td>감사 로그 — 최신 항목부터(ts·id/seq 내림차순) limit개 반환. <code>after</code>는 배타적 시간 하한(after+1초부터)이며 전진 커서가 아님. storage의 기존 오름차순 조회 계약은 유지</td></tr>
+      <tr><td><code>GET /admin/v1/audit?since=&amp;until=&amp;limit=&amp;principal_id=&amp;admin_only=</code></td><td>감사 로그 — 최신 항목부터(ts·id/seq 내림차순) limit개 반환. 기본값은 전체 기록이며, <code>admin_only=true</code>는 관리자 작업·kind 기록을 LIMIT 전에 필터링(Audit UI에서 사용). <code>after</code>는 배타적 시간 하한(after+1초부터)이며 전진 커서가 아님. storage의 기존 오름차순 조회 계약은 유지</td></tr>
       <tr><td><code>GET /admin/v1/upstreams</code></td><td>DB upstream 목록과 상태 — <code>base_url</code> 포함(미설정 시 <code>null</code>)</td></tr>
-      <tr><td><code>PUT/PATCH /admin/v1/upstreams/{id}</code></td><td><code>base_url</code> 생략은 기존 override 유지, URL 문자열은 설정, 명시적 <code>null</code>은 override 제거 후 기본 endpoint 사용. <code>If-Match</code> revision 보호는 유지하며 API 키·OAuth 토큰의 null 처리와는 별개</td></tr>
+      <tr><td><code>PUT/PATCH /admin/v1/upstreams/{id}</code></td><td><code>base_url</code> 생략·<code>null</code>은 기존 override 유지, URL 문자열은 설정. <code>clear_base_url: true</code>만 override를 제거하고 기본 endpoint를 사용하며, URL 설정과 초기화의 동시 요청은 거절. 구버전 폼의 무편집 저장이 override를 지우지 않도록 초기화 의도를 구분한다. <code>If-Match</code> revision 보호와 API 키·OAuth 토큰의 null 처리는 유지</td></tr>
       <tr><td><code>POST /admin/v1/upstreams/{id}/disable</code></td><td>upstream 비활성화</td></tr>
       <tr><td><code>GET /admin/v1/config/current</code></td><td>live config 스냅샷</td></tr>
       <tr><td><code>GET /admin/v1/config/draft</code></td><td>초안·검증 revision과 제공자의 <code>apply_supported</code> 반환. Settings는 지원이 확인된 경우에만 기존 검증 조건에 따라 Apply를 허용하며, 미지원 서버에서도 Save·Validate는 유지</td></tr>

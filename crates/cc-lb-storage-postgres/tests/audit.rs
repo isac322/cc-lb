@@ -106,7 +106,7 @@ async fn run_contract(pool: &PgPool) -> Result<()> {
 async fn run_recent_contract(pool: &PgPool) -> Result<()> {
     let storage = PostgresStorage::new(pool.clone(), Arc::new(TestClock::new_at_secs(NOW)));
     storage.initialize(BackendKind::Postgres).await?;
-    let entries = [
+    let mut entries = [
         recent_audit_entry("matching-old", NOW, "target-principal", AUTHORITY, SUBJECT),
         recent_audit_entry(
             "other-principal-newest-match",
@@ -150,13 +150,29 @@ async fn run_recent_contract(pool: &PgPool) -> Result<()> {
             AUTHORITY,
             SUBJECT,
         ),
+        recent_audit_entry(
+            "admin-action-old",
+            NOW,
+            "target-principal",
+            AUTHORITY,
+            SUBJECT,
+        ),
+        recent_audit_entry(
+            "admin-kind-only",
+            NOW + 1,
+            "other-principal",
+            AUTHORITY,
+            "bob",
+        ),
     ];
+    entries[7].admin_action = Some("principal_update".to_owned());
+    entries[8].kind = Some("admin".to_owned());
     for entry in &entries {
         storage.append_audit(entry).await?;
     }
 
     let all_rows = storage
-        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 11, 5)
+        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 11, 5, false)
         .await?;
     assert_request_ids(
         &all_rows,
@@ -170,7 +186,7 @@ async fn run_recent_contract(pool: &PgPool) -> Result<()> {
     );
 
     let all_with_late_row = storage
-        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 11, 6)
+        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 11, 6, false)
         .await?;
     assert_eq!(
         all_with_late_row
@@ -185,6 +201,7 @@ async fn run_recent_contract(pool: &PgPool) -> Result<()> {
             NOW,
             NOW + 11,
             4,
+            false,
         )
         .await?;
     assert_request_ids(
@@ -206,6 +223,7 @@ async fn run_recent_contract(pool: &PgPool) -> Result<()> {
             NOW,
             NOW + 11,
             3,
+            false,
         )
         .await?;
     assert_request_ids(
@@ -218,7 +236,7 @@ async fn run_recent_contract(pool: &PgPool) -> Result<()> {
     );
 
     let tied_boundary_rows = storage
-        .query_recent_audit(AuditQueryScope::All, NOW + 8, NOW + 8, 10)
+        .query_recent_audit(AuditQueryScope::All, NOW + 8, NOW + 8, 10, false)
         .await?;
     assert_request_ids(
         &tied_boundary_rows,
@@ -227,16 +245,54 @@ async fn run_recent_contract(pool: &PgPool) -> Result<()> {
 
     assert!(
         storage
-            .query_recent_audit(AuditQueryScope::All, NOW, NOW + 11, 0)
+            .query_recent_audit(AuditQueryScope::All, NOW, NOW + 11, 0, true)
             .await?
             .is_empty()
     );
     assert!(
         storage
-            .query_recent_audit(AuditQueryScope::All, NOW + 1, NOW, 10)
+            .query_recent_audit(AuditQueryScope::All, NOW + 1, NOW, 10, true)
             .await?
             .is_empty()
     );
+
+    // admin_only applies its predicate before LIMIT: with these limits the
+    // newest non-admin rows would exhaust the window and hide every admin row
+    // if the predicate ran after LIMIT.
+    let admin_rows = storage
+        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 11, 5, true)
+        .await?;
+    assert_request_ids(&admin_rows, &["admin-kind-only", "admin-action-old"]);
+
+    let principal_admin_rows = storage
+        .query_recent_audit(
+            AuditQueryScope::Principal("target-principal"),
+            NOW,
+            NOW + 11,
+            3,
+            true,
+        )
+        .await?;
+    assert_request_ids(&principal_admin_rows, &["admin-action-old"]);
+
+    let actor_admin_rows = storage
+        .query_recent_audit(
+            AuditQueryScope::Actor {
+                authority: AUTHORITY,
+                subject: SUBJECT,
+            },
+            NOW,
+            NOW + 11,
+            3,
+            true,
+        )
+        .await?;
+    assert_request_ids(&actor_admin_rows, &["admin-action-old"]);
+
+    let bounded_admin_rows = storage
+        .query_recent_audit(AuditQueryScope::All, NOW + 1, NOW + 1, 200, true)
+        .await?;
+    assert_request_ids(&bounded_admin_rows, &["admin-kind-only"]);
     Ok(())
 }
 

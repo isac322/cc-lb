@@ -317,6 +317,8 @@ struct AuditQuery {
     limit: Option<usize>,
     actor_authority: Option<String>,
     actor_subject: Option<String>,
+    #[serde(default)]
+    admin_only: bool,
 }
 
 async fn query_audit(
@@ -374,7 +376,9 @@ async fn query_audit(
                 .map_or(AuditQueryScope::All, AuditQueryScope::Principal),
             _ => unreachable!("actor query fields were validated above"),
         };
-        storage.query_recent_audit(scope, since, until, limit).await
+        storage
+            .query_recent_audit(scope, since, until, limit, query.admin_only)
+            .await
     };
     let entries = match result {
         Ok(entries) => entries,
@@ -399,6 +403,7 @@ async fn query_audit(
                 "until": until,
                 "limit": limit,
                 "actor_subject": query.actor_subject,
+                "admin_only": query.admin_only,
             })),
         },
     )
