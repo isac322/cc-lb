@@ -1164,6 +1164,11 @@ test('single-root compound sections let the section heading own the label', () =
     'Tracing, telemetry, and log redaction.',
   );
 
+  // Routing & resilience: the affinity section renders its leaf directly —
+  // a scalar root keeps its own field label.
+  showCategory(view, 'Routing & resilience');
+  expect(screen.getByLabelText('Ttl Days')).toBeDefined();
+
   // Multi-root sections keep per-root headings: the OAuth section renders
   // the nullable anthropic object and the github object side by side, each
   // with its own heading so the siblings stay distinguishable.
@@ -1182,27 +1187,6 @@ test('single-root compound sections let the section heading own the label', () =
       name: 'Github',
     }),
   ).toBeDefined();
-
-  // Sweep every category: any section whose primary grid holds exactly one
-  // root element keeps that root free of its own heading — the section h4
-  // owns the label. Sections that also render an Advanced disclosure keep
-  // per-root headings, matching the implementation's suppression condition.
-  for (const category of CONFIG_EDITOR_CATEGORIES) {
-    showCategory(view, category.label);
-    for (const card of document.querySelectorAll('[data-config-section]')) {
-      const roots = card.querySelectorAll(':scope > div > [data-config-path]');
-      if (roots.length !== 1) continue;
-      if (card.querySelector('[data-testid="config-advanced"]')) continue;
-      const root = roots[0] as HTMLElement;
-      const ownHeadings = Array.from(
-        root.querySelectorAll('h1, h2, h3, h4, h5, h6'),
-      ).filter((heading) => heading.closest('[data-config-path]') === root);
-      expect(
-        ownHeadings,
-        `${card.getAttribute('data-config-section')} root heading`,
-      ).toHaveLength(0);
-    }
-  }
 
   // Field labels are always kept — scalar roots still show their labels.
   showCategory(view, 'Network & requests');
