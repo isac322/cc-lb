@@ -285,7 +285,7 @@ async fn put_config_draft(
     let response = admin_json(
         app,
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(json!({
             "draft": draft,
             "expected_revision": 0,

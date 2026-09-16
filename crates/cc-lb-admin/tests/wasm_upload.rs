@@ -676,6 +676,8 @@ async fn build_admin_state(
 ) -> cc_lb_admin::AdminState {
     use std::sync::Arc;
     cc_lb_admin::AdminState {
+        config_path: None,
+        startup_config_overrides: Default::default(),
         storage: Some(server.storage.clone()),
         key_store: Some(admin_test_common::key_store(server.storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
@@ -687,6 +689,7 @@ async fn build_admin_state(
         data_dir: Some(server._dir.path().to_path_buf()),
         warmup_dialect_dispatcher: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&cc_lb_config::Config::default()),
+        dynamic_view_rebinder: None,
         config: Arc::new(cc_lb_config::Config::default()),
         scheduler: None,
         admin_auth: crate::admin_test_common::static_token_auth("test-token"),

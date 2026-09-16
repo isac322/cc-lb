@@ -8,6 +8,7 @@ import {
   cloneElement,
   type FocusEventHandler,
   type HTMLAttributes,
+  type InputHTMLAttributes,
   isValidElement,
   type MouseEventHandler,
   type PointerEventHandler,
@@ -31,12 +32,14 @@ export function Card({ className, ...rest }: HTMLAttributes<HTMLDivElement>) {
 }
 export function CardHeader({
   title,
+  titleId,
   action,
   subtitle,
   className,
   align = 'start',
 }: {
   readonly title: ReactNode;
+  readonly titleId?: string;
   readonly subtitle?: ReactNode;
   readonly action?: ReactNode;
   readonly className?: string;
@@ -51,7 +54,9 @@ export function CardHeader({
       )}
     >
       <div className="min-w-0">
-        <h3 className="text-sm font-medium text-text">{title}</h3>
+        <h3 id={titleId} className="text-sm font-medium text-text">
+          {title}
+        </h3>
         {subtitle ? (
           <div
             className="mt-0.5 min-h-4 text-xs text-text-faint"
@@ -62,7 +67,7 @@ export function CardHeader({
         ) : null}
       </div>
       {action ? (
-        <div className="flex flex-wrap items-center gap-2 sm:shrink-0 min-w-0 w-full sm:w-auto">
+        <div className="flex flex-wrap items-center gap-2 min-w-0 w-full sm:w-auto">
           {action}
         </div>
       ) : null}
@@ -125,7 +130,7 @@ export function Button({
       className={cx(
         'inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none',
         'disabled:cursor-not-allowed disabled:opacity-50',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-2',
         BTN_VARIANTS[variant],
         BTN_SIZES[size],
         fullWidth ? 'w-full' : '',
@@ -154,9 +159,9 @@ export function IconButton({
       type={type ?? 'button'}
       aria-label={label}
       className={cx(
-        'inline-flex items-center justify-center text-text-muted hover:text-text rounded-sm',
+        'inline-flex items-center justify-center text-text-muted hover:text-[color:var(--color-text)] rounded-sm',
         'h-9 w-9 md:h-8 md:w-8 hover:bg-overlay-5',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
+        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-1',
         className,
       )}
       {...rest}
@@ -170,11 +175,12 @@ export function IconButton({
 type BadgeTone = 'neutral' | 'accent' | 'ok' | 'warn' | 'danger' | 'mono';
 const BADGE_TONES: Record<BadgeTone, string> = {
   neutral: 'bg-overlay-4 text-text border-subtle',
-  accent: 'bg-accent/15 text-accent border-accent/40',
-  ok: 'bg-[color:var(--color-ok)]/15 text-[color:var(--color-ok)] border-[color:var(--color-ok)]/40',
-  warn: 'bg-[color:var(--color-warn)]/15 text-[color:var(--color-warn)] border-[color:var(--color-warn)]/40',
+  accent:
+    'bg-[color:var(--color-accent-dim)] text-[color:var(--color-accent-text)] border-[color:var(--color-accent)]/40',
+  ok: 'bg-[color:var(--color-ok)]/15 text-[color:var(--color-success-text)] border-[color:var(--color-ok)]/40',
+  warn: 'bg-[color:var(--color-warn)]/15 text-[color:var(--color-warn-text)] border-[color:var(--color-warn)]/40',
   danger:
-    'bg-[color:var(--color-danger)]/15 text-[color:var(--color-danger)] border-[color:var(--color-danger)]/40',
+    'bg-[color:var(--color-danger)]/15 text-[color:var(--color-danger-text)] border-[color:var(--color-danger)]/40',
   mono: 'bg-overlay-5 text-text border-subtle font-mono',
 };
 export function Badge({
@@ -359,10 +365,10 @@ export function Modal({
               disabled={preventDismiss}
               aria-disabled={preventDismiss || undefined}
               className={cx(
-                'inline-flex items-center justify-center text-text-muted hover:text-text rounded-sm',
+                'inline-flex items-center justify-center text-text-muted hover:text-[color:var(--color-text)] rounded-sm',
                 'h-9 w-9 md:h-8 md:w-8 hover:bg-overlay-5',
-                'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
-                'disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-text-muted',
+                'focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-1',
+                'disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[color:var(--color-text-muted)]',
               )}
             >
               <X className="w-4 h-4" />
@@ -846,7 +852,107 @@ export function Field({
   );
 }
 
+export function ToggleSwitch({
+  label,
+  description,
+  className,
+  variant = 'card',
+  ...rest
+}: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & {
+  label: ReactNode;
+  description?: ReactNode;
+  /**
+   * 'card' renders the bordered panel used for standalone toggles.
+   * 'compact' drops the border/background/padding so the switch can sit
+   * inline inside a denser header row.
+   */
+  variant?: 'card' | 'compact';
+}) {
+  const compact = variant === 'compact';
+  return (
+    <label
+      className={cx(
+        compact
+          ? 'flex min-h-[44px] min-w-0 cursor-pointer items-center gap-2'
+          : 'flex min-w-0 cursor-pointer items-start justify-between gap-4 rounded-sm border border-subtle bg-panel-strong px-3 py-2.5',
+        rest.disabled ? 'cursor-not-allowed opacity-60' : undefined,
+        className,
+      )}
+    >
+      <span className="min-w-0">
+        <span
+          className={cx('block text-text', compact ? 'text-xs' : 'text-sm')}
+        >
+          {label}
+        </span>
+        {description ? (
+          <span className="mt-0.5 block text-xs leading-relaxed text-text-faint">
+            {description}
+          </span>
+        ) : null}
+      </span>
+      <span
+        className={cx(
+          'relative inline-flex h-5 w-9 shrink-0',
+          compact ? undefined : 'mt-0.5',
+        )}
+      >
+        <input {...rest} type="checkbox" className="peer sr-only" />
+        <span className="absolute inset-0 rounded-full border border-subtle-strong bg-overlay-6 transition-colors peer-checked:border-[color:var(--color-accent)] peer-checked:bg-[color:var(--color-accent)]/35 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[color:var(--color-accent)] peer-focus-visible:outline-offset-2" />
+        <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-[color:var(--color-text-muted)] shadow-sm transition-transform peer-checked:translate-x-4 peer-checked:bg-[color:var(--color-accent)]" />
+      </span>
+    </label>
+  );
+}
+
+type NoticeTone = 'info' | 'success' | 'warning' | 'danger';
+
+const NOTICE_TONE_CLASS: Record<NoticeTone, string> = {
+  info: 'border-blue-500/30 bg-blue-500/10 text-[color:var(--color-info-text)]',
+  success:
+    'border-emerald-500/30 bg-emerald-500/10 text-[color:var(--color-success-text)]',
+  warning:
+    'border-amber-500/35 bg-amber-500/10 text-[color:var(--color-warn-text)]',
+  danger:
+    'border-red-500/35 bg-red-500/10 text-[color:var(--color-danger-text)]',
+};
+
+export function Notice({
+  tone = 'info',
+  title,
+  children,
+  action,
+  className,
+  role,
+}: {
+  tone?: NoticeTone;
+  title?: ReactNode;
+  children: ReactNode;
+  action?: ReactNode;
+  className?: string;
+  role?: 'alert' | 'status';
+}) {
+  return (
+    <div
+      className={cx(
+        'flex flex-col gap-3 rounded-sm border px-3 py-2.5 text-xs sm:flex-row sm:items-start sm:justify-between',
+        NOTICE_TONE_CLASS[tone],
+        className,
+      )}
+      role={role ?? (tone === 'danger' ? 'alert' : 'status')}
+    >
+      <div className="min-w-0 leading-relaxed">
+        {title ? (
+          <div className="mb-0.5 font-medium text-text">{title}</div>
+        ) : null}
+        <div>{children}</div>
+      </div>
+      {action ? <div className="shrink-0">{action}</div> : null}
+    </div>
+  );
+}
+
 // ─── Input + Select base classes ─────────────────────────────────────────────
 export const INPUT_CLASS =
-  'w-full h-9 px-2.5 text-sm bg-bg border border-subtle rounded-sm text-text placeholder:text-text-faint ' +
-  'focus:border-accent focus:outline-none transition-colors';
+  'w-full h-9 px-2.5 text-sm bg-bg border border-subtle rounded-sm text-text placeholder:text-[color:var(--color-text-faint)] ' +
+  'focus:border-[color:var(--color-accent)] focus:outline-none transition-colors';

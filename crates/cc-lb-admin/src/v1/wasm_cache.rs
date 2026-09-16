@@ -8,7 +8,6 @@ pub(crate) fn data_dir(state: &AdminState) -> PathBuf {
     }
     state
         .config
-        .current_config()
         .runtime
         .data_dir
         .clone()

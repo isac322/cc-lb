@@ -87,6 +87,8 @@ fn test_state(
 ) -> AdminState {
     let config = Config::default();
     AdminState {
+        config_path: None,
+        startup_config_overrides: Default::default(),
         storage: Some(storage.clone()),
         key_store: Some(crate::admin_test_common::key_store(storage)),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
@@ -98,6 +100,7 @@ fn test_state(
         data_dir: None,
         warmup_dialect_dispatcher: None,
         dynamic_view: crate::admin_test_common::dynamic_view_holder(&config),
+        dynamic_view_rebinder: None,
         config: Arc::new(config),
         scheduler: Some(scheduler),
         admin_auth: crate::admin_test_common::static_token_auth(TEST_TOKEN),

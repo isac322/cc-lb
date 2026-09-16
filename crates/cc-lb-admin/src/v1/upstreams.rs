@@ -2138,6 +2138,8 @@ mod tests {
         let storage = Arc::new(storage);
         let aead = Arc::new(AeadService::from_master_key([8; 32]));
         let state = AdminState {
+            config_path: None,
+            startup_config_overrides: Default::default(),
             storage: Some(storage.clone()),
             key_store: None,
             aead: aead.clone(),
@@ -2156,6 +2158,7 @@ mod tests {
             warmup_dialect_dispatcher: None,
             dynamic_view: Arc::new(DynamicViewHolder::new(test_view())),
             config: Arc::new(Config::default()),
+            dynamic_view_rebinder: None,
             scheduler: None,
             admin_auth: Arc::new(crate::auth::AdminAuthenticator::new(Vec::new())),
             start_time: std::time::Instant::now(),

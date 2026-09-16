@@ -199,9 +199,13 @@ fn install_sighup(handler: Option<SighupHandler>, tasks: SignalTasks) {
             return;
         };
         while sighup.recv().await.is_some() {
-            tracing::info!("configuration reload signal received");
             if let Some(handler) = &handler {
+                tracing::info!("SIGHUP received; reloading TLS certificate and key only");
                 handler();
+            } else {
+                tracing::info!(
+                    "SIGHUP received; configuration is fixed at startup and no TLS reload handler is installed, restart cc-lb to apply config changes"
+                );
             }
         }
     });

@@ -344,23 +344,20 @@ pub trait ConfigStore: Send + Sync {
         expected_revision: u64,
     ) -> StorageResult<u64>;
 
-    async fn set_last_validated_revision(
+    async fn set_config_validation(
         &self,
         revision: u64,
-        error: Option<String>,
+        valid: bool,
+        validation: serde_json::Value,
     ) -> StorageResult<()>;
 
     async fn append_config_history(
         &self,
         revision: u64,
-        config_toml: String,
         applied_at_unix_secs: u64,
-        summary: HistorySummary,
     ) -> StorageResult<()>;
 
     async fn list_config_history(&self, limit: usize) -> StorageResult<Vec<HistoryEntry>>;
-
-    async fn get_config_history(&self, revision: u64) -> StorageResult<Option<HistoryEntry>>;
 }
 
 #[async_trait]

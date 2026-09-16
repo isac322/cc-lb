@@ -38,13 +38,16 @@ impl RoutePreviewPort for PreviewPort {
 fn test_state() -> AdminState {
     let config = Config::default();
     AdminState {
+        config_path: None,
+        startup_config_overrides: Default::default(),
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
-        config: Arc::new(Config::default()),
+        dynamic_view_rebinder: None,
+        config: Arc::new(config),
         scheduler: None,
         admin_auth: crate::admin_test_common::static_token_auth("test-token"),
         lazy_refresher: None,

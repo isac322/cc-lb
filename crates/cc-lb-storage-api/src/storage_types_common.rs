@@ -154,21 +154,14 @@ pub struct ConfigDraftState {
     pub draft: Option<Value>,
     pub revision: u64,
     pub last_validated_revision: Option<u64>,
-    pub last_validation_error: Option<String>,
+    pub last_validation: Option<Value>,
     pub saved_at_unix_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistorySummary {
-    pub tls_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub revision: u64,
-    pub config_toml: String,
     pub applied_at_unix_secs: u64,
-    pub summary: HistorySummary,
 }
 
 const UNKNOWN_USAGE_DIMENSION: &str = "unknown";
