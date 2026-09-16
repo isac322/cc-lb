@@ -1,3 +1,4 @@
+import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import {
   ChevronDown,
   ChevronUp,
@@ -5,6 +6,7 @@ import {
   Download,
   FileCheck2,
   FileWarning,
+  PanelLeft,
   Plus,
   RotateCcw,
   Save,
@@ -35,6 +37,7 @@ import {
   CONFIG_EDITOR_CATEGORIES,
   CONFIG_EDITOR_UNASSIGNED_LABEL,
   CONFIG_EDITOR_UNASSIGNED_SECTION_ID,
+  type ConfigEditorCounts,
   type ConfigEditorLeaf,
   type ConfigEditorLeafKind,
   type ConfigEditorModel,
@@ -737,6 +740,7 @@ export function ConfigEditorSection({
       : 'network',
   );
   const [openAdvanced, setOpenAdvanced] = useState<Record<string, boolean>>({});
+  const [categoryNavOpen, setCategoryNavOpen] = useState(false);
   const [searchText, setSearchText] = useState(query ?? '');
   const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [selfLockoutRequired, setSelfLockoutRequired] = useState(false);
@@ -1010,10 +1014,12 @@ export function ConfigEditorSection({
     setActionError(null);
     setDownloadError(null);
   };
-
   const selectCategory = (id: string) => {
     setSelectedCategory(id);
-    onNavigate({ category: id });
+    setCategoryNavOpen(false);
+    // Category switches keep the active search text but drop the field
+    // deep-link — the field belongs to the previous category.
+    onNavigate({ category: id, q: searchText.trim() || undefined });
   };
 
   const revealConfigPath = (path: string) => {
@@ -1452,81 +1458,77 @@ export function ConfigEditorSection({
                     ) : null}
                   </div>
 
-                  <select
-                    aria-label="Configuration category"
-                    data-testid="config-category-select"
-                    className={cx(INPUT_CLASS, 'min-h-[44px] xl:hidden')}
-                    value={activeCategory.id}
-                    onChange={(event) => selectCategory(event.target.value)}
+                  <BaseDialog.Root
+                    open={categoryNavOpen}
+                    onOpenChange={setCategoryNavOpen}
                   >
-                    {categories.map((entry) => {
-                      const parts: string[] = [];
-                      if (entry.counts.modified)
-                        parts.push(`${entry.counts.modified} modified`);
-                      if (entry.counts.overrides)
-                        parts.push(`${entry.counts.overrides} overridden`);
-                      if (entry.counts.errors)
-                        parts.push(`${entry.counts.errors} invalid`);
-                      return (
-                        <option key={entry.id} value={entry.id}>
-                          {parts.length
-                            ? `${entry.label} (${parts.join(', ')})`
-                            : entry.label}
-                        </option>
-                      );
-                    })}
-                  </select>
+                    <BaseDialog.Trigger
+                      data-testid="config-category-trigger"
+                      className="sticky top-14 z-20 flex min-h-[44px] w-full min-w-0 items-center gap-3 rounded-sm border border-subtle bg-bg-sub px-3 py-2 text-left shadow-sm hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent xl:hidden"
+                    >
+                      <PanelLeft
+                        className="h-4 w-4 shrink-0 text-text-faint"
+                        aria-hidden="true"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium text-text">
+                          {activeCategory.label}
+                        </span>
+                        <span className="block truncate text-[10px] text-text-faint">
+                          {activeCategory.description}
+                        </span>
+                      </span>
+                      <CategoryStatusBadges counts={activeCategory.counts} />
+                      <ChevronDown
+                        className="h-4 w-4 shrink-0 text-text-faint"
+                        aria-hidden="true"
+                      />
+                    </BaseDialog.Trigger>
+                    <BaseDialog.Portal>
+                      <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop transition-opacity duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0 xl:hidden" />
+                      <BaseDialog.Popup
+                        data-testid="config-category-drawer"
+                        className="fixed top-0 bottom-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col border-r border-subtle bg-bg-sub outline-none transition-transform duration-200 ease-out data-[ending-style]:-translate-x-full data-[starting-style]:-translate-x-full xl:hidden"
+                      >
+                        <div className="flex items-center justify-between gap-3 border-b border-subtle px-3 py-2.5">
+                          <BaseDialog.Title className="text-sm font-medium text-text">
+                            Configuration categories
+                          </BaseDialog.Title>
+                          <BaseDialog.Close
+                            aria-label="Close categories"
+                            className="inline-flex h-11 w-11 items-center justify-center rounded-sm text-text-muted hover:bg-overlay-5 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                          >
+                            <X className="h-4 w-4" />
+                          </BaseDialog.Close>
+                        </div>
+                        <BaseDialog.Description className="sr-only">
+                          Choose which group of settings to edit.
+                        </BaseDialog.Description>
+                        <nav
+                          aria-label="Configuration categories"
+                          className="min-h-0 flex-1 overflow-y-auto p-2"
+                        >
+                          <CategoryNavList
+                            categories={categories}
+                            activeCategoryId={activeCategory.id}
+                            onSelect={selectCategory}
+                          />
+                        </nav>
+                      </BaseDialog.Popup>
+                    </BaseDialog.Portal>
+                  </BaseDialog.Root>
 
                   <div className="xl:flex xl:items-start xl:gap-4">
                     <nav
                       aria-label="Configuration categories"
-                      data-testid="config-rail"
-                      className="hidden w-52 shrink-0 xl:block"
+                      data-testid="config-category-nav"
+                      className="sticky top-16 hidden w-64 shrink-0 self-start rounded-sm border border-subtle bg-bg-sub p-2 xl:block"
                     >
-                      <ul className="space-y-1">
-                        {categories.map((entry) => {
-                          const active = entry.id === activeCategory.id;
-                          return (
-                            <li key={entry.id}>
-                              <button
-                                type="button"
-                                data-config-category={entry.id}
-                                aria-current={active ? 'page' : undefined}
-                                className={cx(
-                                  'flex min-h-[44px] w-full min-w-0 items-start rounded-sm px-3 py-2 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
-                                  active
-                                    ? 'border-l-2 border-accent bg-overlay-10 font-medium text-text'
-                                    : 'border-l-2 border-transparent text-text-muted hover:bg-overlay-5',
-                                )}
-                                onClick={() => selectCategory(entry.id)}
-                              >
-                                <span className="min-w-0 flex-1">
-                                  <span className="block truncate">
-                                    {entry.label}
-                                  </span>
-                                  <span className="mt-0.5 flex flex-wrap gap-x-2 text-[10px] text-text-faint">
-                                    {entry.counts.modified ? (
-                                      <span>
-                                        {entry.counts.modified} modified
-                                      </span>
-                                    ) : null}
-                                    {entry.counts.overrides ? (
-                                      <span>
-                                        {entry.counts.overrides} overridden
-                                      </span>
-                                    ) : null}
-                                    {entry.counts.errors ? (
-                                      <span className="text-red-300">
-                                        {entry.counts.errors} invalid
-                                      </span>
-                                    ) : null}
-                                  </span>
-                                </span>
-                              </button>
-                            </li>
-                          );
-                        })}
-                      </ul>
+                      <CategoryNavList
+                        categories={categories}
+                        activeCategoryId={activeCategory.id}
+                        onSelect={selectCategory}
+                      />
                     </nav>
 
                     <div className="mt-3 min-w-0 flex-1 xl:mt-0">
@@ -1940,6 +1942,81 @@ function ValidationSummary({
   );
 }
 
+/**
+ * Status badges shared by the desktop side-nav, the mobile category trigger,
+ * and the drawer list. Counts come from the visible-leaf tally computed for
+ * each category.
+ */
+function CategoryStatusBadges({ counts }: { counts: ConfigEditorCounts }) {
+  if (!counts.modified && !counts.overrides && !counts.errors) return null;
+  return (
+    <span className="flex flex-wrap items-center gap-1">
+      {counts.modified ? (
+        <Badge tone="accent">{counts.modified} modified</Badge>
+      ) : null}
+      {counts.overrides ? (
+        <Badge tone="neutral">{counts.overrides} overridden</Badge>
+      ) : null}
+      {counts.errors ? (
+        <Badge tone="danger">{counts.errors} invalid</Badge>
+      ) : null}
+    </span>
+  );
+}
+
+/**
+ * Shared category list rendered inside the desktop side-nav and the mobile
+ * drawer. This is navigation, not a tab widget: items carry aria-current and
+ * no tablist/tab roles.
+ */
+function CategoryNavList({
+  categories,
+  activeCategoryId,
+  onSelect,
+}: {
+  categories: ConfigEditorModel['categories'];
+  activeCategoryId: string;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <ul className="space-y-1">
+      {categories.map((entry) => {
+        const active = entry.id === activeCategoryId;
+        return (
+          <li key={entry.id}>
+            <button
+              type="button"
+              data-config-category={entry.id}
+              aria-current={active ? 'page' : undefined}
+              className={cx(
+                'flex min-h-[44px] w-full min-w-0 items-start rounded-sm px-3 py-2 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
+                active
+                  ? 'border-l-2 border-accent bg-[color:var(--color-accent-dim)] font-medium text-text'
+                  : 'border-l-2 border-transparent text-text-muted hover:bg-overlay-5',
+              )}
+              onClick={() => onSelect(entry.id)}
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">{entry.label}</span>
+                <span className="block truncate text-[10px] text-text-faint">
+                  {entry.description}
+                </span>
+                {entry.counts.modified ||
+                entry.counts.overrides ||
+                entry.counts.errors ? (
+                  <span className="mt-1 block">
+                    <CategoryStatusBadges counts={entry.counts} />
+                  </span>
+                ) : null}
+              </span>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 function ConfigEditorSkeleton() {
   return (
     <div
@@ -1948,13 +2025,18 @@ function ConfigEditorSkeleton() {
       aria-hidden="true"
     >
       <Skeleton className="h-9 w-full" />
+      <Skeleton className="h-11 w-full xl:hidden" />
       <div className="xl:flex xl:gap-4">
-        <div className="hidden w-52 shrink-0 space-y-1 xl:block">
+        <div className="hidden w-64 shrink-0 space-y-1 rounded-sm border border-subtle bg-panel/20 p-2 xl:block">
           {CONFIG_EDITOR_CATEGORIES.map((category) => (
             <Skeleton key={category.id} className="h-11 w-full" />
           ))}
         </div>
         <div className="mt-3 flex-1 space-y-3 xl:mt-0">
+          <div className="space-y-1.5">
+            <Skeleton className="h-5 w-40" />
+            <Skeleton className="h-3 w-64" />
+          </div>
           {[0, 1, 2].map((index) => (
             <div
               key={index}
@@ -2005,8 +2087,20 @@ function CategoryPanel({
   );
   const hasUnknownKeys = unassignedLeaves.some((leaf) => leaf.unknown);
   const hasSchemaKnown = unassignedLeaves.some((leaf) => !leaf.unknown);
+  const headingId = `config-category-heading-${category.id}`;
   return (
-    <div className="space-y-4" data-config-category-panel={category.id}>
+    <section
+      className="space-y-4"
+      data-config-category-panel={category.id}
+      aria-labelledby={headingId}
+    >
+      <header className="space-y-1">
+        <h3 id={headingId} className="text-base font-medium text-text">
+          {category.label}
+        </h3>
+        <p className="text-xs text-text-faint">{category.description}</p>
+        <CategoryStatusBadges counts={category.counts} />
+      </header>
       {category.sections.map((section) => (
         <SectionCard
           key={section.id}
@@ -2029,9 +2123,9 @@ function CategoryPanel({
           data-config-section={CONFIG_EDITOR_UNASSIGNED_SECTION_ID}
           className="rounded-sm border border-amber-500/35 bg-amber-500/5 p-3 sm:p-4"
         >
-          <h3 className="text-sm font-medium text-amber-100">
+          <h4 className="text-sm font-medium text-amber-100">
             {CONFIG_EDITOR_UNASSIGNED_LABEL}
-          </h3>
+          </h4>
           {hasUnknownKeys ? (
             <p className="mt-0.5 text-xs text-text-faint">
               These file keys are not recognized by the schema. They are
@@ -2063,7 +2157,7 @@ function CategoryPanel({
           </div>
         </section>
       ) : null}
-    </div>
+    </section>
   );
 }
 
@@ -2116,7 +2210,7 @@ function SectionCard({
       data-config-section={section.id}
       className="rounded-sm border border-subtle bg-panel/20 p-3 sm:p-4"
     >
-      <h3 className="text-sm font-medium text-text">{section.label}</h3>
+      <h4 className="text-sm font-medium text-text">{section.label}</h4>
       {section.description ? (
         <p className="mt-0.5 text-xs text-text-faint">{section.description}</p>
       ) : null}
@@ -2264,14 +2358,14 @@ function ConfigNode({
       >
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3
+            <h5
               className={cx(
                 'font-medium text-text',
                 depth === 0 ? 'text-sm' : 'text-xs',
               )}
             >
               {titleForKey(path.split('.').at(-1) ?? path)}
-            </h3>
+            </h5>
             {typeof schema.description === 'string' ? (
               <p className="mt-0.5 text-xs leading-relaxed text-text-faint">
                 {schema.description}
@@ -2984,14 +3078,14 @@ function TaggedUnionEditor({
     >
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0">
-          <h3
+          <h5
             className={cx(
               'font-medium text-text',
               depth === 0 ? 'text-sm' : 'text-xs',
             )}
           >
             {titleForKey(path.split('.').at(-1) ?? path)}
-          </h3>
+          </h5>
           {typeof schema.description === 'string' ? (
             <p className="mt-0.5 text-xs text-text-faint">
               {schema.description}
@@ -3099,7 +3193,7 @@ function AdminProvidersEditor({
     >
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="text-xs font-medium text-text">Admin Providers</h3>
+          <h5 className="text-xs font-medium text-text">Admin Providers</h5>
           <p className="mt-0.5 text-xs text-text-faint">
             Provider order is stable. Environment-backed tokens are referenced
             by name and never displayed.

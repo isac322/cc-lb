@@ -11,6 +11,7 @@ import {
 import type React from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import {
+  CONFIG_EDITOR_CATEGORIES,
   recurringJobMetadata,
   resolveConfigFieldGuidance,
 } from '../lib/configEditorModel';
@@ -489,11 +490,17 @@ function flushEffects() {
 }
 
 function showCategory(view: RenderResult, name: string) {
-  const rail = screen.getByTestId('config-rail');
+  const nav = screen.getByTestId('config-category-nav');
   fireEvent.click(
-    within(rail).getByRole('button', { name: new RegExp(`^${name}`) }),
+    within(nav).getByRole('button', { name: new RegExp(`^${name}`) }),
   );
   view.rerender(<SettingsComponent />);
+}
+
+function categoryNavItems(nav: HTMLElement) {
+  return Array.from(
+    nav.querySelectorAll<HTMLElement>('[data-config-category]'),
+  );
 }
 
 function revealField(path: string) {
@@ -520,6 +527,19 @@ function minHeightPx(element: HTMLElement): number | null {
   const scale = element.className.match(
     /(?:^|\s)min-h-(\d+(?:\.\d+)?)(?:\s|$)/,
   );
+  if (scale) return Number.parseFloat(scale[1] ?? '') * 4;
+  return null;
+}
+
+// Resolves the declared width of an element to pixels. jsdom has no layout,
+// so this reads the width declaration — inline style, arbitrary Tailwind
+// value (w-[264px]), or spacing scale (w-64 = 256px).
+function widthPx(element: HTMLElement): number | null {
+  const inline = element.style.width;
+  if (inline.endsWith('px')) return Number.parseFloat(inline);
+  const arbitrary = element.className.match(/w-\[(\d+(?:\.\d+)?)px\]/);
+  if (arbitrary) return Number.parseFloat(arbitrary[1] ?? '');
+  const scale = element.className.match(/(?:^|\s)w-(\d+(?:\.\d+)?)(?:\s|$)/);
   if (scale) return Number.parseFloat(scale[1] ?? '') * 4;
   return null;
 }
@@ -575,14 +595,22 @@ test('settings cold load reserves version, editor, and history heights without a
   const editorSkeleton = screen.getByTestId('config-editor-skeleton');
   expect(editorSkeleton.className).toMatch(/min-h-/);
   expect(editorSkeleton.children.length).toBeGreaterThan(0);
-  // The skeleton mirrors the loaded layout's xl breakpoint: the rail stays
-  // hidden below xl so the panel keeps full width on tablets.
-  expect(editorSkeleton.innerHTML).toContain('xl:block');
-  expect(editorSkeleton.innerHTML).not.toContain('lg:block');
-  expect(editorSkeleton.innerHTML).not.toContain('md:block');
-  expect(editorSkeleton.innerHTML).toContain('xl:flex');
-  expect(editorSkeleton.innerHTML).not.toContain('lg:flex');
-  expect(editorSkeleton.innerHTML).not.toContain('md:flex');
+  // The skeleton mirrors the loaded layout's xl breakpoint: a mobile category
+  // bar is reserved below xl, and the contained side-nav column appears only
+  // at xl so the panel keeps full width on tablets.
+  expect(editorSkeleton.innerHTML).toContain('xl:hidden');
+  expect(editorSkeleton.innerHTML).not.toContain('lg:hidden');
+  expect(editorSkeleton.innerHTML).not.toContain('md:hidden');
+  const navColumn = editorSkeleton.querySelector<HTMLElement>(
+    '[class~="xl:block"]',
+  );
+  expect(navColumn).not.toBeNull();
+  expect(navColumn?.className).toContain('hidden');
+  expect(navColumn?.className).not.toContain('lg:block');
+  expect(navColumn?.className).not.toContain('md:block');
+  expect(navColumn?.querySelectorAll('.skeleton')).toHaveLength(
+    CONFIG_EDITOR_CATEGORIES.length,
+  );
 
   const historySlot = screen.getByTestId('config-history-slot');
   expect(historySlot.className).toContain('min-h-[173px]');
@@ -617,79 +645,145 @@ test('settings preserves version, localization, metadata history, and database b
   expect(screen.queryByText(/takes effect immediately/i)).toBeNull();
 });
 
-test('operator rail navigates seven categories and renders only the selected panel', () => {
+test('category navigation landmark lists seven categories and renders only the selected panel', () => {
   setSettingsLoaded();
+  routerMocks.search = { q: 'tracing' };
   const view = render(<SettingsComponent />);
 
-  const rail = screen.getByTestId('config-rail');
-  expect(rail.tagName).toBe('NAV');
-  const items = within(rail).getAllByRole('button');
+  // The control is a navigation landmark, not a tab widget: plain buttons
+  // marked with aria-current, no tablist/tab roles or aria-selected.
+  const nav = screen.getByTestId('config-category-nav');
+  expect(nav.tagName).toBe('NAV');
+  expect(nav.getAttribute('aria-label')).toBe('Configuration categories');
+  expect(nav.getAttribute('role')).toBeNull();
+  expect(nav.querySelector('[role="tablist"]')).toBeNull();
+  const items = categoryNavItems(nav);
   expect(items).toHaveLength(7);
-  const labels = [
-    'Network & requests',
-    'Storage & data',
-    'Scheduling',
-    'Routing & resilience',
-    'Identity & access',
-    'Pricing & quotas',
-    'Runtime & observability',
-  ];
   items.forEach((item, index) => {
-    expect(item.textContent).toContain(labels[index]);
+    const meta = CONFIG_EDITOR_CATEGORIES[index];
+    expect(item.textContent).toContain(meta?.label);
+    expect(item.textContent).toContain(meta?.description);
+    expect(item.getAttribute('role')).toBeNull();
+    expect(item.getAttribute('aria-selected')).toBeNull();
   });
 
-  const network = within(rail).getByRole('button', {
+  const network = within(nav).getByRole('button', {
     name: /^Network & requests/,
   });
   expect(network.getAttribute('aria-current')).toBe('page');
-  expect(screen.getByRole('textbox', { name: 'Proxy Addr' })).toBeDefined();
+
+  // The active panel is a labelled region: its h3 names it and the category
+  // description sits under the heading.
+  const panel = screen.getByRole('region', { name: 'Network & requests' });
+  expect(
+    within(panel).getByRole('heading', {
+      level: 3,
+      name: 'Network & requests',
+    }),
+  ).toBeDefined();
+  expect(panel.textContent).toContain(
+    'Listeners, request bodies, and request deadlines.',
+  );
+  expect(
+    within(panel).getByRole('textbox', { name: 'Proxy Addr' }),
+  ).toBeDefined();
   expect(screen.queryByLabelText('Tracing Level')).toBeNull();
 
   fireEvent.click(
-    within(rail).getByRole('button', { name: /^Runtime & observability/ }),
+    within(nav).getByRole('button', { name: /^Runtime & observability/ }),
   );
   // In-place category switches keep the operator's scroll position: the route
   // opts out of scroll restoration and no field is focused or scrolled to.
   expect(routerMocks.navigate).toHaveBeenCalledWith(
     expect.objectContaining({ resetScroll: false }),
   );
-  expect(routerMocks.search).toMatchObject({ category: 'runtime' });
+  // The switch clears the field deep-link but preserves the search query.
+  expect(routerMocks.search).toMatchObject({
+    category: 'runtime',
+    q: 'tracing',
+  });
   expect(routerMocks.search.field).toBeUndefined();
   expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
   expect(document.activeElement?.closest('[data-config-path]')).toBeNull();
   view.rerender(<SettingsComponent />);
 
+  const updatedNav = screen.getByTestId('config-category-nav');
   expect(
-    within(screen.getByTestId('config-rail'))
+    within(updatedNav)
       .getByRole('button', { name: /^Runtime & observability/ })
       .getAttribute('aria-current'),
   ).toBe('page');
   expect(
-    within(screen.getByTestId('config-rail'))
+    within(updatedNav)
       .getByRole('button', { name: /^Network & requests/ })
       .getAttribute('aria-current'),
   ).toBeNull();
+  expect(
+    categoryNavItems(updatedNav).filter(
+      (item) => item.getAttribute('aria-current') === 'page',
+    ),
+  ).toHaveLength(1);
+  const runtimePanel = screen.getByRole('region', {
+    name: 'Runtime & observability',
+  });
+  expect(
+    within(runtimePanel).getByRole('heading', {
+      level: 3,
+      name: 'Runtime & observability',
+    }),
+  ).toBeDefined();
   expect(screen.queryByLabelText('Proxy Addr')).toBeNull();
   expect(screen.getByLabelText('Tracing Level')).toBeDefined();
 });
 
-test('mobile category select offers the same seven categories and drives the panel', () => {
+test('mobile category drawer offers the same seven categories and drives the panel', async () => {
   setSettingsLoaded();
   const view = render(<SettingsComponent />);
 
-  const select = screen.getByRole('combobox', {
-    name: 'Configuration category',
-  }) as HTMLSelectElement;
-  const options = within(select).getAllByRole('option');
-  expect(options).toHaveLength(7);
-  expect(select.selectedOptions[0]?.textContent).toContain(
-    'Network & requests',
+  // The native select is gone: below xl a disclosure trigger shows the active
+  // category's label, description, and status at touch size.
+  expect(
+    screen.queryByRole('combobox', { name: 'Configuration category' }),
+  ).toBeNull();
+  const trigger = screen.getByTestId('config-category-trigger');
+  expect(trigger.getAttribute('aria-expanded')).toBe('false');
+  expect(trigger.getAttribute('aria-haspopup')).toBe('dialog');
+  expect(minHeightPx(trigger)).toBeGreaterThanOrEqual(44);
+  expect(trigger.textContent).toContain('Network & requests');
+  expect(trigger.textContent).toContain(
+    'Listeners, request bodies, and request deadlines.',
   );
 
-  const scheduling = options.find((option) =>
-    option.textContent?.includes('Scheduling'),
-  ) as HTMLOptionElement;
-  fireEvent.change(select, { target: { value: scheduling.value } });
+  fireEvent.click(trigger);
+  await flushEffects();
+  expect(trigger.getAttribute('aria-expanded')).toBe('true');
+  const drawer = screen.getByTestId('config-category-drawer');
+  const drawerNav = within(drawer).getByRole('navigation', {
+    name: 'Configuration categories',
+  });
+  const drawerItems = categoryNavItems(drawerNav);
+  expect(drawerItems).toHaveLength(7);
+  drawerItems.forEach((item, index) => {
+    const meta = CONFIG_EDITOR_CATEGORIES[index];
+    expect(item.textContent).toContain(meta?.label);
+    expect(item.textContent).toContain(meta?.description);
+  });
+  expect(
+    within(drawerNav)
+      .getByRole('button', { name: /^Network & requests/ })
+      .getAttribute('aria-current'),
+  ).toBe('page');
+  // Dialog focus management moves focus inside the drawer.
+  expect(drawer.contains(document.activeElement)).toBe(true);
+
+  fireEvent.click(
+    within(drawerNav).getByRole('button', { name: /^Scheduling/ }),
+  );
+  // Selecting a category dismisses the drawer and updates the URL in place.
+  await flushEffects();
+  await flushEffects();
+  expect(trigger.getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByTestId('config-category-drawer')).toBeNull();
   expect(routerMocks.navigate).toHaveBeenCalledWith(
     expect.objectContaining({ resetScroll: false }),
   );
@@ -698,7 +792,13 @@ test('mobile category select offers the same seven categories and drives the pan
   expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
   view.rerender(<SettingsComponent />);
 
-  expect(select.selectedOptions[0]?.textContent).toContain('Scheduling');
+  expect(trigger.textContent).toContain('Scheduling');
+  expect(
+    within(screen.getByRole('region', { name: 'Scheduling' })).getByRole(
+      'heading',
+      { level: 3, name: 'Scheduling' },
+    ),
+  ).toBeDefined();
   expect(screen.queryByLabelText('Proxy Addr')).toBeNull();
   expect(screen.getByText('custom_job')).toBeDefined();
 });
@@ -707,13 +807,28 @@ test('section cards group controls and keep advanced fields behind one disclosur
   setSettingsLoaded();
   const view = render(<SettingsComponent />);
 
+  // The category heading owns the panel; section cards sit one level below.
+  const networkPanel = screen.getByRole('region', {
+    name: 'Network & requests',
+  });
+  expect(
+    within(networkPanel).getByRole('heading', {
+      level: 3,
+      name: 'Network & requests',
+    }),
+  ).toBeDefined();
+  expect(
+    within(networkPanel).getAllByRole('heading', { level: 3 }),
+  ).toHaveLength(1);
   for (const heading of [
     'Listener endpoints',
     'TLS',
     'Request body limits',
     'Timeouts',
   ]) {
-    expect(screen.getByRole('heading', { name: heading })).toBeDefined();
+    expect(
+      screen.getByRole('heading', { level: 4, name: heading }),
+    ).toBeDefined();
   }
   showCategory(view, 'Scheduling');
   const cards = document.querySelectorAll(
@@ -888,7 +1003,7 @@ test('an environment-overridden field keeps its file value editable and shows ef
   expect(input.value).toBe('0.0.0.0:8181');
   expect(field.textContent).toMatch(/Effective[: ]*127\.0\.0\.1:8181/);
   expect(
-    screen.getByRole('button', {
+    within(screen.getByTestId('config-category-nav')).getByRole('button', {
       name: /^Network & requests.*1 modified/,
     }),
   ).toBeDefined();
@@ -1682,7 +1797,9 @@ test('unassigned leaves land in their own category Other settings and stay searc
   ).toBeNull();
   // The modified unassigned leaf counts toward its own category.
   expect(
-    screen.getByRole('button', { name: /^Storage & data.*1 modified/ }),
+    within(screen.getByTestId('config-category-nav')).getByRole('button', {
+      name: /^Storage & data.*1 modified/,
+    }),
   ).toBeDefined();
 
   const search = screen.getByRole('searchbox', { name: /search/i });
@@ -1752,7 +1869,7 @@ test('value details disclosure exposes a 44px touch target', () => {
   expect(minHeightPx(summary as HTMLElement)).toBeGreaterThanOrEqual(44);
 });
 
-test('storage variant switch review lists removed leaves without a container row', () => {
+test('storage variant switch review lists removed leaves without a container row', async () => {
   const sqliteDraft = {
     ...structuredClone(fileConfig),
     storage: {
@@ -1768,15 +1885,27 @@ test('storage variant switch review lists removed leaves without a container row
   // Counts track displayable active fields: only storage.kind and
   // storage.path are active and modified after the switch.
   expect(
-    screen.getByRole('button', { name: /^Storage & data.*2 modified/ }),
+    within(screen.getByTestId('config-category-nav')).getByRole('button', {
+      name: /^Storage & data.*2 modified/,
+    }),
   ).toBeDefined();
-  const categorySelect = screen.getByRole('combobox', {
-    name: 'Configuration category',
-  }) as HTMLSelectElement;
+  // The mobile drawer surfaces the same per-category counts.
+  fireEvent.click(screen.getByTestId('config-category-trigger'));
+  await flushEffects();
+  const drawerNav = within(
+    screen.getByTestId('config-category-drawer'),
+  ).getByRole('navigation', { name: 'Configuration categories' });
   expect(
-    [...categorySelect.options].find((option) => option.value === 'data')
-      ?.textContent,
-  ).toContain('2 modified');
+    within(drawerNav).getByRole('button', {
+      name: /^Storage & data.*2 modified/,
+    }),
+  ).toBeDefined();
+  fireEvent.click(
+    within(screen.getByTestId('config-category-drawer')).getByRole('button', {
+      name: 'Close categories',
+    }),
+  );
+  await flushEffects();
 
   fireEvent.click(screen.getByRole('button', { name: 'Save to config file' }));
   const reviewList = screen.getByTestId('config-review-list');
@@ -2125,28 +2254,32 @@ test('section grids use the 1/2/3-column contract with full-span composite edito
   expect(tlsToggle?.className).toContain('col-span-full');
   expect(tlsToggle?.parentElement?.className).toContain('grid');
 
-  // Viewport contract: below xl the native select drives a full-width panel,
-  // including the 1024px tablet case where md:grid-cols-2 sections retain
-  // enough width for their controls; the category rail starts at xl only.
-  const rail = screen.getByTestId('config-rail');
-  expect(rail.className).toMatch(/hidden.*xl:block|xl:block.*hidden/);
-  expect(rail.className).not.toContain('lg:block');
-  expect(rail.className).not.toContain('md:block');
-  const railLayout = rail.parentElement;
-  expect(railLayout?.className).toContain('xl:flex');
-  expect(railLayout?.className).not.toContain('lg:flex');
-  expect(railLayout?.className).not.toContain('md:flex');
-  const railPanel = rail.nextElementSibling as HTMLElement;
-  expect(railPanel.className).toContain('xl:mt-0');
-  expect(railPanel.className).not.toContain('lg:mt-0');
-  expect(railPanel.className).not.toContain('md:mt-0');
-  const categorySelect = screen.getByRole('combobox', {
-    name: 'Configuration category',
-  });
-  expect(categorySelect.className).toContain('xl:hidden');
-  expect(categorySelect.className).not.toContain('lg:hidden');
-  expect(categorySelect.className).not.toContain('md:hidden');
-  expect(minHeightPx(categorySelect)).toBeGreaterThanOrEqual(44);
+  // Viewport contract: below xl the disclosure trigger drives a full-width
+  // panel, including the 1024px tablet case where md:grid-cols-2 sections
+  // retain enough width for their controls; the contained side-nav starts at
+  // xl only and stays sticky inside the editor card.
+  const nav = screen.getByTestId('config-category-nav');
+  expect(nav.className).toMatch(/hidden.*xl:block|xl:block.*hidden/);
+  expect(nav.className).not.toContain('lg:block');
+  expect(nav.className).not.toContain('md:block');
+  expect(nav.className).toContain('sticky');
+  const navWidth = widthPx(nav);
+  expect(navWidth).not.toBeNull();
+  expect(navWidth as number).toBeGreaterThanOrEqual(256);
+  expect(navWidth as number).toBeLessThanOrEqual(280);
+  const navLayout = nav.parentElement;
+  expect(navLayout?.className).toContain('xl:flex');
+  expect(navLayout?.className).not.toContain('lg:flex');
+  expect(navLayout?.className).not.toContain('md:flex');
+  const navPanel = nav.nextElementSibling as HTMLElement;
+  expect(navPanel.className).toContain('xl:mt-0');
+  expect(navPanel.className).not.toContain('lg:mt-0');
+  expect(navPanel.className).not.toContain('md:mt-0');
+  const categoryTrigger = screen.getByTestId('config-category-trigger');
+  expect(categoryTrigger.className).toContain('xl:hidden');
+  expect(categoryTrigger.className).not.toContain('lg:hidden');
+  expect(categoryTrigger.className).not.toContain('md:hidden');
+  expect(minHeightPx(categoryTrigger)).toBeGreaterThanOrEqual(44);
 
   // Storage & data: the tagged-union storage editor spans the grid.
   showCategory(view, 'Storage & data');
