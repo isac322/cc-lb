@@ -1,0 +1,21 @@
+{
+  "qa_usage_display": {
+    "name": "qa-usage-display",
+    "usage_text": "$2.00 · 3.0K tok",
+    "components": {
+      "tokens_total": 3000,
+      "virtual_cost_micro_usd": 2000000
+    }
+  },
+  "qa_status_missing_credentials": {
+    "name": "qa-status-missing-credentials",
+    "runtime_status": "disabled",
+    "status_dot_class": "status-dot neutral",
+    "button_title_empty_or_absent": true,
+    "prohibited_strings_in_title": [
+      "danger",
+      "error",
+      "missing oauth credentials"
+    ]
+  }
+}

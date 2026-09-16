@@ -1273,7 +1273,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -2105,7 +2105,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -5375,7 +5375,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -11842,7 +11842,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -12711,7 +12711,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -13731,7 +13731,7 @@
       - "postgres:UpstreamStore::update:PostgresStorage::update"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_update`; replaces upstream base_url, warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -13828,7 +13828,7 @@
       - "postgres:UpstreamStore::update:PostgresStorage::update"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -13852,7 +13852,7 @@
     "variants":
       - "Cancel edit"
       - "Save with custom Base URL"
-      - "Save with blank Base URL (sends base_url: null on the wire; the backend Option<Url> update treats null as no-change and retains the existing URL — clearing is not supported)"
+      - "Save with blank Base URL (sends explicit base_url: null, removes the override, and retains the default endpoint after a fresh GET and page reload)"
       - "Save with env var key (sends api_key_env, api_key_value: null; server resolves the env var to ciphertext — the env name itself is never stored or returned)"
       - "Save with literal key (sends api_key_value, api_key_env: null)"
       - "Save with blank literal key field (sends api_key_value: null; treated as no-change, retaining the stored key; the stored secret is never rendered or restored into the form)"
@@ -13864,7 +13864,7 @@
       "variants":
         - "Cancel edit"
         - "Save with custom Base URL"
-        - "Save with blank Base URL (sends base_url: null on the wire; the backend Option<Url> update treats null as no-change and retains the existing URL — clearing is not supported)"
+        - "Save with blank Base URL (sends explicit base_url: null, removes the override, and retains the default endpoint after a fresh GET and page reload)"
         - "Save with env var key (sends api_key_env, api_key_value: null; server resolves the env var to ciphertext — the env name itself is never stored or returned)"
         - "Save with literal key (sends api_key_value, api_key_env: null)"
         - "Save with blank literal key field (sends api_key_value: null; treated as no-change, retaining the stored key; the stored secret is never rendered or restored into the form)"
@@ -13901,7 +13901,7 @@
     "variants":
       - "Cancel edit"
       - "Save with custom Base URL"
-      - "Save with blank Base URL (sends base_url: null on the wire; the backend Option<Url> update treats null as no-change and retains the existing URL — clearing is not supported)"
+      - "Save with blank Base URL (sends explicit base_url: null, removes the override, and retains the default endpoint after a fresh GET and page reload)"
       - "Save with env var key (sends api_key_env, api_key_value: null; server resolves the env var to ciphertext — the env name itself is never stored or returned)"
       - "Save with literal key (sends api_key_value, api_key_env: null)"
       - "Save with blank literal key field (sends api_key_value: null; treated as no-change, retaining the stored key; the stored secret is never rendered or restored into the form)"
@@ -13939,7 +13939,7 @@
       - "postgres:UpstreamStore::update:PostgresStorage::update"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_update`; replaces upstream base_url, warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -14128,7 +14128,7 @@
       - "postgres:UpstreamStore::update:PostgresStorage::update"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -14223,7 +14223,7 @@
       - "postgres:UpstreamStore::update:PostgresStorage::update"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -14316,7 +14316,7 @@
       - "postgres:UpstreamStore::clear_warmup_dialect_plugin:PostgresStorage::clear_warmup_dialect_plugin"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_update` (warmup_dialect_plugin); disassociates dialect plugin so default HTTP warmup is used QA restore: PUT the prior warmup_dialect_plugin with the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -14956,7 +14956,7 @@
       - "postgres:UpstreamStore::create:PostgresStorage::create"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "DynamicView rebinding; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "DynamicView rebinding; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_create`; creates new upstream target for proxy load balancing; encrypts API key via AEAD QA restore: DELETE the created upstream using its returned ETag."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -19185,7 +19185,7 @@
     "storage_operation_ids":
       - "sqlite:UpstreamStore::list:SqliteStorage::list"
       - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL."
+    "cache_or_no_query": "Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -19839,7 +19839,7 @@
       - "postgres:UpstreamStore::set_enabled:PostgresStorage::set_enabled"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_enable`; activates upstream so load balancer can route requests to it QA restore: POST the disable endpoint with the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -19890,7 +19890,7 @@
       - "postgres:UpstreamStore::set_enabled:PostgresStorage::set_enabled"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
+    "cache_or_no_query": "Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response."
     "side_effects": "Audit event `upstream_disable`; disables upstream from proxy candidate pool QA restore: POST the enable endpoint with the returned revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -21996,7 +21996,7 @@
       "symbol": "PostgresStorage::get_by_id"
       "line_start": 47
       "line_end": 49
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     "statements":
       - "kind": "builder"
         "source":
@@ -22039,7 +22039,7 @@
       "symbol": "PostgresStorage::list"
       "line_start": 51
       "line_end": 56
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     "statements":
       - "kind": "builder"
         "source":
@@ -23682,7 +23682,7 @@
       "symbol": "SqliteStorage::get_by_id"
       "line_start": 39
       "line_end": 41
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     "statements":
       - "kind": "builder"
         "source":
@@ -23725,7 +23725,7 @@
       "symbol": "SqliteStorage::list"
       "line_start": 43
       "line_end": 48
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     "statements":
       - "kind": "builder"
         "source":
@@ -25278,15 +25278,15 @@
       "symbol": "PostgresStorage::clear_warmup_dialect_plugin"
       "line_start": 169
       "line_end": 175
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     "statements":
       - "kind": "literal"
         "text": "UPDATE upstream_spec_v1 SET warmup_dialect_plugin = NULL, spec_revision = spec_revision + 1, updated_at = NOW() WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL RETURNING id"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "clear_split_warmup_dialect_plugin"
-          "line_start": 747
-          "line_end": 754
+          "line_start": 754
+          "line_end": 761
         "branches": []
         "bind_parameters":
           - "id"
@@ -25311,15 +25311,15 @@
       "symbol": "PostgresStorage::complete_refresh"
       "line_start": 126
       "line_end": 136
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     "statements":
       - "kind": "literal"
         "text": "SELECT 1 FROM upstream_spec_v1 WHERE id = $1 AND deleted_at IS NULL FOR UPDATE"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "ensure_split_spec_active_in_tx"
-          "line_start": 587
-          "line_end": 593
+          "line_start": 594
+          "line_end": 600
         "branches": []
         "bind_parameters":
           - "id"
@@ -25328,8 +25328,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "complete_split_refresh"
-          "line_start": 484
-          "line_end": 498
+          "line_start": 491
+          "line_end": 505
         "branches": []
         "bind_parameters":
           - "id"
@@ -25339,8 +25339,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "clear_split_apply_error_in_tx"
-          "line_start": 527
-          "line_end": 537
+          "line_start": 534
+          "line_end": 544
         "branches": []
         "bind_parameters":
           - "id"
@@ -25349,8 +25349,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "notify"
-          "line_start": 762
-          "line_end": 767
+          "line_start": 769
+          "line_end": 774
         "branches": []
         "bind_parameters":
           - "CHANNEL"
@@ -25375,7 +25375,7 @@
       "symbol": "PostgresStorage::create"
       "line_start": 38
       "line_end": 41
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     "statements":
       - "kind": "literal"
         "text": "INSERT INTO upstream_spec_v1 (id, name, kind, base_url, enabled, warmup_enabled, warmup_dialect_plugin, spec_revision, created_at, updated_at) VALUES ($1, $2, $3, $4, TRUE, $5, $6, 1, NOW(), NOW())"
@@ -25421,8 +25421,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "notify"
-          "line_start": 762
-          "line_end": 767
+          "line_start": 769
+          "line_end": 774
         "branches":
           - "After inserts, before transaction commit"
         "bind_parameters":
@@ -25448,7 +25448,7 @@
       "symbol": "PostgresStorage::hard_delete"
       "line_start": 158
       "line_end": 167
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     "statements":
       - "kind": "literal"
         "text": "DELETE FROM upstream_spec_v1 WHERE id = $1"
@@ -25465,8 +25465,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "notify"
-          "line_start": 762
-          "line_end": 767
+          "line_start": 769
+          "line_end": 774
         "branches":
           - "After hard delete, before commit"
         "bind_parameters":
@@ -25480,22 +25480,23 @@
       "symbol": "PostgresStorage::set_enabled"
       "line_start": 70
       "line_end": 85
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     "statements":
       - "kind": "literal"
-        "text": "UPDATE upstream_spec_v1\n           SET name = COALESCE($3, name),\n               base_url = COALESCE($4, base_url),\n               enabled = COALESCE($5, enabled),\n               warmup_enabled = COALESCE($6, warmup_enabled),\n               warmup_dialect_plugin = COALESCE($7, warmup_dialect_plugin),\n               spec_revision = spec_revision + 1,\n               updated_at = NOW()\n         WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL\n         RETURNING id"
+        "text": "UPDATE upstream_spec_v1\n           SET name = COALESCE($3, name),\n               base_url = CASE WHEN $4 THEN $5 ELSE base_url END,\n               enabled = COALESCE($6, enabled),\n               warmup_enabled = COALESCE($7, warmup_enabled),\n               warmup_dialect_plugin = COALESCE($8, warmup_dialect_plugin),\n               spec_revision = spec_revision + 1,\n               updated_at = NOW()\n         WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL\n         RETURNING id"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "update_split_spec_in_tx"
-          "line_start": 357
-          "line_end": 384
+          "line_start": 363
+          "line_end": 391
         "branches":
           - "update_spec receives enabled=Some(enabled) and all other UpstreamUpdate fields default"
         "bind_parameters":
           - "id"
           - "u64_to_i64(expected_revision, \"upstream spec revision\")?"
           - "update.name"
-          - "update.base_url.as_ref().map(ToString::to_string)"
+          - "base_url_present"
+          - "base_url"
           - "update.enabled"
           - "update.warmup_enabled"
           - "update .warmup_dialect_plugin .as_ref() .map(serde_json::to_value) .transpose()?,"
@@ -25504,8 +25505,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "notify"
-          "line_start": 762
-          "line_end": 767
+          "line_start": 769
+          "line_end": 774
         "branches": []
         "bind_parameters":
           - "CHANNEL"
@@ -25530,15 +25531,15 @@
       "symbol": "PostgresStorage::set_status"
       "line_start": 112
       "line_end": 114
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     "statements":
       - "kind": "literal"
         "text": "SELECT 1 FROM upstream_spec_v1 WHERE id = $1 AND deleted_at IS NULL FOR UPDATE"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "ensure_split_spec_active_in_tx"
-          "line_start": 587
-          "line_end": 593
+          "line_start": 594
+          "line_end": 600
         "branches": []
         "bind_parameters":
           - "id"
@@ -25547,8 +25548,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "set_split_status"
-          "line_start": 607
-          "line_end": 613
+          "line_start": 614
+          "line_end": 620
         "branches": []
         "bind_parameters":
           - "id"
@@ -25557,8 +25558,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "set_split_status"
-          "line_start": 681
-          "line_end": 718
+          "line_start": 688
+          "line_end": 725
         "branches": []
         "bind_parameters":
           - "id"
@@ -25576,15 +25577,15 @@
       "symbol": "PostgresStorage::soft_delete"
       "line_start": 154
       "line_end": 156
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     "statements":
       - "kind": "literal"
         "text": "UPDATE upstream_spec_v1 SET deleted_at = NOW(), spec_revision = spec_revision + 1, updated_at = NOW() WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL RETURNING id"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "soft_delete_split"
-          "line_start": 728
-          "line_end": 735
+          "line_start": 735
+          "line_end": 742
         "branches": []
         "bind_parameters":
           - "id"
@@ -25597,15 +25598,15 @@
       "symbol": "PostgresStorage::store_oauth_tokens"
       "line_start": 116
       "line_end": 124
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     "statements":
       - "kind": "literal"
         "text": "SELECT spec_revision FROM upstream_spec_v1 WHERE id = $1 AND deleted_at IS NULL"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "ensure_split_spec_revision"
-          "line_start": 546
-          "line_end": 552
+          "line_start": 553
+          "line_end": 559
         "branches":
           - "store_oauth_tokens verifies expected revision before delegating"
         "bind_parameters":
@@ -25615,8 +25616,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "ensure_split_spec_active_in_tx"
-          "line_start": 587
-          "line_end": 593
+          "line_start": 594
+          "line_end": 600
         "branches": []
         "bind_parameters":
           - "id"
@@ -25625,8 +25626,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "update_split_oauth_token"
-          "line_start": 434
-          "line_end": 447
+          "line_start": 441
+          "line_end": 454
         "branches": []
         "bind_parameters":
           - "id"
@@ -25636,8 +25637,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "notify"
-          "line_start": 762
-          "line_end": 767
+          "line_start": 769
+          "line_end": 774
         "branches": []
         "bind_parameters":
           - "CHANNEL"
@@ -25662,22 +25663,23 @@
       "symbol": "PostgresStorage::update"
       "line_start": 58
       "line_end": 68
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     "statements":
       - "kind": "literal"
-        "text": "UPDATE upstream_spec_v1\n           SET name = COALESCE($3, name),\n               base_url = COALESCE($4, base_url),\n               enabled = COALESCE($5, enabled),\n               warmup_enabled = COALESCE($6, warmup_enabled),\n               warmup_dialect_plugin = COALESCE($7, warmup_dialect_plugin),\n               spec_revision = spec_revision + 1,\n               updated_at = NOW()\n         WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL\n         RETURNING id"
+        "text": "UPDATE upstream_spec_v1\n           SET name = COALESCE($3, name),\n               base_url = CASE WHEN $4 THEN $5 ELSE base_url END,\n               enabled = COALESCE($6, enabled),\n               warmup_enabled = COALESCE($7, warmup_enabled),\n               warmup_dialect_plugin = COALESCE($8, warmup_dialect_plugin),\n               spec_revision = spec_revision + 1,\n               updated_at = NOW()\n         WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL\n         RETURNING id"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "update_split_spec_in_tx"
-          "line_start": 357
-          "line_end": 384
+          "line_start": 363
+          "line_end": 391
         "branches":
-          - "When any spec field name/base_url/enabled/warmup_enabled/warmup_dialect_plugin is present"
+          - "When a spec field is present. base_url absence preserves the stored override; explicit null clears it; a URL replaces it. Presence and nullable value are bound separately."
         "bind_parameters":
           - "id"
           - "u64_to_i64(expected_revision, \"upstream spec revision\")?"
           - "update.name"
-          - "update.base_url.as_ref().map(ToString::to_string)"
+          - "base_url_present"
+          - "base_url"
           - "update.enabled"
           - "update.warmup_enabled"
           - "update .warmup_dialect_plugin .as_ref() .map(serde_json::to_value) .transpose()?,"
@@ -25686,8 +25688,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "ensure_split_spec_revision_in_tx"
-          "line_start": 567
-          "line_end": 573
+          "line_start": 574
+          "line_end": 580
         "branches":
           - "When no spec field is present; locks and verifies optimistic revision"
         "bind_parameters":
@@ -25697,8 +25699,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "update_split_api_key_secret_in_tx"
-          "line_start": 411
-          "line_end": 423
+          "line_start": 418
+          "line_end": 430
         "branches":
           - "When api_key_ciphertext is Some"
         "bind_parameters":
@@ -25709,8 +25711,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "update_split_oauth_token_generation_in_tx"
-          "line_start": 461
-          "line_end": 472
+          "line_start": 468
+          "line_end": 479
         "branches":
           - "When oauth_token_generation is Some"
         "bind_parameters":
@@ -25721,8 +25723,8 @@
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs"
           "symbol": "notify"
-          "line_start": 762
-          "line_end": 767
+          "line_start": 769
+          "line_end": 774
         "branches":
           - "Only when at least one field changed"
         "bind_parameters":
@@ -26773,7 +26775,7 @@
       "symbol": "SqliteStorage::clear_warmup_dialect_plugin"
       "line_start": 174
       "line_end": 193
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     "statements":
       - "kind": "literal"
         "text": "UPDATE upstream_spec_v1 SET warmup_dialect_plugin = NULL, spec_revision = spec_revision + 1, updated_at = unixepoch() WHERE id = ? AND spec_revision = ? AND deleted_at IS NULL RETURNING id"
@@ -26806,15 +26808,15 @@
       "symbol": "SqliteStorage::complete_refresh"
       "line_start": 120
       "line_end": 130
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     "statements":
       - "kind": "literal"
         "text": "SELECT 1 FROM upstream_spec_v1 WHERE id = ? AND deleted_at IS NULL"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "ensure_split_spec_active_in_tx"
-          "line_start": 554
-          "line_end": 559
+          "line_start": 561
+          "line_end": 566
         "branches": []
         "bind_parameters":
           - "id.to_string()"
@@ -26823,8 +26825,8 @@
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "complete_split_refresh"
-          "line_start": 483
-          "line_end": 497
+          "line_start": 490
+          "line_end": 504
         "branches": []
         "bind_parameters":
           - "id.to_string()"
@@ -26834,8 +26836,8 @@
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "set_split_status_in_tx"
-          "line_start": 572
-          "line_end": 578
+          "line_start": 579
+          "line_end": 585
         "branches":
           - "Called by complete_split_refresh to preserve status fields while clearing last_apply_error"
         "bind_parameters":
@@ -26845,8 +26847,8 @@
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "set_split_status_in_tx"
-          "line_start": 610
-          "line_end": 631
+          "line_start": 617
+          "line_end": 638
         "branches":
           - "Called by complete_split_refresh with last_apply_error=None"
         "bind_parameters":
@@ -26877,7 +26879,7 @@
       "symbol": "SqliteStorage::create"
       "line_start": 30
       "line_end": 33
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     "statements":
       - "kind": "literal"
         "text": "INSERT INTO upstream_spec_v1 (id, name, kind, base_url, enabled, warmup_enabled, warmup_dialect_plugin, spec_revision, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, 1, unixepoch(), unixepoch())"
@@ -26938,7 +26940,7 @@
       "symbol": "SqliteStorage::hard_delete"
       "line_start": 164
       "line_end": 172
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     "statements":
       - "kind": "literal"
         "text": "DELETE FROM upstream_spec_v1 WHERE id = ?"
@@ -26958,20 +26960,21 @@
       "symbol": "SqliteStorage::set_enabled"
       "line_start": 62
       "line_end": 77
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     "statements":
       - "kind": "literal"
-        "text": "UPDATE upstream_spec_v1\n           SET name = COALESCE(?, name),\n               base_url = COALESCE(?, base_url),\n               enabled = COALESCE(?, enabled),\n               warmup_enabled = COALESCE(?, warmup_enabled),\n               warmup_dialect_plugin = COALESCE(?, warmup_dialect_plugin),\n               spec_revision = spec_revision + 1,\n               updated_at = unixepoch()\n         WHERE id = ? AND spec_revision = ? AND deleted_at IS NULL\n         RETURNING id"
+        "text": "UPDATE upstream_spec_v1\n           SET name = COALESCE(?, name),\n               base_url = CASE WHEN ? THEN ? ELSE base_url END,\n               enabled = COALESCE(?, enabled),\n               warmup_enabled = COALESCE(?, warmup_enabled),\n               warmup_dialect_plugin = COALESCE(?, warmup_dialect_plugin),\n               spec_revision = spec_revision + 1,\n               updated_at = unixepoch()\n         WHERE id = ? AND spec_revision = ? AND deleted_at IS NULL\n         RETURNING id"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "update_split_spec_in_tx"
-          "line_start": 359
-          "line_end": 380
+          "line_start": 365
+          "line_end": 387
         "branches":
           - "update_spec receives enabled=Some(enabled) and all other UpstreamUpdate fields default"
         "bind_parameters":
           - "update.name"
-          - "update.base_url.as_ref().map(ToString::to_string)"
+          - "base_url_present"
+          - "base_url"
           - "update.enabled"
           - "update.warmup_enabled"
           - "warmup_dialect_plugin"
@@ -26997,15 +27000,15 @@
       "symbol": "SqliteStorage::set_status"
       "line_start": 104
       "line_end": 109
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     "statements":
       - "kind": "literal"
         "text": "SELECT 1 FROM upstream_spec_v1 WHERE id = ? AND deleted_at IS NULL"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "ensure_split_spec_active_in_tx"
-          "line_start": 554
-          "line_end": 559
+          "line_start": 561
+          "line_end": 566
         "branches": []
         "bind_parameters":
           - "id.to_string()"
@@ -27014,8 +27017,8 @@
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "set_split_status_in_tx"
-          "line_start": 572
-          "line_end": 578
+          "line_start": 579
+          "line_end": 585
         "branches": []
         "bind_parameters":
           - "id.to_string()"
@@ -27024,8 +27027,8 @@
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "set_split_status_in_tx"
-          "line_start": 610
-          "line_end": 631
+          "line_start": 617
+          "line_end": 638
         "branches": []
         "bind_parameters":
           - "id.to_string()"
@@ -27043,7 +27046,7 @@
       "symbol": "SqliteStorage::soft_delete"
       "line_start": 148
       "line_end": 162
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     "statements":
       - "kind": "literal"
         "text": "UPDATE upstream_spec_v1 SET deleted_at = unixepoch(), spec_revision = spec_revision + 1, updated_at = unixepoch() WHERE id = ? AND spec_revision = ? AND deleted_at IS NULL RETURNING id"
@@ -27064,15 +27067,15 @@
       "symbol": "SqliteStorage::store_oauth_tokens"
       "line_start": 111
       "line_end": 118
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     "statements":
       - "kind": "literal"
         "text": "SELECT spec_revision FROM upstream_spec_v1 WHERE id = ? AND deleted_at IS NULL"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "ensure_split_spec_revision_in_tx"
-          "line_start": 534
-          "line_end": 540
+          "line_start": 541
+          "line_end": 547
         "branches":
           - "expected_revision is Some for store_oauth_tokens"
         "bind_parameters":
@@ -27082,8 +27085,8 @@
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "ensure_split_spec_active_in_tx"
-          "line_start": 554
-          "line_end": 559
+          "line_start": 561
+          "line_end": 566
         "branches":
           - "Used by update_oauth_token when no expected revision; not taken by store_oauth_tokens"
         "bind_parameters":
@@ -27093,8 +27096,8 @@
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "update_split_oauth_token"
-          "line_start": 434
-          "line_end": 447
+          "line_start": 441
+          "line_end": 454
         "branches": []
         "bind_parameters":
           - "id.to_string()"
@@ -27119,20 +27122,21 @@
       "symbol": "SqliteStorage::update"
       "line_start": 50
       "line_end": 60
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     "statements":
       - "kind": "literal"
-        "text": "UPDATE upstream_spec_v1\n           SET name = COALESCE(?, name),\n               base_url = COALESCE(?, base_url),\n               enabled = COALESCE(?, enabled),\n               warmup_enabled = COALESCE(?, warmup_enabled),\n               warmup_dialect_plugin = COALESCE(?, warmup_dialect_plugin),\n               spec_revision = spec_revision + 1,\n               updated_at = unixepoch()\n         WHERE id = ? AND spec_revision = ? AND deleted_at IS NULL\n         RETURNING id"
+        "text": "UPDATE upstream_spec_v1\n           SET name = COALESCE(?, name),\n               base_url = CASE WHEN ? THEN ? ELSE base_url END,\n               enabled = COALESCE(?, enabled),\n               warmup_enabled = COALESCE(?, warmup_enabled),\n               warmup_dialect_plugin = COALESCE(?, warmup_dialect_plugin),\n               spec_revision = spec_revision + 1,\n               updated_at = unixepoch()\n         WHERE id = ? AND spec_revision = ? AND deleted_at IS NULL\n         RETURNING id"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "update_split_spec_in_tx"
-          "line_start": 359
-          "line_end": 380
+          "line_start": 365
+          "line_end": 387
         "branches":
-          - "When any spec field name/base_url/enabled/warmup_enabled/warmup_dialect_plugin is present"
+          - "When a spec field is present. base_url absence preserves the stored override; explicit null clears it; a URL replaces it. Presence and nullable value are bound separately."
         "bind_parameters":
           - "update.name"
-          - "update.base_url.as_ref().map(ToString::to_string)"
+          - "base_url_present"
+          - "base_url"
           - "update.enabled"
           - "update.warmup_enabled"
           - "warmup_dialect_plugin"
@@ -27143,8 +27147,8 @@
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "ensure_split_spec_revision_in_tx"
-          "line_start": 534
-          "line_end": 540
+          "line_start": 541
+          "line_end": 547
         "branches":
           - "When no spec field is present; verifies optimistic revision"
         "bind_parameters":
@@ -27154,8 +27158,8 @@
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "update_split_api_key_secret_in_tx"
-          "line_start": 406
-          "line_end": 418
+          "line_start": 413
+          "line_end": 425
         "branches":
           - "When api_key_ciphertext is Some"
         "bind_parameters":
@@ -27166,8 +27170,8 @@
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs"
           "symbol": "update_split_oauth_token_generation_in_tx"
-          "line_start": 460
-          "line_end": 471
+          "line_start": 467
+          "line_end": 478
         "branches":
           - "When oauth_token_generation is Some"
         "bind_parameters":
@@ -27349,6 +27353,14 @@
     "latest_behavior": "Uncommitted candidate: GC button 'Clean orphaned uploads' always enabled (gcInFlight latch and gcPending guard remain), toasts 'No orphaned upload blobs found' / 'Removed N orphaned upload blobs', progress label 'Cleaning orphaned uploads'; row delete no longer disabled during sweep; dialog awaits del.mutateAsync, relies on the shared MutationCache error toast, supports onDeleted callback; usePluginReferences gcTime:0, delete cancels the in-flight reference query and removes the inactive cache entry on success."
     "impact": "GC presentation clarifies that only unreferenced WASM blobs are removed (registered plugins kept even at Used By 0); delete lifecycle hardened against stale reference cache. Candidate only."
     "candidate_uncommitted": true
+  - "classification": "changed_since_deploy"
+    "type": "api_contract"
+    "name": "Explicit-null Base URL override clearing"
+    "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04"
+    "candidate_uncommitted": true
+    "production_applicability": false
+    "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-162"
+    "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
   - "classification": "removed_since_deploy"
     "type": "route"
     "path": "crates/cc-lb-admin/web/src/routes/credentials.tsx"
@@ -27572,5 +27584,5 @@
     "component": "SettingsCard"
     "file": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx"
     "line": 179
-    "description": "The 'env:{api_key_env}' API Key display branch is source-only/unreachable: UpstreamResponse (crates/cc-lb-admin/src/v1/upstreams.rs:163) omits api_key_env, so the server never returns the env var name (write-only contract: name resolved to ciphertext, never stored/exposed). Separately, a blank Base URL sends base_url: null, but the backend Option<Url> update treats null as no-change and retains the existing URL — clearing an override is not supported. This is a static source observation recorded separately from the runtime-progress overlay's settings_null_default_get_reload triage; it is not asserted as runtime-verified."
-    "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:163-171 (UpstreamResponse fields), :1748 (base_url update gated on is_some)"
+    "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL null-clear contract is now implemented and is recorded in SettingsCard variants; historical null-as-no-change evidence remains a baseline limitation."
+    "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:171-179 (UpstreamResponse fields), :1748 (base_url update gated on is_some)"

@@ -121,7 +121,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/v1/upstreams.rs",
-      "sha256": "bb85cb06700fffcf6eb3b2640d69954da1b9b296cfa8be7db1347bcdfbdab222"
+      "sha256": "02051ceddfe34c2eab0eaf21964b8b6b6047bdb42ffac590cc3297cec9b79405"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/api.ts",
@@ -229,7 +229,7 @@
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs",
-      "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/usage_rollups.rs",
@@ -297,7 +297,7 @@
     },
     {
       "path": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs",
-      "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
     },
     {
       "path": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs",
@@ -2199,7 +2199,7 @@
       "ui_clients": [
         "crates/cc-lb-admin/web/src/lib/queries.ts:422"
       ],
-      "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL.",
+      "cache_or_no_query": "Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.",
       "side_effects": "None",
       "storage_operation_ids": [
         "sqlite:UpstreamStore::list:SqliteStorage::list",
@@ -2225,7 +2225,7 @@
       "ui_clients": [
         "backend-only: single upstream read endpoint; built-in UI reads the upstream collection."
       ],
-      "cache_or_no_query": "Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL.",
+      "cache_or_no_query": "Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.",
       "side_effects": "None",
       "storage_operation_ids": [
         "sqlite:UpstreamStore::list:SqliteStorage::list",
@@ -4359,7 +4359,7 @@
         "symbol": "PostgresStorage::get_by_id",
         "line_start": 47,
         "line_end": 49,
-        "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+        "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
       },
       "statements": [
         {
@@ -4423,7 +4423,7 @@
         "symbol": "PostgresStorage::list",
         "line_start": 51,
         "line_end": 56,
-        "sha256": "51f164dbb3f75062e50b20d32036f9b605d839cfae15e42ae90d31174faf565f"
+        "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
       },
       "statements": [
         {
@@ -6683,7 +6683,7 @@
         "symbol": "SqliteStorage::get_by_id",
         "line_start": 39,
         "line_end": 41,
-        "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+        "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
       },
       "statements": [
         {
@@ -6747,7 +6747,7 @@
         "symbol": "SqliteStorage::list",
         "line_start": 43,
         "line_end": 48,
-        "sha256": "a5bb31f9daa0c077d7f5dedae0be4814cd92309e8f6fb4669556d1c387c48e55"
+        "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
       },
       "statements": [
         {

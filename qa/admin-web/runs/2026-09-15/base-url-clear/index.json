@@ -1,0 +1,87 @@
+{
+  "schema": "cc-lb-base-url-clear-evidence-index/v1",
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/acceptance.json",
+      "sha256": "e744b992c761058b9c5e0114eefd8ea0761e51a40b2f00257665d04b01eb23ce",
+      "bytes": 1625
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/before-fix-regression.txt",
+      "sha256": "05d1a185de4e2430e9e2c34a583f30e853441c9e87e5b2ce21b54023f1c5444c",
+      "bytes": 937
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/after-fix-regressions.txt",
+      "sha256": "f9114e661df00c9bdef83d0455f94e7cfd4382b61342254a5490aaaf4d567e48",
+      "bytes": 1036
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/verification.json",
+      "sha256": "9c8b6733252aeef7c10bb0034aa8f2bcd83de81a0b5f0c6d1e7b9dbc97880506",
+      "bytes": 3223
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/browser-before-api.json",
+      "sha256": "ab392632ca1d05ebb8d08b51a64cec9a8adac6e2add934c15c78715046135433",
+      "bytes": 383
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/browser-baseline.json",
+      "sha256": "ce6da43f33ee0486cc2f8468fc3f29c859170ef1ab0dd41adce488be0e9809d4",
+      "bytes": 545
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/browser-baseline.png",
+      "sha256": "82fa195af9224ef6ef673b28dd305fb1996214077df7fae110874f6c7ca21159",
+      "bytes": 124722
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/browser-after.json",
+      "sha256": "24ef51209fd294ced48f6a8c2596502009d141a41df2c15c42b85c8cb71f2723",
+      "bytes": 349
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/browser-after.png",
+      "sha256": "a997237b155477928519a2ff170526f3961ef9500663d6caa0765144111bb30b",
+      "bytes": 125202
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/browser-reload.json",
+      "sha256": "82b6a9369f373e9eda522415532df81a69f35c39256a4030e995be672591db63",
+      "bytes": 270
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/browser-reload.png",
+      "sha256": "5f13b3a568f7c40f45a80b9c3312809918539f5df94bfe86dc84d3c81367a820",
+      "bytes": 121699
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/browser-rt.json",
+      "sha256": "fcc900ca00c676731778eb8edb1f9378ab76848aedd44aab885314d55f82bed1",
+      "bytes": 6316
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/browser-summary.json",
+      "sha256": "fa369d44b0958397a3e1416ddb568c3caf33acbcf422c2581c3a423b18c4e049",
+      "bytes": 819
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/browser-independent-get-and-restore.json",
+      "sha256": "a1fcfda661e0cb9323625d8bc91ae91a9ce4310077d870497dcaa04b324f42b0",
+      "bytes": 381
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/final-gates.json",
+      "sha256": "830fbd1b056d2214cd2f2bbb2388c3fa7783c7e2384c483e2aeaac44f469b993",
+      "bytes": 1806
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/base-url-clear/clippy.txt",
+      "sha256": "0916dae484deae9921b84b19f43ee5d0e30ee38be331d4c3e826e3b521fd45d6",
+      "bytes": 289
+    }
+  ],
+  "full_process_log_or_binary_included": false,
+  "full_runtime_qa_complete": false
+}

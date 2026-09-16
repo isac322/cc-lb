@@ -1,0 +1,191 @@
+[
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/auth/session",
+    "pathname": "/admin/v1/auth/session",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 92,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b3e-7f91-b3da-151033f3d69c",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/health",
+    "pathname": "/admin/health",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 102,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b49-7a33-9f01-5bf46ac2fbde",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams",
+    "pathname": "/admin/v1/upstreams",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 102,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b47-7201-9c63-4f4deb7cbfcf",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "pathname": "/admin/v1/subscription-quotas/latest",
+    "search": "?windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 102,
+    "duration": 7,
+    "serverTiming": []
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "pathname": "/admin/v1/status",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 102,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b48-7102-b012-8597e159ac4e",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/usage?range=7d&step=hour&group_by=upstream&projection=totals",
+    "pathname": "/admin/usage",
+    "search": "?range=7d&step=hour&group_by=upstream&projection=totals",
+    "initiatorType": "fetch",
+    "startTime": 102,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b48-7102-b012-858b47e5e028",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/principals",
+    "pathname": "/admin/v1/principals",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 102,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b48-7102-b012-85a10dff7f50",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/c804fce8-2b1a-4d3a-a149-878886bee631/subscription-metadata",
+    "pathname": "/admin/v1/upstreams/c804fce8-2b1a-4d3a-a149-878886bee631/subscription-metadata",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 117,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b57-78e3-a83d-e654752419c4",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "pathname": "/admin/v1/subscription-quotas/latest",
+    "search": "?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 117,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b57-78e3-a83d-e66daa670618",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/series?upstream_ids=c804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788921767&until_unix_secs=1789526567&bucket_secs=1800",
+    "pathname": "/admin/v1/subscription-quotas/series",
+    "search": "?upstream_ids=c804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788921767&until_unix_secs=1789526567&bucket_secs=1800",
+    "initiatorType": "fetch",
+    "startTime": 117,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b57-78e3-a83d-e67db0b9dfb4",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/analysis?upstream_ids=c804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788921767&until_unix_secs=1789526567",
+    "pathname": "/admin/v1/subscription-quotas/analysis",
+    "search": "?upstream_ids=c804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788921767&until_unix_secs=1789526567",
+    "initiatorType": "fetch",
+    "startTime": 117,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b58-7cb0-97d5-c5398a34650e",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/events/recent?upstream_id=c804fce8-2b1a-4d3a-a149-878886bee631&limit=5",
+    "pathname": "/admin/events/recent",
+    "search": "?upstream_id=c804fce8-2b1a-4d3a-a149-878886bee631&limit=5",
+    "initiatorType": "fetch",
+    "startTime": 117,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b58-7cb0-97d5-c5540ce659cc",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/usage?range=24h&step=hour&group_by=model&upstream_id=c804fce8-2b1a-4d3a-a149-878886bee631",
+    "pathname": "/admin/usage",
+    "search": "?range=24h&step=hour&group_by=model&upstream_id=c804fce8-2b1a-4d3a-a149-878886bee631",
+    "initiatorType": "fetch",
+    "startTime": 117,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a818-6b58-7cb0-97d5-c547a53b34ae",
+        "duration": 0
+      }
+    ]
+  }
+]

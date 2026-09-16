@@ -1,0 +1,52 @@
+{
+  "schema": "cc-lb-base-url-clear-final-gates/v1",
+  "source_base": "7c8b6168957bff5050d6482ae7d3c137ee7efe31",
+  "cargo_fmt_check_exit": 0,
+  "affected_all_targets_all_features_clippy_exit": 0,
+  "inventory_check_exit": 0,
+  "standard_yaml_parse_exit": 0,
+  "inventory_rows": 433,
+  "storage_operations": 170,
+  "focused_regressions": {
+    "run": 33,
+    "passed": 33,
+    "selected_out": 819
+  },
+  "review": {
+    "reviewer": "ReviewApprovedAuditFix",
+    "blocking_findings": 0,
+    "style_only_suggestion": "Kept the existing module-private double-option deserialization convention."
+  },
+  "catalog_files": [
+    {
+      "path": "qa/admin-web/source-contracts/api-read.json",
+      "sha256": "caf8460fafe4e12220abc338e85a868d4d11c6084d7b14737c674468529feb60"
+    },
+    {
+      "path": "qa/admin-web/source-contracts/api-write.json",
+      "sha256": "daa597137c9317f643c91a89cff914b72a479bdf911f5ccc2dccabe4504bb352"
+    },
+    {
+      "path": "qa/admin-web/source-contracts/ui.json",
+      "sha256": "9b614826ab25f7be49c3bae0aeae6cd68a4a6e417a98337181a051cba7cfe093"
+    },
+    {
+      "path": "qa/admin-web/source-contracts/deployed-delta.json",
+      "sha256": "51c2d12782a91a2bd223a81155f584ba359a4b5739a650b6f6bf0bd36d07c82c"
+    },
+    {
+      "path": "qa/admin-web/api-query-inventory.yaml",
+      "sha256": "92cf700faf5c52aaa124c7bde753e3a904a5ccca3906397e77fcccc6fba0f9a3"
+    },
+    {
+      "path": "qa/admin-web/api-query-inventory.md",
+      "sha256": "fe1dfced46ddce692f52888b39da2630f64858045b6afe5f5bd6c78bc63a1777"
+    },
+    {
+      "path": "qa/admin-web/source-reconciliation.json",
+      "sha256": "5a4c79970150b2126a94eec488858f0e9a896e06de1e3d40e580216dc08beb25"
+    }
+  ],
+  "current_head_ci": "not_yet_run_for_this_uncommitted_change",
+  "full_runtime_qa_complete": false
+}

@@ -1,0 +1,9 @@
+    Starting 33 tests across 9 binaries (819 tests skipped)
+        PASS [   0.343s] ( 5/33) cc-lb-admin::integration v1_upstreams::base_url_roundtrips_across_create_list_get_and_update_without_exposing_secret
+        PASS [   0.351s] ( 6/33) cc-lb-server::integration dispatch_uses_resolved_upstream_base_url::dispatch_uses_resolved_upstream_base_url_not_first_route_dialect
+        PASS [   5.594s] (32/33) cc-lb-storage-conformance scenarios::upstream_store::tests::upstream_store_sqlite
+        SLOW [> 60.000s] (─────) cc-lb-storage-conformance scenarios::upstream_store::tests::postgres_backend::upstream_store_postgres
+        SLOW [>120.000s] (─────) cc-lb-storage-conformance scenarios::upstream_store::tests::postgres_backend::upstream_store_postgres
+        PASS [ 121.091s] (33/33) cc-lb-storage-conformance scenarios::upstream_store::tests::postgres_backend::upstream_store_postgres
+     Summary [ 121.576s] 33 tests run: 33 passed (1 slow), 819 skipped
+[base-url-clear-regressions: exited; cursor=7341]

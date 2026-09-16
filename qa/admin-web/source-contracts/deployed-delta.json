@@ -424,6 +424,15 @@
       "latest_behavior": "Uncommitted candidate: GC button 'Clean orphaned uploads' always enabled (gcInFlight latch and gcPending guard remain), toasts 'No orphaned upload blobs found' / 'Removed N orphaned upload blobs', progress label 'Cleaning orphaned uploads'; row delete no longer disabled during sweep; dialog awaits del.mutateAsync, relies on the shared MutationCache error toast, supports onDeleted callback; usePluginReferences gcTime:0, delete cancels the in-flight reference query and removes the inactive cache entry on success.",
       "impact": "GC presentation clarifies that only unreferenced WASM blobs are removed (registered plugins kept even at Used By 0); delete lifecycle hardened against stale reference cache. Candidate only.",
       "candidate_uncommitted": true
+    },
+    {
+      "type": "api_contract",
+      "name": "Explicit-null Base URL override clearing",
+      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-162",
+      "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
     }
   ],
   "deployed_only_items": [

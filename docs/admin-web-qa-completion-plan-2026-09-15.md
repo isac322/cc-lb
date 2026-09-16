@@ -85,7 +85,7 @@
 
 ## 5. 상세 TODO와 완료 조건
 
-체크박스는 실행 증거가 있을 때만 갱신한다. TODO 도구와 아래 58개 항목의 이름을 동일하게 유지한다. 발견된 추가 의무는 원래 항목을 지우지 않고 새 ID로 추가한다.
+체크박스는 실행 증거가 있을 때만 갱신한다. TODO 도구와 아래 70개 항목의 이름을 동일하게 유지한다. 발견된 추가 의무는 원래 항목을 지우지 않고 새 ID로 추가한다.
 
 ### 문서와 기준선
 
@@ -181,13 +181,13 @@
   - 기대 key와 actual key를 exact 대조하고 missing/duplicate/secret/필수 null을 검사한다. 독립 검토자가 분모와 PASS 주장을 반증 시도한다.
 - [ ] VERIFY-03 최종 성능 병목 결과와 문서 동기화
   - 화면/계정/variant별 결과, 오류와 개선점, SQL 상관 근거, cache 상태, 남은 한계를 작성한다. 스킬/목록/계획/실행 보고의 상태가 모순되지 않게 한다.
-- [ ] VERIFY-04 전체 변경 독립 리뷰와 저장소 게이트 검증
+- [x] VERIFY-04 전체 변경 독립 리뷰와 저장소 게이트 검증
   - 스킬 이전·QA 도구·데이터·문서 전체 diff를 독립 리뷰한다. 변경 범위에 맞는 formatter/lint/typecheck/tests와 실제 실행을 최종 한 번 수행한다.
-- [ ] VERIFY-05 문서 스킬 인벤토리 증거 커밋 PR 생성
+- [x] VERIFY-05 문서 스킬 인벤토리 증거 커밋 PR 생성
   - 명시된 자산과 검증된 비식별 증거만 커밋한다. 분석 제안·비밀값·무관한 원본 앱 변경을 제외하고 PR에 포함/제외 범위를 설명한다.
-- [ ] VERIFY-06 현재 PR head CI 통과와 리뷰 완료
+- [x] VERIFY-06 현재 PR head CI 통과와 리뷰 완료
   - 현재 head의 CI/필수 리뷰를 확인한다. 실패는 무수정 rerun하지 않고 원인을 수정해 검증한다.
-- [ ] VERIFY-07 PR별 변경 설명 후 사용자 머지 승인 요청
+- [x] VERIFY-07 PR별 변경 설명 후 사용자 머지 승인 요청
   - PR마다 §2의 최종 내용·검증·head/base·방식·위험을 설명하고 사용자 승인을 기록한다. 대기 중에는 가능한 독립 작업을 진행한다.
 - [ ] VERIFY-08 승인된 PR만 머지하고 산출물 반영 확인
   - 승인된 동일 head/대상/옵션으로만 머지한다. 변경되면 다시 설명하고 승인받는다. 공유 저장소의 파일/스킬 경로/보고서 반영을 확인한 뒤 goal 완료를 판정한다.
@@ -235,6 +235,46 @@
 - [x] OBS-06 실제 브라우저 SQL 상관 연결 검증
   - 각 DB에서 실제 UI가 보낸 요청을 Resource Timing ID로 서버 head/SQL/acquire 로그에 연결한다. 독립 fetch로 UI 요청을 대체하지 않고, 빠진 로그·본문·순수 wait를 다른 값으로 채우지 않는다.
 
+### 차단 항목 재평가
+
+- [x] REASSESS-01 운영 관측 행과 소스 ID 오프라인 대조
+  - 이미 보존한 Plugins·Upstreams native 관측을 실제 source ID와 대조한다. 별도 관측 이름을 정식 ID로 연결할 근거가 없는 행은 미해결로 남기며 새 운영 요청은 보내지 않는다.
+- [x] REASSESS-02 외부 승인 없이 가능한 잔여 검증 분리
+  - 남은 항목을 외부 승인·credential 필요, 운영 계측 적용 필요, 기존 자료로 가능한 대조, 승인된 격리 환경에서 가능한 검증으로 나눈다. 머지 보류를 다른 작업의 취소로 확대하지 않는다.
+
+- [x] REASSESS-03 PostgreSQL 브라우저 관측 창 종료 증거 검증
+  - 기존 raw snapshot의 `end=null`과 `ui_oracle=null`은 유지하고, 승인된 로컬 PostgreSQL 환경에서 유효한 `endAction` 호출 뒤 종료된 window와 실제 UI·RID·SQL 증거를 새 파일로 보존한다. 운영 요청이나 코드 변경은 하지 않는다.
+  - 새 raw window의 종료 시각과 서버 요청 3건 연결을 확인했다. 다만 기대·관측 해시를 같은 HTML에서 만든 한계가 있어 독립 UI oracle PASS로는 인정하지 않는다.
+- [x] REASSESS-04 독립 UI 오라클과 원본 화면 증거 검증
+  - 클릭 전에 최소 기대 상태를 고정하고, 실제 DOM에서 별도로 추출한 상태와 비교한다. 스크린샷 원본 bytes와 두 상태 객체를 먼저 보존한 뒤 해시를 계산한다. 동일 관측을 양쪽에 복사한 해시 비교는 통과 근거로 사용하지 않는다.
+  - 클릭 전에 고정한 `/plugins` 경로와 `Plugins` 제목을 실제 DOM에서 별도 추출한 상태와 비교했다. 원본 PNG를 보존하고 Main이 화면과 해시를 확인했다. 종료된 관측 창의 registry GET을 실제 PostgreSQL query/acquire 이벤트 3개씩에 연결했다. 이 한 페이지 탐색 검증은 운영 전수 QA 완료를 뜻하지 않는다.
+
+### 격리 잔여 시나리오
+
+- [x] LOCAL-01 Upstream 사용량 표시의 실데이터 경로 검증
+  - 미관측된 cost/token 표시가 어떤 실제 집계·DTO·UI 필드에 연결되는지 확인한다. 외부 호출 없는 격리 fixture 생성 경로가 확인될 때만 실제 상태 전이를 검증한다.
+  - 새 SQLite fixture의 실제 rollup 저장소와 Admin API, 브라우저에서 `$1.25 · 2.0K tok` → `$2.00 · 3.0K tok` 자연 poll 전이를 확인했다. 수정한 캡처에서 실제 `/admin/usage` UI 요청 3건을 각각 SQL·acquire 이벤트에 연결했다. request ingestion 경로를 검증한 것은 아니다.
+- [x] LOCAL-02 Upstream 오류 상태 표시의 생성 경로 검증
+  - 상태 표시의 실제 생성 경로와 UI 계약을 확인한다. 연결되지 않는 URL만 설정해서 오류 상태라고 가정하지 않고, 존재하지 않는 UI 변형도 통과·실패로 만들지 않는다.
+  - 실제 생성 경로는 연결 실패가 아닌 OAuth credential 검증 오류였다. 새 격리 upstream의 `error`·danger 도트·오류 title을 확인하고 실제 disable API 이후 저장소·status API·브라우저가 `disabled`·neutral·title 없음으로 바뀌는 것을 확인했다. native tooltip 픽셀 표시는 검증하지 않았다.
+
+### 승인된 Base URL 초기화
+
+- [x] BASEURL-01 명시적 null 초기화 계약과 호출부 범위 확정
+  - 2026-09-16 사용자가 `명시적 null로 제거 승인`을 선택했다. update에서 생략은 유지, null은 override 제거, URL은 설정이다. create/response의 nullable 표현과 key/OAuth/warmup 필드 계약은 유지한다.
+- [x] BASEURL-02 API와 양 저장소의 삼상태 갱신 구현
+  - `UpstreamUpdate.base_url`의 외부 Option은 변경 여부, 내부 Option은 nullable 값을 뜻한다. 기존 Serde 삼상태 관례와 양 DB의 명시적 presence 조건을 사용하고 모든 실제 caller/mock을 이관한다. 새 migration·의존성·runtime test hook은 추가하지 않는다.
+- [x] BASEURL-03 생략 설정 초기화 및 충돌 회귀 검증
+  - 기존 HTTP 회귀에 생략·명시적 null·복원·stale revision을 추가했고 수정 전 실제 실패를 보존했다. 양 DB conformance와 해당 회귀를 수정 후 검증하며 키·토큰의 비노출과 충돌 보호를 유지한다.
+- [x] BASEURL-04 실제 UI 저장 재조회와 프록시 목적지 검증
+  - 실제 SettingsCard에서 비우기→저장→새 GET→새로고침 뒤 기본값 상태를 확인한다. 실제 proxy 경로는 기존 RecordingDispatcher seam에서 custom override와 제거 후 기본 목적지를 비교한다. 유료/외부 Anthropic 요청은 보내지 않는다.
+  - 수정 전 HTTP 회귀가 기존 URL 반환으로 실패했고, 수정 후 SQLite·PostgreSQL conformance와 signer·실제 Lifecycle dispatch 회귀를 포함한 33/33 검사가 통과했다. 실제 UI 비우기·저장·독립 GET·새로고침 후 DB NULL과 기본 endpoint 표시를 확인하고 원래 loopback override를 복원했다. 외부 provider 요청은 하지 않았다.
+
+- [x] BASEURL-05 초기화 수정 후 카탈로그 문서 최종 검증
+  - formatter, 영향 Rust target의 all-features Clippy, source inventory check와 표준 YAML 파싱을 확인했다. 두 DB의 실제 SQL 및 bind 정보와 UI·API 삼상태 계약을 함께 갱신했다.
+- [ ] BASEURL-06 Base URL 수정 커밋과 PR CI 검증
+  - 추가 승인 수정과 격리 증거를 별도 커밋으로 기존 draft PR에 반영하고 새 head의 CI를 확인한다. 이전 head의 통과를 새 head에 적용하지 않으며 머지 보류는 유지한다.
+
 ## 6. 진행 및 증거 기록
 
 | 시점 | 항목 | 실제 수행/증거 | 남은 조건 |
@@ -268,18 +308,22 @@
 | 2026-09-15 | 수집기 과장 방지 | 수집기 1.0.7에서 뒤늦은 동일 ID 후보·상충 ID·약한 기존 연결이 잘못 유지되는 세 경우를 재현하고 수정 후 같은 재현을 통과했다. | 실제 브라우저 검증과 캐시 ID 재사용 처리는 별도 확인한다. native click 한 호출이 두 요청을 낸 도구 현상도 기록하며 UI action과 HTTP request를 1:1로 가정하지 않는다. |
 | 2026-09-15 | Canonical 수집기 연결 검증 | 수정된 수집기 1.0.7에서 보존한 SQLite 17개, PostgreSQL 19개 Resource Timing ID를 관측 전부터 저장한 private 서버 로그에 모두 연결했다. 각 DB에서 6개 SQL-bearing entry를 확인했다. `qa/admin-web/runs/2026-09-15/server-timing/index.json`에 성공·실패·제한 증거를 분리 보존했다. | SQLite는 sequence 106 이후의 별도 window이며 앞선 103개 drain 복구가 아니다. PG raw snapshot의 action window는 열려 있어 전체 UI oracle 완료가 아니다. 순수 DB/queue 시간과 전체 운영 행렬은 계속 미완료다. |
 | 2026-09-15 | 최종 코드 게이트 | Rust format, Web lint/typecheck, 72 files·699 Web tests, 현재 inventory check, recorder syntax 모두 PASS. Server/SQLite library tests는 Server-Timing 추가 후에도 191/191 PASS. | 테스트/도구 통과가 운영 전체 실행이나 머지 승인을 뜻하지 않는다. |
+| 2026-09-15 | PR #793 생성 및 CI | `qa/admin-web-exhaustive-completion`의 `7c8b6168957bff5050d6482ae7d3c137ee7efe31`을 푸시하고 `master` 대상 draft PR을 생성했다. Rust·Web·publish-check 모두 성공했고 상태 검사 포함 11개 성공, release-artifact 조건부 검사 1개 제외를 확인했다. | 이 결과는 해당 head에 한정한다. 이후 로컬 QA 기록은 별도 변경이며 자동으로 같은 CI 증거를 적용하지 않는다. |
+| 2026-09-15 | 머지 보류 | 저장소·PR·base/head·squash/admin 방식·브랜치 유지·미완료 범위를 제시한 뒤 사용자가 `머지 보류`를 선택했다. | Draft 해제·머지·자동 머지·브랜치 삭제·운영 배포는 실행하지 않는다. 별도 승인 없는 나머지 QA 작업은 가능한 범위만 수행한다. |
+| 2026-09-16 | 격리 사용량·오류 상태 전이 | `post-hold-usage-status/index.json`의 22개 파일에 초기·전이 원시 DOM/PNG/API/SQL seed 및 UI 요청 상관 증거를 보존했다. 기존 미관측 `UPSTREAM-004`, `UPSTREAM-006`에 대한 새 로컬 기능 증거이며 과거 행은 덮어쓰지 않았다. | `/admin/v1` 전용 RT 필터가 `/admin/usage`를 빠뜨린 수집 결함을 수정해 새 관측으로 검증했다. 운영 요청·앱 코드·PR 변경은 없고 해당 fixture 포트·브라우저 탭은 종료했다. |
 
 ## 7. 승인 및 차단 기록
 
 | 대상 | 요청할 구체적 변경/작업 | 승인 상태 | 실행 상태 |
 |---|---|---|---|
-| 이 작업의 모든 PR 머지 | PR별 최종 설명과 검증 후 요청 | 미승인 | 실행 금지 |
+| PR #793 머지 | head `7c8b6168957bff5050d6482ae7d3c137ee7efe31`, base `master`, squash/admin, 브랜치 삭제 없음으로 최종 요청 | 사용자 `머지 보류` 선택 | Draft 유지. 머지·ready 전환·auto-merge·queue·브랜치 삭제 금지. 새 명시적 승인 필요 |
 | 격리 Admin 요청 계측 | Admin 전용 ID/span, 양 DB acquire 로그, 필요한 직접 의존성 선언 및 격리 검증 | 사용자 `격리 계측 구현 승인` 선택 | 명시한 세 runtime 파일과 지원 metadata만 변경. Proxy 처리·운영 설정·배포는 제외 |
 | 운영 쓰기 또는 운영 설정 변경 | 필요 시 대상·부작용·복구 방법별 요청 | 미승인 | 변경 없음 |
 | 최신 Audit 기록 누락 수정 | Admin Audit용 최근 제한 조회 추가, 기존 append-order 계약 유지, 양 DB/handler/회귀 검증 | 사용자 ask에서 `Audit 오류 수정 승인` 선택 | 위 AUDIT-01~04 범위만 구현 가능. 머지·운영 반영 미승인 |
 | Settings Apply 501 | 파일 기반 ConfigWatcher가 apply를 지원하지 않으나 UI에서 Apply를 제공하는 문제 | 수정 방향 미승인 | 재현/지원 조건과 실패 기록만 보존. 동적 설정 기능 구현 금지 |
 | 추가 다섯 앱 오류 수정 | FIX-01~05: 중복 이름 저장/Base URL/선택 라벨/Router revision/Plugins 삭제·GC 표시 | 사용자 다중 선택으로 다섯 항목 모두 승인 | 해당 UI/API/양 DB/회귀 범위만 수정. 별도 계측·Settings Apply·배포·머지 미승인 |
 | Server-Timing ID 전달 | `app.rs`에서 기존 x-request-id와 동일한 ID만 rid.description으로 전달하고 QA 수집기에 연결 | 사용자 `격리 환경 추가 승인` 선택 | 새 시간값·본문·credential 노출 없음. 운영 설정·배포는 별도 승인 |
+| Base URL 명시적 null 제거 | Upstream update의 생략/명시적 null/URL을 삼상태로 구분하고 양 DB·기존 호출부·UI·프록시 목적지 검증 | 2026-09-16 사용자 `명시적 null로 제거 승인` 선택 | 격리 구현·검증 완료. 키·토큰 null 계약과 운영 데이터·머지 보류는 유지 |
 
 문서의 TODO가 모두 체크되고, 실제 증거의 필수 항목이 모두 충족되고, 승인 필요한 작업까지 완료되기 전에는 goal을 완료 처리하지 않는다.
 

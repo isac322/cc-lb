@@ -14462,7 +14462,7 @@
       "variants": [
         "Cancel edit",
         "Save with custom Base URL",
-        "Save with blank Base URL (sends base_url: null on the wire; the backend Option<Url> update treats null as no-change and retains the existing URL — clearing is not supported)",
+        "Save with blank Base URL (sends explicit base_url: null, removes the override, and retains the default endpoint after a fresh GET and page reload)",
         "Save with env var key (sends api_key_env, api_key_value: null; server resolves the env var to ciphertext — the env name itself is never stored or returned)",
         "Save with literal key (sends api_key_value, api_key_env: null)",
         "Save with blank literal key field (sends api_key_value: null; treated as no-change, retaining the stored key; the stored secret is never rendered or restored into the form)"
@@ -14475,7 +14475,7 @@
         "variants": [
           "Cancel edit",
           "Save with custom Base URL",
-          "Save with blank Base URL (sends base_url: null on the wire; the backend Option<Url> update treats null as no-change and retains the existing URL — clearing is not supported)",
+          "Save with blank Base URL (sends explicit base_url: null, removes the override, and retains the default endpoint after a fresh GET and page reload)",
           "Save with env var key (sends api_key_env, api_key_value: null; server resolves the env var to ciphertext — the env name itself is never stored or returned)",
           "Save with literal key (sends api_key_value, api_key_env: null)",
           "Save with blank literal key field (sends api_key_value: null; treated as no-change, retaining the stored key; the stored secret is never rendered or restored into the form)"
@@ -14504,7 +14504,7 @@
             "symbol": "useUpdateUpstream",
             "line": 1052
           },
-          "side_effect_notes": "Updates database record with If-Match: spec_revision header; invalidates ['upstreams'] and ['upstream', id]. Outbound facts only: blank Base URL sends base_url: null, which the backend treats as no-change (Option<Url> update cannot clear an existing URL). The literal API key field always starts blank; the stored secret is never repopulated, api_key_env is write-only (server stores only ciphertext), and the env:{name} display branch is unreachable since UpstreamResponse omits api_key_env.",
+          "side_effect_notes": "Updates the spec with If-Match revision protection and invalidates upstream queries. An omitted base_url preserves the override; explicit null removes it; a URL sets it. Blank API-key inputs remain no-change and secrets are never repopulated; api_key_env provenance is not persisted or returned.",
           "id": "UI-UP-13",
           "parent_action_id": "UI-SRC-9FD3FEC04C3D",
           "path_bindings": [
@@ -17263,8 +17263,8 @@
       "component": "SettingsCard",
       "file": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx",
       "line": 179,
-      "description": "The 'env:{api_key_env}' API Key display branch is source-only/unreachable: UpstreamResponse (crates/cc-lb-admin/src/v1/upstreams.rs:163) omits api_key_env, so the server never returns the env var name (write-only contract: name resolved to ciphertext, never stored/exposed). Separately, a blank Base URL sends base_url: null, but the backend Option<Url> update treats null as no-change and retains the existing URL — clearing an override is not supported. This is a static source observation recorded separately from the runtime-progress overlay's settings_null_default_get_reload triage; it is not asserted as runtime-verified.",
-      "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:163-171 (UpstreamResponse fields), :1748 (base_url update gated on is_some)"
+      "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL null-clear contract is now implemented and is recorded in SettingsCard variants; historical null-as-no-change evidence remains a baseline limitation.",
+      "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:171-179 (UpstreamResponse fields), :1748 (base_url update gated on is_some)"
     }
   ]
 }

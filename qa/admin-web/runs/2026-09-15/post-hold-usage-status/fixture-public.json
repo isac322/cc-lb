@@ -1,0 +1,14 @@
+{
+  "api_upstream": {
+    "id": "c804fce8-2b1a-4d3a-a149-878886bee631",
+    "name": "qa-usage-display"
+  },
+  "oauth_upstream": {
+    "id": "39358d12-bfdc-41aa-8381-49bd2c96be12",
+    "name": "qa-status-missing-credentials"
+  },
+  "origin": "http://127.0.0.1:56352",
+  "fixture_manifest": "/data/tmp/cc-lb-admin-web-qa-completion/target/keepalive-qa/admin-web-usage-status/fixture-manifest.json",
+  "source_commit": "7c8b6168957bff5050d6482ae7d3c137ee7efe31",
+  "warmup_enabled": false
+}

@@ -1,0 +1,497 @@
+[
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/auth/session",
+    "pathname": "/admin/v1/auth/session",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 92,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c95e-70e3-9887-41bb46ff9428",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams",
+    "pathname": "/admin/v1/upstreams",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 109,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c96f-7512-bf87-dacdf3c4689d",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "pathname": "/admin/v1/subscription-quotas/latest",
+    "search": "?windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 109,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c970-7f23-b016-630d7bfcc189",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/usage?range=7d&step=hour&group_by=upstream&projection=totals",
+    "pathname": "/admin/usage",
+    "search": "?range=7d&step=hour&group_by=upstream&projection=totals",
+    "initiatorType": "fetch",
+    "startTime": 110,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c970-7f23-b016-631277f4b833",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "pathname": "/admin/v1/status",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 110,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c970-7f23-b016-632b3af45cbb",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/health",
+    "pathname": "/admin/health",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 110,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c971-7582-9d45-9e20d54bc3e3",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/principals",
+    "pathname": "/admin/v1/principals",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 110,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c972-7a83-a05f-6bc4e4adf168",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "pathname": "/admin/v1/subscription-quotas/latest",
+    "search": "?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 124,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c97e-7591-ae27-9027f2fb9929",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "pathname": "/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 139,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c98e-7543-91ca-be1b1e3b4a4e",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/oauth/status",
+    "pathname": "/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/oauth/status",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 139,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c98e-7543-91ca-be2e3fab81b4",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/plugins/registry",
+    "pathname": "/admin/v1/plugins/registry",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 139,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c98d-7301-a867-5031bfc4f6aa",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/warmup",
+    "pathname": "/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/warmup",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 139,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c98e-7543-91ca-be091d6a6054",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/series?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788917466&until_unix_secs=1789522266&bucket_secs=1800",
+    "pathname": "/admin/v1/subscription-quotas/series",
+    "search": "?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788917466&until_unix_secs=1789522266&bucket_secs=1800",
+    "initiatorType": "fetch",
+    "startTime": 140,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c98f-71f2-8503-d7371ea23b57",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/events/recent?upstream_id=39358d12-bfdc-41aa-8381-49bd2c96be12&limit=5",
+    "pathname": "/admin/events/recent",
+    "search": "?upstream_id=39358d12-bfdc-41aa-8381-49bd2c96be12&limit=5",
+    "initiatorType": "fetch",
+    "startTime": 141,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c990-7411-966c-b6216a2f3f95",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/usage?range=24h&step=hour&group_by=model",
+    "pathname": "/admin/usage",
+    "search": "?range=24h&step=hour&group_by=model",
+    "initiatorType": "fetch",
+    "startTime": 141,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c990-7411-966c-b61ee016893d",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/analysis?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788917466&until_unix_secs=1789522266",
+    "pathname": "/admin/v1/subscription-quotas/analysis",
+    "search": "?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788917466&until_unix_secs=1789522266",
+    "initiatorType": "fetch",
+    "startTime": 141,
+    "duration": 9,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-c98f-71f2-8503-d743dff644fd",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/usage?range=7d&step=hour&group_by=upstream&projection=totals",
+    "pathname": "/admin/usage",
+    "search": "?range=7d&step=hour&group_by=upstream&projection=totals",
+    "initiatorType": "fetch",
+    "startTime": 5186,
+    "duration": 13,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-dd4a-74f3-bb17-bb676d806eef",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "pathname": "/admin/v1/subscription-quotas/latest",
+    "search": "?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 5187,
+    "duration": 12,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-dd4c-7d90-9c98-47087d7d8663",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/usage?range=24h&step=hour&group_by=model",
+    "pathname": "/admin/usage",
+    "search": "?range=24h&step=hour&group_by=model",
+    "initiatorType": "fetch",
+    "startTime": 5188,
+    "duration": 17,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-dd4e-7da2-98a3-dd4ea70d20e3",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/events/recent?upstream_id=39358d12-bfdc-41aa-8381-49bd2c96be12&limit=5",
+    "pathname": "/admin/events/recent",
+    "search": "?upstream_id=39358d12-bfdc-41aa-8381-49bd2c96be12&limit=5",
+    "initiatorType": "fetch",
+    "startTime": 10203,
+    "duration": 17,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-f0e4-76a0-8d76-e19bfb66ab5a",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "pathname": "/admin/v1/subscription-quotas/latest",
+    "search": "?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 10204,
+    "duration": 15,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-f0e7-7633-b438-9dc65874d951",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/usage?range=7d&step=hour&group_by=upstream&projection=totals",
+    "pathname": "/admin/usage",
+    "search": "?range=7d&step=hour&group_by=upstream&projection=totals",
+    "initiatorType": "fetch",
+    "startTime": 10204,
+    "duration": 16,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-f0e7-7633-b438-9dbc7ae18af9",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/usage?range=24h&step=hour&group_by=model",
+    "pathname": "/admin/usage",
+    "search": "?range=24h&step=hour&group_by=model",
+    "initiatorType": "fetch",
+    "startTime": 10238,
+    "duration": 12,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-f104-7bf0-9e53-a4c5e24b2bac",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/auth/session",
+    "pathname": "/admin/v1/auth/session",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 14025,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-ffcd-7320-9133-6618a9cec872",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "pathname": "/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 14050,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-ffe4-7f50-9998-4864d4012ce9",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/oauth/status",
+    "pathname": "/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/oauth/status",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 14050,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-ffe5-7e22-a733-ec0c9a0ebd38",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "pathname": "/admin/v1/status",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 14050,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-ffe5-7e22-a733-ec1f7ee5dbb6",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams",
+    "pathname": "/admin/v1/upstreams",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 14050,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-ffe5-7e22-a733-ec3ce6f1efbf",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/principals",
+    "pathname": "/admin/v1/principals",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 14050,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-ffe5-7e22-a733-ec22cf4c2ec5",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/health",
+    "pathname": "/admin/health",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 14050,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-ffe8-7953-8f5a-7f27f6045993",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/plugins/registry",
+    "pathname": "/admin/v1/plugins/registry",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 14050,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-ffe3-7f63-90f0-033aef574beb",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/series?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788917480&until_unix_secs=1789522280&bucket_secs=1800",
+    "pathname": "/admin/v1/subscription-quotas/series",
+    "search": "?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788917480&until_unix_secs=1789522280&bucket_secs=1800",
+    "initiatorType": "fetch",
+    "startTime": 14050,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-ffe6-7003-8142-a6faab33eb9f",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/analysis?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788917480&until_unix_secs=1789522280",
+    "pathname": "/admin/v1/subscription-quotas/analysis",
+    "search": "?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788917480&until_unix_secs=1789522280",
+    "initiatorType": "fetch",
+    "startTime": 14050,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d6-ffe7-7900-aa2d-9ed58465875d",
+        "duration": 0
+      }
+    ]
+  }
+]

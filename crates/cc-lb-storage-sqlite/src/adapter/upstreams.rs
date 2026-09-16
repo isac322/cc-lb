@@ -356,10 +356,16 @@ async fn update_split_spec_in_tx(
     update: UpstreamUpdate,
 ) -> StorageResult<()> {
     let warmup_dialect_plugin = json_string(update.warmup_dialect_plugin.as_ref())?;
+    let base_url_present = update.base_url.is_some();
+    let base_url = update
+        .base_url
+        .as_ref()
+        .and_then(Option::as_ref)
+        .map(url::Url::as_str);
     let row = sqlx::query(
         "UPDATE upstream_spec_v1
            SET name = COALESCE(?, name),
-               base_url = COALESCE(?, base_url),
+               base_url = CASE WHEN ? THEN ? ELSE base_url END,
                enabled = COALESCE(?, enabled),
                warmup_enabled = COALESCE(?, warmup_enabled),
                warmup_dialect_plugin = COALESCE(?, warmup_dialect_plugin),
@@ -369,7 +375,8 @@ async fn update_split_spec_in_tx(
          RETURNING id",
     )
     .bind(update.name)
-    .bind(update.base_url.as_ref().map(ToString::to_string))
+    .bind(base_url_present)
+    .bind(base_url)
     .bind(update.enabled)
     .bind(update.warmup_enabled)
     .bind(warmup_dialect_plugin)

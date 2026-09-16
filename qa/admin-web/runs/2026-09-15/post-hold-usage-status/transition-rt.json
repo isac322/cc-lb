@@ -1,0 +1,1302 @@
+[
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/auth/session",
+    "initiatorType": "fetch",
+    "startTime": 98,
+    "duration": 108,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-869e-7581-9cde-9e0ee56bcc4d",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/auth/session",
+    "initiatorType": "fetch",
+    "startTime": 5730,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9c9f-7150-89de-ba9a1a3ff4ed",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 5761,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9cbe-7c31-9fd9-4e110c72513e",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 5761,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9cbe-7c31-9fd9-4e040cb72a3d",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams",
+    "initiatorType": "fetch",
+    "startTime": 5761,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9cbd-7a00-b87f-b3b7786e3400",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/principals",
+    "initiatorType": "fetch",
+    "startTime": 5762,
+    "duration": 9,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9cbe-7c31-9fd9-4e2510e0ad15",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 5770,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9cc6-7350-b61e-4871cee7279d",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/plugins/registry",
+    "initiatorType": "fetch",
+    "startTime": 5787,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9cd8-7963-84c7-38ebf9871372",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "initiatorType": "fetch",
+    "startTime": 5788,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9cd9-7f12-9613-52d49fb055c1",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/oauth/status",
+    "initiatorType": "fetch",
+    "startTime": 5788,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9cd9-7f12-9613-52e6544eda29",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/series?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788916799&until_unix_secs=1789521599&bucket_secs=1800",
+    "initiatorType": "fetch",
+    "startTime": 5788,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9cd9-7f12-9613-52fcdbc2b28f",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/analysis?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788916799&until_unix_secs=1789521599",
+    "initiatorType": "fetch",
+    "startTime": 5788,
+    "duration": 14,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9cd9-7f12-9613-5309cad74b8a",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/warmup",
+    "initiatorType": "fetch",
+    "startTime": 5788,
+    "duration": 15,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-9cd9-7f12-9613-52cc607c5bd6",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 10814,
+    "duration": 11,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-b07c-7872-a2ed-718a0444c3fd",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 15853,
+    "duration": 9,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-c42f-7a02-82e3-108f4d0a5029",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 21002,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-d848-76e2-afde-f0ffcd52bcf5",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 21002,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-d848-76e2-afde-f0eba8803a86",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 26019,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cc-ebe1-71f1-afc3-cc8144a9bbe9",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 31185,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-0010-7f91-83a3-d468cc6da0e9",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams",
+    "initiatorType": "fetch",
+    "startTime": 35932,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-129b-7df3-a526-0453f37b5bb1",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "initiatorType": "fetch",
+    "startTime": 35933,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-129c-7711-941c-738acd045517",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/series?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788916829&until_unix_secs=1789521629&bucket_secs=1800",
+    "initiatorType": "fetch",
+    "startTime": 35933,
+    "duration": 12,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-129f-7b70-9ab1-ca61f941f44d",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/warmup",
+    "initiatorType": "fetch",
+    "startTime": 35934,
+    "duration": 12,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-129e-7072-9a5e-a893ab9dd801",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 36017,
+    "duration": 11,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-12f3-7e12-9ba5-940f3f0f172c",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 36344,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-1436-7690-9ba9-dee5c2319bdb",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 41366,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-27d5-75b0-936f-1cb186b9fd6f",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 46507,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-3be9-7b83-87b1-ef5d7a14f149",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 51108,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-4de1-7450-87dd-2626100181a0",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 51537,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-4f8e-7180-8275-7ab5804682a8",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 56618,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-6368-7a22-85ef-194e203bd8e7",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 61746,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-776e-74c3-a1fa-a434309cbce9",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams",
+    "initiatorType": "fetch",
+    "startTime": 66044,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-8837-7901-b8b4-6860f6a0b0c6",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "initiatorType": "fetch",
+    "startTime": 66044,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-8839-7a70-ab35-faaa4ca9feff",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/series?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788916859&until_unix_secs=1789521659&bucket_secs=1800",
+    "initiatorType": "fetch",
+    "startTime": 66044,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-883a-7ce2-86a6-96c8cfce9b84",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/warmup",
+    "initiatorType": "fetch",
+    "startTime": 66044,
+    "duration": 9,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-883a-7ce2-86a6-96d24c4b7de5",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 66248,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-8904-7982-abba-f8a04837a583",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 66784,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-8b1d-76e0-9eff-46b1970850f9",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 71942,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-9f44-7cd1-8882-f61ccf3b6651",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 76953,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-b2d6-7e40-876c-c30f023b322e",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 81386,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-c429-7732-a2a0-807e8093a1ba",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 82001,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-c68f-7853-a2e0-5d6bb727e4b7",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 87124,
+    "duration": 13,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-da96-7112-befa-67a7284be218",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 92283,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-eeb9-7ab2-ae1c-e6af7af14e88",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams",
+    "initiatorType": "fetch",
+    "startTime": 96174,
+    "duration": 9,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-fded-75e1-84eb-84a1c87558c5",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "initiatorType": "fetch",
+    "startTime": 96175,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-fdee-7a93-baea-4300df2f3dfa",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/series?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788916890&until_unix_secs=1789521690&bucket_secs=1800",
+    "initiatorType": "fetch",
+    "startTime": 96175,
+    "duration": 11,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-fdf0-74e0-9d9b-7a81ed2afc69",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/warmup",
+    "initiatorType": "fetch",
+    "startTime": 96176,
+    "duration": 13,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-fdf1-76f1-8529-91bd5d110766",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 96523,
+    "duration": 9,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cd-ff49-7661-ad9d-c3dfa5eba83a",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 97430,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-02d4-7e50-a5c7-6914d270fd6d",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 102636,
+    "duration": 9,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-172b-7df3-b041-b525ee502dc3",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 107792,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-2b4d-7f42-a9c4-013107de1c6b",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 111678,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-3a7c-7013-929c-07c10ac84e33",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 112929,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-3f5d-7763-a3b3-36325cd0e168",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 117968,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-530c-7b42-9469-9c7d3b82a69b",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 123169,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-675d-7c32-85c2-f42bcef86901",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/analysis?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788916919&until_unix_secs=1789521719",
+    "initiatorType": "fetch",
+    "startTime": 125899,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-7208-7160-9374-61e0648faeba",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams",
+    "initiatorType": "fetch",
+    "startTime": 126328,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-73b4-78d0-8b24-a2036cb506aa",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "initiatorType": "fetch",
+    "startTime": 126328,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-73b5-7c62-b85e-20bca03dc935",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/series?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788916920&until_unix_secs=1789521720&bucket_secs=1800",
+    "initiatorType": "fetch",
+    "startTime": 126328,
+    "duration": 9,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-73b6-7131-928c-e21641f54b25",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/warmup",
+    "initiatorType": "fetch",
+    "startTime": 126330,
+    "duration": 9,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-73b7-7c22-b35f-a8e7be9954be",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 126837,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-75b3-7b82-b620-92737ad658d7",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 128260,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-7b42-79d1-be4e-3a8332e940be",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 133279,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-8edb-7af1-bd1f-ce7f584b1e1d",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 138317,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-a28a-7d52-8849-ade988e33eef",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 141995,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-b0e8-73d1-a785-f5d3f164d4fb",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 143452,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-b698-7143-bd59-084e38301993",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 148461,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-ca2a-7ba2-b47b-7e6ba76d1cbd",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 153529,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-ddf4-7343-97d6-3f0dd242922c",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams",
+    "initiatorType": "fetch",
+    "startTime": 156465,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-e96c-73c0-89af-5a9a2d26ba16",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "initiatorType": "fetch",
+    "startTime": 156465,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-e96d-70e3-9331-04c4ee6f8fb9",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/series?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788916950&until_unix_secs=1789521750&bucket_secs=1800",
+    "initiatorType": "fetch",
+    "startTime": 156465,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-e96d-70e3-9331-04d1bcb9a8cc",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/warmup",
+    "initiatorType": "fetch",
+    "startTime": 156466,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-e96e-7d22-aa05-f43244aebfeb",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 157015,
+    "duration": 7,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-eb95-7d31-85e8-7148cf70a098",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 158668,
+    "duration": 14,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7ce-f208-77e3-a843-6ff0709cc6d6",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 163835,
+    "duration": 11,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-0636-7cf1-9392-19f59f467f04",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 168980,
+    "duration": 11,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-1a50-7ac1-8960-e50b0b936ef7",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 172116,
+    "duration": 12,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-2691-77a3-8145-8b05d71deee8",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 174128,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-2e6b-7a02-b8be-d1a2e6e758b7",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 179190,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-4232-7692-9170-8f9a5de2f973",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 184346,
+    "duration": 9,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-5656-7a61-a5f4-57056af5d9ab",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams",
+    "initiatorType": "fetch",
+    "startTime": 186562,
+    "duration": 12,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-5eff-7aa3-b205-e0eb9c26e53a",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "initiatorType": "fetch",
+    "startTime": 186563,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-5f00-7bb2-ae6f-b5570e27cbc7",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/series?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788916980&until_unix_secs=1789521780&bucket_secs=1800",
+    "initiatorType": "fetch",
+    "startTime": 186563,
+    "duration": 15,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-5f00-7bb2-ae6f-b566ec82fd88",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/warmup",
+    "initiatorType": "fetch",
+    "startTime": 186563,
+    "duration": 17,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-5f01-77c3-903c-1584c2ad61d0",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 187138,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-613e-7092-b414-7d14e94e4c92",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 189378,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-69fe-7121-8d07-e4fce416912b",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 194394,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-7d96-7052-9054-c13488d1ee2f",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 199544,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-91b3-7da3-9dad-b40a361ee9fe",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 202219,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-9c27-7b42-a3e7-3b58e7d0a8bc",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 204705,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-a5db-7d60-acbe-610f409888b9",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 209747,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-b98d-7111-96c5-618802a6a007",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 214895,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-cdaa-7d62-b4fb-365d84b26b8c",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/subscription-metadata",
+    "initiatorType": "fetch",
+    "startTime": 216709,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-d4c0-70e1-8ce0-060adccf0f54",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams",
+    "initiatorType": "fetch",
+    "startTime": 216710,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-d4c2-73f3-9d7f-9fd244ca8893",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/series?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12&windows=5h%2C7d%2C7d_sonnet%2C7d_opus%2C7d_fable%2Coverage&source=merged&since_unix_secs=1788917010&until_unix_secs=1789521810&bucket_secs=1800",
+    "initiatorType": "fetch",
+    "startTime": 216711,
+    "duration": 9,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-d4c3-74b0-aa01-6716a707a9a2",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/upstreams/39358d12-bfdc-41aa-8381-49bd2c96be12/warmup",
+    "initiatorType": "fetch",
+    "startTime": 216711,
+    "duration": 12,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-d4c5-73f3-942e-d7424f29be9f",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/status",
+    "initiatorType": "fetch",
+    "startTime": 217370,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-d758-7483-957e-a7333cef81b9",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 219985,
+    "duration": 10,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-e18c-73a0-82f7-8b33149137ca",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 225294,
+    "duration": 13,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7cf-f64c-7951-b129-c680e74f2796",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56352/admin/v1/subscription-quotas/latest?upstream_ids=39358d12-bfdc-41aa-8381-49bd2c96be12%2Cc804fce8-2b1a-4d3a-a149-878886bee631&windows=5h%2C7d%2Coverage%2C7d_sonnet%2C7d_opus%2C7d_fable&source=merged",
+    "initiatorType": "fetch",
+    "startTime": 230415,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a7d0-0a4a-79c0-901d-315a7e197bd5",
+        "duration": 0
+      }
+    ]
+  }
+]

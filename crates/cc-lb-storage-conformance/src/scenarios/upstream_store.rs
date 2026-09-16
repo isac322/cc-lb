@@ -141,7 +141,7 @@ scenario!(update_revision_ok, |store| async move {
             record.id,
             record.revision,
             UpstreamUpdate {
-                base_url: Some(url("https://example.com/v1")?),
+                base_url: Some(Some(url("https://example.com/v1")?)),
                 api_key_ciphertext: Some(vec![1, 2, 3]),
                 ..UpstreamUpdate::default()
             },
@@ -297,7 +297,7 @@ scenario!(
                 record.id,
                 record.revision,
                 UpstreamUpdate {
-                    base_url: Some(url("https://status-stable.example.com")?),
+                    base_url: Some(Some(url("https://status-stable.example.com")?)),
                     ..UpstreamUpdate::default()
                 },
             )
@@ -337,7 +337,7 @@ scenario!(
                 record.id,
                 record.revision,
                 UpstreamUpdate {
-                    base_url: Some(url("https://secret-token-stable.example.com")?),
+                    base_url: Some(Some(url("https://secret-token-stable.example.com")?)),
                     ..UpstreamUpdate::default()
                 },
             )
@@ -345,6 +345,93 @@ scenario!(
         ensure!(
             spec_updated.revision == record.revision + 1,
             "spec update should still use original revision after secret/token updates"
+        );
+        ensure!(
+            spec_updated.api_key_ciphertext == Some(vec![9, 8, 7]),
+            "spec update should preserve the api key secret"
+        );
+        // Omitting base_url preserves the override.
+        let preserved = store
+            .update_spec(record.id, spec_updated.revision, UpstreamUpdate::default())
+            .await?;
+        ensure!(
+            preserved.base_url == Some(url("https://secret-token-stable.example.com")?),
+            "omitted base_url should preserve the existing override"
+        );
+        ensure!(
+            preserved.revision == spec_updated.revision + 1,
+            "preserve update should bump spec revision"
+        );
+        ensure!(
+            preserved.api_key_ciphertext == Some(vec![9, 8, 7]),
+            "preserve update should keep the api key secret"
+        );
+        // An explicit null clears the override.
+        let cleared = store
+            .update_spec(
+                record.id,
+                preserved.revision,
+                UpstreamUpdate {
+                    base_url: Some(None),
+                    ..UpstreamUpdate::default()
+                },
+            )
+            .await?;
+        ensure!(
+            cleared.base_url.is_none(),
+            "explicit null should clear base_url"
+        );
+        ensure!(
+            cleared.revision == preserved.revision + 1,
+            "clear update should bump spec revision"
+        );
+        ensure!(
+            cleared.api_key_ciphertext == Some(vec![9, 8, 7]),
+            "clear update should keep the api key secret"
+        );
+        // A new URL replaces the cleared override.
+        let replaced = store
+            .update_spec(
+                record.id,
+                cleared.revision,
+                UpstreamUpdate {
+                    base_url: Some(Some(url("https://secret-token-reset.example.com")?)),
+                    ..UpstreamUpdate::default()
+                },
+            )
+            .await?;
+        ensure!(
+            replaced.base_url == Some(url("https://secret-token-reset.example.com")?),
+            "set update should install the new base_url"
+        );
+        ensure!(
+            replaced.revision == cleared.revision + 1,
+            "set update should bump spec revision"
+        );
+        // A stale clear must fail and leave the current URL untouched.
+        let error = store
+            .update_spec(
+                record.id,
+                cleared.revision,
+                UpstreamUpdate {
+                    base_url: Some(None),
+                    ..UpstreamUpdate::default()
+                },
+            )
+            .await
+            .expect_err("stale clear should fail");
+        ensure!(
+            matches!(error, StorageError::Conflict { .. }),
+            "expected conflict, got {error:?}"
+        );
+        let current = store.get_by_id(record.id).await?.expect("record");
+        ensure!(
+            current.base_url == Some(url("https://secret-token-reset.example.com")?),
+            "stale clear should preserve the current base_url"
+        );
+        ensure!(
+            current.revision == replaced.revision,
+            "stale clear should not bump spec revision"
         );
         Ok(())
     }
@@ -376,7 +463,7 @@ scenario!(
                 record.id,
                 deleted.revision,
                 UpstreamUpdate {
-                    base_url: Some(url("https://example.com/after-delete")?),
+                    base_url: Some(Some(url("https://example.com/after-delete")?)),
                     ..UpstreamUpdate::default()
                 },
             )
@@ -633,8 +720,48 @@ fn url(value: &str) -> Result<Url> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "postgres")]
     use super::*;
+
+    use cc_lb_engine::SystemClock;
+    use cc_lb_storage_api::{BackendKind, MetaStore};
+    use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
+
+    struct SqliteBackend;
+    struct SqliteFixture {
+        _dir: tempfile::TempDir,
+        database_url: String,
+    }
+
+    #[async_trait]
+    impl UpstreamStoreBackend for SqliteBackend {
+        type Store = SqliteStorage;
+        type Fixture = SqliteFixture;
+
+        async fn create_fixture(&self) -> Result<Self::Fixture> {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("upstream_store.sqlite");
+            let database_url = format!("sqlite://{}", path.display());
+            Ok(SqliteFixture {
+                _dir: dir,
+                database_url,
+            })
+        }
+
+        async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Store> {
+            let storage = open_sqlite(&fixture.database_url, Arc::new(SystemClock)).await?;
+            MetaStore::initialize(&storage, BackendKind::Sqlite).await?;
+            Ok(storage)
+        }
+
+        async fn teardown(&self, _fixture: Self::Fixture) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_store_sqlite() -> Result<()> {
+        run_all(Arc::new(SqliteBackend)).await
+    }
 
     #[cfg(feature = "postgres")]
     mod postgres_backend {

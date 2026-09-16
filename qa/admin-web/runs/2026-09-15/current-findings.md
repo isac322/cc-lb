@@ -41,9 +41,27 @@
 
 ## 6. Known bug (미수정)
 
-- `clearBaseURL`, `SettingsApply`: 알려진 product bug. 승인되지 않은 runtime 수정 없음.
+- `SettingsApply`: 미지원 동작에 대한 수정 방향은 아직 승인되지 않았다.
+- `clearBaseURL`: 2026-09-16 명시적 null 제거 계약을 별도로 승인받아 로컬 후보에서 수정·검증했다. 과거 관측은 보존하며 운영에 반영됐다고 주장하지 않는다.
 
 ## 7. Source catalog 상태
 
 - Live source 파일은 approved uncommitted candidate 기준으로 재생성되었다(standard parser 통과). Baseline archive hash는 `input_freeze.archive_member`에 보존.
 - 현재 분모: 433 rows / 170 storage operations / 422 production matrix rows / ui_actions 205 / api_endpoints 115.
+
+## 8. 머지 보류 후 로컬 추가 검증
+
+- PR #793 머지 보류는 유지한다. 이 절의 추가 증거는 현재 PR head의 CI 범위와 구분하며 아직 새 커밋·푸시·배포에 반영하지 않았다.
+- `post-hold-reassessment/native-source-mapping.json`: 원래 native 관측 245행을 오프라인 대조했다. 244행은 정식 ID, 1행은 이름 편집 후 Escape 취소의 명시적 변형 별칭이다. 기존 실행 상태와 운영 행렬은 바꾸지 않았다.
+- `post-hold-reassessment/independent-page-oracle-check.json`: 실제 로컬 PostgreSQL Plugins 탐색에서 사전에 고정한 경로·제목을 DOM에서 별도 추출한 상태와 비교하고 원본 PNG를 확인했다. 종료된 관측 창과 실제 registry SQL/acquire 연결을 검증했다. 과거 열린 window·유실 자료·동일 HTML 해시를 양쪽에 복사한 oracle은 그대로 한계로 남긴다.
+- **2026-09-16 로컬 사용량 전이:** `post-hold-usage-status/verification.json`에 저장소·API·UI의 `$1.25 · 2.0K tok` → `$2.00 · 3.0K tok` 변화를 기록했다. 원시 request ingestion이 아닌 직접 시드한 rollup의 표시 경로 검증이다.
+- **2026-09-16 로컬 상태 전이:** OAuth credential 없는 upstream의 실제 적용 오류와 danger 도트·오류 title을 확인했다. disable API 뒤 저장소·status API·UI에서 disabled·neutral·title 없음으로 전이했다. 연결 불가능한 URL을 오류 발생 원인으로 간주했던 가설은 기각했다. native tooltip 픽셀은 미검증이다.
+- RT 수집 스크립트의 `/admin/v1` 전용 필터가 `/admin/usage`를 누락시킨 문제를 확인했다. 새 same-origin `/admin/` 관측에서 실제 UI 사용량 요청 3건을 각각 SQL 2개·acquire 2개에 연결했다. 과거 누락 구간을 새 측정값으로 채우지 않았다.
+- 이 결과는 두 로컬 변형의 기능·상태 전이 검증이며, 운영 전수 실행·순수 DB 시간·순수 pool wait·전체 QA PASS를 의미하지 않는다.
+
+## 9. 승인된 Base URL 초기화 수정
+
+- update에서 필드 생략은 유지, URL은 설정, 명시적 null은 override 제거로 구현했다. create/response nullable 표현과 API 키·OAuth 토큰 처리는 유지했다.
+- 기존 HTTP 회귀는 수정 전 `String(previous_url) != Null`로 실패했다. 수정 후 SQLite·PostgreSQL conformance, signer 및 실제 Lifecycle→RecordingDispatcher 기본 목적지 검증을 포함한 33개 검사가 모두 통과했다.
+- 실제 SettingsCard에서 입력 비우기→저장→독립 GET→새로고침을 수행했다. DB의 base_url NULL, 화면의 `—`, 기본 endpoint 메타데이터를 확인했다. 사용자에게 보이는 입력 동작과 저장된 상태가 이제 일치한다.
+- 격리 fixture는 원래 loopback override로 복원하고 서버·브라우저를 종료했다. revision과 audit 기록은 정상적으로 증가했으므로 byte-identical 복원으로 표기하지 않는다. 외부 Anthropic 요청과 운영 변경은 없었다.

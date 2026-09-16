@@ -419,6 +419,16 @@
         "candidate_uncommitted": true
       },
       {
+        "classification": "changed_since_deploy",
+        "type": "api_contract",
+        "name": "Explicit-null Base URL override clearing",
+        "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+        "candidate_uncommitted": true,
+        "production_applicability": false,
+        "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-162",
+        "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
+      },
+      {
         "classification": "removed_since_deploy",
         "type": "route",
         "path": "crates/cc-lb-admin/web/src/routes/credentials.tsx",
@@ -2516,6 +2526,16 @@
       "candidate_uncommitted": true
     },
     {
+      "classification": "changed_since_deploy",
+      "type": "api_contract",
+      "name": "Explicit-null Base URL override clearing",
+      "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-162",
+      "description": "Approved on 2026-09-16: PUT/PATCH omission preserves base_url, explicit null clears it, URL sets it. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
+    },
+    {
       "classification": "removed_since_deploy",
       "type": "route",
       "path": "crates/cc-lb-admin/web/src/routes/credentials.tsx",
@@ -2823,8 +2843,8 @@
       "component": "SettingsCard",
       "file": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx",
       "line": 179,
-      "description": "The 'env:{api_key_env}' API Key display branch is source-only/unreachable: UpstreamResponse (crates/cc-lb-admin/src/v1/upstreams.rs:163) omits api_key_env, so the server never returns the env var name (write-only contract: name resolved to ciphertext, never stored/exposed). Separately, a blank Base URL sends base_url: null, but the backend Option<Url> update treats null as no-change and retains the existing URL — clearing an override is not supported. This is a static source observation recorded separately from the runtime-progress overlay's settings_null_default_get_reload triage; it is not asserted as runtime-verified.",
-      "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:163-171 (UpstreamResponse fields), :1748 (base_url update gated on is_some)"
+      "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL null-clear contract is now implemented and is recorded in SettingsCard variants; historical null-as-no-change evidence remains a baseline limitation.",
+      "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:171-179 (UpstreamResponse fields), :1748 (base_url update gated on is_some)"
     }
   ]
 }

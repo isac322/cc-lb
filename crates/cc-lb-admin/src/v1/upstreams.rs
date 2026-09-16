@@ -139,8 +139,8 @@ struct UpstreamCreateBody {
 struct UpstreamUpdateBody {
     #[serde(default)]
     name: Option<String>,
-    #[serde(default)]
-    base_url: Option<Url>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    base_url: Option<Option<Url>>,
     #[serde(default)]
     api_key_env: Option<String>,
     #[serde(default)]
@@ -151,6 +151,14 @@ struct UpstreamUpdateBody {
     warmup_enabled: Option<bool>,
     #[serde(default)]
     warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+}
+
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]

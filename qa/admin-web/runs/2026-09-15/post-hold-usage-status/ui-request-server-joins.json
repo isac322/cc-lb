@@ -1,0 +1,531 @@
+{
+  "rows": [
+    {
+      "phase": "baseline",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cc-9cbe-7c31-9fd9-4e110c72513e",
+      "startTime": 5761,
+      "duration": 4,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.726916,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000466666
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        4.625e-05
+      ]
+    },
+    {
+      "phase": "baseline",
+      "route": "/admin/v1/upstreams",
+      "rid": "req_admin_01a0a7cc-9cbd-7a00-b87f-b3b7786e3400",
+      "startTime": 5761,
+      "duration": 5,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.450167,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000207167
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        9.0125e-05
+      ]
+    },
+    {
+      "phase": "baseline",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cc-d848-76e2-afde-f0ffcd52bcf5",
+      "startTime": 21002,
+      "duration": 7,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.826084,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.00024075
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.000103167
+      ]
+    },
+    {
+      "phase": "baseline",
+      "route": "/admin/v1/upstreams",
+      "rid": "req_admin_01a0a7cd-129b-7df3-a526-0453f37b5bb1",
+      "startTime": 35932,
+      "duration": 8,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.435584,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000207875
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.000130416
+      ]
+    },
+    {
+      "phase": "baseline",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cd-12f3-7e12-9ba5-940f3f0f172c",
+      "startTime": 36017,
+      "duration": 11,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.5745,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000111083
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.000121917
+      ]
+    },
+    {
+      "phase": "baseline",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cd-4de1-7450-87dd-2626100181a0",
+      "startTime": 51108,
+      "duration": 5,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.3209160000000002,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        9.2875e-05
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        5.0625e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cc-9cbe-7c31-9fd9-4e110c72513e",
+      "startTime": 5761,
+      "duration": 4,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.726916,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000466666
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        4.625e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/upstreams",
+      "rid": "req_admin_01a0a7cc-9cbd-7a00-b87f-b3b7786e3400",
+      "startTime": 5761,
+      "duration": 5,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.450167,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000207167
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        9.0125e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cc-d848-76e2-afde-f0ffcd52bcf5",
+      "startTime": 21002,
+      "duration": 7,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.826084,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.00024075
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.000103167
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/upstreams",
+      "rid": "req_admin_01a0a7cd-129b-7df3-a526-0453f37b5bb1",
+      "startTime": 35932,
+      "duration": 8,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.435584,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000207875
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.000130416
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cd-12f3-7e12-9ba5-940f3f0f172c",
+      "startTime": 36017,
+      "duration": 11,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.5745,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000111083
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.000121917
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cd-4de1-7450-87dd-2626100181a0",
+      "startTime": 51108,
+      "duration": 5,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.3209160000000002,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        9.2875e-05
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        5.0625e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/upstreams",
+      "rid": "req_admin_01a0a7cd-8837-7901-b8b4-6860f6a0b0c6",
+      "startTime": 66044,
+      "duration": 4,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.439875,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        8.1458e-05
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        6.0667e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cd-8904-7982-abba-f8a04837a583",
+      "startTime": 66248,
+      "duration": 4,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.281334,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        5.3459e-05
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        6.0834e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cd-c429-7732-a2a0-807e8093a1ba",
+      "startTime": 81386,
+      "duration": 6,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.295334,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000118
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        7.1041e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/upstreams",
+      "rid": "req_admin_01a0a7cd-fded-75e1-84eb-84a1c87558c5",
+      "startTime": 96174,
+      "duration": 9,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.9802909999999998,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000197916
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.000120208
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cd-ff49-7661-ad9d-c3dfa5eba83a",
+      "startTime": 96523,
+      "duration": 9,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 3.109667,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000148709
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.00055725
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7ce-3a7c-7013-929c-07c10ac84e33",
+      "startTime": 111678,
+      "duration": 10,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 4.549833,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000510958
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.0003345
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/upstreams",
+      "rid": "req_admin_01a0a7ce-73b4-78d0-8b24-a2036cb506aa",
+      "startTime": 126328,
+      "duration": 6,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.675458,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        9.5334e-05
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        6.5834e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7ce-75b3-7b82-b620-92737ad658d7",
+      "startTime": 126837,
+      "duration": 8,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.52275,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000121666
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.000112208
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7ce-b0e8-73d1-a785-f5d3f164d4fb",
+      "startTime": 141995,
+      "duration": 7,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.2301669999999998,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.00010075
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        5.0084e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/upstreams",
+      "rid": "req_admin_01a0a7ce-e96c-73c0-89af-5a9a2d26ba16",
+      "startTime": 156465,
+      "duration": 4,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.500541,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000114583
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        7.2416e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7ce-eb95-7d31-85e8-7148cf70a098",
+      "startTime": 157015,
+      "duration": 7,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.87775,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000119917
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        7.1292e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cf-2691-77a3-8145-8b05d71deee8",
+      "startTime": 172116,
+      "duration": 12,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 5.410125,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000290208
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.000187334
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/upstreams",
+      "rid": "req_admin_01a0a7cf-5eff-7aa3-b205-e0eb9c26e53a",
+      "startTime": 186562,
+      "duration": 12,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 4.85075,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000669084
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        0.000358
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cf-613e-7092-b414-7d14e94e4c92",
+      "startTime": 187138,
+      "duration": 8,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.0855,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.00014775
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        8.1792e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cf-9c27-7b42-a3e7-3b58e7d0a8bc",
+      "startTime": 202219,
+      "duration": 8,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.719375,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000158208
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        8.6958e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/upstreams",
+      "rid": "req_admin_01a0a7cf-d4c2-73f3-9d7f-9fd244ca8893",
+      "startTime": 216710,
+      "duration": 6,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 1.73975,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        8.6083e-05
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        4.5208e-05
+      ]
+    },
+    {
+      "phase": "transition",
+      "route": "/admin/v1/status",
+      "rid": "req_admin_01a0a7cf-d758-7483-957e-a7333cef81b9",
+      "startTime": 217370,
+      "duration": 10,
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 2.04425,
+      "sql_events": 1,
+      "driver_query_elapsed_secs": [
+        0.000132792
+      ],
+      "pool_acquire_events": 1,
+      "pool_acquire_total_secs": [
+        7.6666e-05
+      ]
+    }
+  ],
+  "unique_server_requests": 23,
+  "raw_entries_retained": 29,
+  "counting_note": "Snapshots overlap; unique RID count is separate from observed entry count.",
+  "query_attribution_limit": "The retained Resource Timing selection contains status/upstream-list requests but no /admin/usage entries. Usage browser-to-SQL attribution is not established by this artifact; no cache or zero-DB inference is made.",
+  "full_runtime_qa_complete": false
+}

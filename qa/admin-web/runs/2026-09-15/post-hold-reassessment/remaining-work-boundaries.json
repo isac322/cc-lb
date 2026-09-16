@@ -1,0 +1,56 @@
+{
+  "schema": "cc-lb-remaining-work-boundaries/v1",
+  "basis": "Current goal TODOs and existing source/evidence; macro TODOs and micro unresolved-task rows are not the same set.",
+  "merge": {
+    "pull_request": 793,
+    "head": "7c8b6168957bff5050d6482ae7d3c137ee7efe31",
+    "decision": "hold",
+    "new_merge_approval_requested": false
+  },
+  "needs_external_prerequisite": [
+    {
+      "scope": "Successful non-production OAuth and fixed provider metadata endpoints",
+      "missing": "User-designated non-production credential location and permission for provider calls; no production credential copying."
+    },
+    {
+      "scope": "New instrumentation in production",
+      "missing": "Separate deployment/log-configuration authorization; isolated implementation approval does not authorize activation."
+    },
+    {
+      "scope": "Settings Apply or Base URL clearing behavior changes",
+      "missing": "Explicit approval of the particular runtime behavior and affected symbols before changing them."
+    }
+  ],
+  "not_external_approval_blockers": [
+    {
+      "scope": "Native observation source ID alias",
+      "state": "Offline reconciliation completed: 245 rows mapped, one verified Escape-cancel suffix alias, no execution status changed."
+    },
+    {
+      "scope": "PostgreSQL raw action window end=null and ui_oracle=null",
+      "state": "New isolated closed-window verification is in progress. Prior open-window raw artifact is retained, not edited."
+    },
+    {
+      "scope": "Uncaptured loading skeletons",
+      "state": "Potentially testable with an existing isolated response gate; a transient observation miss is not proof of missing provider credentials."
+    },
+    {
+      "scope": "Pure DB execution and pure queue wait",
+      "state": "Current SQLx driver lifetime/acquire-total fields do not separate these intervals. Keep them unknown; do not substitute related timings."
+    }
+  ],
+  "suggestions_requiring_source_confirmation": [
+    {
+      "micro_id": "UPSTREAM-004",
+      "scenario": "Usage cost and token display with isolated stored request data",
+      "qualification": "Scout proposal only; exact seed and lifecycle writer/query path must be verified before execution."
+    },
+    {
+      "micro_id": "UPSTREAM-006",
+      "scenario": "Status error indicator and tooltip",
+      "qualification": "Scout loopback-failure proposal alone does not prove that upstream URL failure drives the actual status field; trace the real status source first."
+    }
+  ],
+  "operations_this_reassessment": "No production requests, no PR changes, no merge. Only offline evidence processing and the already-authorized local PostgreSQL fixture.",
+  "full_runtime_qa_complete": false
+}

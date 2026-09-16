@@ -1,0 +1,13 @@
+{
+  "expected": {
+    "settings_display": "—",
+    "persisted_after_reload": true
+  },
+  "observed": {
+    "settings_display": "—",
+    "header_line": "Base URL: https://api.anthropic.com"
+  },
+  "validations": {
+    "settings_displays_dash_after_reload": true
+  }
+}

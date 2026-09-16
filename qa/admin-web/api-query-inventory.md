@@ -785,7 +785,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `list_upstreams`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** Populates Upstreams command group in palette
 - **Runtime result:** `PENDING`
@@ -1079,7 +1079,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `list_upstreams`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** Translates upstream IDs into display names across Recent Requests table and Pool Quota Popovers
 - **Runtime result:** `PENDING`
@@ -2318,7 +2318,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `list_upstreams`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** Populates Upstream dropdown filter options and upstream name column in logs table
 - **Runtime result:** `PENDING`
@@ -4596,7 +4596,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `list_upstreams`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** Renders audit table with 9 columns (Timestamp, Principal, Actor, Route, Upstream, Action, Kind, Status, Detail)
 - **Runtime result:** `PENDING`
@@ -4924,7 +4924,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `list_upstreams`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Sets X-Total-Count header; in-memory keyset pagination on ?after (UUID) UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** Renders upstream sidebar items with name, kind badge, status dot, and quota/usage summaries
 - **Runtime result:** `PENDING`
@@ -5279,7 +5279,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`, `content-type`
 - **Handler:** `update_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::update:SqliteStorage::update`, `postgres:UpstreamStore::update:PostgresStorage::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_update`; replaces upstream base_url, warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision.
 - **Expected UI:** Updates upstream name across sidebar and header; shows success toast 'Name updated'; on error (e.g. 409 stale revision or name conflict) the name reverts and editing exits
 - **Runtime result:** `PENDING`
@@ -5313,7 +5313,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`, `content-type`
 - **Handler:** `update_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::update:SqliteStorage::update`, `postgres:UpstreamStore::update:PostgresStorage::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision.
 - **Expected UI:** Toggles upstream status; shows success toast; triggers dynamic rebind in proxy engine
 - **Runtime result:** `PENDING`
@@ -5347,7 +5347,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`, `content-type`
 - **Handler:** `update_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::update:SqliteStorage::update`, `postgres:UpstreamStore::update:PostgresStorage::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_update`; replaces upstream base_url, warmup config, or credentials QA restore: repeat the update with captured prior fields and the returned revision.
 - **Expected UI:** Exits edit mode and shows success toast; displays updated Base URL ('—' when base_url is null) and API Key source. In practice the API Key row always reads 'literal value (stored)': the 'env:{name}' branch is source-only/unreachable because UpstreamResponse omits api_key_env.
 - **Runtime result:** `PENDING`
@@ -5415,7 +5415,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`, `content-type`
 - **Handler:** `update_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::update:SqliteStorage::update`, `postgres:UpstreamStore::update:PostgresStorage::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision.
 - **Expected UI:** Updates warmup_enabled; displays success toast; schedules or deschedules background warmup loop
 - **Runtime result:** `PENDING`
@@ -5449,7 +5449,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`, `content-type`
 - **Handler:** `update_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::update:SqliteStorage::update`, `postgres:UpstreamStore::update:PostgresStorage::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_update`; partially updates upstream fields (e.g. toggles warmup_enabled) QA restore: repeat the update with captured prior fields and the returned revision.
 - **Expected UI:** Associates plugin wasm registry ID with upstream warmup; shows success toast
 - **Runtime result:** `PENDING`
@@ -5483,7 +5483,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`
 - **Handler:** `delete_upstream_warmup_dialect_plugin`
 - **Storage operations:** `sqlite:UpstreamStore::clear_warmup_dialect_plugin:SqliteStorage::clear_warmup_dialect_plugin`, `postgres:UpstreamStore::clear_warmup_dialect_plugin:PostgresStorage::clear_warmup_dialect_plugin`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] and ['warmup', 'summary'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_update` (warmup_dialect_plugin); disassociates dialect plugin so default HTTP warmup is used QA restore: PUT the prior warmup_dialect_plugin with the returned revision.
 - **Expected UI:** Removes warmup dialect plugin; dropdown resets to None; shows success toast
 - **Runtime result:** `PENDING`
@@ -5715,7 +5715,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `content-type`
 - **Handler:** `create_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::create:SqliteStorage::create`, `postgres:UpstreamStore::create:PostgresStorage::create`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** DynamicView rebinding; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** DynamicView rebinding; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_create`; creates new upstream target for proxy load balancing; encrypts API key via AEAD QA restore: DELETE the created upstream using its returned ETag.
 - **Expected UI:** Creates upstream in DB, closes modal, shows success toast, and refreshes upstream list
 - **Runtime result:** `PENDING`
@@ -7471,7 +7471,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `get_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1587), so the field is present and null when the upstream has no custom base URL.
+- **Cache / no-query path:** Paginates the complete upstream collection with UpstreamStore::list (page size 1000) and filters by stringified ID in memory; no get_by_id SQL is executed. Returns ETag from the matched revision. UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1587), so the field is present and null when the upstream has no custom base URL.
 - **Side effects:** None
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
@@ -7711,7 +7711,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`
 - **Handler:** `enable_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::set_enabled:SqliteStorage::set_enabled`, `postgres:UpstreamStore::set_enabled:PostgresStorage::set_enabled`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_enable`; activates upstream so load balancer can route requests to it QA restore: POST the disable endpoint with the returned revision.
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
@@ -7731,7 +7731,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: `authorization`, `if-match`
 - **Handler:** `disable_upstream`
 - **Storage operations:** `sqlite:UpstreamStore::set_enabled:SqliteStorage::set_enabled`, `postgres:UpstreamStore::set_enabled:PostgresStorage::set_enabled`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:167,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
+- **Cache / no-query path:** Rebinds DynamicViewHolder; invalidates queryKey ['upstreams'] UpstreamResponse now serializes base_url: Option<Url> (crates/cc-lb-admin/src/v1/upstreams.rs:175,1586), so the field is present and null when the upstream has no custom base URL; credential secret and api_key_env provenance are not exposed in the response.
 - **Side effects:** Audit event `upstream_disable`; disables upstream from proxy candidate pool QA restore: POST the enable endpoint with the returned revision.
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
@@ -7907,7 +7907,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **GAP-BACKEND-ONLY-CONFIG-DIFF** (backend_only): GET /admin/config/diff exists but has no Admin Web caller.
 - **GAP-NONEXISTENT-CONFIG-DOWNLOAD** (nonexistent): The UI downloads a database export from GET /admin/v1/export; it has no standalone config download action.
 - **GAP-NONEXISTENT-WASM-DOWNLOAD** (nonexistent): Neither frontend nor backend exposes uploaded WASM bytecode download.
-- **GAP-UPSTREAMS-4** (documented): The 'env:{api_key_env}' API Key display branch is source-only/unreachable: UpstreamResponse (crates/cc-lb-admin/src/v1/upstreams.rs:163) omits api_key_env, so the server never returns the env var name (write-only contract: name resolved to ciphertext, never stored/exposed). Separately, a blank Base URL sends base_url: null, but the backend Option<Url> update treats null as no-change and retains the existing URL — clearing an override is not supported. This is a static source observation recorded separately from the runtime-progress overlay's settings_null_default_get_reload triage; it is not asserted as runtime-verified.
+- **GAP-UPSTREAMS-4** (documented): The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL null-clear contract is now implemented and is recorded in SettingsCard variants; historical null-as-no-change evidence remains a baseline limitation.
 
 ## 6. Legacy ID Mapping
 
