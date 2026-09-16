@@ -89,6 +89,7 @@ const loadedDraft = {
   last_validated_revision: 7,
   last_validation_error: null,
   saved_at_unix_secs: 1_722_340_800,
+  apply_supported: true,
 };
 
 function loadingResult() {
@@ -146,6 +147,36 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+});
+
+test('Apply requires confirmed server support for a validated draft', () => {
+  setSettingsLoaded();
+  const apply = mutationResult();
+  queryMocks.useApplyConfig.mockReturnValue(apply);
+  queryMocks.useConfigDraft.mockReturnValue(
+    loadedResult({ ...loadedDraft, apply_supported: false }),
+  );
+  const { rerender } = render(<SettingsComponent />);
+  const button = screen.getByRole('button', { name: 'Apply' });
+  expect(button.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(button);
+  expect(apply.mutate).not.toHaveBeenCalled();
+
+  queryMocks.useConfigDraft.mockReturnValue(
+    loadedResult({ ...loadedDraft, apply_supported: true }),
+  );
+  rerender(<SettingsComponent />);
+  expect(button.hasAttribute('disabled')).toBe(false);
+  fireEvent.click(button);
+  expect(apply.mutate).toHaveBeenCalledTimes(1);
+
+  queryMocks.useConfigDraft.mockReturnValue(
+    loadedResult({ ...loadedDraft, apply_supported: undefined }),
+  );
+  rerender(<SettingsComponent />);
+  expect(button.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(button);
+  expect(apply.mutate).toHaveBeenCalledTimes(1);
 });
 
 test('settings cold load skeletonizes fixed metadata, checklist, and history slots', () => {
@@ -317,6 +348,7 @@ test('settings editor initializes from current config when no saved draft exists
       last_validated_revision: null,
       last_validation_error: null,
       saved_at_unix_secs: null,
+      apply_supported: true,
     }),
   );
   const saveMutate = vi.fn();
@@ -478,6 +510,7 @@ test('pristine editor follows an expired server draft at the new revision', () =
       last_validated_revision: null,
       last_validation_error: null,
       saved_at_unix_secs: null,
+      apply_supported: true,
     }),
   );
   view.rerender(<SettingsComponent />);

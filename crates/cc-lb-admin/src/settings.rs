@@ -85,6 +85,7 @@ pub struct ConfigDraftResponse {
     pub last_validated_revision: Option<u64>,
     pub last_validation_error: Option<String>,
     pub saved_at_unix_secs: Option<u64>,
+    pub apply_supported: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +200,7 @@ fn strip_schema_defaults(value: &mut Value) {
 pub async fn get_draft(
     storage: &dyn Storage,
     clock: &dyn cc_lb_clock::Clock,
+    apply_supported: bool,
 ) -> Result<ConfigDraftResponse, SettingsError> {
     let state = storage.get_config_draft().await?;
     if invalid_draft_expired(&state, cc_lb_clock::unix_secs(clock.now())) {
@@ -206,9 +208,9 @@ pub async fn get_draft(
         let _ = storage
             .put_config_draft(ConfigDraftState::default(), revision)
             .await?;
-        return draft_response(storage.get_config_draft().await?);
+        return draft_response(storage.get_config_draft().await?, apply_supported);
     }
-    draft_response(state)
+    draft_response(state, apply_supported)
 }
 
 pub async fn put_draft(
@@ -435,7 +437,10 @@ pub async fn diff_history(
     })
 }
 
-fn draft_response(state: ConfigDraftState) -> Result<ConfigDraftResponse, SettingsError> {
+fn draft_response(
+    state: ConfigDraftState,
+    apply_supported: bool,
+) -> Result<ConfigDraftResponse, SettingsError> {
     let mut draft = state.draft;
     if let Some(draft) = &mut draft {
         mask_secret_like_values(draft);
@@ -446,6 +451,7 @@ fn draft_response(state: ConfigDraftState) -> Result<ConfigDraftResponse, Settin
         last_validated_revision: state.last_validated_revision,
         last_validation_error: state.last_validation_error,
         saved_at_unix_secs: state.saved_at_unix_secs,
+        apply_supported,
     })
 }
 

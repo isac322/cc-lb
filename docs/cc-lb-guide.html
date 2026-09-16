@@ -826,6 +826,7 @@ curl -s http://127.0.0.1:8080/v1/messages \
       <tr><td><code>PUT/PATCH /admin/v1/upstreams/{id}</code></td><td><code>base_url</code> 생략은 기존 override 유지, URL 문자열은 설정, 명시적 <code>null</code>은 override 제거 후 기본 endpoint 사용. <code>If-Match</code> revision 보호는 유지하며 API 키·OAuth 토큰의 null 처리와는 별개</td></tr>
       <tr><td><code>POST /admin/v1/upstreams/{id}/disable</code></td><td>upstream 비활성화</td></tr>
       <tr><td><code>GET /admin/v1/config/current</code></td><td>live config 스냅샷</td></tr>
+      <tr><td><code>GET /admin/v1/config/draft</code></td><td>초안·검증 revision과 제공자의 <code>apply_supported</code> 반환. Settings는 지원이 확인된 경우에만 기존 검증 조건에 따라 Apply를 허용하며, 미지원 서버에서도 Save·Validate는 유지</td></tr>
       <tr><td><code>POST /admin/v1/config/reload</code></td><td>설정 파일 재로드</td></tr>
       <tr><td><code>GET /</code></td><td>embedded admin UI (HTML)</td></tr>
     </table>

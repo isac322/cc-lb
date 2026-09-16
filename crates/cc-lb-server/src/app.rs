@@ -2106,6 +2106,10 @@ impl CurrentConfig for InMemoryCurrentConfig {
         self.current.load_full()
     }
 
+    fn supports_apply(&self) -> bool {
+        true
+    }
+
     fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
         self.dynamic_view_rebinder.clone()
     }

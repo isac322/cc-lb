@@ -765,6 +765,7 @@ export interface ConfigDraftResponse {
   last_validated_revision: number | null;
   last_validation_error: string | null;
   saved_at_unix_secs: number | null;
+  apply_supported: boolean;
 }
 
 interface HistorySummary {

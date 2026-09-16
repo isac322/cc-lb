@@ -56,11 +56,57 @@ async fn config_apply_current_admin_config_smoke() {
 }
 
 #[tokio::test]
+async fn unsupported_provider_reports_apply_unavailable_after_validation() {
+    let (_dir, storage) = temp_storage().await;
+    let mut state = test_state();
+    state.storage = Some(storage);
+    let app = router(state);
+
+    let (status, _, initial, _) =
+        authed_json(app.clone(), "GET", "/admin/config/draft", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(initial["apply_supported"], false);
+
+    let (status, _, saved, _) = authed_json(
+        app.clone(),
+        "PUT",
+        "/admin/v1/config/draft",
+        Some(put_body(config_value(180), 0)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let revision = saved["revision"].as_u64().expect("saved revision");
+    let (status, _, validation, _) = authed_json(
+        app.clone(),
+        "POST",
+        "/admin/v1/config/draft/validate",
+        Some(serde_json::json!({ "expected_revision": revision })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(validation["valid"], true);
+
+    let (status, _, draft, _) =
+        authed_json(app.clone(), "GET", "/admin/v1/config/draft", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(draft["last_validated_revision"], revision);
+    assert_eq!(draft["apply_supported"], false);
+
+    let (status, _, _, _) = authed_json(app, "POST", "/admin/v1/config/apply", None).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
 async fn config_apply_audit_records_static_token_actor_identity() {
     let (dir, storage) = temp_storage().await;
     let config_path = dir.path().join("cc-lb.toml");
     let reloader = Arc::new(TestReloader::new(config_path.clone(), minimal_config()));
     let app = app(apply_state(storage, config_path, reloader).await);
+
+    let (status, _, capabilities, _) =
+        authed_json(app.clone(), "GET", "/admin/v1/config/draft", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(capabilities["apply_supported"], true);
 
     let (status, _, draft, _) = authed_json(
         app.clone(),

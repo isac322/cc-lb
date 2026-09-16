@@ -548,7 +548,19 @@ function ConfigDraftSection() {
       : null;
   const canValidate =
     editor?.hasSavedDraft === true && !editorDirty && !serverRevisionChanged;
+  const applySupported = draft.data?.apply_supported;
+  const applySupportMessage =
+    applySupported === true
+      ? null
+      : applySupported === false
+        ? 'This server does not support applying saved drafts. Changes to startup-fixed settings must be made through the deployment configuration and restart workflow.'
+        : draft.isPending
+          ? 'Checking server support for applying drafts...'
+          : draft.isError
+            ? 'Apply support could not be confirmed because the configuration draft could not be loaded.'
+            : 'Apply is unavailable until server support is confirmed.';
   const canApply =
+    applySupported === true &&
     editor != null &&
     canValidate &&
     lastValidatedRevision != null &&
@@ -692,7 +704,11 @@ function ConfigDraftSection() {
                 iconLeft={<PlayCircle className="w-3 h-3" />}
                 loading={applyPending}
                 disabled={!canApply || configPending}
-                aria-describedby="config-pipeline-status"
+                aria-describedby={
+                  applySupportMessage
+                    ? 'config-pipeline-status config-apply-support'
+                    : 'config-pipeline-status'
+                }
                 onClick={handleApply}
               >
                 {applyPending ? 'Applying...' : 'Apply'}
@@ -812,6 +828,11 @@ function ConfigDraftSection() {
               editorGuidance
             )}
           </div>
+          {applySupportMessage ? (
+            <p id="config-apply-support" className="text-xs text-text-muted">
+              {applySupportMessage}
+            </p>
+          ) : null}
           <div data-testid="config-checklist-slot" className="min-h-[20px]">
             {schema.isLoading ? (
               <Skeleton className="h-4 w-48" />

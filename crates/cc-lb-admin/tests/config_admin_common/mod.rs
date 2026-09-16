@@ -340,6 +340,10 @@ impl CurrentConfig for TestReloader {
         Arc::new(self.current())
     }
 
+    fn supports_apply(&self) -> bool {
+        true
+    }
+
     fn put_draft_config(&self, config: Config) -> Result<(), ConfigDraftError> {
         *self.draft.write().unwrap() = Some(config);
         Ok(())

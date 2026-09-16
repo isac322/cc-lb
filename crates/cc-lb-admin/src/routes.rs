@@ -552,7 +552,7 @@ async fn get_config_draft(
         Ok(storage) => storage,
         Err(error) => return settings_error_response(error, false),
     };
-    match crate::settings::get_draft(storage, &*state.clock).await {
+    match crate::settings::get_draft(storage, &*state.clock, state.config.supports_apply()).await {
         Ok(response) => {
             let action = "config_draft_read";
             if let Err(error) = record_admin_audit(
