@@ -1,4 +1,3 @@
-import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import {
   ChevronDown,
   ChevronUp,
@@ -6,7 +5,6 @@ import {
   Download,
   FileCheck2,
   FileWarning,
-  PanelLeft,
   Plus,
   RotateCcw,
   Save,
@@ -740,7 +738,6 @@ export function ConfigEditorSection({
       : 'network',
   );
   const [openAdvanced, setOpenAdvanced] = useState<Record<string, boolean>>({});
-  const [categoryNavOpen, setCategoryNavOpen] = useState(false);
   const [searchText, setSearchText] = useState(query ?? '');
   const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [selfLockoutRequired, setSelfLockoutRequired] = useState(false);
@@ -1016,7 +1013,6 @@ export function ConfigEditorSection({
   };
   const selectCategory = (id: string) => {
     setSelectedCategory(id);
-    setCategoryNavOpen(false);
     // Category switches keep the active search text but drop the field
     // deep-link — the field belongs to the previous category.
     onNavigate({ category: id, q: searchText.trim() || undefined });
@@ -1458,100 +1454,36 @@ export function ConfigEditorSection({
                     ) : null}
                   </div>
 
-                  <BaseDialog.Root
-                    open={categoryNavOpen}
-                    onOpenChange={setCategoryNavOpen}
+                  <nav
+                    aria-label="Configuration categories"
+                    data-testid="config-category-nav"
+                    className="xl:sticky xl:top-12 xl:z-10 xl:bg-bg-sub xl:backdrop-blur-sm"
                   >
-                    <BaseDialog.Trigger
-                      data-testid="config-category-trigger"
-                      className="sticky top-14 z-20 flex min-h-[44px] w-full min-w-0 items-center gap-3 rounded-sm border border-subtle bg-bg-sub px-3 py-2 text-left shadow-sm hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent xl:hidden"
-                    >
-                      <PanelLeft
-                        className="h-4 w-4 shrink-0 text-text-faint"
-                        aria-hidden="true"
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-medium text-text">
-                          {activeCategory.label}
-                        </span>
-                        <span className="block truncate text-[10px] text-text-faint">
-                          {activeCategory.description}
-                        </span>
-                      </span>
-                      <CategoryStatusBadges counts={activeCategory.counts} />
-                      <ChevronDown
-                        className="h-4 w-4 shrink-0 text-text-faint"
-                        aria-hidden="true"
-                      />
-                    </BaseDialog.Trigger>
-                    <BaseDialog.Portal>
-                      <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop transition-opacity duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0 xl:hidden" />
-                      <BaseDialog.Popup
-                        data-testid="config-category-drawer"
-                        className="fixed top-0 bottom-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col border-r border-subtle bg-bg-sub outline-none transition-transform duration-200 ease-out data-[ending-style]:-translate-x-full data-[starting-style]:-translate-x-full xl:hidden"
-                      >
-                        <div className="flex items-center justify-between gap-3 border-b border-subtle px-3 py-2.5">
-                          <BaseDialog.Title className="text-sm font-medium text-text">
-                            Configuration categories
-                          </BaseDialog.Title>
-                          <BaseDialog.Close
-                            aria-label="Close categories"
-                            className="inline-flex h-11 w-11 items-center justify-center rounded-sm text-text-muted hover:bg-overlay-5 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-                          >
-                            <X className="h-4 w-4" />
-                          </BaseDialog.Close>
-                        </div>
-                        <BaseDialog.Description className="sr-only">
-                          Choose which group of settings to edit.
-                        </BaseDialog.Description>
-                        <nav
-                          aria-label="Configuration categories"
-                          className="min-h-0 flex-1 overflow-y-auto p-2"
-                        >
-                          <CategoryNavList
-                            categories={categories}
-                            activeCategoryId={activeCategory.id}
-                            onSelect={selectCategory}
-                          />
-                        </nav>
-                      </BaseDialog.Popup>
-                    </BaseDialog.Portal>
-                  </BaseDialog.Root>
+                    <CategoryNavList
+                      categories={categories}
+                      activeCategoryId={activeCategory.id}
+                      onSelect={selectCategory}
+                    />
+                  </nav>
 
-                  <div className="xl:flex xl:items-start xl:gap-4">
-                    <nav
-                      aria-label="Configuration categories"
-                      data-testid="config-category-nav"
-                      className="sticky top-16 hidden w-64 shrink-0 self-start rounded-sm border border-subtle bg-bg-sub p-2 xl:block"
-                    >
-                      <CategoryNavList
-                        categories={categories}
-                        activeCategoryId={activeCategory.id}
-                        onSelect={selectCategory}
-                      />
-                    </nav>
-
-                    <div className="mt-3 min-w-0 flex-1 xl:mt-0">
-                      <CategoryPanel
-                        category={activeCategory}
-                        model={model}
-                        rootSchema={editorData.schema as ConfigSchema}
-                        value={state.value}
-                        defaultConfig={editorData.default_config}
-                        effectiveConfig={editorData.effective_config}
-                        overrides={editorData.overrides ?? []}
-                        issues={issues}
-                        openAdvanced={openAdvanced}
-                        onToggleAdvanced={(sectionId, open) =>
-                          setOpenAdvanced((current) => ({
-                            ...current,
-                            [sectionId]: open,
-                          }))
-                        }
-                        onChange={updateValue}
-                      />
-                    </div>
-                  </div>
+                  <CategoryPanel
+                    category={activeCategory}
+                    model={model}
+                    rootSchema={editorData.schema as ConfigSchema}
+                    value={state.value}
+                    defaultConfig={editorData.default_config}
+                    effectiveConfig={editorData.effective_config}
+                    overrides={editorData.overrides ?? []}
+                    issues={issues}
+                    openAdvanced={openAdvanced}
+                    onToggleAdvanced={(sectionId, open) =>
+                      setOpenAdvanced((current) => ({
+                        ...current,
+                        [sectionId]: open,
+                      }))
+                    }
+                    onChange={updateValue}
+                  />
                 </div>
               </ConfigSourcesContext.Provider>
             </StorageUrlReplacementContext.Provider>
@@ -1943,9 +1875,9 @@ function ValidationSummary({
 }
 
 /**
- * Status badges shared by the desktop side-nav, the mobile category trigger,
- * and the drawer list. Counts come from the visible-leaf tally computed for
- * each category.
+ * Full status badges for the active category panel header. Counts come from
+ * the visible-leaf tally computed for each category; the nav grid uses the
+ * compact CategoryStatusDots instead.
  */
 function CategoryStatusBadges({ counts }: { counts: ConfigEditorCounts }) {
   if (!counts.modified && !counts.overrides && !counts.errors) return null;
@@ -1965,9 +1897,47 @@ function CategoryStatusBadges({ counts }: { counts: ConfigEditorCounts }) {
 }
 
 /**
- * Shared category list rendered inside the desktop side-nav and the mobile
- * drawer. This is navigation, not a tab widget: items carry aria-current and
- * no tablist/tab roles.
+ * Compact per-category status for the inline nav grid: one dot per non-empty
+ * tally (modified / overridden / invalid) plus a screen-reader summary. The
+ * row keeps a fixed height so badge changes never re-layout the grid.
+ */
+function CategoryStatusDots({ counts }: { counts: ConfigEditorCounts }) {
+  const summary = [
+    counts.modified ? `${counts.modified} modified` : null,
+    counts.overrides ? `${counts.overrides} overridden` : null,
+    counts.errors ? `${counts.errors} invalid` : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
+  return (
+    <span className="flex h-2 items-center gap-1">
+      {counts.modified ? (
+        <span
+          aria-hidden="true"
+          className="h-1.5 w-1.5 rounded-full bg-accent"
+        />
+      ) : null}
+      {counts.overrides ? (
+        <span
+          aria-hidden="true"
+          className="h-1.5 w-1.5 rounded-full bg-[color:var(--color-text-faint)]"
+        />
+      ) : null}
+      {counts.errors ? (
+        <span
+          aria-hidden="true"
+          className="h-1.5 w-1.5 rounded-full bg-[color:var(--color-danger)]"
+        />
+      ) : null}
+      {summary ? <span className="sr-only">{summary}</span> : null}
+    </span>
+  );
+}
+
+/**
+ * Flat category grid rendered once inside the inline nav — no drawer, sheet,
+ * or per-viewport copies. This is navigation, not a tab widget: items carry
+ * aria-current and no tablist/tab roles.
  */
 function CategoryNavList({
   categories,
@@ -1979,35 +1949,39 @@ function CategoryNavList({
   onSelect: (id: string) => void;
 }) {
   return (
-    <ul className="space-y-1">
+    <ul className="grid grid-cols-2 gap-x-1 gap-y-1 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
       {categories.map((entry) => {
         const active = entry.id === activeCategoryId;
+        const statusSummary = [
+          entry.counts.modified ? `${entry.counts.modified} modified` : null,
+          entry.counts.overrides
+            ? `${entry.counts.overrides} overridden`
+            : null,
+          entry.counts.errors ? `${entry.counts.errors} invalid` : null,
+        ]
+          .filter(Boolean)
+          .join(', ');
         return (
-          <li key={entry.id}>
+          <li key={entry.id} className="min-w-0">
             <button
               type="button"
               data-config-category={entry.id}
               aria-current={active ? 'page' : undefined}
+              title={statusSummary || undefined}
               className={cx(
-                'flex min-h-[44px] w-full min-w-0 items-start rounded-sm px-3 py-2 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
+                'flex h-full min-h-[44px] w-full min-w-0 items-start border-b-2 px-2 py-2 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
                 active
-                  ? 'border-l-2 border-accent bg-[color:var(--color-accent-dim)] font-medium text-text'
-                  : 'border-l-2 border-transparent text-text-muted hover:bg-overlay-5',
+                  ? 'border-accent bg-[color:var(--color-accent-dim)] font-medium text-text'
+                  : 'border-transparent text-text-muted hover:bg-overlay-5 hover:text-text',
               )}
               onClick={() => onSelect(entry.id)}
             >
               <span className="min-w-0 flex-1">
-                <span className="block truncate">{entry.label}</span>
-                <span className="block truncate text-[10px] text-text-faint">
-                  {entry.description}
+                <span className="line-clamp-2">{entry.label}</span>
+                <span className="sr-only">{entry.description}</span>
+                <span className="mt-1 block">
+                  <CategoryStatusDots counts={entry.counts} />
                 </span>
-                {entry.counts.modified ||
-                entry.counts.overrides ||
-                entry.counts.errors ? (
-                  <span className="mt-1 block">
-                    <CategoryStatusBadges counts={entry.counts} />
-                  </span>
-                ) : null}
               </span>
             </button>
           </li>
@@ -2025,32 +1999,26 @@ function ConfigEditorSkeleton() {
       aria-hidden="true"
     >
       <Skeleton className="h-9 w-full" />
-      <Skeleton className="h-11 w-full xl:hidden" />
-      <div className="xl:flex xl:gap-4">
-        <div className="hidden w-64 shrink-0 space-y-1 rounded-sm border border-subtle bg-panel/20 p-2 xl:block">
-          {CONFIG_EDITOR_CATEGORIES.map((category) => (
-            <Skeleton key={category.id} className="h-11 w-full" />
-          ))}
+      <div className="grid grid-cols-2 gap-x-1 gap-y-1 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
+        {CONFIG_EDITOR_CATEGORIES.map((category) => (
+          <Skeleton key={category.id} className="h-14 w-full" />
+        ))}
+      </div>
+      <div className="space-y-6">
+        <div className="space-y-1.5">
+          <Skeleton className="h-5 w-40" />
+          <Skeleton className="h-3 w-64" />
         </div>
-        <div className="mt-3 flex-1 space-y-3 xl:mt-0">
-          <div className="space-y-1.5">
-            <Skeleton className="h-5 w-40" />
-            <Skeleton className="h-3 w-64" />
-          </div>
-          {[0, 1, 2].map((index) => (
-            <div
-              key={index}
-              className="rounded-sm border border-subtle bg-panel/30 px-3 py-3"
-            >
-              <Skeleton className={cx('h-4', index % 2 ? 'w-36' : 'w-44')} />
-              <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
-                <Skeleton className="h-16 w-full" />
-                <Skeleton className="h-16 w-full" />
-                <Skeleton className="hidden h-16 w-full 2xl:block" />
-              </div>
+        {[0, 1, 2].map((index) => (
+          <div key={index} className="border-t border-subtle pt-5">
+            <Skeleton className={cx('h-4', index % 2 ? 'w-36' : 'w-44')} />
+            <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="hidden h-16 w-full 2xl:block" />
             </div>
-          ))}
-        </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -2090,7 +2058,7 @@ function CategoryPanel({
   const headingId = `config-category-heading-${category.id}`;
   return (
     <section
-      className="space-y-4"
+      className="space-y-6"
       data-config-category-panel={category.id}
       aria-labelledby={headingId}
     >
@@ -2121,7 +2089,7 @@ function CategoryPanel({
         <section
           data-testid="config-section-card"
           data-config-section={CONFIG_EDITOR_UNASSIGNED_SECTION_ID}
-          className="rounded-sm border border-amber-500/35 bg-amber-500/5 p-3 sm:p-4"
+          className="border-t border-amber-500/40 pt-5"
         >
           <h4 className="text-sm font-medium text-amber-100">
             {CONFIG_EDITOR_UNASSIGNED_LABEL}
@@ -2208,7 +2176,7 @@ function SectionCard({
     <section
       data-testid="config-section-card"
       data-config-section={section.id}
-      className="rounded-sm border border-subtle bg-panel/20 p-3 sm:p-4"
+      className="border-t border-subtle pt-5"
     >
       <h4 className="text-sm font-medium text-text">{section.label}</h4>
       {section.description ? (
