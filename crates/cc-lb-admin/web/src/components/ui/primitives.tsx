@@ -851,21 +851,35 @@ export function ToggleSwitch({
   label,
   description,
   className,
+  variant = 'card',
   ...rest
 }: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & {
   label: ReactNode;
   description?: ReactNode;
+  /**
+   * 'card' renders the bordered panel used for standalone toggles.
+   * 'compact' drops the border/background/padding so the switch can sit
+   * inline inside a denser header row.
+   */
+  variant?: 'card' | 'compact';
 }) {
+  const compact = variant === 'compact';
   return (
     <label
       className={cx(
-        'flex min-w-0 cursor-pointer items-start justify-between gap-4 rounded-sm border border-subtle bg-panel-strong/35 px-3 py-2.5',
+        compact
+          ? 'flex min-h-[44px] min-w-0 cursor-pointer items-center gap-2'
+          : 'flex min-w-0 cursor-pointer items-start justify-between gap-4 rounded-sm border border-subtle bg-panel-strong/35 px-3 py-2.5',
         rest.disabled ? 'cursor-not-allowed opacity-60' : undefined,
         className,
       )}
     >
       <span className="min-w-0">
-        <span className="block text-sm text-text">{label}</span>
+        <span
+          className={cx('block text-text', compact ? 'text-xs' : 'text-sm')}
+        >
+          {label}
+        </span>
         {description ? (
           <span className="mt-0.5 block text-xs leading-relaxed text-text-faint">
             {description}

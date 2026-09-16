@@ -1,7 +1,6 @@
 import {
   ChevronDown,
   ChevronUp,
-  CircleHelp,
   Copy,
   Download,
   FileCheck2,
@@ -37,8 +36,10 @@ import {
   CONFIG_EDITOR_UNASSIGNED_LABEL,
   CONFIG_EDITOR_UNASSIGNED_SECTION_ID,
   type ConfigEditorLeaf,
+  type ConfigEditorLeafKind,
   type ConfigEditorModel,
   type ConfigEditorSection as ConfigEditorSectionModel,
+  type ConfigFieldGuidance,
   type ConfigSchema,
   classifyConfigLeaf,
   configPathToString,
@@ -49,6 +50,8 @@ import {
   isNullableConfigSchema,
   normalizeConfigDraft,
   parseConfigPath,
+  recurringJobMetadata,
+  resolveConfigFieldGuidance,
   resolveConfigSchema,
   searchConfigLeaves,
   setConfigValue,
@@ -1452,7 +1455,7 @@ export function ConfigEditorSection({
                   <select
                     aria-label="Configuration category"
                     data-testid="config-category-select"
-                    className={cx(INPUT_CLASS, 'min-h-[44px] md:hidden')}
+                    className={cx(INPUT_CLASS, 'min-h-[44px] xl:hidden')}
                     value={activeCategory.id}
                     onChange={(event) => selectCategory(event.target.value)}
                   >
@@ -1474,11 +1477,11 @@ export function ConfigEditorSection({
                     })}
                   </select>
 
-                  <div className="md:flex md:items-start md:gap-4">
+                  <div className="xl:flex xl:items-start xl:gap-4">
                     <nav
                       aria-label="Configuration categories"
                       data-testid="config-rail"
-                      className="hidden w-52 shrink-0 md:block"
+                      className="hidden w-52 shrink-0 xl:block"
                     >
                       <ul className="space-y-1">
                         {categories.map((entry) => {
@@ -1526,7 +1529,7 @@ export function ConfigEditorSection({
                       </ul>
                     </nav>
 
-                    <div className="mt-3 min-w-0 flex-1 md:mt-0">
+                    <div className="mt-3 min-w-0 flex-1 xl:mt-0">
                       <CategoryPanel
                         category={activeCategory}
                         model={model}
@@ -1945,22 +1948,23 @@ function ConfigEditorSkeleton() {
       aria-hidden="true"
     >
       <Skeleton className="h-9 w-full" />
-      <div className="md:flex md:gap-4">
-        <div className="hidden w-52 shrink-0 space-y-1 md:block">
+      <div className="xl:flex xl:gap-4">
+        <div className="hidden w-52 shrink-0 space-y-1 xl:block">
           {CONFIG_EDITOR_CATEGORIES.map((category) => (
             <Skeleton key={category.id} className="h-11 w-full" />
           ))}
         </div>
-        <div className="mt-3 flex-1 space-y-3 md:mt-0">
+        <div className="mt-3 flex-1 space-y-3 xl:mt-0">
           {[0, 1, 2].map((index) => (
             <div
               key={index}
               className="rounded-sm border border-subtle bg-panel/30 px-3 py-3"
             >
               <Skeleton className={cx('h-4', index % 2 ? 'w-36' : 'w-44')} />
-              <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
                 <Skeleton className="h-16 w-full" />
                 <Skeleton className="h-16 w-full" />
+                <Skeleton className="hidden h-16 w-full 2xl:block" />
               </div>
             </div>
           ))}
@@ -2040,7 +2044,7 @@ function CategoryPanel({
               settings section.
             </p>
           ) : null}
-          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
             {unassignedLeaves.map((leaf) => (
               <ScalarField
                 key={leaf.pathString}
@@ -2117,7 +2121,7 @@ function SectionCard({
         <p className="mt-0.5 text-xs text-text-faint">{section.description}</p>
       ) : null}
       {primaryRoots.length ? (
-        <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
           {primaryRoots.map(renderRoot)}
         </div>
       ) : null}
@@ -2132,7 +2136,7 @@ function SectionCard({
             <ChevronDown className="h-3.5 w-3.5" />
             Advanced ({advancedRoots.length})
           </summary>
-          <div className="grid grid-cols-1 gap-3 border-t border-subtle/70 px-3 py-3 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-3 border-t border-subtle/70 px-3 py-3 md:grid-cols-2 2xl:grid-cols-3">
             {advancedRoots.map(renderRoot)}
           </div>
         </details>
@@ -2252,7 +2256,7 @@ function ConfigNode({
     return (
       <div
         className={cx(
-          'space-y-3',
+          'col-span-full space-y-3',
           depth === 0 ? '' : 'rounded-sm border border-subtle/70 bg-bg/25 p-3',
         )}
         data-config-path={path}
@@ -2287,7 +2291,7 @@ function ConfigNode({
             </Button>
           ) : null}
         </div>
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
           {Object.entries(properties).map(([key, childSchema]) =>
             childKeys && !childKeys.has(key) ? null : (
               <ConfigNode
@@ -2340,7 +2344,11 @@ function OptionalObjectToggle({
   onEnable: () => void;
 }) {
   return (
-    <div data-config-path={path} tabIndex={-1} className="rounded-sm">
+    <div
+      data-config-path={path}
+      tabIndex={-1}
+      className="col-span-full rounded-sm"
+    >
       <ToggleSwitch
         checked={enabled}
         label={titleForKey(path.split('.').at(-1) ?? path)}
@@ -2356,6 +2364,38 @@ function OptionalObjectToggle({
   );
 }
 
+/**
+ * Compact trade-off block for a scalar field: what moving a numeric value in
+ * either direction does, or what toggling a boolean does, plus any
+ * operational recommendation. Rendered as a dl so the labels stay visible.
+ */
+function GuidanceTradeoffs({ guidance }: { guidance: ConfigFieldGuidance }) {
+  const rows: { label: string; text: string }[] = [];
+  if (guidance.lower) rows.push({ label: 'Lower', text: guidance.lower });
+  if (guidance.higher) rows.push({ label: 'Higher', text: guidance.higher });
+  if (guidance.enabled) rows.push({ label: 'On', text: guidance.enabled });
+  if (guidance.disabled) rows.push({ label: 'Off', text: guidance.disabled });
+  if (guidance.recommendation) {
+    rows.push({ label: 'Recommendation', text: guidance.recommendation });
+  }
+  if (!rows.length) return null;
+  return (
+    <dl className="mt-2 space-y-1">
+      {rows.map((row) => (
+        <div
+          key={row.label}
+          className="flex gap-1.5 text-[10px] leading-relaxed"
+        >
+          <dt className="shrink-0 font-medium uppercase tracking-wide text-text-muted">
+            {row.label}
+          </dt>
+          <dd className="min-w-0 text-text-faint">{row.text}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 function ScalarField({
   rootSchema,
   schema,
@@ -2367,6 +2407,7 @@ function ScalarField({
   override,
   issues,
   onChange,
+  embedded = false,
 }: {
   rootSchema: ConfigSchema;
   schema: ConfigSchema;
@@ -2378,6 +2419,8 @@ function ScalarField({
   override?: ConfigOverrideInfo;
   issues: ConfigValidationIssue[];
   onChange: (value: unknown) => void;
+  /** Render without the outer card chrome for use inside a composite row. */
+  embedded?: boolean;
 }) {
   const { fileConfig } = useContext(ConfigSourcesContext);
   const storageUrlReplacement = useContext(StorageUrlReplacementContext);
@@ -2390,7 +2433,6 @@ function ScalarField({
   const error = issues.find((issue) => issue.severity === 'error');
   const isSensitive =
     Boolean(override?.sensitive) || path === OPAQUE_STORAGE_URL_PATH;
-  const classification = classifyConfigLeaf(path);
   const label = titleForKey(path.split('.').at(-1) ?? path);
   const resolvedInput = resolveConfigSchema(rootSchema, schema);
   const schemaVariants = getConfigSchemaVariants(rootSchema, resolvedInput);
@@ -2440,6 +2482,21 @@ function ScalarField({
     : {};
   const isStringArray =
     schemaTypes.includes('array') && arrayItems.type === 'string';
+  const leafKind: ConfigEditorLeafKind = boolean
+    ? 'boolean'
+    : enumValues.length
+      ? 'enum'
+      : schemaTypes.includes('integer')
+        ? 'integer'
+        : numeric
+          ? 'number'
+          : isStringArray
+            ? 'array'
+            : schemaTypes.includes('string')
+              ? 'string'
+              : 'unknown';
+  const classification = classifyConfigLeaf(path, leafKind);
+  const guidance = resolveConfigFieldGuidance(path, description, leafKind);
   const inputId = `config-${path.replaceAll('.', '-')}`;
   const humanized =
     classification.presentation === 'duration' ||
@@ -2471,90 +2528,93 @@ function ScalarField({
   return (
     <div
       data-config-path={path}
+      data-field-embedded={embedded ? '' : undefined}
       tabIndex={-1}
       className={cx(
-        'min-w-0 rounded-sm border bg-panel-strong/25 p-3 outline-none focus:ring-2 focus:ring-accent/60',
-        error
-          ? 'border-red-500/45'
-          : classification.dangerous
-            ? 'border-amber-500/50'
-            : 'border-subtle/70',
+        'min-w-0 outline-none focus:ring-2 focus:ring-accent/60',
+        isStringArray ? 'col-span-full' : undefined,
+        embedded
+          ? 'rounded-sm'
+          : cx(
+              'rounded-sm border bg-panel-strong/25 p-3',
+              error
+                ? 'border-red-500/45'
+                : classification.dangerous
+                  ? 'border-amber-500/50'
+                  : 'border-subtle/70',
+            ),
       )}
     >
-      <div className="mb-2 flex min-w-0 items-start justify-between gap-2">
+      <div className="mb-2 flex min-w-0 flex-wrap items-start justify-between gap-2">
         <label
           htmlFor={inputId}
           className="min-w-0 text-xs font-medium text-text"
         >
           {label}
-          {description ? (
-            <span
-              className="ml-1 inline-flex align-middle text-text-faint"
-              title={description}
-            >
-              <CircleHelp className="h-3.5 w-3.5" />
-            </span>
-          ) : null}
           {modified ? (
             <Badge tone="accent" className="ml-1.5 align-middle">
               Modified
             </Badge>
           ) : null}
         </label>
-        <div className="flex shrink-0 gap-1">
-          {path === OPAQUE_STORAGE_URL_PATH ? (
-            <>
-              {replacingOpaque || storageUrlReplacement.value !== null ? (
+        {embedded ? null : (
+          <div className="flex shrink-0 flex-wrap justify-end gap-1">
+            {path === OPAQUE_STORAGE_URL_PATH ? (
+              <>
+                {replacingOpaque || storageUrlReplacement.value !== null ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    iconLeft={<X className="h-3 w-3" />}
+                    onClick={() => {
+                      storageUrlReplacement.onChange(null);
+                      setReplacingOpaque(false);
+                    }}
+                  >
+                    Cancel replacement
+                  </Button>
+                ) : null}
+                {configured ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    iconLeft={<X className="h-3 w-3" />}
+                    onClick={() => {
+                      storageUrlReplacement.onChange(null);
+                      setReplacingOpaque(false);
+                      onChange(unsetConfigValue(value, path));
+                    }}
+                  >
+                    Unset
+                  </Button>
+                ) : null}
+              </>
+            ) : (
+              <>
                 <Button
                   size="sm"
                   variant="ghost"
-                  iconLeft={<X className="h-3 w-3" />}
-                  onClick={() => {
-                    storageUrlReplacement.onChange(null);
-                    setReplacingOpaque(false);
-                  }}
+                  iconLeft={<RotateCcw className="h-3 w-3" />}
+                  onClick={reset}
                 >
-                  Cancel replacement
+                  Reset
                 </Button>
-              ) : null}
-              {configured ? (
                 <Button
                   size="sm"
                   variant="ghost"
                   iconLeft={<X className="h-3 w-3" />}
-                  onClick={() => {
-                    storageUrlReplacement.onChange(null);
-                    setReplacingOpaque(false);
-                    onChange(unsetConfigValue(value, path));
-                  }}
+                  onClick={() => onChange(unsetConfigValue(value, path))}
                 >
                   Unset
                 </Button>
-              ) : null}
-            </>
-          ) : (
-            <>
-              <Button
-                size="sm"
-                variant="ghost"
-                iconLeft={<RotateCcw className="h-3 w-3" />}
-                onClick={reset}
-              >
-                Reset
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                iconLeft={<X className="h-3 w-3" />}
-                onClick={() => onChange(unsetConfigValue(value, path))}
-              >
-                Unset
-              </Button>
-            </>
-          )}
-        </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
-
+      <p className="mb-2 text-xs leading-relaxed text-text-faint">
+        {guidance.description}
+      </p>
       {nullable && !configured && !(numeric && clearedWhileEditing) ? (
         <Button
           size="sm"
@@ -2608,6 +2668,7 @@ function ScalarField({
       ) : boolean ? (
         <ToggleSwitch
           id={inputId}
+          data-field-control
           checked={configured ? current === true : effectiveValue === true}
           label={
             (configured ? current : effectiveValue) === true
@@ -2734,6 +2795,8 @@ function ScalarField({
           ) : null}
         </div>
       )}
+
+      <GuidanceTradeoffs guidance={guidance} />
 
       <div className="mt-2 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-[10px] text-text-faint">
         <span>Draft: {displayValue(current, isSensitive)}</span>
@@ -2915,7 +2978,7 @@ function TaggedUnionEditor({
   const showDiscriminator = !childKeys || childKeys.has(selected.property);
   return (
     <div
-      className="space-y-3 rounded-sm border border-subtle/70 bg-bg/25 p-3"
+      className="col-span-full space-y-3 rounded-sm border border-subtle/70 bg-bg/25 p-3"
       data-config-path={path}
       tabIndex={-1}
     >
@@ -2966,7 +3029,7 @@ function TaggedUnionEditor({
           </label>
         ) : null}
       </div>
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
         {Object.entries(properties).map(([key, child]) =>
           key === selected.property ||
           (childKeys && !childKeys.has(key)) ? null : (
@@ -3030,7 +3093,7 @@ function AdminProvidersEditor({
 
   return (
     <div
-      className="space-y-3 rounded-sm border border-subtle/70 bg-bg/25 p-3"
+      className="col-span-full space-y-3 rounded-sm border border-subtle/70 bg-bg/25 p-3"
       data-config-path={path}
       tabIndex={-1}
     >
@@ -3178,7 +3241,7 @@ function AdminProvidersEditor({
                     </Button>
                   </div>
                 </div>
-                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
                   {Object.entries(properties).map(([key, child]) =>
                     key === (variant?.property ?? 'kind') ? null : (
                       <ConfigNode
@@ -3253,82 +3316,216 @@ function RecurringJobsEditor({
     : {};
   return (
     <div
-      className="space-y-3 rounded-sm border border-subtle/70 bg-bg/25 p-3"
+      className="col-span-full space-y-2"
       data-config-path={path}
       tabIndex={-1}
     >
-      <div>
-        <h3 className="text-xs font-medium text-text">Recurring Jobs</h3>
-        <p className="mt-0.5 text-xs text-text-faint">
-          Known scheduler jobs are listed with any unknown file keys preserved
-          for validation.
-        </p>
-      </div>
-      <div className="space-y-3">
-        {keys.map((key) => (
-          <div
+      {keys.length ? (
+        keys.map((key) => (
+          <RecurringJobRow
             key={key}
-            className="rounded-sm border border-subtle bg-panel-strong/30 p-3"
+            rootSchema={rootSchema}
+            jobSchema={jobSchema}
+            jobKey={key}
+            path={path}
+            value={value}
+            defaultConfig={defaultConfig}
+            effectiveConfig={effectiveConfig}
+            overrides={overrides}
+            issues={issues}
+            hasDefault={Object.hasOwn(defaults, key)}
+            defaultJobValue={defaults[key]}
+            onChange={onChange}
+          />
+        ))
+      ) : (
+        <p className="text-xs text-text-faint">
+          No recurring jobs are configured.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One flattened row per recurring job: the section card already supplies the
+ * "Recurring jobs" title, so each job is a single subtle row whose header
+ * carries the friendly label, key, status, the compact enabled switch, and
+ * reset/unset actions. Interval/jitter render as embedded scalar fields.
+ */
+function RecurringJobRow({
+  rootSchema,
+  jobSchema,
+  jobKey,
+  path,
+  value,
+  defaultConfig,
+  effectiveConfig,
+  overrides,
+  issues,
+  hasDefault,
+  defaultJobValue,
+  onChange,
+}: {
+  rootSchema: ConfigSchema;
+  jobSchema: ConfigSchema;
+  jobKey: string;
+  path: string;
+  value: JsonObject;
+  defaultConfig: JsonObject;
+  effectiveConfig: JsonObject;
+  overrides: ConfigOverrideInfo[];
+  issues: ConfigValidationIssue[];
+  hasDefault: boolean;
+  defaultJobValue: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const { fileConfig } = useContext(ConfigSourcesContext);
+  const jobPath = `${path}.${jobKey}`;
+  const enabledPath = `${jobPath}.enabled`;
+  const meta = recurringJobMetadata(jobKey);
+  const jobGuidance = resolveConfigFieldGuidance(
+    jobPath,
+    typeof jobSchema.description === 'string'
+      ? jobSchema.description
+      : undefined,
+  );
+  const enabledGuidance = resolveConfigFieldGuidance(
+    enabledPath,
+    undefined,
+    'boolean',
+  );
+  const jobCurrent = getConfigValue(value, jobPath);
+  const jobFile = getConfigValue(fileConfig, jobPath);
+  const jobModified =
+    jobCurrent !== undefined && !isSameJson(jobCurrent, jobFile);
+  const dangerous = classifyConfigLeaf(jobPath).dangerous;
+  const enabledCurrent = getConfigValue(value, enabledPath);
+  const enabledEffective = getConfigValue(effectiveConfig, enabledPath);
+  const enabledConfigured =
+    enabledCurrent !== undefined && enabledCurrent !== null;
+  const enabledChecked = enabledConfigured
+    ? enabledCurrent === true
+    : enabledEffective === true;
+  const enabledOverride = overrideForPath(overrides, enabledPath);
+  const jobIssues = issues.filter(
+    (issue) => issue.path === jobPath || issue.path === enabledPath,
+  );
+  const fieldProperties = Object.entries(
+    objectProperties(rootSchema, jobSchema),
+  ).filter(([field]) => field !== 'enabled');
+  return (
+    <div
+      className="rounded-sm border border-subtle bg-panel-strong/30 p-3"
+      data-config-path={jobPath}
+      tabIndex={-1}
+    >
+      <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-xs font-medium text-text">
+            {meta?.label ?? titleForKey(jobKey)}
+          </span>
+          <span className="break-all font-mono text-[10px] text-text-faint">
+            {jobKey}
+          </span>
+          {!hasDefault ? <Badge tone="warn">Unknown key</Badge> : null}
+          {dangerous ? <Badge tone="warn">Danger</Badge> : null}
+          {jobModified ? <Badge tone="accent">Modified</Badge> : null}
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-1">
+          <ToggleSwitch
+            variant="compact"
+            data-config-path={enabledPath}
+            data-field-control
+            checked={enabledChecked}
+            aria-invalid={jobIssues.some(
+              (issue) =>
+                issue.path === enabledPath && issue.severity === 'error',
+            )}
+            label="Enabled"
+            onChange={(event) =>
+              onChange(setConfigValue(value, enabledPath, event.target.checked))
+            }
+          />
+          <Button
+            size="sm"
+            variant="ghost"
+            iconLeft={<RotateCcw className="h-3 w-3" />}
+            disabled={!hasDefault}
+            onClick={() =>
+              onChange(
+                setConfigValue(value, jobPath, cloneJson(defaultJobValue)),
+              )
+            }
           >
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <span className="break-all font-mono text-xs text-text">
-                {key}
-              </span>
-              <div className="flex items-center gap-1">
-                {!Object.hasOwn(defaults, key) ? (
-                  <Badge tone="warn">Unknown key</Badge>
-                ) : null}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  iconLeft={<RotateCcw className="h-3 w-3" />}
-                  disabled={!Object.hasOwn(defaults, key)}
-                  onClick={() =>
-                    onChange(
-                      setConfigValue(
-                        value,
-                        `${path}.${key}`,
-                        cloneJson(defaults[key]),
-                      ),
-                    )
-                  }
-                >
-                  Reset
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  iconLeft={<X className="h-3 w-3" />}
-                  onClick={() =>
-                    onChange(unsetConfigValue(value, `${path}.${key}`))
-                  }
-                >
-                  Unset
-                </Button>
-              </div>
-            </div>
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-              {Object.entries(objectProperties(rootSchema, jobSchema)).map(
-                ([field, child]) => (
-                  <ConfigNode
-                    key={field}
-                    rootSchema={rootSchema}
-                    schema={child}
-                    path={`${path}.${key}.${field}`}
-                    value={value}
-                    defaultConfig={defaultConfig}
-                    effectiveConfig={effectiveConfig}
-                    overrides={overrides}
-                    issues={issues}
-                    onChange={onChange}
-                    depth={2}
-                  />
-                ),
-              )}
-            </div>
-          </div>
-        ))}
+            Reset
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            iconLeft={<X className="h-3 w-3" />}
+            onClick={() => onChange(unsetConfigValue(value, jobPath))}
+          >
+            Unset
+          </Button>
+        </div>
       </div>
+      <p className="mt-1.5 text-xs leading-relaxed text-text-faint">
+        {jobGuidance.description}
+      </p>
+      <GuidanceTradeoffs guidance={jobGuidance} />
+      <GuidanceTradeoffs guidance={enabledGuidance} />
+      <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-faint">
+        <span className="font-medium text-text-muted">Enabled</span>
+        <span>Draft: {displayValue(enabledCurrent)}</span>
+        <span>Effective: {displayValue(enabledEffective)}</span>
+        {!enabledConfigured ? <Badge tone="neutral">Inherited</Badge> : null}
+      </div>
+      {enabledOverride ? (
+        <div className="mt-1 text-[10px] leading-relaxed text-amber-200/90">
+          Enabled state comes from {sourceLabel(enabledOverride)} ·{' '}
+          {enabledOverride.name}. The file value applies only if the override is
+          removed.
+        </div>
+      ) : null}
+      {jobIssues.map((issue, index) => (
+        <div
+          key={`${issue.code}-${index}`}
+          className={cx(
+            'mt-1.5 text-[11px]',
+            issue.severity === 'error' ? 'text-red-300' : 'text-amber-200',
+          )}
+        >
+          {issue.message}
+        </div>
+      ))}
+      {fieldProperties.length ? (
+        <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {fieldProperties.map(([field, child]) => {
+            const fieldPath = `${jobPath}.${field}`;
+            return (
+              <ScalarField
+                key={field}
+                embedded
+                rootSchema={rootSchema}
+                schema={child}
+                nullable={isNullableConfigSchema(rootSchema, child)}
+                path={fieldPath}
+                value={value}
+                defaultValue={getConfigValue(defaultConfig, fieldPath)}
+                effectiveValue={getConfigValue(effectiveConfig, fieldPath)}
+                override={overrideForPath(overrides, fieldPath)}
+                issues={issues.filter(
+                  (issue) =>
+                    issue.path === fieldPath ||
+                    issue.path.startsWith(`${fieldPath}.`),
+                )}
+                onChange={onChange}
+              />
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }

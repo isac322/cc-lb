@@ -668,6 +668,1195 @@ export function classifyConfigLeaf(
   };
 }
 
+export type ConfigImpactDimension =
+  | 'availability'
+  | 'cost'
+  | 'cpu'
+  | 'durability'
+  | 'latency'
+  | 'memory'
+  | 'network'
+  | 'observability'
+  | 'security'
+  | 'storage'
+  | 'throughput';
+
+/**
+ * Operational guidance for one config field or recurring job: a short purpose
+ * sentence plus the trade-off of moving the value in either direction (or
+ * toggling it). Produced by {@link resolveConfigFieldGuidance}.
+ */
+export interface ConfigFieldGuidance {
+  /** What the field controls, in one sentence. */
+  description: string;
+  /** Effect of setting a numeric/duration/bytes value lower. */
+  lower?: string;
+  /** Effect of setting a numeric/duration/bytes value higher. */
+  higher?: string;
+  /** Effect of enabling a boolean field. */
+  enabled?: string;
+  /** Effect of disabling a boolean field. */
+  disabled?: string;
+  /** Operational recommendation or enum-choice guidance. */
+  recommendation?: string;
+  /** Operational dimensions the field affects. */
+  impactDimensions?: readonly ConfigImpactDimension[];
+}
+
+/** Table entries may omit any field; the resolver backfills from fallbacks. */
+type ConfigFieldGuidanceOverride = Partial<ConfigFieldGuidance>;
+
+type ConfigFieldGuidanceFactory = (
+  segments: readonly ConfigPathSegment[],
+) => ConfigFieldGuidanceOverride;
+
+export interface ConfigRecurringJobMetadata {
+  key: string;
+  label: string;
+  purpose: string;
+}
+
+/**
+ * Built-in recurring jobs registered by the scheduler
+ * (`default_scheduler_recurring_jobs` in cc-lb-config). Unknown job keys in
+ * the config file fail validation but are still rendered so they can be
+ * removed.
+ */
+export const CONFIG_RECURRING_JOBS = [
+  {
+    key: 'anthropic_compat_refresh',
+    label: 'Anthropic compat refresh',
+    purpose:
+      'Refreshes Anthropic compatibility metadata such as supported client versions.',
+  },
+  {
+    key: 'apalis_housekeeping',
+    label: 'Apalis housekeeping',
+    purpose:
+      'Reclaims finished and stale job-queue rows so the scheduler queue stays small.',
+  },
+  {
+    key: 'oauth_refresh_watchdog',
+    label: 'OAuth refresh watchdog',
+    purpose:
+      'Detects OAuth tokens nearing expiry and enqueues refresh jobs for them.',
+  },
+  {
+    key: 'oauth_usage_poll',
+    label: 'OAuth usage poll',
+    purpose:
+      'Polls upstream OAuth usage endpoints to keep per-upstream quota state current.',
+  },
+  {
+    key: 'pool_quota_snapshot',
+    label: 'Pool quota snapshot',
+    purpose:
+      'Snapshots per-pool quota state so routing decisions use fresh limits.',
+  },
+  {
+    key: 'price_catalog_refresh',
+    label: 'Price catalog refresh',
+    purpose:
+      'Fetches the latest model price catalog and stores a new version when it changes.',
+  },
+  {
+    key: 'prompt_cache_purge',
+    label: 'Prompt cache purge',
+    purpose:
+      'Removes expired prompt-cache observations so shadow-cache state stays bounded.',
+  },
+  {
+    key: 'upstream_affinity_purge',
+    label: 'Upstream affinity purge',
+    purpose: 'Deletes upstream-affinity records that are past their TTL.',
+  },
+  {
+    key: 'usage_prune',
+    label: 'Usage prune',
+    purpose:
+      'Deletes request events, rollups, and audit records older than their retention windows.',
+  },
+  {
+    key: 'usage_rollup',
+    label: 'Usage rollup',
+    purpose:
+      'Aggregates raw request events into usage buckets for metering and quota accounting.',
+  },
+  {
+    key: 'warmup_watchdog',
+    label: 'Warmup watchdog',
+    purpose:
+      'Checks that upstream warmup cycles are being enqueued and re-enqueues missing ones.',
+  },
+] as const satisfies readonly ConfigRecurringJobMetadata[];
+
+export function recurringJobMetadata(
+  key: string,
+): ConfigRecurringJobMetadata | null {
+  return CONFIG_RECURRING_JOBS.find((job) => job.key === key) ?? null;
+}
+
+function recurringJobFieldGuidance(
+  field: 'enabled' | 'interval_secs' | 'jitter_secs',
+): ConfigFieldGuidanceFactory {
+  return (segments) => {
+    const job = recurringJobMetadata(String(segments[2] ?? ''));
+    const label = job?.label ?? 'this recurring job';
+    switch (field) {
+      case 'enabled':
+        return {
+          description: `Whether ${label} runs on its schedule.`,
+          enabled: `${label} is enqueued every interval.`,
+          disabled: `${label} is never enqueued; its work stops until re-enabled.`,
+          impactDimensions: ['availability'],
+        };
+      case 'interval_secs':
+        return {
+          description: `How often ${label} runs.`,
+          lower:
+            'Runs more often — fresher results but more database and upstream load.',
+          higher: 'Runs less often — lighter load but staler results.',
+          impactDimensions: ['throughput', 'latency'],
+        };
+      case 'jitter_secs':
+        return {
+          description: `Random extra delay added to each ${label} run.`,
+          lower:
+            'Runs closer to the exact interval; jobs may fire in synchronized bursts.',
+          higher:
+            'Spreads runs over a wider window, smoothing load but delaying each run.',
+          impactDimensions: ['throughput'],
+        };
+    }
+  };
+}
+
+const CONFIG_FIELD_GUIDANCE: readonly {
+  pattern: ConfigPathMatcher;
+  guidance: ConfigFieldGuidanceOverride | ConfigFieldGuidanceFactory;
+}[] = [
+  {
+    pattern: 'admin.auth.providers.*.audiences',
+    guidance: {
+      description:
+        'Audience tags this provider accepts when validating admin requests.',
+      recommendation:
+        'Cloudflare Access providers need the application audience tag; static token providers ignore this.',
+      impactDimensions: ['security'],
+    },
+  },
+  {
+    pattern: 'admin.auth.providers.*.header',
+    guidance: {
+      description:
+        'HTTP header that carries the Cloudflare Access JWT assertion.',
+      recommendation:
+        'Must match the header Cloudflare sends; the default works for standard Access deployments.',
+      impactDimensions: ['security', 'availability'],
+    },
+  },
+  {
+    pattern: 'admin.auth.providers.*.id',
+    guidance: {
+      description:
+        'Unique identifier for this provider, used in logs and session records.',
+      impactDimensions: ['observability'],
+    },
+  },
+  {
+    pattern: 'admin.auth.providers.*.kind',
+    guidance: {
+      description: 'Authentication mechanism for this provider.',
+      recommendation:
+        "'static_token' checks a shared bearer token; 'cloudflare' validates Cloudflare Access JWTs against the team domain.",
+      impactDimensions: ['security'],
+    },
+  },
+  {
+    pattern: 'admin.auth.providers.*.team_domain',
+    guidance: {
+      description:
+        'Cloudflare Access team domain, used as the JWT issuer and JWKS base URL.',
+      recommendation:
+        'Format is `<team>.cloudflareaccess.com`; a wrong domain makes every admin login fail.',
+      impactDimensions: ['security', 'availability'],
+    },
+  },
+  {
+    pattern: 'admin.auth.providers.*.token_env',
+    guidance: {
+      description:
+        'Environment variable holding the static admin bearer token.',
+      recommendation:
+        'The variable must be set before startup; a missing value locks out static-token admin access.',
+      impactDimensions: ['security', 'availability'],
+    },
+  },
+  {
+    pattern: 'aead.key_env',
+    guidance: {
+      description:
+        'Environment variable holding the master key that encrypts stored secrets.',
+      recommendation:
+        'Losing or rotating this key without re-encrypting makes stored credentials unreadable.',
+      impactDimensions: ['security', 'durability'],
+    },
+  },
+  {
+    pattern: 'body.files_cap_bytes',
+    guidance: {
+      description:
+        'Maximum total size of file attachments accepted in one request body.',
+      lower: 'Rejects large file uploads sooner and bounds memory per request.',
+      higher:
+        'Accepts bigger uploads but raises peak memory and parsing cost per request.',
+      impactDimensions: ['memory', 'availability'],
+    },
+  },
+  {
+    pattern: 'body.messages_cap_bytes',
+    guidance: {
+      description:
+        'Maximum size of the messages payload accepted in one request body.',
+      lower: 'Rejects oversized prompts sooner and bounds per-request memory.',
+      higher:
+        'Accepts larger prompts at the cost of higher peak memory per request.',
+      impactDimensions: ['memory', 'availability'],
+    },
+  },
+  {
+    pattern: 'bulkhead.max_conns_per_upstream',
+    guidance: {
+      description: 'Maximum simultaneous connections opened to one upstream.',
+      lower:
+        'Protects upstreams from connection floods but queues or rejects excess traffic.',
+      higher:
+        'Allows more parallel upstream traffic but can overwhelm a weak upstream.',
+      impactDimensions: ['throughput', 'availability'],
+    },
+  },
+  {
+    pattern: 'bulkhead.semaphore_per_upstream',
+    guidance: {
+      description:
+        'Maximum in-flight requests permitted per upstream before new ones are shed.',
+      lower:
+        'Sheds load earlier, protecting upstreams at the cost of more rejected requests.',
+      higher:
+        'Admits more concurrent work but weakens isolation when an upstream degrades.',
+      impactDimensions: ['throughput', 'availability'],
+    },
+  },
+  {
+    pattern: 'circuit_breaker.failures_to_open',
+    guidance: {
+      description:
+        'Failures inside the rolling window required to open the breaker.',
+      lower:
+        'Trips sooner, failing fast on flaky upstreams but risking false positives.',
+      higher:
+        'Tolerates more errors before tripping, keeping traffic flowing to a degraded upstream longer.',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
+    pattern: 'circuit_breaker.half_open_after_secs',
+    guidance: {
+      description:
+        'How long the breaker stays open before a probe request is allowed through.',
+      lower:
+        'Retries recovery sooner but may probe a still-down upstream more often.',
+      higher:
+        'Gives upstreams longer to recover at the cost of extended fail-fast periods.',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
+    pattern: 'circuit_breaker.window_secs',
+    guidance: {
+      description: 'Rolling window over which upstream failures are counted.',
+      lower: 'Reacts to recent failures quickly but forgets older context.',
+      higher:
+        'Smooths the failure count over a longer period, slowing reaction to new outages.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'cluster.instance_url',
+    guidance: {
+      description: 'Base URL other cluster members use to reach this instance.',
+      recommendation:
+        'Must be routable from peers; a wrong value breaks cluster coordination for this node.',
+      impactDimensions: ['availability', 'network'],
+    },
+  },
+  {
+    pattern: 'cluster.token_env',
+    guidance: {
+      description:
+        'Environment variable holding the shared token for cluster-internal requests.',
+      recommendation:
+        'Must match on every member; a mismatch rejects inter-node calls.',
+      impactDimensions: ['security', 'availability'],
+    },
+  },
+  {
+    pattern: 'event_bus.broadcast_capacity',
+    guidance: {
+      description:
+        'Event slots buffered per broadcast subscriber before events are dropped.',
+      lower: 'Slow consumers drop events sooner, keeping memory bounded.',
+      higher:
+        'Tolerates slower consumers at the cost of more buffered events in memory.',
+      impactDimensions: ['memory', 'availability'],
+    },
+  },
+  {
+    pattern: 'event_bus.partial_retention_max_entries',
+    guidance: {
+      description:
+        'Maximum partial events retained for subscribers that reconnect.',
+      lower:
+        'Bounds retention memory but evicts events before slow subscribers catch up.',
+      higher:
+        'Keeps more history for reconnecting subscribers at higher memory cost.',
+      impactDimensions: ['memory', 'durability'],
+    },
+  },
+  {
+    pattern: 'event_bus.partial_retention_ttl_secs',
+    guidance: {
+      description:
+        'How long a retained partial event stays available for replay.',
+      lower:
+        'Expires events sooner, bounding memory but shrinking the replay window.',
+      higher:
+        'Extends the replay window for reconnecting subscribers at higher memory cost.',
+      impactDimensions: ['memory', 'durability'],
+    },
+  },
+  {
+    pattern: 'event_bus.pg_notify_channel',
+    guidance: {
+      description:
+        'Postgres NOTIFY channel used to fan out partial events between instances.',
+      recommendation:
+        'Must be identical on every instance sharing the database; a typo silently splits the event bus.',
+      impactDimensions: ['availability', 'network'],
+    },
+  },
+  {
+    pattern: 'event_bus.storage_tail_poll_interval_ms',
+    guidance: {
+      description:
+        'How often the event bus polls storage for events it may have missed.',
+      lower: 'Catches missed events faster but queries storage more often.',
+      higher: 'Reduces polling load but delays recovery of missed events.',
+      impactDimensions: ['latency', 'storage'],
+    },
+  },
+  {
+    pattern: 'limit_reservation_ttl.tick_secs',
+    guidance: {
+      description: 'How often the sweeper releases expired limit reservations.',
+      lower: 'Frees stale reservations sooner but runs the sweep more often.',
+      higher: 'Sweeps less often, leaving stale reservations held longer.',
+      impactDimensions: ['availability', 'storage'],
+    },
+  },
+  {
+    pattern: 'limit_reservation_ttl.ttl_secs',
+    guidance: {
+      description:
+        'How long a quota reservation is held while waiting for confirmation.',
+      lower:
+        'Releases quota faster after abandoned requests but may expire slow confirmations.',
+      higher:
+        'Gives slow requests more time but ties up quota longer when requests die.',
+      impactDimensions: ['availability', 'throughput'],
+    },
+  },
+  {
+    pattern: 'listener.admin_addr',
+    guidance: {
+      description: 'Bind address for the admin API and dashboard.',
+      recommendation:
+        'Keep it on loopback or a private interface; binding publicly exposes the admin surface.',
+      impactDimensions: ['security', 'availability'],
+    },
+  },
+  {
+    pattern: 'listener.metrics_addr',
+    guidance: {
+      description: 'Bind address for the Prometheus metrics endpoint.',
+      recommendation:
+        'Expose only where the scraper can reach it; metrics can reveal internal topology.',
+      impactDimensions: ['security', 'observability'],
+    },
+  },
+  {
+    pattern: 'listener.proxy_addr',
+    guidance: {
+      description: 'Bind address for the public proxy listener.',
+      recommendation:
+        'Use a wildcard address to serve external traffic; loopback restricts the proxy to local clients.',
+      impactDimensions: ['availability', 'network'],
+    },
+  },
+  {
+    pattern: 'listener.tls.cert_path',
+    guidance: {
+      description:
+        'Filesystem path to the PEM certificate chain served to TLS clients.',
+      recommendation:
+        'Must be readable by the process; a wrong path disables TLS or fails startup.',
+      impactDimensions: ['security', 'availability'],
+    },
+  },
+  {
+    pattern: 'listener.tls.key_path',
+    guidance: {
+      description:
+        'Filesystem path to the PEM private key for the TLS certificate.',
+      recommendation:
+        'Must match the certificate and be readable only by the service account.',
+      impactDimensions: ['security', 'availability'],
+    },
+  },
+  {
+    pattern: 'listener.tls.reload_on_sighup',
+    guidance: {
+      description:
+        'Reload the TLS certificate and key when the process receives SIGHUP.',
+      enabled: 'Certificate rotation applies on SIGHUP without a restart.',
+      disabled: 'Certificate changes require a full process restart.',
+      impactDimensions: ['availability', 'security'],
+    },
+  },
+  {
+    pattern: 'oauth.anthropic.auth_url',
+    guidance: {
+      description:
+        'Anthropic OAuth authorization endpoint users are redirected to.',
+      recommendation:
+        'Only change for a compatible OAuth deployment; a wrong URL breaks sign-in.',
+      impactDimensions: ['availability', 'security'],
+    },
+  },
+  {
+    pattern: 'oauth.anthropic.client_id',
+    guidance: {
+      description:
+        'OAuth client ID registered with Anthropic for this deployment.',
+      recommendation:
+        'Must match the registered application; a wrong ID fails authorization.',
+      impactDimensions: ['security', 'availability'],
+    },
+  },
+  {
+    pattern: 'oauth.anthropic.redirect_uri',
+    guidance: {
+      description: 'Redirect URI Anthropic returns authorization codes to.',
+      recommendation:
+        'Must exactly match the URI registered with Anthropic or authorization is rejected.',
+      impactDimensions: ['security', 'availability'],
+    },
+  },
+  {
+    pattern: 'oauth.anthropic.scopes',
+    guidance: {
+      description:
+        'OAuth scopes requested when authorizing Anthropic accounts.',
+      recommendation:
+        'Request only the scopes upstream features need; extra scopes widen token access.',
+      impactDimensions: ['security'],
+    },
+  },
+  {
+    pattern: 'oauth.anthropic.token_url',
+    guidance: {
+      description:
+        'Anthropic OAuth endpoint used to exchange codes and refresh tokens.',
+      recommendation:
+        'Only change for a compatible OAuth deployment; a wrong URL breaks token refresh.',
+      impactDimensions: ['availability', 'security'],
+    },
+  },
+  {
+    pattern: 'observability.log_redaction',
+    guidance: {
+      description: 'Redact secrets and credential-like values from log output.',
+      enabled:
+        'Logs mask sensitive values, reducing leak risk at slight context cost.',
+      disabled:
+        'Logs include raw values — useful for debugging but may expose secrets.',
+      impactDimensions: ['security', 'observability'],
+    },
+  },
+  {
+    pattern: 'observability.otlp_endpoint',
+    guidance: {
+      description:
+        'OTLP collector endpoint that receives exported traces and metrics.',
+      recommendation:
+        'Leave unset to disable export; a wrong endpoint drops telemetry silently.',
+      impactDimensions: ['observability', 'network'],
+    },
+  },
+  {
+    pattern: 'observability.tracing_level',
+    guidance: {
+      description:
+        'Minimum severity for emitted traces and logs (error, warn, info, debug, trace).',
+      recommendation:
+        "'debug' and 'trace' increase volume sharply; keep 'info' in production.",
+      impactDimensions: ['observability', 'cost'],
+    },
+  },
+  {
+    pattern: 'observability.user_prompt_redaction',
+    guidance: {
+      description: 'Redact user prompt content from logs and traces.',
+      enabled:
+        'Prompt text is masked, protecting user data but limiting prompt debugging.',
+      disabled:
+        'Prompt text appears in telemetry — helpful for debugging, risky for privacy.',
+      impactDimensions: ['security', 'observability'],
+    },
+  },
+  {
+    pattern: 'price_catalog.cache_path',
+    guidance: {
+      description:
+        'Local file where the downloaded price catalog is cached between refreshes.',
+      recommendation:
+        'Must be writable; a bad path forces every read to fall back to the last fetch.',
+      impactDimensions: ['cost', 'durability'],
+    },
+  },
+  {
+    pattern: 'price_catalog.url',
+    guidance: {
+      description:
+        'URL of the LiteLLM-compatible price catalog fetched by the refresh job.',
+      recommendation:
+        'Point at a trusted mirror to control update cadence; a wrong URL stops price updates.',
+      impactDimensions: ['cost', 'availability'],
+    },
+  },
+  {
+    pattern: 'prompt_cache_shadow.grace_margin_secs',
+    guidance: {
+      description:
+        'Extra lifetime granted to shadow-cache entries beyond their observed TTL.',
+      lower: 'Entries expire closer to their true TTL, freeing memory sooner.',
+      higher:
+        'Entries linger longer, absorbing TTL jitter at higher memory cost.',
+      impactDimensions: ['memory', 'latency'],
+    },
+  },
+  {
+    pattern: 'prompt_cache_shadow.max_live_entries_per_partition',
+    guidance: {
+      description: 'Maximum live shadow-cache entries kept per partition.',
+      lower: 'Bounds memory but evicts entries before they expire naturally.',
+      higher: 'Tracks more entries per partition at higher memory cost.',
+      impactDimensions: ['memory'],
+    },
+  },
+  {
+    pattern: 'prompt_cache_shadow.refresh_debounce_secs',
+    guidance: {
+      description: 'Minimum interval between shadow-cache refresh passes.',
+      lower:
+        'Refreshes more often, keeping state fresher at higher storage load.',
+      higher:
+        'Reduces refresh load but lets shadow state go staler between passes.',
+      impactDimensions: ['storage', 'latency'],
+    },
+  },
+  {
+    pattern: 'request_event_retention_days',
+    guidance: {
+      description:
+        'How long request event records are kept before the prune job deletes them.',
+      lower:
+        'Deletes history sooner, saving storage but shortening the audit window.',
+      higher: 'Keeps a longer audit trail at steadily growing storage cost.',
+      impactDimensions: ['storage', 'durability'],
+    },
+  },
+  {
+    pattern: 'runtime.data_dir',
+    guidance: {
+      description:
+        'Directory for runtime state, caches, and plugin working data.',
+      recommendation:
+        'Must be writable and persistent; an ephemeral or read-only path loses state on restart.',
+      impactDimensions: ['durability', 'availability'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.allocation_strategy',
+    guidance: {
+      description: 'How Wasm instances and memories are allocated for plugins.',
+      recommendation:
+        "'ondemand' creates instances per request with lower idle memory; 'pooling' pre-allocates warm instances for lower latency at higher baseline memory.",
+      impactDimensions: ['memory', 'latency'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.cookie_redaction',
+    guidance: {
+      description:
+        'Strip cookie headers from request data visible to Wasm plugins.',
+      enabled:
+        'Plugins never see cookies, reducing the credential-leak surface.',
+      disabled:
+        'Plugins receive cookies — needed only by plugins that inspect them.',
+      impactDimensions: ['security'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.memory_guard_bytes',
+    guidance: {
+      description: 'Guard region reserved around each Wasm linear memory.',
+      lower: 'Saves address space but narrows the out-of-bounds safety margin.',
+      higher:
+        'Widens the safety margin at the cost of more reserved address space.',
+      impactDimensions: ['memory', 'security'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.memory_max_pages',
+    guidance: {
+      description:
+        'Maximum Wasm memory pages a single plugin may allocate (64 KiB each).',
+      lower: 'Caps plugin memory tightly but can fail memory-hungry plugins.',
+      higher:
+        'Allows larger plugin memories at a higher per-plugin memory ceiling.',
+      impactDimensions: ['memory', 'availability'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.memory_reservation_bytes',
+    guidance: {
+      description:
+        'Virtual address space reserved for each Wasm linear memory.',
+      lower:
+        'Reserves less address space but limits how far a memory can grow.',
+      higher: 'Allows more in-place growth at the cost of larger reservations.',
+      impactDimensions: ['memory'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.pool_total_core_instances',
+    guidance: {
+      description: 'Core instances kept warm in the pooling allocator.',
+      lower:
+        'Lower warm-pool memory but slower cold-start allocation under burst.',
+      higher: 'More instances ready instantly at higher idle memory.',
+      impactDimensions: ['memory', 'latency'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.pool_total_memories',
+    guidance: {
+      description: 'Memories kept warm in the pooling allocator.',
+      lower: 'Lower warm-pool footprint but more allocation on demand.',
+      higher: 'More pre-allocated memories at higher baseline memory use.',
+      impactDimensions: ['memory', 'latency'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.shape_origin_policy',
+    guidance: {
+      recommendation:
+        "'unrestricted' preserves historical behavior; 'selected_upstream_origin' rejects plugin URLs whose origin differs from the chosen upstream.",
+      impactDimensions: ['security'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.wire_bounds.max_header_value_bytes',
+    guidance: {
+      description:
+        'Maximum size of a single header value crossing the plugin boundary.',
+      lower:
+        'Rejects oversized headers sooner but may break plugins needing large values.',
+      higher: 'Allows larger header values at higher per-message memory.',
+      impactDimensions: ['memory', 'availability'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.wire_bounds.max_headers',
+    guidance: {
+      description:
+        'Maximum number of headers allowed on a plugin wire message.',
+      lower: 'Bounds parsing work but may truncate header-heavy messages.',
+      higher: 'Accepts header-heavy messages at slightly higher parsing cost.',
+      impactDimensions: ['memory', 'availability'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.wire_bounds.output_body_bytes',
+    guidance: {
+      description: 'Maximum body size a plugin may return on the wire.',
+      lower: 'Bounds response memory but rejects large plugin outputs.',
+      higher: 'Allows larger plugin outputs at higher memory per response.',
+      impactDimensions: ['memory', 'availability'],
+    },
+  },
+  {
+    pattern: 'runtime.wasmtime.wire_bounds.reason_bytes',
+    guidance: {
+      description:
+        'Maximum size of a reason or diagnostic string on the plugin wire.',
+      lower: 'Bounds message size but truncates long diagnostic strings.',
+      higher: 'Preserves longer diagnostics at marginally higher memory.',
+      impactDimensions: ['memory', 'observability'],
+    },
+  },
+  {
+    pattern: 'scheduler.dlq_retention_days',
+    guidance: {
+      description: 'How long dead-lettered jobs are kept before deletion.',
+      lower:
+        'Dead letters disappear sooner, saving storage but shortening the debugging window.',
+      higher: 'Keeps failed jobs longer for inspection at higher storage cost.',
+      impactDimensions: ['storage', 'observability'],
+    },
+  },
+  {
+    pattern: 'scheduler.entity_concurrency',
+    guidance: {
+      description:
+        'Worker slots for per-entity jobs such as per-upstream refreshes.',
+      lower:
+        'Runs fewer entity jobs in parallel, smoothing load but slowing completion.',
+      higher:
+        'Processes more entities at once at higher CPU and database load.',
+      impactDimensions: ['throughput', 'cpu'],
+    },
+  },
+  {
+    pattern: 'scheduler.keepalive_concurrency',
+    guidance: {
+      description:
+        'Worker slots for keepalive jobs that hold pooled resources warm.',
+      lower:
+        'Fewer parallel keepalives, reducing load but risking stale pools.',
+      higher: 'More parallel keepalives at higher background load.',
+      impactDimensions: ['throughput', 'cpu'],
+    },
+  },
+  {
+    pattern: 'scheduler.recurring_jobs',
+    guidance: {
+      description:
+        'Per-job enablement and cadence for the built-in maintenance jobs.',
+    },
+  },
+  {
+    pattern: 'scheduler.recurring_jobs.*',
+    guidance: (segments) => {
+      const job = recurringJobMetadata(String(segments[2] ?? ''));
+      if (job) {
+        return {
+          description: job.purpose,
+          impactDimensions: ['availability'],
+        };
+      }
+      return {
+        description:
+          'Recurring job declared in the config file. This key is not a built-in job and fails validation.',
+        recommendation: 'Remove the entry or rename it to a built-in job key.',
+        impactDimensions: ['availability'],
+      };
+    },
+  },
+  {
+    pattern: 'scheduler.recurring_jobs.*.enabled',
+    guidance: recurringJobFieldGuidance('enabled'),
+  },
+  {
+    pattern: 'scheduler.recurring_jobs.*.interval_secs',
+    guidance: recurringJobFieldGuidance('interval_secs'),
+  },
+  {
+    pattern: 'scheduler.recurring_jobs.*.jitter_secs',
+    guidance: recurringJobFieldGuidance('jitter_secs'),
+  },
+  {
+    pattern: 'scheduler.separate_pool.acquire_timeout_secs',
+    guidance: {
+      description:
+        'How long the scheduler waits for a pool connection before failing.',
+      lower:
+        'Fails faster under pool exhaustion but may abort under brief contention.',
+      higher:
+        'Waits longer for a free connection, masking exhaustion as latency.',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
+    pattern: 'scheduler.separate_pool.idle_timeout_secs',
+    guidance: {
+      description:
+        'How long an idle scheduler connection is kept before being closed.',
+      lower: 'Releases idle connections sooner, freeing database slots.',
+      higher:
+        'Keeps connections warm longer, avoiding reconnect cost but holding slots.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'scheduler.separate_pool.max_connections',
+    guidance: {
+      description:
+        'Maximum connections the scheduler pool may open to the database.',
+      lower:
+        'Bounds database load but can starve scheduler work under concurrency.',
+      higher:
+        'Allows more parallel scheduler work at higher database connection usage.',
+      impactDimensions: ['throughput', 'availability'],
+    },
+  },
+  {
+    pattern: 'scheduler.separate_pool.min_connections',
+    guidance: {
+      description: 'Connections the scheduler pool keeps open even when idle.',
+      lower: 'Frees database slots when idle but pays reconnect cost on wake.',
+      higher:
+        'Keeps connections warm for instant scheduling at constant slot usage.',
+      impactDimensions: ['latency', 'availability'],
+    },
+  },
+  {
+    pattern: 'scheduler.separate_pool.sslmode',
+    guidance: {
+      description:
+        'TLS mode for scheduler database connections (disable, allow, prefer, require, verify-ca, verify-full).',
+      recommendation:
+        "'require' or stronger protects credentials in transit; use 'disable' only on trusted networks.",
+      impactDimensions: ['security', 'network'],
+    },
+  },
+  {
+    pattern: 'scheduler.separate_pool.statement_timeout_secs',
+    guidance: {
+      description:
+        'Maximum runtime of a single scheduler query before it is cancelled.',
+      lower:
+        'Cancels runaway queries sooner but may abort legitimate long work.',
+      higher:
+        'Allows longer queries at the risk of holding connections on slow statements.',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
+    pattern: 'scheduler.singleton_concurrency',
+    guidance: {
+      description:
+        'Worker slots for singleton jobs that run once cluster-wide.',
+      lower:
+        'Runs fewer singleton jobs in parallel, serializing maintenance work.',
+      higher: 'Overlaps more singleton jobs at higher database and CPU load.',
+      impactDimensions: ['throughput', 'cpu'],
+    },
+  },
+  {
+    pattern: 'storage.kind',
+    guidance: {
+      description: 'Storage backend for primary data.',
+      recommendation:
+        "'sqlite' runs embedded against a local file; 'postgres' uses an external database and unlocks pooling and multi-instance deployments.",
+      impactDimensions: ['durability', 'availability'],
+    },
+  },
+  {
+    pattern: 'storage.path',
+    guidance: {
+      description: 'Filesystem path of the SQLite database file.',
+      recommendation:
+        'Must be writable and persistent; a wrong path creates an empty database elsewhere.',
+      impactDimensions: ['durability', 'availability'],
+    },
+  },
+  {
+    pattern: 'storage.pool.acquire_timeout_secs',
+    guidance: {
+      description:
+        'How long a request waits for a pooled connection before failing.',
+      lower:
+        'Fails faster under exhaustion but may abort during brief contention.',
+      higher:
+        'Waits longer for a connection, surfacing exhaustion as latency instead of errors.',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
+    pattern: 'storage.pool.idle_timeout_secs',
+    guidance: {
+      description:
+        'How long an idle pooled connection is kept before being closed.',
+      lower: 'Releases idle connections sooner, freeing database slots.',
+      higher:
+        'Keeps connections warm longer at the cost of held database slots.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'storage.pool.max_connections',
+    guidance: {
+      description: 'Maximum connections the pool may open to the database.',
+      lower: 'Bounds database load but queues requests when traffic spikes.',
+      higher:
+        'Serves more parallel queries at higher database connection usage.',
+      impactDimensions: ['throughput', 'availability'],
+    },
+  },
+  {
+    pattern: 'storage.pool.max_lifetime_secs',
+    guidance: {
+      description: 'Maximum age of a pooled connection before it is recycled.',
+      lower:
+        'Recycles connections more often, picking up server-side changes sooner.',
+      higher:
+        'Reuses connections longer, saving reconnect cost but holding stale sessions.',
+      impactDimensions: ['availability'],
+    },
+  },
+  {
+    pattern: 'storage.pool.min_connections',
+    guidance: {
+      description: 'Connections kept open even when the pool is idle.',
+      lower:
+        'Frees database slots when idle but pays reconnect cost on the next request.',
+      higher:
+        'Keeps connections warm for instant queries at constant slot usage.',
+      impactDimensions: ['latency', 'availability'],
+    },
+  },
+  {
+    pattern: 'storage.pool.sslmode',
+    guidance: {
+      description:
+        'TLS mode for database connections (disable, allow, prefer, require, verify-ca, verify-full).',
+      recommendation:
+        "'require' or stronger protects credentials in transit; use 'disable' only on trusted networks.",
+      impactDimensions: ['security', 'network'],
+    },
+  },
+  {
+    pattern: 'storage.pool.statement_timeout_secs',
+    guidance: {
+      description:
+        'Maximum runtime of a single query before the database cancels it.',
+      lower:
+        'Cancels runaway queries sooner but may abort legitimate slow reads.',
+      higher:
+        'Allows longer queries at the risk of holding connections on slow statements.',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
+    pattern: 'storage.pool.test_before_acquire',
+    guidance: {
+      description: 'Health-check each pooled connection before handing it out.',
+      enabled:
+        'Stale connections are detected before use, adding a small checkout latency.',
+      disabled:
+        'Checkout is faster but a dead connection can surface as a request error.',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
+    pattern: 'storage.url',
+    guidance: {
+      description: 'Postgres connection URL for primary storage.',
+      recommendation:
+        'Contains credentials — treat it as a secret; a wrong URL prevents startup or silently targets another database.',
+      impactDimensions: ['durability', 'security', 'availability'],
+    },
+  },
+  {
+    pattern: 'subscription_quota.routing_max_staleness_secs',
+    guidance: {
+      description:
+        'How old cached subscription-quota state may be before routing treats it as stale.',
+      lower: 'Routing uses fresher quota data but re-fetches more often.',
+      higher:
+        'Tolerates staler quota data, reducing reads but risking outdated limit decisions.',
+      impactDimensions: ['availability', 'cost'],
+    },
+  },
+  {
+    pattern: 'subscription_quota.writer_batch_max_records',
+    guidance: {
+      description: 'Maximum quota records flushed per writer batch.',
+      lower:
+        'Smaller batches flush sooner with less memory but more write round-trips.',
+      higher:
+        'Bigger batches amortize writes at higher memory and longer flush latency.',
+      impactDimensions: ['throughput', 'storage'],
+    },
+  },
+  {
+    pattern: 'subscription_quota.writer_channel_capacity',
+    guidance: {
+      description:
+        'Buffered quota records the writer channel holds before producers block or drop.',
+      lower: 'Bounds memory but back-pressures or drops records under burst.',
+      higher: 'Absorbs bigger bursts at higher memory cost.',
+      impactDimensions: ['memory', 'throughput'],
+    },
+  },
+  {
+    pattern: 'subscription_quota.writer_flush_ms',
+    guidance: {
+      description:
+        'Maximum time quota records wait in the buffer before a flush.',
+      lower:
+        'Flushes sooner, keeping quota state fresh at higher write frequency.',
+      higher: 'Batches longer, reducing writes but delaying quota visibility.',
+      impactDimensions: ['latency', 'storage'],
+    },
+  },
+  {
+    pattern: 'timeouts.drain_secs',
+    guidance: {
+      description:
+        'Grace period for in-flight requests to finish during shutdown.',
+      lower: 'Shuts down faster but cuts off requests still in flight.',
+      higher:
+        'Gives requests more time to complete at the cost of slower restarts.',
+      impactDimensions: ['availability', 'latency'],
+    },
+  },
+  {
+    pattern: 'timeouts.upstream_total_secs',
+    guidance: {
+      description:
+        'Total deadline for a single upstream request, including retries.',
+      lower:
+        'Fails slow upstreams sooner, freeing capacity but aborting long requests.',
+      higher:
+        'Allows slower upstream responses at the cost of longer-held connections.',
+      impactDimensions: ['latency', 'availability'],
+    },
+  },
+  {
+    pattern: 'upstream_affinity.ttl_days',
+    guidance: {
+      description:
+        'How long an upstream affinity record is kept before the purge job removes it.',
+      lower:
+        'Affinity expires sooner, rebalancing traffic but losing stickiness.',
+      higher:
+        'Keeps clients pinned to upstreams longer at higher storage and imbalance risk.',
+      impactDimensions: ['storage', 'latency'],
+    },
+  },
+];
+
+const GENERIC_LEAF_GUIDANCE: Record<
+  ConfigLeafPresentation,
+  ConfigFieldGuidanceOverride & { description: string }
+> = {
+  boolean: {
+    description: 'Toggle for this behavior.',
+    enabled: 'Enables this behavior.',
+    disabled: 'Disables this behavior.',
+  },
+  enum: {
+    description: 'Selects one of the supported modes.',
+  },
+  duration: {
+    description: 'Duration that controls how quickly the system reacts.',
+    lower: 'Shorter values react faster but add scheduling and I/O overhead.',
+    higher: 'Longer values reduce overhead but react more slowly to change.',
+  },
+  bytes: {
+    description: 'Size limit in bytes.',
+    lower:
+      'Smaller values bound memory and disk use but reject larger payloads.',
+    higher:
+      'Larger values accept bigger payloads at higher memory and disk cost.',
+  },
+  count: {
+    description: 'Numeric tuning value.',
+    lower: 'Lower values conserve resources but limit throughput.',
+    higher: 'Higher values raise throughput at greater resource cost.',
+  },
+  address: {
+    description:
+      'Network address in host:port form; a wrong value can make the service unreachable or expose it broadly.',
+  },
+  url: {
+    description:
+      'URL of an external endpoint; a wrong value breaks the integration that depends on it.',
+  },
+  path: {
+    description:
+      'Filesystem path; a wrong value causes file-access failures at runtime.',
+  },
+  env: {
+    description:
+      'Name of an environment variable read at startup; a missing or wrong variable keeps the service from loading the value.',
+  },
+  string: {
+    description: 'Free-form text value.',
+  },
+  array: {
+    description: 'List of values.',
+  },
+  unknown: {
+    description: 'Setting preserved from the config file.',
+  },
+};
+
+/**
+ * Resolve operational guidance for a config path. Explicit per-path metadata
+ * wins first; the schema description is used when the table entry omits one;
+ * presentation-based generic text backfills anything still missing, so every
+ * leaf — including schema fields added later — resolves to a non-empty
+ * description, and numeric/boolean leaves always carry trade-off text.
+ *
+ * Recurring job paths (`scheduler.recurring_jobs.<name>` and its fields) are
+ * synthesized from {@link CONFIG_RECURRING_JOBS} plus wildcard field guidance.
+ */
+export function resolveConfigFieldGuidance(
+  path: string | ConfigPath,
+  schemaDescription?: string,
+  kind?: ConfigEditorLeafKind,
+): ConfigFieldGuidance {
+  const segments = parseConfigPath(path);
+  const generic =
+    GENERIC_LEAF_GUIDANCE[classifyConfigLeaf(segments, kind).presentation];
+  const schemaText =
+    typeof schemaDescription === 'string' && schemaDescription.trim()
+      ? schemaDescription.trim()
+      : null;
+  let override: ConfigFieldGuidanceOverride | null = null;
+  for (const entry of CONFIG_FIELD_GUIDANCE) {
+    if (!matchPathSegments(entry.pattern.split('.'), segments)) continue;
+    override =
+      typeof entry.guidance === 'function'
+        ? entry.guidance(segments)
+        : entry.guidance;
+    break;
+  }
+  return {
+    description: override?.description ?? schemaText ?? generic.description,
+    lower: override?.lower ?? generic.lower,
+    higher: override?.higher ?? generic.higher,
+    enabled: override?.enabled ?? generic.enabled,
+    disabled: override?.disabled ?? generic.disabled,
+    recommendation: override?.recommendation,
+    impactDimensions: override?.impactDimensions,
+  };
+}
+
 const DURATION_UNITS: readonly { label: string; ms: number }[] = [
   { label: 'day', ms: 86_400_000 },
   { label: 'hour', ms: 3_600_000 },

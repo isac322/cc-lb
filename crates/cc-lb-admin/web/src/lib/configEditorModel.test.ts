@@ -9,6 +9,7 @@ import {
   CONFIG_EDITOR_CATEGORIES,
   CONFIG_EDITOR_SECTIONS,
   CONFIG_EDITOR_UNASSIGNED_SECTION_ID,
+  CONFIG_RECURRING_JOBS,
   type ConfigSchema,
   classifyConfigLeaf,
   expandConfigSchema,
@@ -20,6 +21,8 @@ import {
   normalizeConfigDraft,
   OPAQUE_STORAGE_URL_SENTINEL,
   parseConfigPath,
+  recurringJobMetadata,
+  resolveConfigFieldGuidance,
   resolveConfigValue,
   searchConfigLeaves,
   setConfigValue,
@@ -724,6 +727,166 @@ describe('config editor information architecture', () => {
         `${leaf.pathString} is a schema leaf hidden from every section`,
       ).toBe(1);
       expect(sectionIds.has(memberships[0]?.id ?? '')).toBe(true);
+    }
+  });
+});
+
+describe('config field guidance', () => {
+  const realSchema = JSON.parse(
+    readFileSync(
+      `${import.meta.dirname}/../../../../../config-schema.json`,
+      'utf-8',
+    ),
+  ) as ConfigSchema;
+
+  it('resolves explicit guidance with numeric trade-offs', () => {
+    const guidance = resolveConfigFieldGuidance(
+      'storage.pool.max_connections',
+      undefined,
+      'integer',
+    );
+    expect(guidance.description).toContain('pool');
+    expect(guidance.lower).toBeTruthy();
+    expect(guidance.higher).toBeTruthy();
+    expect(guidance.impactDimensions?.length).toBeGreaterThan(0);
+  });
+
+  it('resolves boolean guidance with enabled and disabled effects', () => {
+    const guidance = resolveConfigFieldGuidance(
+      'observability.log_redaction',
+      undefined,
+      'boolean',
+    );
+    expect(guidance.enabled).toBeTruthy();
+    expect(guidance.disabled).toBeTruthy();
+  });
+
+  it('falls back to the schema description when the table omits one', () => {
+    const guidance = resolveConfigFieldGuidance(
+      'runtime.wasmtime.shape_origin_policy',
+      'Schema-provided description.',
+      'enum',
+    );
+    expect(guidance.description).toBe('Schema-provided description.');
+    expect(guidance.recommendation).toContain('unrestricted');
+  });
+
+  it('falls back to presentation guidance for schema leaves without metadata', () => {
+    const numeric = resolveConfigFieldGuidance(
+      'future.new_timeout_secs',
+      undefined,
+      'integer',
+    );
+    expect(numeric.description).toBeTruthy();
+    expect(numeric.lower).toBeTruthy();
+    expect(numeric.higher).toBeTruthy();
+
+    const toggle = resolveConfigFieldGuidance(
+      'future.new_flag',
+      undefined,
+      'boolean',
+    );
+    expect(toggle.description).toBeTruthy();
+    expect(toggle.enabled).toBeTruthy();
+    expect(toggle.disabled).toBeTruthy();
+  });
+
+  it('synthesizes recurring job guidance from the catalog and wildcard fields', () => {
+    const job = resolveConfigFieldGuidance(
+      'scheduler.recurring_jobs.usage_rollup',
+    );
+    expect(job.description).toBe(recurringJobMetadata('usage_rollup')?.purpose);
+
+    const interval = resolveConfigFieldGuidance(
+      'scheduler.recurring_jobs.usage_rollup.interval_secs',
+      undefined,
+      'integer',
+    );
+    expect(interval.description).toContain('Usage rollup');
+    expect(interval.lower).toBeTruthy();
+    expect(interval.higher).toBeTruthy();
+
+    const enabled = resolveConfigFieldGuidance(
+      'scheduler.recurring_jobs.usage_rollup.enabled',
+      undefined,
+      'boolean',
+    );
+    expect(enabled.enabled).toBeTruthy();
+    expect(enabled.disabled).toBeTruthy();
+  });
+
+  it('describes unknown recurring job keys without built-in purposes', () => {
+    const job = resolveConfigFieldGuidance(
+      'scheduler.recurring_jobs.not_a_job',
+    );
+    expect(job.description).toContain('not a built-in job');
+
+    const field = resolveConfigFieldGuidance(
+      'scheduler.recurring_jobs.not_a_job.enabled',
+      undefined,
+      'boolean',
+    );
+    expect(field.description).toContain('this recurring job');
+    expect(field.enabled).toBeTruthy();
+  });
+
+  it('catalogs every built-in recurring job', () => {
+    expect(CONFIG_RECURRING_JOBS.map((job) => job.key)).toEqual([
+      'anthropic_compat_refresh',
+      'apalis_housekeeping',
+      'oauth_refresh_watchdog',
+      'oauth_usage_poll',
+      'pool_quota_snapshot',
+      'price_catalog_refresh',
+      'prompt_cache_purge',
+      'upstream_affinity_purge',
+      'usage_prune',
+      'usage_rollup',
+      'warmup_watchdog',
+    ]);
+    for (const job of CONFIG_RECURRING_JOBS) {
+      expect(job.label).toBeTruthy();
+      expect(job.purpose).toBeTruthy();
+    }
+  });
+
+  it('describes every canonical schema leaf with the right trade-off shape', () => {
+    const leaves = expandConfigSchema(realSchema);
+    expect(leaves.length).toBeGreaterThan(0);
+    for (const leaf of leaves) {
+      const schemaDescription =
+        typeof leaf.schema.description === 'string'
+          ? leaf.schema.description
+          : undefined;
+      const guidance = resolveConfigFieldGuidance(
+        leaf.pathString,
+        schemaDescription,
+        leaf.kind,
+      );
+      expect(
+        guidance.description.trim().length,
+        `${leaf.pathString} must resolve a non-empty description`,
+      ).toBeGreaterThan(0);
+      if (leaf.kind === 'integer' || leaf.kind === 'number') {
+        expect(
+          guidance.lower,
+          `${leaf.pathString} must describe lowering the value`,
+        ).toBeTruthy();
+        expect(
+          guidance.higher,
+          `${leaf.pathString} must describe raising the value`,
+        ).toBeTruthy();
+      }
+      if (leaf.kind === 'boolean') {
+        expect(
+          guidance.enabled,
+          `${leaf.pathString} must describe enabling`,
+        ).toBeTruthy();
+        expect(
+          guidance.disabled,
+          `${leaf.pathString} must describe disabling`,
+        ).toBeTruthy();
+      }
     }
   });
 });

@@ -389,6 +389,7 @@ function SettingsPage() {
                 field: next.field,
                 q: next.q,
               },
+              resetScroll: false,
             })
           }
         />

@@ -10,6 +10,10 @@ import {
 } from '@testing-library/react';
 import type React from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import {
+  recurringJobMetadata,
+  resolveConfigFieldGuidance,
+} from '../lib/configEditorModel';
 import { Route as SettingsRoute } from './settings';
 
 const queryMocks = vi.hoisted(() => ({
@@ -318,7 +322,7 @@ const fileConfig = {
   scheduler: {
     separate_pool: { max_connections: 5, keepalive_secs: 120 },
     recurring_jobs: {
-      quota_refresh: { enabled: true, interval_secs: 3600, jitter_secs: 30 },
+      usage_rollup: { enabled: true, interval_secs: 3600, jitter_secs: 30 },
       custom_job: { enabled: false, interval_secs: 600, jitter_secs: 10 },
     },
     dlq_retention_days: 30,
@@ -370,8 +374,8 @@ const defaultConfig = {
   scheduler: {
     ...structuredClone(fileConfig.scheduler),
     recurring_jobs: {
-      quota_refresh: structuredClone(
-        fileConfig.scheduler.recurring_jobs.quota_refresh,
+      usage_rollup: structuredClone(
+        fileConfig.scheduler.recurring_jobs.usage_rollup,
       ),
     },
   },
@@ -571,6 +575,14 @@ test('settings cold load reserves version, editor, and history heights without a
   const editorSkeleton = screen.getByTestId('config-editor-skeleton');
   expect(editorSkeleton.className).toMatch(/min-h-/);
   expect(editorSkeleton.children.length).toBeGreaterThan(0);
+  // The skeleton mirrors the loaded layout's xl breakpoint: the rail stays
+  // hidden below xl so the panel keeps full width on tablets.
+  expect(editorSkeleton.innerHTML).toContain('xl:block');
+  expect(editorSkeleton.innerHTML).not.toContain('lg:block');
+  expect(editorSkeleton.innerHTML).not.toContain('md:block');
+  expect(editorSkeleton.innerHTML).toContain('xl:flex');
+  expect(editorSkeleton.innerHTML).not.toContain('lg:flex');
+  expect(editorSkeleton.innerHTML).not.toContain('md:flex');
 
   const historySlot = screen.getByTestId('config-history-slot');
   expect(historySlot.className).toContain('min-h-[173px]');
@@ -636,8 +648,15 @@ test('operator rail navigates seven categories and renders only the selected pan
   fireEvent.click(
     within(rail).getByRole('button', { name: /^Runtime & observability/ }),
   );
-  expect(routerMocks.navigate).toHaveBeenCalled();
+  // In-place category switches keep the operator's scroll position: the route
+  // opts out of scroll restoration and no field is focused or scrolled to.
+  expect(routerMocks.navigate).toHaveBeenCalledWith(
+    expect.objectContaining({ resetScroll: false }),
+  );
   expect(routerMocks.search).toMatchObject({ category: 'runtime' });
+  expect(routerMocks.search.field).toBeUndefined();
+  expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
+  expect(document.activeElement?.closest('[data-config-path]')).toBeNull();
   view.rerender(<SettingsComponent />);
 
   expect(
@@ -671,7 +690,12 @@ test('mobile category select offers the same seven categories and drives the pan
     option.textContent?.includes('Scheduling'),
   ) as HTMLOptionElement;
   fireEvent.change(select, { target: { value: scheduling.value } });
+  expect(routerMocks.navigate).toHaveBeenCalledWith(
+    expect.objectContaining({ resetScroll: false }),
+  );
   expect(routerMocks.search).toMatchObject({ category: 'scheduling' });
+  expect(routerMocks.search.field).toBeUndefined();
+  expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
   view.rerender(<SettingsComponent />);
 
   expect(select.selectedOptions[0]?.textContent).toContain('Scheduling');
@@ -744,6 +768,11 @@ test('settings search stays local until a result jumps to its field', async () =
     category: 'runtime',
     field: 'observability.tracing_level',
   });
+  // Jumping to a result still keeps the page scroll: the route opts out of
+  // scroll restoration and only the target field is centered and focused.
+  expect(routerMocks.navigate).toHaveBeenCalledWith(
+    expect.objectContaining({ resetScroll: false }),
+  );
   view.rerender(<SettingsComponent />);
   await flushEffects();
 
@@ -751,6 +780,9 @@ test('settings search stays local until a result jumps to its field', async () =
     '[data-config-path="observability.tracing_level"]',
   );
   expect(field?.contains(document.activeElement)).toBe(true);
+  expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledWith(
+    expect.objectContaining({ block: 'center' }),
+  );
 });
 
 test('duration and byte controls pair raw storage values with humanized units', () => {
@@ -1773,4 +1805,382 @@ test('storage variant switch review lists removed leaves without a container row
   // The leaf rows already describe the diff; no bare container rows.
   expect(within(reviewList).queryAllByText('storage')).toHaveLength(0);
   expect(within(reviewList).queryAllByText('storage.pool')).toHaveLength(0);
+});
+
+test('recurring jobs render one flat card per key with the enabled switch in the header', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Scheduling');
+
+  const section = document.querySelector<HTMLElement>(
+    '[data-config-section="recurring-jobs"]',
+  );
+  expect(section).not.toBeNull();
+  // The section card already owns the "Recurring jobs" heading and
+  // description; the editor must not repeat them inside a nested card.
+  expect(
+    within(section as HTMLElement).getAllByRole('heading', {
+      name: /recurring jobs/i,
+    }),
+  ).toHaveLength(1);
+  expect(section?.textContent).not.toMatch(/unknown file keys/i);
+
+  const editor = document.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.recurring_jobs"]',
+  );
+  expect(editor).not.toBeNull();
+  // Flattened: the editor sits directly in the section grid and spans it,
+  // without its own card chrome.
+  expect(editor?.parentElement?.className).toContain('grid');
+  expect(editor?.className).toContain('col-span-full');
+  expect(editor?.className).not.toMatch(/border|bg-panel|bg-bg/);
+
+  // Exactly one job card per configured key — no nested job containers.
+  const jobCards = [...(editor?.querySelectorAll('[data-config-path]') ?? [])]
+    .map((element) => element.getAttribute('data-config-path') ?? '')
+    .filter((path) => /^scheduler\.recurring_jobs\.[^.[\]]+$/.test(path));
+  expect(jobCards.sort()).toEqual([
+    'scheduler.recurring_jobs.custom_job',
+    'scheduler.recurring_jobs.usage_rollup',
+  ]);
+
+  const job = document.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.recurring_jobs.usage_rollup"]',
+  ) as HTMLElement;
+  // Built-in jobs get the catalog label and purpose next to the raw key.
+  expect(job.textContent).toContain('usage_rollup');
+  expect(job.textContent).toContain(
+    recurringJobMetadata('usage_rollup')?.label ?? 'missing label',
+  );
+  expect(job.textContent).toContain(
+    recurringJobMetadata('usage_rollup')?.purpose ?? 'missing purpose',
+  );
+
+  // Enabled is a compact switch in the job header — before the body fields —
+  // not a standalone field card in the body grid.
+  const enabled = job.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.recurring_jobs.usage_rollup.enabled"]',
+  );
+  expect(enabled).not.toBeNull();
+  expect(enabled?.tagName).toBe('INPUT');
+  expect(enabled?.hasAttribute('data-field-control')).toBe(true);
+  expect(enabled?.closest('[data-field-embedded]')).toBeNull();
+  // WAI switch label stability: the accessible name stays "Enabled" in both
+  // states. The header switch carries no description sentence, so the compact
+  // header cluster keeps a small tap target and cannot overflow on mobile.
+  const enabledLabel = enabled?.closest('label');
+  const enabledGuidance = resolveConfigFieldGuidance(
+    'scheduler.recurring_jobs.usage_rollup.enabled',
+    undefined,
+    'boolean',
+  );
+  expect(enabledLabel?.textContent).toBe('Enabled');
+  expect(enabledLabel?.textContent).not.toContain(enabledGuidance.description);
+  const actionsCluster = enabledLabel?.parentElement;
+  const headerRow = actionsCluster?.parentElement;
+  expect(actionsCluster?.className).toContain('flex-wrap');
+  expect(headerRow?.className).toContain('flex-wrap');
+  expect(headerRow?.className).toContain('min-w-0');
+  expect(headerRow?.firstElementChild?.className).toContain('min-w-0');
+  expect(within(job).getByRole('checkbox', { name: 'Enabled' })).toBe(enabled);
+  fireEvent.click(enabled as HTMLElement);
+  const toggled = job.querySelector<HTMLInputElement>(
+    '[data-config-path="scheduler.recurring_jobs.usage_rollup.enabled"]',
+  );
+  expect(toggled?.checked).toBe(false);
+  expect(within(job).getByRole('checkbox', { name: 'Enabled' })).toBe(toggled);
+  expect(within(job).queryByRole('checkbox', { name: 'Disabled' })).toBeNull();
+
+  const interval = job.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.recurring_jobs.usage_rollup.interval_secs"]',
+  );
+  const jitter = job.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.recurring_jobs.usage_rollup.jitter_secs"]',
+  );
+  expect(interval).not.toBeNull();
+  expect(jitter).not.toBeNull();
+  // Interval and jitter are embedded siblings in one compact two-column body.
+  expect(interval?.hasAttribute('data-field-embedded')).toBe(true);
+  expect(jitter?.hasAttribute('data-field-embedded')).toBe(true);
+  const body = interval?.parentElement;
+  expect(body).toBe(jitter?.parentElement);
+  expect(body?.className).toContain('sm:grid-cols-2');
+  expect(body?.contains(enabled as Node)).toBe(false);
+  expect(
+    (enabled?.compareDocumentPosition(interval as Node) ?? 0) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  // Embedded fields keep their guidance: purpose plus Lower/Higher trade-offs.
+  expect(within(interval as HTMLElement).getByText('Lower')).toBeDefined();
+  expect(within(interval as HTMLElement).getByText('Higher')).toBeDefined();
+  // The On/Off effect guidance stays in the row body — it is not folded into
+  // the header switch label.
+  expect(within(job).getByText('On')).toBeDefined();
+  expect(within(job).getByText('Off')).toBeDefined();
+  expect(job.textContent).toContain(enabledGuidance.enabled ?? 'missing');
+  expect(job.textContent).toContain(enabledGuidance.disabled ?? 'missing');
+
+  // Unknown keys stay visible and marked, with their fields still editable.
+  const unknown = document.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.recurring_jobs.custom_job"]',
+  ) as HTMLElement;
+  expect(unknown).not.toBeNull();
+  expect(unknown.textContent).toContain('custom_job');
+  expect(unknown.textContent).toContain('Unknown key');
+  // The job-level guidance explains why the key is flagged and recommends the
+  // fix in the row body.
+  const unknownGuidance = resolveConfigFieldGuidance(
+    'scheduler.recurring_jobs.custom_job',
+  );
+  expect(unknown.textContent).toContain(unknownGuidance.description);
+  expect(unknownGuidance.recommendation).toBeTruthy();
+  expect(within(unknown).getByText('Recommendation')).toBeDefined();
+  expect(unknown.textContent).toContain(
+    unknownGuidance.recommendation as string,
+  );
+  expect(
+    unknown.querySelector(
+      '[data-config-path="scheduler.recurring_jobs.custom_job.enabled"]',
+    ),
+  ).not.toBeNull();
+  expect(
+    unknown
+      .querySelector(
+        '[data-config-path="scheduler.recurring_jobs.custom_job.interval_secs"]',
+      )
+      ?.hasAttribute('data-field-embedded'),
+  ).toBe(true);
+});
+
+test('recurring job unknown badge follows defaults, not the static catalog', () => {
+  // A job present in default_config but missing from the static metadata
+  // catalog is still a known job: the catalog only enriches label and
+  // purpose. Only keys with no default (file-only entries like custom_job)
+  // are flagged unknown.
+  const defaults = structuredClone(defaultConfig);
+  const defaultJobs = defaults.scheduler.recurring_jobs as Record<
+    string,
+    unknown
+  >;
+  defaultJobs.legacy_sweep = {
+    enabled: true,
+    interval_secs: 120,
+    jitter_secs: 10,
+  };
+  expect(recurringJobMetadata('legacy_sweep')).toBeNull();
+  setSettingsLoaded(editorResponse({ default_config: defaults }));
+  const view = render(<SettingsComponent />);
+  showCategory(view, 'Scheduling');
+
+  const legacy = document.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.recurring_jobs.legacy_sweep"]',
+  );
+  expect(legacy).not.toBeNull();
+  expect(legacy?.textContent).toContain('legacy_sweep');
+  expect(legacy?.textContent).not.toContain('Unknown key');
+
+  const custom = document.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.recurring_jobs.custom_job"]',
+  );
+  expect(custom?.textContent).toContain('Unknown key');
+});
+
+test('scalar fields show purpose and trade-off guidance across every category', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+
+  const expectGuidance = (
+    path: string,
+    kind: 'integer' | 'boolean' | 'string',
+    labels: readonly string[],
+    guidanceKeys: readonly (
+      | 'description'
+      | 'lower'
+      | 'higher'
+      | 'enabled'
+      | 'disabled'
+      | 'recommendation'
+    )[],
+  ) => {
+    const field = document.querySelector<HTMLElement>(
+      `[data-config-path="${path}"]`,
+    );
+    expect(field, `${path} to render`).not.toBeNull();
+    const guidance = resolveConfigFieldGuidance(path, undefined, kind);
+    // The purpose is visible text, not hidden behind a title tooltip.
+    expect(
+      within(field as HTMLElement).getByText(guidance.description),
+      `${path} purpose`,
+    ).toBeDefined();
+    for (const label of labels) {
+      expect(
+        within(field as HTMLElement).getByText(label),
+        `${path} shows ${label}`,
+      ).toBeDefined();
+    }
+    for (const key of guidanceKeys) {
+      const text = guidance[key];
+      expect(text, `${path} guidance.${key}`).toBeTruthy();
+      expect(field?.textContent, `${path} renders guidance.${key}`).toContain(
+        text,
+      );
+    }
+  };
+
+  // Network & requests — numeric bytes field.
+  expectGuidance(
+    'body.messages_cap_bytes',
+    'integer',
+    ['Lower', 'Higher'],
+    ['lower', 'higher'],
+  );
+
+  // Storage & data — numeric pool field.
+  showCategory(view, 'Storage & data');
+  expectGuidance(
+    'storage.pool.max_connections',
+    'integer',
+    ['Lower', 'Higher'],
+    ['lower', 'higher'],
+  );
+
+  // Scheduling — numeric retention field.
+  showCategory(view, 'Scheduling');
+  expectGuidance(
+    'scheduler.dlq_retention_days',
+    'integer',
+    ['Lower', 'Higher'],
+    ['lower', 'higher'],
+  );
+
+  // Routing & resilience — numeric threshold field.
+  showCategory(view, 'Routing & resilience');
+  expectGuidance(
+    'circuit_breaker.failures_to_open',
+    'integer',
+    ['Lower', 'Higher'],
+    ['lower', 'higher'],
+  );
+
+  // Identity & access — env-var string field with a recommendation.
+  showCategory(view, 'Identity & access');
+  expectGuidance(
+    'cluster.token_env',
+    'string',
+    ['Recommendation'],
+    ['recommendation'],
+  );
+
+  // Pricing & quotas — numeric batch field.
+  showCategory(view, 'Pricing & quotas');
+  expectGuidance(
+    'subscription_quota.writer_batch_max_records',
+    'integer',
+    ['Lower', 'Higher'],
+    ['lower', 'higher'],
+  );
+
+  // Runtime & observability — boolean field shows On/Off effects.
+  showCategory(view, 'Runtime & observability');
+  expectGuidance(
+    'observability.log_redaction',
+    'boolean',
+    ['On', 'Off'],
+    ['enabled', 'disabled'],
+  );
+});
+
+test('section grids use the 1/2/3-column contract with full-span composite editors', () => {
+  setSettingsLoaded();
+  const view = render(<SettingsComponent />);
+
+  const expectGridContract = (
+    grid: Element | null | undefined,
+    name: string,
+  ) => {
+    expect(grid, `${name} grid`).not.toBeNull();
+    expect(grid?.className, name).toContain('grid-cols-1');
+    expect(grid?.className, name).toContain('md:grid-cols-2');
+    expect(grid?.className, name).toContain('2xl:grid-cols-3');
+    expect(grid?.className, name).not.toContain('lg:grid-cols-2');
+  };
+
+  // Network: scalar fields sit in the responsive grid; the optional TLS
+  // object toggle is a composite and spans every column.
+  const proxyAddr = document.querySelector<HTMLElement>(
+    '[data-config-path="listener.proxy_addr"]',
+  );
+  const networkGrid = proxyAddr?.parentElement;
+  expectGridContract(networkGrid, 'listener-endpoints');
+  expect(proxyAddr?.className).not.toContain('col-span-full');
+  // The optional TLS object is a composite: it renders as a full-span toggle
+  // inside its own section's grid.
+  const tlsSection = document.querySelector<HTMLElement>(
+    '[data-config-section="tls"]',
+  );
+  const tlsToggle = tlsSection?.querySelector<HTMLElement>(
+    '[data-config-path="listener.tls"]',
+  );
+  expect(tlsToggle).not.toBeNull();
+  expect(tlsToggle?.className).toContain('col-span-full');
+  expect(tlsToggle?.parentElement?.className).toContain('grid');
+
+  // Viewport contract: below xl the native select drives a full-width panel,
+  // including the 1024px tablet case where md:grid-cols-2 sections retain
+  // enough width for their controls; the category rail starts at xl only.
+  const rail = screen.getByTestId('config-rail');
+  expect(rail.className).toMatch(/hidden.*xl:block|xl:block.*hidden/);
+  expect(rail.className).not.toContain('lg:block');
+  expect(rail.className).not.toContain('md:block');
+  const railLayout = rail.parentElement;
+  expect(railLayout?.className).toContain('xl:flex');
+  expect(railLayout?.className).not.toContain('lg:flex');
+  expect(railLayout?.className).not.toContain('md:flex');
+  const railPanel = rail.nextElementSibling as HTMLElement;
+  expect(railPanel.className).toContain('xl:mt-0');
+  expect(railPanel.className).not.toContain('lg:mt-0');
+  expect(railPanel.className).not.toContain('md:mt-0');
+  const categorySelect = screen.getByRole('combobox', {
+    name: 'Configuration category',
+  });
+  expect(categorySelect.className).toContain('xl:hidden');
+  expect(categorySelect.className).not.toContain('lg:hidden');
+  expect(categorySelect.className).not.toContain('md:hidden');
+  expect(minHeightPx(categorySelect)).toBeGreaterThanOrEqual(44);
+
+  // Storage & data: the tagged-union storage editor spans the grid.
+  showCategory(view, 'Storage & data');
+  const storage = document.querySelector<HTMLElement>(
+    '[data-config-path="storage"]',
+  );
+  expect(storage?.className).toContain('col-span-full');
+  expect(storage?.parentElement?.className).toContain('grid');
+  const maxConnections = document.querySelector<HTMLElement>(
+    '[data-config-path="storage.pool.max_connections"]',
+  );
+  expectGridContract(maxConnections?.parentElement, 'database-pool');
+
+  // Scheduling: the recurring jobs editor is a full-span composite.
+  showCategory(view, 'Scheduling');
+  const jobs = document.querySelector<HTMLElement>(
+    '[data-config-path="scheduler.recurring_jobs"]',
+  );
+  expect(jobs?.className).toContain('col-span-full');
+  expect(jobs?.parentElement?.className).toContain('grid');
+
+  // Identity & access: admin providers and the nested cluster object span
+  // the grid; the nested object's inner grid follows the same contract.
+  showCategory(view, 'Identity & access');
+  const providers = document.querySelector<HTMLElement>(
+    '[data-config-path="admin.auth.providers"]',
+  );
+  expect(providers?.className).toContain('col-span-full');
+  const cluster = document.querySelector<HTMLElement>(
+    '[data-config-path="cluster"]',
+  );
+  expect(cluster?.className).toContain('col-span-full');
+  const clusterChild = document.querySelector<HTMLElement>(
+    '[data-config-path="cluster.token_env"]',
+  );
+  expectGridContract(clusterChild?.parentElement, 'cluster');
 });
