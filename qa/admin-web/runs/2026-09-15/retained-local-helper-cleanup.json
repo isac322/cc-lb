@@ -1,0 +1,45 @@
+{
+  "schema": "cc-lb-retained-local-helper-cleanup/v1",
+  "services": [
+    {
+      "name": "admin-web-qa-sqlite",
+      "result": "Stopped admin-web-qa-sqlite: exited exit=0 uptime=23h5m restarts=0",
+      "data_deleted": false
+    },
+    {
+      "name": "admin-web-qa-pg-app",
+      "result": "Stopped admin-web-qa-pg-app: exited exit=0 uptime=22h10m restarts=0",
+      "data_deleted": false
+    },
+    {
+      "name": "admin-web-recorder-smoke",
+      "result": "Stopped admin-web-recorder-smoke: exited exit=143 uptime=23h14m restarts=0",
+      "data_deleted": false
+    },
+    {
+      "name": "admin-web-qa-fake-upstream",
+      "result": "Stopped admin-web-qa-fake-upstream: exited exit=143 uptime=22h37m restarts=0",
+      "data_deleted": false
+    },
+    {
+      "name": "admin-web-qa-oauth-mock",
+      "result": "Stopped admin-web-qa-oauth-mock: exited exit=143 uptime=22h21m restarts=0",
+      "data_deleted": false
+    }
+  ],
+  "closed_ports": [
+    19080,
+    19081,
+    53251,
+    53252,
+    53253,
+    53261,
+    53262,
+    53263,
+    53300
+  ],
+  "fixture_database_and_snapshot_files_deleted": false,
+  "qa_postgres_storage_service": "retained; no database/container removal performed",
+  "production_operations": 0,
+  "full_runtime_qa_complete": false
+}

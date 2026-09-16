@@ -51,8 +51,8 @@
 
 ## 8. 머지 보류 후 로컬 추가 검증
 
-- PR #793 머지 보류는 유지한다. 이 절의 추가 증거는 현재 PR head의 CI 범위와 구분하며 아직 새 커밋·푸시·배포에 반영하지 않았다.
-- `post-hold-reassessment/native-source-mapping.json`: 원래 native 관측 245행을 오프라인 대조했다. 244행은 정식 ID, 1행은 이름 편집 후 Escape 취소의 명시적 변형 별칭이다. 기존 실행 상태와 운영 행렬은 바꾸지 않았다.
+- PR #793 머지 보류는 유지한다. 후속 로컬 검증과 승인된 수정은 `80e1180f…`, `91cd5219…` 커밋으로 draft PR에 반영됐고 각 head의 CI를 별도로 확인했다. 이 반영은 머지나 운영 배포가 아니다.
+- `post-hold-reassessment/native-source-mapping.json`: 원래 native 관측 245행을 오프라인 대조했다. 244행은 정식 ID, 1행은 이름 편집 후 Escape 취소의 명시적 변형 별칭이다. 기존 실행 상태와 운영 행렬은 바꾸지 않았으며, 최신 분류는 runtime-progress의 후속 overlay에 연결했다.
 - `post-hold-reassessment/independent-page-oracle-check.json`: 실제 로컬 PostgreSQL Plugins 탐색에서 사전에 고정한 경로·제목을 DOM에서 별도 추출한 상태와 비교하고 원본 PNG를 확인했다. 종료된 관측 창과 실제 registry SQL/acquire 연결을 검증했다. 과거 열린 window·유실 자료·동일 HTML 해시를 양쪽에 복사한 oracle은 그대로 한계로 남긴다.
 - **2026-09-16 로컬 사용량 전이:** `post-hold-usage-status/verification.json`에 저장소·API·UI의 `$1.25 · 2.0K tok` → `$2.00 · 3.0K tok` 변화를 기록했다. 원시 request ingestion이 아닌 직접 시드한 rollup의 표시 경로 검증이다.
 - **2026-09-16 로컬 상태 전이:** OAuth credential 없는 upstream의 실제 적용 오류와 danger 도트·오류 title을 확인했다. disable API 뒤 저장소·status API·UI에서 disabled·neutral·title 없음으로 전이했다. 연결 불가능한 URL을 오류 발생 원인으로 간주했던 가설은 기각했다. native tooltip 픽셀은 미검증이다.
@@ -73,3 +73,10 @@
 - Apply 전용 안내는 공유 aria-live pipeline 밖에 두고 Apply만 설명 대상으로 연결했다. Validate 설명은 그대로 유지했다. 초기 로딩·조회 오류·미확인 상태의 안내도 구분한다.
 - 최종 로컬 typecheck의 package-script 실행은 shell의 명령 검색 문제로 tsgo를 찾지 못했다. 설치된 동일 버전 tsgo를 절대경로로 실행한 `-b --noEmit` 검사는 통과했다. 전역 shell 설정이나 의존성을 변경하지 않았다.
 - **별도 기존 계약 제한:** 지원 모드 Apply handler는 `{status: applied}`를 반환하지만 client는 `applied_revision` 등을 기대한다. 성공 토스트의 잘못된 revision 표시는 소스 추론이며 이 브라우저 run에서 실행한 결과가 아니다. client의 `expected_revision`도 해당 handler가 추출하지 않는다. history 재조회는 있으나 새 이력 생성은 별도 미검증이다. 이번 capability 승인 범위 밖이므로 고치지 않았다.
+
+## 11. 현재 보고와 과거 관측의 구분
+
+- `runtime-progress.json`과 `.md`는 2026-09-16 후속 overlay를 포함한다. 원래 정규화 1,511행·분류 계수·미해결 135항목은 과거 snapshot으로 보존하며 현재 남은 작업 수로 오인하지 않는다.
+- 최신 source에는 205 actions와 595 variant labels가 있다. label 수는 entity·page·poll을 전개한 실행 분모가 아니며 실행률 계산에 사용하지 않는다.
+- Base URL 초기화, file-provider Apply 비활성화, 두 로컬 usage/status 전이는 각각의 제한된 해결 범위를 갖는다. 전체 운영 행렬과 순수 DB/queue wait, 비운영 OAuth 성공 경로, 운영 계측 적용·머지는 여전히 미완료다.
+- 사용자가 비운영 OAuth 테스트 계정을 현재 제공할 수 없다고 확인했다. 실제 성공 경로만 외부 전제조건 차단으로 남기고, 이미 검증된 실패·취소·격리 기능 결과와 분리한다. 운영 토큰이나 임의 계정을 대신 사용하지 않는다.

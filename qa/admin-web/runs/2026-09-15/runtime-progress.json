@@ -1,18 +1,18 @@
 {
   "schema": "cc-lb-admin-web-runtime-progress/v2",
-  "as_of_date": "2026-09-15",
+  "as_of_date": "2026-09-16",
   "runtime_complete": false,
   "overall_status": "INCOMPLETE",
   "overall_pass": false,
   "overall_pass_blockers": [
-    "Expected full runtime denominator remains unknown because actual entity/page/cursor/poll populations are not exhaustively fixed.",
-    "Production UI execution is incomplete; the full production matrix is not covered.",
-    "Pure DB execution time and pure pool queue wait remain unmeasured; server-timing evidence measures handler span, query-stream lifetime, and full acquire only.",
-    "PostgreSQL canonical browser capture is incomplete (action_window_still_open); earlier PostgreSQL UI rows without retained server logs were not substituted.",
-    "Provider OAuth external actions were not executed.",
-    "Production deployment of the approved candidate is not done.",
-    "Native pointer coverage is blocked for the keepalive UI path (Camofox 410).",
-    "Product failures, blocked variants, and not-executed safety cells remain."
+    "The full runtime entity/variant/page/cursor/poll denominator is not yet fixed.",
+    "Production UI execution and same-request production SQL/pool evidence are incomplete; isolated proofs do not replace them.",
+    "Pure DB execution and pure pool queue wait remain unmeasured; observed driver and acquire-total durations are not substituted.",
+    "Historical PostgreSQL open-window and missing-log artifacts remain incomplete. A later independently checked closed local window is separate evidence, not a reconstruction of them.",
+    "The native pointer capability was recovered, but the complete Keepalive native UI/cursor matrix was not executed after recovery.",
+    "The user confirmed no non-production OAuth test account is currently available; successful real OAuth/metadata scenarios remain blocked without substituting production credentials or mocks.",
+    "The approved candidates have not been activated in production, and PR #793 remains held for merge.",
+    "The pre-existing supported Apply response/expected_revision/history contract needs separate disposition; capability reporting does not resolve it."
   ],
   "source_versions": {
     "current_baseline": {
@@ -87451,7 +87451,8 @@
     "artifacts_written": [
       "cc-lb-admin-web-qa-completion/qa/admin-web/runs/2026-09-15/runtime-progress.json",
       "cc-lb-admin-web-qa-completion/qa/admin-web/runs/2026-09-15/runtime-progress.md"
-    ]
+    ],
+    "scope": "This derived-report synchronization only; separately approved application changes and their evidence are described in the resolution overlays."
   },
   "approved_fix_overlay": {
     "scope": "Approved FIX01..05 candidate; overlay only — baseline ef70b347 cells, classifications, and 433/205 denominators are unchanged.",
@@ -87986,11 +87987,17 @@
   "known_bugs_no_unapproved_fix": [
     {
       "id": "clearBaseURL",
-      "note": "Known product bug; no unapproved runtime fix applied."
+      "note": "The historical missing clear behavior was subsequently approved, fixed and verified in a local candidate; production activation is not asserted.",
+      "historical_note": "Known product bug; no unapproved runtime fix applied.",
+      "current_disposition": "resolved_in_approved_candidate",
+      "resolution_evidence": "base-url-clear/verification.json"
     },
     {
       "id": "SettingsApply",
-      "note": "Known product bug; no unapproved runtime fix applied."
+      "note": "Unsupported-provider Apply enablement was subsequently approved and fixed through provider capability reporting. Existing supported-mode response/revision/history limitations remain separate and unresolved.",
+      "historical_note": "Known product bug; no unapproved runtime fix applied.",
+      "current_disposition": "unsupported_ui_fixed_supported_contract_limit_remains",
+      "resolution_evidence": "settings-apply-capability/verification.json"
     }
   ],
   "artifacts_written": [
@@ -88031,5 +88038,165 @@
     ],
     "all_passed": true,
     "note": "Main local final gate: 699 web tests, 191 current library tests, generator 433/170 + standard parse + counterproofs, independent privacy scan 91 files 0 secrets. These are build/lint/test gates, not runtime QA completion."
+  },
+  "baseline_observation_date": "2026-09-15",
+  "historical_snapshot_boundary": {
+    "fields": [
+      "normalized_cells",
+      "historical_attempts",
+      "classification_counts",
+      "unresolved_tasks",
+      "current_source_progress",
+      "production_source_progress"
+    ],
+    "note": "These fields preserve the original normalized observation snapshot and its unresolved-task list. Later narrow resolutions live in post_hold_resolution_overlay; neither historical counts nor missing production cells are silently rewritten."
+  },
+  "post_hold_resolution_overlay": {
+    "as_of_date": "2026-09-16",
+    "environment": "isolated fixtures and offline evidence reconciliation; not production activation",
+    "evidence": [
+      {
+        "kind": "native_mapping",
+        "path": "qa/admin-web/runs/2026-09-15/post-hold-reassessment/native-source-mapping.json",
+        "sha256": "05d0495fb750da0445ec11b68db69c82b6dc93398a575e07201a21c6428f776f"
+      },
+      {
+        "kind": "independent_ui_oracle",
+        "path": "qa/admin-web/runs/2026-09-15/post-hold-reassessment/independent-page-oracle-check.json",
+        "sha256": "7a4264e48b61f8008cd3647cb4bd338fa29f81701b869af42a9f431c100378cb"
+      },
+      {
+        "kind": "usage_status",
+        "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/verification.json",
+        "sha256": "6e00390f8a31bba0cc8bcdc92e5b8c0825fad9f36b7a41f2e648c875029f7cdc"
+      },
+      {
+        "kind": "base_url_clear",
+        "path": "qa/admin-web/runs/2026-09-15/base-url-clear/verification.json",
+        "sha256": "9c8b6733252aeef7c10bb0034aa8f2bcd83de81a0b5f0c6d1e7b9dbc97880506"
+      },
+      {
+        "kind": "settings_capability",
+        "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/verification.json",
+        "sha256": "74f38bb9dbe5706083ff80dd282513e236391b940d63807929f15011945cff22"
+      },
+      {
+        "kind": "supported_apply_limit",
+        "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/preexisting-supported-apply-limit.json",
+        "sha256": "ab4285caeb6cff74b937ec82bcc6d4d7087f12ba7328d39259c4881f229d7c78"
+      }
+    ],
+    "native_source_mapping": {
+      "plugins": {
+        "raw_rows": 33,
+        "exact_id_rows": 33,
+        "verified_variant_alias_rows": 0,
+        "unmapped_rows": 0,
+        "observed_entity_aliases": 2,
+        "reported_status_counts": {
+          "PASS": 15,
+          "BLOCKED": 4,
+          "NOT_APPLICABLE": 5,
+          "SKIPPED_WRITE": 5,
+          "PASS_TARGET_ONLY": 4
+        }
+      },
+      "upstreams": {
+        "raw_rows": 212,
+        "exact_id_rows": 211,
+        "verified_variant_alias_rows": 1,
+        "unmapped_rows": 0,
+        "observed_entity_aliases": 9,
+        "reported_status_counts": {
+          "PASS": 88,
+          "SKIPPED_WRITE": 94,
+          "BLOCKED": 20,
+          "NOT_APPLICABLE": 10
+        }
+      }
+    },
+    "independent_ui_oracle": {
+      "scope": "One local PostgreSQL Plugins page navigation",
+      "expected": {
+        "pathname": "/plugins",
+        "heading": "Plugins"
+      },
+      "action_closed": true,
+      "original_screenshot_preserved": true,
+      "historic_open_window_not_replaced": true
+    },
+    "local_variant_resolutions": [
+      {
+        "baseline_task_id": "UPSTREAM-004",
+        "result": "functional_state_transition_verified",
+        "scope": "Fresh isolated SQLite point-in-time and state-transition proof",
+        "full_measurement_pass": false
+      },
+      {
+        "baseline_task_id": "UPSTREAM-006",
+        "result": "functional_state_transition_verified",
+        "scope": "Fresh isolated SQLite point-in-time and state-transition proof",
+        "full_measurement_pass": false
+      }
+    ],
+    "base_url_clear": {
+      "result": "approved_fix_verified",
+      "candidate_sha256": "932d4865672405a6b2c32ed71e7c0bb44e94bd4d9fd23a6ffec59a5152f59ef8",
+      "focused_tests": {
+        "focused_tests_run": 33,
+        "passed": 33,
+        "selected_out": 819,
+        "sqlite_conformance": "executed and passed",
+        "postgres_conformance": "executed and passed",
+        "proxy_scope": "Actual Lifecycle dispatch captured by RecordingDispatcher before and after real storage clear/rebuild; no external provider network call."
+      },
+      "actual_ui_persistence_verified": true,
+      "deployed_to_production": false
+    },
+    "settings_capability": {
+      "result": "approved_capability_scope_verified",
+      "backend_tests": {
+        "run": 23,
+        "passed": 23,
+        "selected_out": 644
+      },
+      "web_tests": {
+        "files": 72,
+        "run": 700,
+        "passed": 700
+      },
+      "file_provider_apply_requests": 0,
+      "supported_apply_execution_contract_fixed": false
+    },
+    "held_pr": {
+      "repository": "isac322/cc-lb",
+      "number": 793,
+      "last_verified_head": "91cd5219bd9047d1339ff40e9aec11142867a36e",
+      "checks_at_that_head": {
+        "success": 11,
+        "conditional_skip": 1
+      },
+      "draft": true,
+      "merge_hold_continues": true
+    },
+    "full_runtime_qa_complete": false,
+    "current_source_snapshot": {
+      "actions": 205,
+      "declared_variant_labels": 595,
+      "request_occurrences": 149,
+      "note": "Static label counts only, not a fully expanded runtime cell denominator. Historical baseline variant count remains in the original snapshot.",
+      "ui_contract_sha256": "e08559922b06c1286c11a4137adabaab24a9b1f18c662c348214564db4623898"
+    }
+  },
+  "external_prerequisites": {
+    "nonproduction_oauth_account": {
+      "status": "unavailable_user_confirmed",
+      "confirmed_date": "2026-09-16",
+      "successful_oauth_and_metadata_checks": "blocked",
+      "production_token_copying": false,
+      "arbitrary_account_selection": false,
+      "fake_success_substitution": false,
+      "credential_access_or_external_calls_authorized_by_last_reply": false
+    }
   }
 }

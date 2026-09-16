@@ -1,6 +1,8 @@
-# Admin Web Runtime Progress — 2026-09-15
+# Admin Web Runtime Progress — updated 2026-09-16; baseline 2026-09-15
 
 > **현재 상태: INCOMPLETE.** 완료 보고가 아니라 동결한 source/evidence를 현재 실행·미실행·차단·실패 집합에 연결한 진행 ledger다. `runtime_complete=false`, `overall_pass=false`다.
+
+이 문서의 기존 정규화 행·분류 계수·135개 미해결 항목은 **과거 관측 snapshot**이다. 이후의 제한된 해결 증거는 아래 `후속 승인·검증 overlay`와 JSON의 `post_hold_resolution_overlay`에 별도로 기록한다. 과거 행을 새 결과로 덮어쓰거나 운영 실행률로 환산하지 않는다.
 
 ## 판정 요약
 
@@ -8,7 +10,7 @@
 - Production deployed: `e56d029ea8641827d420c582c5f41a72ab9e2182`
 - Audit candidate: `ef70b34+uncommitted-audit-patch-…` — 승인된 latest-200 범위의 별도 overlay이며 baseline FAIL을 삭제하지 않는다.
 - Approved fix candidate: `ef70b347` + uncommitted patch `7ef93773…` (binary `f564dcf5…`) — 별도 `approved_fix_overlay`이며 baseline 분모·셀을 바꾸지 않는다.
-- 입력 707개(전체 evidence/run 입력 동결; browser profile·credential·cache 디렉터리는 비입력으로 명시 제외), 누락 0개, JSON/JSONL parse error 0개.
+- 과거 input freeze는 707개 입력을 고정했다(browser profile·credential·cache 제외; 당시 누락 0·JSON/JSONL parse error 0). 이는 현재 run 디렉터리의 총 파일 수가 아니다. 후속 증거 6개는 overlay의 경로·SHA-256으로 별도 고정한다.
 - Canonical inventory는 approved uncommitted candidate 기준으로 재생성되었다(standard parser Ruby/Psych 통과, `approved-source-catalog-check.json`). 현재 분모는 433 rows / 170 storage operations / 422 production matrix rows이며, 아래 정규화 cell 수치는 historical 값을 그대로 보존한다.
 - 필수 SQL/pool correlation, native keepalive pointer, production UI matrix가 미완료이므로 overall PASS를 주장하지 않는다.
 
@@ -17,7 +19,7 @@
 | 기준 | 수치 | 의미 |
 |---|---:|---|
 | Current source action | 205 | `ui.json.items` 원시 배열 길이 |
-| Current base variant | 582 | `variants` 합계; runtime cell 수가 아님 |
+| Historical base variant | 582 | 원래 snapshot의 variant label 수. 현재 source는 595개 label이며 어느 쪽도 runtime cell 수가 아님 |
 | UI request occurrence | 149 | action별 `requests` 원시 합계 |
 | API endpoint row | 115 | api-read 70 + api-write 45 |
 | Canonical inventory row | 433 | ui_action 215 + network_request 162 + backend_endpoint 56 |
@@ -130,11 +132,11 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 - direct 성공 230과 abort 6은 UI 실행이 아니다.
 - heavy-card DOM UI artifact 1개는 최초 8,442ms HTTP 200과 자동 poll 8회를 관측했다.
 - 2s/3s/10s client deadline은 right-censored lower bound이며 HTTP server FAIL이 아니다.
-- native pointer는 Camofox 410, SQL/pool correlation은 unavailable이다.
+- 당시 native pointer는 Camofox 410으로 막혔다. 이후 다른 제한된 관측에서 native 기능은 복구됐지만 Keepalive의 전체 native UI·cursor 행렬과 운영 SQL/pool 상관 증거는 아직 확보하지 못했다.
 
 ## 미완료 작업 목록
 
-총 **135개 task**. 각 항목은 source, 환경, 사유, 원시 artifact에 연결된다. `→ approved-fix` 표시는 baseline 분류를 유지한 채 candidate 해결/제한 증거를 가리킨다.
+과거 snapshot의 **135개 task**를 보존한다. 아래 분류는 현재 남은 작업 수를 다시 계산한 결과가 아니다. `→ approved-fix`와 후속 overlay는 해당 환경·변형에 대한 새 증거만 연결하며 운영 전체 완료를 뜻하지 않는다.
 
 ### blocked (65)
 
@@ -353,7 +355,7 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 
 - `production-plugins-native-2026-09-15.json`, `production-upstreams-native-2026-09-15.json`: native Camofox bounded slice 관측. Raw 파일은 private이며 정확한 scope 확인이 pending이므로 `production_area_matrix`/`normalized_cells`에 편입하지 않고 별도 overlay로 기록한다.
 - Plugins: 33 rows / 20 unique item_id / PASS 15, PASS_TARGET_ONLY 4, BLOCKED 4, NOT_APPLICABLE 5, SKIPPED_WRITE 5 / writes 0 / measurement_blocked 4종 / unconfirmed 1(첫 Edit 클릭 미반응 — product bug 미확정).
-- Upstreams: 212 rows / 44 unique item_id / PASS 88, SKIPPED_WRITE 94, BLOCKED 20, NOT_APPLICABLE 10 / writes 0 / unmatched item_id 1(`UI-SRC-0D929B471D7A-name-edit`, bounded slice 범위 밖).
+- Upstreams: 원시 212 rows / 44 unique item_id / PASS 88, SKIPPED_WRITE 94, BLOCKED 20, NOT_APPLICABLE 10 / writes 0. 이후 오프라인 대조에서 접미사 ID `UI-SRC-0D929B471D7A-name-edit`를 기존 이름 편집의 Escape 취소 변형으로 연결했다. 9개 쓰기 미실행 행과 원래 상태는 그대로다.
 
 ## Scope 외 production GET (분리 기록)
 
@@ -361,9 +363,10 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 - GET `/admin/v1/auth/session` 404, `/admin/v1/status` 200, `/admin/v1/principals` 200(22건), `/admin/v1/upstreams` 200(9건), `/admin/v1/plugins/registry` 200(0건).
 - Local proof로도, historical production coverage로도, 부재로도 세지 않고 별도 기록한다.
 
-## Known bug (미수정)
+## 기존 제품 문제와 후속 승인 범위
 
-- `clearBaseURL`, `SettingsApply`: 알려진 product bug이며 승인되지 않은 runtime 수정을 적용하지 않았다.
+- `clearBaseURL`: 과거 미지원 동작을 별도 승인 후 로컬 후보에서 수정·검증했다. 운영 반영은 주장하지 않는다.
+- `SettingsApply`: 미지원 제공자의 버튼 활성화는 capability 표시로 수정했다. 지원 모드의 기존 응답 revision·expected_revision 처리·이력 생성 제한은 별도 미검증 사항이며 이번 capability 변경으로 해결됐다고 보지 않는다.
 
 ## Finalization gate (Main local, build/lint/test)
 
@@ -371,3 +374,15 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 - Main 보고 기준 web test 699, current library test 191, generator 433/170 + standard parse + counterproof, independent privacy scan 91 files 0 secret.
 - 이 gate는 build/lint/test 수준이며 runtime QA 완료가 아니다.
 
+
+## 후속 승인·검증 overlay
+
+- 현재 source snapshot: 205 actions, 595 declared variant labels, 149 request occurrences. runtime entity·page·poll 곱의 완전한 분모는 여전히 미확정이다.
+- Native source mapping: 보존된 245행 중 정식 ID 244행, 근거가 확인된 Escape 취소 별칭 1행. 원래 실행·측정 상태는 바꾸지 않았다.
+- `post-hold-reassessment/independent-page-oracle-check.json`: 로컬 PostgreSQL 한 페이지 탐색에서 사전 기대와 실제 DOM을 별도 비교하고 원본 PNG·종료된 window·서버 연결을 확인했다. 과거 열린 window나 유실 자료를 복구한 것은 아니다.
+- `post-hold-usage-status/verification.json`: `UPSTREAM-004` 사용량 표시와 `UPSTREAM-006` 오류 상태의 새 격리 SQLite 기능·상태 전이 증거. 운영 coverage나 모든 timing 필드 완료를 뜻하지 않는다.
+- `base-url-clear/verification.json`: 생략/명시적 null/URL 삼상태를 별도 승인 후 수정했다. 양 DB·HTTP·실제 Lifecycle dispatch 33개 회귀와 UI 저장·새 조회·새로고침을 확인했다.
+- `settings-apply-capability/verification.json`: backend 23개, Web 700개 및 실제 file-provider Save/Validate 뒤 Apply 차단을 확인했다. 해당 UI 관측 구간의 Apply 요청은 0건이다. 성공 metadata와 history 문제는 `preexisting-supported-apply-limit.json`에 별도 기록했다.
+- 마지막 검증 PR head는 `91cd5219bd9047d1339ff40e9aec11142867a36e`이며 11개 검사 성공, 조건부 1개 제외를 확인했다. PR #793은 draft이고 사용자 머지 보류가 유지된다. 이 값은 확인한 시점의 기록이며 자동으로 미래 head에 적용하지 않는다.
+- 후속 후보의 운영 활성화, 전체 운영 UI 행렬, 실제 비운영 OAuth 성공 경로, 순수 DB 실행·pool queue wait는 아직 충족되지 않았다. `runtime_complete=false`, `overall_pass=false`를 유지한다.
+- 사용자는 2026-09-16 비운영 OAuth 테스트 계정이 현재 없다고 확인했다. 실제 성공 경로는 차단 상태로 유지하며 운영 토큰·임의 계정·가짜 응답으로 대체하지 않는다. 이 답변으로 자격증명 접근이나 외부 호출이 승인된 것은 아니다.
