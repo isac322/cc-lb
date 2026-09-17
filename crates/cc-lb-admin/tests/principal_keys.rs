@@ -1,6 +1,9 @@
 use crate::admin_test_common;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 
+use std::sync::Arc;
+
+use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_storage_api::{AuditStore, RequestEvent, RequestEventStore};
 use serde_json::json;
 
@@ -31,6 +34,97 @@ async fn key_issue_rejects_removed_kind_fields() {
         assert_eq!(body["error"], "validation_failed");
         assert!(body["message"].as_str().unwrap().contains(removed));
     }
+}
+
+#[tokio::test]
+async fn key_issue_accepts_omitted_and_empty_labels_and_authenticates() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let (_, _, principal) = server
+        .client
+        .post_json(
+            "/admin/v1/principals",
+            json!({ "name": "optional-key-label", "kind": "machine", "allowed_models": [], "default_limits": [] }),
+        )
+        .await;
+    let principal_id = principal["id"].as_str().unwrap();
+    admin_test_common::set_dynamic_principal(&server.dynamic_view, principal_id);
+    let authn = BuiltinAuthn::new(
+        admin_test_common::key_store(server.storage.clone()),
+        Arc::new(cc_lb_clock::SystemClock),
+    );
+
+    for request in [json!({}), json!({ "label": "" })] {
+        let (status, _, issued) = server
+            .client
+            .post_json(
+                &format!("/admin/v1/principals/{principal_id}/keys"),
+                request,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "issue response: {issued}");
+        let expected_key_id = issued["key_id"].as_str().unwrap().to_owned();
+
+        let plaintext = issued["plaintext_key"].as_str().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_bytes(plaintext.as_bytes()).unwrap(),
+        );
+        let view = server.dynamic_view.load();
+        let authenticated = authn
+            .authenticate(&headers, &view.principal_view)
+            .await
+            .expect("empty-label key authenticates");
+        assert_eq!(authenticated.principal_id, principal_id);
+        assert_eq!(authenticated.key_id, expected_key_id);
+    }
+
+    let (status, _, body) = server
+        .client
+        .get(&format!("/admin/v1/principals/{principal_id}/keys"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let keys = body["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 2);
+    assert!(keys.iter().all(|key| key["label"].is_null()));
+}
+
+#[tokio::test]
+async fn key_issue_maps_invalid_nonempty_labels_to_bad_request() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let (_, _, principal) = server
+        .client
+        .post_json(
+            "/admin/v1/principals",
+            json!({ "name": "invalid-key-label", "kind": "machine", "allowed_models": [], "default_limits": [] }),
+        )
+        .await;
+    let principal_id = principal["id"].as_str().unwrap();
+
+    for (label, reason_fragment) in [("bad\0label", "NUL"), ("system.reserved-label", "system")] {
+        let (status, _, body) = server
+            .client
+            .post_json(
+                &format!("/admin/v1/principals/{principal_id}/keys"),
+                json!({ "label": label }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_input");
+        assert_eq!(body["field"], "label");
+        assert!(
+            body["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(reason_fragment))
+        );
+    }
+
+    let (status, _, body) = server
+        .client
+        .get(&format!("/admin/v1/principals/{principal_id}/keys"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["keys"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
