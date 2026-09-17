@@ -18,6 +18,7 @@ import {
   type AggregateResponse,
   type AnalysisResponse,
   ApiError,
+  type Upstream as ApiUpstream,
   type AuditQueryResponse,
   type ConfigDraftResponse,
   type ConfigDraftSavedResponse,
@@ -81,30 +82,10 @@ export const POLLING_INTERVALS = {
   CACHE_KEEPALIVE_DETAIL_MS: 5_000,
 };
 
-export interface UpstreamStatus {
-  last_apply_error: string | null;
-  last_apply_at_unix_secs: number | null;
-  last_warmup_at_unix_secs: number | null;
-}
-
-export interface Upstream {
-  id: string;
-  name: string;
-  kind: 'anthropic_api_key' | 'anthropic_oauth';
-  enabled: boolean;
-  spec_revision: number;
-  base_url?: string | null;
-  api_key_env?: string | null;
-  warmup_enabled: boolean;
-  warmup_dialect_plugin: UpstreamWarmupDialectPlugin | null;
-  status: UpstreamStatus;
-}
-
-export interface UpstreamWarmupDialectPlugin {
-  wasm_registry_id: string;
-  config: Record<string, unknown>;
-  wire_version?: number;
-}
+export type Upstream = ApiUpstream;
+export type UpstreamWarmupDialectPlugin = NonNullable<
+  Upstream['warmup_dialect_plugin']
+>;
 
 interface UpstreamListResp {
   upstreams: Upstream[];
