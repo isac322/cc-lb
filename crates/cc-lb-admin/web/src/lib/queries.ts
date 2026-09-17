@@ -300,6 +300,7 @@ export const qk = {
   pluginRegistry: ['plugins', 'registry'] as const,
   pluginChain: (pid: string, slot?: ChainSlot) =>
     ['plugin-chain', pid, slot ?? 'all'] as const,
+  pluginReferences: (id: string) => ['plugin-references', id] as const,
   events: (filters: Record<string, string | undefined>) =>
     ['events', filters] as const,
   audit: (filters: Record<string, string | undefined>) =>
@@ -1415,18 +1416,25 @@ export interface PluginReferencesResponse {
 
 export function usePluginReferences(id: string | null) {
   return useQuery({
-    queryKey: ['plugin-references', id],
+    queryKey: qk.pluginReferences(id ?? ''),
     queryFn: () =>
       getJson<PluginReferencesResponse>(
         `/admin/v1/plugins/registry/${id}/references`,
       ),
     enabled: !!id,
+    gcTime: 0,
   });
 }
 
 export function useDeletePlugin() {
   const qc = useQueryClient();
   return useMutation({
+    onMutate: async (vars) => {
+      await qc.cancelQueries({
+        queryKey: qk.pluginReferences(vars.id),
+        exact: true,
+      });
+    },
     mutationFn: ({
       id,
       revision,
@@ -1451,7 +1459,6 @@ export function useDeletePlugin() {
     onSuccess: async (_data, vars) => {
       const invalidations = [
         qc.invalidateQueries({ queryKey: qk.pluginRegistry }),
-        qc.invalidateQueries({ queryKey: ['plugin-references', vars.id] }),
       ];
       if (vars.cascade) {
         invalidations.push(
@@ -1460,6 +1467,11 @@ export function useDeletePlugin() {
         );
       }
       await Promise.all(invalidations);
+      qc.removeQueries({
+        queryKey: qk.pluginReferences(vars.id),
+        exact: true,
+        type: 'inactive',
+      });
     },
   });
 }

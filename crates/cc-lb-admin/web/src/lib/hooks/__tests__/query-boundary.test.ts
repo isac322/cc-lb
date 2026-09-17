@@ -16,9 +16,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   type PluginChainEntry,
   type Principal,
+  qk,
   type Upstream,
   useDeletePlugin,
   usePluginChain,
+  usePluginReferences,
   usePrincipals,
   usePrincipalWritePending,
   useRouterTerminalStrategy,
@@ -131,7 +133,7 @@ describe('query observer boundaries', () => {
     expect(screen.getByTestId('disabled-value').textContent).toBe('disabled');
   });
 
-  it('refreshes observed plugin-chain and upstream state after a cascade delete', async () => {
+  it('refreshes cascade side effects without refetching deleted plugin references', async () => {
     const principalId = 'principal-1';
     const pluginId = 'plugin-1';
     const oldChainEntry: PluginChainEntry = {
@@ -172,6 +174,7 @@ describe('query observer boundaries', () => {
       warmup_dialect_plugin: null,
     };
     let cascadeApplied = false;
+    let referenceGetCount = 0;
     const fetchMock = vi.fn(
       async (
         input: RequestInfo | URL,
@@ -183,6 +186,32 @@ describe('query observer boundaries', () => {
         if (method === 'GET' && url === '/admin/v1/upstreams') {
           return jsonResponse({
             upstreams: [cascadeApplied ? updatedUpstream : oldUpstream],
+          });
+        }
+        if (
+          method === 'GET' &&
+          url === `/admin/v1/plugins/registry/${pluginId}/references`
+        ) {
+          referenceGetCount += 1;
+          if (cascadeApplied) {
+            return new Response(
+              JSON.stringify({ error: 'unknown_registry_entry' }),
+              {
+                status: 404,
+                headers: { 'Content-Type': 'application/json' },
+              },
+            );
+          }
+          return jsonResponse({
+            registry: {
+              id: pluginId,
+              name: 'Plugin 1',
+              refcount: 2,
+              revision: 4,
+            },
+            refcount: 2,
+            reference_fingerprint: 'references-v1',
+            references: [],
           });
         }
         if (
@@ -208,14 +237,16 @@ describe('query observer boundaries', () => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
-    const { result } = renderHook(
+    const { result, unmount } = renderHook(
       () => {
         const upstreams = useUpstreams();
         const pluginChain = usePluginChain(principalId);
         const deletePlugin = useDeletePlugin();
+        const pluginReferences = usePluginReferences(pluginId);
         return {
           upstream: upstreams.data?.upstreams[0],
           chainEntries: pluginChain.data?.entries,
+          referenceFingerprint: pluginReferences.data?.reference_fingerprint,
           deletePlugin: deletePlugin.mutateAsync,
         };
       },
@@ -228,6 +259,7 @@ describe('query observer boundaries', () => {
     await waitFor(() => {
       expect(result.current.upstream?.spec_revision).toBe(7);
       expect(result.current.chainEntries?.[0]?.revision).toBe(3);
+      expect(result.current.referenceFingerprint).toBe('references-v1');
     });
 
     await act(async () => {
@@ -243,6 +275,14 @@ describe('query observer boundaries', () => {
       expect(result.current.chainEntries).toEqual([]);
       expect(result.current.upstream?.spec_revision).toBe(8);
       expect(result.current.upstream?.warmup_dialect_plugin).toBeNull();
+      expect(referenceGetCount).toBe(1);
+    });
+
+    unmount();
+    await waitFor(() => {
+      expect(
+        client.getQueryData(qk.pluginReferences(pluginId)),
+      ).toBeUndefined();
     });
   });
 
