@@ -92,7 +92,9 @@ pub struct UpstreamCreate {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpstreamUpdate {
     pub name: Option<String>,
-    pub base_url: Option<Url>,
+    /// `None` preserves the override; `Some(None)` clears it;
+    /// `Some(Some(url))` sets a new override.
+    pub base_url: Option<Option<Url>>,
     pub enabled: Option<bool>,
     pub api_key_ciphertext: Option<Vec<u8>>,
     pub oauth_token_generation: Option<u64>,
