@@ -26,6 +26,18 @@ impl ValidationError {
 
 pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_admin_auth(config)?;
+    validate_tls_filesystem(config)?;
+    validate_storage(config)?;
+    validate_storage_filesystem(config)?;
+    validate_event_bus(config)?;
+    validate_oauth(config)?;
+    validate_upstream_affinity(config)?;
+    wasmtime::validate_wasmtime_runtime(config)?;
+    Ok(())
+}
+
+pub fn validate_config_without_filesystem(config: &Config) -> Result<(), ConfigError> {
+    validate_admin_auth(config)?;
     validate_tls(config)?;
     validate_storage(config)?;
     validate_event_bus(config)?;
@@ -144,26 +156,30 @@ fn validate_event_bus(config: &Config) -> Result<(), ValidationError> {
 }
 
 fn validate_tls(config: &Config) -> Result<(), ValidationError> {
-    if let Some(tls) = &config.listener.tls {
-        validate_tls_section("listener.tls", tls)?;
-    }
-    Ok(())
+    validate_tls_paths(config, |_, _| Ok(()))
 }
 
-fn validate_tls_section(prefix: &str, tls: &crate::TlsConfig) -> Result<(), ValidationError> {
-    let cert_field = format!("{prefix}.cert_path");
-    let cert_path = tls
-        .cert_path
-        .as_deref()
-        .ok_or_else(|| ValidationError::new(cert_field.clone(), "missing TLS certificate path"))?;
-    ensure_existing_file(&cert_field, cert_path)?;
+fn validate_tls_filesystem(config: &Config) -> Result<(), ValidationError> {
+    validate_tls_paths(config, ensure_existing_file)
+}
 
-    let key_field = format!("{prefix}.key_path");
-    let key_path = tls
-        .key_path
-        .as_deref()
-        .ok_or_else(|| ValidationError::new(key_field.clone(), "missing TLS key path"))?;
-    ensure_existing_file(&key_field, key_path)
+fn validate_tls_paths(
+    config: &Config,
+    mut validate_path: impl FnMut(&str, &Path) -> Result<(), ValidationError>,
+) -> Result<(), ValidationError> {
+    if let Some(tls) = &config.listener.tls {
+        let cert_path = tls.cert_path.as_deref().ok_or_else(|| {
+            ValidationError::new("listener.tls.cert_path", "missing TLS certificate path")
+        })?;
+        validate_path("listener.tls.cert_path", cert_path)?;
+
+        let key_path = tls
+            .key_path
+            .as_deref()
+            .ok_or_else(|| ValidationError::new("listener.tls.key_path", "missing TLS key path"))?;
+        validate_path("listener.tls.key_path", key_path)?;
+    }
+    Ok(())
 }
 
 fn validate_storage(config: &Config) -> Result<(), ConfigError> {
@@ -177,14 +193,19 @@ fn validate_storage(config: &Config) -> Result<(), ConfigError> {
                 });
             }
         }
-        StorageConfig::Sqlite { path } => {
-            if path == Path::new(DEFAULT_SQLITE_PATH) && !path.exists() {
-                return Ok(());
-            }
-            validate_sqlite_path(path)?;
-        }
+        StorageConfig::Sqlite { .. } => {}
     }
 
+    Ok(())
+}
+
+fn validate_storage_filesystem(config: &Config) -> Result<(), ConfigError> {
+    if let StorageConfig::Sqlite { path } = &config.storage {
+        if path == Path::new(DEFAULT_SQLITE_PATH) && !path.exists() {
+            return Ok(());
+        }
+        validate_sqlite_path(path)?;
+    }
     Ok(())
 }
 

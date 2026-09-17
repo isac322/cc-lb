@@ -3,74 +3,106 @@ use crate::config_admin_common;
 use axum::http::StatusCode;
 use cc_lb_storage_api::{ConfigDraftState, ConfigStore};
 use config_admin_common::{
-    app, authed_json, config_value, expected_revision_body, put_body, temp_storage, test_state,
+    app, authed_json, config_value, put_body, temp_storage, test_state_with_config_path,
+    write_config_file,
 };
 use serde_json::json;
 
+fn app_with_file(
+    dir: &tempfile::TempDir,
+    storage: std::sync::Arc<cc_lb_storage_sqlite::SqliteStorage>,
+) -> axum::Router {
+    let config = config_admin_common::minimal_config();
+    let path = write_config_file(dir.path(), &config);
+    app(test_state_with_config_path(config, Some(storage), path))
+}
+
 #[tokio::test]
 async fn get_no_draft_returns_zero_revision_and_null_payload() {
-    let (_dir, storage) = temp_storage().await;
-    let app = app(test_state(
-        config_admin_common::minimal_config(),
-        Some(storage),
-    ));
+    let (dir, storage) = temp_storage().await;
+    let app = app_with_file(&dir, storage);
 
-    let (status, _, json, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
+    let (status, headers, json, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
 
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("cache-control").unwrap(), "no-store");
     assert_eq!(json["draft"], serde_json::Value::Null);
     assert_eq!(json["revision"], 0);
     assert_eq!(json["last_validated_revision"], serde_json::Value::Null);
-    assert_eq!(json["last_validation_error"], serde_json::Value::Null);
+    assert_eq!(json["last_validation"], serde_json::Value::Null);
     assert_eq!(json["saved_at_unix_secs"], serde_json::Value::Null);
 }
 
 #[tokio::test]
-async fn put_draft_from_zero_revision_saves_invalid_json_without_validation() {
-    let (_dir, storage) = temp_storage().await;
-    let app = app(test_state(
-        config_admin_common::minimal_config(),
-        Some(storage),
-    ));
+async fn put_draft_saves_partial_json_without_validation_and_normalizes_nulls() {
+    let (dir, storage) = temp_storage().await;
+    let app = app_with_file(&dir, storage);
+    let draft = json!({
+        "listener": { "admin_addr": null },
+        "not_config": true,
+    });
 
-    let draft = json!({ "not_config": true });
-    let (status, _, json, _) = authed_json(
+    let (status, _, saved, _) = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
-        Some(put_body(draft.clone(), 0)),
+        "/admin/v1/config/draft",
+        Some(put_body(draft, 0)),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["revision"], 1);
-    assert!(json["saved_at_unix_secs"].as_u64().unwrap() > 0);
+    assert_eq!(saved["revision"], 1);
+    let (_, _, stored, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
+    assert_eq!(
+        stored["draft"],
+        json!({ "listener": {}, "not_config": true })
+    );
+}
 
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
-    assert_eq!(json["draft"], draft);
-    assert_eq!(json["revision"], 1);
+#[tokio::test]
+async fn put_draft_stores_only_storage_url_sentinel() {
+    let (dir, storage) = temp_storage().await;
+    let app = app_with_file(&dir, storage);
+    let secret = "postgres://replacement-user:replacement-password@localhost/db";
+
+    let (_, _, saved, bytes) = authed_json(
+        app.clone(),
+        "PUT",
+        "/admin/v1/config/draft",
+        Some(put_body(
+            json!({ "storage": { "kind": "postgres", "url": secret } }),
+            0,
+        )),
+    )
+    .await;
+    assert_eq!(saved["revision"], 1);
+    assert!(!String::from_utf8_lossy(&bytes).contains(secret));
+
+    let (_, _, stored, bytes) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
+    assert_eq!(
+        stored["draft"]["storage"]["url"],
+        cc_lb_config::STORAGE_URL_REDACTION_SENTINEL
+    );
+    assert!(!String::from_utf8_lossy(&bytes).contains(secret));
 }
 
 #[tokio::test]
 async fn stale_put_returns_current_revision_conflict() {
-    let (_dir, storage) = temp_storage().await;
-    let app = app(test_state(
-        config_admin_common::minimal_config(),
-        Some(storage),
-    ));
+    let (dir, storage) = temp_storage().await;
+    let app = app_with_file(&dir, storage);
 
     let _ = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
-        Some(put_body(json!({ "not_config": true }), 0)),
+        "/admin/v1/config/draft",
+        Some(put_body(json!({ "first": true }), 0)),
     )
     .await;
     let (status, _, json, _) = authed_json(
         app,
         "PUT",
-        "/admin/config/draft",
-        Some(put_body(json!({ "other": true }), 0)),
+        "/admin/v1/config/draft",
+        Some(put_body(json!({ "second": true }), 0)),
     )
     .await;
 
@@ -80,241 +112,72 @@ async fn stale_put_returns_current_revision_conflict() {
 }
 
 #[tokio::test]
-async fn saving_new_draft_invalidates_last_validated_revision() {
-    let (_dir, storage) = temp_storage().await;
-    let app = app(test_state(
-        config_admin_common::minimal_config(),
-        Some(storage),
-    ));
+async fn saving_new_draft_invalidates_prior_validation() {
+    let (dir, storage) = temp_storage().await;
+    let app = app_with_file(&dir, storage);
 
-    let (status, _, first, _) = authed_json(
+    let (_, _, first, _) = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(config_value(100), 0)),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(first["revision"], 1);
-
-    let (status, _, validated, _) = authed_json(
+    let (_, _, validated, _) = authed_json(
         app.clone(),
         "POST",
-        "/admin/config/draft/validate",
-        Some(expected_revision_body(1)),
+        "/admin/v1/config/draft/validate",
+        Some(json!({ "expected_revision": first["revision"] })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(validated["valid"], true);
+    assert_eq!(validated["file"]["valid"], true);
 
-    let (status, _, second, _) = authed_json(
+    let (_, _, second, _) = authed_json(
         app.clone(),
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         Some(put_body(config_value(200), 1)),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
     assert_eq!(second["revision"], 2);
 
-    let (_, _, json, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
-    assert_eq!(json["revision"], 2);
-    assert_eq!(json["last_validated_revision"], serde_json::Value::Null);
-    assert_eq!(json["last_validation_error"], serde_json::Value::Null);
-    assert_eq!(json["draft"]["timeouts"]["upstream_total_secs"], 200);
-}
-
-#[tokio::test]
-async fn validate_rejects_database_owned_top_level_keys() {
-    for key in [
-        "principals",
-        "upstreams",
-        "plugins",
-        "plugin_chains",
-        "quotas",
-    ] {
-        let (_dir, storage) = temp_storage().await;
-        let app = app(test_state(
-            config_admin_common::minimal_config(),
-            Some(storage),
-        ));
-        let mut draft = serde_json::Map::new();
-        draft.insert(key.to_owned(), json!({}));
-
-        let (status, _, saved, _) = authed_json(
-            app.clone(),
-            "PUT",
-            "/admin/config/draft",
-            Some(put_body(serde_json::Value::Object(draft), 0)),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-
-        let (status, _, validated, _) = authed_json(
-            app,
-            "POST",
-            "/admin/config/draft/validate",
-            Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(validated["valid"], false);
-        let error = validated["error"].as_str().unwrap();
-        assert!(error.contains("unknown field"));
-        assert!(error.contains(key));
-    }
-}
-
-#[tokio::test]
-async fn validate_accepts_top_level_retention_and_price_catalog() {
-    let (_dir, storage) = temp_storage().await;
-    let app = app(test_state(
-        config_admin_common::minimal_config(),
-        Some(storage),
-    ));
-    let mut draft = config_value(123);
-    draft["request_event_retention_days"] = json!(45);
-    draft["price_catalog"]["url"] = json!("https://catalog.example/prices.json");
-    draft["price_catalog"]["cache_path"] = json!("/tmp/catalog.json");
-
-    let (_, _, saved, _) = authed_json(
-        app.clone(),
-        "PUT",
-        "/admin/config/draft",
-        Some(put_body(draft, 0)),
-    )
-    .await;
-    let (status, _, validated, _) = authed_json(
-        app,
-        "POST",
-        "/admin/config/draft/validate",
-        Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(validated["valid"], true);
-}
-
-#[tokio::test]
-async fn validate_rejects_removed_config_wrappers_and_price_refresh_interval() {
-    for removed in ["api_keys", "downstream_auth", "tls"] {
-        let (_dir, storage) = temp_storage().await;
-        let app = app(test_state(
-            config_admin_common::minimal_config(),
-            Some(storage),
-        ));
-        let mut draft = config_value(123);
-        draft[removed] = json!({});
-
-        let (_, _, saved, _) = authed_json(
-            app.clone(),
-            "PUT",
-            "/admin/config/draft",
-            Some(put_body(draft, 0)),
-        )
-        .await;
-        let (_, _, validated, _) = authed_json(
-            app,
-            "POST",
-            "/admin/config/draft/validate",
-            Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
-        )
-        .await;
-
-        assert_eq!(validated["valid"], false);
-        assert!(validated["error"].as_str().unwrap().contains(removed));
-    }
-
-    for removed in ["token_env", "token"] {
-        let (_dir, storage) = temp_storage().await;
-        let app = app(test_state(
-            config_admin_common::minimal_config(),
-            Some(storage),
-        ));
-        let mut draft = config_value(123);
-        draft["admin"][removed] = json!("REMOVED_ADMIN_TOKEN_FIELD");
-
-        let (_, _, saved, _) = authed_json(
-            app.clone(),
-            "PUT",
-            "/admin/config/draft",
-            Some(put_body(draft, 0)),
-        )
-        .await;
-        let (_, _, validated, _) = authed_json(
-            app,
-            "POST",
-            "/admin/config/draft/validate",
-            Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
-        )
-        .await;
-
-        assert_eq!(validated["valid"], false);
-        assert!(validated["error"].as_str().unwrap().contains(removed));
-    }
-
-    let (_dir, storage) = temp_storage().await;
-    let app = app(test_state(
-        config_admin_common::minimal_config(),
-        Some(storage),
-    ));
-    let mut draft = config_value(123);
-    draft["price_catalog"]["refresh_interval"] = json!("1h");
-    let (_, _, saved, _) = authed_json(
-        app.clone(),
-        "PUT",
-        "/admin/config/draft",
-        Some(put_body(draft, 0)),
-    )
-    .await;
-    let (_, _, validated, _) = authed_json(
-        app,
-        "POST",
-        "/admin/config/draft/validate",
-        Some(expected_revision_body(saved["revision"].as_u64().unwrap())),
-    )
-    .await;
-
-    assert_eq!(validated["valid"], false);
-    assert!(
-        validated["error"]
-            .as_str()
-            .unwrap()
-            .contains("refresh_interval")
-    );
+    let (_, _, draft, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
+    assert_eq!(draft["last_validated_revision"], serde_json::Value::Null);
+    assert_eq!(draft["last_validation"], serde_json::Value::Null);
 }
 
 #[tokio::test]
 async fn get_draft_purges_expired_invalid_draft() {
-    let (_dir, storage) = temp_storage().await;
+    let (dir, storage) = temp_storage().await;
     storage
         .put_config_draft(
             ConfigDraftState {
                 draft: Some(json!({ "some": "bad" })),
                 revision: 0,
                 last_validated_revision: None,
-                last_validation_error: None,
+                last_validation: None,
                 saved_at_unix_secs: Some(1),
             },
             0,
         )
         .await
         .unwrap();
+    let validation = json!({
+        "revision": 1,
+        "file": { "valid": false, "issues": [] },
+        "effective": { "valid": false, "issues": [] },
+        "filesystem": [],
+        "overrides": [],
+    });
     storage
-        .set_last_validated_revision(1, Some("unknown field `some`".to_owned()))
+        .set_config_validation(1, false, validation)
         .await
         .unwrap();
-    let app = app(test_state(
-        config_admin_common::minimal_config(),
-        Some(storage),
-    ));
+    let app = app_with_file(&dir, storage);
 
-    let (status, _, body, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
+    let (_, _, body, _) = authed_json(app, "GET", "/admin/v1/config/draft", None).await;
 
-    assert_eq!(status, StatusCode::OK);
     assert_eq!(body["draft"], serde_json::Value::Null);
-    assert_eq!(body["last_validation_error"], serde_json::Value::Null);
+    assert_eq!(body["last_validation"], serde_json::Value::Null);
     assert_eq!(body["saved_at_unix_secs"], serde_json::Value::Null);
 }

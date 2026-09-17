@@ -378,6 +378,8 @@
 | Base URL 명시적 null 제거 | Upstream update의 생략/명시적 null/URL을 삼상태로 구분하고 양 DB·기존 호출부·UI·프록시 목적지 검증 | 2026-09-16 사용자 `명시적 null로 제거 승인` 선택 | 격리 구현·검증 완료. 키·토큰 null 계약과 운영 데이터·머지 보류는 유지 |
 | 앱 안전성 세 항목 수정 | 명시적 `clear_base_url`, LIMIT 전 `admin_only`, Audit 필터·정렬 인덱스와 읽기/쓰기 검증 | 2026-09-16 사용자 `세 문제 수정 승인` 선택 | 이 범위의 앱/API/새 migration 및 격리 검증만 승인. 기존 null 초기화 HTTP 계약을 대체. 머지·운영 배포·운영 DB 실행은 미승인 |
 | 대용량 운영 PG 인덱스 준비 | 운영 배포 전 동일한 5개 인덱스를 별도 승인된 온라인 작업으로 생성하고 정의·valid/ready 확인 | 미승인 | 직접 startup 생성은 쓰기를 막을 수 있으므로 사전 준비와 승인 전 배포 차단. 격리 리허설만 수행 |
+| 최종 PR의 master 통합 | PR #793에 master `b07b25ee`를 통합하고 새 Settings 파일 저장 계약·기존 독립 수정 보존, 미출시 인덱스 migration만 재번호 부여 | 2026-09-17 사용자 `최종 PR 수정 승인` 선택 | 별도 작업트리에서 검증 후 같은 draft PR에 commit/push. 호환성 임시 릴리스·운영 DDL·머지·배포는 제외 |
+| PostgreSQL 초안 revision 저장 | `ConfigStore::put_config_draft`의 생성/조건부 갱신 분리 및 기존 revision 회귀 시나리오를 양 DB harness에 등록 | 2026-09-17 사용자 `수정하고 검증 계속` 선택 | 동일 DB에서 수정 전 HTTP 500, 수정 후 revision 7→8 HTTP 200 및 stale revision 409 확인. 공개 API·schema 변경 없음 |
 
 문서의 TODO가 모두 체크되고, 실제 증거의 필수 항목이 모두 충족되고, 승인 필요한 작업까지 완료되기 전에는 goal을 완료 처리하지 않는다.
 
@@ -400,3 +402,30 @@ PostgreSQL의 plain `CREATE INDEX`는 생성하는 동안 해당 테이블의 �
 따라서 대용량 운영 `audit_log_v1`에서는 새 앱 배포보다 먼저, 별도로 승인받은 작업에서 새 migration과 동일한 인덱스 이름·키 순서·조건으로 `CREATE INDEX CONCURRENTLY`를 한 문장씩 transaction 밖에서 실행해야 한다. 앱 migration 경로 안에서 concurrent 생성을 실행하거나 timeout을 해제하지 않는다. 생성 후 대상 테이블, 전체 정의, `indisvalid`, `indisready`를 확인한다. 이름만 같은 잘못된/invalid 인덱스는 `IF NOT EXISTS`만으로 검증되지 않는다.
 
 올바른 사전 생성이 확인되면 앱의 새 migration은 인덱스 생성을 건너뛴다. 이 경로도 짧은 잠금과 migration 기록 작업까지 없어진다는 뜻은 아니다. 격리 10만 행 리허설은 운영 무중단 증명이나 운영 DDL 승인으로 간주하지 않는다. SQLite 검증은 별도 writer가 없는 격리 startup에서 수행했으며 인덱스 생성이 다른 writer에 영향을 주지 않는다고 주장하지 않는다.
+
+### 7.3 최종 통합과 단일 유지보수 전환의 경계
+
+- 최종 후보는 PR #793의 `a9da5c3c`와 master `b07b25ee`를 통합한다. 앞서 실험한 임시 키 발급 중지·migration 상한·호환성 중간 릴리스는 이 후보에 포함하지 않는다.
+- Settings는 master의 editor → draft → validate → atomic file save / TOML download 계약을 유지한다. 저장은 실행 중 설정을 바꾸지 않는다. 새 설정의 활성화에는 프로세스 재시작이 필요하다. 기존 Apply 지원 필드·current/schema/diff/apply/reload 경로는 현재 계약에서 제거한다. 과거 실행 증거는 그대로 보존한다.
+- 이미 master에 있는 PostgreSQL `0119`와 SQLite `0087` history 정리 migration은 byte 단위로 보존한다. 이 PR의 미출시 Audit 인덱스만 PostgreSQL `0120`–`0124`, SQLite `0088`로 옮긴다. 과거 migration의 checksum은 변경하지 않는다.
+- History 정리는 조회 가능한 JSON을 revision·시각 메타데이터로 줄이는 작업이다. WAL, 과거 백업, 재사용 전 저장 페이지까지 비밀을 물리적으로 지웠다는 뜻이 아니다. 별도 유지보수·credential 회전은 이번 통합에서 실행하지 않는다.
+- 격리 PostgreSQL 18에서 실제 구버전 binary로 schema 114와 키를 만든 뒤 종료하고 최종 후보를 시작했다. schema 124, 기존 migration checksum 보존, 같은 키의 전환 전후 프록시 HTTP 200을 확인했다. 작은 합성 DB의 결과이며 운영 DB의 migration 시간이나 실제 배포 성공 증거가 아니다.
+- 운영 전환은 별도 승인 대상이다. 확인 당시 활성 앱·primary는 `runbear-local`, `runbear-operation` 앱 replica는 0이고 DB는 standby였다. 실행 시점에 대상·백업·구버전 종료를 다시 확인해야 한다. 이 문서는 scale·DDL·릴리스·ArgoCD sync를 승인하지 않는다.
+
+### 7.4 PostgreSQL 초안 revision 결함과 회귀 증거
+
+- 기존 SQL의 `INSERT ... SELECT ... WHERE expected_revision = 0`은 기존 행을 갱신할 때도 입력 행을 제거했다. 올바른 revision으로 두 번째 초안을 저장해도 storage conflict가 발생했고 API는 500을 반환했다. 이 SQL은 통합 전 master에도 동일했다.
+- 최초 생성은 revision 0에 한정한 upsert, 이후 저장은 현재 revision이 일치하는 행의 조건부 UPDATE로 분리했다. 존재하지 않는 초안의 nonzero revision과 실제 stale revision은 계속 거부한다.
+- 기존 `config_draft_optimistic_revision` 시나리오가 harness에 등록되지 않아 이 경로를 실행하지 못했다. PostgreSQL·SQLite에 해당 시나리오만 등록하고, 없는 행을 nonzero revision으로 만들 수 없다는 경계를 추가했다.
+- 실제 등록된 회귀는 수정 전 SQLite PASS / PostgreSQL FAIL, 수정 후 양쪽 PASS였다. 동일한 업그레이드 DB에서도 기존 revision 7 저장의 500이 수정 후 200·revision 8로 바뀌고, 다시 보낸 revision 7은 409로 거부되었다. 파일 저장 후 초안 정리·만료 초안 정리·브라우저 상태 전이는 별도로 검증 기록에 남긴다.
+
+### 7.5 최종 통합 후보 검증
+
+- 증거는 `qa/admin-web/runs/2026-09-17/final-cutover-integration/index.json`에 파일별 SHA와 함께 보존했다. 테스트 binary는 두 통합 부모와 실제 source diff SHA로 식별한다. 최종 commit 이후의 CI와 혼동하지 않는다.
+- 현재 소스 인벤토리 426행, UI action 209개, 원자 요청 148개, API endpoint 104개를 생성·대조하고 YAML 파싱을 확인했다. 과거 운영 기록은 변경하지 않았으며 전체 운영 실행 상태는 `runtime_pending`이다.
+- Web typecheck/build와 73파일·775테스트, Biome 182파일, Rust format·전체 테스트 컴파일·all-features/SQLite-only Clippy를 통과했다.
+- 수정 후 macOS 전체 workspace는 2,365개 중 2,361개 PASS, 기존 native PDK SIGSEGV 4개 FAIL, 14개 제외였다. 같은 최종 소스의 Linux PDK 4개는 모두 PASS다. macOS 전체 검사를 green으로 보고하지 않는다.
+- 실제 구버전 binary에서 만든 PostgreSQL 114→124 및 SQLite 81→88 업그레이드, 기존 checksum 보존, history 메타데이터 축소를 확인했다. 양 DB의 반복 초안 저장·검증·다운로드·atomic file save·저장 후 정리·만료 정리·재시작 전후 설정 전이를 실제 HTTP로 검증했다.
+- Native Settings 저장/다운로드/재시작 배너, Base URL 삭제/원복, Audit 관리자 행 렌더링, Router 전략/revision 왕복, Plugins built-in 화면을 확인했다. 최초 Settings 원복 보고는 검증된 draft까지만 반영된 상태였다. 독립 API 점검에서 이를 발견해 파일 덮어쓰기 확인까지 완료했고, 최종 revision 12·draft null·file/effective info를 확인했다. 이 과정도 증거에 보존했다.
+- 검증용 서비스·PostgreSQL 컨테이너·자격증명/config/DB 파일·임시 binary를 정리했다. 기존 공유 DB와 운영 환경은 변경하지 않았다. Native Audit 관측은 해당 fixture의 관리자 행 렌더링에 한정되며 운영 전수 또는 모든 필터 조합의 증거가 아니다.
+- 같은 draft PR에 반영한 새 head의 CI는 별도로 확인한다. 머지·릴리스·운영 반영은 계속 보류한다.

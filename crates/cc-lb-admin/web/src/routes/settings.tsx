@@ -1,47 +1,26 @@
-import { Collapsible as BaseCollapsible } from '@base-ui/react/collapsible';
-import { createFileRoute } from '@tanstack/react-router';
-import {
-  CheckCircle2,
-  Download,
-  PlayCircle,
-  RefreshCw,
-  Save,
-} from 'lucide-react';
+import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { Download } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { ConfigEditorSection } from '../components/settings-config';
 import {
   Button,
   Card,
   CardBody,
   CardHeader,
-  cx,
   Field,
   INPUT_CLASS,
   PageContainer,
   Section,
   Skeleton,
-  SkeletonRow,
-  Spinner,
-  StatusBadge,
 } from '../components/ui/primitives';
 import {
   RelativeOffsetTime,
   RelativeTime,
 } from '../components/ui/RelativeTime';
-import { downloadJson } from '../lib/api';
-import { useAuthSessionContext } from '../lib/authSession';
+import { type ConfigHistoryResponse, downloadJson } from '../lib/api';
 import { formatAbsolute, useLocale, useTimezone } from '../lib/locale';
-import {
-  useApplyConfig,
-  useConfigCurrent,
-  useConfigDraft,
-  useConfigHistory,
-  useConfigSchema,
-  useReloadConfig,
-  useSaveDraft,
-  useStatus,
-  useValidateConfig,
-} from '../lib/queries';
+import { useConfigHistory, useStatus } from '../lib/queries';
 
 const ALL_BCP47_LOCALES = [
   'af-ZA',
@@ -210,35 +189,43 @@ function getAvailableLocales(
 }
 
 export const Route = createFileRoute('/settings')({
+  validateSearch: (search: Record<string, unknown>) => ({
+    category: typeof search.category === 'string' ? search.category : undefined,
+    field: typeof search.field === 'string' ? search.field : undefined,
+    q: typeof search.q === 'string' ? search.q : undefined,
+  }),
   component: SettingsPage,
 });
 
 function SettingsPage() {
-  const authSession = useAuthSessionContext();
   const status = useStatus();
-  const [exporting, setExporting] = useState(false);
-  const exportingRef = useRef(false);
+  const configHistory = useConfigHistory();
+  const [downloadingDatabaseSnapshot, setDownloadingDatabaseSnapshot] =
+    useState(false);
+  const downloadingDatabaseSnapshotRef = useRef(false);
   const { locale, effective, setLocale } = useLocale();
   const { timezone, effective: effectiveTz, setTimezone } = useTimezone();
   const [now, setNow] = useState(new Date());
+  const search = Route.useSearch();
+  const navigate = useNavigate({ from: Route.fullPath });
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // The export is a plain download rather than a mutation, so its in-flight
+  // The snapshot is a plain download rather than a mutation, so its in-flight
   // state is local. The ref rejects a second click landing in the same tick,
   // before React has re-rendered the Button as disabled.
-  const handleDownloadExport = async () => {
-    if (exportingRef.current) return;
-    exportingRef.current = true;
-    setExporting(true);
+  const handleDownloadDatabaseSnapshot = async () => {
+    if (downloadingDatabaseSnapshotRef.current) return;
+    downloadingDatabaseSnapshotRef.current = true;
+    setDownloadingDatabaseSnapshot(true);
     try {
-      await downloadExport();
+      await downloadDatabaseResourcesSnapshot();
     } finally {
-      exportingRef.current = false;
-      setExporting(false);
+      downloadingDatabaseSnapshotRef.current = false;
+      setDownloadingDatabaseSnapshot(false);
     }
   };
 
@@ -246,7 +233,7 @@ function SettingsPage() {
     <PageContainer>
       <Section
         title="Settings"
-        subtitle="Admin self-service, configuration draft pipeline, and exports."
+        subtitle="Version, localization, configuration drafts, and data backups."
       >
         {/* Version card */}
         <Card data-testid="version-card">
@@ -326,32 +313,6 @@ function SettingsPage() {
           </CardBody>
         </Card>
 
-        {authSession?.auth_mode === 'static_token' ? (
-          <Card data-testid="admin-token-card">
-            <CardHeader
-              title="Admin Token"
-              subtitle="The active static-token provider reads its bearer token from the environment when cc-lb starts."
-            />
-            <CardBody>
-              <p
-                data-testid="admin-token-guidance"
-                className="text-sm text-text-muted"
-              >
-                Update the secret named by the active{' '}
-                <code className="font-mono text-text">static_token</code>{' '}
-                provider&apos;s{' '}
-                <code className="font-mono text-text">token_env</code>, then
-                restart the cc-lb process. Admin authentication providers are
-                configured under{' '}
-                <code className="font-mono text-text">
-                  admin.auth.providers
-                </code>{' '}
-                and cannot be rotated from this dashboard.
-              </p>
-            </CardBody>
-          </Card>
-        ) : null}
-
         {/* Localization */}
         <Card>
           <CardHeader
@@ -416,576 +377,133 @@ function SettingsPage() {
           </CardBody>
         </Card>
 
-        {/* Config draft pipeline */}
-        <ConfigDraftSection />
+        <ConfigEditorSection
+          history={configHistory}
+          category={search.category}
+          field={search.field}
+          query={search.q}
+          onNavigate={(next) =>
+            navigate({
+              search: {
+                category: next.category,
+                field: next.field,
+                q: next.q,
+              },
+              resetScroll: false,
+            })
+          }
+        />
 
         {/* History */}
-        <ConfigHistorySection />
+        <ConfigHistorySection history={configHistory} />
 
-        {/* Restart-required matrix */}
-        <RestartRequiredMatrix />
-
-        {/* Export */}
-        <Card>
-          <CardHeader
-            title="Configuration Export"
-            subtitle="Download a JSON snapshot of all upstreams, principals, plugins, and chains."
-          />
-          <CardBody>
-            <Button
-              iconLeft={<Download className="w-4 h-4" />}
-              loading={exporting}
-              onClick={handleDownloadExport}
-            >
-              {exporting ? 'Downloading...' : 'Download export.json'}
-            </Button>
-          </CardBody>
-        </Card>
+        {/* Database export */}
+        <Section
+          title="Data & Backups"
+          subtitle="Export resources stored in the cc-lb database."
+        >
+          <Card>
+            <CardHeader
+              title="Database resources snapshot"
+              subtitle="Download a JSON snapshot of upstreams, principals, plugins, and chains stored in the database."
+            />
+            <CardBody>
+              <Button
+                iconLeft={<Download className="w-4 h-4" />}
+                loading={downloadingDatabaseSnapshot}
+                onClick={handleDownloadDatabaseSnapshot}
+              >
+                {downloadingDatabaseSnapshot
+                  ? 'Downloading...'
+                  : 'Download database snapshot'}
+              </Button>
+            </CardBody>
+          </Card>
+        </Section>
       </Section>
     </PageContainer>
   );
 }
 
-function ConfigDraftSection() {
-  const draft = useConfigDraft();
-  const current = useConfigCurrent();
-  const schema = useConfigSchema();
-  const save = useSaveDraft();
-  const validate = useValidateConfig();
-  const apply = useApplyConfig();
-  const reload = useReloadConfig();
-  const [editor, setEditor] = useState<{
-    text: string;
-    savedText: string;
-    revision: number;
-    savedAtUnixSecs: number | null;
-    hasSavedDraft: boolean;
-  } | null>(null);
-  const [localValidation, setLocalValidation] = useState<{
-    revision: number;
-    error: string | null;
-  } | null>(null);
-
-  useEffect(() => {
-    const draftData = draft.data;
-    if (!draftData) return;
-
-    const source = draftData.draft ?? current.data;
-    if (source === undefined) return;
-
-    const sourceText = JSON.stringify(source, null, 2);
-    if (sourceText === undefined) return;
-
-    setEditor((existing) => {
-      if (existing && existing.text !== existing.savedText) return existing;
-      // A successful save can advance the editor before an invalidated draft
-      // query finishes. Never replace that confirmed revision with stale data.
-      if (existing && existing.revision > draftData.revision) return existing;
-
-      const hasSavedDraft = draftData.draft != null;
-      const savedAtUnixSecs = hasSavedDraft
-        ? draftData.saved_at_unix_secs
-        : null;
-      if (
-        existing?.text === sourceText &&
-        existing.savedText === sourceText &&
-        existing.revision === draftData.revision &&
-        existing.savedAtUnixSecs === savedAtUnixSecs &&
-        existing.hasSavedDraft === hasSavedDraft
-      ) {
-        return existing;
-      }
-
-      return {
-        text: sourceText,
-        savedText: sourceText,
-        revision: draftData.revision,
-        savedAtUnixSecs,
-        hasSavedDraft,
-      };
-    });
-  }, [current.data, draft.data]);
-
-  const draftUnavailable = draft.data === undefined;
-  const currentConfigRequired = draft.data?.draft == null;
-  const currentUnavailable =
-    currentConfigRequired && current.data === undefined;
-  const editorPending =
-    editor == null &&
-    ((draftUnavailable && draft.isPending) ||
-      (currentUnavailable && current.isPending));
-  const editorLoadError =
-    editor == null &&
-    ((draftUnavailable && draft.isError) ||
-      (currentUnavailable && current.isError));
-  const editorRetrying =
-    (draftUnavailable && draft.isFetching) ||
-    (currentUnavailable && current.isFetching);
-
-  const draftRevision = draft.data?.revision ?? null;
-  const editorRevision = editor?.revision ?? null;
-  const editorDirty = editor ? editor.text !== editor.savedText : false;
-  const serverRevisionChanged =
-    draftRevision != null &&
-    editorRevision != null &&
-    draftRevision !== editorRevision;
-  const canSave =
-    editor != null &&
-    (editorDirty || (!editor.hasSavedDraft && !serverRevisionChanged));
-  const editorValidation =
-    localValidation?.revision === editorRevision ? localValidation : null;
-  const serverValidationMatchesEditor =
-    draftRevision != null && draftRevision === editorRevision;
-  const lastValidatedRevision = editorValidation
-    ? editorValidation.revision
-    : serverValidationMatchesEditor
-      ? (draft.data?.last_validated_revision ?? null)
-      : null;
-  const lastValidationError = editorValidation
-    ? editorValidation.error
-    : serverValidationMatchesEditor
-      ? (draft.data?.last_validation_error ?? null)
-      : null;
-  const canValidate =
-    editor?.hasSavedDraft === true && !editorDirty && !serverRevisionChanged;
-  const applySupported = draft.data?.apply_supported;
-  const applySupportMessage =
-    applySupported === true
-      ? null
-      : applySupported === false
-        ? 'This server does not support applying saved drafts. Changes to startup-fixed settings must be made through the deployment configuration and restart workflow.'
-        : draft.isPending
-          ? 'Checking server support for applying drafts...'
-          : draft.isError
-            ? 'Apply support could not be confirmed because the configuration draft could not be loaded.'
-            : 'Apply is unavailable until server support is confirmed.';
-  const canApply =
-    applySupported === true &&
-    editor != null &&
-    canValidate &&
-    lastValidatedRevision != null &&
-    lastValidationError == null &&
-    lastValidatedRevision === editor.revision;
-  const lastValidatedLabel = lastValidationError
-    ? `error @ rev ${lastValidatedRevision ?? '—'}`
-    : lastValidatedRevision != null
-      ? `rev ${lastValidatedRevision}`
-      : '—';
-
-  // Save, validate, apply and reload all mutate the same draft revision, so
-  // they share one lock: a second operation launched mid-flight would race on
-  // a revision it can no longer trust.
-  const savePending = save.isPending;
-  const validatePending = validate.isPending;
-  const applyPending = apply.isPending;
-  const reloadPending = reload.isPending;
-  const configPending =
-    savePending || validatePending || applyPending || reloadPending;
-  const configPendingLabel = savePending
-    ? 'Saving draft...'
-    : validatePending
-      ? 'Validating draft...'
-      : applyPending
-        ? 'Applying revision...'
-        : reloadPending
-          ? 'Reloading configuration...'
-          : null;
-  const editorGuidance = editorDirty
-    ? serverRevisionChanged
-      ? `The server draft is revision ${draftRevision}, while this editor started from revision ${editorRevision}. Save checks revision ${editorRevision}; Validate and Apply stay disabled until these changes are saved.`
-      : 'Save your editor changes before validating or applying. Validate and Apply use the saved server draft.'
-    : serverRevisionChanged
-      ? `Waiting for server draft revision ${draftRevision} to match editor revision ${editorRevision} before validating or applying.`
-      : editor && !editor.hasSavedDraft
-        ? 'Save this configuration as a server draft before validating or applying.'
-        : null;
-
-  const handleRetryEditor = () => {
-    if (draftUnavailable) void draft.refetch();
-    if (currentUnavailable) void current.refetch();
-  };
-
-  const handleSave = () => {
-    if (!editor || !canSave) return;
-
-    const savedText = editor.text;
-    const startRevision = editor.revision;
-    try {
-      const parsed = JSON.parse(savedText) as Record<string, unknown>;
-      save.mutate(
-        { draft: parsed, expected_revision: startRevision },
-        {
-          onSuccess: (response) => {
-            setEditor((active) => {
-              if (
-                !active ||
-                active.text !== savedText ||
-                active.revision !== startRevision
-              ) {
-                return active;
-              }
-              return {
-                ...active,
-                savedText,
-                revision: response.revision,
-                savedAtUnixSecs: response.saved_at_unix_secs,
-                hasSavedDraft: true,
-              };
-            });
-            setLocalValidation(null);
-            toast.success('Draft saved');
-          },
-        },
-      );
-    } catch {
-      toast.error('Draft is not valid JSON');
-    }
-  };
-
-  const handleValidate = () => {
-    if (!editor || !canValidate) return;
-
-    validate.mutate(editor.revision, {
-      onSuccess: (result) => {
-        const error = result.valid
-          ? null
-          : (result.error ?? 'Validation failed');
-        setLocalValidation({ revision: result.revision, error });
-        if (result.valid) {
-          toast.success('Draft valid');
-        } else {
-          toast.error(`Invalid: ${error}`);
-        }
-      },
-    });
-  };
-
-  const handleApply = () => {
-    if (!editor || !canApply) return;
-
-    apply.mutate(editor.revision, {
-      onSuccess: (result) =>
-        toast.success(`Applied revision ${result.applied_revision}`),
-    });
-  };
-
-  return (
-    <Section
-      title="Configuration Draft"
-      subtitle="Edit → validate → apply pipeline"
-    >
-      <Card>
-        <CardHeader
-          title="Draft"
-          action={
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                iconLeft={<Save className="w-3 h-3" />}
-                loading={savePending}
-                disabled={!canSave || !editor.text || configPending}
-                onClick={handleSave}
-              >
-                {savePending ? 'Saving...' : 'Save'}
-              </Button>
-              <Button
-                size="sm"
-                iconLeft={<CheckCircle2 className="w-3 h-3" />}
-                loading={validatePending}
-                disabled={!canValidate || configPending}
-                aria-describedby="config-pipeline-status"
-                onClick={handleValidate}
-              >
-                {validatePending ? 'Validating...' : 'Validate'}
-              </Button>
-              <Button
-                size="sm"
-                variant="primary"
-                iconLeft={<PlayCircle className="w-3 h-3" />}
-                loading={applyPending}
-                disabled={!canApply || configPending}
-                aria-describedby={
-                  applySupportMessage
-                    ? 'config-pipeline-status config-apply-support'
-                    : 'config-pipeline-status'
-                }
-                onClick={handleApply}
-              >
-                {applyPending ? 'Applying...' : 'Apply'}
-              </Button>
-              <Button
-                size="sm"
-                iconLeft={<RefreshCw className="w-3 h-3" />}
-                loading={reloadPending}
-                disabled={configPending}
-                onClick={() =>
-                  reload.mutate(undefined, {
-                    onSuccess: () => toast.success('Reload triggered'),
-                  })
-                }
-              >
-                {reloadPending ? 'Reloading...' : 'Reload'}
-              </Button>
-            </div>
-          }
-        />
-        <CardBody aria-busy={configPending} className="space-y-3">
-          <div
-            data-testid="draft-metadata"
-            className="flex min-h-4 flex-wrap gap-4 text-xs text-text-faint"
-          >
-            <div className="inline-flex items-center gap-1">
-              Revision:
-              <div
-                data-testid="draft-revision-slot"
-                className="inline-flex h-4 min-w-8 items-center font-mono"
-              >
-                {editorPending ? (
-                  <Skeleton className="h-3 w-8" />
-                ) : (
-                  (editor?.revision ?? '—')
-                )}
-              </div>
-            </div>
-            <div className="inline-flex items-center gap-1">
-              Last validated:
-              <div
-                data-testid="draft-last-validated-slot"
-                className={cx(
-                  'inline-flex h-4 min-w-24 items-center font-mono',
-                  lastValidationError ? 'text-red-400' : undefined,
-                )}
-              >
-                {editorPending ? (
-                  <Skeleton className="h-3 w-20" />
-                ) : (
-                  lastValidatedLabel
-                )}
-              </div>
-            </div>
-            <div className="inline-flex items-center gap-1">
-              Saved at:
-              <div
-                data-testid="draft-saved-at-slot"
-                className="inline-flex h-4 min-w-24 items-center font-mono"
-              >
-                {editorPending ? (
-                  <Skeleton className="h-3 w-20" />
-                ) : editor?.savedAtUnixSecs ? (
-                  <RelativeTime ts={new Date(editor.savedAtUnixSecs * 1000)} />
-                ) : (
-                  '—'
-                )}
-              </div>
-            </div>
-          </div>
-          {editorLoadError ? (
-            <div
-              className="flex items-center justify-between gap-3 rounded-sm border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
-              role="alert"
-            >
-              <span>
-                {draftUnavailable && draft.isError
-                  ? 'Failed to load the configuration draft.'
-                  : 'Failed to load the current configuration.'}
-              </span>
-              <Button
-                size="sm"
-                loading={editorRetrying}
-                disabled={editorRetrying || configPending}
-                onClick={handleRetryEditor}
-              >
-                {editorRetrying ? 'Retrying...' : 'Retry'}
-              </Button>
-            </div>
-          ) : null}
-          <textarea
-            data-testid="config-draft-editor"
-            className="w-full min-h-[260px] p-3 text-xs font-mono bg-panel-strong border border-subtle rounded-sm placeholder:text-text-faint focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-            style={{ lineHeight: 1.5 }}
-            value={editor?.text ?? ''}
-            disabled={configPending || !editor}
-            onChange={(event) =>
-              setEditor((active) =>
-                active ? { ...active, text: event.target.value } : active,
-              )
-            }
-            placeholder="JSON config draft…"
-          />
-          <div
-            id="config-pipeline-status"
-            data-testid="config-pipeline-status"
-            role="status"
-            aria-live="polite"
-            className="min-h-4 text-xs text-text-muted"
-          >
-            {configPendingLabel ? (
-              <span className="inline-flex items-center gap-1.5">
-                <Spinner className="w-3 h-3 text-accent" />
-                {configPendingLabel}
-              </span>
-            ) : (
-              editorGuidance
-            )}
-          </div>
-          {applySupportMessage ? (
-            <p id="config-apply-support" className="text-xs text-text-muted">
-              {applySupportMessage}
-            </p>
-          ) : null}
-          <div data-testid="config-checklist-slot" className="min-h-[20px]">
-            {schema.isLoading ? (
-              <Skeleton className="h-4 w-48" />
-            ) : schema.data ? (
-              <BaseCollapsible.Root className="text-xs">
-                <BaseCollapsible.Trigger className="cursor-pointer text-text-faint">
-                  Coverage checklist ({schema.data.coverage_checklist.length}{' '}
-                  fields)
-                </BaseCollapsible.Trigger>
-                <BaseCollapsible.Panel className="overflow-hidden h-[var(--collapsible-panel-height)] transition-[height] duration-150 ease-out data-[ending-style]:h-0 data-[starting-style]:h-0">
-                  <ul className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-1 font-mono">
-                    {schema.data.coverage_checklist.map((field) => (
-                      <li key={field}>· {field}</li>
-                    ))}
-                  </ul>
-                </BaseCollapsible.Panel>
-              </BaseCollapsible.Root>
-            ) : null}
-          </div>
-        </CardBody>
-      </Card>
-    </Section>
-  );
-}
-
-const HISTORY_CELL_CLASS_NAMES = ['px-4', 'px-4', 'px-4'] as const;
-const HISTORY_SKELETON_CLASS_NAMES = [
-  'ml-auto w-8',
-  'w-24',
-  'mx-auto w-12',
-] as const;
 const HISTORY_LOADING_ROW_IDS = [0, 1, 2, 3] as const;
 
-function ConfigHistorySection() {
-  const history = useConfigHistory();
+interface ConfigHistoryQueryResult {
+  data?: ConfigHistoryResponse;
+  isLoading: boolean;
+  isError: boolean;
+  isFetching: boolean;
+  refetch: () => unknown;
+}
+
+function ConfigHistorySection({
+  history,
+}: {
+  history: ConfigHistoryQueryResult;
+}) {
   return (
-    <Section title="Configuration History" subtitle="Last 20 applied revisions">
+    <Section title="Saved Config History" subtitle="Last 20 saved revisions">
       <Card>
         <div
           data-testid="config-history-slot"
-          className="min-h-[173px] overflow-x-auto sm:min-h-[163px]"
+          className="min-h-[173px] sm:min-h-[163px]"
         >
-          <table className="min-w-[400px] w-full font-mono text-xs">
-            <thead className="table-header sticky top-0 z-10">
-              <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-right px-4 py-2">Rev</th>
-                <th className="text-left px-4 py-2">Applied</th>
-                <th className="text-center px-4 py-2">TLS</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.isLoading ? (
-                HISTORY_LOADING_ROW_IDS.map((id) => (
-                  <SkeletonRow
-                    key={id}
-                    cols={3}
-                    cellClassNames={HISTORY_CELL_CLASS_NAMES}
-                    skeletonClassNames={HISTORY_SKELETON_CLASS_NAMES}
-                  />
-                ))
-              ) : history.data?.history.length ? (
-                history.data.history.map((h) => (
-                  <tr key={h.revision} className="border-b border-row">
-                    <td className="px-4 py-2 text-right">{h.revision}</td>
-                    <td className="px-4 py-2">
-                      <RelativeTime
-                        ts={new Date(h.applied_at_unix_secs * 1000)}
-                      />
-                    </td>
-                    <td className="px-4 py-2 text-center">
-                      <StatusBadge
-                        tone={h.config_summary.tls_enabled ? 'ok' : 'neutral'}
-                        label={h.config_summary.tls_enabled ? 'on' : 'off'}
-                      />
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td
-                    colSpan={3}
-                    className="px-4 py-12 text-center text-xs text-text-faint"
-                  >
-                    No history available.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-    </Section>
-  );
-}
-
-const RESTART_MATRIX: { field: string; reason: string }[] = [
-  {
-    field: 'listener.proxy_addr',
-    reason: 'Socket bindings are fixed at process start',
-  },
-  {
-    field: 'listener.admin_addr',
-    reason: 'Socket bindings are fixed at process start',
-  },
-  {
-    field: 'listener.metrics_addr',
-    reason: 'Socket bindings are fixed at process start',
-  },
-  { field: 'listener.tls.cert_path', reason: 'Listener TLS certificate' },
-  { field: 'listener.tls.key_path', reason: 'Listener TLS key' },
-  { field: 'storage.path', reason: 'Storage backend' },
-  { field: 'storage.url', reason: 'Storage backend' },
-  { field: 'storage.pool', reason: 'Storage pool' },
-  { field: 'aead.key_env', reason: 'Storage encryption key env' },
-  {
-    field: 'admin.auth.providers',
-    reason: 'Admin authentication providers are built at process start',
-  },
-  { field: 'oauth.anthropic.client_id', reason: 'Anthropic OAuth client' },
-  { field: 'oauth.anthropic.auth_url', reason: 'Anthropic OAuth endpoint' },
-  { field: 'oauth.anthropic.token_url', reason: 'Anthropic OAuth endpoint' },
-  { field: 'oauth.anthropic.redirect_uri', reason: 'Anthropic OAuth redirect' },
-  { field: 'oauth.anthropic.scopes', reason: 'Anthropic OAuth scopes' },
-];
-
-function RestartRequiredMatrix() {
-  return (
-    <Section
-      title="Restart-Required Fields"
-      subtitle="cc-lb.toml fields that cannot be applied by hot reload."
-    >
-      <Card>
-        <div className="overflow-x-auto">
-          <table className="min-w-[640px] w-full font-mono text-xs">
-            <thead className="table-header sticky top-0 z-10">
-              <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-left px-4 py-2">Field</th>
-                <th className="text-center px-4 py-2">Hot reload</th>
-                <th className="text-left px-4 py-2">Reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              {RESTART_MATRIX.map((r) => (
-                <tr key={r.field} className="border-b border-row">
-                  <td className="px-4 py-2">{r.field}</td>
-                  <td className="px-4 py-2 text-center">
-                    <StatusBadge tone="danger" label="No" />
-                  </td>
-                  <td className="px-4 py-2 text-text-muted">{r.reason}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div
+            className="grid grid-cols-[minmax(4rem,auto)_minmax(0,1fr)] border-b border-subtle px-4 py-2 text-[10px] uppercase tracking-wider text-text-faint"
+            role="row"
+          >
+            <span role="columnheader">Rev</span>
+            <span role="columnheader">Saved</span>
+          </div>
+          <div className="font-mono text-xs">
+            {history.isError ? (
+              <div
+                role="alert"
+                className="flex min-h-20 flex-col items-center justify-center gap-2 border-b border-row px-4 py-4 text-center"
+              >
+                <span className="text-text-muted">
+                  Saved config history could not be loaded. Restart status may
+                  be incomplete until this request succeeds.
+                </span>
+                <Button
+                  size="sm"
+                  loading={history.isFetching}
+                  onClick={() => void history.refetch()}
+                >
+                  Retry history
+                </Button>
+              </div>
+            ) : null}
+            {history.isLoading ? (
+              HISTORY_LOADING_ROW_IDS.map((id) => (
+                <div
+                  key={id}
+                  className="grid grid-cols-[minmax(4rem,auto)_minmax(0,1fr)] items-center gap-3 border-b border-row px-4 py-2"
+                >
+                  <Skeleton className="h-4 w-8" />
+                  <Skeleton className="h-4 w-24 max-w-full" />
+                </div>
+              ))
+            ) : history.data?.entries.length ? (
+              history.data.entries.map((entry) => (
+                <div
+                  key={entry.revision}
+                  className="grid grid-cols-[minmax(4rem,auto)_minmax(0,1fr)] items-center gap-3 border-b border-row px-4 py-2"
+                  role="row"
+                >
+                  <span role="cell">{entry.revision}</span>
+                  <span className="min-w-0" role="cell">
+                    <RelativeTime
+                      ts={new Date(entry.saved_at_unix_secs * 1000)}
+                    />
+                  </span>
+                </div>
+              ))
+            ) : !history.isError ? (
+              <div className="px-4 py-12 text-center text-xs text-text-faint">
+                No saved config history available.
+              </div>
+            ) : null}
+          </div>
         </div>
       </Card>
     </Section>
@@ -1001,14 +519,14 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-async function downloadExport() {
+async function downloadDatabaseResourcesSnapshot() {
   try {
     await downloadJson(
       '/admin/v1/export',
-      `cc-lb-export-${new Date().toISOString().slice(0, 16)}.json`,
+      `cc-lb-database-resources-${new Date().toISOString().slice(0, 16)}.json`,
     );
-    toast.success('Export downloaded');
+    toast.success('Database snapshot downloaded');
   } catch (e) {
-    toast.error(`Export failed: ${String(e)}`);
+    toast.error(`Database snapshot download failed: ${String(e)}`);
   }
 }

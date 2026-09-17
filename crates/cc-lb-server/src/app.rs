@@ -3,11 +3,10 @@ use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::Json;
 use axum::Router;
@@ -23,13 +22,13 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, TlsConfig};
 use cc_lb_engine::{
     BreakerRegistry, BreakerRuntimeConfig, BulkheadDispatch, BulkheadRegistry,
-    BulkheadRuntimeConfig, CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewBuilder,
-    DynamicViewHolder, HopByHopStripLayer, Lifecycle, LifecycleConfig, SubscriptionQuotaSink,
+    BulkheadRuntimeConfig, CircuitBreakerDispatch, ClockHandle, DynamicView, DynamicViewHolder,
+    HopByHopStripLayer, Lifecycle, LifecycleConfig, SubscriptionQuotaSink,
     SubscriptionQuotaWriterConfig, UpstreamDispatch, UpstreamRateLimitSink,
     anthropic_error_response,
     api_keys::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
-        limit_engine::LimitEngine, principal_view::PrincipalView,
+        limit_engine::LimitEngine,
     },
     cache_keepalive::AnthropicKeepaliveDispatcher,
     make_default_dispatcher, spawn_audit_writer, start_subscription_quota_writer,
@@ -76,7 +75,6 @@ use crate::prompt_cache_observation_sink::{
 };
 use crate::reconcile::Reconciler;
 use crate::refresh::{LazyRefreshClaimGuard, LazyRefresher};
-use crate::reload::ConfigWatcher;
 use crate::replica;
 use crate::signal;
 use crate::state_machine::{ServerState, ServerStateHandle};
@@ -85,7 +83,7 @@ use crate::subscription_quota_cache::SubscriptionQuotaCache;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::auth::{AdminAuthenticator, build_providers};
 use cc_lb_admin::{
-    AdminPorts, AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder,
+    AdminPorts, AdminState, DynamicViewRebinder, StartupConfigOverrides,
     WarmupDialectDispatchError, WarmupDialectDispatchErrorKind, WarmupDialectDispatchOutcome,
     WarmupDialectDispatcher,
 };
@@ -268,7 +266,6 @@ pub struct App {
     pub proxy_addr: SocketAddr,
     pub admin_addr: SocketAddr,
     lifecycle: Arc<Lifecycle>,
-    pub reload_task: Option<JoinHandle<()>>,
     notify_cancel: Option<CancellationToken>,
     notifier_task: Option<JoinHandle<()>>,
     notify_listener_task: Option<JoinHandle<()>>,
@@ -363,7 +360,6 @@ impl App {
             proxy_addr,
             admin_addr,
             lifecycle,
-            reload_task,
             notify_cancel,
             notifier_task,
             notify_listener_task,
@@ -422,9 +418,6 @@ impl App {
             }
         };
 
-        if let Some(task) = reload_task {
-            task.abort();
-        }
         if let Some(cancel) = notify_cancel {
             cancel.cancel();
         }
@@ -500,8 +493,11 @@ pub async fn run_serve(
     clock: ClockHandle,
 ) -> Result<(), ServeError> {
     let mut config = Config::load(config_path)?;
-    if let Some(data_dir) = data_dir {
-        config.runtime.data_dir = Some(data_dir.to_path_buf());
+    let startup_config_overrides = StartupConfigOverrides {
+        runtime_data_dir: data_dir.map(Path::to_path_buf),
+    };
+    if let Some(data_dir) = startup_config_overrides.runtime_data_dir.as_ref() {
+        config.runtime.data_dir = Some(data_dir.clone());
     }
     cc_lb_observability::install_panic_hook(cc_lb_observability::RedactionPolicy::new(
         config.observability.user_prompt_redaction,
@@ -510,6 +506,7 @@ pub async fn run_serve(
     let app = match build_app_with_path_inner(
         config,
         Some(config_path),
+        startup_config_overrides,
         Some(StartupPreflight { strict_preflight }),
         clock,
     )
@@ -584,6 +581,7 @@ pub async fn build_app_for_testing(
     build_app_with_storage_inner(
         config,
         None,
+        StartupConfigOverrides::default(),
         managed_store,
         storage,
         aead,
@@ -773,12 +771,20 @@ pub async fn build_app_with_path(
     config_path: Option<&Path>,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
-    build_app_with_path_inner(config, config_path, None, clock).await
+    build_app_with_path_inner(
+        config,
+        config_path,
+        StartupConfigOverrides::default(),
+        None,
+        clock,
+    )
+    .await
 }
 
 async fn build_app_with_path_inner(
     config: Config,
     config_path: Option<&Path>,
+    startup_config_overrides: StartupConfigOverrides,
     startup_preflight: Option<StartupPreflight>,
     clock: ClockHandle,
 ) -> Result<App, BuildError> {
@@ -796,6 +802,7 @@ async fn build_app_with_path_inner(
     build_app_with_storage_inner(
         config,
         config_path,
+        startup_config_overrides,
         managed_store,
         storage,
         aead,
@@ -855,6 +862,7 @@ pub async fn build_app_with_storage(
     build_app_with_storage_inner(
         config,
         config_path,
+        StartupConfigOverrides::default(),
         managed_store,
         storage,
         aead,
@@ -871,6 +879,7 @@ pub async fn build_app_with_storage(
 async fn build_app_with_storage_inner(
     config: Config,
     config_path: Option<&Path>,
+    startup_config_overrides: StartupConfigOverrides,
     managed_store: Arc<dyn ManagedKeyStore>,
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
@@ -1434,20 +1443,10 @@ async fn build_app_with_storage_inner(
             .routing_max_staleness_secs,
         clock: clock.clone(),
     });
-    let config_watcher = config_path.map(|path| {
-        let watcher = Arc::new(ConfigWatcher::new_with_principal_view(
-            path,
-            config.clone(),
-            Arc::clone(&runtime),
-            Some(dynamic_view.clone()),
-        ));
-        watcher.set_dynamic_view_rebinder(admin_rebinder.clone());
-        watcher
-    });
     let signals = signal::install(
         drain_controller.clone(),
         Duration::from_secs(config.timeouts.drain_secs),
-        sighup_handler(reload_tls_state, config_watcher.clone()),
+        sighup_handler(reload_tls_state),
     );
     {
         let logger_slot = lifecycle_event_logger_slot.clone();
@@ -1682,14 +1681,7 @@ async fn build_app_with_storage_inner(
         clock: clock.clone(),
     };
 
-    let admin_config: Arc<dyn CurrentConfig> = match &config_watcher {
-        Some(watcher) => watcher.clone(),
-        None => Arc::new(InMemoryCurrentConfig::new(
-            config.clone(),
-            dynamic_view.clone(),
-            Some(admin_rebinder.clone()),
-        )),
-    };
+    let admin_config = Arc::new(config.clone());
     let admin_state = AdminState {
         storage: Some(storage.clone()),
         key_store: Some(key_store),
@@ -1707,6 +1699,8 @@ async fn build_app_with_storage_inner(
         subscription_metadata_hook,
         lazy_refresher: lazy_refresher.clone(),
         runtime: Some(runtime.clone()),
+        config_path: config_path.map(Path::to_path_buf),
+        startup_config_overrides,
         data_dir: Some(data_dir.clone()),
         warmup_dialect_dispatcher: lazy_refresher_concrete.clone().map(|lazy_refresher| {
             Arc::new(ServerWarmupDialectDispatcher {
@@ -1718,6 +1712,7 @@ async fn build_app_with_storage_inner(
         }),
         dynamic_view: dynamic_view.clone(),
         config: admin_config,
+        dynamic_view_rebinder: Some(admin_rebinder),
         scheduler: Some(cc_lb_scheduler::admin::SchedulerAdminHandle::new(
             scheduler_lazy_handle.clone(),
         )),
@@ -1731,7 +1726,6 @@ async fn build_app_with_storage_inner(
         storage_tail: storage_tail_tx,
         clock: clock.clone(),
     };
-    let reload_task = config_watcher.clone().map(spawn_reload_watcher);
 
     server_state.transition_to_ready();
 
@@ -1741,7 +1735,6 @@ async fn build_app_with_storage_inner(
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         lifecycle,
-        reload_task,
         notify_cancel: Some(notify_cancel),
         notifier_task,
         notify_listener_task,
@@ -2031,29 +2024,14 @@ fn active_tls_config(config: &Config) -> Option<&TlsConfig> {
     config.listener.tls.as_ref()
 }
 
-fn sighup_handler(
-    tls_state: Option<Arc<TlsState>>,
-    config_watcher: Option<Arc<ConfigWatcher>>,
-) -> Option<signal::SighupHandler> {
-    if tls_state.is_none() && config_watcher.is_none() {
-        return None;
-    }
-    Some(Arc::new(move || {
-        if let Some(tls_state) = &tls_state
-            && let Err(error) = tls_state.reload()
-        {
-            tracing::warn!(error = %error, "TLS reload failed");
-        }
-        if let Some(config_watcher) = &config_watcher
-            && let Err(error) = config_watcher.reload_now()
-        {
-            tracing::warn!(error = %error, "configuration reload failed");
-        }
-    }))
-}
-
-fn spawn_reload_watcher(config_watcher: Arc<ConfigWatcher>) -> JoinHandle<()> {
-    config_watcher.spawn_file_watcher()
+fn sighup_handler(tls_state: Option<Arc<TlsState>>) -> Option<signal::SighupHandler> {
+    tls_state.map(|tls_state| {
+        Arc::new(move || {
+            if let Err(error) = tls_state.reload() {
+                tracing::warn!(error = %error, "TLS reload failed");
+            }
+        }) as signal::SighupHandler
+    })
 }
 
 #[cfg(feature = "postgres")]
@@ -2077,82 +2055,6 @@ fn load_cluster_token(config: &Config) -> Result<String, BuildError> {
         .ok_or_else(|| BuildError::ClusterTokenMissing {
             env: config.cluster.token_env.clone(),
         })
-}
-
-struct InMemoryCurrentConfig {
-    current: ArcSwap<Config>,
-    draft: Mutex<Option<Config>>,
-    dynamic_view: Arc<DynamicViewHolder>,
-    dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,
-}
-
-impl InMemoryCurrentConfig {
-    fn new(
-        config: Config,
-        dynamic_view: Arc<DynamicViewHolder>,
-        dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,
-    ) -> Self {
-        Self {
-            current: ArcSwap::from_pointee(config),
-            draft: Mutex::new(None),
-            dynamic_view,
-            dynamic_view_rebinder,
-        }
-    }
-}
-
-impl CurrentConfig for InMemoryCurrentConfig {
-    fn current_config(&self) -> Arc<Config> {
-        self.current.load_full()
-    }
-
-    fn supports_apply(&self) -> bool {
-        true
-    }
-
-    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
-        self.dynamic_view_rebinder.clone()
-    }
-
-    fn put_draft_config(&self, config: Config) -> Result<(), ConfigDraftError> {
-        config
-            .validate()
-            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
-        let mut draft = self
-            .draft
-            .lock()
-            .map_err(|_| ConfigDraftError::Invalid("config draft lock poisoned".to_owned()))?;
-        *draft = Some(config);
-        Ok(())
-    }
-
-    fn apply_draft_config(&self) -> Result<Arc<Config>, ConfigDraftError> {
-        let config = self
-            .draft
-            .lock()
-            .map_err(|_| ConfigDraftError::Invalid("config draft lock poisoned".to_owned()))?
-            .take()
-            .ok_or(ConfigDraftError::MissingDraft)?;
-        config
-            .validate()
-            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
-        let principal_view = Arc::new(PrincipalView::from_db(
-            &[],
-            std::collections::HashMap::new(),
-        ));
-        let current_view = self.dynamic_view.load();
-        // `.build()` bumps generation +1, so CAS on strictly-newer never
-        // rejects on the happy path. If a concurrent reconcile committed
-        // a fresher view we accept it and skip the redundant swap.
-        self.dynamic_view.try_store_if_newer(
-            DynamicViewBuilder::from_view(&current_view)
-                .principal_view(principal_view)
-                .build(),
-        );
-        let config = Arc::new(config);
-        self.current.store(config.clone());
-        Ok(config)
-    }
 }
 
 #[derive(Clone)]

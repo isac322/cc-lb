@@ -1,0 +1,11 @@
+   Compiling cc-lb-storage-postgres v0.4.9 (/data/tmp/cc-lb-final-cutover-integration/crates/cc-lb-storage-postgres)
+   Compiling cc-lb-storage-conformance v0.4.9 (/data/tmp/cc-lb-final-cutover-integration/crates/cc-lb-storage-conformance)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.34s
+────────────
+ Nextest run ID 884feff9-d5a9-42c1-b59f-77f5d6544044 with nextest profile: default
+    Starting 2 tests across 2 binaries (174 tests skipped)
+        PASS [   0.413s] (1/2) cc-lb-storage-conformance::integration storage_roundtrips_sqlite::config_draft_optimistic_revision_sqlite
+        PASS [   4.489s] (2/2) cc-lb-storage-conformance::integration storage_roundtrips_postgres::config_draft_optimistic_revision_postgres
+────────────
+     Summary [   4.489s] 2 tests run: 2 passed, 174 skipped
+[cutover-draft-regression-after: exited; cursor=867]

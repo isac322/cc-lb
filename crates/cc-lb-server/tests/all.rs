@@ -44,8 +44,6 @@ mod drain_timeout_force_closes;
 mod drop_pct_50;
 #[path = "dynamic_view_rebind.rs"]
 mod dynamic_view_rebind;
-#[path = "file_watch_debounced.rs"]
-mod file_watch_debounced;
 #[path = "files_content_explicit_route.rs"]
 mod files_content_explicit_route;
 #[path = "header_preservation_contract.rs"]
@@ -54,10 +52,6 @@ mod header_preservation_contract;
 mod healthcheck_common;
 #[path = "healthz_always_200.rs"]
 mod healthz_always_200;
-#[path = "hot_reload_race.rs"]
-mod hot_reload_race;
-#[path = "invalid_new_config_keeps_old.rs"]
-mod invalid_new_config_keeps_old;
 #[path = "latency_injection.rs"]
 mod latency_injection;
 #[path = "load_bad_cert.rs"]
@@ -86,8 +80,6 @@ mod oauth_refresh;
 mod oauth_usage_proxy;
 #[path = "observation_failure_isolation.rs"]
 mod observation_failure_isolation;
-#[path = "per_principal_reload_fault_injection.rs"]
-mod per_principal_reload_fault_injection;
 #[path = "postgres_full_storage_live.rs"]
 mod postgres_full_storage_live;
 #[path = "preflight.rs"]
@@ -110,14 +102,6 @@ mod readyz_503_when_no_upstream_ready;
 mod reconciliation;
 #[path = "reload_atomic_swap.rs"]
 mod reload_atomic_swap;
-#[path = "reload_common.rs"]
-mod reload_common;
-#[path = "reload_evicts_stale_slots.rs"]
-mod reload_evicts_stale_slots;
-#[path = "restart_required_field_warns.rs"]
-mod restart_required_field_warns;
-#[path = "restart_required_matrix.rs"]
-mod restart_required_matrix;
 #[path = "rfc_0002_fix_live_qa.rs"]
 mod rfc_0002_fix_live_qa;
 #[path = "rst_after_bytes.rs"]
@@ -132,8 +116,6 @@ mod scheduler_startup_hard_fail;
 mod scheduler_startup_no_migration_collision;
 #[path = "server_starts_and_responds.rs"]
 mod server_starts_and_responds;
-#[path = "sighup_reloads_quota_defaults.rs"]
-mod sighup_reloads_quota_defaults;
 #[path = "thinking_budget_service_tier_e2e.rs"]
 mod thinking_budget_service_tier_e2e;
 #[path = "tls_common.rs"]

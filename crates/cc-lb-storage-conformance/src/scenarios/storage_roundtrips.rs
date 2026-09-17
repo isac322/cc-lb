@@ -4,8 +4,8 @@ use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
     AuditStore as _, ConfigDraftState, ConfigStore as _, RequestEventStore as _,
     types::{
-        AuditEntry, HistoryEntry, HistorySummary, RequestCacheBreakpoint,
-        RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventUpstream,
+        AuditEntry, HistoryEntry, RequestCacheBreakpoint, RequestCacheBreakpointSource,
+        RequestCacheState, RequestEvent, RequestEventUpstream,
     },
 };
 use serde_json::json;
@@ -210,7 +210,7 @@ where
         let expected_draft = ConfigDraftState {
             revision,
             last_validated_revision: None,
-            last_validation_error: None,
+            last_validation: None,
             ..draft
         };
         let read_back = storage.get_config_draft().await?;
@@ -218,24 +218,11 @@ where
 
         let history = HistoryEntry {
             revision,
-            config_toml: "[timeouts]\nupstream_total_secs = 30\n".to_owned(),
             applied_at_unix_secs: 1_800_400_010,
-            summary: HistorySummary { tls_enabled: true },
         };
         storage
-            .append_config_history(
-                history.revision,
-                history.config_toml.clone(),
-                history.applied_at_unix_secs,
-                history.summary.clone(),
-            )
+            .append_config_history(history.revision, history.applied_at_unix_secs)
             .await?;
-
-        let read_back = storage
-            .get_config_history(revision)
-            .await?
-            .context("config history entry should round-trip")?;
-        assert_byte_identical!(read_back, history, "ConfigStore history point read")?;
 
         let listed = storage.list_config_history(10).await?;
         assert_byte_identical_vec!(

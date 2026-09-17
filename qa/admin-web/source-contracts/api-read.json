@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "source_commit": "19b05570",
+  "source_commit": "a9da5c3c",
   "source_state": {
     "kind": "approved_uncommitted_candidate",
-    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
-    "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
+    "base_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+    "note": "Source hashes and references describe the approved uncommitted merge candidate worktree (HEAD a9da5c3c + master b07b25eebe7bbee7e882643c6776c82015d49689); source_commit identifies the PR-side base, not an updated production deployment."
   },
   "response_observability": {
     "scope": "server_admin_listener",
@@ -16,7 +16,7 @@
     "span": "admin.request",
     "event": "admin_response_head_ready",
     "handler_timing": "response_head_generation",
-    "source": "crates/cc-lb-server/src/app.rs:2822-2873"
+    "source": "crates/cc-lb-server/src/app.rs:2724-2775"
   },
   "source_files": [
     {
@@ -53,7 +53,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/lib.rs",
-      "sha256": "32094f1e6df42d5daf23d153b26270df7c6e4c12b328daae8065476a1fbe564a"
+      "sha256": "f35ad60e4d0e1c944e3d5738985095625d53dd47fa55ee5e5d3dc64fefc92fad"
     },
     {
       "path": "crates/cc-lb-admin/src/principals.rs",
@@ -61,15 +61,15 @@
     },
     {
       "path": "crates/cc-lb-admin/src/routes.rs",
-      "sha256": "cd879a0c93c7680cb4f290388f42c073693940e850813011686082f7394932ed"
+      "sha256": "c447bb80bd7d4ca1dc6cf603854e592ae3bbd7723d8523f147e4fb2e7af27bec"
     },
     {
       "path": "crates/cc-lb-admin/src/scheduler.rs",
-      "sha256": "d750e700d3d838f76126f7b0a954dde6dc0867edc511e2c3f0134c3202b8c58d"
+      "sha256": "c5bc3a62fc8dac8efe6b23eb33fdd7a218fb42cda95b620b346f24dc42f22da7"
     },
     {
       "path": "crates/cc-lb-admin/src/settings.rs",
-      "sha256": "5e20de6cd410ed0b55c212f92bb4fe7f0363b6fe6ded36ddfe1a5c562b4b7b81"
+      "sha256": "195e506f6cb2e2bb407780b24236475e6ea45cb201484fb1938a3ab39c931629"
     },
     {
       "path": "crates/cc-lb-admin/src/static_assets.rs",
@@ -89,7 +89,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/v1/oauth.rs",
-      "sha256": "ed2f23ac212102d4b7f34717c202600af7c807098b486028bc7f2557bf32089f"
+      "sha256": "547b9509637cc1f396347dea5a848f31971dc7425b4a16016a90f18864cac36b"
     },
     {
       "path": "crates/cc-lb-admin/src/v1/plugins.rs",
@@ -125,11 +125,11 @@
     },
     {
       "path": "crates/cc-lb-admin/src/v1/upstreams.rs",
-      "sha256": "6cbbe2930c93838f4aff3421580c7924974c8d41d91cb7f7bf0a69205bc75aff"
+      "sha256": "0c0d887a976ffb1e88aebeaae91a3394cfebcdcd1d802a4b3aeed2418e80e39a"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/api.ts",
-      "sha256": "7b235dec905c24ee5094c57e7e565731e6ab0ad3452328f90a5ebb6a14bfa3a0"
+      "sha256": "021ff7d295bfa9ad595a040f80102002242c74a11cd53de531e9a68d54d184a4"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/cacheKeepaliveApi.ts",
@@ -137,7 +137,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/queries.ts",
-      "sha256": "e485c94f9ab3258a2bdc3f0d95f390beb1c813306ff545ce7b1b329106f8937e"
+      "sha256": "4258c0589093622b2a3b9114d1a72f008e5f219ebae19fc76e5a1cffaf585da8"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts",
@@ -145,7 +145,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-      "sha256": "00d0717b7beb91420319c656ee1845af3e9815e81ed76395aa4e50e86a4d0fe5"
+      "sha256": "b665fd388f9ac02a41466605045b5c7fd789e4635305bcd21056992fe0dfb1ef"
     },
     {
       "path": "crates/cc-lb-scheduler/src/admin.rs",
@@ -153,7 +153,7 @@
     },
     {
       "path": "crates/cc-lb-server/src/app.rs",
-      "sha256": "094d8af664467d9ff02b62d64d981f8c87cbc1e0166331839660b2508aeb7180"
+      "sha256": "529a89bddcb53a80a2c931043f16e82863651846c9e22708cf0d8bdaf8251d82"
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
@@ -165,7 +165,7 @@
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
-      "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
+      "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/current_request_event_cursor.sql",
@@ -257,7 +257,7 @@
     },
     {
       "path": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
-      "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
+      "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
     },
     {
       "path": "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
@@ -316,7 +316,7 @@
     {
       "method": "GET",
       "path": "/",
-      "source": "crates/cc-lb-admin/src/routes.rs:123",
+      "source": "crates/cc-lb-admin/src/routes.rs:113",
       "handler": "serve_index",
       "auth": "None (Public)",
       "ui_clients": [
@@ -338,7 +338,7 @@
     {
       "method": "GET",
       "path": "/{*file}",
-      "source": "crates/cc-lb-admin/src/routes.rs:124",
+      "source": "crates/cc-lb-admin/src/routes.rs:114",
       "handler": "serve_asset",
       "auth": "None (Public)",
       "ui_clients": [
@@ -362,7 +362,7 @@
     {
       "method": "GET",
       "path": "/admin/health",
-      "source": "crates/cc-lb-admin/src/routes.rs:125",
+      "source": "crates/cc-lb-admin/src/routes.rs:115",
       "handler": "health",
       "auth": "None (Unauthenticated health check)",
       "ui_clients": [
@@ -382,7 +382,7 @@
     {
       "method": "GET",
       "path": "/admin/health/state",
-      "source": "crates/cc-lb-server/src/app.rs:2371",
+      "source": "crates/cc-lb-server/src/app.rs:2273",
       "handler": "admin_server_state",
       "auth": "None (Unauthenticated listener state check)",
       "ui_clients": [
@@ -501,104 +501,20 @@
     },
     {
       "method": "GET",
-      "path": "/admin/config/current",
+      "path": "/admin/v1/config/editor",
       "source": "crates/cc-lb-admin/src/routes.rs:49",
-      "handler": "get_config",
+      "handler": "get_config_editor",
       "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
       "ui_clients": [
-        "crates/cc-lb-admin/web/src/lib/queries.ts:784"
+        "useConfigEditor (crates/cc-lb-admin/web/src/lib/queries.ts:781) in ConfigEditorSection (crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:733)"
       ],
-      "cache_or_no_query": "In-memory state.config.current_config() Arc clone; secrets are masked via mask_secret_like_values before serialization.",
-      "side_effects": "Audit log write: record_admin_audit(\"config_read\", \"/admin/v1/config/current\")",
-      "storage_operation_ids": [
-        "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-        "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-      ],
-      "parameters": {
-        "path": [],
-        "query": [],
-        "header": [],
-        "body": []
-      },
-      "risk_tier": "read_with_audit"
-    },
-    {
-      "method": "GET",
-      "path": "/admin/v1/config/current",
-      "source": "crates/cc-lb-admin/src/routes.rs:50",
-      "handler": "get_config",
-      "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
-      "ui_clients": [
-        "backend-only: compatibility alias; built-in admin web calls /admin/config/current."
-      ],
-      "cache_or_no_query": "In-memory state.config.current_config() Arc clone; secrets are masked via mask_secret_like_values before serialization.",
-      "side_effects": "Audit log write: record_admin_audit(\"config_read\", \"/admin/v1/config/current\")",
-      "storage_operation_ids": [
-        "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-        "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-      ],
-      "parameters": {
-        "path": [],
-        "query": [],
-        "header": [],
-        "body": []
-      },
-      "risk_tier": "read_with_audit"
-    },
-    {
-      "method": "GET",
-      "path": "/admin/config/schema",
-      "source": "crates/cc-lb-admin/src/routes.rs:51",
-      "handler": "get_config_schema",
-      "auth": "require_admin_auth middleware",
-      "ui_clients": [
-        "crates/cc-lb-admin/web/src/lib/queries.ts:790"
-      ],
-      "cache_or_no_query": "In-memory schemars schema generation; HTTP Cache-Control: max-age=60",
-      "side_effects": "None",
-      "storage_operation_ids": [],
-      "parameters": {
-        "path": [],
-        "query": [],
-        "header": [],
-        "body": []
-      },
-      "risk_tier": "read"
-    },
-    {
-      "method": "GET",
-      "path": "/admin/v1/config/schema",
-      "source": "crates/cc-lb-admin/src/routes.rs:52",
-      "handler": "get_config_schema",
-      "auth": "require_admin_auth middleware",
-      "ui_clients": [
-        "backend-only: compatibility alias; built-in admin web calls /admin/config/schema."
-      ],
-      "cache_or_no_query": "In-memory schemars schema generation; HTTP Cache-Control: max-age=60",
-      "side_effects": "None",
-      "storage_operation_ids": [],
-      "parameters": {
-        "path": [],
-        "query": [],
-        "header": [],
-        "body": []
-      },
-      "risk_tier": "read"
-    },
-    {
-      "method": "GET",
-      "path": "/admin/config/draft",
-      "source": "crates/cc-lb-admin/src/routes.rs:54",
-      "handler": "get_config_draft",
-      "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
-      "ui_clients": [
-        "crates/cc-lb-admin/web/src/lib/queries.ts:796"
-      ],
-      "cache_or_no_query": "Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query.",
-      "side_effects": "Audit log write: record_admin_audit(\"config_draft_read\", \"/admin/v1/config/draft\")",
+      "cache_or_no_query": "Aggregates the editor payload in settings::editor_response: schemars JSON schema, Config::default(), file_config parsed from the on-disk TOML (partial_file_json), effective_config from state.config plus startup overrides, the unexpired DB draft row, ConfigFileInfo (path/exists/mode/reason/sha256 fingerprint via atomic-replace capability probe), env/CLI override provenance, and restart_required: true. storage.url is redacted in file_config, effective_config, default_config and draft; sensitive override effective_value is omitted. Response Cache-Control: no-store. A stale invalid draft older than 24h is cleared via conditional put_config_draft before the response is built.",
+      "side_effects": "Audit log write: record_admin_audit(\"config_editor_read\", \"/admin/v1/config/editor\"); conditional draft reset write when an invalid draft is expired (>24h).",
       "storage_operation_ids": [
         "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
         "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft",
+        "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft",
+        "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft",
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
         "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
       ],
@@ -613,17 +529,19 @@
     {
       "method": "GET",
       "path": "/admin/v1/config/draft",
-      "source": "crates/cc-lb-admin/src/routes.rs:58",
+      "source": "crates/cc-lb-admin/src/routes.rs:50",
       "handler": "get_config_draft",
       "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
       "ui_clients": [
-        "backend-only: compatibility alias; built-in admin web calls /admin/config/draft."
+        "useConfigDraft (crates/cc-lb-admin/web/src/lib/queries.ts:787) in ConfigEditorSection (crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:734)"
       ],
-      "cache_or_no_query": "Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query.",
+      "cache_or_no_query": "Reads the singleton config draft row via ConfigStore::get_config_draft; when the stored draft is invalid and older than 24h, get_unexpired_draft clears it with a conditional ConfigStore::put_config_draft reset and re-reads. Response is Cache-Control: no-store; draft and storage.url are redacted (STORAGE_URL_REDACTION_SENTINEL) before serialization. ConfigDraftResponse fields: draft, revision, last_validated_revision, last_validation (full stored ConfigValidationReport JSON), saved_at_unix_secs; the PR-era apply_supported field is removed with the CurrentConfig abstraction.",
       "side_effects": "Audit log write: record_admin_audit(\"config_draft_read\", \"/admin/v1/config/draft\")",
       "storage_operation_ids": [
         "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
         "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft",
+        "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft",
+        "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft",
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
         "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
       ],
@@ -637,41 +555,14 @@
     },
     {
       "method": "GET",
-      "path": "/admin/config/history",
-      "source": "crates/cc-lb-admin/src/routes.rs:68",
-      "handler": "get_config_history",
-      "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
-      "ui_clients": [
-        "crates/cc-lb-admin/web/src/lib/queries.ts:803"
-      ],
-      "cache_or_no_query": "Query parameter limit defaults to 20 and is passed through to storage SQL without a maximum clamp; limit=0 short-circuits to an empty result.",
-      "side_effects": "Audit log write: record_admin_audit(\"config_history_read\", \"/admin/v1/config/history\")",
-      "storage_operation_ids": [
-        "sqlite:ConfigStore::list_config_history:SqliteStorage::list_config_history",
-        "postgres:ConfigStore::list_config_history:PostgresStorage::list_config_history",
-        "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-        "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-      ],
-      "parameters": {
-        "path": [],
-        "query": [
-          "limit"
-        ],
-        "header": [],
-        "body": []
-      },
-      "risk_tier": "read_with_audit"
-    },
-    {
-      "method": "GET",
       "path": "/admin/v1/config/history",
-      "source": "crates/cc-lb-admin/src/routes.rs:69",
+      "source": "crates/cc-lb-admin/src/routes.rs:63",
       "handler": "get_config_history",
       "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
       "ui_clients": [
-        "backend-only: compatibility alias; built-in admin web calls /admin/config/history."
+        "useConfigHistory (crates/cc-lb-admin/web/src/lib/queries.ts:793) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:202)"
       ],
-      "cache_or_no_query": "Query parameter limit defaults to 20 and is passed through to storage SQL without a maximum clamp; limit=0 short-circuits to an empty result.",
+      "cache_or_no_query": "Query parameter limit defaults to 20 and is clamped to 100 by settings::list_history before reaching storage SQL; limit=0 short-circuits to an empty result. HistoryEntry now carries only revision + applied_at_unix_secs (config_toml payload and HistorySummary removed; migration 0119/0087 purged stored payloads), so ConfigHistoryItem exposes revision and saved_at_unix_secs only.",
       "side_effects": "Audit log write: record_admin_audit(\"config_history_read\", \"/admin/v1/config/history\")",
       "storage_operation_ids": [
         "sqlite:ConfigStore::list_config_history:SqliteStorage::list_config_history",
@@ -683,62 +574,6 @@
         "path": [],
         "query": [
           "limit"
-        ],
-        "header": [],
-        "body": []
-      },
-      "risk_tier": "read_with_audit"
-    },
-    {
-      "method": "GET",
-      "path": "/admin/config/diff",
-      "source": "crates/cc-lb-admin/src/routes.rs:70",
-      "handler": "get_config_diff",
-      "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
-      "ui_clients": [
-        "backend-only: no built-in admin web caller; the settings UI has no revision-diff modal."
-      ],
-      "cache_or_no_query": "Fetches two revisions from DB, calculates structural JSON diff in memory",
-      "side_effects": "Audit log write: record_admin_audit(\"config_diff_read\", \"/admin/v1/config/diff\")",
-      "storage_operation_ids": [
-        "sqlite:ConfigStore::get_config_history:SqliteStorage::get_config_history",
-        "postgres:ConfigStore::get_config_history:PostgresStorage::get_config_history",
-        "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-        "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-      ],
-      "parameters": {
-        "path": [],
-        "query": [
-          "from_revision",
-          "to_revision"
-        ],
-        "header": [],
-        "body": []
-      },
-      "risk_tier": "read_with_audit"
-    },
-    {
-      "method": "GET",
-      "path": "/admin/v1/config/diff",
-      "source": "crates/cc-lb-admin/src/routes.rs:71",
-      "handler": "get_config_diff",
-      "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
-      "ui_clients": [
-        "backend-only: versioned config-diff alias; the settings UI has no revision-diff modal."
-      ],
-      "cache_or_no_query": "Fetches two revisions from DB, calculates diff in memory",
-      "side_effects": "Audit log write: record_admin_audit(\"config_diff_read\", \"/admin/v1/config/diff\")",
-      "storage_operation_ids": [
-        "sqlite:ConfigStore::get_config_history:SqliteStorage::get_config_history",
-        "postgres:ConfigStore::get_config_history:PostgresStorage::get_config_history",
-        "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-        "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-      ],
-      "parameters": {
-        "path": [],
-        "query": [
-          "from_revision",
-          "to_revision"
         ],
         "header": [],
         "body": []
@@ -816,7 +651,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/dashboard/summary",
-      "source": "crates/cc-lb-admin/src/routes.rs:75",
+      "source": "crates/cc-lb-admin/src/routes.rs:64",
       "handler": "crate::dashboard_routes::handle_dashboard_summary",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -878,7 +713,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/dashboard/usage",
-      "source": "crates/cc-lb-admin/src/routes.rs:79",
+      "source": "crates/cc-lb-admin/src/routes.rs:68",
       "handler": "crate::dashboard_routes::handle_dashboard_usage",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -983,7 +818,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/events/recent",
-      "source": "crates/cc-lb-admin/src/routes.rs:83",
+      "source": "crates/cc-lb-admin/src/routes.rs:72",
       "handler": "crate::events_routes::handle_recent_events",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1056,7 +891,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/events/histogram",
-      "source": "crates/cc-lb-admin/src/routes.rs:87",
+      "source": "crates/cc-lb-admin/src/routes.rs:76",
       "handler": "crate::events_routes::handle_events_histogram",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1090,7 +925,7 @@
     {
       "method": "GET",
       "path": "/admin/events/histogram",
-      "source": "crates/cc-lb-admin/src/routes.rs:91",
+      "source": "crates/cc-lb-admin/src/routes.rs:80",
       "handler": "crate::events_routes::handle_events_histogram",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1124,7 +959,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/events/delta",
-      "source": "crates/cc-lb-admin/src/routes.rs:95",
+      "source": "crates/cc-lb-admin/src/routes.rs:84",
       "handler": "crate::events_routes::handle_events_delta",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1194,7 +1029,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/events/stream",
-      "source": "crates/cc-lb-admin/src/routes.rs:99",
+      "source": "crates/cc-lb-admin/src/routes.rs:88",
       "handler": "crate::events_routes::handle_events_stream",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1265,7 +1100,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/events/detail/{event_id}",
-      "source": "crates/cc-lb-admin/src/events_detail_route.rs:19",
+      "source": "crates/cc-lb-admin/src/events_detail_route.rs:18",
       "handler": "handle_event_detail",
       "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
       "ui_clients": [
@@ -1414,7 +1249,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/subscription-quotas/aggregate",
-      "source": "crates/cc-lb-admin/src/subscription_quotas.rs:61",
+      "source": "crates/cc-lb-admin/src/subscription_quotas.rs:60",
       "handler": "handle_aggregate",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1450,7 +1285,7 @@
     {
       "method": "GET",
       "path": "/admin/subscription-quotas/aggregate",
-      "source": "crates/cc-lb-admin/src/subscription_quotas.rs:65",
+      "source": "crates/cc-lb-admin/src/subscription_quotas.rs:64",
       "handler": "handle_aggregate",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1486,7 +1321,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/subscription-quotas/analysis",
-      "source": "crates/cc-lb-admin/src/subscription_quotas.rs:69",
+      "source": "crates/cc-lb-admin/src/subscription_quotas.rs:68",
       "handler": "handle_analysis",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1552,7 +1387,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/subscription-quotas/pool-history",
-      "source": "crates/cc-lb-admin/src/subscription_quotas.rs:74",
+      "source": "crates/cc-lb-admin/src/subscription_quotas.rs:73",
       "handler": "handle_pool_history",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1585,7 +1420,7 @@
     {
       "method": "GET",
       "path": "/admin/subscription-quotas/pool-history",
-      "source": "crates/cc-lb-admin/src/subscription_quotas.rs:78",
+      "source": "crates/cc-lb-admin/src/subscription_quotas.rs:77",
       "handler": "handle_pool_history",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1696,7 +1531,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/plugins/registry/{id}",
-      "source": "crates/cc-lb-admin/src/v1/plugins.rs:41",
+      "source": "crates/cc-lb-admin/src/v1/plugins.rs:40",
       "handler": "get_registry",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1723,7 +1558,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/plugins/registry/{id}/references",
-      "source": "crates/cc-lb-admin/src/v1/plugins.rs:37",
+      "source": "crates/cc-lb-admin/src/v1/plugins.rs:36",
       "handler": "get_registry_references",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1752,7 +1587,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/principals/{principal_id}/plugin-chain",
-      "source": "crates/cc-lb-admin/src/v1/plugins.rs:47",
+      "source": "crates/cc-lb-admin/src/v1/plugins.rs:46",
       "handler": "list_chain",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1779,7 +1614,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/plugin-chain-entries/{id}",
-      "source": "crates/cc-lb-admin/src/v1/plugins.rs:59",
+      "source": "crates/cc-lb-admin/src/v1/plugins.rs:58",
       "handler": "get_chain",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1806,7 +1641,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/upstreams/{id}/oauth/status",
-      "source": "crates/cc-lb-admin/src/v1/oauth.rs:68",
+      "source": "crates/cc-lb-admin/src/v1/oauth.rs:66",
       "handler": "get_oauth_status",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1831,7 +1666,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/principals",
-      "source": "crates/cc-lb-admin/src/v1/principals.rs:33",
+      "source": "crates/cc-lb-admin/src/v1/principals.rs:31",
       "handler": "list_principals",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1857,7 +1692,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/principals/{id}",
-      "source": "crates/cc-lb-admin/src/v1/principals.rs:37",
+      "source": "crates/cc-lb-admin/src/v1/principals.rs:35",
       "handler": "get_principal",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1882,7 +1717,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/principals/{id}/allowed_models",
-      "source": "crates/cc-lb-admin/src/v1/principals.rs:50",
+      "source": "crates/cc-lb-admin/src/v1/principals.rs:48",
       "handler": "get_allowed_models",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -1907,7 +1742,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/principals/{id}/router-terminal",
-      "source": "crates/cc-lb-admin/src/v1/principals.rs:46",
+      "source": "crates/cc-lb-admin/src/v1/principals.rs:44",
       "handler": "get_router_terminal",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -2064,7 +1899,7 @@
     {
       "method": "GET",
       "path": "/admin/principals/{id}/keys/{key_id}/usage",
-      "source": "crates/cc-lb-admin/src/routes.rs:45",
+      "source": "crates/cc-lb-admin/src/routes.rs:43",
       "handler": "principal_key_usage",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -2095,7 +1930,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/principals/{id}/keys",
-      "source": "crates/cc-lb-admin/src/v1/keys.rs:28",
+      "source": "crates/cc-lb-admin/src/v1/keys.rs:26",
       "handler": "list_keys",
       "auth": "require_admin_auth; handler calls authorize(AdminAction::SensitiveRead), but the current authorize implementation unconditionally returns Ok, so it adds no runtime denial beyond authentication.",
       "ui_clients": [
@@ -2126,7 +1961,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/principals/{principal_id}/cache-keepalive",
-      "source": "crates/cc-lb-admin/src/v1/principal_cache_keepalive.rs:28",
+      "source": "crates/cc-lb-admin/src/v1/principal_cache_keepalive.rs:26",
       "handler": "list_cache_keepalive",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -2165,7 +2000,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/principals/{principal_id}/cache-keepalive/{session_or_decision_id}",
-      "source": "crates/cc-lb-admin/src/v1/principal_cache_keepalive.rs:32",
+      "source": "crates/cc-lb-admin/src/v1/principal_cache_keepalive.rs:30",
       "handler": "get_cache_keepalive_detail",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -2199,7 +2034,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/upstreams",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:85",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:83",
       "handler": "list_upstreams",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -2225,7 +2060,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/upstreams/{id}",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:89",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:87",
       "handler": "get_upstream",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -2250,7 +2085,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/upstreams/{id}/subscription-metadata",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:96",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:94",
       "handler": "get_upstream_subscription_metadata",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -2275,7 +2110,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/upstreams/{id}/warmup",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:108",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:106",
       "handler": "super::upstream_warmup::get_upstream_warmup",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -2308,7 +2143,7 @@
     {
       "method": "GET",
       "path": "/admin/v1/upstreams/{id}/warmup/attempts",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:112",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:110",
       "handler": "super::upstream_warmup::list_upstream_warmup_attempts",
       "auth": "require_admin_auth middleware",
       "ui_clients": [
@@ -3234,9 +3069,9 @@
       "source": {
         "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
         "symbol": "PostgresStorage::get_config_draft",
-        "line_start": 15,
-        "line_end": 28,
-        "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
+        "line_start": 13,
+        "line_end": 26,
+        "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
       },
       "statements": [
         {
@@ -3245,39 +3080,11 @@
           "source": {
             "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
             "symbol": "get_config_draft",
-            "line_start": 17,
-            "line_end": 17
+            "line_start": 15,
+            "line_end": 15
           },
           "branches": [],
           "bind_parameters": []
-        }
-      ]
-    },
-    {
-      "id": "postgres:ConfigStore::get_config_history:PostgresStorage::get_config_history",
-      "engine": "postgres",
-      "trait_method": "ConfigStore::get_config_history",
-      "source": {
-        "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
-        "symbol": "PostgresStorage::get_config_history",
-        "line_start": 158,
-        "line_end": 171,
-        "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
-      },
-      "statements": [
-        {
-          "kind": "literal",
-          "text": "SELECT config FROM config_history_v1 WHERE revision = $1",
-          "source": {
-            "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
-            "symbol": "get_config_history",
-            "line_start": 160,
-            "line_end": 160
-          },
-          "branches": [],
-          "bind_parameters": [
-            "162: .bind(u64_to_i64(revision, \"history revision\")?)"
-          ]
         }
       ]
     },
@@ -3288,9 +3095,9 @@
       "source": {
         "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
         "symbol": "PostgresStorage::list_config_history",
-        "line_start": 140,
-        "line_end": 156,
-        "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
+        "line_start": 138,
+        "line_end": 154,
+        "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
       },
       "statements": [
         {
@@ -3299,8 +3106,8 @@
           "source": {
             "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
             "symbol": "list_config_history",
-            "line_start": 146,
-            "line_end": 146
+            "line_start": 144,
+            "line_end": 144
           },
           "branches": [],
           "bind_parameters": [
@@ -5901,9 +5708,9 @@
       "source": {
         "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
         "symbol": "SqliteStorage::get_config_draft",
-        "line_start": 14,
-        "line_end": 27,
-        "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
+        "line_start": 12,
+        "line_end": 25,
+        "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
       },
       "statements": [
         {
@@ -5912,40 +5719,12 @@
           "source": {
             "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
             "symbol": "get_config_draft",
-            "line_start": 16,
-            "line_end": 16
+            "line_start": 14,
+            "line_end": 14
           },
           "branches": [],
           "bind_parameters": [
             "17: .bind(CONFIG_DRAFT_ID)"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "sqlite:ConfigStore::get_config_history:SqliteStorage::get_config_history",
-      "engine": "sqlite",
-      "trait_method": "ConfigStore::get_config_history",
-      "source": {
-        "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
-        "symbol": "SqliteStorage::get_config_history",
-        "line_start": 157,
-        "line_end": 169,
-        "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
-      },
-      "statements": [
-        {
-          "kind": "literal",
-          "text": "SELECT payload FROM config_history_v1 WHERE id = ?",
-          "source": {
-            "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
-            "symbol": "get_config_history",
-            "line_start": 159,
-            "line_end": 159
-          },
-          "branches": [],
-          "bind_parameters": [
-            "160: .bind(revision.to_string())"
           ]
         }
       ]
@@ -5957,9 +5736,9 @@
       "source": {
         "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
         "symbol": "SqliteStorage::list_config_history",
-        "line_start": 134,
-        "line_end": 155,
-        "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
+        "line_start": 122,
+        "line_end": 143,
+        "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
       },
       "statements": [
         {
@@ -5968,8 +5747,8 @@
           "source": {
             "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
             "symbol": "list_config_history",
-            "line_start": 140,
-            "line_end": 140
+            "line_start": 128,
+            "line_end": 128
           },
           "branches": [],
           "bind_parameters": [
@@ -7410,6 +7189,103 @@
             "299-310: per interval, bind ordinal, interval_id, upstream_id, start_unix_secs, end_unix_secs"
           ],
           "text": "WITH intervals(ordinal, interval_id, upstream_id, start_unix_secs, end_unix_secs) AS (VALUES {values}) SELECT intervals.interval_id AS interval_id, COALESCE(SUM(rollup.input_tokens + rollup.output_tokens + rollup.cache_creation_input_tokens + rollup.cache_read_input_tokens), 0) AS tokens FROM intervals LEFT JOIN usage_rollups_v2 rollup ON rollup.upstream_id = intervals.upstream_id AND rollup.resolution = 'minute' AND rollup.bucket_start_unix_secs >= intervals.start_unix_secs AND rollup.bucket_start_unix_secs <= intervals.end_unix_secs GROUP BY intervals.ordinal, intervals.interval_id ORDER BY intervals.ordinal ASC"
+        }
+      ]
+    },
+    {
+      "id": "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft",
+      "engine": "postgres",
+      "trait_method": "ConfigStore::put_config_draft",
+      "source": {
+        "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
+        "symbol": "PostgresStorage::put_config_draft",
+        "line_start": 28,
+        "line_end": 65,
+        "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
+      },
+      "statements": [
+        {
+          "kind": "literal",
+          "text": "INSERT INTO config_draft_v1 (id, config, revision, updated_at) VALUES ('singleton', $1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, revision = EXCLUDED.revision, updated_at = NOW() WHERE config_draft_v1.revision = $3 RETURNING revision",
+          "source": {
+            "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
+            "symbol": "put_config_draft",
+            "line_start": 44,
+            "line_end": 49
+          },
+          "branches": [
+            "selected when expected_revision == 0 (first draft insert or guarded upsert)"
+          ],
+          "bind_parameters": [
+            "56: .bind(config)",
+            "57: .bind(u64_to_i64(revision, \"config revision\")?)",
+            "58: .bind(u64_to_i64(expected_revision, \"expected config revision\")?)"
+          ]
+        },
+        {
+          "kind": "literal",
+          "text": "UPDATE config_draft_v1 SET config = $1, revision = $2, updated_at = NOW() WHERE id = 'singleton' AND revision = $3 RETURNING revision",
+          "source": {
+            "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
+            "symbol": "put_config_draft",
+            "line_start": 51,
+            "line_end": 53
+          },
+          "branches": [
+            "selected when expected_revision != 0 (compare-and-swap on existing singleton row)"
+          ],
+          "bind_parameters": [
+            "56: .bind(config)",
+            "57: .bind(u64_to_i64(revision, \"config revision\")?)",
+            "58: .bind(u64_to_i64(expected_revision, \"expected config revision\")?)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft",
+      "engine": "sqlite",
+      "trait_method": "ConfigStore::put_config_draft",
+      "source": {
+        "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
+        "symbol": "SqliteStorage::put_config_draft",
+        "line_start": 27,
+        "line_end": 60,
+        "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
+      },
+      "statements": [
+        {
+          "kind": "literal",
+          "text": "SELECT payload FROM config_drafts_v1 WHERE id = ?",
+          "source": {
+            "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
+            "symbol": "read_config_draft_in_tx",
+            "line_start": 149,
+            "line_end": 149
+          },
+          "branches": [
+            "read within immediate transaction for optimistic concurrency validation"
+          ],
+          "bind_parameters": [
+            "150: .bind(CONFIG_DRAFT_ID) — \"singleton\""
+          ]
+        },
+        {
+          "kind": "literal",
+          "text": "INSERT INTO config_drafts_v1 (id, payload, created_at, updated_at) VALUES (?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
+          "source": {
+            "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
+            "symbol": "put_config_draft",
+            "line_start": 50,
+            "line_end": 50
+          },
+          "branches": [
+            "upsert draft payload on revision match"
+          ],
+          "bind_parameters": [
+            "52: .bind(CONFIG_DRAFT_ID)",
+            "53: .bind(payload)"
+          ]
         }
       ]
     }

@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "source_commit": "19b05570",
+  "source_commit": "a9da5c3c",
   "source_state": {
     "kind": "approved_uncommitted_candidate",
-    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
-    "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
+    "base_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+    "note": "Source hashes and references describe the approved uncommitted merge candidate worktree (HEAD a9da5c3c + master b07b25eebe7bbee7e882643c6776c82015d49689); source_commit identifies the PR-side base, not an updated production deployment."
   },
   "source_files": [
     {
@@ -17,11 +17,11 @@
     },
     {
       "path": "crates/cc-lb-admin/src/routes.rs",
-      "sha256": "cd879a0c93c7680cb4f290388f42c073693940e850813011686082f7394932ed"
+      "sha256": "c447bb80bd7d4ca1dc6cf603854e592ae3bbd7723d8523f147e4fb2e7af27bec"
     },
     {
       "path": "crates/cc-lb-admin/src/settings.rs",
-      "sha256": "5e20de6cd410ed0b55c212f92bb4fe7f0363b6fe6ded36ddfe1a5c562b4b7b81"
+      "sha256": "195e506f6cb2e2bb407780b24236475e6ea45cb201484fb1938a3ab39c931629"
     },
     {
       "path": "crates/cc-lb-admin/src/v1/keys.rs",
@@ -29,7 +29,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/v1/oauth.rs",
-      "sha256": "ed2f23ac212102d4b7f34717c202600af7c807098b486028bc7f2557bf32089f"
+      "sha256": "547b9509637cc1f396347dea5a848f31971dc7425b4a16016a90f18864cac36b"
     },
     {
       "path": "crates/cc-lb-admin/src/v1/plugins.rs",
@@ -49,7 +49,7 @@
     },
     {
       "path": "crates/cc-lb-admin/src/v1/upstreams.rs",
-      "sha256": "6cbbe2930c93838f4aff3421580c7924974c8d41d91cb7f7bf0a69205bc75aff"
+      "sha256": "0c0d887a976ffb1e88aebeaae91a3394cfebcdcd1d802a4b3aeed2418e80e39a"
     },
     {
       "path": "crates/cc-lb-control/src/api_keys/key_store.rs",
@@ -73,7 +73,7 @@
     },
     {
       "path": "crates/cc-lb-server/src/app.rs",
-      "sha256": "094d8af664467d9ff02b62d64d981f8c87cbc1e0166331839660b2508aeb7180"
+      "sha256": "529a89bddcb53a80a2c931043f16e82863651846c9e22708cf0d8bdaf8251d82"
     },
     {
       "path": "crates/cc-lb-storage-api/src/plugin_registry_models.rs",
@@ -85,7 +85,7 @@
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
-      "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
+      "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
     },
     {
       "path": "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
@@ -121,7 +121,7 @@
     },
     {
       "path": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
-      "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
+      "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
     },
     {
       "path": "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
@@ -156,7 +156,7 @@
     {
       "method": "POST",
       "path": "/admin/principals/{id}/keys/{key_id}/revoke",
-      "source": "crates/cc-lb-admin/src/routes.rs:32",
+      "source": "crates/cc-lb-admin/src/routes.rs:31",
       "handler": "revoke_api_key",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [],
@@ -199,7 +199,7 @@
     {
       "method": "POST",
       "path": "/admin/principals/{id}/keys/{key_id}/disable",
-      "source": "crates/cc-lb-admin/src/routes.rs:36",
+      "source": "crates/cc-lb-admin/src/routes.rs:35",
       "handler": "disable_api_key",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [],
@@ -242,7 +242,7 @@
     {
       "method": "POST",
       "path": "/admin/principals/{id}/keys/{key_id}/enable",
-      "source": "crates/cc-lb-admin/src/routes.rs:40",
+      "source": "crates/cc-lb-admin/src/routes.rs:39",
       "handler": "enable_api_key",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [],
@@ -286,65 +286,12 @@
     },
     {
       "method": "PUT",
-      "path": "/admin/config/draft",
-      "source": "crates/cc-lb-admin/src/routes.rs:54",
-      "handler": "put_config_draft",
-      "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
-      "ui_clients": [
-        "useSaveDraft (crates/cc-lb-admin/web/src/lib/queries.ts:1611) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:453)"
-      ],
-      "storage_operation_ids": [
-        "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
-        "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft",
-        "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft",
-        "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft",
-        "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-        "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-      ],
-      "cache_or_no_query": "Stores in-memory draft copy via CurrentConfig::put_draft_config; invalidates TanStack queryKey ['config', 'draft']",
-      "side_effects": "Audit event `config_draft_put`; increments draft revision in DB and resets last_validated_revision to null QA restore: Re-put previous draft configuration or clear draft.",
-      "risk_tier": "reversible_write",
-      "parameters": {
-        "path": [],
-        "query": [],
-        "header": [
-          {
-            "name": "authorization",
-            "type": "String",
-            "required": true,
-            "description": "Bearer admin auth token"
-          },
-          {
-            "name": "content-type",
-            "type": "String",
-            "required": true,
-            "description": "application/json"
-          }
-        ],
-        "body": [
-          {
-            "name": "draft",
-            "type": "Value",
-            "required": true,
-            "description": "Configuration object or TOML-compatible JSON structure"
-          },
-          {
-            "name": "expected_revision",
-            "type": "u64",
-            "required": true,
-            "description": "Current expected draft revision for optimistic locking"
-          }
-        ]
-      }
-    },
-    {
-      "method": "PUT",
       "path": "/admin/v1/config/draft",
-      "source": "crates/cc-lb-admin/src/routes.rs:58",
+      "source": "crates/cc-lb-admin/src/routes.rs:50",
       "handler": "put_config_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useSaveDraft (crates/cc-lb-admin/web/src/lib/queries.ts:1611) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:453)"
+        "useSaveDraft (crates/cc-lb-admin/web/src/lib/queries.ts:1606) in ConfigEditorSection (crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:735)"
       ],
       "storage_operation_ids": [
         "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
@@ -354,8 +301,8 @@
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
         "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
       ],
-      "cache_or_no_query": "Stores in-memory draft copy via CurrentConfig::put_draft_config; invalidates TanStack queryKey ['config', 'draft']",
-      "side_effects": "Audit event `config_draft_put`; increments draft revision in DB and resets last_validated_revision to null QA restore: Re-put previous draft configuration or clear draft.",
+      "cache_or_no_query": "Writes the draft JSON to the singleton config_draft row via ConfigStore::put_config_draft with optimistic revision check (expected_revision must equal stored revision; stale -> 409 stale_draft_revision with current_revision). Draft is normalized (null fields stripped) and storage.url redacted before persistence; last_validated_revision and last_validation reset to null. Invalidates TanStack queryKey ['config','editor'] and ['config','draft'].",
+      "side_effects": "Audit event `config_draft_put`; increments draft revision in DB and clears validation state QA restore: Re-put previous draft configuration or clear draft.",
       "risk_tier": "reversible_write",
       "parameters": {
         "path": [],
@@ -386,53 +333,6 @@
             "type": "u64",
             "required": true,
             "description": "Current expected draft revision for optimistic locking"
-          }
-        ]
-      }
-    },
-    {
-      "method": "POST",
-      "path": "/admin/config/draft/validate",
-      "source": "crates/cc-lb-admin/src/routes.rs:61",
-      "handler": "validate_config_draft",
-      "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
-      "ui_clients": [
-        "useValidateConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1602) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:454)"
-      ],
-      "storage_operation_ids": [
-        "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
-        "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft",
-        "sqlite:ConfigStore::set_last_validated_revision:SqliteStorage::set_last_validated_revision",
-        "postgres:ConfigStore::set_last_validated_revision:PostgresStorage::set_last_validated_revision",
-        "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-        "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-      ],
-      "cache_or_no_query": "No cache write; updates last_validated_revision in storage",
-      "side_effects": "Audit event `config_draft_validate`; checks TOML/JSON schema and semantic validity; marks revision as validated or stores validation error QA restore: Re-validate previous revision.",
-      "risk_tier": "reversible_write",
-      "parameters": {
-        "path": [],
-        "query": [],
-        "header": [
-          {
-            "name": "authorization",
-            "type": "String",
-            "required": true,
-            "description": "Bearer admin auth token"
-          },
-          {
-            "name": "content-type",
-            "type": "String",
-            "required": true,
-            "description": "application/json"
-          }
-        ],
-        "body": [
-          {
-            "name": "expected_revision",
-            "type": "u64",
-            "required": true,
-            "description": "Expected revision of draft being validated"
           }
         ]
       }
@@ -440,22 +340,22 @@
     {
       "method": "POST",
       "path": "/admin/v1/config/draft/validate",
-      "source": "crates/cc-lb-admin/src/routes.rs:63",
+      "source": "crates/cc-lb-admin/src/routes.rs:54",
       "handler": "validate_config_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
-        "useValidateConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1602) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:454)"
+        "useValidateConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1581) in ConfigEditorSection (crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:736)"
       ],
       "storage_operation_ids": [
         "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
         "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft",
-        "sqlite:ConfigStore::set_last_validated_revision:SqliteStorage::set_last_validated_revision",
-        "postgres:ConfigStore::set_last_validated_revision:PostgresStorage::set_last_validated_revision",
+        "sqlite:ConfigStore::set_config_validation:SqliteStorage::set_config_validation",
+        "postgres:ConfigStore::set_config_validation:PostgresStorage::set_config_validation",
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
         "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
       ],
-      "cache_or_no_query": "No cache write; updates last_validated_revision in storage",
-      "side_effects": "Audit event `config_draft_validate`; checks TOML/JSON schema and semantic validity; marks revision as validated or stores validation error QA restore: Re-validate previous revision.",
+      "cache_or_no_query": "Materializes the stored draft to TOML (restoring the redacted storage.url from the current file or the optional storage_url_replacement), validates file + effective + filesystem + override dimensions, and persists the full ConfigValidationReport via ConfigStore::set_config_validation (sets last_validated_revision only when valid). No response cache.",
+      "side_effects": "Audit event `config_draft_validate`; stores validation report and marks revision validated when clean QA restore: Re-validate previous revision.",
       "risk_tier": "reversible_write",
       "parameters": {
         "path": [],
@@ -480,25 +380,88 @@
             "type": "u64",
             "required": true,
             "description": "Expected revision of draft being validated"
+          },
+          {
+            "name": "storage_url_replacement",
+            "type": "Option<String>",
+            "required": false,
+            "description": "Replacement storage.url used when the draft carries the redaction sentinel and the current file has no value to restore"
           }
         ]
       }
     },
     {
       "method": "POST",
-      "path": "/admin/config/apply",
-      "source": "crates/cc-lb-admin/src/routes.rs:66",
-      "handler": "apply_config_draft",
-      "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
+      "path": "/admin/v1/config/draft/download",
+      "source": "crates/cc-lb-admin/src/routes.rs:59",
+      "handler": "download_config_draft",
+      "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
       "ui_clients": [
-        "useApplyConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1587) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:455)"
+        "downloadConfigDraft (crates/cc-lb-admin/web/src/lib/api.ts:299) in ConfigEditorSection (crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1208)"
       ],
       "storage_operation_ids": [
+        "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
+        "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft",
         "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
         "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
       ],
-      "cache_or_no_query": "Atomically swaps DynamicView and CurrentConfig; clears in-memory draft; invalidates TanStack queryKey ['config', 'draft'], ['config', 'current']",
-      "side_effects": "Audit event `config_apply`; activates new runtime proxy state in memory without database entity mutation QA restore: Re-apply previous configuration draft or reload original config.",
+      "cache_or_no_query": "Reads the singleton draft row, requires expected_revision match and a validated revision (last_validated_revision == expected_revision, or a stored last_validation report whose revision matches and file.valid is true), re-materializes the draft to TOML with storage.url restored, and requires report.file.valid. Returns raw TOML bytes as application/toml attachment (filename cc-lb.toml) with Cache-Control: no-store; no JSON body.",
+      "side_effects": "Audit event `config_download`; no persistent mutation QA restore: n/a (read-only download).",
+      "risk_tier": "read_with_audit",
+      "parameters": {
+        "path": [],
+        "query": [],
+        "header": [
+          {
+            "name": "authorization",
+            "type": "String",
+            "required": true,
+            "description": "Bearer admin auth token"
+          },
+          {
+            "name": "content-type",
+            "type": "String",
+            "required": true,
+            "description": "application/json"
+          }
+        ],
+        "body": [
+          {
+            "name": "expected_revision",
+            "type": "u64",
+            "required": true,
+            "description": "Expected draft revision for optimistic locking"
+          },
+          {
+            "name": "storage_url_replacement",
+            "type": "Option<String>",
+            "required": false,
+            "description": "Replacement storage.url when the draft carries the redaction sentinel"
+          }
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/config/save",
+      "source": "crates/cc-lb-admin/src/routes.rs:58",
+      "handler": "save_config_file",
+      "auth": "require_admin_auth + authorize(AdminAction::Write)",
+      "ui_clients": [
+        "useSaveConfigFile (crates/cc-lb-admin/web/src/lib/queries.ts:1628) in ConfigEditorSection (crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:737)"
+      ],
+      "storage_operation_ids": [
+        "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft",
+        "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft",
+        "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft",
+        "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft",
+        "sqlite:ConfigStore::append_config_history:SqliteStorage::append_config_history",
+        "postgres:ConfigStore::append_config_history:PostgresStorage::append_config_history",
+        "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
+        "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
+      ],
+      "cache_or_no_query": "Writes the validated draft to the config file on disk, not to runtime state: requires expected_revision match and last_validated_revision == expected_revision (409 draft_not_validated otherwise), re-materializes and re-validates, checks expected_fingerprint against the current file sha256 (409 file_changed), refuses non-writable paths (409 file_not_writable) and active admin-auth provider removal unless confirm_self_lockout (409 self_lockout_confirmation_required), then atomic_replace writes a 0600 temp file, fsyncs, re-checks fingerprint, and renames. Afterwards clears the draft via put_config_draft and records metadata-only history via append_config_history; both are best-effort after the file write (failures logged, not rolled back). Response: revision, saved_at_unix_secs, restart_required: true, fingerprint.",
+      "side_effects": "Audit event `config_save` on success (payload: revision, saved_at_unix_secs, fingerprint, restart_required) and `config_save_failed` on failure (payload: reason); success-audit failure is logged, not fatal. Atomically replaces the config file on disk; runtime keeps running the old config until restart. QA restore: restore previous file contents and restart.",
       "risk_tier": "destructive_write",
       "parameters": {
         "path": [],
@@ -509,105 +472,46 @@
             "type": "String",
             "required": true,
             "description": "Bearer admin auth token"
-          }
-        ],
-        "body": []
-      }
-    },
-    {
-      "method": "POST",
-      "path": "/admin/v1/config/apply",
-      "source": "crates/cc-lb-admin/src/routes.rs:67",
-      "handler": "apply_config_draft",
-      "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
-      "ui_clients": [
-        "useApplyConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1587) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:455)"
-      ],
-      "storage_operation_ids": [
-        "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-        "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-      ],
-      "cache_or_no_query": "Atomically swaps DynamicView and CurrentConfig; clears in-memory draft; invalidates TanStack queryKey ['config', 'draft'], ['config', 'current']",
-      "side_effects": "Audit event `config_apply`; activates new runtime proxy state in memory without database entity mutation QA restore: Re-apply previous configuration draft or reload original config.",
-      "risk_tier": "destructive_write",
-      "parameters": {
-        "path": [],
-        "query": [],
-        "header": [
+          },
           {
-            "name": "authorization",
+            "name": "content-type",
             "type": "String",
             "required": true,
-            "description": "Bearer admin auth token"
+            "description": "application/json"
           }
         ],
-        "body": []
-      }
-    },
-    {
-      "method": "POST",
-      "path": "/admin/config/reload",
-      "source": "crates/cc-lb-admin/src/routes.rs:72",
-      "handler": "reload_config",
-      "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
-      "ui_clients": [
-        "useReloadConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1628) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:456)"
-      ],
-      "storage_operation_ids": [
-        "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-        "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-      ],
-      "cache_or_no_query": "No database storage entity modified (only audit entry written)",
-      "side_effects": "Audit event `config_reload_signal`; sends UNIX SIGHUP signal to pid (nix::sys::signal::kill) to trigger process config re-read from disk QA restore: Ensure valid configuration file exists on disk and send SIGHUP again.",
-      "risk_tier": "external_action",
-      "parameters": {
-        "path": [],
-        "query": [],
-        "header": [
+        "body": [
           {
-            "name": "authorization",
-            "type": "String",
+            "name": "expected_revision",
+            "type": "u64",
             "required": true,
-            "description": "Bearer admin auth token"
-          }
-        ],
-        "body": []
-      }
-    },
-    {
-      "method": "POST",
-      "path": "/admin/v1/config/reload",
-      "source": "crates/cc-lb-admin/src/routes.rs:73",
-      "handler": "reload_config",
-      "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
-      "ui_clients": [
-        "useReloadConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1628) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:456)"
-      ],
-      "storage_operation_ids": [
-        "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-        "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-      ],
-      "cache_or_no_query": "No database storage entity modified (only audit entry written)",
-      "side_effects": "Audit event `config_reload_signal`; sends UNIX SIGHUP signal to pid (nix::sys::signal::kill) to trigger process config re-read from disk QA restore: Ensure valid configuration file exists on disk and send SIGHUP again.",
-      "risk_tier": "external_action",
-      "parameters": {
-        "path": [],
-        "query": [],
-        "header": [
+            "description": "Expected draft revision for optimistic locking"
+          },
           {
-            "name": "authorization",
-            "type": "String",
+            "name": "expected_fingerprint",
+            "type": "Option<String>",
             "required": true,
-            "description": "Bearer admin auth token"
+            "description": "Expected sha256:<hex> fingerprint of the current config file; null allowed only when the file does not exist"
+          },
+          {
+            "name": "storage_url_replacement",
+            "type": "Option<String>",
+            "required": false,
+            "description": "Replacement storage.url when the draft carries the redaction sentinel"
+          },
+          {
+            "name": "confirm_self_lockout",
+            "type": "bool",
+            "required": false,
+            "description": "Must be true to save a draft that removes or changes the active admin auth provider"
           }
-        ],
-        "body": []
+        ]
       }
     },
     {
       "method": "POST",
       "path": "/admin/v1/principals/{id}/keys",
-      "source": "crates/cc-lb-admin/src/v1/keys.rs:27",
+      "source": "crates/cc-lb-admin/src/v1/keys.rs:26",
       "handler": "issue_key",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -661,7 +565,7 @@
     {
       "method": "POST",
       "path": "/admin/v1/principals/{id}/keys/{key_id}/revoke",
-      "source": "crates/cc-lb-admin/src/v1/keys.rs:31",
+      "source": "crates/cc-lb-admin/src/v1/keys.rs:30",
       "handler": "revoke_key",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -785,7 +689,7 @@
     {
       "method": "POST",
       "path": "/admin/v1/upstreams/from-oauth-draft",
-      "source": "crates/cc-lb-admin/src/v1/oauth.rs:58",
+      "source": "crates/cc-lb-admin/src/v1/oauth.rs:57",
       "handler": "create_upstream_from_oauth_draft",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -893,7 +797,7 @@
     {
       "method": "POST",
       "path": "/admin/v1/upstreams/{id}/oauth/complete",
-      "source": "crates/cc-lb-admin/src/v1/oauth.rs:63",
+      "source": "crates/cc-lb-admin/src/v1/oauth.rs:62",
       "handler": "complete_oauth",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -951,7 +855,7 @@
     {
       "method": "PATCH",
       "path": "/admin/v1/plugins/registry/{id}",
-      "source": "crates/cc-lb-admin/src/v1/plugins.rs:41",
+      "source": "crates/cc-lb-admin/src/v1/plugins.rs:40",
       "handler": "patch_registry",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -1007,7 +911,7 @@
     {
       "method": "DELETE",
       "path": "/admin/v1/plugins/registry/{id}",
-      "source": "crates/cc-lb-admin/src/v1/plugins.rs:41",
+      "source": "crates/cc-lb-admin/src/v1/plugins.rs:40",
       "handler": "delete_registry",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -1067,7 +971,7 @@
     {
       "method": "POST",
       "path": "/admin/v1/principals/{principal_id}/plugin-chain",
-      "source": "crates/cc-lb-admin/src/v1/plugins.rs:47",
+      "source": "crates/cc-lb-admin/src/v1/plugins.rs:46",
       "handler": "insert_chain",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -1155,7 +1059,7 @@
     {
       "method": "POST",
       "path": "/admin/v1/principals/{principal_id}/plugin-chain/reorder",
-      "source": "crates/cc-lb-admin/src/v1/plugins.rs:51",
+      "source": "crates/cc-lb-admin/src/v1/plugins.rs:50",
       "handler": "reorder_chain",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -1207,7 +1111,7 @@
     {
       "method": "POST",
       "path": "/admin/v1/principals/{principal_id}/plugin-chain/rebalance",
-      "source": "crates/cc-lb-admin/src/v1/plugins.rs:55",
+      "source": "crates/cc-lb-admin/src/v1/plugins.rs:54",
       "handler": "rebalance_chain",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [],
@@ -1251,7 +1155,7 @@
     {
       "method": "PUT",
       "path": "/admin/v1/plugin-chain-entries/{id}",
-      "source": "crates/cc-lb-admin/src/v1/plugins.rs:59",
+      "source": "crates/cc-lb-admin/src/v1/plugins.rs:58",
       "handler": "update_chain",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [],
@@ -1325,7 +1229,7 @@
     {
       "method": "DELETE",
       "path": "/admin/v1/plugin-chain-entries/{id}",
-      "source": "crates/cc-lb-admin/src/v1/plugins.rs:59",
+      "source": "crates/cc-lb-admin/src/v1/plugins.rs:58",
       "handler": "delete_chain",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -1370,7 +1274,7 @@
     {
       "method": "POST",
       "path": "/admin/v1/plugins/wasm",
-      "source": "crates/cc-lb-admin/src/v1/plugins_wasm.rs:88",
+      "source": "crates/cc-lb-admin/src/v1/plugins_wasm.rs:87",
       "handler": "upload_wasm",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -1487,7 +1391,7 @@
     {
       "method": "POST",
       "path": "/admin/v1/principals",
-      "source": "crates/cc-lb-admin/src/v1/principals.rs:32",
+      "source": "crates/cc-lb-admin/src/v1/principals.rs:31",
       "handler": "create_principal",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -1562,7 +1466,7 @@
     {
       "method": "PUT",
       "path": "/admin/v1/principals/{id}",
-      "source": "crates/cc-lb-admin/src/v1/principals.rs:36",
+      "source": "crates/cc-lb-admin/src/v1/principals.rs:35",
       "handler": "update_principal",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -1644,7 +1548,7 @@
     {
       "method": "PATCH",
       "path": "/admin/v1/principals/{id}",
-      "source": "crates/cc-lb-admin/src/v1/principals.rs:36",
+      "source": "crates/cc-lb-admin/src/v1/principals.rs:35",
       "handler": "update_principal",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -1726,7 +1630,7 @@
     {
       "method": "DELETE",
       "path": "/admin/v1/principals/{id}",
-      "source": "crates/cc-lb-admin/src/v1/principals.rs:36",
+      "source": "crates/cc-lb-admin/src/v1/principals.rs:35",
       "handler": "delete_principal",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -1861,7 +1765,7 @@
     {
       "method": "PUT",
       "path": "/admin/v1/principals/{id}/router-terminal",
-      "source": "crates/cc-lb-admin/src/v1/principals.rs:45",
+      "source": "crates/cc-lb-admin/src/v1/principals.rs:44",
       "handler": "update_router_terminal",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -1919,7 +1823,7 @@
     {
       "method": "PUT",
       "path": "/admin/v1/principals/{id}/allowed_models",
-      "source": "crates/cc-lb-admin/src/v1/principals.rs:49",
+      "source": "crates/cc-lb-admin/src/v1/principals.rs:48",
       "handler": "update_allowed_models",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -2033,7 +1937,7 @@
     {
       "method": "POST",
       "path": "/admin/v1/upstreams",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:84",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:83",
       "handler": "create_upstream",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -2114,7 +2018,7 @@
     {
       "method": "PUT",
       "path": "/admin/v1/upstreams/{id}",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:88",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:87",
       "handler": "update_upstream",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -2214,7 +2118,7 @@
     {
       "method": "PATCH",
       "path": "/admin/v1/upstreams/{id}",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:88",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:87",
       "handler": "update_upstream",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -2314,7 +2218,7 @@
     {
       "method": "DELETE",
       "path": "/admin/v1/upstreams/{id}",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:88",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:87",
       "handler": "delete_upstream",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -2359,7 +2263,7 @@
     {
       "method": "POST",
       "path": "/admin/v1/upstreams/{id}/subscription-metadata/refresh",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:99",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:98",
       "handler": "refresh_upstream_subscription_metadata",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -2402,7 +2306,7 @@
     {
       "method": "POST",
       "path": "/admin/v1/upstreams/{id}/warmup/fire-now",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:103",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:102",
       "handler": "fire_now_upstream_warmup",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -2443,7 +2347,7 @@
     {
       "method": "DELETE",
       "path": "/admin/v1/upstreams/{id}/warmup-dialect-plugin",
-      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:115",
+      "source": "crates/cc-lb-admin/src/v1/upstreams.rs:114",
       "handler": "delete_upstream_warmup_dialect_plugin",
       "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
       "ui_clients": [
@@ -2633,9 +2537,9 @@
       "source": {
         "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
         "symbol": "PostgresStorage::get_config_draft",
-        "line_start": 15,
-        "line_end": 28,
-        "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
+        "line_start": 13,
+        "line_end": 26,
+        "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
       },
       "statements": [
         {
@@ -2644,8 +2548,8 @@
           "source": {
             "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
             "symbol": "get_config_draft",
-            "line_start": 17,
-            "line_end": 17
+            "line_start": 15,
+            "line_end": 15
           },
           "branches": [],
           "bind_parameters": []
@@ -2659,72 +2563,45 @@
       "source": {
         "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
         "symbol": "PostgresStorage::put_config_draft",
-        "line_start": 30,
-        "line_end": 57,
-        "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
+        "line_start": 28,
+        "line_end": 65,
+        "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
       },
       "statements": [
         {
           "kind": "literal",
-          "text": "INSERT INTO config_draft_v1 (id, config, revision, updated_at)              SELECT 'singleton', $1, $2, NOW() WHERE $3 = 0              ON CONFLICT (id) DO UPDATE              SET config = EXCLUDED.config, updated_at = NOW(),              revision = config_draft_v1.revision + 1              WHERE config_draft_v1.revision = $3              RETURNING revision",
+          "text": "INSERT INTO config_draft_v1 (id, config, revision, updated_at) VALUES ('singleton', $1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, revision = EXCLUDED.revision, updated_at = NOW() WHERE config_draft_v1.revision = $3 RETURNING revision",
           "source": {
             "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
-            "symbol": "PostgresStorage::put_config_draft",
-            "line_start": 46,
-            "line_end": 46
+            "symbol": "put_config_draft",
+            "line_start": 44,
+            "line_end": 49
           },
           "branches": [
-            "atomic compare-and-swap on config_draft_v1.revision = $3"
+            "selected when expected_revision == 0 (first draft insert or guarded upsert)"
           ],
           "bind_parameters": [
-            "config",
-            "revision (expected_revision + 1)",
-            "expected_revision"
+            "56: .bind(config)",
+            "57: .bind(u64_to_i64(revision, \"config revision\")?)",
+            "58: .bind(u64_to_i64(expected_revision, \"expected config revision\")?)"
           ]
-        }
-      ]
-    },
-    {
-      "id": "postgres:ConfigStore::set_last_validated_revision:PostgresStorage::set_last_validated_revision",
-      "engine": "postgres",
-      "trait_method": "ConfigStore::set_last_validated_revision",
-      "source": {
-        "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
-        "symbol": "PostgresStorage::set_last_validated_revision",
-        "line_start": 59,
-        "line_end": 103,
-        "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
-      },
-      "statements": [
-        {
-          "kind": "literal",
-          "text": "SELECT config FROM config_draft_v1 WHERE id = 'singleton' FOR UPDATE",
-          "source": {
-            "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
-            "symbol": "PostgresStorage::set_last_validated_revision",
-            "line_start": 66,
-            "line_end": 66
-          },
-          "branches": [
-            "row-lock in transaction"
-          ],
-          "bind_parameters": []
         },
         {
           "kind": "literal",
-          "text": "INSERT INTO config_draft_v1 (id, config, revision, updated_at)              VALUES ('singleton', $1, $2, NOW())              ON CONFLICT (id) DO UPDATE              SET config = EXCLUDED.config, revision = EXCLUDED.revision, updated_at = NOW()",
+          "text": "UPDATE config_draft_v1 SET config = $1, revision = $2, updated_at = NOW() WHERE id = 'singleton' AND revision = $3 RETURNING revision",
           "source": {
             "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
-            "symbol": "PostgresStorage::set_last_validated_revision",
-            "line_start": 94,
-            "line_end": 94
+            "symbol": "put_config_draft",
+            "line_start": 51,
+            "line_end": 53
           },
           "branches": [
-            "updates last_validated_revision or last_validation_error"
+            "selected when expected_revision != 0 (compare-and-swap on existing singleton row)"
           ],
           "bind_parameters": [
-            "config",
-            "revision"
+            "56: .bind(config)",
+            "57: .bind(u64_to_i64(revision, \"config revision\")?)",
+            "58: .bind(u64_to_i64(expected_revision, \"expected config revision\")?)"
           ]
         }
       ]
@@ -5033,9 +4910,9 @@
       "source": {
         "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
         "symbol": "SqliteStorage::get_config_draft",
-        "line_start": 14,
-        "line_end": 27,
-        "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
+        "line_start": 12,
+        "line_end": 25,
+        "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
       },
       "statements": [
         {
@@ -5044,8 +4921,8 @@
           "source": {
             "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
             "symbol": "get_config_draft",
-            "line_start": 16,
-            "line_end": 16
+            "line_start": 14,
+            "line_end": 14
           },
           "branches": [],
           "bind_parameters": [
@@ -5061,9 +4938,9 @@
       "source": {
         "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
         "symbol": "SqliteStorage::put_config_draft",
-        "line_start": 29,
-        "line_end": 62,
-        "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
+        "line_start": 27,
+        "line_end": 60,
+        "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
       },
       "statements": [
         {
@@ -5072,14 +4949,14 @@
           "source": {
             "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
             "symbol": "read_config_draft_in_tx",
-            "line_start": 175,
-            "line_end": 175
+            "line_start": 149,
+            "line_end": 149
           },
           "branches": [
             "read within immediate transaction for optimistic concurrency validation"
           ],
           "bind_parameters": [
-            "CONFIG_DRAFT_ID (\"singleton\")"
+            "150: .bind(CONFIG_DRAFT_ID) — \"singleton\""
           ]
         },
         {
@@ -5087,63 +4964,16 @@
           "text": "INSERT INTO config_drafts_v1 (id, payload, created_at, updated_at) VALUES (?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
           "source": {
             "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
-            "symbol": "SqliteStorage::put_config_draft",
-            "line_start": 52,
-            "line_end": 52
+            "symbol": "put_config_draft",
+            "line_start": 50,
+            "line_end": 50
           },
           "branches": [
             "upsert draft payload on revision match"
           ],
           "bind_parameters": [
-            "CONFIG_DRAFT_ID (\"singleton\")",
-            "payload"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "sqlite:ConfigStore::set_last_validated_revision:SqliteStorage::set_last_validated_revision",
-      "engine": "sqlite",
-      "trait_method": "ConfigStore::set_last_validated_revision",
-      "source": {
-        "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
-        "symbol": "SqliteStorage::set_last_validated_revision",
-        "line_start": 64,
-        "line_end": 96,
-        "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
-      },
-      "statements": [
-        {
-          "kind": "literal",
-          "text": "SELECT payload FROM config_drafts_v1 WHERE id = ?",
-          "source": {
-            "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
-            "symbol": "read_config_draft_in_tx",
-            "line_start": 175,
-            "line_end": 175
-          },
-          "branches": [
-            "read within immediate transaction"
-          ],
-          "bind_parameters": [
-            "CONFIG_DRAFT_ID (\"singleton\")"
-          ]
-        },
-        {
-          "kind": "literal",
-          "text": "INSERT INTO config_drafts_v1 (id, payload, created_at, updated_at) VALUES (?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
-          "source": {
-            "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
-            "symbol": "SqliteStorage::set_last_validated_revision",
-            "line_start": 87,
-            "line_end": 87
-          },
-          "branches": [
-            "updates last_validated_revision or last_validation_error"
-          ],
-          "bind_parameters": [
-            "CONFIG_DRAFT_ID (\"singleton\")",
-            "payload"
+            "52: .bind(CONFIG_DRAFT_ID)",
+            "53: .bind(payload)"
           ]
         }
       ]
@@ -7033,6 +6863,190 @@
           ]
         }
       ]
+    },
+    {
+      "id": "postgres:ConfigStore::set_config_validation:PostgresStorage::set_config_validation",
+      "engine": "postgres",
+      "trait_method": "ConfigStore::set_config_validation",
+      "source": {
+        "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
+        "symbol": "PostgresStorage::set_config_validation",
+        "line_start": 67,
+        "line_end": 105,
+        "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
+      },
+      "statements": [
+        {
+          "kind": "literal",
+          "text": "SELECT config FROM config_draft_v1 WHERE id = 'singleton' FOR UPDATE",
+          "source": {
+            "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
+            "symbol": "PostgresStorage::set_config_validation",
+            "line_start": 75,
+            "line_end": 75
+          },
+          "branches": [
+            "row-lock in transaction"
+          ],
+          "bind_parameters": []
+        },
+        {
+          "kind": "literal",
+          "text": "INSERT INTO config_draft_v1 (id, config, revision, updated_at) VALUES ('singleton', $1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, revision = EXCLUDED.revision, updated_at = NOW()",
+          "source": {
+            "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
+            "symbol": "PostgresStorage::set_config_validation",
+            "line_start": 96,
+            "line_end": 96
+          },
+          "branches": [
+            "persists last_validated_revision (valid only) and full last_validation report JSON"
+          ],
+          "bind_parameters": [
+            "88: .bind(config)",
+            "89: .bind(u64_to_i64(revision, \"config revision\")?)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sqlite:ConfigStore::set_config_validation:SqliteStorage::set_config_validation",
+      "engine": "sqlite",
+      "trait_method": "ConfigStore::set_config_validation",
+      "source": {
+        "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
+        "symbol": "SqliteStorage::set_config_validation",
+        "line_start": 62,
+        "line_end": 88,
+        "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
+      },
+      "statements": [
+        {
+          "kind": "literal",
+          "text": "SELECT payload FROM config_drafts_v1 WHERE id = ?",
+          "source": {
+            "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
+            "symbol": "read_config_draft_in_tx",
+            "line_start": 149,
+            "line_end": 149
+          },
+          "branches": [
+            "read within immediate transaction"
+          ],
+          "bind_parameters": [
+            "150: .bind(CONFIG_DRAFT_ID) — \"singleton\""
+          ]
+        },
+        {
+          "kind": "literal",
+          "text": "INSERT INTO config_drafts_v1 (id, payload, created_at, updated_at) VALUES (?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
+          "source": {
+            "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
+            "symbol": "SqliteStorage::set_config_validation",
+            "line_start": 79,
+            "line_end": 79
+          },
+          "branches": [
+            "persists last_validated_revision (valid only) and full last_validation report JSON"
+          ],
+          "bind_parameters": [
+            "81: .bind(CONFIG_DRAFT_ID)",
+            "82: .bind(payload)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "postgres:ConfigStore::append_config_history:PostgresStorage::append_config_history",
+      "engine": "postgres",
+      "trait_method": "ConfigStore::append_config_history",
+      "source": {
+        "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
+        "symbol": "PostgresStorage::append_config_history",
+        "line_start": 107,
+        "line_end": 136,
+        "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
+      },
+      "statements": [
+        {
+          "kind": "literal",
+          "text": "INSERT INTO config_history_v1 (revision, config, created_at)              VALUES ($1, $2, NOW())",
+          "source": {
+            "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
+            "symbol": "append_config_history",
+            "line_start": 120,
+            "line_end": 120
+          },
+          "branches": [
+            "metadata-only history row: config JSON carries {revision, applied_at_unix_secs} — no config_toml payload"
+          ],
+          "bind_parameters": [
+            "112: .bind(u64_to_i64(revision, \"history revision\")?)",
+            "113: .bind(config)"
+          ]
+        },
+        {
+          "kind": "literal",
+          "text": "DELETE FROM config_history_v1              WHERE revision NOT IN (                  SELECT revision FROM config_history_v1 ORDER BY revision DESC LIMIT 50              )",
+          "source": {
+            "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
+            "symbol": "append_config_history",
+            "line_start": 129,
+            "line_end": 129
+          },
+          "branches": [
+            "retention prune keeps newest 50 revisions in the same transaction"
+          ],
+          "bind_parameters": []
+        }
+      ]
+    },
+    {
+      "id": "sqlite:ConfigStore::append_config_history:SqliteStorage::append_config_history",
+      "engine": "sqlite",
+      "trait_method": "ConfigStore::append_config_history",
+      "source": {
+        "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
+        "symbol": "SqliteStorage::append_config_history",
+        "line_start": 90,
+        "line_end": 120,
+        "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
+      },
+      "statements": [
+        {
+          "kind": "literal",
+          "text": "INSERT INTO config_history_v1 (id, payload, created_at, updated_at) VALUES (?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
+          "source": {
+            "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
+            "symbol": "append_config_history",
+            "line_start": 103,
+            "line_end": 103
+          },
+          "branches": [
+            "metadata-only history row: payload JSON carries {revision, applied_at_unix_secs} — no config_toml payload"
+          ],
+          "bind_parameters": [
+            "105: .bind(revision.to_string())",
+            "106: .bind(payload)"
+          ]
+        },
+        {
+          "kind": "literal",
+          "text": "DELETE FROM config_history_v1 WHERE id NOT IN (SELECT id FROM config_history_v1 ORDER BY CAST(id AS INTEGER) DESC LIMIT ?)",
+          "source": {
+            "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
+            "symbol": "append_config_history",
+            "line_start": 112,
+            "line_end": 112
+          },
+          "branches": [
+            "retention prune keeps newest 50 revisions in the same transaction"
+          ],
+          "bind_parameters": [
+            "114: .bind(u64_to_i64(CONFIG_HISTORY_LIMIT as u64, \"config history limit\")?) — 50"
+          ]
+        }
+      ]
     }
   ],
   "gaps": [
@@ -7049,8 +7063,8 @@
       "description": "POST /admin/v1/router/preview is intentionally a read-only POST because its simulation input is a JSON body. It performs no storage query, audit append, external request, cache mutation, or persistent side effect."
     },
     {
-      "area": "config_apply_runtime_only",
-      "description": "The registered POST /admin[/v1]/config/apply handler calls CurrentConfig::apply_draft_config and appends an admin audit event. It does not call the separate settings::apply_config file/history workflow, so no ConfigStore::append_config_history SQL is attributed to these endpoints."
+      "area": "config_save_file_write",
+      "description": "POST /admin/v1/config/save writes the validated draft to the config file on disk via atomic replace and clears the draft; it does not mutate runtime state (restart_required: true). The previous apply/reload/current/diff/schema routes and the CurrentConfig in-memory apply path are removed by the master Settings rework; ConfigStore::append_config_history is now invoked by save (metadata-only rows) and ConfigStore::get_config_history is removed."
     },
     {
       "area": "plugin_registry_patch_audit",
@@ -7059,6 +7073,10 @@
     {
       "area": "plugin_wasm_gc_audit",
       "description": "POST /admin/v1/plugins/wasm/gc deletes only orphan blobs (sha256 absent from wasm_registry_v2) and their local cache files — registry-referenced blobs are kept even at refcount 0 — and does not emit an admin audit event."
+    },
+    {
+      "area": "settings_routes_retired",
+      "description": "Removed by merge with master b07b25ee: GET /admin[/v1]/config/current, GET /admin[/v1]/config/schema, GET /admin[/v1]/config/diff, GET /admin/config/draft, POST /admin[/v1]/config/apply, POST /admin[/v1]/config/reload, POST /admin/config/draft/validate, PUT /admin/config/draft. Replacements: GET /admin/v1/config/editor (supersedes current+schema), POST /admin/v1/config/save (supersedes apply), POST /admin/v1/config/draft/download (supersedes diff/export of draft), remaining config routes are v1-only."
     }
   ]
 }

@@ -1,19 +1,19 @@
 {
   "schema_version": 1,
-  "source_commit": "19b05570",
+  "source_commit": "a9da5c3c",
   "source_state": {
     "kind": "approved_uncommitted_candidate",
-    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
-    "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
+    "base_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+    "note": "Source hashes and references describe the approved uncommitted merge candidate worktree (HEAD a9da5c3c + master b07b25eebe7bbee7e882643c6776c82015d49689); source_commit identifies the PR-side base, not an updated production deployment."
   },
   "deployed_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
   "source_reconciliation": {
     "status": "source_reconciled",
-    "ui_actions": 205,
-    "ui_request_occurrences": 149,
-    "api_endpoints": 115,
-    "registered_backend_routes": 115,
-    "production_ui_source_files": 93,
+    "ui_actions": 209,
+    "ui_request_occurrences": 148,
+    "api_endpoints": 104,
+    "registered_backend_routes": 104,
+    "production_ui_source_files": 97,
     "ui_routes": 8,
     "unknown_ui_requests": [],
     "moved_legacy_ids_missing_from_api_catalog": [],
@@ -41,36 +41,6 @@
         "method": "GET",
         "path": "/internal/v1/partials/{event_id}",
         "reason": "API catalog declares non-UI clients: backend-only: authenticated cluster-peer partial-fetch endpoint; no browser UI caller."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/v1/config/current",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/config/current."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/v1/config/schema",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/config/schema."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/v1/config/draft",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/config/draft."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/v1/config/history",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/config/history."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/config/diff",
-        "reason": "API catalog declares non-UI clients: backend-only: no built-in admin web caller; the settings UI has no revision-diff modal."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/v1/config/diff",
-        "reason": "API catalog declares non-UI clients: backend-only: versioned config-diff alias; the settings UI has no revision-diff modal."
       },
       {
         "method": "GET",
@@ -218,26 +188,6 @@
         "reason": "No Admin Web caller in current source."
       },
       {
-        "method": "PUT",
-        "path": "/admin/v1/config/draft",
-        "reason": "API catalog declares non-UI clients: useSaveDraft (crates/cc-lb-admin/web/src/lib/queries.ts:1611) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:453)"
-      },
-      {
-        "method": "POST",
-        "path": "/admin/v1/config/draft/validate",
-        "reason": "API catalog declares non-UI clients: useValidateConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1602) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:454)"
-      },
-      {
-        "method": "POST",
-        "path": "/admin/v1/config/apply",
-        "reason": "API catalog declares non-UI clients: useApplyConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1587) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:455)"
-      },
-      {
-        "method": "POST",
-        "path": "/admin/v1/config/reload",
-        "reason": "API catalog declares non-UI clients: useReloadConfig (crates/cc-lb-admin/web/src/lib/queries.ts:1628) on Settings page (crates/cc-lb-admin/web/src/routes/settings.tsx:456)"
-      },
-      {
         "method": "POST",
         "path": "/admin/v1/principals/{principal_id}/plugin-chain/rebalance",
         "reason": "No Admin Web caller in current source."
@@ -287,8 +237,8 @@
       },
       {
         "source_contract": "api-write.json",
-        "area": "config_apply_runtime_only",
-        "description": "The registered POST /admin[/v1]/config/apply handler calls CurrentConfig::apply_draft_config and appends an admin audit event. It does not call the separate settings::apply_config file/history workflow, so no ConfigStore::append_config_history SQL is attributed to these endpoints."
+        "area": "config_save_file_write",
+        "description": "POST /admin/v1/config/save writes the validated draft to the config file on disk via atomic replace and clears the draft; it does not mutate runtime state (restart_required: true). The previous apply/reload/current/diff/schema routes and the CurrentConfig in-memory apply path are removed by the master Settings rework; ConfigStore::append_config_history is now invoked by save (metadata-only rows) and ConfigStore::get_config_history is removed."
       },
       {
         "source_contract": "api-write.json",
@@ -299,6 +249,11 @@
         "source_contract": "api-write.json",
         "area": "plugin_wasm_gc_audit",
         "description": "POST /admin/v1/plugins/wasm/gc deletes only orphan blobs (sha256 absent from wasm_registry_v2) and their local cache files — registry-referenced blobs are kept even at refcount 0 — and does not emit an admin audit event."
+      },
+      {
+        "source_contract": "api-write.json",
+        "area": "settings_routes_retired",
+        "description": "Removed by merge with master b07b25ee: GET /admin[/v1]/config/current, GET /admin[/v1]/config/schema, GET /admin[/v1]/config/diff, GET /admin/config/draft, POST /admin[/v1]/config/apply, POST /admin[/v1]/config/reload, POST /admin/config/draft/validate, PUT /admin/config/draft. Replacements: GET /admin/v1/config/editor (supersedes current+schema), POST /admin/v1/config/save (supersedes apply), POST /admin/v1/config/draft/download (supersedes diff/export of draft), remaining config routes are v1-only."
       },
       {
         "classification": "changed_since_deploy",
@@ -344,10 +299,11 @@
       },
       {
         "classification": "changed_since_deploy",
-        "target": "POST /admin/v1/config/apply",
+        "target": "POST /admin/v1/config/apply (removed) -> POST /admin/v1/config/save",
         "deployed_behavior": "Logs audit record with hardcoded actor 'admin' and principal_id 'admin'.",
-        "latest_behavior": "Logs audit record with resolved actor metadata (actor_authority, actor_subject, actor_kind, actor_email).",
-        "impact": "Audit records contain structured actor identity in latest."
+        "latest_behavior": "Route removed by master b07b25ee. Replacement POST /admin/v1/config/save writes the validated draft to the config file (atomic replace, fingerprint + self-lockout checks), clears the draft, records metadata-only history, and logs 'config_save'/'config_save_failed' audit events with resolved actor metadata; restart_required: true.",
+        "impact": "Apply semantics replaced by file save + restart; audit records contain structured actor identity.",
+        "candidate_uncommitted": true
       },
       {
         "classification": "changed_since_deploy",
@@ -422,7 +378,7 @@
         "classification": "changed_since_deploy",
         "type": "api_contract",
         "name": "Explicit clear_base_url Base URL override reset",
-        "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+        "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
         "candidate_uncommitted": true,
         "production_applicability": false,
         "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-160",
@@ -431,12 +387,12 @@
       {
         "classification": "changed_since_deploy",
         "type": "api_and_ui_capability",
-        "name": "Provider-aware configuration draft Apply availability",
-        "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+        "name": "File-backed Settings editor contract (master b07b25ee)",
+        "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
         "candidate_uncommitted": true,
         "production_applicability": false,
-        "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551",
-        "description": "Approved on 2026-09-16: draft responses expose required apply_supported from the real provider. Only explicit true may enable Apply alongside existing validation/revision checks. Unsupported and unconfirmed states show Apply-specific accessible guidance. Existing apply/reload implementations are unchanged; file-backed provider remains unsupported."
+        "reference": "crates/cc-lb-admin/src/settings.rs:203; crates/cc-lb-admin/src/routes.rs:49-63; crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:732",
+        "description": "Supersedes the PR-era apply_supported capability: the CurrentConfig abstraction is removed; GET /admin/v1/config/editor exposes file mode/fingerprint, override provenance and restart_required; save writes the config file and requires restart. Non-v1 /admin/config/* aliases removed."
       },
       {
         "classification": "removed_since_deploy",
@@ -525,6 +481,61 @@
           "RestartRequiredMatrix: fully dynamic row",
           "ConfigHistory: Upstreams, Principals, Plugins columns"
         ]
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "api",
+        "endpoints": [
+          "GET /admin/config/current",
+          "GET /admin/v1/config/current",
+          "GET /admin/config/schema",
+          "GET /admin/v1/config/schema",
+          "GET /admin/config/diff",
+          "GET /admin/v1/config/diff",
+          "POST /admin/config/apply",
+          "POST /admin/v1/config/apply",
+          "POST /admin/config/reload",
+          "POST /admin/v1/config/reload",
+          "GET /admin/config/draft",
+          "PUT /admin/config/draft",
+          "POST /admin/config/draft/validate",
+          "GET /admin/config/history"
+        ],
+        "reason": "Master b07b25ee Settings rework: file-backed editor contract replaces in-memory current/apply/reload/diff; remaining config routes are v1-only (no non-v1 aliases). Replacements: GET /admin/v1/config/editor, POST /admin/v1/config/save, POST /admin/v1/config/draft/download.",
+        "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+        "candidate_uncommitted": true
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "storage_operation",
+        "trait_methods": [
+          "ConfigStore::get_config_history",
+          "ConfigStore::set_last_validated_revision"
+        ],
+        "reason": "Master b07b25ee: get_config_history removed with the /config/diff route; set_last_validated_revision replaced by set_config_validation storing the full validation report.",
+        "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+        "candidate_uncommitted": true
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "schema_field",
+        "endpoint": "GET /admin/v1/config/draft",
+        "removed_fields": [
+          "apply_supported (PR-era field removed with the CurrentConfig abstraction); last_validation_error replaced by last_validation report object"
+        ],
+        "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+        "candidate_uncommitted": true
+      },
+      {
+        "classification": "removed_since_deploy",
+        "type": "schema_field",
+        "endpoint": "GET /admin/v1/config/history",
+        "removed_fields": [
+          "config_toml",
+          "summary (HistorySummary removed; entries carry revision + saved_at_unix_secs only)"
+        ],
+        "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+        "candidate_uncommitted": true
       }
     ]
   },
@@ -568,6 +579,34 @@
         "request_id": "REQ-SRC-B038CDBE84D7",
         "method": "GET",
         "path": "/admin/v1/auth/session",
+        "reason": "Endpoint added after deployed commit e56d029e"
+      },
+      {
+        "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:mount",
+        "request_id": "UI-SET-17",
+        "method": "GET",
+        "path": "/admin/v1/config/editor",
+        "reason": "Endpoint added after deployed commit e56d029e"
+      },
+      {
+        "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load",
+        "request_id": "UI-SET-12A",
+        "method": "GET",
+        "path": "/admin/v1/config/editor",
+        "reason": "Endpoint added after deployed commit e56d029e"
+      },
+      {
+        "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:save_file",
+        "request_id": "UI-SET-15",
+        "method": "POST",
+        "path": "/admin/v1/config/save",
+        "reason": "Endpoint added after deployed commit e56d029e"
+      },
+      {
+        "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:download_toml",
+        "request_id": "UI-SET-16",
+        "method": "POST",
+        "path": "/admin/v1/config/draft/download",
         "reason": "Endpoint added after deployed commit e56d029e"
       },
       {
@@ -1469,43 +1508,39 @@
       "legacy_id": "UI-SET-02",
       "status": "preserved",
       "canonical_id": "UI-SET-02",
-      "source_id": "settings.tsx#SettingsPage:download_export",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "settings.tsx#SettingsPage:download_database_snapshot",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-03",
       "status": "preserved",
       "canonical_id": "UI-SET-03",
-      "source_id": "settings.tsx#ConfigDraftSection:mount",
-      "reason": "Same source-backed UI action."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:mount",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-04",
       "status": "preserved",
       "canonical_id": "UI-SET-04",
-      "source_id": "settings.tsx#ConfigDraftSection:save_draft",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:save_draft",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-05",
       "status": "preserved",
       "canonical_id": "UI-SET-05",
-      "source_id": "settings.tsx#ConfigDraftSection:validate_draft",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:validate_draft",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-06",
-      "status": "preserved",
-      "canonical_id": "UI-SET-06",
-      "source_id": "settings.tsx#ConfigDraftSection:apply_draft",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "POST /admin/config/apply was removed; master replaces runtime apply with save-to-file plus restart (UI-SET-15 POST /admin/v1/config/save)."
     },
     {
       "legacy_id": "UI-SET-07",
-      "status": "preserved",
-      "canonical_id": "UI-SET-07",
-      "source_id": "settings.tsx#ConfigDraftSection:reload_daemon",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "POST /admin/config/reload was removed; master makes saved config startup-fixed, surfaced via the restart-drift banner and restart_required flag."
     },
     {
       "legacy_id": "UI-SET-08",
@@ -2294,68 +2329,58 @@
     },
     {
       "legacy_id": "UI-SET-03A",
-      "status": "preserved",
-      "canonical_id": "UI-SET-03A",
-      "source_id": "settings.tsx#ConfigDraftSection:mount",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "GET /admin/config/current was removed; the baseline file/effective config now arrives inside GET /admin/v1/config/editor (UI-SET-17)."
     },
     {
       "legacy_id": "UI-SET-03B",
       "status": "preserved",
       "canonical_id": "UI-SET-03B",
-      "source_id": "settings.tsx#ConfigDraftSection:mount",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:mount",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-03C",
-      "status": "preserved",
-      "canonical_id": "UI-SET-03C",
-      "source_id": "settings.tsx#ConfigDraftSection:mount",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "GET /admin/config/schema was removed; the config schema now arrives inside GET /admin/v1/config/editor (UI-SET-17)."
     },
     {
       "legacy_id": "UI-SET-12",
       "status": "preserved",
       "canonical_id": "UI-SET-12",
-      "source_id": "settings.tsx#ConfigDraftSection:retry_editor",
-      "reason": "Same source-backed UI action."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-12A",
       "status": "preserved",
       "canonical_id": "UI-SET-12A",
-      "source_id": "settings.tsx#ConfigDraftSection:retry_editor",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-12B",
       "status": "preserved",
       "canonical_id": "UI-SET-12B",
-      "source_id": "settings.tsx#ConfigDraftSection:retry_editor",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-13",
-      "status": "preserved",
-      "canonical_id": "UI-SET-13",
-      "source_id": "settings.tsx#ConfigDraftSection:toggle_checklist",
-      "reason": "Same source-backed UI action."
+      "status": "retired",
+      "retired_reason": "The schema coverage checklist was removed with the textarea editor; per-section Advanced disclosures (UI-SRC-5F12838E8F4B) replace it."
     },
     {
       "legacy_id": "UI-SET-14",
       "status": "preserved",
       "canonical_id": "UI-SET-14",
-      "source_id": "settings.tsx#ConfigDraftSection:edit_draft",
-      "reason": "Same source-backed UI action."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:edit_field",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "API-BACKEND-CONFIG-DIFF",
-      "status": "moved_to_api_catalog",
-      "endpoint": {
-        "method": "GET",
-        "path": "/admin/config/diff"
-      },
-      "reason": "The same backend-only operation is now sourced from the API catalog."
+      "status": "retired",
+      "retired_reason": "Master removed both config/diff routes and raw configuration history; there is no current API replacement."
     },
     {
       "legacy_id": "UI-AUD-07",
@@ -2404,8 +2429,8 @@
     },
     {
       "source_contract": "api-write.json",
-      "area": "config_apply_runtime_only",
-      "description": "The registered POST /admin[/v1]/config/apply handler calls CurrentConfig::apply_draft_config and appends an admin audit event. It does not call the separate settings::apply_config file/history workflow, so no ConfigStore::append_config_history SQL is attributed to these endpoints."
+      "area": "config_save_file_write",
+      "description": "POST /admin/v1/config/save writes the validated draft to the config file on disk via atomic replace and clears the draft; it does not mutate runtime state (restart_required: true). The previous apply/reload/current/diff/schema routes and the CurrentConfig in-memory apply path are removed by the master Settings rework; ConfigStore::append_config_history is now invoked by save (metadata-only rows) and ConfigStore::get_config_history is removed."
     },
     {
       "source_contract": "api-write.json",
@@ -2416,6 +2441,11 @@
       "source_contract": "api-write.json",
       "area": "plugin_wasm_gc_audit",
       "description": "POST /admin/v1/plugins/wasm/gc deletes only orphan blobs (sha256 absent from wasm_registry_v2) and their local cache files — registry-referenced blobs are kept even at refcount 0 — and does not emit an admin audit event."
+    },
+    {
+      "source_contract": "api-write.json",
+      "area": "settings_routes_retired",
+      "description": "Removed by merge with master b07b25ee: GET /admin[/v1]/config/current, GET /admin[/v1]/config/schema, GET /admin[/v1]/config/diff, GET /admin/config/draft, POST /admin[/v1]/config/apply, POST /admin[/v1]/config/reload, POST /admin/config/draft/validate, PUT /admin/config/draft. Replacements: GET /admin/v1/config/editor (supersedes current+schema), POST /admin/v1/config/save (supersedes apply), POST /admin/v1/config/draft/download (supersedes diff/export of draft), remaining config routes are v1-only."
     },
     {
       "classification": "changed_since_deploy",
@@ -2461,10 +2491,11 @@
     },
     {
       "classification": "changed_since_deploy",
-      "target": "POST /admin/v1/config/apply",
+      "target": "POST /admin/v1/config/apply (removed) -> POST /admin/v1/config/save",
       "deployed_behavior": "Logs audit record with hardcoded actor 'admin' and principal_id 'admin'.",
-      "latest_behavior": "Logs audit record with resolved actor metadata (actor_authority, actor_subject, actor_kind, actor_email).",
-      "impact": "Audit records contain structured actor identity in latest."
+      "latest_behavior": "Route removed by master b07b25ee. Replacement POST /admin/v1/config/save writes the validated draft to the config file (atomic replace, fingerprint + self-lockout checks), clears the draft, records metadata-only history, and logs 'config_save'/'config_save_failed' audit events with resolved actor metadata; restart_required: true.",
+      "impact": "Apply semantics replaced by file save + restart; audit records contain structured actor identity.",
+      "candidate_uncommitted": true
     },
     {
       "classification": "changed_since_deploy",
@@ -2539,7 +2570,7 @@
       "classification": "changed_since_deploy",
       "type": "api_contract",
       "name": "Explicit clear_base_url Base URL override reset",
-      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
       "candidate_uncommitted": true,
       "production_applicability": false,
       "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-160",
@@ -2548,12 +2579,12 @@
     {
       "classification": "changed_since_deploy",
       "type": "api_and_ui_capability",
-      "name": "Provider-aware configuration draft Apply availability",
-      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+      "name": "File-backed Settings editor contract (master b07b25ee)",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
       "candidate_uncommitted": true,
       "production_applicability": false,
-      "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551",
-      "description": "Approved on 2026-09-16: draft responses expose required apply_supported from the real provider. Only explicit true may enable Apply alongside existing validation/revision checks. Unsupported and unconfirmed states show Apply-specific accessible guidance. Existing apply/reload implementations are unchanged; file-backed provider remains unsupported."
+      "reference": "crates/cc-lb-admin/src/settings.rs:203; crates/cc-lb-admin/src/routes.rs:49-63; crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:732",
+      "description": "Supersedes the PR-era apply_supported capability: the CurrentConfig abstraction is removed; GET /admin/v1/config/editor exposes file mode/fingerprint, override provenance and restart_required; save writes the config file and requires restart. Non-v1 /admin/config/* aliases removed."
     },
     {
       "classification": "removed_since_deploy",
@@ -2642,6 +2673,61 @@
         "RestartRequiredMatrix: fully dynamic row",
         "ConfigHistory: Upstreams, Principals, Plugins columns"
       ]
+    },
+    {
+      "classification": "removed_since_deploy",
+      "type": "api",
+      "endpoints": [
+        "GET /admin/config/current",
+        "GET /admin/v1/config/current",
+        "GET /admin/config/schema",
+        "GET /admin/v1/config/schema",
+        "GET /admin/config/diff",
+        "GET /admin/v1/config/diff",
+        "POST /admin/config/apply",
+        "POST /admin/v1/config/apply",
+        "POST /admin/config/reload",
+        "POST /admin/v1/config/reload",
+        "GET /admin/config/draft",
+        "PUT /admin/config/draft",
+        "POST /admin/config/draft/validate",
+        "GET /admin/config/history"
+      ],
+      "reason": "Master b07b25ee Settings rework: file-backed editor contract replaces in-memory current/apply/reload/diff; remaining config routes are v1-only (no non-v1 aliases). Replacements: GET /admin/v1/config/editor, POST /admin/v1/config/save, POST /admin/v1/config/draft/download.",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
+    },
+    {
+      "classification": "removed_since_deploy",
+      "type": "storage_operation",
+      "trait_methods": [
+        "ConfigStore::get_config_history",
+        "ConfigStore::set_last_validated_revision"
+      ],
+      "reason": "Master b07b25ee: get_config_history removed with the /config/diff route; set_last_validated_revision replaced by set_config_validation storing the full validation report.",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
+    },
+    {
+      "classification": "removed_since_deploy",
+      "type": "schema_field",
+      "endpoint": "GET /admin/v1/config/draft",
+      "removed_fields": [
+        "apply_supported (PR-era field removed with the CurrentConfig abstraction); last_validation_error replaced by last_validation report object"
+      ],
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
+    },
+    {
+      "classification": "removed_since_deploy",
+      "type": "schema_field",
+      "endpoint": "GET /admin/v1/config/history",
+      "removed_fields": [
+        "config_toml",
+        "summary (HistorySummary removed; entries carry revision + saved_at_unix_secs only)"
+      ],
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
     }
   ],
   "gaps": [
@@ -2771,17 +2857,17 @@
       "source_contract": "Settings",
       "gap_id": "GAP-SET-01",
       "id": "GAP-SET-01",
-      "title": "No Config Diff Modal in UI (Backend-Only Endpoint)",
-      "description": "GET /admin/config/diff?from={revA}&to={revB} and qk.configDiff query key exist, but there is NO UI caller, modal, or comparison button in Admin Web. History rows in ConfigHistorySection are static table rows with no expansion or comparison triggers.",
-      "resolution": "Confirmed absent in UI. Marked as API-BACKEND-CONFIG-DIFF with Web-Unreachable status; no fake UI modal should be generated."
+      "title": "Config Diff Endpoint Removed (Backend and UI)",
+      "description": "The legacy inventory documented GET /admin/config/diff?from={revA}&to={revB} with no UI caller. In the merged candidate the diff route and the qk.configDiff query key are deleted entirely; revision comparison is superseded by the save-file ConfirmDialog change review (config-review-list).",
+      "resolution": "Endpoint absent from merged routes.rs; no UI modal ever existed. Superseded by the review list in the save confirmation."
     },
     {
       "source_contract": "Settings",
       "gap_id": "GAP-SET-02",
       "id": "GAP-SET-02",
       "title": "No Config Draft Discard API or UI Action",
-      "description": "Neither the backend axum routes (routes.rs) nor the frontend (settings.tsx) implements a draft discard / rollback endpoint or button. An operator must manually overwrite the draft text with the current configuration to discard draft changes.",
-      "resolution": "Documented in state transition rules; no discard button exists in current source."
+      "description": "Neither the backend axum routes (routes.rs) nor the frontend (ConfigEditor.tsx) implements a draft discard/delete endpoint or button; a saved draft can only be overwritten by a new PUT or by saving to the config file.",
+      "resolution": "Documented in state transition rules; no discard button exists in merged source."
     },
     {
       "source_contract": "Settings",
@@ -2865,6 +2951,46 @@
       "line": 209,
       "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL clear contract is now implemented via explicit clear_base_url: true (omitted or null base_url preserves the override); the form captures the edit-time baseline so a mid-edit refetch cannot fabricate a clear, and an unconfirmed clear keeps the editor open with an error toast. Historical null-as-clear evidence remains a baseline limitation.",
       "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:169-179 (UpstreamResponse fields), :1203-1207 (clear_base_url maps to Some(None); base_url maps to Some(url))"
+    },
+    {
+      "source_contract": "Settings",
+      "gap_id": "GAP-SET-03",
+      "id": "GAP-SET-03",
+      "title": "Admin Token Guidance Card Removed",
+      "description": "The static-token admin guidance card (previously settings.tsx#SettingsPage:admin_token_view, item UI-SRC-0744A60F49D3) is absent from the merged route. Admin provider guidance now lives in the config editor Identity & access category (admin.auth.providers) and the self-lockout confirmation on save.",
+      "resolution": "Retired item UI-SRC-0744A60F49D3; replacement coverage via ConfigEditorSection admin provider editing and save confirmation."
+    },
+    {
+      "source_contract": "Settings",
+      "gap_id": "GAP-SET-04",
+      "id": "GAP-SET-04",
+      "title": "Runtime Apply and Hot Reload Actions Removed",
+      "description": "Apply Draft (UI-SRC-EDE5449D42BD / UI-SET-06 POST /admin/config/apply) and Trigger Daemon Reload (UI-SRC-EA3DE5874C4D / UI-SET-07 POST /admin/config/reload) are removed: master makes configuration startup-fixed. Replacement: Save to config file (UI-SET-15 POST /admin/v1/config/save) plus restart, with restart_required and the restart-drift banner communicating pending state.",
+      "resolution": "Retired UI-SET-06 and UI-SET-07 in legacy_id_mapping; replacement action UI-SRC-9A3432FEB525."
+    },
+    {
+      "source_contract": "Settings",
+      "gap_id": "GAP-SET-05",
+      "id": "GAP-SET-05",
+      "title": "Schema Coverage Checklist Removed",
+      "description": "The collapsible schema coverage checklist (UI-SET-13, settings.tsx#ConfigDraftSection:toggle_checklist) was removed with the raw-JSON textarea editor. The structured editor replaces it with per-section Advanced disclosures and category modified/overrides/error counts.",
+      "resolution": "Retired UI-SET-13; replacement action UI-SRC-5F12838E8F4B (toggle_advanced)."
+    },
+    {
+      "source_contract": "Settings",
+      "gap_id": "GAP-SET-06",
+      "id": "GAP-SET-06",
+      "title": "Restart-Required Static Matrix Removed",
+      "description": "The static RestartRequiredMatrix table (UI-SRC-625C96B0933F) listing 15 restart-required keys is removed. Restart semantics are now data-driven: ConfigEditorResponse.restart_required plus the \"Saved ... not applied yet — restart cc-lb\" banner driven by saved_at vs process uptime.",
+      "resolution": "Retired item; replacement is the restart-drift Notice inside ConfigEditorSection."
+    },
+    {
+      "source_contract": "Settings",
+      "gap_id": "GAP-SET-07",
+      "id": "GAP-SET-07",
+      "title": "Raw JSON Draft Textarea Replaced by Structured Editor",
+      "description": "The free-text JSON textarea draft editor was replaced by schema-driven structured field controls (components/settings-config/ConfigEditor.tsx + lib/configEditorModel.ts). UI-SET-14 is retained as the semantic draft-editing action (edit_field); malformed-JSON input classes no longer exist — invalid values surface via server validation issues instead.",
+      "resolution": "UI-SET-14 re-anchored to ConfigEditorSection:edit_field; coverage dimension config_draft_text replaced by config_field_value."
     }
   ]
 }

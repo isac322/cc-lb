@@ -110,6 +110,14 @@ fn storage_roundtrips_sqlite() {
 }
 
 #[test]
+fn config_draft_optimistic_revision_sqlite() {
+    run_sqlite_scenario(
+        "config_draft_optimistic_revision",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::config_draft_optimistic_revision,
+    );
+}
+
+#[test]
 fn managed_keys_empty_label_roundtrip_sqlite() {
     run_sqlite_scenario(
         "managed_keys_empty_label_roundtrip",

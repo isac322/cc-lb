@@ -1,7 +1,7 @@
 # cc-lb Admin Web & API/Query QA Inventory
 
-> **Source base commit:** `19b05570`  
-> **Source state:** `approved_uncommitted_candidate` — Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment.  
+> **Source base commit:** `a9da5c3c`  
+> **Source state:** `approved_uncommitted_candidate` — Source hashes and references describe the approved uncommitted merge candidate worktree (HEAD a9da5c3c + master b07b25eebe7bbee7e882643c6776c82015d49689); source_commit identifies the PR-side base, not an updated production deployment.  
 > **Source reconciliation:** `source_reconciled`  
 > **Runtime status:** `runtime_pending`  
 > **Production applicability:** `reconciled_from_deployed_delta`  
@@ -17,11 +17,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 | Dimension | Count / Status |
 |---|---|
-| UI parent actions | 205 |
-| UI atomic request occurrences | 149 |
-| Registered API method/path rows | 115 |
-| Independent backend route scan | 115 |
-| Production UI source denominator | 93 files |
+| UI parent actions | 209 |
+| UI atomic request occurrences | 148 |
+| Registered API method/path rows | 104 |
+| Independent backend route scan | 104 |
+| Production UI source denominator | 97 files |
 | UI route denominator | 8 routes |
 | Unknown UI requests | 0 |
 | Runtime | runtime_pending |
@@ -256,32 +256,35 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-PLUG-22** | `ui_action` | — | Plugins / PluginDetailApply | Apply Plugin Target Navigation Links | `read` | `available` |
 | **UI-SRC-DF3F46767D73** | `ui_action` | — | Settings / Version Card | System Status & Version Telemetry | `read` | `available` |
 | **UI-SET-01** | `network_request` | UI-SRC-DF3F46767D73 | Settings / Version Card | GET /admin/v1/status | `read` | `available` |
-| **UI-SRC-0744A60F49D3** | `ui_action` | — | Settings / Admin Token Card | Admin Token Guidance View | `read` | `available` |
 | **UI-SET-10** | `ui_action` | — | Settings / Localization Card | Change Locale Preference | `read` | `available` |
 | **UI-SET-11** | `ui_action` | — | Settings / Localization Card | Change Timezone Preference | `read` | `available` |
 | **UI-SRC-5A139160911F** | `ui_action` | — | Settings / Localization Card | Localization Live Preview Clock Tick | `read` | `available` |
-| **UI-SET-03** | `ui_action` | — | Settings / ConfigDraftSection | Load Configuration Draft Pipeline Data | `read` | `available` |
-| **UI-SET-03B** | `network_request` | UI-SET-03 | Settings / ConfigDraftSection | GET /admin/config/draft | `read_with_audit` | `available` |
-| **UI-SET-03A** | `network_request` | UI-SET-03 | Settings / ConfigDraftSection | GET /admin/config/current | `read_with_audit` | `available` |
-| **UI-SET-03C** | `network_request` | UI-SET-03 | Settings / ConfigDraftSection | GET /admin/config/schema | `read` | `available` |
-| **UI-SET-14** | `ui_action` | — | Settings / ConfigDraftSection | Edit Draft Textarea | `read` | `available` |
-| **UI-SRC-67C497520AA2** | `ui_action` | — | Settings / ConfigDraftSection | Save Draft | `reversible_write` | `available` |
-| **UI-SET-04** | `network_request` | UI-SRC-67C497520AA2 | Settings / ConfigDraftSection | PUT /admin/config/draft | `reversible_write` | `available` |
-| **UI-SRC-BFD8C956C3C5** | `ui_action` | — | Settings / ConfigDraftSection | Validate Draft | `reversible_write` | `available` |
-| **UI-SET-05** | `network_request` | UI-SRC-BFD8C956C3C5 | Settings / ConfigDraftSection | POST /admin/config/draft/validate | `reversible_write` | `available` |
-| **UI-SRC-EDE5449D42BD** | `ui_action` | — | Settings / ConfigDraftSection | Apply Draft Revision | `reversible_write` | `available` |
-| **UI-SET-06** | `network_request` | UI-SRC-EDE5449D42BD | Settings / ConfigDraftSection | POST /admin/config/apply | `destructive_write` | `available` |
-| **UI-SRC-EA3DE5874C4D** | `ui_action` | — | Settings / ConfigDraftSection | Trigger Daemon Configuration Hot Reload | `external_action` | `available` |
-| **UI-SET-07** | `network_request` | UI-SRC-EA3DE5874C4D | Settings / ConfigDraftSection | POST /admin/config/reload | `external_action` | `available` |
-| **UI-SET-12** | `ui_action` | — | Settings / ConfigDraftSection | Retry Draft Editor Loading | `read` | `available` |
-| **UI-SET-12B** | `network_request` | UI-SET-12 | Settings / ConfigDraftSection | GET /admin/config/draft | `read_with_audit` | `available` |
-| **UI-SET-12A** | `network_request` | UI-SET-12 | Settings / ConfigDraftSection | GET /admin/config/current | `read_with_audit` | `available` |
-| **UI-SET-13** | `ui_action` | — | Settings / ConfigDraftSection | Toggle Schema Coverage Checklist | `read` | `available` |
+| **UI-SET-03** | `ui_action` | — | Settings / ConfigEditorSection | Load Configuration Editor & Draft Data | `read` | `partially_deployed` |
+| **UI-SET-17** | `network_request` | UI-SET-03 | Settings / ConfigEditorSection | GET /admin/v1/config/editor | `read_with_audit` | `not_deployed` |
+| **UI-SET-03B** | `network_request` | UI-SET-03 | Settings / ConfigEditorSection | GET /admin/v1/config/draft | `read_with_audit` | `available` |
+| **UI-SET-14** | `ui_action` | — | Settings / ConfigEditorSection | Edit Configuration Field Value | `read` | `available` |
+| **UI-SRC-67C497520AA2** | `ui_action` | — | Settings / ConfigEditorSection | Save Draft | `reversible_write` | `available` |
+| **UI-SET-04** | `network_request` | UI-SRC-67C497520AA2 | Settings / ConfigEditorSection | PUT /admin/v1/config/draft | `reversible_write` | `available` |
+| **UI-SRC-BFD8C956C3C5** | `ui_action` | — | Settings / ConfigEditorSection | Validate Draft | `reversible_write` | `available` |
+| **UI-SET-05** | `network_request` | UI-SRC-BFD8C956C3C5 | Settings / ConfigEditorSection | POST /admin/v1/config/draft/validate | `reversible_write` | `available` |
+| **UI-SET-12** | `ui_action` | — | Settings / ConfigEditorSection | Retry Configuration Editor Loading | `read` | `partially_deployed` |
+| **UI-SET-12A** | `network_request` | UI-SET-12 | Settings / ConfigEditorSection | GET /admin/v1/config/editor | `read_with_audit` | `not_deployed` |
+| **UI-SET-12B** | `network_request` | UI-SET-12 | Settings / ConfigEditorSection | GET /admin/v1/config/draft | `read_with_audit` | `available` |
 | **UI-SRC-C9DD3E291979** | `ui_action` | — | Settings / ConfigHistorySection | Load Configuration History | `read` | `available` |
-| **UI-SET-08** | `network_request` | UI-SRC-C9DD3E291979 | Settings / ConfigHistorySection | GET /admin/config/history | `read_with_audit` | `available` |
-| **UI-SRC-625C96B0933F** | `ui_action` | — | Settings / RestartRequiredMatrix | Restart-Required Fields Matrix View | `read` | `available` |
-| **UI-SRC-49B5404AC804** | `ui_action` | — | Settings / Configuration Export Card | Download Configuration Export Snapshot | `read` | `available` |
-| **UI-SET-02** | `network_request` | UI-SRC-49B5404AC804 | Settings / Configuration Export Card | GET /admin/v1/export | `read_with_audit` | `available` |
+| **UI-SET-08** | `network_request` | UI-SRC-C9DD3E291979 | Settings / ConfigHistorySection | GET /admin/v1/config/history | `read_with_audit` | `available` |
+| **UI-SRC-49B5404AC804** | `ui_action` | — | Settings / Database Resources Snapshot Card | Download Database Resources Snapshot | `read` | `available` |
+| **UI-SET-02** | `network_request` | UI-SRC-49B5404AC804 | Settings / Database Resources Snapshot Card | GET /admin/v1/export | `read_with_audit` | `available` |
+| **UI-SRC-9A3432FEB525** | `ui_action` | — | Settings / ConfigEditorSection | Save Draft to Config File | `reversible_write` | `not_deployed` |
+| **UI-SET-15** | `network_request` | UI-SRC-9A3432FEB525 | Settings / ConfigEditorSection | POST /admin/v1/config/save | `destructive_write` | `not_deployed` |
+| **UI-SRC-228C90EA6F13** | `ui_action` | — | Settings / ConfigEditorSection | Download Validated Draft as TOML | `read_with_audit` | `not_deployed` |
+| **UI-SET-16** | `network_request` | UI-SRC-228C90EA6F13 | Settings / ConfigEditorSection | POST /admin/v1/config/draft/download | `read_with_audit` | `not_deployed` |
+| **UI-SRC-089FBD95699E** | `ui_action` | — | Settings / ConfigEditorSection | Select Configuration Category | `read` | `available` |
+| **UI-SRC-FA4533F02DD6** | `ui_action` | — | Settings / ConfigEditorSection | Search Settings Fields | `read` | `available` |
+| **UI-SRC-5F12838E8F4B** | `ui_action` | — | Settings / ConfigEditorSection | Toggle Advanced Settings Disclosure | `read` | `available` |
+| **UI-SRC-2DBACF6A00B0** | `ui_action` | — | Settings / ConfigEditorSection | Reveal Field from Validation Issue | `read` | `available` |
+| **UI-SRC-6C749C277F0A** | `ui_action` | — | Settings / ConfigEditorSection | Replace Opaque Storage URL | `read` | `available` |
+| **UI-SRC-6349C47F4250** | `ui_action` | — | Settings / ConfigEditorSection | Copy Draft JSON to Clipboard | `read` | `available` |
+| **UI-SRC-E5CC6F8E2B14** | `ui_action` | — | Settings / ConfigEditorSection | Deep-Link Field Focus via ?field= | `read` | `available` |
 | **UI-SRC-2FC5E3F9B148** | `ui_action` | — | Audit / AuditPage | Load Audit Trail & Supporting Entity Maps | `read` | `available` |
 | **UI-AUD-01** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/audit | `read_with_audit` | `available` |
 | **UI-AUD-07** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/v1/principals | `read` | `available` |
@@ -419,12 +422,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **API-SRC-276F2E8B8B8D** | `backend_endpoint` | — | Backend-Only / serve_asset | GET /{*file} | `read` | `available` |
 | **API-SRC-7A787CD5C3CF** | `backend_endpoint` | — | Backend-Only / admin_server_state | GET /admin/health/state | `read` | `available` |
 | **API-SYS-02** | `backend_endpoint` | — | Backend-Only / handle_internal_partial_fetch | GET /internal/v1/partials/{event_id} | `read` | `available` |
-| **API-SRC-E5535B2DF6A8** | `backend_endpoint` | — | Backend-Only / get_config | GET /admin/v1/config/current | `read_with_audit` | `available` |
-| **API-SRC-CA5516D80DC5** | `backend_endpoint` | — | Backend-Only / get_config_schema | GET /admin/v1/config/schema | `read` | `available` |
-| **API-SRC-51C67C36397F** | `backend_endpoint` | — | Backend-Only / get_config_draft | GET /admin/v1/config/draft | `read_with_audit` | `available` |
-| **API-SRC-E9BB1496F09E** | `backend_endpoint` | — | Backend-Only / get_config_history | GET /admin/v1/config/history | `read_with_audit` | `available` |
-| **API-BACKEND-CONFIG-DIFF** | `backend_endpoint` | — | Backend-Only / get_config_diff | GET /admin/config/diff | `read_with_audit` | `available` |
-| **API-SRC-903AA90CBF0D** | `backend_endpoint` | — | Backend-Only / get_config_diff | GET /admin/v1/config/diff | `read_with_audit` | `available` |
 | **API-SRC-15D90407F542** | `backend_endpoint` | — | Backend-Only / query_audit | GET /admin/v1/audit | `read_with_audit` | `available` |
 | **API-SRC-C2E19B96F128** | `backend_endpoint` | — | Backend-Only / crate::dashboard_routes::handle_dashboard_summary | GET /admin/v1/dashboard/summary | `read` | `available` |
 | **API-SRC-6272C4C4303C** | `backend_endpoint` | — | Backend-Only / crate::dashboard_routes::handle_dashboard_usage | GET /admin/v1/dashboard/usage | `read` | `available` |
@@ -454,10 +451,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **API-SRC-5E2D298E32DE** | `backend_endpoint` | — | Backend-Only / revoke_api_key | POST /admin/principals/{id}/keys/{key_id}/revoke | `destructive_write` | `available` |
 | **API-SRC-D05CE36481FC** | `backend_endpoint` | — | Backend-Only / disable_api_key | POST /admin/principals/{id}/keys/{key_id}/disable | `reversible_write` | `available` |
 | **API-SRC-EECEBC08D3B2** | `backend_endpoint` | — | Backend-Only / enable_api_key | POST /admin/principals/{id}/keys/{key_id}/enable | `reversible_write` | `available` |
-| **API-SRC-EE67A2692EE2** | `backend_endpoint` | — | Backend-Only / put_config_draft | PUT /admin/v1/config/draft | `reversible_write` | `available` |
-| **API-SRC-EEA580024B08** | `backend_endpoint` | — | Backend-Only / validate_config_draft | POST /admin/v1/config/draft/validate | `reversible_write` | `available` |
-| **API-SRC-B9B9B5853D97** | `backend_endpoint` | — | Backend-Only / apply_config_draft | POST /admin/v1/config/apply | `destructive_write` | `available` |
-| **API-SRC-D6B9EEC29AA6** | `backend_endpoint` | — | Backend-Only / reload_config | POST /admin/v1/config/reload | `external_action` | `available` |
 | **API-SYS-06** | `backend_endpoint` | — | Backend-Only / rebalance_chain | POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance | `reversible_write` | `available` |
 | **API-SRC-B624778A38FE** | `backend_endpoint` | — | Backend-Only / update_chain | PUT /admin/v1/plugin-chain-entries/{id} | `reversible_write` | `available` |
 | **API-SRC-B1B43DF36688** | `backend_endpoint` | — | Backend-Only / update_principal | PUT /admin/v1/principals/{id} | `reversible_write` | `available` |
@@ -965,7 +958,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-6A947BA8B48A`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:917#useSubscriptionQuotaAggregate`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:911#useSubscriptionQuotaAggregate`
 - **Preconditions:** Overview route active, authenticated
 - **Steps:** OverviewPage mounts → useSubscriptionQuotaAggregate executes GET /admin/v1/subscription-quotas/aggregate?windows=5h%2C7d%2C7d_fable&source=merged → Polls every 30,000ms while window visible
 - **Scope:** `continuous_poll` — Mount & 30s poll interval
@@ -999,7 +992,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-F52C6DD98101`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:951#useSubscriptionQuotaPoolHistory`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:945#useSubscriptionQuotaPoolHistory`
 - **Preconditions:** Overview route active, authenticated
 - **Steps:** OverviewPage mounts or time range toggle changes → useSubscriptionQuotaPoolHistory executes GET /admin/v1/subscription-quotas/pool-history with computed time bounds → Polls every 30,000ms while window visible
 - **Scope:** `continuous_poll` — Mount, 30s poll interval, and range state changes
@@ -2630,7 +2623,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-E9A473CD5D19`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1207#useCreatePrincipal`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1201#useCreatePrincipal`
 - **Preconditions:** name.trim() !== ''; createInFlight.current === false
 - **Steps:** Fill Name input → Select Kind → Optionally add default limits → Click 'Create' submit button
 - **Scope:** `once` — Operator input form
@@ -2664,7 +2657,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-03`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1245#useTogglePrincipal`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1239#useTogglePrincipal`
 - **Preconditions:** Principal selected; del.isPending === false; principalWritePending === false
 - **Steps:** Click 'Enable' or 'Disable' button in detail header
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[]
@@ -2686,7 +2679,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-03`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1245#useTogglePrincipal`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1239#useTogglePrincipal`
 - **Preconditions:** Principal selected; del.isPending === false; principalWritePending === false
 - **Steps:** Click 'Enable' or 'Disable' button in detail header
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[]
@@ -2721,7 +2714,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-B1990946C344`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1232#useDeletePrincipal`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1226#useDeletePrincipal`
 - **Preconditions:** Principal selected; toggle.isPending === false; principalWritePending === false
 - **Steps:** Click 'Delete' button in detail header → Confirm in dialog
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[]
@@ -2769,7 +2762,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-74652446E668`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1268#useSetAllowedModels`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1262#useSetAllowedModels`
 - **Preconditions:** Principal selected; editing === true; editRevision !== null; principalWritePending === false
 - **Steps:** Click 'Edit' on Allowed Models card → Type or modify comma-separated model names in textarea → Click 'Save'
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[].allowed_models
@@ -2803,7 +2796,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-D74A22B571BC`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1290#useUpdatePrincipalDefaultLimits`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1284#useUpdatePrincipalDefaultLimits`
 - **Preconditions:** Principal selected; editing === true; editRevision !== null; principalWritePending === false
 - **Steps:** Click 'Edit' on Default Limits card → Add/modify/remove limits in LimitsEditor → Click 'Save'
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[].default_limits
@@ -2953,7 +2946,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-72D80A37A7FC`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1515#useInsertChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1509#useInsertChainEntry`
 - **Preconditions:** Basic tab active; routerWriteBlocked === false
 - **Steps:** In Basic tab, toggle 'Keep prompt cache warm by reusing upstreams' switch
 - **Scope:** `each_principal` — Selected principal ID
@@ -2974,7 +2967,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-72D80A37A7FC`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1556#useDeleteChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1550#useDeleteChainEntry`
 - **Preconditions:** Basic tab active; routerWriteBlocked === false
 - **Steps:** In Basic tab, toggle 'Keep prompt cache warm by reusing upstreams' switch
 - **Scope:** `each_principal` — Selected principal ID
@@ -3008,7 +3001,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-12BD8F041AC6`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1564#useUpdateRouterTerminalStrategy`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1558#useUpdateRouterTerminalStrategy`
 - **Preconditions:** terminalStrategy.data exists; routerWriteBlocked === false
 - **Steps:** Click a radio card in TerminalStrategyRadioGroup ('first-pick', 'round-robin', 'least-latency', 'cheapest')
 - **Scope:** `each_principal` — Selected principal ID
@@ -3042,7 +3035,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-D4D3CDAFC561`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1515#useInsertChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1509#useInsertChainEntry`
 - **Preconditions:** Advanced tab active; routerWriteBlocked === false; plugin not already in chain
 - **Steps:** Click '+ Add filter' trigger → Select a plugin from the popover list
 - **Scope:** `each_principal` — GET /admin/v1/plugins/registry
@@ -3076,7 +3069,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-C4E25AD91ABF`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1541#useReorderChain`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1535#useReorderChain`
 - **Preconditions:** index > 0 for up, index < entries.length - 1 for down; routerWriteBlocked === false
 - **Steps:** Click 'Move filter up' or 'Move filter down' arrow button on a filter step
 - **Scope:** `each_principal` — Router filter entries
@@ -3110,7 +3103,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-797468122201`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1556#useDeleteChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1550#useDeleteChainEntry`
 - **Preconditions:** routerWriteBlocked === false
 - **Steps:** Click Trash icon on a filter step
 - **Scope:** `each_principal` — Router filter entries
@@ -3158,7 +3151,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-18`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1556#useDeleteChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1550#useDeleteChainEntry`
 - **Preconditions:** shapeWriteBlocked === false; pluginId !== currentPluginId
 - **Steps:** Click a radio card in Shape slot editor ('None' or any compatible plugin)
 - **Scope:** `each_principal` — GET /admin/v1/plugins/registry filtered by pluginSupportsSlot(p, 'shape')
@@ -3179,7 +3172,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-18`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1515#useInsertChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1509#useInsertChainEntry`
 - **Preconditions:** shapeWriteBlocked === false; pluginId !== currentPluginId
 - **Steps:** Click a radio card in Shape slot editor ('None' or any compatible plugin)
 - **Scope:** `each_principal` — GET /admin/v1/plugins/registry filtered by pluginSupportsSlot(p, 'shape')
@@ -3213,7 +3206,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-4A31DF64FCC2`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1541#useReorderChain`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1535#useReorderChain`
 - **Preconditions:** chainBusy === false; entries.length > 1
 - **Steps:** Drag an observability hook item and drop at a new index
 - **Scope:** `each_principal` — Observability hook chain entries
@@ -3247,7 +3240,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-8AE44ADD2C3E`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1556#useDeleteChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1550#useDeleteChainEntry`
 - **Preconditions:** chainBusy === false
 - **Steps:** Click Trash icon on hook item → Confirm in removal modal
 - **Scope:** `each_principal` — Observability hook chain entries
@@ -3315,7 +3308,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-911C0971EF03`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1338#useIssueKey`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1332#useIssueKey`
 - **Preconditions:** issueInFlight.current === false; issuePending === false
 - **Steps:** Click 'Issue Key' button → Optionally enter Label in modal → Click 'Issue' button
 - **Scope:** `each_principal` — Selected principal ID
@@ -3349,7 +3342,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-B4272A92476E`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1350#useRevokeKey`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1344#useRevokeKey`
 - **Preconditions:** Key is active (revoked_at_unix_secs === null); revokeInFlight.current === false
 - **Steps:** Click Trash icon on an active API key row → Confirm in Revoke API key? dialog
 - **Scope:** `each_key` — GET /admin/v1/principals/${id}/keys -> data.keys[]
@@ -3383,7 +3376,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-A3E7AE6357CE`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1831#useCacheKeepaliveSummary`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1859#useCacheKeepaliveSummary`
 - **Preconditions:** Principal selected
 - **Steps:** Mount CacheKeepaliveCard for selected principal → Initial load and continuous polling every 5,000ms
 - **Scope:** `each_principal` — Selected principal ID
@@ -3417,7 +3410,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-921EE69973B8`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1314#useUpdatePrincipalCacheKeepalive`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1308#useUpdatePrincipalCacheKeepalive`
 - **Preconditions:** toggleLocked === false (togglePending === false && principalWritePending === false)
 - **Steps:** Click switch in CacheKeepaliveCard header
 - **Scope:** `each_principal` — Selected principal ID
@@ -3451,7 +3444,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-09A`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1314#useUpdatePrincipalCacheKeepalive`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1308#useUpdatePrincipalCacheKeepalive`
 - **Preconditions:** busy === false; all numeric fields >= 0 and finite
 - **Steps:** Click 'Settings' on card → Modify lead times, max renewals, max duration, snapshot bytes, extra tools, or ambiguous flag → Click 'Save changes'
 - **Scope:** `each_principal` — Selected principal ID
@@ -3485,7 +3478,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-PR-10`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1809#useCacheKeepaliveSessions`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1837#useCacheKeepaliveSessions`
 - **Preconditions:** open === true; principalId non-empty
 - **Steps:** Click 'Sessions' button on CacheKeepaliveCard → Drawer opens and initializes infinite query → Polls every 5,000ms when tab is visible
 - **Scope:** `each_principal` — Selected principal ID
@@ -3587,7 +3580,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-B75FF5FEE2B9`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1809#useCacheKeepaliveSessions`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1837#useCacheKeepaliveSessions`
 - **Preconditions:** query.hasNextPage === true; query.isFetchingNextPage === false
 - **Steps:** Scroll to bottom of sessions list → Click 'Loading older sessions...' button
 - **Scope:** `each_principal` — Infinite query pages[].next_cursor
@@ -3621,7 +3614,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-BACAC4FD9C6A`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1843#useCacheKeepaliveSessionDetail`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1871#useCacheKeepaliveSessionDetail`
 - **Preconditions:** Session selected (sessionId !== null)
 - **Steps:** Click a session row in CacheKeepaliveSessionsDrawer → SessionDetailPane mounts and polls every 5,000ms
 - **Scope:** `each_session` — GET /admin/v1/principals/${id}/cache-keepalive -> rows[].id
@@ -3745,7 +3738,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-42AEDACD7B73`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1504#useGcPlugins`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1498#useGcPlugins`
 - **Preconditions:** !gcPending; !gcInFlight.current
 - **Steps:** Click 'Clean orphaned uploads' button in card header (enabled even when every registered plugin is in use)
 - **Scope:** `once` — Catalog header action
@@ -3779,7 +3772,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-F8C17F59AB34`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1369#useUploadWasm`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1363#useUploadWasm`
 - **Preconditions:** !upload.isPending
 - **Steps:** Click dropzone button (or press Enter/Space while focused) to open file browser, OR drag & drop .wasm file onto dropzone → Select valid .wasm file (<= 32 MiB)
 - **Scope:** `each_plugin` — Each plugin upload action
@@ -3813,7 +3806,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-19B510951607`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1369#useUploadWasm`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1363#useUploadWasm`
 - **Preconditions:** Upload failed with 409 replacement_confirmation_required; pendingReplacement state contains replaceRegistryId and expectedRevision
 - **Steps:** Trigger upload of a plugin whose name exists with lower/same semver → Observe 'Confirm Plugin Replacement' modal showing current vs incoming versions and hashes → Click 'Replace' button
 - **Scope:** `each_plugin` — Each duplicate replacement conflict
@@ -3909,7 +3902,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-9693EBA2D460`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1435#useDeletePlugin`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1429#useDeletePlugin`
 - **Preconditions:** pendingDelete != null; !del.isPending; !fingerprintPending
 - **Steps:** In delete dialog, wait for fingerprint if referenced → Click 'Delete plugin' (if zero refs) or 'Delete and remove uses' (if referenced)
 - **Scope:** `each_plugin` — Each plugin deletion execution
@@ -3999,7 +3992,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-824B79F88848`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1484#usePatchPlugin`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1478#usePatchPlugin`
 - **Preconditions:** !plugin.is_builtin; isEditingLabel === true; !patch.isPending
 - **Steps:** In inline label edit form, enter new label string (or clear for null) → Click 'Save' button
 - **Scope:** `each_plugin` — Each label update action
@@ -4062,7 +4055,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-SET-01`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:202#SettingsPage`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:200#SettingsPage`
 - **Preconditions:** Authenticated session
 - **Steps:** Navigate to /settings or mount SettingsPage
 - **Scope:** `once` — Single execution
@@ -4092,25 +4085,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** Renders build metadata, uptime, and generation
 - **Runtime result:** `PENDING`
 
-### [UI-SRC-0744A60F49D3] Settings — Admin Token Guidance View
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:326#SettingsPage`
-- **Preconditions:** authSession context has auth_mode === 'static_token'
-- **Steps:** Mount SettingsPage with authSession.auth_mode === 'static_token'
-- **Scope:** `once` — Single execution
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **Expected UI:** Displays static-token provider guidance for token_env and daemon restart
-- **Client-only reason:** Conditional informational card rendered solely based on client AuthSessionContext
-- **Runtime result:** `PENDING`
-
 ### [UI-SET-10] Settings — Change Locale Preference
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:360#SettingsPage`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:329#SettingsPage`
 - **Preconditions:** SettingsPage mounted
 - **Steps:** Select option in Locale dropdown
 - **Scope:** `once` — Equivalence classes: ['auto', 'en-US', 'ko-KR']
@@ -4124,7 +4103,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:377#SettingsPage`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:345#SettingsPage`
 - **Preconditions:** SettingsPage mounted
 - **Steps:** Select option in Timezone dropdown
 - **Scope:** `once` — Equivalence classes: ['auto', 'UTC', 'Asia/Seoul']
@@ -4138,7 +4117,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:182#SettingsPage`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:213#SettingsPage`
 - **Preconditions:** SettingsPage mounted
 - **Steps:** 1000ms timer elapses
 - **Scope:** `once` — Continuous 1000ms interval
@@ -4148,369 +4127,252 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Client-only reason:** Client-only setInterval updating local Date state
 - **Runtime result:** `PENDING`
 
-### [UI-SET-03] Settings — Load Configuration Draft Pipeline Data
+### [UI-SET-03] Settings — Load Configuration Editor & Draft Data
 
 - **Entry type:** `ui_action`
-- **Atomic requests:** `UI-SET-03B`, `UI-SET-03A`, `UI-SET-03C`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:435#ConfigDraftSection`
+- **Atomic requests:** `UI-SET-17`, `UI-SET-03B`
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:726#ConfigEditorSection`
 - **Preconditions:** Authenticated session
-- **Steps:** Mount ConfigDraftSection
+- **Steps:** Mount ConfigEditorSection inside SettingsPage
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `available`
-- **Expected UI:** Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation.
+- **Production applicability:** `partially_deployed` — At least one atomic request branch is absent from the deployed API.
+- **Expected UI:** Populates revision/file-path metadata, running summary, category nav, and the structured field editor; restart drift banner appears when the latest saved revision post-dates process start.
 - **Runtime result:** `PENDING`
 
-### [UI-SET-03B] Settings — Load Configuration Draft Pipeline Data — useConfigDraft
+### [UI-SET-17] Settings — Load Configuration Editor & Draft Data — useConfigEditor
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SET-03`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:793#useConfigDraft`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:781#useConfigEditor`
 - **Preconditions:** Authenticated session
-- **Steps:** Mount ConfigDraftSection
+- **Steps:** Mount ConfigEditorSection inside SettingsPage
+- **Scope:** `once` — Single execution
+- **Risk:** `read_with_audit`
+- **Production applicability:** `not_deployed` — Endpoint added after deployed commit e56d029e
+- **HTTP:** `GET /admin/v1/config/editor`
+  - Query: None
+  - Body: None
+  - Headers: None
+- **Handler:** `get_config_editor`
+- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft`, `postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
+- **Cache / no-query path:** Aggregates the editor payload in settings::editor_response: schemars JSON schema, Config::default(), file_config parsed from the on-disk TOML (partial_file_json), effective_config from state.config plus startup overrides, the unexpired DB draft row, ConfigFileInfo (path/exists/mode/reason/sha256 fingerprint via atomic-replace capability probe), env/CLI override provenance, and restart_required: true. storage.url is redacted in file_config, effective_config, default_config and draft; sensitive override effective_value is omitted. Response Cache-Control: no-store. A stale invalid draft older than 24h is cleared via conditional put_config_draft before the response is built.
+- **Side effects:** Audit log write: record_admin_audit("config_editor_read", "/admin/v1/config/editor"); conditional draft reset write when an invalid draft is expired (>24h).
+- **Expected UI:** Populates revision/file-path metadata, running summary, category nav, and the structured field editor; restart drift banner appears when the latest saved revision post-dates process start.
+- **Runtime result:** `PENDING`
+
+### [UI-SET-03B] Settings — Load Configuration Editor & Draft Data — useConfigDraft
+
+- **Entry type:** `network_request`
+- **Parent action:** `UI-SET-03`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:787#useConfigDraft`
+- **Preconditions:** Authenticated session
+- **Steps:** Mount ConfigEditorSection inside SettingsPage
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/config/draft`
+- **HTTP:** `GET /admin/v1/config/draft`
   - Query: None
   - Body: None
   - Headers: None
 - **Handler:** `get_config_draft`
-- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query.
+- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft`, `postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
+- **Cache / no-query path:** Reads the singleton config draft row via ConfigStore::get_config_draft; when the stored draft is invalid and older than 24h, get_unexpired_draft clears it with a conditional ConfigStore::put_config_draft reset and re-reads. Response is Cache-Control: no-store; draft and storage.url are redacted (STORAGE_URL_REDACTION_SENTINEL) before serialization. ConfigDraftResponse fields: draft, revision, last_validated_revision, last_validation (full stored ConfigValidationReport JSON), saved_at_unix_secs; the PR-era apply_supported field is removed with the CurrentConfig abstraction.
 - **Side effects:** Audit log write: record_admin_audit("config_draft_read", "/admin/v1/config/draft")
-- **Expected UI:** Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation.
+- **Expected UI:** Populates revision/file-path metadata, running summary, category nav, and the structured field editor; restart drift banner appears when the latest saved revision post-dates process start.
 - **Runtime result:** `PENDING`
 
-### [UI-SET-03A] Settings — Load Configuration Draft Pipeline Data — useConfigCurrent
-
-- **Entry type:** `network_request`
-- **Parent action:** `UI-SET-03`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:781#useConfigCurrent`
-- **Preconditions:** Authenticated session
-- **Steps:** Mount ConfigDraftSection
-- **Scope:** `once` — Single execution
-- **Risk:** `read_with_audit`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/config/current`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `get_config`
-- **Storage operations:** `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** In-memory state.config.current_config() Arc clone; secrets are masked via mask_secret_like_values before serialization.
-- **Side effects:** Audit log write: record_admin_audit("config_read", "/admin/v1/config/current")
-- **Expected UI:** Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation.
-- **Runtime result:** `PENDING`
-
-### [UI-SET-03C] Settings — Load Configuration Draft Pipeline Data — useConfigSchema
-
-- **Entry type:** `network_request`
-- **Parent action:** `UI-SET-03`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:787#useConfigSchema`
-- **Preconditions:** Authenticated session
-- **Steps:** Mount ConfigDraftSection
-- **Scope:** `once` — Single execution
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/config/schema`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `get_config_schema`
-- **Storage operations:** None
-- **Cache / no-query path:** In-memory schemars schema generation; HTTP Cache-Control: max-age=60
-- **Side effects:** None
-- **Expected UI:** Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation.
-- **Runtime result:** `PENDING`
-
-### [UI-SET-14] Settings — Edit Draft Textarea
+### [UI-SET-14] Settings — Edit Configuration Field Value
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:756#ConfigDraftSection`
-- **Preconditions:** Editor initialized and not locked by configPending
-- **Steps:** Type or paste in JSON config textarea
-- **Scope:** `once` — Equivalence classes: [valid JSON modification, invalid syntax string, empty string]
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1035#updateValue`
+- **Preconditions:** Editor loaded (editorData && state && model)
+- **Steps:** Change a field control (text/number input, enum select, ToggleSwitch, string-array row, tagged-union kind select, admin provider row, recurring job row) inside the structured editor → Click Reset/Unset/Set value on a field, or toggle a nullable object section
+- **Scope:** `once` — Per-field edit; equivalence classes per leaf kind (string/integer/number/boolean/enum/array/nullable object/tagged union)
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **Expected UI:** Updates editor.text state; sets editorDirty=true; updates guidance text
-- **Client-only reason:** Controlled React textarea local state
+- **Expected UI:** Updates editor state.value; marks leaf Modified; enables Save draft; locks Validate/Save to file/Download until re-saved
+- **Client-only reason:** Controlled React editor state; no request until Save draft
 - **Runtime result:** `PENDING`
 
 ### [UI-SRC-67C497520AA2] Settings — Save Draft
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-SET-04`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:568#ConfigDraftSection`
-- **Preconditions:** canSave === true: editor != null && (editorDirty || (!editor.hasSavedDraft && !serverRevisionChanged)) && !configPending
-- **Steps:** Click Save button
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1074#handleSaveDraft`
+- **Preconditions:** canSaveDraft === true: state && (dirty || !state.hasSavedDraft) && !stale
+- **Steps:** Click "Save draft" button
 - **Scope:** `once` — Single execution per draft edit
 - **Risk:** `reversible_write`
 - **Production applicability:** `available`
-- **Expected UI:** Displays saving spinner; on success updates revision counter and saved time, toast 'Draft saved'
+- **Expected UI:** Displays saving spinner; on success updates revision/saved metadata and toast; unsaved-changes notice clears
 - **Runtime result:** `PENDING`
 
 ### [UI-SET-04] Settings — Save Draft — useSaveDraft
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-67C497520AA2`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1611#useSaveDraft`
-- **Preconditions:** canSave === true: editor != null && (editorDirty || (!editor.hasSavedDraft && !serverRevisionChanged)) && !configPending
-- **Steps:** Click Save button
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1606#useSaveDraft`
+- **Preconditions:** canSaveDraft === true: state && (dirty || !state.hasSavedDraft) && !stale
+- **Steps:** Click "Save draft" button
 - **Scope:** `once` — Single execution per draft edit
 - **Risk:** `reversible_write`
 - **Production applicability:** `available`
-- **HTTP:** `PUT /admin/config/draft`
+- **HTTP:** `PUT /admin/v1/config/draft`
   - Query: None
   - Body: `draft`, `expected_revision`
   - Headers: `authorization`, `content-type`
 - **Handler:** `put_config_draft`
 - **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft`, `postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Stores in-memory draft copy via CurrentConfig::put_draft_config; invalidates TanStack queryKey ['config', 'draft']
-- **Side effects:** Audit event `config_draft_put`; increments draft revision in DB and resets last_validated_revision to null QA restore: Re-put previous draft configuration or clear draft.
-- **Expected UI:** Displays saving spinner; on success updates revision counter and saved time, toast 'Draft saved'
+- **Cache / no-query path:** Writes the draft JSON to the singleton config_draft row via ConfigStore::put_config_draft with optimistic revision check (expected_revision must equal stored revision; stale -> 409 stale_draft_revision with current_revision). Draft is normalized (null fields stripped) and storage.url redacted before persistence; last_validated_revision and last_validation reset to null. Invalidates TanStack queryKey ['config','editor'] and ['config','draft'].
+- **Side effects:** Audit event `config_draft_put`; increments draft revision in DB and clears validation state QA restore: Re-put previous draft configuration or clear draft.
+- **Expected UI:** Displays saving spinner; on success updates revision/saved metadata and toast; unsaved-changes notice clears
 - **Runtime result:** `PENDING`
 
 ### [UI-SRC-BFD8C956C3C5] Settings — Validate Draft
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-SET-05`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:605#ConfigDraftSection`
-- **Preconditions:** canValidate === true: editor.hasSavedDraft === true && !editorDirty && !serverRevisionChanged && !configPending
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1109#handleValidate`
+- **Preconditions:** canValidate === true: state.hasSavedDraft === true && !dirty && !stale
 - **Steps:** Click Validate button
 - **Scope:** `once` — Single execution per saved revision
 - **Risk:** `reversible_write`
 - **Production applicability:** `available`
-- **Expected UI:** Displays validating spinner; on success updates last validated revision slot (green or red with error text)
+- **Expected UI:** Displays validating spinner; stores localValidation for the pinned revision; enables Save to config file and Download TOML when all sections pass
 - **Runtime result:** `PENDING`
 
 ### [UI-SET-05] Settings — Validate Draft — useValidateConfig
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-BFD8C956C3C5`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1602#useValidateConfig`
-- **Preconditions:** canValidate === true: editor.hasSavedDraft === true && !editorDirty && !serverRevisionChanged && !configPending
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1581#useValidateConfig`
+- **Preconditions:** canValidate === true: state.hasSavedDraft === true && !dirty && !stale
 - **Steps:** Click Validate button
 - **Scope:** `once` — Single execution per saved revision
 - **Risk:** `reversible_write`
 - **Production applicability:** `available`
-- **HTTP:** `POST /admin/config/draft/validate`
+- **HTTP:** `POST /admin/v1/config/draft/validate`
   - Query: None
-  - Body: `expected_revision`
+  - Body: `expected_revision`, `storage_url_replacement`
   - Headers: `authorization`, `content-type`
 - **Handler:** `validate_config_draft`
-- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:ConfigStore::set_last_validated_revision:SqliteStorage::set_last_validated_revision`, `postgres:ConfigStore::set_last_validated_revision:PostgresStorage::set_last_validated_revision`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** No cache write; updates last_validated_revision in storage
-- **Side effects:** Audit event `config_draft_validate`; checks TOML/JSON schema and semantic validity; marks revision as validated or stores validation error QA restore: Re-validate previous revision.
-- **Expected UI:** Displays validating spinner; on success updates last validated revision slot (green or red with error text)
+- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:ConfigStore::set_config_validation:SqliteStorage::set_config_validation`, `postgres:ConfigStore::set_config_validation:PostgresStorage::set_config_validation`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
+- **Cache / no-query path:** Materializes the stored draft to TOML (restoring the redacted storage.url from the current file or the optional storage_url_replacement), validates file + effective + filesystem + override dimensions, and persists the full ConfigValidationReport via ConfigStore::set_config_validation (sets last_validated_revision only when valid). No response cache.
+- **Side effects:** Audit event `config_draft_validate`; stores validation report and marks revision validated when clean QA restore: Re-validate previous revision.
+- **Expected UI:** Displays validating spinner; stores localValidation for the pinned revision; enables Save to config file and Download TOML when all sections pass
 - **Runtime result:** `PENDING`
 
-### [UI-SRC-EDE5449D42BD] Settings — Apply Draft Revision
+### [UI-SET-12] Settings — Retry Configuration Editor Loading
 
 - **Entry type:** `ui_action`
-- **Atomic requests:** `UI-SET-06`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:622#ConfigDraftSection`
-- **Preconditions:** canApply === true: editor != null && canValidate && lastValidatedRevision != null && lastValidationError == null && lastValidatedRevision === editor.revision && !configPending
-- **Steps:** Click Apply button
-- **Scope:** `once` — Single execution per validated revision
-- **Risk:** `reversible_write`
-- **Production applicability:** `available`
-- **Expected UI:** Unsupported or unconfirmed provider capability disables Apply without disabling Save or Validate. Apply-only guidance is outside the aria-live pipeline and referenced only by Apply. Supported mode retains its existing request and refresh behavior; success-revision metadata compatibility is a separately recorded pre-existing limitation.
-- **Runtime result:** `PENDING`
-
-### [UI-SET-06] Settings — Apply Draft Revision — useApplyConfig
-
-- **Entry type:** `network_request`
-- **Parent action:** `UI-SRC-EDE5449D42BD`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1587#useApplyConfig`
-- **Preconditions:** canApply === true: editor != null && canValidate && lastValidatedRevision != null && lastValidationError == null && lastValidatedRevision === editor.revision && !configPending
-- **Steps:** Click Apply button
-- **Scope:** `once` — Single execution per validated revision
-- **Risk:** `destructive_write`
-- **Production applicability:** `available`
-- **HTTP:** `POST /admin/config/apply`
-  - Query: None
-  - Body: `expected_revision`
-  - Headers: `authorization`
-- **Handler:** `apply_config_draft`
-- **Storage operations:** `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Atomically swaps DynamicView and CurrentConfig; clears in-memory draft; invalidates TanStack queryKey ['config', 'draft'], ['config', 'current']
-- **Side effects:** Audit event `config_apply`; activates new runtime proxy state in memory without database entity mutation QA restore: Re-apply previous configuration draft or reload original config.
-- **Expected UI:** Unsupported or unconfirmed provider capability disables Apply without disabling Save or Validate. Apply-only guidance is outside the aria-live pipeline and referenced only by Apply. Supported mode retains its existing request and refresh behavior; success-revision metadata compatibility is a separately recorded pre-existing limitation.
-- **Runtime result:** `PENDING`
-
-### [UI-SRC-EA3DE5874C4D] Settings — Trigger Daemon Configuration Hot Reload
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `UI-SET-07`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:672#ConfigDraftSection`
-- **Preconditions:** !configPending
-- **Steps:** Click Reload button
-- **Scope:** `once` — Single execution
-- **Risk:** `external_action`
-- **Production applicability:** `available`
-- **Expected UI:** Displays reloading spinner; toast 'Reload triggered'
-- **Runtime result:** `PENDING`
-
-### [UI-SET-07] Settings — Trigger Daemon Configuration Hot Reload — useReloadConfig
-
-- **Entry type:** `network_request`
-- **Parent action:** `UI-SRC-EA3DE5874C4D`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1628#useReloadConfig`
-- **Preconditions:** !configPending
-- **Steps:** Click Reload button
-- **Scope:** `once` — Single execution
-- **Risk:** `external_action`
-- **Production applicability:** `available`
-- **HTTP:** `POST /admin/config/reload`
-  - Query: None
-  - Body: None
-  - Headers: `authorization`
-- **Handler:** `reload_config`
-- **Storage operations:** `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** No database storage entity modified (only audit entry written)
-- **Side effects:** Audit event `config_reload_signal`; sends UNIX SIGHUP signal to pid (nix::sys::signal::kill) to trigger process config re-read from disk QA restore: Ensure valid configuration file exists on disk and send SIGHUP again.
-- **Expected UI:** Displays reloading spinner; toast 'Reload triggered'
-- **Runtime result:** `PENDING`
-
-### [UI-SET-12] Settings — Retry Draft Editor Loading
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `UI-SET-12B`, `UI-SET-12A`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:550#ConfigDraftSection`
-- **Preconditions:** editorLoadError === true (either draft or current failed) && !editorRetrying && !configPending
+- **Atomic requests:** `UI-SET-12A`, `UI-SET-12B`
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1250#ConfigEditorSection`
+- **Preconditions:** loadError === true (editor or draft query failed)
 - **Steps:** Click Retry button in error banner
 - **Scope:** `once` — Single execution upon error
 - **Risk:** `read`
-- **Production applicability:** `available`
-- **Expected UI:** Banner displays 'Retrying...'; triggers refetch of failed queries
+- **Production applicability:** `partially_deployed` — At least one atomic request branch is absent from the deployed API.
+- **Expected UI:** Notice action shows fetching spinner; triggers refetch of failed queries
 - **Runtime result:** `PENDING`
 
-### [UI-SET-12B] Settings — Retry Draft Editor Loading — draft.refetch
+### [UI-SET-12A] Settings — Retry Configuration Editor Loading — editorQuery.refetch
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SET-12`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:562#handleRetryEditor`
-- **Preconditions:** editorLoadError === true (either draft or current failed) && !editorRetrying && !configPending
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1251#editorQuery.refetch`
+- **Preconditions:** loadError === true (editor or draft query failed)
+- **Steps:** Click Retry button in error banner
+- **Scope:** `once` — Single execution upon error
+- **Risk:** `read_with_audit`
+- **Production applicability:** `not_deployed` — Endpoint added after deployed commit e56d029e
+- **HTTP:** `GET /admin/v1/config/editor`
+  - Query: None
+  - Body: None
+  - Headers: None
+- **Handler:** `get_config_editor`
+- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft`, `postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
+- **Cache / no-query path:** Aggregates the editor payload in settings::editor_response: schemars JSON schema, Config::default(), file_config parsed from the on-disk TOML (partial_file_json), effective_config from state.config plus startup overrides, the unexpired DB draft row, ConfigFileInfo (path/exists/mode/reason/sha256 fingerprint via atomic-replace capability probe), env/CLI override provenance, and restart_required: true. storage.url is redacted in file_config, effective_config, default_config and draft; sensitive override effective_value is omitted. Response Cache-Control: no-store. A stale invalid draft older than 24h is cleared via conditional put_config_draft before the response is built.
+- **Side effects:** Audit log write: record_admin_audit("config_editor_read", "/admin/v1/config/editor"); conditional draft reset write when an invalid draft is expired (>24h).
+- **Expected UI:** Notice action shows fetching spinner; triggers refetch of failed queries
+- **Runtime result:** `PENDING`
+
+### [UI-SET-12B] Settings — Retry Configuration Editor Loading — draftQuery.refetch
+
+- **Entry type:** `network_request`
+- **Parent action:** `UI-SET-12`
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1252#draftQuery.refetch`
+- **Preconditions:** loadError === true (editor or draft query failed)
 - **Steps:** Click Retry button in error banner
 - **Scope:** `once` — Single execution upon error
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/config/draft`
+- **HTTP:** `GET /admin/v1/config/draft`
   - Query: None
   - Body: None
   - Headers: None
 - **Handler:** `get_config_draft`
-- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query.
+- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft`, `postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
+- **Cache / no-query path:** Reads the singleton config draft row via ConfigStore::get_config_draft; when the stored draft is invalid and older than 24h, get_unexpired_draft clears it with a conditional ConfigStore::put_config_draft reset and re-reads. Response is Cache-Control: no-store; draft and storage.url are redacted (STORAGE_URL_REDACTION_SENTINEL) before serialization. ConfigDraftResponse fields: draft, revision, last_validated_revision, last_validation (full stored ConfigValidationReport JSON), saved_at_unix_secs; the PR-era apply_supported field is removed with the CurrentConfig abstraction.
 - **Side effects:** Audit log write: record_admin_audit("config_draft_read", "/admin/v1/config/draft")
-- **Expected UI:** Banner displays 'Retrying...'; triggers refetch of failed queries
-- **Runtime result:** `PENDING`
-
-### [UI-SET-12A] Settings — Retry Draft Editor Loading — current.refetch
-
-- **Entry type:** `network_request`
-- **Parent action:** `UI-SET-12`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:564#handleRetryEditor`
-- **Preconditions:** editorLoadError === true (either draft or current failed) && !editorRetrying && !configPending
-- **Steps:** Click Retry button in error banner
-- **Scope:** `once` — Single execution upon error
-- **Risk:** `read_with_audit`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/config/current`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `get_config`
-- **Storage operations:** `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** In-memory state.config.current_config() Arc clone; secrets are masked via mask_secret_like_values before serialization.
-- **Side effects:** Audit log write: record_admin_audit("config_read", "/admin/v1/config/current")
-- **Expected UI:** Banner displays 'Retrying...'; triggers refetch of failed queries
-- **Runtime result:** `PENDING`
-
-### [UI-SET-13] Settings — Toggle Schema Coverage Checklist
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:772#ConfigDraftSection`
-- **Preconditions:** schema.data available
-- **Steps:** Click Coverage checklist trigger
-- **Scope:** `once` — Toggle action
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **Expected UI:** Expands or collapses BaseCollapsible panel showing list of schema coverage fields
-- **Client-only reason:** Client UI collapsible state managed by @base-ui/react/collapsible
+- **Expected UI:** Notice action shows fetching spinner; triggers refetch of failed queries
 - **Runtime result:** `PENDING`
 
 ### [UI-SRC-C9DD3E291979] Settings — Load Configuration History
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-SET-08`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:801#ConfigHistorySection`
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:438#ConfigHistorySection`
 - **Preconditions:** Authenticated session
-- **Steps:** Mount ConfigHistorySection
+- **Steps:** Mount ConfigHistorySection → Click "Retry history" button in error state
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **Expected UI:** Renders table of up to 20 last applied revisions
+- **Expected UI:** Renders table of up to 20 last saved revisions; error state offers retry
 - **Runtime result:** `PENDING`
 
 ### [UI-SET-08] Settings — Load Configuration History — useConfigHistory
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-C9DD3E291979`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:799#useConfigHistory`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:793#useConfigHistory`
 - **Preconditions:** Authenticated session
-- **Steps:** Mount ConfigHistorySection
+- **Steps:** Mount ConfigHistorySection → Click "Retry history" button in error state
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/config/history`
+- **HTTP:** `GET /admin/v1/config/history`
   - Query: `limit=20`
   - Body: None
   - Headers: None
 - **Handler:** `get_config_history`
 - **Storage operations:** `sqlite:ConfigStore::list_config_history:SqliteStorage::list_config_history`, `postgres:ConfigStore::list_config_history:PostgresStorage::list_config_history`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Query parameter limit defaults to 20 and is passed through to storage SQL without a maximum clamp; limit=0 short-circuits to an empty result.
+- **Cache / no-query path:** Query parameter limit defaults to 20 and is clamped to 100 by settings::list_history before reaching storage SQL; limit=0 short-circuits to an empty result. HistoryEntry now carries only revision + applied_at_unix_secs (config_toml payload and HistorySummary removed; migration 0119/0087 purged stored payloads), so ConfigHistoryItem exposes revision and saved_at_unix_secs only.
 - **Side effects:** Audit log write: record_admin_audit("config_history_read", "/admin/v1/config/history")
-- **Expected UI:** Renders table of up to 20 last applied revisions
+- **Expected UI:** Renders table of up to 20 last saved revisions; error state offers retry
 - **Runtime result:** `PENDING`
 
-### [UI-SRC-625C96B0933F] Settings — Restart-Required Fields Matrix View
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:892#RestartRequiredMatrix`
-- **Preconditions:** SettingsPage mounted
-- **Steps:** Mount SettingsPage
-- **Scope:** `once` — 15 static field definitions
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **Expected UI:** Renders table listing fields where Hot reload = 'No' (danger badge) and explanation
-- **Client-only reason:** Static client-side reference matrix
-- **Runtime result:** `PENDING`
-
-### [UI-SRC-49B5404AC804] Settings — Download Configuration Export Snapshot
+### [UI-SRC-49B5404AC804] Settings — Download Database Resources Snapshot
 
 - **Entry type:** `ui_action`
 - **Atomic requests:** `UI-SET-02`
-- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:191#handleDownloadExport`
-- **Preconditions:** SettingsPage mounted && !exportingRef.current
-- **Steps:** Click Download export.json button
+- **Source:** `crates/cc-lb-admin/web/src/routes/settings.tsx:220#handleDownloadDatabaseSnapshot`
+- **Preconditions:** SettingsPage mounted && !downloadingDatabaseSnapshotRef.current
+- **Steps:** Click "Download database snapshot" button
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **Expected UI:** Initiates browser blob download and shows feedback toast
+- **Expected UI:** Initiates browser blob download of upstreams, principals, plugins, and chains stored in the database; shows feedback toast
 - **Runtime result:** `PENDING`
 
-### [UI-SET-02] Settings — Download Configuration Export Snapshot — downloadJson
+### [UI-SET-02] Settings — Download Database Resources Snapshot — downloadJson
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-49B5404AC804`
 - **Source:** `crates/cc-lb-admin/web/src/lib/api.ts:267#downloadJson`
-- **Preconditions:** SettingsPage mounted && !exportingRef.current
-- **Steps:** Click Download export.json button
+- **Preconditions:** SettingsPage mounted && !downloadingDatabaseSnapshotRef.current
+- **Steps:** Click "Download database snapshot" button
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
@@ -4522,7 +4384,173 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`, `sqlite:PrincipalStore::list:SqliteStorage::list`, `postgres:PrincipalStore::list:PostgresStorage::list`, `sqlite:PluginRegistryStore::list_registry:SqliteStorage::list_registry`, `postgres:PluginRegistryStore::list_registry:PostgresStorage::list_registry`, `sqlite:PluginRegistryStore::get_blob_bytes:SqliteStorage::get_blob_bytes`, `postgres:PluginRegistryStore::get_blob_bytes:PostgresStorage::get_blob_bytes`, `sqlite:PluginRegistryStore::list_chain_for_principal:SqliteStorage::list_chain_for_principal`, `postgres:PluginRegistryStore::list_chain_for_principal:PostgresStorage::list_chain_for_principal`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
 - **Cache / no-query path:** Database-backed export: paginates all upstreams, principals, plugin registry entries, blob bytes, and each principal plugin-chain slot; then appends an audit record.
 - **Side effects:** Audit log write: record_admin_audit("config_export", "/admin/v1/export")
-- **Expected UI:** Initiates browser blob download and shows feedback toast
+- **Expected UI:** Initiates browser blob download of upstreams, principals, plugins, and chains stored in the database; shows feedback toast
+- **Runtime result:** `PENDING`
+
+### [UI-SRC-9A3432FEB525] Settings — Save Draft to Config File
+
+- **Entry type:** `ui_action`
+- **Atomic requests:** `UI-SET-15`
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1193#handleSaveFileRequest`
+- **Preconditions:** canSaveFile === true: validationCurrent && file.valid && effective.valid && no filesystem errors && file.mode === "writable"
+- **Steps:** Click "Save to config file" button → Confirm in the overwrite/lockout ConfirmDialog (check "I confirmed another valid admin access path exists" when required)
+- **Scope:** `once` — Single execution per validated revision
+- **Risk:** `reversible_write`
+- **Production applicability:** `not_deployed` — Every atomic request for this action is absent from the deployed API.
+- **Expected UI:** Atomically replaces the TOML config file; saved draft stays server-side; restart required to apply
+- **Runtime result:** `PENDING`
+
+### [UI-SET-15] Settings — Save Draft to Config File — useSaveConfigFile
+
+- **Entry type:** `network_request`
+- **Parent action:** `UI-SRC-9A3432FEB525`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1628#useSaveConfigFile`
+- **Preconditions:** canSaveFile === true: validationCurrent && file.valid && effective.valid && no filesystem errors && file.mode === "writable"
+- **Steps:** Click "Save to config file" button → Confirm in the overwrite/lockout ConfirmDialog (check "I confirmed another valid admin access path exists" when required)
+- **Scope:** `once` — Single execution per validated revision
+- **Risk:** `destructive_write`
+- **Production applicability:** `not_deployed` — Endpoint added after deployed commit e56d029e
+- **HTTP:** `POST /admin/v1/config/save`
+  - Query: None
+  - Body: `expected_revision`, `expected_fingerprint`, `storage_url_replacement`, `confirm_self_lockout`
+  - Headers: `authorization`, `content-type`
+- **Handler:** `save_config_file`
+- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft`, `postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft`, `sqlite:ConfigStore::append_config_history:SqliteStorage::append_config_history`, `postgres:ConfigStore::append_config_history:PostgresStorage::append_config_history`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
+- **Cache / no-query path:** Writes the validated draft to the config file on disk, not to runtime state: requires expected_revision match and last_validated_revision == expected_revision (409 draft_not_validated otherwise), re-materializes and re-validates, checks expected_fingerprint against the current file sha256 (409 file_changed), refuses non-writable paths (409 file_not_writable) and active admin-auth provider removal unless confirm_self_lockout (409 self_lockout_confirmation_required), then atomic_replace writes a 0600 temp file, fsyncs, re-checks fingerprint, and renames. Afterwards clears the draft via put_config_draft and records metadata-only history via append_config_history; both are best-effort after the file write (failures logged, not rolled back). Response: revision, saved_at_unix_secs, restart_required: true, fingerprint.
+- **Side effects:** Audit event `config_save` on success (payload: revision, saved_at_unix_secs, fingerprint, restart_required) and `config_save_failed` on failure (payload: reason); success-audit failure is logged, not fatal. Atomically replaces the config file on disk; runtime keeps running the old config until restart. QA restore: restore previous file contents and restart.
+- **Expected UI:** Atomically replaces the TOML config file; saved draft stays server-side; restart required to apply
+- **Runtime result:** `PENDING`
+
+### [UI-SRC-228C90EA6F13] Settings — Download Validated Draft as TOML
+
+- **Entry type:** `ui_action`
+- **Atomic requests:** `UI-SET-16`
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1202#handleDownload`
+- **Preconditions:** canDownload === true: validationCurrent && file.valid; downloadLock prevents concurrent downloads
+- **Steps:** Click "Download TOML" button → Click "Retry" in the download-failed Notice
+- **Scope:** `once` — Single execution per validated revision
+- **Risk:** `read_with_audit`
+- **Production applicability:** `not_deployed` — Every atomic request for this action is absent from the deployed API.
+- **Expected UI:** Initiates browser blob download of the validated draft rendered as TOML
+- **Runtime result:** `PENDING`
+
+### [UI-SET-16] Settings — Download Validated Draft as TOML — downloadConfigDraft
+
+- **Entry type:** `network_request`
+- **Parent action:** `UI-SRC-228C90EA6F13`
+- **Source:** `crates/cc-lb-admin/web/src/lib/api.ts:299#downloadConfigDraft`
+- **Preconditions:** canDownload === true: validationCurrent && file.valid; downloadLock prevents concurrent downloads
+- **Steps:** Click "Download TOML" button → Click "Retry" in the download-failed Notice
+- **Scope:** `once` — Single execution per validated revision
+- **Risk:** `read_with_audit`
+- **Production applicability:** `not_deployed` — Endpoint added after deployed commit e56d029e
+- **HTTP:** `POST /admin/v1/config/draft/download`
+  - Query: None
+  - Body: `expected_revision`, `storage_url_replacement`
+  - Headers: `authorization`, `content-type`
+- **Handler:** `download_config_draft`
+- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
+- **Cache / no-query path:** Reads the singleton draft row, requires expected_revision match and a validated revision (last_validated_revision == expected_revision, or a stored last_validation report whose revision matches and file.valid is true), re-materializes the draft to TOML with storage.url restored, and requires report.file.valid. Returns raw TOML bytes as application/toml attachment (filename cc-lb.toml) with Cache-Control: no-store; no JSON body.
+- **Side effects:** Audit event `config_download`; no persistent mutation QA restore: n/a (read-only download).
+- **Expected UI:** Initiates browser blob download of the validated draft rendered as TOML
+- **Runtime result:** `PENDING`
+
+### [UI-SRC-089FBD95699E] Settings — Select Configuration Category
+
+- **Entry type:** `ui_action`
+- **Atomic requests:** None
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1042#selectCategory`
+- **Preconditions:** Editor loaded with model categories
+- **Steps:** Click a category in the left nav (Network & requests, Storage & data, Scheduling, Routing & resilience, Identity & access, Pricing & quotas, Runtime & observability) → Open /settings?category={id} deep link
+- **Scope:** `once` — Per category selection
+- **Risk:** `read`
+- **Production applicability:** `available`
+- **Expected UI:** Switches the rendered category panel and syncs ?category= into the URL without scroll reset
+- **Client-only reason:** Client-side navigation state synced to URL search params via TanStack Router
+- **Runtime result:** `PENDING`
+
+### [UI-SRC-FA4533F02DD6] Settings — Search Settings Fields
+
+- **Entry type:** `ui_action`
+- **Atomic requests:** None
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1059#activateSearchResult`
+- **Preconditions:** Editor loaded; non-empty trimmed query
+- **Steps:** Type in "Search settings" combobox → ArrowDown/ArrowUp to move active option; Enter or click to activate → Escape, clear button, or outside pointerdown closes the overlay
+- **Scope:** `once` — Per keystroke/activation; results capped at 24
+- **Risk:** `read`
+- **Production applicability:** `available`
+- **Expected UI:** Filters config leaves client-side and deep-links the chosen field
+- **Client-only reason:** Client-side search over the in-memory editor model; URL ?q=/field= sync only
+- **Runtime result:** `PENDING`
+
+### [UI-SRC-5F12838E8F4B] Settings — Toggle Advanced Settings Disclosure
+
+- **Entry type:** `ui_action`
+- **Atomic requests:** None
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:2457#SectionCard`
+- **Preconditions:** Section has advanced-classified leaves
+- **Steps:** Click "Advanced (n)" summary inside a section card
+- **Scope:** `once` — Per section disclosure
+- **Risk:** `read`
+- **Production applicability:** `available`
+- **Expected UI:** Expands or collapses the section's advanced field group
+- **Client-only reason:** Client UI disclosure state (details/summary)
+- **Runtime result:** `PENDING`
+
+### [UI-SRC-2DBACF6A00B0] Settings — Reveal Field from Validation Issue
+
+- **Entry type:** `ui_action`
+- **Atomic requests:** None
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1049#revealConfigPath`
+- **Preconditions:** Validation report present with issue.path
+- **Steps:** Click a validation issue row in ValidationSummary
+- **Scope:** `once` — Per issue click
+- **Risk:** `read`
+- **Production applicability:** `available`
+- **Expected UI:** Navigates to and focuses the offending field control
+- **Client-only reason:** Client-side navigation and focus management
+- **Runtime result:** `PENDING`
+
+### [UI-SRC-6C749C277F0A] Settings — Replace Opaque Storage URL
+
+- **Entry type:** `ui_action`
+- **Atomic requests:** None
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:2964#ScalarField`
+- **Preconditions:** storage.url leaf rendered; value is opaque sentinel
+- **Steps:** Click "Replace URL" on the storage.url field → Type the replacement URL → Click "Cancel replacement" or "Unset"
+- **Scope:** `once` — Per replacement edit
+- **Risk:** `read`
+- **Production applicability:** `available`
+- **Expected UI:** Holds the real storage URL client-side so it is never rendered; forwarded only inside mutation request bodies
+- **Client-only reason:** Client-only state that leads to storage_url_replacement on later validate/save/download requests
+- **Runtime result:** `PENDING`
+
+### [UI-SRC-6349C47F4250] Settings — Copy Draft JSON to Clipboard
+
+- **Entry type:** `ui_action`
+- **Atomic requests:** None
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:1323#ConfigEditorSection`
+- **Preconditions:** downloadError shown; editor state present
+- **Steps:** Click "Copy draft JSON" inside the download-failed Notice
+- **Scope:** `once` — Single execution
+- **Risk:** `read`
+- **Production applicability:** `available`
+- **Expected UI:** Copies the current draft object as formatted JSON for manual recovery
+- **Client-only reason:** Client-only navigator.clipboard write
+- **Runtime result:** `PENDING`
+
+### [UI-SRC-E5CC6F8E2B14] Settings — Deep-Link Field Focus via ?field=
+
+- **Entry type:** `ui_action`
+- **Atomic requests:** None
+- **Source:** `crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:935#ConfigEditorSection`
+- **Preconditions:** Editor model loaded; field param present and not yet handled
+- **Steps:** Open /settings?field={path} (or activate a search result / issue that sets ?field=)
+- **Scope:** `once` — Per distinct ?field= value
+- **Risk:** `read`
+- **Production applicability:** `available`
+- **Expected UI:** Focuses the requested field control after the editor model resolves
+- **Client-only reason:** Client-side URL search param handling and focus management
 - **Runtime result:** `PENDING`
 
 ### [UI-SRC-2FC5E3F9B148] Audit — Load Audit Trail & Supporting Entity Maps
@@ -4946,7 +4974,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-3FC895176F17`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:807#useSubscriptionQuotaLatest`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:801#useSubscriptionQuotaLatest`
 - **Preconditions:** Upstreams loaded
 - **Steps:** UpstreamsPage mounts with visible upstreams → useSubscriptionQuotaLatest queries merged snapshots for all upstreams every 5s
 - **Scope:** `once` — Single page execution
@@ -5130,7 +5158,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-224914630CC5`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:838#useSubscriptionQuotaSeries`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:832#useSubscriptionQuotaSeries`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Select an OAuth upstream or change quota range
 - **Scope:** `each_upstream` — Each selected OAuth upstream
@@ -5164,7 +5192,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-2351FFDF6073`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:882#useSubscriptionQuotaAnalysis`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:876#useSubscriptionQuotaAnalysis`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Select an OAuth upstream or change quota range
 - **Scope:** `each_upstream` — Each selected OAuth upstream
@@ -5198,7 +5226,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-UP-09`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:838#useSubscriptionQuotaSeries`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:832#useSubscriptionQuotaSeries`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Click 1h, 6h, 24h, or 7d button in Quota History header
 - **Scope:** `each_upstream` — Each selected OAuth upstream × 4 ranges
@@ -5219,7 +5247,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-UP-09`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:882#useSubscriptionQuotaAnalysis`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:876#useSubscriptionQuotaAnalysis`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Click 1h, 6h, 24h, or 7d button in Quota History header
 - **Scope:** `each_upstream` — Each selected OAuth upstream × 4 ranges
@@ -5267,7 +5295,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-0D929B471D7A`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1053#useUpdateUpstream`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1047#useUpdateUpstream`
 - **Preconditions:** Upstream detail pane open
 - **Steps:** Click upstream name in DetailView header to enter editing mode (resets the save latch and seeds the input with the current name) → Type new unique name → Press Enter or blur the input to submit once (saveStartedRef latch makes Enter+blur a single mutation) → Or press Escape to cancel without a request
 - **Scope:** `each_upstream` — Each upstream
@@ -5301,7 +5329,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-C72B3D4F216B`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1129#useUpdateUpstreamWarmupSettings`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1123#useUpdateUpstreamWarmupSettings`
 - **Preconditions:** Upstream detail pane open
 - **Steps:** Click the Enabled/Disabled switch in DetailView header
 - **Scope:** `each_upstream` — Each upstream
@@ -5335,7 +5363,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-9FD3FEC04C3D`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1053#useUpdateUpstream`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1047#useUpdateUpstream`
 - **Preconditions:** Non-OAuth upstream selected
 - **Steps:** Click 'Edit' in SettingsCard → Modify Base URL or toggle API Key mode (env var vs literal value) → Click 'Save'
 - **Scope:** `each_upstream` — Each non-OAuth upstream
@@ -5403,7 +5431,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-6D1976AC76E2`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1129#useUpdateUpstreamWarmupSettings`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1123#useUpdateUpstreamWarmupSettings`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Click the Warmup switch in WarmupCardMinimal header, or click 'Enable warmup' button in disabled banner
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5437,7 +5465,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-1B467A3726A3`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1129#useUpdateUpstreamWarmupSettings`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1123#useUpdateUpstreamWarmupSettings`
 - **Preconditions:** OAuth upstream selected; Registered shape plugins available
 - **Steps:** Select a shape plugin from the Shape plugin dropdown
 - **Scope:** `each_upstream` — Each OAuth upstream × shape plugins
@@ -5471,7 +5499,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-329B12DA3BC3`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1108#useClearUpstreamWarmupDialectPlugin`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1102#useClearUpstreamWarmupDialectPlugin`
 - **Preconditions:** Shape plugin currently attached
 - **Steps:** Select 'None (default request shape)' in plugin dropdown → Confirm deletion in ConfirmDialog
 - **Scope:** `each_upstream` — Each OAuth upstream with attached plugin
@@ -5505,7 +5533,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-C41372BCA4B0`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1076#useFireNowUpstreamWarmup`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1070#useFireNowUpstreamWarmup`
 - **Preconditions:** Warmup enabled on upstream; Cooldown not active
 - **Steps:** Click 'Fire now' button in WarmupCardMinimal → Click 'Fire now' in ConfirmDialog
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5539,7 +5567,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-4851B3D30282`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1783#useWarmupAttempts`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1811#useWarmupAttempts`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Click 'History' button in WarmupCardMinimal, or click 'Last run' attempt outcome badge
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5587,7 +5615,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-49171C2D2202`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1154#useOAuthStart`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1148#useOAuthStart`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Click 'Connect' or 'Reconnect' button in OAuth Status card
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5621,7 +5649,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-0D6108CB1DBC`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1163#useOAuthComplete`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1157#useOAuthComplete`
 - **Preconditions:** OAuth Authorization Modal open with valid state token
 - **Steps:** Click 'Open authorization URL' to authenticate with Anthropic → Paste authorization code into modal input → Click 'Complete'
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5655,7 +5683,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-9D5B9DACBF9A`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1016#useDeleteUpstream`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1010#useDeleteUpstream`
 - **Preconditions:** Upstream selected
 - **Steps:** Click 'Delete' button in DetailView header → Click 'Delete' in ConfirmDialog
 - **Scope:** `each_upstream` — Each upstream
@@ -5703,7 +5731,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-5A9E89C6EEB0`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1008#useCreateUpstream`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1002#useCreateUpstream`
 - **Preconditions:** Create modal on step 'configure_non_oauth'
 - **Steps:** In CreateUpstreamModal, select Anthropic API Key and click Continue → Fill in Name, optional Base URL, and API key (literal or env var) → Click 'Create'
 - **Scope:** `once` — Single execution per creation
@@ -5737,7 +5765,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-427756CE86BB`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1638#useStartOauthDraft`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1666#useStartOauthDraft`
 - **Preconditions:** Create modal on step 'oauth_handshake'
 - **Steps:** In CreateUpstreamModal, select Anthropic OAuth and click Continue → Click 'Authorize with Anthropic'
 - **Scope:** `once` — Single execution per OAuth creation
@@ -5771,7 +5799,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-CB056EC17B20`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1645#useCompleteOauthDraft`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1673#useCompleteOauthDraft`
 - **Preconditions:** Draft state token present; Code non-empty
 - **Steps:** Paste authorization code returned from Anthropic into textarea → Click 'Verify and fetch account'
 - **Scope:** `once` — Single execution per OAuth creation
@@ -5805,7 +5833,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-2533F30C81A8`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1653#useCreateFromOauthDraft`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1681#useCreateFromOauthDraft`
 - **Preconditions:** Draft verified, on step 'oauth_confirm'
 - **Steps:** Review Account Preview (Plan, Rate, Org, Role, etc.) → Edit or accept prefilled Upstream Name → Click 'Save'
 - **Scope:** `once` — Single execution per OAuth creation
@@ -5873,7 +5901,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-83D0030A34AF`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1770#useWarmupSummary`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1798#useWarmupSummary`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Mount WarmupCardMinimal on OAuth upstream selection
 - **Scope:** `each_upstream` — Each OAuth upstream
@@ -5975,7 +6003,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-9CDF9EE839AE`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1783#useWarmupAttempts`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1811#useWarmupAttempts`
 - **Preconditions:** Warmup history drawer open
 - **Steps:** Click filter chip: All, Success, Retrying, Failed, or Skipped
 - **Scope:** `each_filter_combination` — Each selected upstream × 5 status filters
@@ -6009,7 +6037,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-35D5E99A460E`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1783#useWarmupAttempts`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1811#useWarmupAttempts`
 - **Preconditions:** query.hasNextPage is true
 - **Steps:** Scroll to bottom of attempts list in WarmupHistoryDrawer → Click 'Load older' button
 - **Scope:** `each_upstream` — Each upstream with next_cursor
@@ -6189,7 +6217,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 - **Entry type:** `network_request`
 - **Parent action:** `UI-SRC-7BDECC53787E`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1515#useInsertChainEntry`
+- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1509#useInsertChainEntry`
 - **Preconditions:** Principal selected; Plugin registry loaded; No conflicting write is pending
 - **Steps:** Select an observability-capable plugin → Click Add
 - **Scope:** `each_plugin` — GET /admin/v1/plugins/registry entries supporting slot 'observability_hook'
@@ -6759,7 +6787,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-C767025D0EDC] Backend-Only — GET /
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:123`
+- **Source:** `crates/cc-lb-admin/src/routes.rs:113`
 - **Preconditions:** None (Public)
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -6779,7 +6807,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-276F2E8B8B8D] Backend-Only — GET /{*file}
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:124`
+- **Source:** `crates/cc-lb-admin/src/routes.rs:114`
 - **Preconditions:** None (Public)
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -6799,7 +6827,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-7A787CD5C3CF] Backend-Only — GET /admin/health/state
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-server/src/app.rs:2371`
+- **Source:** `crates/cc-lb-server/src/app.rs:2273`
 - **Preconditions:** None (Unauthenticated listener state check)
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -6836,126 +6864,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
 
-### [API-SRC-E5535B2DF6A8] Backend-Only — GET /admin/v1/config/current
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:50`
-- **Preconditions:** require_admin_auth + authorize(AdminAction::SensitiveRead)
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read_with_audit`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/config/current`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `get_config`
-- **Storage operations:** `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** In-memory state.config.current_config() Arc clone; secrets are masked via mask_secret_like_values before serialization.
-- **Side effects:** Audit log write: record_admin_audit("config_read", "/admin/v1/config/current")
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-CA5516D80DC5] Backend-Only — GET /admin/v1/config/schema
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:52`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/config/schema`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `get_config_schema`
-- **Storage operations:** None
-- **Cache / no-query path:** In-memory schemars schema generation; HTTP Cache-Control: max-age=60
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-51C67C36397F] Backend-Only — GET /admin/v1/config/draft
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:58`
-- **Preconditions:** require_admin_auth + authorize(AdminAction::SensitiveRead)
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read_with_audit`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/config/draft`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `get_config_draft`
-- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query.
-- **Side effects:** Audit log write: record_admin_audit("config_draft_read", "/admin/v1/config/draft")
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-E9BB1496F09E] Backend-Only — GET /admin/v1/config/history
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:69`
-- **Preconditions:** require_admin_auth + authorize(AdminAction::SensitiveRead)
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read_with_audit`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/config/history`
-  - Query: `limit`
-  - Body: None
-  - Headers: None
-- **Handler:** `get_config_history`
-- **Storage operations:** `sqlite:ConfigStore::list_config_history:SqliteStorage::list_config_history`, `postgres:ConfigStore::list_config_history:PostgresStorage::list_config_history`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Query parameter limit defaults to 20 and is passed through to storage SQL without a maximum clamp; limit=0 short-circuits to an empty result.
-- **Side effects:** Audit log write: record_admin_audit("config_history_read", "/admin/v1/config/history")
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-BACKEND-CONFIG-DIFF] Backend-Only — GET /admin/config/diff
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:70`
-- **Preconditions:** require_admin_auth + authorize(AdminAction::SensitiveRead)
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read_with_audit`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/config/diff`
-  - Query: `from_revision`, `to_revision`
-  - Body: None
-  - Headers: None
-- **Handler:** `get_config_diff`
-- **Storage operations:** `sqlite:ConfigStore::get_config_history:SqliteStorage::get_config_history`, `postgres:ConfigStore::get_config_history:PostgresStorage::get_config_history`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Fetches two revisions from DB, calculates structural JSON diff in memory
-- **Side effects:** Audit log write: record_admin_audit("config_diff_read", "/admin/v1/config/diff")
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-903AA90CBF0D] Backend-Only — GET /admin/v1/config/diff
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:71`
-- **Preconditions:** require_admin_auth + authorize(AdminAction::SensitiveRead)
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read_with_audit`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/config/diff`
-  - Query: `from_revision`, `to_revision`
-  - Body: None
-  - Headers: None
-- **Handler:** `get_config_diff`
-- **Storage operations:** `sqlite:ConfigStore::get_config_history:SqliteStorage::get_config_history`, `postgres:ConfigStore::get_config_history:PostgresStorage::get_config_history`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Fetches two revisions from DB, calculates diff in memory
-- **Side effects:** Audit log write: record_admin_audit("config_diff_read", "/admin/v1/config/diff")
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
 ### [API-SRC-15D90407F542] Backend-Only — GET /admin/v1/audit
 
 - **Entry type:** `backend_endpoint`
@@ -6979,7 +6887,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-C2E19B96F128] Backend-Only — GET /admin/v1/dashboard/summary
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:75`
+- **Source:** `crates/cc-lb-admin/src/routes.rs:64`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -6999,7 +6907,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-6272C4C4303C] Backend-Only — GET /admin/v1/dashboard/usage
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:79`
+- **Source:** `crates/cc-lb-admin/src/routes.rs:68`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7039,7 +6947,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-393CB1B46201] Backend-Only — GET /admin/v1/events/recent
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:83`
+- **Source:** `crates/cc-lb-admin/src/routes.rs:72`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7059,7 +6967,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-220A728FB03F] Backend-Only — GET /admin/events/histogram
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:91`
+- **Source:** `crates/cc-lb-admin/src/routes.rs:80`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7099,7 +7007,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-07C82F02A23B] Backend-Only — GET /admin/v1/events/stream
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:99`
+- **Source:** `crates/cc-lb-admin/src/routes.rs:88`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7159,7 +7067,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-B19EB1F130F2] Backend-Only — GET /admin/subscription-quotas/aggregate
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:65`
+- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:64`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7199,7 +7107,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-155F19B11A2E] Backend-Only — GET /admin/subscription-quotas/pool-history
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:78`
+- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:77`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7259,7 +7167,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-BD965DDC38E0] Backend-Only — GET /admin/v1/plugins/registry/{id}
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/v1/plugins.rs:41`
+- **Source:** `crates/cc-lb-admin/src/v1/plugins.rs:40`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7279,7 +7187,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-8895068281DE] Backend-Only — GET /admin/v1/plugin-chain-entries/{id}
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/v1/plugins.rs:59`
+- **Source:** `crates/cc-lb-admin/src/v1/plugins.rs:58`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7299,7 +7207,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-166291C6FB8A] Backend-Only — GET /admin/v1/principals/{id}
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/v1/principals.rs:37`
+- **Source:** `crates/cc-lb-admin/src/v1/principals.rs:35`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7319,7 +7227,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-4B568BB20E22] Backend-Only — GET /admin/v1/principals/{id}/allowed_models
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/v1/principals.rs:50`
+- **Source:** `crates/cc-lb-admin/src/v1/principals.rs:48`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7439,7 +7347,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-7383936FE537] Backend-Only — GET /admin/principals/{id}/keys/{key_id}/usage
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:45`
+- **Source:** `crates/cc-lb-admin/src/routes.rs:43`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7459,7 +7367,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-7C0B903CAB5B] Backend-Only — GET /admin/v1/upstreams/{id}
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/v1/upstreams.rs:89`
+- **Source:** `crates/cc-lb-admin/src/v1/upstreams.rs:87`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7479,7 +7387,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-5E2D298E32DE] Backend-Only — POST /admin/principals/{id}/keys/{key_id}/revoke
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:32`
+- **Source:** `crates/cc-lb-admin/src/routes.rs:31`
 - **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7499,7 +7407,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-D05CE36481FC] Backend-Only — POST /admin/principals/{id}/keys/{key_id}/disable
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:36`
+- **Source:** `crates/cc-lb-admin/src/routes.rs:35`
 - **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7519,7 +7427,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-EECEBC08D3B2] Backend-Only — POST /admin/principals/{id}/keys/{key_id}/enable
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:40`
+- **Source:** `crates/cc-lb-admin/src/routes.rs:39`
 - **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7536,90 +7444,10 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
 
-### [API-SRC-EE67A2692EE2] Backend-Only — PUT /admin/v1/config/draft
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:58`
-- **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `reversible_write`
-- **Production applicability:** `available`
-- **HTTP:** `PUT /admin/v1/config/draft`
-  - Query: None
-  - Body: `draft`, `expected_revision`
-  - Headers: `authorization`, `content-type`
-- **Handler:** `put_config_draft`
-- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft`, `postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Stores in-memory draft copy via CurrentConfig::put_draft_config; invalidates TanStack queryKey ['config', 'draft']
-- **Side effects:** Audit event `config_draft_put`; increments draft revision in DB and resets last_validated_revision to null QA restore: Re-put previous draft configuration or clear draft.
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-EEA580024B08] Backend-Only — POST /admin/v1/config/draft/validate
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:63`
-- **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `reversible_write`
-- **Production applicability:** `available`
-- **HTTP:** `POST /admin/v1/config/draft/validate`
-  - Query: None
-  - Body: `expected_revision`
-  - Headers: `authorization`, `content-type`
-- **Handler:** `validate_config_draft`
-- **Storage operations:** `sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft`, `postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft`, `sqlite:ConfigStore::set_last_validated_revision:SqliteStorage::set_last_validated_revision`, `postgres:ConfigStore::set_last_validated_revision:PostgresStorage::set_last_validated_revision`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** No cache write; updates last_validated_revision in storage
-- **Side effects:** Audit event `config_draft_validate`; checks TOML/JSON schema and semantic validity; marks revision as validated or stores validation error QA restore: Re-validate previous revision.
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-B9B9B5853D97] Backend-Only — POST /admin/v1/config/apply
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:67`
-- **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `destructive_write`
-- **Production applicability:** `available`
-- **HTTP:** `POST /admin/v1/config/apply`
-  - Query: None
-  - Body: None
-  - Headers: `authorization`
-- **Handler:** `apply_config_draft`
-- **Storage operations:** `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Atomically swaps DynamicView and CurrentConfig; clears in-memory draft; invalidates TanStack queryKey ['config', 'draft'], ['config', 'current']
-- **Side effects:** Audit event `config_apply`; activates new runtime proxy state in memory without database entity mutation QA restore: Re-apply previous configuration draft or reload original config.
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-D6B9EEC29AA6] Backend-Only — POST /admin/v1/config/reload
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:73`
-- **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `external_action`
-- **Production applicability:** `available`
-- **HTTP:** `POST /admin/v1/config/reload`
-  - Query: None
-  - Body: None
-  - Headers: `authorization`
-- **Handler:** `reload_config`
-- **Storage operations:** `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** No database storage entity modified (only audit entry written)
-- **Side effects:** Audit event `config_reload_signal`; sends UNIX SIGHUP signal to pid (nix::sys::signal::kill) to trigger process config re-read from disk QA restore: Ensure valid configuration file exists on disk and send SIGHUP again.
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
 ### [API-SYS-06] Backend-Only — POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/v1/plugins.rs:55`
+- **Source:** `crates/cc-lb-admin/src/v1/plugins.rs:54`
 - **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7639,7 +7467,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-B624778A38FE] Backend-Only — PUT /admin/v1/plugin-chain-entries/{id}
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/v1/plugins.rs:59`
+- **Source:** `crates/cc-lb-admin/src/v1/plugins.rs:58`
 - **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7659,7 +7487,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-B1B43DF36688] Backend-Only — PUT /admin/v1/principals/{id}
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/v1/principals.rs:36`
+- **Source:** `crates/cc-lb-admin/src/v1/principals.rs:35`
 - **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7894,8 +7722,8 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **GAP-PLUG-DOWNLOAD** (design_gap): WASM binary download feature is completely missing from both backend and frontend. The prompt asks for 'download' tracking, but neither GET /admin/v1/plugins/wasm/{id} nor any export button in PluginDetailIntegrity / PluginCatalog exists.
 - **GAP-PLUG-BACKEND-ONLY-ENDPOINTS** (unreachable_surface): Four REST endpoints implemented in crates/cc-lb-admin/src/v1/plugins.rs are never called by the admin web UI: (1) GET /admin/v1/plugins/registry/{id} (UI fetches whole registry and finds by ID in memory), (2) POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance (re-spacing order integers), (3) GET /admin/v1/plugin-chain-entries/{id} (single chain entry fetch), and (4) PUT /admin/v1/plugin-chain-entries/{id} (single chain entry update).
 - **GAP-PLUG-HEALTH-METRICS** (display_only): PluginDetailOperate displays static text indicating 'Health metrics for individual plugins are not yet available in the dashboard' and points to raw Prometheus metric names (cc_lb_plugin_call_duration_seconds, cc_lb_plugin_trap_total). There is no live telemetry or chart in the UI.
-- **GAP-SET-01** (documented): GET /admin/config/diff?from={revA}&to={revB} and qk.configDiff query key exist, but there is NO UI caller, modal, or comparison button in Admin Web. History rows in ConfigHistorySection are static table rows with no expansion or comparison triggers.
-- **GAP-SET-02** (documented): Neither the backend axum routes (routes.rs) nor the frontend (settings.tsx) implements a draft discard / rollback endpoint or button. An operator must manually overwrite the draft text with the current configuration to discard draft changes.
+- **GAP-SET-01** (documented): The legacy inventory documented GET /admin/config/diff?from={revA}&to={revB} with no UI caller. In the merged candidate the diff route and the qk.configDiff query key are deleted entirely; revision comparison is superseded by the save-file ConfirmDialog change review (config-review-list).
+- **GAP-SET-02** (documented): Neither the backend axum routes (routes.rs) nor the frontend (ConfigEditor.tsx) implements a draft discard/delete endpoint or button; a saved draft can only be overwritten by a new PUT or by saving to the config file.
 - **GAP-AUD-01** (documented): AuditPage requests useAudit with limit='200'. The UI table displays at most 200 admin rows and a static 'No more entries' footer. There are no next/previous page buttons, cursor tokens, or infinite scrolling.
 - **GAP-AUD-02** (documented): GET /admin/audit returns all audit_log_v1 rows matching query bounds, but the UI client explicitly filters for entries where admin_action != null || kind != null. Regular proxy request logs returned by the endpoint are silently omitted from the table view.
 - **GAP-UPSTREAMS-1** (documented): WarmupConfigModal is conditionally rendered when pluginSnapshot exists with open={configOpen}, but configOpen is initialized to false and no button or interaction anywhere in WarmupCardMinimal or the UI ever calls setConfigOpen(true). It is an unreachable dead modal in production.
@@ -7908,6 +7736,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **GAP-NONEXISTENT-CONFIG-DOWNLOAD** (nonexistent): The UI downloads a database export from GET /admin/v1/export; it has no standalone config download action.
 - **GAP-NONEXISTENT-WASM-DOWNLOAD** (nonexistent): Neither frontend nor backend exposes uploaded WASM bytecode download.
 - **GAP-UPSTREAMS-4** (documented): The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL clear contract is now implemented via explicit clear_base_url: true (omitted or null base_url preserves the override); the form captures the edit-time baseline so a mid-edit refetch cannot fabricate a clear, and an unconfirmed clear keeps the editor open with an error toast. Historical null-as-clear evidence remains a baseline limitation.
+- **GAP-SET-03** (documented): The static-token admin guidance card (previously settings.tsx#SettingsPage:admin_token_view, item UI-SRC-0744A60F49D3) is absent from the merged route. Admin provider guidance now lives in the config editor Identity & access category (admin.auth.providers) and the self-lockout confirmation on save.
+- **GAP-SET-04** (documented): Apply Draft (UI-SRC-EDE5449D42BD / UI-SET-06 POST /admin/config/apply) and Trigger Daemon Reload (UI-SRC-EA3DE5874C4D / UI-SET-07 POST /admin/config/reload) are removed: master makes configuration startup-fixed. Replacement: Save to config file (UI-SET-15 POST /admin/v1/config/save) plus restart, with restart_required and the restart-drift banner communicating pending state.
+- **GAP-SET-05** (documented): The collapsible schema coverage checklist (UI-SET-13, settings.tsx#ConfigDraftSection:toggle_checklist) was removed with the raw-JSON textarea editor. The structured editor replaces it with per-section Advanced disclosures and category modified/overrides/error counts.
+- **GAP-SET-06** (documented): The static RestartRequiredMatrix table (UI-SRC-625C96B0933F) listing 15 restart-required keys is removed. Restart semantics are now data-driven: ConfigEditorResponse.restart_required plus the "Saved ... not applied yet — restart cc-lb" banner driven by saved_at vs process uptime.
+- **GAP-SET-07** (documented): The free-text JSON textarea draft editor was replaced by schema-driven structured field controls (components/settings-config/ConfigEditor.tsx + lib/configEditorModel.ts). UI-SET-14 is retained as the semantic draft-editing action (edit_field); malformed-JSON input classes no longer exist — invalid values surface via server validation issues instead.
 
 ## 6. Legacy ID Mapping
 
@@ -8009,12 +7842,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-PLUG-07** | `preserved` | UI-PLUG-07 | Same method/path and source-backed request occurrence. |
 | **UI-PLUG-08** | `preserved` | UI-PLUG-08 | Same method/path and source-backed request occurrence. |
 | **UI-SET-01** | `preserved` | UI-SET-01 | Same method/path and source-backed request occurrence. |
-| **UI-SET-02** | `preserved` | UI-SET-02 | Same method/path and source-backed request occurrence. |
-| **UI-SET-03** | `preserved` | UI-SET-03 | Same source-backed UI action. |
-| **UI-SET-04** | `preserved` | UI-SET-04 | Same method/path and source-backed request occurrence. |
-| **UI-SET-05** | `preserved` | UI-SET-05 | Same method/path and source-backed request occurrence. |
-| **UI-SET-06** | `preserved` | UI-SET-06 | Same method/path and source-backed request occurrence. |
-| **UI-SET-07** | `preserved` | UI-SET-07 | Same method/path and source-backed request occurrence. |
+| **UI-SET-02** | `preserved` | UI-SET-02 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
+| **UI-SET-03** | `preserved` | UI-SET-03 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
+| **UI-SET-04** | `preserved` | UI-SET-04 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
+| **UI-SET-05** | `preserved` | UI-SET-05 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
+| **UI-SET-06** | `retired` | — | POST /admin/config/apply was removed; master replaces runtime apply with save-to-file plus restart (UI-SET-15 POST /admin/v1/config/save). |
+| **UI-SET-07** | `retired` | — | POST /admin/config/reload was removed; master makes saved config startup-fixed, surfaced via the restart-drift banner and restart_required flag. |
 | **UI-SET-08** | `preserved` | UI-SET-08 | Same method/path and source-backed request occurrence. |
 | **UI-SET-10** | `preserved` | UI-SET-10 | Same source-backed UI action. |
 | **UI-SET-11** | `preserved` | UI-SET-11 | Same source-backed UI action. |
@@ -8126,15 +7959,15 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-PLUG-20** | `preserved` | UI-PLUG-20 | Same source-backed UI action. |
 | **UI-PLUG-21** | `preserved` | UI-PLUG-21 | Same source-backed UI action. |
 | **UI-PLUG-22** | `preserved` | UI-PLUG-22 | Same source-backed UI action. |
-| **UI-SET-03A** | `preserved` | UI-SET-03A | Same method/path and source-backed request occurrence. |
-| **UI-SET-03B** | `preserved` | UI-SET-03B | Same method/path and source-backed request occurrence. |
-| **UI-SET-03C** | `preserved` | UI-SET-03C | Same method/path and source-backed request occurrence. |
-| **UI-SET-12** | `preserved` | UI-SET-12 | Same source-backed UI action. |
-| **UI-SET-12A** | `preserved` | UI-SET-12A | Same method/path and source-backed request occurrence. |
-| **UI-SET-12B** | `preserved` | UI-SET-12B | Same method/path and source-backed request occurrence. |
-| **UI-SET-13** | `preserved` | UI-SET-13 | Same source-backed UI action. |
-| **UI-SET-14** | `preserved` | UI-SET-14 | Same source-backed UI action. |
-| **API-BACKEND-CONFIG-DIFF** | `moved_to_api_catalog` | GET /admin/config/diff | The same backend-only operation is now sourced from the API catalog. |
+| **UI-SET-03A** | `retired` | — | GET /admin/config/current was removed; the baseline file/effective config now arrives inside GET /admin/v1/config/editor (UI-SET-17). |
+| **UI-SET-03B** | `preserved` | UI-SET-03B | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
+| **UI-SET-03C** | `retired` | — | GET /admin/config/schema was removed; the config schema now arrives inside GET /admin/v1/config/editor (UI-SET-17). |
+| **UI-SET-12** | `preserved` | UI-SET-12 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
+| **UI-SET-12A** | `preserved` | UI-SET-12A | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
+| **UI-SET-12B** | `preserved` | UI-SET-12B | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
+| **UI-SET-13** | `retired` | — | The schema coverage checklist was removed with the textarea editor; per-section Advanced disclosures (UI-SRC-5F12838E8F4B) replace it. |
+| **UI-SET-14** | `preserved` | UI-SET-14 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
+| **API-BACKEND-CONFIG-DIFF** | `retired` | — | Master removed both config/diff routes and raw configuration history; there is no current API replacement. |
 | **UI-AUD-07** | `preserved` | UI-AUD-07 | Same method/path and source-backed request occurrence. |
 | **UI-AUD-08** | `preserved` | UI-AUD-08 | Same method/path and source-backed request occurrence. |
 | **UI-AUD-09** | `preserved` | UI-AUD-09 | Same source-backed UI action. |

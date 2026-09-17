@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-17T08:02:54.859Z",
+  "task": "native_audit_admin_only",
+  "observation": {
+    "url": "http://127.0.0.1:57722/audit",
+    "subtitle": "37admin actions · unfiltered",
+    "row_count": 38,
+    "sample_rows": [
+      [
+        "4s ago",
+        "",
+        "static-token/cutover-fixture",
+        "/admin/v1/upstreams/391c58b8-082f-468a-9425-81569db949fe",
+        "cutover-owned-upstream",
+        "upstream_update(id=391c58b8-082f-468a-9425-81569db949fe, fields=base_url)",
+        "—",
+        "200",
+        "view"
+      ],
+      [
+        "6s ago",
+        "",
+        "static-token/cutover-fixture",
+        "/admin/v1/upstreams/391c58b8-082f-468a-9425-81569db949fe",
+        "cutover-owned-upstream",
+        "upstream_update(id=391c58b8-082f-468a-9425-81569db949fe, fields=base_url)",
+        "—",
+        "200",
+        "view"
+      ],
+      [
+        "13s ago",
+        "",
+        "static-token/cutover-fixture",
+        "/admin/v1/config/editor",
+        "admin",
+        "config_editor_read",
+        "—",
+        "200",
+        "view"
+      ],
+      [
+        "13s ago",
+        "",
+        "static-token/cutover-fixture",
+        "/admin/v1/config/draft",
+        "admin",
+        "config_draft_read",
+        "—",
+        "200",
+        "view"
+      ],
+      [
+        "13s ago",
+        "",
+        "static-token/cutover-fixture",
+        "/admin/v1/config/draft/validate",
+        "admin",
+        "config_draft_validate",
+        "—",
+        "200",
+        "view"
+      ]
+    ]
+  }
+}

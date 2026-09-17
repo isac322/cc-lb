@@ -1,0 +1,90 @@
+        PASS [   0.063s] (2290/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite executor_tests::cancellation_classified_expected
+        PASS [   0.065s] (2291/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite executor_tests::executor_is_open_loop
+        PASS [   0.064s] (2292/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite executor_tests::sse_timing_split_frames
+        PASS [   0.065s] (2293/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite manifest_tests::manifest_determinism
+        PASS [   0.065s] (2294/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite manifest_tests::replay_refuses_tampered
+        PASS [   0.063s] (2295/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite manifest_tests::verdict_enum_roundtrip
+        PASS [   0.064s] (2296/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica::tests::full_profile_has_final_gate_shape
+        PASS [   0.063s] (2297/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica::tests::run_requires_seed_or_manifest_before_other_run_inputs
+        PASS [   0.064s] (2298/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica::tests::sub_one_rps_full_profile_cannot_pass
+        PASS [   0.065s] (2299/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica_final::tests::wave_evidence_attaches_run_storage_to_every_wave
+        PASS [   0.064s] (2300/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica_final::tests::wave_evidence_records_failed_load_attempts
+        PASS [   0.063s] (2301/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica_final::tests::wave_evidence_uses_per_wave_request_counts_for_rps
+        PASS [   0.063s] (2302/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica_load::tests::parse_batch_output_reads_successful_counts
+        PASS [   0.064s] (2303/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica_load::tests::parse_batch_output_records_failed_requests
+        PASS [   0.071s] (2304/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica_load::tests::replica_request_count_distributes_remainder
+        PASS [   0.072s] (2305/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica_tests::per_replica_limit_assert
+        PASS [   0.065s] (2306/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica_tests::postgres_config_rendering
+        PASS [   0.063s] (2307/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica_tests::replica_dynamic_port_allocation
+        PASS [   0.063s] (2308/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite multi_replica_tests::storage_verdict_splits_hotpath_vs_plane
+        PASS [   0.063s] (2309/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite preflight_tests::cleanup_by_label
+        PASS [   0.063s] (2310/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite preflight_tests::preflight_verdicts
+        PASS [   0.064s] (2311/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite preflight_tests::t1_chaos_observation_requires_150ms_delta
+        PASS [   0.065s] (2312/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite request_classifier_tests::expected_label_classifier
+        PASS [   0.103s] (2313/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite supervisor_tests::readiness_diagnostic_includes_child_launch_and_stderr
+        PASS [   0.100s] (2314/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite supervisor_tests::supervisor_classifies_panic_fail
+        PASS [   0.104s] (2315/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite supervisor_tests::supervisor_cleanup_kills_children
+        PASS [   0.103s] (2316/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite supervisor_tests::supervisor_posttraffic_child_death_fail
+        PASS [   0.064s] (2317/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite supervisor_tests::supervisor_preflight_capability_blocked
+        PASS [   0.068s] (2318/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite topology_decision_tests::fabric_decision_rejects_incomplete_or_unshaped_proofs
+        PASS [   0.067s] (2319/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite topology_decision_tests::fabric_decision_schema
+        PASS [   0.068s] (2320/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite topology_spec_tests::netem_render_is_directional
+        PASS [   0.067s] (2321/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite topology_spec_tests::netem_render_per_destination_classid
+        PASS [   0.066s] (2322/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite topology_spec_tests::topology_directional_rejects_localhost
+        PASS [   0.064s] (2323/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite traffic_tests::prefix_reuse_cardinality
+        PASS [   0.064s] (2324/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite traffic_tests::principal_skew_within_bounds
+        PASS [   0.063s] (2325/2365) cc-lb-stress-suite::bin/cc-lb-stress-suite traffic_tests::request_mix_within_bounds
+        PASS [   1.626s] (2326/2365) cc-lb-tls-tests::integration bad_cert_reload_rejected::bad_cert_reload_keeps_previous_certificate_serving
+        PASS [   0.942s] (2327/2365) cc-lb-tls-tests::integration handshake_self_signed::handshake_self_signed_proxy_tls_only
+        PASS [   0.923s] (2328/2365) cc-lb-tls-tests::integration tls12_version_behavior::tls12_only_client_is_accepted_by_current_ring_tls12_policy
+        PASS [   0.186s] (2329/2365) cc-lb-upstream request::tests::shaped_request_accessors_and_mutators_preserve_parts
+        PASS [   0.069s] (2330/2365) cc-lb-upstream request::tests::signed_request_exposes_and_consumes_signed_parts
+        PASS [   0.173s] (2331/2365) fake-anthropic oauth::tests::authorize_redirects_with_code
+        PASS [   0.067s] (2332/2365) fake-anthropic oauth::tests::token_code_exchange
+        PASS [   0.066s] (2333/2365) fake-anthropic oauth::tests::token_pkce_verifier_mismatch_rejected
+        PASS [   0.067s] (2334/2365) fake-anthropic oauth::tests::token_refresh_invalidates_old_refresh
+        PASS [   0.066s] (2335/2365) fake-anthropic oauth::tests::token_refresh_rotates_both
+        PASS [   0.067s] (2336/2365) fake-anthropic weather::tests::seeded_jitter_schedule_is_deterministic
+        PASS [   0.083s] (2337/2365) fake-anthropic::integration auth_required::invalid_auth_is_rejected_and_bearer_sk_ant_is_accepted
+        PASS [   0.063s] (2338/2365) fake-anthropic::integration auth_required::missing_auth_returns_anthropic_error_shape
+        PASS [   0.064s] (2339/2365) fake-anthropic::integration cache_stats_injection::inject_cache_stats_overrides_matching_message_usage_only
+        PASS [   0.063s] (2340/2365) fake-anthropic::integration long_error_mode::long_mode_message_exceeds_cap_and_is_multiline_with_unbroken_run
+        PASS [   0.063s] (2341/2365) fake-anthropic::integration long_error_mode::long_mode_message_is_deterministic
+        PASS [   0.064s] (2342/2365) fake-anthropic::integration ok_path::non_streaming_and_aux_endpoints_return_anthropic_like_shapes
+        PASS [   0.063s] (2343/2365) fake-anthropic::integration ok_path::sse_ok_path_uses_single_content_block_index_and_terminal_events
+        PASS [   5.120s] (2344/2365) cc-lb-tls-tests::integration cert_reload_mid_traffic::cert_reload_mid_traffic_keeps_in_flight_stream_alive
+        PASS [   0.077s] (2345/2365) fake-anthropic::integration unknown_event::tamper_unknown_event_mode_emits_foo_event
+        PASS [   0.062s] (2346/2365) fake-anthropic::integration weather::fake_529_retry_after
+        PASS [   0.610s] (2347/2365) fake-anthropic::integration slow_mode::slow_mode_rate_limits_first_sse_frame
+        PASS [   0.065s] (2348/2365) fake-anthropic::integration weather::fake_weather_defaults_preserve_stream_shape
+        PASS [   0.062s] (2349/2365) fake-anthropic::integration weather::fake_weather_determinism
+        PASS [   0.063s] (2350/2365) fake-anthropic::integration whitelist_headers::record_whitelist_headers
+        PASS [   0.954s] (2351/2365) tests-integration::integration terminal_observation::terminal_authentication_failed
+        PASS [   1.104s] (2352/2365) tests-integration::integration managed_api_key_full_flow::managed_api_key_full_flow
+        PASS [   0.420s] (2353/2365) tests-integration::integration terminal_observation::terminal_body_too_large
+        PASS [   0.605s] (2354/2365) tests-integration::integration terminal_observation::terminal_limit_rejected
+        PASS [   0.487s] (2355/2365) tests-integration::integration terminal_observation::terminal_route_no_upstream_after_filter
+        PASS [   0.445s] (2356/2365) tests-integration::integration terminal_observation::terminal_success_non_stream
+        PASS [   0.486s] (2357/2365) tests-integration::integration terminal_observation::terminal_success_stream
+        PASS [   0.581s] (2358/2365) tests-integration::integration terminal_observation::terminal_upstream_4xx
+        PASS [   0.413s] (2359/2365) tests-integration::integration terminal_observation::terminal_upstream_5xx
+        PASS [   1.375s] (2360/2365) tests-integration::integration terminal_observation::terminal_tower_timeout
+        PASS [   0.428s] (2361/2365) tests-integration::integration terminal_observation::terminal_upstream_dispatch_failed
+        PASS [   0.197s] (2362/2365) tests-multi-replica::integration multi_replica_notify_and_failover::multi_replica_notify_and_failover
+        PASS [   0.469s] (2363/2365) tests-integration::integration terminal_observation::terminal_upstream_stream_error
+        SLOW [>240.000s] (─────────) cc-lb-storage-postgres::integration crash_recovery::client_timeout_mid_commit
+        SLOW [>240.000s] (─────────) cc-lb-storage-postgres::integration crash_recovery::connection_drop_mid_commit
+        SLOW [>300.000s] (─────────) cc-lb-storage-postgres::integration crash_recovery::client_timeout_mid_commit
+        SLOW [>300.000s] (─────────) cc-lb-storage-postgres::integration crash_recovery::connection_drop_mid_commit
+        SLOW [>360.000s] (─────────) cc-lb-storage-postgres::integration crash_recovery::client_timeout_mid_commit
+        PASS [ 363.172s] (2364/2365) cc-lb-storage-postgres::integration crash_recovery::client_timeout_mid_commit
+        SLOW [>360.000s] (─────────) cc-lb-storage-postgres::integration crash_recovery::connection_drop_mid_commit
+        PASS [ 361.340s] (2365/2365) cc-lb-storage-postgres::integration crash_recovery::connection_drop_mid_commit
+────────────
+     Summary [1020.273s] 2365 tests run: 2361 passed (7 slow), 4 failed, 14 skipped
+     SIGSEGV [   0.108s] (1328/2365) cc-lb-pdk-wasmtime::integration filter_service_tier_dispatch::run_filter_dispatches_archived_service_tier
+     SIGSEGV [   0.101s] (1331/2365) cc-lb-pdk-wasmtime::integration response_transform_dispatch::run_transform_response_dispatches_owned_request
+     SIGSEGV [   0.104s] (1332/2365) cc-lb-pdk-wasmtime::integration response_transform_dispatch::run_transform_sse_event_dispatches_owned_request
+     SIGSEGV [   0.115s] (1333/2365) cc-lb-pdk-wasmtime::integration filter_service_tier_dispatch::run_filter_dispatches_owned_service_tier
+error: test run failed
+[cutover-workspace-tests-fixed: failed; cursor=345799]

@@ -1,16 +1,16 @@
 {
   "deployed_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
-  "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+  "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
   "source_state": {
     "kind": "approved_uncommitted_candidate",
-    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
-    "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
+    "base_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+    "note": "Source hashes and references describe the approved uncommitted merge candidate worktree (HEAD a9da5c3c + master b07b25eebe7bbee7e882643c6776c82015d49689); source_commit identifies the PR-side base, not an updated production deployment."
   },
   "candidate": {
     "status": "uncommitted_approved_candidate",
-    "source_base": "19b055708f3b9814b517158bfbb196aabb5dea81",
+    "source_base": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
     "candidate_uncommitted": true,
-    "scope": "Audit latest + approved FIX01..05 + admin observability instrumentation + safety fixes: explicit clear_base_url upstream reset, admin_only audit filter before LIMIT, audit read-order index migrations",
+    "scope": "Merge candidate (HEAD a9da5c3c + master b07b25ee): Audit latest + approved FIX01..05 + admin observability instrumentation + safety fixes (explicit clear_base_url upstream reset, admin_only audit filter before LIMIT, audit read-order index migrations renumbered PG 0120-0124 / SQLite 0088) + master Settings rework (editor/draft/validate/save/download file-backed contract; current/schema/diff/apply/reload routes removed; ConfigStore validation-report and metadata-only history; config history payload purge migrations PG 0119 / SQLite 0087)",
     "production_applicability": false,
     "note": "Approved local candidate only; not committed and not deployed to production. Entries marked candidate_uncommitted describe candidate-vs-deployed behavior and must not be read as production state. Binary verification is recorded separately per candidate under qa/admin-web/runs; source_files hashes define this source catalog."
   },
@@ -23,7 +23,7 @@
       "auth": "AdminAuth (any authenticated identity)",
       "storage": "None (Memory/Context)",
       "reference": "crates/cc-lb-admin/src/v1/router.rs:36",
-      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
       "production_applicability": false,
       "description": "Returns authenticated admin identity and mode (static_token or external)"
     },
@@ -193,7 +193,7 @@
           }
         }
       ],
-      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
       "candidate_uncommitted": true,
       "production_applicability": false,
       "description": "Newest-first audit query with scope filtering applied before LIMIT; backs GET /admin/audit and GET /admin/v1/audit in the candidate. The new admin_only parameter (API default false; the audit page sends admin_only=true) appends the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT on both engines; both implementations now build the statement with sqlx QueryBuilder (Postgres binds until twice). Existing ascending AuditStore::query_audit and query_audit_by_actor definitions are preserved but are no longer mapped by the HTTP audit handler."
@@ -201,16 +201,16 @@
     {
       "type": "middleware",
       "name": "admin_request_trace_middleware",
-      "scope": "Admin router only: applied in admin_router() at crates/cc-lb-server/src/app.rs:2366 after with_browser_security_headers; covers cc_lb_admin::router, server_state_router and internal_partials routes; proxy_router unchanged",
-      "reference": "crates/cc-lb-server/src/app.rs:2822",
+      "scope": "Admin router only: applied in admin_router() at crates/cc-lb-server/src/app.rs:2268 after with_browser_security_headers; covers cc_lb_admin::router, server_state_router and internal_partials routes; proxy_router unchanged",
+      "reference": "crates/cc-lb-server/src/app.rs:2724",
       "source": {
         "file": "crates/cc-lb-server/src/app.rs",
         "symbol": "admin_request_trace_middleware",
-        "line_start": 2822,
-        "line_end": 2873,
-        "sha256": "094d8af664467d9ff02b62d64d981f8c87cbc1e0166331839660b2508aeb7180"
+        "line_start": 2724,
+        "line_end": 2775,
+        "sha256": "529a89bddcb53a80a2c931043f16e82863651846c9e22708cf0d8bdaf8251d82"
       },
-      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
       "candidate_uncommitted": true,
       "production_applicability": false,
       "description": "Generates req_admin_{uuidv7} per admin request, opens tracing span 'admin.request' (request_id, http.request.method, http.route, http.response.status_code, handler_ms), inserts 'x-request-id' and appends 'Server-Timing: rid;desc=<same opaque ID>' without a duration, and logs 'admin_response_head_ready'. handler_ms measures response-head generation only; the body is not read or buffered. Resource Timing IDs require external backend joining; cached responses can retain an earlier ID."
@@ -235,7 +235,7 @@
           "sha256": "84b15eb7402be9bc6866ea7f905a945e6af7cb8496cb1b0d5284a753b9bdd207"
         }
       ],
-      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
       "candidate_uncommitted": true,
       "production_applicability": false,
       "description": "Sets .acquire_time_level(log::LevelFilter::Debug) on PgPoolOptions and SqlitePoolOptions so sqlx logs pool acquisition timing at DEBUG. Acquire elapsed covers the whole acquire call (checkout wait plus connect and test_before_acquire work), not pure pool wait; query elapsed is not pure DB time."
@@ -245,52 +245,141 @@
       "name": "audit_log_v1 read-order indexes for query_recent_audit",
       "sources": [
         {
-          "file": "crates/cc-lb-storage-postgres/migrations/0119_audit_log_principal_ts_seq_index.sql",
-          "symbol": "0119_audit_log_principal_ts_seq_index.sql",
+          "file": "crates/cc-lb-storage-postgres/migrations/0120_audit_log_principal_ts_seq_index.sql",
+          "symbol": "0120_audit_log_principal_ts_seq_index.sql",
           "line_start": 1,
-          "line_end": 26,
+          "line_end": 25,
           "sha256": "7f3181b425f9de504eca701eb923e18babddad1ec0823aff17c693a064996d4f"
         },
         {
-          "file": "crates/cc-lb-storage-postgres/migrations/0120_audit_log_actor_ts_seq_index.sql",
-          "symbol": "0120_audit_log_actor_ts_seq_index.sql",
+          "file": "crates/cc-lb-storage-postgres/migrations/0121_audit_log_actor_ts_seq_index.sql",
+          "symbol": "0121_audit_log_actor_ts_seq_index.sql",
           "line_start": 1,
-          "line_end": 19,
-          "sha256": "0434b91ff5f1418c2f8ce5fd9876b7801f2b72fc40e59f7e269358c83dea711b"
+          "line_end": 18,
+          "sha256": "1139e5e60ad981d4e98cd4f0ce977e9d634999a9cc7954c3a62760e18c4b118a"
         },
         {
-          "file": "crates/cc-lb-storage-postgres/migrations/0121_audit_log_admin_ts_seq_index.sql",
-          "symbol": "0121_audit_log_admin_ts_seq_index.sql",
+          "file": "crates/cc-lb-storage-postgres/migrations/0122_audit_log_admin_ts_seq_index.sql",
+          "symbol": "0122_audit_log_admin_ts_seq_index.sql",
           "line_start": 1,
-          "line_end": 19,
-          "sha256": "749c51d59b91d0aa26004dd400b9f5d71edcc18ac4eee8e05bf74277b363ce3a"
+          "line_end": 18,
+          "sha256": "18edca08cf353f9c8d7ef6aa2e4031c8df263cae979d52461b1cf9b997dd2c23"
         },
         {
-          "file": "crates/cc-lb-storage-postgres/migrations/0122_audit_log_admin_principal_ts_seq_index.sql",
-          "symbol": "0122_audit_log_admin_principal_ts_seq_index.sql",
+          "file": "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_principal_ts_seq_index.sql",
+          "symbol": "0123_audit_log_admin_principal_ts_seq_index.sql",
           "line_start": 1,
-          "line_end": 17,
-          "sha256": "c8df8207c0b924a8d560dfe8e911b38fb7c9de52813e6958c5ec1ebc2911c724"
+          "line_end": 16,
+          "sha256": "a2a306bb67f5900fa04ece3c9531b8a1f52868e2195a2e72e062b19c06db18bf"
         },
         {
-          "file": "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_actor_ts_seq_index.sql",
-          "symbol": "0123_audit_log_admin_actor_ts_seq_index.sql",
+          "file": "crates/cc-lb-storage-postgres/migrations/0124_audit_log_admin_actor_ts_seq_index.sql",
+          "symbol": "0124_audit_log_admin_actor_ts_seq_index.sql",
           "line_start": 1,
-          "line_end": 15,
-          "sha256": "166f9165fbde0383851df9d1db72ae096afeec788ae5aca2e3844b2ba5e86bfb"
+          "line_end": 14,
+          "sha256": "1a80ae5e91ce8aec17c539a28076d8a2811ad741a2228a40d9bf2bb45d46ce4f"
         },
         {
-          "file": "crates/cc-lb-storage-sqlite/migrations/0087_audit_log_read_order_indexes.sql",
-          "symbol": "0087_audit_log_read_order_indexes.sql",
+          "file": "crates/cc-lb-storage-sqlite/migrations/0088_audit_log_read_order_indexes.sql",
+          "symbol": "0088_audit_log_read_order_indexes.sql",
           "line_start": 1,
-          "line_end": 39,
+          "line_end": 38,
           "sha256": "3b8653f193766ff684abd20012a1d44aecd464bae35072017925102c8580d88f"
         }
       ],
-      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
       "candidate_uncommitted": true,
       "production_applicability": false,
-      "description": "Five new indexes per engine serve ORDER BY ts DESC, id/seq DESC inside each scope: scoped (principal, actor) plus partial admin_only indexes carrying the identical (admin_action IS NOT NULL OR kind IS NOT NULL) predicate; the Postgres actor index is partial on actor_authority IS NOT NULL. Postgres migrations are plain CREATE INDEX (one per file, lock_timeout 1s): each build holds a SHARE lock that blocks writes to audit_log_v1 for its duration, so a large live deployment MUST stay blocked until an operator pre-creates the indexes with CREATE INDEX CONCURRENTLY using identical definitions and verifies pg_index.indisvalid; no production DDL is authorized. SQLite migration 0087 creates all five indexes in one file. Both engines add real write amplification and WAL/index-build cost; this is not a zero-overhead change."
+      "description": "Five new indexes per engine serve ORDER BY ts DESC, id/seq DESC inside each scope: scoped (principal, actor) plus partial admin_only indexes carrying the identical (admin_action IS NOT NULL OR kind IS NOT NULL) predicate; the Postgres actor index is partial on actor_authority IS NOT NULL. Postgres migrations are plain CREATE INDEX (one per file, lock_timeout 1s): each build holds a SHARE lock that blocks writes to audit_log_v1 for its duration, so a large live deployment MUST stay blocked until an operator pre-creates the indexes with CREATE INDEX CONCURRENTLY using identical definitions and verifies pg_index.indisvalid; no production DDL is authorized. SQLite migration 0088 creates all five indexes in one file. Both engines add real write amplification and WAL/index-build cost; this is not a zero-overhead change."
+    },
+    {
+      "type": "api",
+      "method": "GET",
+      "path": "/admin/v1/config/editor",
+      "handler": "get_config_editor",
+      "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
+      "storage": "ConfigStore::get_config_draft (+ conditional put_config_draft expiry purge); AuditStore::append_audit",
+      "reference": "crates/cc-lb-admin/src/routes.rs:49; crates/cc-lb-admin/src/settings.rs:203",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "New editor aggregate endpoint from master b07b25ee: returns schema, default_config, file_config, effective_config, draft, revision, last_validated_revision, last_validation, saved_at_unix_secs, file info (mode/fingerprint), override provenance, restart_required. storage.url redacted; Cache-Control: no-store. Supersedes removed GET /admin[/v1]/config/current and /config/schema."
+    },
+    {
+      "type": "api",
+      "method": "POST",
+      "path": "/admin/v1/config/save",
+      "handler": "save_config_file",
+      "auth": "require_admin_auth + authorize(AdminAction::Write)",
+      "storage": "ConfigStore::get_config_draft, put_config_draft (draft clear), append_config_history (metadata-only); AuditStore::append_audit",
+      "reference": "crates/cc-lb-admin/src/routes.rs:58; crates/cc-lb-admin/src/settings.rs:301",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "New file-save endpoint from master b07b25ee: writes the validated draft to the config file via atomic temp+rename with fingerprint check and self-lockout confirmation; clears the draft and records metadata-only history; restart_required: true (no runtime apply). Supersedes removed POST /admin[/v1]/config/apply."
+    },
+    {
+      "type": "api",
+      "method": "POST",
+      "path": "/admin/v1/config/draft/download",
+      "handler": "download_config_draft",
+      "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
+      "storage": "ConfigStore::get_config_draft; AuditStore::append_audit",
+      "reference": "crates/cc-lb-admin/src/routes.rs:59; crates/cc-lb-admin/src/settings.rs:391",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "New endpoint from master b07b25ee: returns the validated draft materialized to TOML as an attachment (application/toml, filename cc-lb.toml, no-store) after revision + validation checks; storage.url restored from the current file or storage_url_replacement."
+    },
+    {
+      "type": "migration",
+      "name": "config_history_v1 payload purge (metadata-only history)",
+      "sources": [
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0119_purge_config_history_payload.sql",
+          "symbol": "0119_purge_config_history_payload.sql",
+          "line_start": 1,
+          "line_end": 11,
+          "sha256": "1b65ec4dd99310bc45f28fca5211ed8509f2b1ab9f991589bada22553329c8cf"
+        },
+        {
+          "file": "crates/cc-lb-storage-sqlite/migrations/0087_purge_config_history_payload.sql",
+          "symbol": "0087_purge_config_history_payload.sql",
+          "line_start": 1,
+          "line_end": 11,
+          "sha256": "be6ec8a51d4cdb45c2ea29a653f5c279de5382c8b98f9aadafc8a7a9ed4e1c90"
+        }
+      ],
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "Master b07b25ee migrations purge stored config payloads from config_history_v1 so history rows carry only revision + applied_at_unix_secs metadata; pairs with the HistoryEntry field removal (config_toml, summary) and the new file-backed save flow."
+    },
+    {
+      "type": "storage_operation",
+      "trait_method": "ConfigStore::set_config_validation",
+      "operation_ids": [
+        "sqlite:ConfigStore::set_config_validation:SqliteStorage::set_config_validation",
+        "postgres:ConfigStore::set_config_validation:PostgresStorage::set_config_validation"
+      ],
+      "scope_type": "replaces ConfigStore::set_last_validated_revision",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "Master b07b25ee rework: stores the full ConfigValidationReport JSON in ConfigDraftState.last_validation and sets last_validated_revision only when valid; called by POST /admin/v1/config/draft/validate."
+    },
+    {
+      "type": "storage_operation",
+      "trait_method": "ConfigStore::append_config_history",
+      "operation_ids": [
+        "sqlite:ConfigStore::append_config_history:SqliteStorage::append_config_history",
+        "postgres:ConfigStore::append_config_history:PostgresStorage::append_config_history"
+      ],
+      "scope_type": "signature changed: (revision, applied_at_unix_secs) metadata-only",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "Master b07b25ee rework: drops config_toml and HistorySummary parameters; invoked by POST /admin/v1/config/save after the file write (best-effort)."
     }
   ],
   "removed_since_deploy": [
@@ -372,6 +461,57 @@
         "RestartRequiredMatrix: fully dynamic row",
         "ConfigHistory: Upstreams, Principals, Plugins columns"
       ]
+    },
+    {
+      "type": "api",
+      "endpoints": [
+        "GET /admin/config/current",
+        "GET /admin/v1/config/current",
+        "GET /admin/config/schema",
+        "GET /admin/v1/config/schema",
+        "GET /admin/config/diff",
+        "GET /admin/v1/config/diff",
+        "POST /admin/config/apply",
+        "POST /admin/v1/config/apply",
+        "POST /admin/config/reload",
+        "POST /admin/v1/config/reload",
+        "GET /admin/config/draft",
+        "PUT /admin/config/draft",
+        "POST /admin/config/draft/validate",
+        "GET /admin/config/history"
+      ],
+      "reason": "Master b07b25ee Settings rework: file-backed editor contract replaces in-memory current/apply/reload/diff; remaining config routes are v1-only (no non-v1 aliases). Replacements: GET /admin/v1/config/editor, POST /admin/v1/config/save, POST /admin/v1/config/draft/download.",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
+    },
+    {
+      "type": "storage_operation",
+      "trait_methods": [
+        "ConfigStore::get_config_history",
+        "ConfigStore::set_last_validated_revision"
+      ],
+      "reason": "Master b07b25ee: get_config_history removed with the /config/diff route; set_last_validated_revision replaced by set_config_validation storing the full validation report.",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
+    },
+    {
+      "type": "schema_field",
+      "endpoint": "GET /admin/v1/config/draft",
+      "removed_fields": [
+        "apply_supported (PR-era field removed with the CurrentConfig abstraction); last_validation_error replaced by last_validation report object"
+      ],
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
+    },
+    {
+      "type": "schema_field",
+      "endpoint": "GET /admin/v1/config/history",
+      "removed_fields": [
+        "config_toml",
+        "summary (HistorySummary removed; entries carry revision + saved_at_unix_secs only)"
+      ],
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
     }
   ],
   "changed_contracts": [
@@ -412,10 +552,11 @@
       "impact": "Protected by RBAC in latest."
     },
     {
-      "target": "POST /admin/v1/config/apply",
+      "target": "POST /admin/v1/config/apply (removed) -> POST /admin/v1/config/save",
       "deployed_behavior": "Logs audit record with hardcoded actor 'admin' and principal_id 'admin'.",
-      "latest_behavior": "Logs audit record with resolved actor metadata (actor_authority, actor_subject, actor_kind, actor_email).",
-      "impact": "Audit records contain structured actor identity in latest."
+      "latest_behavior": "Route removed by master b07b25ee. Replacement POST /admin/v1/config/save writes the validated draft to the config file (atomic replace, fingerprint + self-lockout checks), clears the draft, records metadata-only history, and logs 'config_save'/'config_save_failed' audit events with resolved actor metadata; restart_required: true.",
+      "impact": "Apply semantics replaced by file save + restart; audit records contain structured actor identity.",
+      "candidate_uncommitted": true
     },
     {
       "target": "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx",
@@ -480,7 +621,7 @@
     {
       "type": "api_contract",
       "name": "Explicit clear_base_url Base URL override reset",
-      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
       "candidate_uncommitted": true,
       "production_applicability": false,
       "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-160",
@@ -488,12 +629,12 @@
     },
     {
       "type": "api_and_ui_capability",
-      "name": "Provider-aware configuration draft Apply availability",
-      "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
+      "name": "File-backed Settings editor contract (master b07b25ee)",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
       "candidate_uncommitted": true,
       "production_applicability": false,
-      "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551",
-      "description": "Approved on 2026-09-16: draft responses expose required apply_supported from the real provider. Only explicit true may enable Apply alongside existing validation/revision checks. Unsupported and unconfirmed states show Apply-specific accessible guidance. Existing apply/reload implementations are unchanged; file-backed provider remains unsupported."
+      "reference": "crates/cc-lb-admin/src/settings.rs:203; crates/cc-lb-admin/src/routes.rs:49-63; crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:732",
+      "description": "Supersedes the PR-era apply_supported capability: the CurrentConfig abstraction is removed; GET /admin/v1/config/editor exposes file mode/fingerprint, override provenance and restart_required; save writes the config file and requires restart. Non-v1 /admin/config/* aliases removed."
     }
   ],
   "deployed_only_items": [
@@ -1187,8 +1328,13 @@
     "crates/cc-lb-admin/web/src/components/CommandPalette.tsx",
     "crates/cc-lb-admin/web/src/components/layout/AppShell.tsx",
     "crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx",
+    "crates/cc-lb-admin/web/src/components/plugins/PluginCatalog.tsx",
+    "crates/cc-lb-admin/web/src/components/plugins/PluginDeleteDialog.tsx",
     "crates/cc-lb-admin/web/src/components/plugins/PluginDetail.loading.test.tsx",
     "crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx",
+    "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+    "crates/cc-lb-admin/web/src/components/settings-config/index.ts",
+    "crates/cc-lb-admin/web/src/components/settings-config/schema.ts",
     "crates/cc-lb-admin/web/src/components/ui/RequestEventsTable.test.tsx",
     "crates/cc-lb-admin/web/src/components/ui/RequestEventsTable.tsx",
     "crates/cc-lb-admin/web/src/components/ui/Sparkline.tsx",
@@ -1198,9 +1344,11 @@
     "crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx",
     "crates/cc-lb-admin/web/src/components/ui/latency/computeStageGroups.test.ts",
     "crates/cc-lb-admin/web/src/components/ui/latency/computeStageGroups.ts",
+    "crates/cc-lb-admin/web/src/components/upstreams/InlineNameEditor.tsx",
     "crates/cc-lb-admin/web/src/lib/api.test.ts",
     "crates/cc-lb-admin/web/src/lib/api.ts",
     "crates/cc-lb-admin/web/src/lib/authSession.tsx",
+    "crates/cc-lb-admin/web/src/lib/configEditorModel.ts",
     "crates/cc-lb-admin/web/src/lib/queries.ts",
     "crates/cc-lb-admin/web/src/routeTree.gen.ts",
     "crates/cc-lb-admin/web/src/routes/-audit-loading.test.tsx",
@@ -1211,24 +1359,26 @@
     "crates/cc-lb-admin/web/src/routes/principals.tsx",
     "crates/cc-lb-admin/web/src/routes/settings.tsx",
     "crates/cc-lb-admin/web/src/routes/status.tsx",
-    "crates/cc-lb-admin/web/src/components/plugins/PluginCatalog.tsx",
-    "crates/cc-lb-admin/web/src/components/plugins/PluginDeleteDialog.tsx",
-    "crates/cc-lb-admin/web/src/components/upstreams/InlineNameEditor.tsx",
     "crates/cc-lb-server/src/app.rs",
     "crates/cc-lb-server/src/storage_factory.rs",
     "crates/cc-lb-storage-api/src/audit.rs",
+    "crates/cc-lb-storage-api/src/storage_types_common.rs",
     "crates/cc-lb-storage-api/src/traits.rs",
+    "crates/cc-lb-storage-postgres/migrations/0119_purge_config_history_payload.sql",
+    "crates/cc-lb-storage-postgres/migrations/0120_audit_log_principal_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0121_audit_log_actor_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0122_audit_log_admin_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_principal_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0124_audit_log_admin_actor_ts_seq_index.sql",
     "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+    "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
     "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
+    "crates/cc-lb-storage-sqlite/migrations/0087_purge_config_history_payload.sql",
+    "crates/cc-lb-storage-sqlite/migrations/0088_audit_log_read_order_indexes.sql",
     "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+    "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
     "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
-    "crates/cc-lb-storage-sqlite/src/lib.rs",
-    "crates/cc-lb-storage-postgres/migrations/0119_audit_log_principal_ts_seq_index.sql",
-    "crates/cc-lb-storage-postgres/migrations/0120_audit_log_actor_ts_seq_index.sql",
-    "crates/cc-lb-storage-postgres/migrations/0121_audit_log_admin_ts_seq_index.sql",
-    "crates/cc-lb-storage-postgres/migrations/0122_audit_log_admin_principal_ts_seq_index.sql",
-    "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_actor_ts_seq_index.sql",
-    "crates/cc-lb-storage-sqlite/migrations/0087_audit_log_read_order_indexes.sql"
+    "crates/cc-lb-storage-sqlite/src/lib.rs"
   ],
   "unread_files": [],
   "gaps": []

@@ -96,7 +96,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 53] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 51] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -141,16 +141,6 @@ const METRIC_DEFINITIONS: [MetricDefinition; 53] = [
         name: "cc_lb_drain_force_closed_total",
         kind: MetricKind::Counter,
         description: "Proxy request handlers still in flight when the drain deadline elapsed.",
-    },
-    MetricDefinition {
-        name: "cc_lb_config_reload_total",
-        kind: MetricKind::Counter,
-        description: "Configuration reload attempts by outcome.",
-    },
-    MetricDefinition {
-        name: "cc_lb_config_reload_failed_total",
-        kind: MetricKind::Counter,
-        description: "Configuration reload failures.",
     },
     MetricDefinition {
         name: "cc_lb_tls_reload_total",
@@ -413,16 +403,6 @@ pub fn register_metrics() {
         "Proxy request handlers still in flight when the drain deadline elapsed."
     );
     metrics::describe_counter!(
-        "cc_lb_config_reload_total",
-        Unit::Count,
-        "Configuration reload attempts by outcome."
-    );
-    metrics::describe_counter!(
-        "cc_lb_config_reload_failed_total",
-        Unit::Count,
-        "Configuration reload failures."
-    );
-    metrics::describe_counter!(
         "cc_lb_tls_reload_total",
         Unit::Count,
         "TLS certificate reload attempts by outcome."
@@ -624,8 +604,6 @@ fn touch_metrics() {
     metrics::counter!("cc_lb_panic_total").increment(0);
     metrics::gauge!("cc_lb_drain_in_progress").set(0.0);
     metrics::counter!("cc_lb_drain_force_closed_total").increment(0);
-    metrics::counter!("cc_lb_config_reload_total", "outcome" => "unknown").increment(0);
-    metrics::counter!("cc_lb_config_reload_failed_total").increment(0);
     metrics::counter!("cc_lb_tls_reload_total", "outcome" => "success").increment(0);
     metrics::counter!("cc_lb_tls_reload_total", "outcome" => "failure").increment(0);
     metrics::counter!("cc_lb_limit_reservation_ttl_evicted_total").absolute(0);

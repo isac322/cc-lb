@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-17T08:03:03.873Z",
+  "task": "plugins_existing_builtin_basics",
+  "observation": {
+    "headings": [
+      "Plugins",
+      "Upload plugin",
+      "Plugin library"
+    ],
+    "plugin_cards_sample": [
+      "Search...⌘K",
+      "⌘K",
+      "Choose .wasm fileDrag and drop or click to browse. Max 32 MiB.",
+      "Built-in",
+      "Router"
+    ]
+  }
+}

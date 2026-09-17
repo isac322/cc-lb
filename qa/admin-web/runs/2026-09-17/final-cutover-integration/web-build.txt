@@ -1,0 +1,62 @@
+vite v8.3.0 building client environment for production...
+transforming...
+✓ 4146 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                                   1.25 kB │ gzip:   0.47 kB
+dist/assets/geist-mono-symbols2-wght-normal-CO5SzqOn.woff2        5.81 kB
+dist/assets/geist-mono-cyrillic-ext-wght-normal-X_5orZeX.woff2    6.17 kB
+dist/assets/geist-cyrillic-ext-wght-normal-DjL33-gN.woff2         7.42 kB
+dist/assets/geist-mono-vietnamese-wght-normal-DadHysG0.woff2      7.69 kB
+dist/assets/geist-vietnamese-wght-normal-6IgcOCM7.woff2           8.00 kB
+dist/assets/geist-mono-cyrillic-wght-normal-DiZS0aHC.woff2       12.94 kB
+dist/assets/geist-mono-latin-ext-wght-normal-Bwz-egvJ.woff2      14.69 kB
+dist/assets/geist-cyrillic-wght-normal-BEAKL7Jp.woff2            15.08 kB
+dist/assets/geist-latin-ext-wght-normal-DC-KSUi6.woff2           16.51 kB
+dist/assets/geist-mono-latin-wght-normal-XN7g48iV.woff2          23.12 kB
+dist/assets/geist-latin-wght-normal-BgDaEnEv.woff2               29.40 kB
+dist/assets/TimeRangeBounds-Chw94eNX.css                          7.96 kB │ gzip:   1.63 kB
+dist/assets/index-DfYU7f5w.css                                   80.71 kB │ gzip:  14.65 kB
+dist/assets/clamp-D0kAXd-u.js                                     0.08 kB │ gzip:   0.09 kB
+dist/assets/isElementDisabled-KSuuBj8D.js                         0.11 kB │ gzip:   0.11 kB
+dist/assets/serializeValue-B_EucO5O.js                            0.13 kB │ gzip:   0.12 kB
+dist/assets/chevron-down-B--jMpac.js                              0.16 kB │ gzip:   0.16 kB
+dist/assets/chevron-left-BE-NCPAl.js                              0.16 kB │ gzip:   0.16 kB
+dist/assets/chevron-right-BDItVbpj.js                             0.16 kB │ gzip:   0.16 kB
+dist/assets/download-DtX_dVZm.js                                  0.26 kB │ gzip:   0.22 kB
+dist/assets/copy-CpwRbuaW.js                                      0.27 kB │ gzip:   0.23 kB
+dist/assets/useControlled-DkdRkyiR.js                             0.30 kB │ gzip:   0.24 kB
+dist/assets/formatNumber-CHuyrLrX.js                              0.30 kB │ gzip:   0.22 kB
+dist/assets/zap-QPZ90HhN.js                                       0.31 kB │ gzip:   0.24 kB
+dist/assets/refresh-cw-9cSY7xFv.js                                0.35 kB │ gzip:   0.25 kB
+dist/assets/trash-DAWjH7AC.js                                     0.38 kB │ gzip:   0.25 kB
+dist/assets/rolldown-runtime-hePW80VL.js                          0.71 kB │ gzip:   0.42 kB
+dist/assets/timezone-DaQClfl4.js                                  0.72 kB │ gzip:   0.45 kB
+dist/assets/RadioIndicator-Dwy8oE1N.js                            0.89 kB │ gzip:   0.59 kB
+dist/assets/Toggle-LaE8lwxQ.js                                    1.11 kB │ gzip:   0.68 kB
+dist/assets/useRegisterFieldControl-DtxxuSYz.js                   2.20 kB │ gzip:   1.04 kB
+dist/assets/SwitchThumb-D6OTeWPO.js                               3.13 kB │ gzip:   1.67 kB
+dist/assets/CompositeRoot-y3YOi1Yu.js                             3.86 kB │ gzip:   1.75 kB
+dist/assets/plus-DDRxsxDz.js                                      3.92 kB │ gzip:   1.91 kB
+dist/assets/RadioGroup-CQI3w21I.js                                4.84 kB │ gzip:   2.31 kB
+dist/assets/audit-CaSzV6cx.js                                     8.22 kB │ gzip:   2.97 kB
+dist/assets/useLiveEventStream-aZnQnrWo.js                       13.18 kB │ gzip:   5.25 kB
+dist/assets/preload-helper-Blnw4pay.js                           24.86 kB │ gzip:   9.35 kB
+dist/assets/plugins-BzHQ50HC.js                                  30.45 kB │ gzip:   7.42 kB
+dist/assets/routes-FG4akMjS.js                                   33.28 kB │ gzip:  11.11 kB
+dist/assets/logs-B9cHa4gR.js                                     49.95 kB │ gzip:  17.58 kB
+dist/assets/TimeRangeBounds-B53lYdAw.js                          72.05 kB │ gzip:  21.60 kB
+dist/assets/ToggleGroup-D_kwZhBW.js                              80.50 kB │ gzip:  20.67 kB
+dist/assets/upstreams-DjDxfKLu.js                                89.79 kB │ gzip:  24.10 kB
+dist/assets/principals-D7ZiMiNG.js                              112.11 kB │ gzip:  33.74 kB
+dist/assets/settings-CmokPASf.js                                118.64 kB │ gzip:  33.15 kB
+dist/assets/index-CfjuXGBt.js                                   502.67 kB │ gzip: 152.67 kB
+dist/assets/RelativeTime-BfnR9PAg.js                            622.04 kB │ gzip: 187.10 kB
+
+✓ built in 1.08s
+$ bunx --bun vite build
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.

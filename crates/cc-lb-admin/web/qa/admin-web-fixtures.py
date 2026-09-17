@@ -69,32 +69,30 @@ SCENARIOS = {
     "keepalive_runner": "crates/cc-lb-admin/web/qa/keepalive-qa-runner.py",
 }
 
+_catalog_bytes = {
+    name: (ROOT / "qa" / "admin-web" / "source-contracts" / name).read_bytes()
+    for name in ("ui.json", "api-read.json", "api-write.json")
+}
 SOURCE_CONTRACTS = {
-    "ApiSqlWriteInventory-contract.json": "0fe89efdd4f3a71d568a1050ba01a201ccf2442bbea973949c945cbf00b19820",
-    "ApiSqlReadInventory-contract.json": "fbda145e628497fa5cc784e4fb1d45bbc7e6e876364ab4ea898ab40282202525",
-    "UiInventoryGlobal-contract.json": "eb5ae11f8ecd8b5bd2384167653336a773f1a7e7a021124b819abf1054fcd1b7",
-    "UiInventoryPrincipals-contract.json": "0258d60bbbeb77609a62ffc65e55afde0a8809312cc5ff6b89ea6c6d1314e323",
-    "UiInventoryUpstreams-contract.json": "dd052d40178b4481ab22461e074055c69013b18ed0ce5460b77eb06887fef1fd",
-    "UiInventoryPlugins-contract.json": "e3d6b1ad502008a2d165740973c28e962d7c4c0c71a43b31f79fd740d8cfc7ac",
-    "UiInventorySettings-contract.json": "d2f74a27a980b558d534d8af47c811269890a0d6d9900096801198045a7e20cc",
+    f"qa/admin-web/source-contracts/{name}": hashlib.sha256(content).hexdigest()
+    for name, content in _catalog_bytes.items()
 }
 
 INVENTORY_RECONCILIATION = {
-    "captured_on": "2026-09-15",
-    "write_endpoint_count": 45,
-    "read_endpoint_count": 70,
+    "captured_on": datetime.now(timezone.utc).date().isoformat(),
+    "write_endpoint_count": len(json.loads(_catalog_bytes["api-write.json"])["endpoints"]),
+    "read_endpoint_count": len(json.loads(_catalog_bytes["api-read.json"])["endpoints"]),
     "operation_groups": {
-        "principals": ["ApiSqlWriteInventory", "UiInventoryPrincipals"],
-        "keys": ["ApiSqlWriteInventory", "ApiSqlReadInventory", "UiInventoryPrincipals"],
-        "router": ["ApiSqlWriteInventory", "UiInventoryPrincipals"],
-        "upstreams": ["ApiSqlWriteInventory", "UiInventoryUpstreams"],
-        "warmup_oauth": ["ApiSqlWriteInventory", "UiInventoryUpstreams"],
-        "plugins": ["ApiSqlWriteInventory", "UiInventoryPlugins", "UiInventoryPrincipals", "UiInventoryUpstreams"],
-        "settings_audit": ["ApiSqlWriteInventory", "ApiSqlReadInventory", "UiInventorySettings"],
-        "auth_error_empty": ["ApiSqlReadInventory", "UiInventoryGlobal"],
+        "principals": ["api-write.json", "ui.json"],
+        "keys": ["api-write.json", "api-read.json", "ui.json"],
+        "router": ["api-write.json", "ui.json"],
+        "upstreams": ["api-write.json", "ui.json"],
+        "warmup_oauth": ["api-write.json", "ui.json"],
+        "plugins": ["api-write.json", "ui.json"],
+        "settings_audit": ["api-write.json", "api-read.json", "ui.json"],
+        "auth_error_empty": ["api-read.json", "ui.json"],
     },
     "aliases": {
-        "config": ["/admin/config/*", "/admin/v1/config/*"],
         "audit": ["/admin/audit", "/admin/v1/audit"],
         "legacy_key_mutations": [
             "/admin/principals/{id}/keys/{key_id}/revoke",
@@ -121,14 +119,9 @@ ENGINE_MATRIX = {
 
 GET_SIDE_EFFECTS = [
     {"id": "GET-AUDIT-EXPORT", "method": "GET", "path": "/admin/v1/export", "effect": "appends config_export Audit entry after reading the database catalog"},
-    {"id": "GET-AUDIT-CONFIG-CURRENT", "method": "GET", "path": "/admin/config/current", "effect": "appends config_read Audit entry"},
-    {"id": "GET-AUDIT-CONFIG-CURRENT-V1", "method": "GET", "path": "/admin/v1/config/current", "effect": "same handler; appends config_read Audit entry"},
-    {"id": "GET-AUDIT-CONFIG-DRAFT", "method": "GET", "path": "/admin/config/draft", "effect": "appends config_draft_read Audit entry"},
-    {"id": "GET-AUDIT-CONFIG-DRAFT-V1", "method": "GET", "path": "/admin/v1/config/draft", "effect": "same handler; appends config_draft_read Audit entry"},
-    {"id": "GET-AUDIT-CONFIG-HISTORY", "method": "GET", "path": "/admin/config/history", "effect": "appends config_history_read Audit entry"},
-    {"id": "GET-AUDIT-CONFIG-HISTORY-V1", "method": "GET", "path": "/admin/v1/config/history", "effect": "same handler; appends config_history_read Audit entry"},
-    {"id": "GET-AUDIT-CONFIG-DIFF", "method": "GET", "path": "/admin/config/diff?from=1&to=1", "effect": "appends config_diff_read Audit entry when both revisions exist"},
-    {"id": "GET-AUDIT-CONFIG-DIFF-V1", "method": "GET", "path": "/admin/v1/config/diff?from=1&to=1", "effect": "same handler; appends config_diff_read Audit entry when both revisions exist"},
+    {"id": "GET-AUDIT-CONFIG-EDITOR", "method": "GET", "path": "/admin/v1/config/editor", "effect": "appends config_editor_read Audit entry"},
+    {"id": "GET-AUDIT-CONFIG-DRAFT-V1", "method": "GET", "path": "/admin/v1/config/draft", "effect": "appends config_draft_read Audit entry"},
+    {"id": "GET-AUDIT-CONFIG-HISTORY-V1", "method": "GET", "path": "/admin/v1/config/history", "effect": "appends config_history_read Audit entry"},
     {"id": "GET-AUDIT-AUDIT", "method": "GET", "path": "/admin/audit", "effect": "queries first, then appends audit_query; response does not contain its own new row"},
     {"id": "GET-AUDIT-AUDIT-V1", "method": "GET", "path": "/admin/v1/audit", "effect": "same handler; queries first, then appends audit_query"},
     {"id": "GET-AUDIT-EVENT-DETAIL", "method": "GET", "path": "/admin/v1/events/detail/{event_id}", "effect": "appends request_event_detail_read Audit entry"},
@@ -179,10 +172,13 @@ COVERAGE_GROUPS: dict[str, list[dict[str, Any]]] = {
         {"id": "API-PLUGIN-CHAIN-DIRECT", "method": "PUT/POST", "path": "/admin/v1/plugin-chain-entries/{id} and /rebalance", "fixture": "plugin.primary", "reset": "snapshot", "ui": "backend-only"},
     ],
     "settings_audit": [
-        {"id": "UI-SET-04", "method": "PUT", "path": "/admin/config/draft", "fixture": "settings.no_draft or settings.valid_draft", "reset": "snapshot"},
-        {"id": "UI-SET-05", "method": "POST", "path": "/admin/config/draft/validate", "fixture": "settings.valid_draft", "reset": "snapshot"},
-        {"id": "UI-SET-06", "method": "POST", "path": "/admin/config/apply", "fixture": "settings.validated_draft", "reset": "snapshot plus config file", "warning": "isolated instance only"},
-        {"id": "UI-SET-07", "method": "POST", "path": "/admin/config/reload", "fixture": "isolated process", "reset": "restart plus snapshot", "warning": "sends SIGHUP to the isolated cc-lb PID"},
+        {"id": "UI-SET-17", "method": "GET", "path": "/admin/v1/config/editor", "fixture": "isolated config file", "reset": "snapshot for Audit entry"},
+        {"id": "UI-SET-03B", "method": "GET", "path": "/admin/v1/config/draft", "fixture": "settings.no_draft or settings.valid_draft", "reset": "snapshot for Audit entry"},
+        {"id": "UI-SET-08", "method": "GET", "path": "/admin/v1/config/history?limit=20", "fixture": "settings.saved_history", "reset": "snapshot for Audit entry"},
+        {"id": "UI-SET-04", "method": "PUT", "path": "/admin/v1/config/draft", "fixture": "settings.no_draft or settings.valid_draft", "reset": "snapshot"},
+        {"id": "UI-SET-05", "method": "POST", "path": "/admin/v1/config/draft/validate", "fixture": "settings.valid_draft", "reset": "snapshot"},
+        {"id": "UI-SET-15", "method": "POST", "path": "/admin/v1/config/save", "fixture": "settings.validated_draft with current file fingerprint", "reset": "snapshot plus config file; restart only if saved settings were activated", "warning": "isolated instance only; atomic file save does not change running configuration"},
+        {"id": "UI-SET-16", "method": "POST", "path": "/admin/v1/config/draft/download", "fixture": "settings.validated_draft", "reset": "snapshot for Audit entry; delete owned download", "warning": "TOML may contain credentials; do not publish the download"},
         {"id": "UI-SET-02/GET-side-effects", "method": "GET", "path": "/admin/v1/export and config/audit/detail/key reads", "fixture": "populated", "reset": "snapshot", "side_effect": "Audit writes listed in get_side_effects"},
         {"id": "UI-AUD-01/UI-AUD-09", "method": "GET", "path": "/admin/audit", "fixture": "audit.seeded_history", "reset": "snapshot", "side_effect": "Audit query appends audit_query after selecting response rows"},
     ],
@@ -231,8 +227,8 @@ ERROR_RECIPES = [
     {"id": "ERR-WARMUP-MISSING-CREDENTIALS", "request": "POST /admin/v1/upstreams/{oauth_missing_credentials}/warmup/fire-now", "expect": [400, "oauth_credentials_missing"], "reset": "populated"},
     {"id": "ERR-PLUGIN-REFERENCED", "request": "DELETE /admin/v1/plugins/registry/{plugin} without cascade", "expect": [409, "plugin_registry_referenced"], "reset": "populated", "requires": "plugin artifacts"},
     {"id": "ERR-PLUGIN-STALE-FINGERPRINT", "request": "cascade delete after changing a reference using the old fingerprint", "expect": [409, "references_changed"], "reset": "populated", "requires": "plugin artifacts"},
-    {"id": "ERR-CONFIG-STALE", "request": "PUT /admin/config/draft with expected_revision 0", "expect": [409, "stale_draft_revision"], "reset": "populated"},
-    {"id": "ERR-CONFIG-INVALID", "request": "save isolated invalid draft then validate its revision", "expect": [200, "valid=false"], "reset": "populated"},
+    {"id": "ERR-CONFIG-STALE", "request": "PUT /admin/v1/config/draft with expected_revision 0", "expect": [409, "stale_draft_revision"], "reset": "populated"},
+    {"id": "ERR-CONFIG-INVALID", "request": "save isolated invalid draft then validate its revision", "expect": [200, "file.valid=false or effective.valid=false or filesystem severity=error"], "reset": "populated"},
 ]
 
 
@@ -980,21 +976,23 @@ def prepare_fixture(args: argparse.Namespace) -> None:
         )
     _, _, draft = client.request(
         "PUT",
-        "/admin/config/draft",
+        "/admin/v1/config/draft",
         body={"draft": draft_config, "expected_revision": 0},
         expected=(200,),
     )
     draft_revision = int(draft["revision"])
     _, _, validation = client.request(
         "POST",
-        "/admin/config/draft/validate",
+        "/admin/v1/config/draft/validate",
         body={"expected_revision": draft_revision},
         expected=(200,),
     )
-    if not validation.get("valid"):
-        raise FixtureError(
-            f"generated fixture draft did not validate: {validation.get('error')}"
-        )
+    if (
+        not validation.get("file", {}).get("valid")
+        or not validation.get("effective", {}).get("valid")
+        or any(issue.get("severity") == "error" for issue in validation.get("filesystem", []))
+    ):
+        raise FixtureError("generated fixture draft did not pass file, effective, and filesystem validation")
 
     audit_seed = seed_audit_history(manifest, primary, api_active)
     fixtures = {
@@ -1643,8 +1641,9 @@ def proof_fixture(args: argparse.Namespace) -> None:
     principals = check("principals", "GET", "/admin/v1/principals")
     upstreams = check("upstreams", "GET", "/admin/v1/upstreams")
     plugins = check("plugins", "GET", "/admin/v1/plugins/registry")
-    draft_state = check("config-draft", "GET", "/admin/config/draft")
-    check("config-history", "GET", "/admin/config/history")
+    check("config-editor", "GET", "/admin/v1/config/editor")
+    draft_state = check("config-draft", "GET", "/admin/v1/config/draft")
+    check("config-history", "GET", "/admin/v1/config/history")
     audit = check("audit-all", "GET", "/admin/audit?limit=1000")
     primary_id = fixtures.get("principal", {}).get("primary", {}).get("id")
     key_id = fixtures.get("key", {}).get("preexisting", {}).get("key_id")

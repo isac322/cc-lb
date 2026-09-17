@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "source_commit": "19b05570",
+  "source_commit": "a9da5c3c",
   "source_state": {
     "kind": "approved_uncommitted_candidate",
-    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81",
-    "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
+    "base_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+    "note": "Source hashes and references describe the approved uncommitted merge candidate worktree (HEAD a9da5c3c + master b07b25eebe7bbee7e882643c6776c82015d49689); source_commit identifies the PR-side base, not an updated production deployment."
   },
   "metadata": {
     "input_contracts": [
@@ -17,8 +17,8 @@
     ],
     "imported_action_count": 202,
     "imported_request_occurrence_count": 148,
-    "canonical_action_count": 205,
-    "canonical_request_occurrence_count": 149,
+    "canonical_action_count": 209,
+    "canonical_request_occurrence_count": 148,
     "source_reconciled": true,
     "source_reconciliation_status": "source_reconciled_by_current_generator",
     "runtime_status": "runtime_pending",
@@ -115,6 +115,18 @@
       "sha256": "e2680e3fbd89b75af910dac3e6a337792156557a8e2850db17b4f1de82cf96a0"
     },
     {
+      "path": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+      "sha256": "c08aebb225bf5efca7db021e60732b3cd704a75fceff0611320ef1e2322d4cd9"
+    },
+    {
+      "path": "crates/cc-lb-admin/web/src/components/settings-config/index.ts",
+      "sha256": "b217a6528c429c8b5436ee576eaaddd32ed1b0528d3f5c8479c9edc9f0028221"
+    },
+    {
+      "path": "crates/cc-lb-admin/web/src/components/settings-config/schema.ts",
+      "sha256": "42f9534b11dc64d664cf079d0b70b96ea97cb973ffd661a0c439a32ce7f57dc2"
+    },
+    {
       "path": "crates/cc-lb-admin/web/src/components/ui/BreakdownPopover.tsx",
       "sha256": "89ef55f2d8780abd55504460afa5faabf8c3f441702e9e3565de395247957bfa"
     },
@@ -188,7 +200,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/components/ui/primitives.tsx",
-      "sha256": "70a1ca33ba8b6c60348cd08849d10bec7c4f6c005776b8f82c051505b47dda70"
+      "sha256": "0f71a972edf84b5250ef079b12c7692adc969c3fb0b213b45679296c416eb279"
     },
     {
       "path": "crates/cc-lb-admin/web/src/components/ui/usage/CostPie.tsx",
@@ -268,7 +280,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/api.ts",
-      "sha256": "7b235dec905c24ee5094c57e7e565731e6ab0ad3452328f90a5ebb6a14bfa3a0"
+      "sha256": "021ff7d295bfa9ad595a040f80102002242c74a11cd53de531e9a68d54d184a4"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/auth.ts",
@@ -289,6 +301,10 @@
     {
       "path": "crates/cc-lb-admin/web/src/lib/colors.ts",
       "sha256": "fca01a020df8d38e3de1a235a9408a37bafbeab150effef82ea88e9c97558c83"
+    },
+    {
+      "path": "crates/cc-lb-admin/web/src/lib/configEditorModel.ts",
+      "sha256": "5cc2f4b37be9b70094d0a7c901800fe73aaa0f51548c8c3f99e25a8ca8fb42c9"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/constants.ts",
@@ -316,7 +332,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/queries.ts",
-      "sha256": "e485c94f9ab3258a2bdc3f0d95f390beb1c813306ff545ce7b1b329106f8937e"
+      "sha256": "4258c0589093622b2a3b9114d1a72f008e5f219ebae19fc76e5a1cffaf585da8"
     },
     {
       "path": "crates/cc-lb-admin/web/src/lib/queryClient.ts",
@@ -396,7 +412,7 @@
     },
     {
       "path": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-      "sha256": "00d0717b7beb91420319c656ee1845af3e9815e81ed76395aa4e50e86a4d0fe5"
+      "sha256": "b665fd388f9ac02a41466605045b5c7fd789e4635305bcd21056992fe0dfb1ef"
     },
     {
       "path": "crates/cc-lb-admin/web/src/routes/upstreams.tsx",
@@ -437,7 +453,7 @@
     {
       "path": "crates/cc-lb-admin/web/src/routes/settings.tsx",
       "route": "/settings",
-      "sha256": "00d0717b7beb91420319c656ee1845af3e9815e81ed76395aa4e50e86a4d0fe5"
+      "sha256": "b665fd388f9ac02a41466605045b5c7fd789e4635305bcd21056992fe0dfb1ef"
     },
     {
       "path": "crates/cc-lb-admin/web/src/routes/upstreams.tsx",
@@ -897,17 +913,17 @@
       }
     },
     {
-      "id": "config_draft_text",
+      "id": "config_field_value",
       "kind": "equivalence_classes",
       "classes": [
-        "valid_schema_compliant_json",
-        "valid_json_schema_violation",
-        "malformed_json_client_rejected",
-        "empty_string"
+        "valid_value_within_schema",
+        "value_violating_schema_constraint",
+        "unset_or_nullable_cleared",
+        "reset_to_schema_default"
       ],
       "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "ConfigDraftSection"
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "ScalarField"
       }
     },
     {
@@ -1783,43 +1799,39 @@
       "legacy_id": "UI-SET-02",
       "status": "preserved",
       "canonical_id": "UI-SET-02",
-      "source_id": "settings.tsx#SettingsPage:download_export",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "settings.tsx#SettingsPage:download_database_snapshot",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-03",
       "status": "preserved",
       "canonical_id": "UI-SET-03",
-      "source_id": "settings.tsx#ConfigDraftSection:mount",
-      "reason": "Same source-backed UI action."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:mount",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-04",
       "status": "preserved",
       "canonical_id": "UI-SET-04",
-      "source_id": "settings.tsx#ConfigDraftSection:save_draft",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:save_draft",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-05",
       "status": "preserved",
       "canonical_id": "UI-SET-05",
-      "source_id": "settings.tsx#ConfigDraftSection:validate_draft",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:validate_draft",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-06",
-      "status": "preserved",
-      "canonical_id": "UI-SET-06",
-      "source_id": "settings.tsx#ConfigDraftSection:apply_draft",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "POST /admin/config/apply was removed; master replaces runtime apply with save-to-file plus restart (UI-SET-15 POST /admin/v1/config/save)."
     },
     {
       "legacy_id": "UI-SET-07",
-      "status": "preserved",
-      "canonical_id": "UI-SET-07",
-      "source_id": "settings.tsx#ConfigDraftSection:reload_daemon",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "POST /admin/config/reload was removed; master makes saved config startup-fixed, surfaced via the restart-drift banner and restart_required flag."
     },
     {
       "legacy_id": "UI-SET-08",
@@ -2608,68 +2620,58 @@
     },
     {
       "legacy_id": "UI-SET-03A",
-      "status": "preserved",
-      "canonical_id": "UI-SET-03A",
-      "source_id": "settings.tsx#ConfigDraftSection:mount",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "GET /admin/config/current was removed; the baseline file/effective config now arrives inside GET /admin/v1/config/editor (UI-SET-17)."
     },
     {
       "legacy_id": "UI-SET-03B",
       "status": "preserved",
       "canonical_id": "UI-SET-03B",
-      "source_id": "settings.tsx#ConfigDraftSection:mount",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:mount",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-03C",
-      "status": "preserved",
-      "canonical_id": "UI-SET-03C",
-      "source_id": "settings.tsx#ConfigDraftSection:mount",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "GET /admin/config/schema was removed; the config schema now arrives inside GET /admin/v1/config/editor (UI-SET-17)."
     },
     {
       "legacy_id": "UI-SET-12",
       "status": "preserved",
       "canonical_id": "UI-SET-12",
-      "source_id": "settings.tsx#ConfigDraftSection:retry_editor",
-      "reason": "Same source-backed UI action."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-12A",
       "status": "preserved",
       "canonical_id": "UI-SET-12A",
-      "source_id": "settings.tsx#ConfigDraftSection:retry_editor",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-12B",
       "status": "preserved",
       "canonical_id": "UI-SET-12B",
-      "source_id": "settings.tsx#ConfigDraftSection:retry_editor",
-      "reason": "Same method/path and source-backed request occurrence."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "UI-SET-13",
-      "status": "preserved",
-      "canonical_id": "UI-SET-13",
-      "source_id": "settings.tsx#ConfigDraftSection:toggle_checklist",
-      "reason": "Same source-backed UI action."
+      "status": "retired",
+      "retired_reason": "The schema coverage checklist was removed with the textarea editor; per-section Advanced disclosures (UI-SRC-5F12838E8F4B) replace it."
     },
     {
       "legacy_id": "UI-SET-14",
       "status": "preserved",
       "canonical_id": "UI-SET-14",
-      "source_id": "settings.tsx#ConfigDraftSection:edit_draft",
-      "reason": "Same source-backed UI action."
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:edit_field",
+      "reason": "Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source."
     },
     {
       "legacy_id": "API-BACKEND-CONFIG-DIFF",
-      "status": "moved_to_api_catalog",
-      "endpoint": {
-        "method": "GET",
-        "path": "/admin/config/diff"
-      },
-      "reason": "The same backend-only operation is now sourced from the API catalog."
+      "status": "retired",
+      "retired_reason": "Master removed both config/diff routes and raw configuration history; there is no current API replacement."
     },
     {
       "legacy_id": "UI-AUD-07",
@@ -4019,7 +4021,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useSubscriptionQuotaAggregate",
-            "line": 917
+            "line": 911
           },
           "side_effect_notes": "Note: Legacy inventory incorrectly lumped snapshot into /admin/dashboard/pool-history",
           "id": "UI-OV-03",
@@ -4105,7 +4107,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useSubscriptionQuotaPoolHistory",
-            "line": 951
+            "line": 945
           },
           "side_effect_notes": "Note: Legacy inventory incorrectly listed path as /admin/dashboard/pool-history",
           "id": "UI-OV-04",
@@ -7896,7 +7898,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCreatePrincipal",
-            "line": 1207
+            "line": 1201
           },
           "side_effect_notes": "Invalidates query key ['principals']",
           "id": "UI-PR-23",
@@ -7972,7 +7974,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useTogglePrincipal",
-            "line": 1245
+            "line": 1239
           },
           "side_effect_notes": "Sends ifMatch: revision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "condition": "target_enabled === true",
@@ -8001,7 +8003,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useTogglePrincipal",
-            "line": 1245
+            "line": 1239
           },
           "side_effect_notes": "Sends ifMatch: revision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "condition": "target_enabled === false",
@@ -8085,7 +8087,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeletePrincipal",
-            "line": 1232
+            "line": 1226
           },
           "side_effect_notes": "Sends ifMatch: revision header. Invalidates ['principals'], ['status'], ['plugin-chain', id]",
           "id": "UI-PR-04",
@@ -8218,7 +8220,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useSetAllowedModels",
-            "line": 1268
+            "line": 1262
           },
           "side_effect_notes": "Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "id": "UI-PR-05",
@@ -8314,7 +8316,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdatePrincipalDefaultLimits",
-            "line": 1290
+            "line": 1284
           },
           "side_effect_notes": "Sends ifMatch: expected_revision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "id": "UI-PR-06",
@@ -8689,7 +8691,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useInsertChainEntry",
-            "line": 1515
+            "line": 1509
           },
           "side_effect_notes": "Executed when enabling. Invalidates ['plugin-chain', id]",
           "id": "UI-PR-15",
@@ -8716,7 +8718,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeleteChainEntry",
-            "line": 1556
+            "line": 1550
           },
           "side_effect_notes": "Executed when disabling, sends ifMatch: revision header. Invalidates ['plugin-chain']",
           "id": "UI-PR-15B",
@@ -8802,7 +8804,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateRouterTerminalStrategy",
-            "line": 1564
+            "line": 1558
           },
           "side_effect_notes": "Sends ifMatch: revision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "id": "UI-PR-14",
@@ -8888,7 +8890,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useInsertChainEntry",
-            "line": 1515
+            "line": 1509
           },
           "side_effect_notes": "order is calculated as (entries.length + 1) * 100. Invalidates ['plugin-chain', id]",
           "id": "UI-PR-16B",
@@ -8972,7 +8974,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useReorderChain",
-            "line": 1541
+            "line": 1535
           },
           "side_effect_notes": "Sends array of { id, order: (i + 1) * 100, expected_revision }. Invalidates ['plugin-chain', id]",
           "id": "UI-PR-16",
@@ -9049,7 +9051,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeleteChainEntry",
-            "line": 1556
+            "line": 1550
           },
           "side_effect_notes": "Sends ifMatch: revision header. Invalidates ['plugin-chain']",
           "id": "UI-PR-16C",
@@ -9180,7 +9182,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeleteChainEntry",
-            "line": 1556
+            "line": 1550
           },
           "side_effect_notes": "Deletes existing entry with ifMatch: revision",
           "id": "UI-PR-18A",
@@ -9211,7 +9213,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useInsertChainEntry",
-            "line": 1515
+            "line": 1509
           },
           "side_effect_notes": "slot='shape', order=100. Retries on 409 conflict after refetching chain",
           "id": "UI-PR-18B",
@@ -9293,7 +9295,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useReorderChain",
-            "line": 1541
+            "line": 1535
           },
           "side_effect_notes": "Submits { id, order: (i + 1) * 100, expected_revision } for each item",
           "id": "UI-PR-19B",
@@ -9371,7 +9373,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeleteChainEntry",
-            "line": 1556
+            "line": 1550
           },
           "side_effect_notes": "Sends ifMatch: revision header. Invalidates ['plugin-chain']",
           "id": "UI-PR-19C",
@@ -9539,7 +9541,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useIssueKey",
-            "line": 1338
+            "line": 1332
           },
           "side_effect_notes": "Invalidates ['principal-keys', id]. Label is optional; an empty label is sent as label: ''.",
           "id": "UI-PR-21",
@@ -9622,7 +9624,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useRevokeKey",
-            "line": 1350
+            "line": 1344
           },
           "side_effect_notes": "Invalidates ['principal-keys', id]",
           "id": "UI-PR-22",
@@ -9713,7 +9715,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCacheKeepaliveSummary",
-            "line": 1831
+            "line": 1859
           },
           "side_effect_notes": "Explicitly passes limit: 0 to fetch only the summary block without session rows. Polled every 5,000ms.",
           "id": "UI-PR-07",
@@ -9796,7 +9798,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdatePrincipalCacheKeepalive",
-            "line": 1314
+            "line": 1308
           },
           "side_effect_notes": "Sends ifMatch: principal.revision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "id": "UI-PR-08",
@@ -9887,7 +9889,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdatePrincipalCacheKeepalive",
-            "line": 1314
+            "line": 1308
           },
           "side_effect_notes": "Sends ifMatch: editingRevision header. Awaits invalidation of ['principal', id], ['principals'], and ['router-terminal', id] before settling (invalidatePrincipalRecordQueries).",
           "id": "UI-PR-09",
@@ -9985,7 +9987,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCacheKeepaliveSessions",
-            "line": 1809
+            "line": 1837
           },
           "side_effect_notes": "NOTICE: limit parameter is OMITTED (backend default limit applied). Query key is ['cache-keepalive', 'sessions', id, filters]. Polled every 5,000ms.",
           "id": "UI-PR-10A",
@@ -10235,7 +10237,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCacheKeepaliveSessions",
-            "line": 1809
+            "line": 1837
           },
           "side_effect_notes": "Passes cursor=next_cursor returned from preceding page. Next cursor encodes last_message_at_ms and session_key_hash ASC.",
           "id": "UI-PR-11B",
@@ -10325,7 +10327,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCacheKeepaliveSessionDetail",
-            "line": 1843
+            "line": 1871
           },
           "side_effect_notes": "Polled every 5,000ms via POLLING_INTERVALS.CACHE_KEEPALIVE_DETAIL_MS",
           "id": "UI-PR-12",
@@ -10674,7 +10676,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useGcPlugins",
-            "line": 1504
+            "line": 1498
           },
           "side_effect_notes": "Removes uploaded WASM blobs no longer referenced by any registered plugin; registered plugins remain available even when Used By is 0; invalidates plugin registry query",
           "id": "UI-PLUG-04",
@@ -10757,7 +10759,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUploadWasm",
-            "line": 1369
+            "line": 1363
           },
           "side_effect_notes": "Writes wasm blob to storage, compiles cwasm to disk cache, inserts wasm_registry row, appends audit log",
           "id": "UI-PLUG-02",
@@ -10839,7 +10841,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUploadWasm",
-            "line": 1369
+            "line": 1363
           },
           "side_effect_notes": "Overwrites registry entry in place with same ID, increments revision, recompiles/caches cwasm, triggers proxy runtime rebind",
           "id": "UI-PLUG-03",
@@ -11102,7 +11104,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeletePlugin",
-            "line": 1435
+            "line": 1429
           },
           "side_effect_notes": "Deletes wasm_registry record and cwasm cache file. In cascade mode, also deletes plugin_chains rows, clears upstream warmup_dialect_plugin, bumps upstream revisions. onMutate cancels the in-flight plugin-references query; onSuccess awaits registry (+plugin-chain/upstreams on cascade) invalidation, then removes the deleted plugin's inactive plugin-references cache entry.",
           "id": "UI-PLUG-08",
@@ -11376,7 +11378,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "usePatchPlugin",
-            "line": 1484
+            "line": 1478
           },
           "side_effect_notes": "Updates label column in wasm_registry, increments revision, appends audit log",
           "id": "UI-PLUG-07",
@@ -11558,7 +11560,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "SettingsPage",
-        "line": 202
+        "line": 200
       },
       "name": "System Status & Version Telemetry",
       "trigger_steps": [
@@ -11618,50 +11620,6 @@
       }
     },
     {
-      "id": "UI-SRC-0744A60F49D3",
-      "source_id": "settings.tsx#SettingsPage:admin_token_view",
-      "contract_source_id": "settings.tsx#SettingsPage:admin_token_view",
-      "contract_area": "settings",
-      "legacy_ids": [],
-      "page": "Settings",
-      "component": "Admin Token Card",
-      "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "SettingsPage",
-        "line": 326
-      },
-      "name": "Admin Token Guidance View",
-      "trigger_steps": [
-        "Mount SettingsPage with authSession.auth_mode === 'static_token'"
-      ],
-      "preconditions": [
-        "authSession context has auth_mode === 'static_token'"
-      ],
-      "variants": [
-        "static_token present (card rendered)",
-        "non-static_token (null/hidden)"
-      ],
-      "scope": "once",
-      "iteration_source": "Single execution",
-      "coverage": {
-        "kind": "state_branches",
-        "variants": [
-          "static_token present (card rendered)",
-          "non-static_token (null/hidden)"
-        ]
-      },
-      "risk_tier": "read",
-      "expected_ui": "Displays static-token provider guidance for token_env and daemon restart",
-      "polling": "not_applicable",
-      "client_only_reason": "Conditional informational card rendered solely based on client AuthSessionContext",
-      "atomic_request_ids": [],
-      "requests": [],
-      "applicability": {
-        "latest_source": true,
-        "production": "pending_deployed_delta"
-      }
-    },
-    {
       "id": "UI-SET-10",
       "source_id": "settings.tsx#SettingsPage:select_locale",
       "contract_source_id": "settings.tsx#SettingsPage:select_locale",
@@ -11674,7 +11632,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "SettingsPage",
-        "line": 360
+        "line": 329
       },
       "name": "Change Locale Preference",
       "trigger_steps": [
@@ -11720,7 +11678,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "SettingsPage",
-        "line": 377
+        "line": 345
       },
       "name": "Change Timezone Preference",
       "trigger_steps": [
@@ -11764,7 +11722,7 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "SettingsPage",
-        "line": 182
+        "line": 213
       },
       "name": "Localization Live Preview Clock Tick",
       "trigger_steps": [
@@ -11797,109 +11755,89 @@
     },
     {
       "id": "UI-SET-03",
-      "source_id": "settings.tsx#ConfigDraftSection:mount",
-      "contract_source_id": "settings.tsx#ConfigDraftSection:mount",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:mount",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:mount",
       "contract_area": "settings",
       "legacy_ids": [
         "UI-SET-03",
-        "UI-SET-03A",
-        "UI-SET-03B",
-        "UI-SET-03C"
+        "UI-SET-03B"
       ],
       "page": "Settings",
-      "component": "ConfigDraftSection",
+      "component": "ConfigEditorSection",
       "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "ConfigDraftSection",
-        "line": 435
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "ConfigEditorSection",
+        "line": 726
       },
-      "name": "Load Configuration Draft Pipeline Data",
+      "name": "Load Configuration Editor & Draft Data",
       "trigger_steps": [
-        "Mount ConfigDraftSection"
+        "Mount ConfigEditorSection inside SettingsPage"
       ],
       "preconditions": [
         "Authenticated session"
       ],
       "variants": [
-        "draft exists (uses draft)",
-        "draft null (uses current as baseline)",
-        "schema loaded (checklist available)"
+        "editor + draft loaded -> structured editor seeded from draft ?? file_config at server revision",
+        "draft null -> editor seeded from file_config; hasSavedDraft=false shows \"Start with a saved draft\" notice",
+        "editor or draft query error -> \"Configuration editor unavailable\" danger Notice with Retry",
+        "loading -> ConfigEditorSkeleton placeholder",
+        "server revision advanced past pinned editor revision -> \"Draft revision changed\" stale notice locks save/validate/save-file/download"
       ],
       "scope": "once",
       "iteration_source": "Single execution",
       "coverage": {
         "kind": "state_branches",
         "variants": [
-          "draft exists (uses draft)",
-          "draft null (uses current as baseline)",
-          "schema loaded (checklist available)"
+          "editor + draft loaded -> structured editor seeded from draft ?? file_config at server revision",
+          "draft null -> editor seeded from file_config; hasSavedDraft=false shows \"Start with a saved draft\" notice",
+          "editor or draft query error -> \"Configuration editor unavailable\" danger Notice with Retry",
+          "loading -> ConfigEditorSkeleton placeholder",
+          "server revision advanced past pinned editor revision -> \"Draft revision changed\" stale notice locks save/validate/save-file/download"
         ]
       },
       "risk_tier": "read",
-      "expected_ui": "Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation.",
+      "expected_ui": "Populates revision/file-path metadata, running summary, category nav, and the structured field editor; restart drift banner appears when the latest saved revision post-dates process start.",
       "polling": "not_applicable",
       "client_only_reason": null,
       "atomic_request_ids": [
-        "UI-SET-03B",
-        "UI-SET-03A",
-        "UI-SET-03C"
+        "UI-SET-17",
+        "UI-SET-03B"
       ],
       "requests": [
         {
           "method": "GET",
-          "path": "/admin/config/draft",
+          "path": "/admin/v1/config/editor",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "useConfigEditor",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "useConfigEditor",
+            "line": 781
+          },
+          "side_effect_notes": "Reads schema, default/file/effective config, draft, revision, file info, overrides, restart_required; appends audit entry config_editor_read",
+          "id": "UI-SET-17",
+          "parent_action_id": "UI-SET-03",
+          "path_bindings": [],
+          "risk_tier": "read",
+          "applicability": {
+            "latest_source": true,
+            "production": "pending_deployed_delta"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/config/draft",
           "query_fields": [],
           "body_fields": [],
           "client_symbol": "useConfigDraft",
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useConfigDraft",
-            "line": 793
-          },
-          "side_effect_notes": "None",
-          "id": "UI-SET-03B",
-          "parent_action_id": "UI-SET-03",
-          "path_bindings": [],
-          "risk_tier": "read",
-          "applicability": {
-            "latest_source": true,
-            "production": "pending_deployed_delta"
-          }
-        },
-        {
-          "method": "GET",
-          "path": "/admin/config/current",
-          "query_fields": [],
-          "body_fields": [],
-          "client_symbol": "useConfigCurrent",
-          "source": {
-            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
-            "symbol": "useConfigCurrent",
-            "line": 781
-          },
-          "side_effect_notes": "None",
-          "id": "UI-SET-03A",
-          "parent_action_id": "UI-SET-03",
-          "path_bindings": [],
-          "risk_tier": "read",
-          "applicability": {
-            "latest_source": true,
-            "production": "pending_deployed_delta"
-          }
-        },
-        {
-          "method": "GET",
-          "path": "/admin/config/schema",
-          "query_fields": [],
-          "body_fields": [],
-          "client_symbol": "useConfigSchema",
-          "source": {
-            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
-            "symbol": "useConfigSchema",
             "line": 787
           },
-          "side_effect_notes": "None",
-          "id": "UI-SET-03C",
+          "side_effect_notes": "Reads saved draft, revision, last validation; appends audit entry config_draft_read",
+          "id": "UI-SET-03B",
           "parent_action_id": "UI-SET-03",
           "path_bindings": [],
           "risk_tier": "read",
@@ -11916,47 +11854,52 @@
     },
     {
       "id": "UI-SET-14",
-      "source_id": "settings.tsx#ConfigDraftSection:edit_draft",
-      "contract_source_id": "settings.tsx#ConfigDraftSection:edit_draft",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:edit_field",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:edit_field",
       "contract_area": "settings",
       "legacy_ids": [
         "UI-SET-14"
       ],
       "page": "Settings",
-      "component": "ConfigDraftSection",
+      "component": "ConfigEditorSection",
       "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "ConfigDraftSection",
-        "line": 756
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "updateValue",
+        "line": 1035
       },
-      "name": "Edit Draft Textarea",
+      "name": "Edit Configuration Field Value",
       "trigger_steps": [
-        "Type or paste in JSON config textarea"
+        "Change a field control (text/number input, enum select, ToggleSwitch, string-array row, tagged-union kind select, admin provider row, recurring job row) inside the structured editor",
+        "Click Reset/Unset/Set value on a field, or toggle a nullable object section"
       ],
       "preconditions": [
-        "Editor initialized and not locked by configPending"
+        "Editor loaded (editorData && state && model)"
       ],
       "variants": [
-        "valid JSON input",
-        "invalid JSON syntax",
-        "dirty state",
-        "revert back to savedText"
+        "scalar edit -> setConfigValue writes path; dirty=true",
+        "clearing a nullable text field -> unsetConfigValue removes the key",
+        "Reset -> restores schema default (or unsets when no default)",
+        "Unset -> removes the path from the draft object",
+        "tagged-union kind switch -> replaces subtree with new variant skeleton; stale-variant keys become removals",
+        "any change -> clears localValidation, actionError, downloadError; \"Draft has unsaved changes\" notice appears"
       ],
       "scope": "once",
-      "iteration_source": "Equivalence classes: [valid JSON modification, invalid syntax string, empty string]",
+      "iteration_source": "Per-field edit; equivalence classes per leaf kind (string/integer/number/boolean/enum/array/nullable object/tagged union)",
       "coverage": {
         "kind": "state_branches",
         "variants": [
-          "valid JSON input",
-          "invalid JSON syntax",
-          "dirty state",
-          "revert back to savedText"
+          "scalar edit -> setConfigValue writes path; dirty=true",
+          "clearing a nullable text field -> unsetConfigValue removes the key",
+          "Reset -> restores schema default (or unsets when no default)",
+          "Unset -> removes the path from the draft object",
+          "tagged-union kind switch -> replaces subtree with new variant skeleton; stale-variant keys become removals",
+          "any change -> clears localValidation, actionError, downloadError; \"Draft has unsaved changes\" notice appears"
         ]
       },
       "risk_tier": "read",
-      "expected_ui": "Updates editor.text state; sets editorDirty=true; updates guidance text",
+      "expected_ui": "Updates editor state.value; marks leaf Modified; enables Save draft; locks Validate/Save to file/Download until re-saved",
       "polling": "not_applicable",
-      "client_only_reason": "Controlled React textarea local state",
+      "client_only_reason": "Controlled React editor state; no request until Save draft",
       "atomic_request_ids": [],
       "requests": [],
       "applicability": {
@@ -11966,45 +11909,43 @@
     },
     {
       "id": "UI-SRC-67C497520AA2",
-      "source_id": "settings.tsx#ConfigDraftSection:save_draft",
-      "contract_source_id": "settings.tsx#ConfigDraftSection:save_draft",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:save_draft",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:save_draft",
       "contract_area": "settings",
       "legacy_ids": [
         "UI-SET-04"
       ],
       "page": "Settings",
-      "component": "ConfigDraftSection",
+      "component": "ConfigEditorSection",
       "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "ConfigDraftSection",
-        "line": 568
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "handleSaveDraft",
+        "line": 1074
       },
       "name": "Save Draft",
       "trigger_steps": [
-        "Click Save button"
+        "Click \"Save draft\" button"
       ],
       "preconditions": [
-        "canSave === true: editor != null && (editorDirty || (!editor.hasSavedDraft && !serverRevisionChanged)) && !configPending"
+        "canSaveDraft === true: state && (dirty || !state.hasSavedDraft) && !stale"
       ],
       "variants": [
-        "invalid JSON -> client toast 'Draft is not valid JSON' (no request)",
-        "valid JSON -> PUT /admin/config/draft with { draft, expected_revision }",
-        "200 OK -> updates editor savedText, revision, savedAtUnixSecs, hasSavedDraft=true, clears localValidation, invalidates configDraft, toast 'Draft saved'",
-        "409 Conflict / Revision mismatch -> error toast"
+        "valid -> PUT /admin/v1/config/draft with { draft: normalizeConfigDraft(schema, value), expected_revision }",
+        "200 -> updates saved snapshot, revision, savedAtUnixSecs, hasSavedDraft=true, clears localValidation, invalidates configEditor+configDraft, toast \"Configuration draft saved\"",
+        "409 stale revision / error -> danger Notice \"Configuration action failed\" with response message"
       ],
       "scope": "once",
       "iteration_source": "Single execution per draft edit",
       "coverage": {
         "kind": "state_branches",
         "variants": [
-          "invalid JSON -> client toast 'Draft is not valid JSON' (no request)",
-          "valid JSON -> PUT /admin/config/draft with { draft, expected_revision }",
-          "200 OK -> updates editor savedText, revision, savedAtUnixSecs, hasSavedDraft=true, clears localValidation, invalidates configDraft, toast 'Draft saved'",
-          "409 Conflict / Revision mismatch -> error toast"
+          "valid -> PUT /admin/v1/config/draft with { draft: normalizeConfigDraft(schema, value), expected_revision }",
+          "200 -> updates saved snapshot, revision, savedAtUnixSecs, hasSavedDraft=true, clears localValidation, invalidates configEditor+configDraft, toast \"Configuration draft saved\"",
+          "409 stale revision / error -> danger Notice \"Configuration action failed\" with response message"
         ]
       },
       "risk_tier": "reversible_write",
-      "expected_ui": "Displays saving spinner; on success updates revision counter and saved time, toast 'Draft saved'",
+      "expected_ui": "Displays saving spinner; on success updates revision/saved metadata and toast; unsaved-changes notice clears",
       "polling": "not_applicable",
       "client_only_reason": null,
       "atomic_request_ids": [
@@ -12013,7 +11954,7 @@
       "requests": [
         {
           "method": "PUT",
-          "path": "/admin/config/draft",
+          "path": "/admin/v1/config/draft",
           "query_fields": [],
           "body_fields": [
             "draft",
@@ -12023,9 +11964,9 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useSaveDraft",
-            "line": 1611
+            "line": 1606
           },
-          "side_effect_notes": "Updates config_draft table in DB; appends audit entry; increments revision",
+          "side_effect_notes": "Updates config_draft table in DB; appends audit entry config_draft_put; increments revision",
           "id": "UI-SET-04",
           "parent_action_id": "UI-SRC-67C497520AA2",
           "path_bindings": [],
@@ -12043,43 +11984,45 @@
     },
     {
       "id": "UI-SRC-BFD8C956C3C5",
-      "source_id": "settings.tsx#ConfigDraftSection:validate_draft",
-      "contract_source_id": "settings.tsx#ConfigDraftSection:validate_draft",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:validate_draft",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:validate_draft",
       "contract_area": "settings",
       "legacy_ids": [
         "UI-SET-05"
       ],
       "page": "Settings",
-      "component": "ConfigDraftSection",
+      "component": "ConfigEditorSection",
       "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "ConfigDraftSection",
-        "line": 605
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "handleValidate",
+        "line": 1109
       },
       "name": "Validate Draft",
       "trigger_steps": [
         "Click Validate button"
       ],
       "preconditions": [
-        "canValidate === true: editor.hasSavedDraft === true && !editorDirty && !serverRevisionChanged && !configPending"
+        "canValidate === true: state.hasSavedDraft === true && !dirty && !stale"
       ],
       "variants": [
-        "valid configuration -> { valid: true, revision }, toast 'Draft valid', sets localValidation { revision, error: null }",
-        "invalid configuration -> { valid: false, revision, error }, toast 'Invalid: ...', sets localValidation { revision, error }",
-        "network error / failure -> error toast"
+        "report valid -> toast \"Configuration is valid\"; ValidationSummary success Notice",
+        "report invalid -> toast \"Configuration needs attention\"; ValidationSummary lists file/effective/filesystem/override issues; focus moves to summary",
+        "storage_url_replacement set -> sent as storage_url_replacement in body",
+        "error -> danger Notice \"Configuration action failed\""
       ],
       "scope": "once",
       "iteration_source": "Single execution per saved revision",
       "coverage": {
         "kind": "state_branches",
         "variants": [
-          "valid configuration -> { valid: true, revision }, toast 'Draft valid', sets localValidation { revision, error: null }",
-          "invalid configuration -> { valid: false, revision, error }, toast 'Invalid: ...', sets localValidation { revision, error }",
-          "network error / failure -> error toast"
+          "report valid -> toast \"Configuration is valid\"; ValidationSummary success Notice",
+          "report invalid -> toast \"Configuration needs attention\"; ValidationSummary lists file/effective/filesystem/override issues; focus moves to summary",
+          "storage_url_replacement set -> sent as storage_url_replacement in body",
+          "error -> danger Notice \"Configuration action failed\""
         ]
       },
       "risk_tier": "reversible_write",
-      "expected_ui": "Displays validating spinner; on success updates last validated revision slot (green or red with error text)",
+      "expected_ui": "Displays validating spinner; stores localValidation for the pinned revision; enables Save to config file and Download TOML when all sections pass",
       "polling": "not_applicable",
       "client_only_reason": null,
       "atomic_request_ids": [
@@ -12088,18 +12031,19 @@
       "requests": [
         {
           "method": "POST",
-          "path": "/admin/config/draft/validate",
+          "path": "/admin/v1/config/draft/validate",
           "query_fields": [],
           "body_fields": [
-            "expected_revision"
+            "expected_revision",
+            "storage_url_replacement"
           ],
           "client_symbol": "useValidateConfig",
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useValidateConfig",
-            "line": 1602
+            "line": 1581
           },
-          "side_effect_notes": "Parses draft TOML and validates against schema; updates last_validated_revision and last_validation_error in DB; appends audit entry",
+          "side_effect_notes": "Validates draft against schema incl. filesystem and override checks; persists last_validation/last_validated_revision; appends audit entry config_draft_validate; invalidates configEditor+configDraft",
           "id": "UI-SET-05",
           "parent_action_id": "UI-SRC-BFD8C956C3C5",
           "path_bindings": [],
@@ -12116,157 +12060,9 @@
       }
     },
     {
-      "id": "UI-SRC-EDE5449D42BD",
-      "source_id": "settings.tsx#ConfigDraftSection:apply_draft",
-      "contract_source_id": "settings.tsx#ConfigDraftSection:apply_draft",
-      "contract_area": "settings",
-      "legacy_ids": [
-        "UI-SET-06"
-      ],
-      "page": "Settings",
-      "component": "ConfigDraftSection",
-      "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "ConfigDraftSection",
-        "line": 622
-      },
-      "name": "Apply Draft Revision",
-      "trigger_steps": [
-        "Click Apply button"
-      ],
-      "preconditions": [
-        "canApply === true: editor != null && canValidate && lastValidatedRevision != null && lastValidationError == null && lastValidatedRevision === editor.revision && !configPending"
-      ],
-      "variants": [
-        "provider apply_supported=false -> Apply disabled with a provider-specific unsupported explanation; no request",
-        "capability loading, unavailable, or unconfirmed -> Apply disabled; explanation distinguishes loading from query errors",
-        "provider apply_supported=true with matching validated revision -> existing Apply request path",
-        "supported-provider response remains {status: applied}; revision-labelled success toast expects fields not supplied by this handler (pre-existing contract mismatch)",
-        "conflict / validation stale -> existing error handling"
-      ],
-      "scope": "once",
-      "iteration_source": "Single execution per validated revision",
-      "coverage": {
-        "kind": "state_branches",
-        "variants": [
-          "provider apply_supported=false -> Apply disabled with a provider-specific unsupported explanation; no request",
-          "capability loading, unavailable, or unconfirmed -> Apply disabled; explanation distinguishes loading from query errors",
-          "provider apply_supported=true with matching validated revision -> existing Apply request path",
-          "supported-provider response remains {status: applied}; revision-labelled success toast expects fields not supplied by this handler (pre-existing contract mismatch)",
-          "conflict / validation stale -> existing error handling"
-        ]
-      },
-      "risk_tier": "reversible_write",
-      "expected_ui": "Unsupported or unconfirmed provider capability disables Apply without disabling Save or Validate. Apply-only guidance is outside the aria-live pipeline and referenced only by Apply. Supported mode retains its existing request and refresh behavior; success-revision metadata compatibility is a separately recorded pre-existing limitation.",
-      "polling": "not_applicable",
-      "client_only_reason": null,
-      "atomic_request_ids": [
-        "UI-SET-06"
-      ],
-      "requests": [
-        {
-          "method": "POST",
-          "path": "/admin/config/apply",
-          "query_fields": [],
-          "body_fields": [
-            "expected_revision"
-          ],
-          "client_symbol": "useApplyConfig",
-          "source": {
-            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
-            "symbol": "useApplyConfig",
-            "line": 1587
-          },
-          "side_effect_notes": "Writes config to disk file; inserts into config_history; appends audit entry; triggers runtime reconfig",
-          "id": "UI-SET-06",
-          "parent_action_id": "UI-SRC-EDE5449D42BD",
-          "path_bindings": [],
-          "risk_tier": "reversible_write",
-          "applicability": {
-            "latest_source": true,
-            "production": "pending_deployed_delta"
-          }
-        }
-      ],
-      "applicability": {
-        "latest_source": true,
-        "production": "pending_deployed_delta"
-      }
-    },
-    {
-      "id": "UI-SRC-EA3DE5874C4D",
-      "source_id": "settings.tsx#ConfigDraftSection:reload_daemon",
-      "contract_source_id": "settings.tsx#ConfigDraftSection:reload_daemon",
-      "contract_area": "settings",
-      "legacy_ids": [
-        "UI-SET-07"
-      ],
-      "page": "Settings",
-      "component": "ConfigDraftSection",
-      "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "ConfigDraftSection",
-        "line": 672
-      },
-      "name": "Trigger Daemon Configuration Hot Reload",
-      "trigger_steps": [
-        "Click Reload button"
-      ],
-      "preconditions": [
-        "!configPending"
-      ],
-      "variants": [
-        "success -> { status, reloading }, toast 'Reload triggered'",
-        "error -> error toast"
-      ],
-      "scope": "once",
-      "iteration_source": "Single execution",
-      "coverage": {
-        "kind": "state_branches",
-        "variants": [
-          "success -> { status, reloading }, toast 'Reload triggered'",
-          "error -> error toast"
-        ]
-      },
-      "risk_tier": "external_action",
-      "expected_ui": "Displays reloading spinner; toast 'Reload triggered'",
-      "polling": "not_applicable",
-      "client_only_reason": null,
-      "atomic_request_ids": [
-        "UI-SET-07"
-      ],
-      "requests": [
-        {
-          "method": "POST",
-          "path": "/admin/config/reload",
-          "query_fields": [],
-          "body_fields": [],
-          "client_symbol": "useReloadConfig",
-          "source": {
-            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
-            "symbol": "useReloadConfig",
-            "line": 1628
-          },
-          "side_effect_notes": "Sends SIGHUP to the cc-lb process for hot-reload; appends audit entry",
-          "id": "UI-SET-07",
-          "parent_action_id": "UI-SRC-EA3DE5874C4D",
-          "path_bindings": [],
-          "risk_tier": "external_action",
-          "applicability": {
-            "latest_source": true,
-            "production": "pending_deployed_delta"
-          }
-        }
-      ],
-      "applicability": {
-        "latest_source": true,
-        "production": "pending_deployed_delta"
-      }
-    },
-    {
       "id": "UI-SET-12",
-      "source_id": "settings.tsx#ConfigDraftSection:retry_editor",
-      "contract_source_id": "settings.tsx#ConfigDraftSection:retry_editor",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load",
       "contract_area": "settings",
       "legacy_ids": [
         "UI-SET-12",
@@ -12274,74 +12070,53 @@
         "UI-SET-12B"
       ],
       "page": "Settings",
-      "component": "ConfigDraftSection",
+      "component": "ConfigEditorSection",
       "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "ConfigDraftSection",
-        "line": 550
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "ConfigEditorSection",
+        "line": 1250
       },
-      "name": "Retry Draft Editor Loading",
+      "name": "Retry Configuration Editor Loading",
       "trigger_steps": [
         "Click Retry button in error banner"
       ],
       "preconditions": [
-        "editorLoadError === true (either draft or current failed) && !editorRetrying && !configPending"
+        "loadError === true (editor or draft query failed)"
       ],
       "variants": [
-        "draftUnavailable (refetches draft)",
-        "currentUnavailable (refetches current)",
-        "both unavailable (refetches both)"
+        "editor query failed -> refetches GET /admin/v1/config/editor",
+        "draft query failed -> refetches GET /admin/v1/config/draft",
+        "both failed -> refetches both"
       ],
       "scope": "once",
       "iteration_source": "Single execution upon error",
       "coverage": {
         "kind": "state_branches",
         "variants": [
-          "draftUnavailable (refetches draft)",
-          "currentUnavailable (refetches current)",
-          "both unavailable (refetches both)"
+          "editor query failed -> refetches GET /admin/v1/config/editor",
+          "draft query failed -> refetches GET /admin/v1/config/draft",
+          "both failed -> refetches both"
         ]
       },
       "risk_tier": "read",
-      "expected_ui": "Banner displays 'Retrying...'; triggers refetch of failed queries",
+      "expected_ui": "Notice action shows fetching spinner; triggers refetch of failed queries",
       "polling": "not_applicable",
       "client_only_reason": null,
       "atomic_request_ids": [
-        "UI-SET-12B",
-        "UI-SET-12A"
+        "UI-SET-12A",
+        "UI-SET-12B"
       ],
       "requests": [
         {
           "method": "GET",
-          "path": "/admin/config/draft",
+          "path": "/admin/v1/config/editor",
           "query_fields": [],
           "body_fields": [],
-          "client_symbol": "draft.refetch",
+          "client_symbol": "editorQuery.refetch",
           "source": {
-            "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-            "symbol": "handleRetryEditor",
-            "line": 562
-          },
-          "side_effect_notes": "None",
-          "id": "UI-SET-12B",
-          "parent_action_id": "UI-SET-12",
-          "path_bindings": [],
-          "risk_tier": "read",
-          "applicability": {
-            "latest_source": true,
-            "production": "pending_deployed_delta"
-          }
-        },
-        {
-          "method": "GET",
-          "path": "/admin/config/current",
-          "query_fields": [],
-          "body_fields": [],
-          "client_symbol": "current.refetch",
-          "source": {
-            "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-            "symbol": "handleRetryEditor",
-            "line": 564
+            "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+            "symbol": "editorQuery.refetch",
+            "line": 1251
           },
           "side_effect_notes": "None",
           "id": "UI-SET-12A",
@@ -12352,54 +12127,29 @@
             "latest_source": true,
             "production": "pending_deployed_delta"
           }
+        },
+        {
+          "method": "GET",
+          "path": "/admin/v1/config/draft",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "draftQuery.refetch",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+            "symbol": "draftQuery.refetch",
+            "line": 1252
+          },
+          "side_effect_notes": "None",
+          "id": "UI-SET-12B",
+          "parent_action_id": "UI-SET-12",
+          "path_bindings": [],
+          "risk_tier": "read",
+          "applicability": {
+            "latest_source": true,
+            "production": "pending_deployed_delta"
+          }
         }
       ],
-      "applicability": {
-        "latest_source": true,
-        "production": "pending_deployed_delta"
-      }
-    },
-    {
-      "id": "UI-SET-13",
-      "source_id": "settings.tsx#ConfigDraftSection:toggle_checklist",
-      "contract_source_id": "settings.tsx#ConfigDraftSection:toggle_checklist",
-      "contract_area": "settings",
-      "legacy_ids": [
-        "UI-SET-13"
-      ],
-      "page": "Settings",
-      "component": "ConfigDraftSection",
-      "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "ConfigDraftSection",
-        "line": 772
-      },
-      "name": "Toggle Schema Coverage Checklist",
-      "trigger_steps": [
-        "Click Coverage checklist trigger"
-      ],
-      "preconditions": [
-        "schema.data available"
-      ],
-      "variants": [
-        "collapsed",
-        "expanded"
-      ],
-      "scope": "once",
-      "iteration_source": "Toggle action",
-      "coverage": {
-        "kind": "state_branches",
-        "variants": [
-          "collapsed",
-          "expanded"
-        ]
-      },
-      "risk_tier": "read",
-      "expected_ui": "Expands or collapses BaseCollapsible panel showing list of schema coverage fields",
-      "polling": "not_applicable",
-      "client_only_reason": "Client UI collapsible state managed by @base-ui/react/collapsible",
-      "atomic_request_ids": [],
-      "requests": [],
       "applicability": {
         "latest_source": true,
         "production": "pending_deployed_delta"
@@ -12418,19 +12168,21 @@
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "symbol": "ConfigHistorySection",
-        "line": 801
+        "line": 438
       },
       "name": "Load Configuration History",
       "trigger_steps": [
-        "Mount ConfigHistorySection"
+        "Mount ConfigHistorySection",
+        "Click \"Retry history\" button in error state"
       ],
       "preconditions": [
         "Authenticated session"
       ],
       "variants": [
         "loading (4 skeleton rows)",
-        "empty ('No history available.')",
-        "populated (rows with Rev, Applied relative time, TLS StatusBadge)"
+        "empty (\"No saved config history available.\")",
+        "error -> role=alert row with \"Retry history\" button refetching the same query",
+        "populated (rows with Rev and Saved relative time)"
       ],
       "scope": "once",
       "iteration_source": "Single execution",
@@ -12438,12 +12190,13 @@
         "kind": "state_branches",
         "variants": [
           "loading (4 skeleton rows)",
-          "empty ('No history available.')",
-          "populated (rows with Rev, Applied relative time, TLS StatusBadge)"
+          "empty (\"No saved config history available.\")",
+          "error -> role=alert row with \"Retry history\" button refetching the same query",
+          "populated (rows with Rev and Saved relative time)"
         ]
       },
       "risk_tier": "read",
-      "expected_ui": "Renders table of up to 20 last applied revisions",
+      "expected_ui": "Renders table of up to 20 last saved revisions; error state offers retry",
       "polling": "not_applicable",
       "client_only_reason": null,
       "atomic_request_ids": [
@@ -12452,7 +12205,7 @@
       "requests": [
         {
           "method": "GET",
-          "path": "/admin/config/history",
+          "path": "/admin/v1/config/history",
           "query_fields": [
             "limit=20"
           ],
@@ -12461,9 +12214,9 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useConfigHistory",
-            "line": 799
+            "line": 793
           },
-          "side_effect_notes": "None",
+          "side_effect_notes": "Appends audit entry config_history_read",
           "id": "UI-SET-08",
           "parent_action_id": "UI-SRC-C9DD3E291979",
           "path_bindings": [],
@@ -12480,86 +12233,44 @@
       }
     },
     {
-      "id": "UI-SRC-625C96B0933F",
-      "source_id": "settings.tsx#RestartRequiredMatrix:render",
-      "contract_source_id": "settings.tsx#RestartRequiredMatrix:render",
-      "contract_area": "settings",
-      "legacy_ids": [],
-      "page": "Settings",
-      "component": "RestartRequiredMatrix",
-      "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "RestartRequiredMatrix",
-        "line": 892
-      },
-      "name": "Restart-Required Fields Matrix View",
-      "trigger_steps": [
-        "Mount SettingsPage"
-      ],
-      "preconditions": [
-        "SettingsPage mounted"
-      ],
-      "variants": [
-        "static list of 15 restart-required configuration keys with reasons"
-      ],
-      "scope": "once",
-      "iteration_source": "15 static field definitions",
-      "coverage": {
-        "kind": "state_branches",
-        "variants": [
-          "static list of 15 restart-required configuration keys with reasons"
-        ]
-      },
-      "risk_tier": "read",
-      "expected_ui": "Renders table listing fields where Hot reload = 'No' (danger badge) and explanation",
-      "polling": "not_applicable",
-      "client_only_reason": "Static client-side reference matrix",
-      "atomic_request_ids": [],
-      "requests": [],
-      "applicability": {
-        "latest_source": true,
-        "production": "pending_deployed_delta"
-      }
-    },
-    {
       "id": "UI-SRC-49B5404AC804",
-      "source_id": "settings.tsx#SettingsPage:download_export",
-      "contract_source_id": "settings.tsx#SettingsPage:download_export",
+      "source_id": "settings.tsx#SettingsPage:download_database_snapshot",
+      "contract_source_id": "settings.tsx#SettingsPage:download_database_snapshot",
       "contract_area": "settings",
       "legacy_ids": [
         "UI-SET-02"
       ],
       "page": "Settings",
-      "component": "Configuration Export Card",
+      "component": "Database Resources Snapshot Card",
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/settings.tsx",
-        "symbol": "handleDownloadExport",
-        "line": 191
+        "symbol": "handleDownloadDatabaseSnapshot",
+        "line": 220
       },
-      "name": "Download Configuration Export Snapshot",
+      "name": "Download Database Resources Snapshot",
       "trigger_steps": [
-        "Click Download export.json button"
+        "Click \"Download database snapshot\" button"
       ],
       "preconditions": [
-        "SettingsPage mounted && !exportingRef.current"
+        "SettingsPage mounted && !downloadingDatabaseSnapshotRef.current"
       ],
       "variants": [
-        "in-flight: Button disabled with 'Downloading...'",
-        "success: Triggers browser file download of cc-lb-export-{timestamp}.json; toast 'Export downloaded'",
-        "error: toast 'Export failed: ...'"
+        "in-flight: Button disabled with \"Downloading...\"",
+        "success: Triggers browser file download of cc-lb-database-resources-{timestamp}.json; toast \"Database snapshot downloaded\"",
+        "error: toast \"Database snapshot download failed: ...\""
       ],
       "scope": "once",
       "iteration_source": "Single execution",
       "coverage": {
         "kind": "state_branches",
         "variants": [
-          "in-flight: Button disabled with 'Downloading...'",
-          "success: Triggers browser file download of cc-lb-export-{timestamp}.json; toast 'Export downloaded'",
-          "error: toast 'Export failed: ...'"
+          "in-flight: Button disabled with \"Downloading...\"",
+          "success: Triggers browser file download of cc-lb-database-resources-{timestamp}.json; toast \"Database snapshot downloaded\"",
+          "error: toast \"Database snapshot download failed: ...\""
         ]
       },
       "risk_tier": "read",
-      "expected_ui": "Initiates browser blob download and shows feedback toast",
+      "expected_ui": "Initiates browser blob download of upstreams, principals, plugins, and chains stored in the database; shows feedback toast",
       "polling": "not_applicable",
       "client_only_reason": null,
       "atomic_request_ids": [
@@ -12588,6 +12299,489 @@
           }
         }
       ],
+      "applicability": {
+        "latest_source": true,
+        "production": "pending_deployed_delta"
+      }
+    },
+    {
+      "id": "UI-SRC-9A3432FEB525",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:save_file",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:save_file",
+      "contract_area": "settings",
+      "legacy_ids": [],
+      "page": "Settings",
+      "component": "ConfigEditorSection",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "handleSaveFileRequest",
+        "line": 1193
+      },
+      "name": "Save Draft to Config File",
+      "trigger_steps": [
+        "Click \"Save to config file\" button",
+        "Confirm in the overwrite/lockout ConfirmDialog (check \"I confirmed another valid admin access path exists\" when required)"
+      ],
+      "preconditions": [
+        "canSaveFile === true: validationCurrent && file.valid && effective.valid && no filesystem errors && file.mode === \"writable\""
+      ],
+      "variants": [
+        "file absent and no provider change -> POST /admin/v1/config/save immediately",
+        "file exists -> ConfirmDialog \"Overwrite the current config file?\" listing grouped change review (dangerous first)",
+        "admin.auth.providers changed or prior self_lockout_confirmation_required -> destructive ConfirmDialog requires checkbox acknowledgement; confirmDisabled until checked",
+        "200 -> toast \"Configuration file saved\"; restart-drift banner appears (saved revision newer than process start)",
+        "409 self_lockout_confirmation_required -> dialog reopens with acknowledgement required",
+        "error with embedded validation report -> localValidation updated; danger Notice \"Configuration action failed\""
+      ],
+      "scope": "once",
+      "iteration_source": "Single execution per validated revision",
+      "coverage": {
+        "kind": "state_branches",
+        "variants": [
+          "file absent and no provider change -> POST /admin/v1/config/save immediately",
+          "file exists -> ConfirmDialog \"Overwrite the current config file?\" listing grouped change review (dangerous first)",
+          "admin.auth.providers changed or prior self_lockout_confirmation_required -> destructive ConfirmDialog requires checkbox acknowledgement; confirmDisabled until checked",
+          "200 -> toast \"Configuration file saved\"; restart-drift banner appears (saved revision newer than process start)",
+          "409 self_lockout_confirmation_required -> dialog reopens with acknowledgement required",
+          "error with embedded validation report -> localValidation updated; danger Notice \"Configuration action failed\""
+        ]
+      },
+      "risk_tier": "reversible_write",
+      "expected_ui": "Atomically replaces the TOML config file; saved draft stays server-side; restart required to apply",
+      "polling": "not_applicable",
+      "client_only_reason": null,
+      "atomic_request_ids": [
+        "UI-SET-15"
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/admin/v1/config/save",
+          "query_fields": [],
+          "body_fields": [
+            "expected_revision",
+            "expected_fingerprint",
+            "storage_url_replacement",
+            "confirm_self_lockout"
+          ],
+          "client_symbol": "useSaveConfigFile",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "useSaveConfigFile",
+            "line": 1628
+          },
+          "side_effect_notes": "Atomically writes the config TOML file; records config history entry; appends audit entry config_save (or config_save_failed); invalidates configEditor+configDraft+configHistory",
+          "id": "UI-SET-15",
+          "parent_action_id": "UI-SRC-9A3432FEB525",
+          "path_bindings": [],
+          "risk_tier": "reversible_write",
+          "applicability": {
+            "latest_source": true,
+            "production": "pending_deployed_delta"
+          }
+        }
+      ],
+      "applicability": {
+        "latest_source": true,
+        "production": "pending_deployed_delta"
+      }
+    },
+    {
+      "id": "UI-SRC-228C90EA6F13",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:download_toml",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:download_toml",
+      "contract_area": "settings",
+      "legacy_ids": [],
+      "page": "Settings",
+      "component": "ConfigEditorSection",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "handleDownload",
+        "line": 1202
+      },
+      "name": "Download Validated Draft as TOML",
+      "trigger_steps": [
+        "Click \"Download TOML\" button",
+        "Click \"Retry\" in the download-failed Notice"
+      ],
+      "preconditions": [
+        "canDownload === true: validationCurrent && file.valid; downloadLock prevents concurrent downloads"
+      ],
+      "variants": [
+        "success -> browser download of validated TOML via Content-Disposition filename; toast \"Validated TOML downloaded\"",
+        "failure -> danger Notice \"Download failed\" with Retry and \"Copy draft JSON\" fallback actions",
+        "second click while in-flight -> deduplicated by pendingConfigDraftDownload/downloadLock"
+      ],
+      "scope": "once",
+      "iteration_source": "Single execution per validated revision",
+      "coverage": {
+        "kind": "state_branches",
+        "variants": [
+          "success -> browser download of validated TOML via Content-Disposition filename; toast \"Validated TOML downloaded\"",
+          "failure -> danger Notice \"Download failed\" with Retry and \"Copy draft JSON\" fallback actions",
+          "second click while in-flight -> deduplicated by pendingConfigDraftDownload/downloadLock"
+        ]
+      },
+      "risk_tier": "read_with_audit",
+      "expected_ui": "Initiates browser blob download of the validated draft rendered as TOML",
+      "polling": "not_applicable",
+      "client_only_reason": null,
+      "atomic_request_ids": [
+        "UI-SET-16"
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/admin/v1/config/draft/download",
+          "query_fields": [],
+          "body_fields": [
+            "expected_revision",
+            "storage_url_replacement"
+          ],
+          "client_symbol": "downloadConfigDraft",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/api.ts",
+            "symbol": "downloadConfigDraft",
+            "line": 299
+          },
+          "side_effect_notes": "Renders validated draft as TOML attachment; appends audit entry config_download",
+          "id": "UI-SET-16",
+          "parent_action_id": "UI-SRC-228C90EA6F13",
+          "path_bindings": [],
+          "risk_tier": "read_with_audit",
+          "applicability": {
+            "latest_source": true,
+            "production": "pending_deployed_delta"
+          }
+        }
+      ],
+      "applicability": {
+        "latest_source": true,
+        "production": "pending_deployed_delta"
+      }
+    },
+    {
+      "id": "UI-SRC-089FBD95699E",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:select_category",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:select_category",
+      "contract_area": "settings",
+      "legacy_ids": [],
+      "page": "Settings",
+      "component": "ConfigEditorSection",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "selectCategory",
+        "line": 1042
+      },
+      "name": "Select Configuration Category",
+      "trigger_steps": [
+        "Click a category in the left nav (Network & requests, Storage & data, Scheduling, Routing & resilience, Identity & access, Pricing & quotas, Runtime & observability)",
+        "Open /settings?category={id} deep link"
+      ],
+      "preconditions": [
+        "Editor loaded with model categories"
+      ],
+      "variants": [
+        "select -> activeCategory switches; URL search updated {category, q}; field deep-link dropped",
+        "unknown ?category= value -> falls back to \"network\"",
+        "category counts show modified/overridden/error badges from visible leaves"
+      ],
+      "scope": "once",
+      "iteration_source": "Per category selection",
+      "coverage": {
+        "kind": "state_branches",
+        "variants": [
+          "select -> activeCategory switches; URL search updated {category, q}; field deep-link dropped",
+          "unknown ?category= value -> falls back to \"network\"",
+          "category counts show modified/overridden/error badges from visible leaves"
+        ]
+      },
+      "risk_tier": "read",
+      "expected_ui": "Switches the rendered category panel and syncs ?category= into the URL without scroll reset",
+      "polling": "not_applicable",
+      "client_only_reason": "Client-side navigation state synced to URL search params via TanStack Router",
+      "atomic_request_ids": [],
+      "requests": [],
+      "applicability": {
+        "latest_source": true,
+        "production": "pending_deployed_delta"
+      }
+    },
+    {
+      "id": "UI-SRC-FA4533F02DD6",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:search_settings",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:search_settings",
+      "contract_area": "settings",
+      "legacy_ids": [],
+      "page": "Settings",
+      "component": "ConfigEditorSection",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "activateSearchResult",
+        "line": 1059
+      },
+      "name": "Search Settings Fields",
+      "trigger_steps": [
+        "Type in \"Search settings\" combobox",
+        "ArrowDown/ArrowUp to move active option; Enter or click to activate",
+        "Escape, clear button, or outside pointerdown closes the overlay"
+      ],
+      "preconditions": [
+        "Editor loaded; non-empty trimmed query"
+      ],
+      "variants": [
+        "results -> up to 24 matching visible leaves with breadcrumb + path; aria-activedescendant highlight",
+        "no match -> \"No settings match this search.\" option and sr-only status",
+        "activate -> selects result category, opens its Advanced disclosure when needed, sets ?field= deep link, focuses the field control",
+        "clear/Escape -> overlay closes, focus returns to input without reopening"
+      ],
+      "scope": "once",
+      "iteration_source": "Per keystroke/activation; results capped at 24",
+      "coverage": {
+        "kind": "state_branches",
+        "variants": [
+          "results -> up to 24 matching visible leaves with breadcrumb + path; aria-activedescendant highlight",
+          "no match -> \"No settings match this search.\" option and sr-only status",
+          "activate -> selects result category, opens its Advanced disclosure when needed, sets ?field= deep link, focuses the field control",
+          "clear/Escape -> overlay closes, focus returns to input without reopening"
+        ]
+      },
+      "risk_tier": "read",
+      "expected_ui": "Filters config leaves client-side and deep-links the chosen field",
+      "polling": "not_applicable",
+      "client_only_reason": "Client-side search over the in-memory editor model; URL ?q=/field= sync only",
+      "atomic_request_ids": [],
+      "requests": [],
+      "applicability": {
+        "latest_source": true,
+        "production": "pending_deployed_delta"
+      }
+    },
+    {
+      "id": "UI-SRC-5F12838E8F4B",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:toggle_advanced",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:toggle_advanced",
+      "contract_area": "settings",
+      "legacy_ids": [],
+      "page": "Settings",
+      "component": "ConfigEditorSection",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "SectionCard",
+        "line": 2457
+      },
+      "name": "Toggle Advanced Settings Disclosure",
+      "trigger_steps": [
+        "Click \"Advanced (n)\" summary inside a section card"
+      ],
+      "preconditions": [
+        "Section has advanced-classified leaves"
+      ],
+      "variants": [
+        "open -> advanced field grid rendered; openAdvanced[sectionId]=true",
+        "close -> grid collapsed; state retained",
+        "deep-link/search activation can force-open the disclosure for the target field"
+      ],
+      "scope": "once",
+      "iteration_source": "Per section disclosure",
+      "coverage": {
+        "kind": "state_branches",
+        "variants": [
+          "open -> advanced field grid rendered; openAdvanced[sectionId]=true",
+          "close -> grid collapsed; state retained",
+          "deep-link/search activation can force-open the disclosure for the target field"
+        ]
+      },
+      "risk_tier": "read",
+      "expected_ui": "Expands or collapses the section's advanced field group",
+      "polling": "not_applicable",
+      "client_only_reason": "Client UI disclosure state (details/summary)",
+      "atomic_request_ids": [],
+      "requests": [],
+      "applicability": {
+        "latest_source": true,
+        "production": "pending_deployed_delta"
+      }
+    },
+    {
+      "id": "UI-SRC-2DBACF6A00B0",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:reveal_issue",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:reveal_issue",
+      "contract_area": "settings",
+      "legacy_ids": [],
+      "page": "Settings",
+      "component": "ConfigEditorSection",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "revealConfigPath",
+        "line": 1049
+      },
+      "name": "Reveal Field from Validation Issue",
+      "trigger_steps": [
+        "Click a validation issue row in ValidationSummary"
+      ],
+      "preconditions": [
+        "Validation report present with issue.path"
+      ],
+      "variants": [
+        "issue in another category -> category switches and field is focused",
+        "issue in advanced section -> disclosure opens then field focused",
+        "issue without path -> row not clickable"
+      ],
+      "scope": "once",
+      "iteration_source": "Per issue click",
+      "coverage": {
+        "kind": "state_branches",
+        "variants": [
+          "issue in another category -> category switches and field is focused",
+          "issue in advanced section -> disclosure opens then field focused",
+          "issue without path -> row not clickable"
+        ]
+      },
+      "risk_tier": "read",
+      "expected_ui": "Navigates to and focuses the offending field control",
+      "polling": "not_applicable",
+      "client_only_reason": "Client-side navigation and focus management",
+      "atomic_request_ids": [],
+      "requests": [],
+      "applicability": {
+        "latest_source": true,
+        "production": "pending_deployed_delta"
+      }
+    },
+    {
+      "id": "UI-SRC-6C749C277F0A",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:storage_url_replacement",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:storage_url_replacement",
+      "contract_area": "settings",
+      "legacy_ids": [],
+      "page": "Settings",
+      "component": "ConfigEditorSection",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "ScalarField",
+        "line": 2964
+      },
+      "name": "Replace Opaque Storage URL",
+      "trigger_steps": [
+        "Click \"Replace URL\" on the storage.url field",
+        "Type the replacement URL",
+        "Click \"Cancel replacement\" or \"Unset\""
+      ],
+      "preconditions": [
+        "storage.url leaf rendered; value is opaque sentinel"
+      ],
+      "variants": [
+        "replace -> storageUrlReplacement state set; included in validate/save/download request bodies",
+        "cancel -> replacement cleared; sentinel restored",
+        "unset -> replacement cleared and storage.url removed from draft",
+        "any change -> clears localValidation/actionError/downloadError"
+      ],
+      "scope": "once",
+      "iteration_source": "Per replacement edit",
+      "coverage": {
+        "kind": "state_branches",
+        "variants": [
+          "replace -> storageUrlReplacement state set; included in validate/save/download request bodies",
+          "cancel -> replacement cleared; sentinel restored",
+          "unset -> replacement cleared and storage.url removed from draft",
+          "any change -> clears localValidation/actionError/downloadError"
+        ]
+      },
+      "risk_tier": "read",
+      "expected_ui": "Holds the real storage URL client-side so it is never rendered; forwarded only inside mutation request bodies",
+      "polling": "not_applicable",
+      "client_only_reason": "Client-only state that leads to storage_url_replacement on later validate/save/download requests",
+      "atomic_request_ids": [],
+      "requests": [],
+      "applicability": {
+        "latest_source": true,
+        "production": "pending_deployed_delta"
+      }
+    },
+    {
+      "id": "UI-SRC-6349C47F4250",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:copy_draft_json",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:copy_draft_json",
+      "contract_area": "settings",
+      "legacy_ids": [],
+      "page": "Settings",
+      "component": "ConfigEditorSection",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "ConfigEditorSection",
+        "line": 1323
+      },
+      "name": "Copy Draft JSON to Clipboard",
+      "trigger_steps": [
+        "Click \"Copy draft JSON\" inside the download-failed Notice"
+      ],
+      "preconditions": [
+        "downloadError shown; editor state present"
+      ],
+      "variants": [
+        "success -> toast \"Draft JSON copied\"",
+        "clipboard failure -> toast \"Could not copy draft JSON\""
+      ],
+      "scope": "once",
+      "iteration_source": "Single execution",
+      "coverage": {
+        "kind": "state_branches",
+        "variants": [
+          "success -> toast \"Draft JSON copied\"",
+          "clipboard failure -> toast \"Could not copy draft JSON\""
+        ]
+      },
+      "risk_tier": "read",
+      "expected_ui": "Copies the current draft object as formatted JSON for manual recovery",
+      "polling": "not_applicable",
+      "client_only_reason": "Client-only navigator.clipboard write",
+      "atomic_request_ids": [],
+      "requests": [],
+      "applicability": {
+        "latest_source": true,
+        "production": "pending_deployed_delta"
+      }
+    },
+    {
+      "id": "UI-SRC-E5CC6F8E2B14",
+      "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:deep_link_field",
+      "contract_source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:deep_link_field",
+      "contract_area": "settings",
+      "legacy_ids": [],
+      "page": "Settings",
+      "component": "ConfigEditorSection",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+        "symbol": "ConfigEditorSection",
+        "line": 935
+      },
+      "name": "Deep-Link Field Focus via ?field=",
+      "trigger_steps": [
+        "Open /settings?field={path} (or activate a search result / issue that sets ?field=)"
+      ],
+      "preconditions": [
+        "Editor model loaded; field param present and not yet handled"
+      ],
+      "variants": [
+        "known field -> its category selected, Advanced disclosure opened when needed, control focused via data-config-path",
+        "handled once per field value (handledFieldRef) until ?field= changes or clears"
+      ],
+      "scope": "once",
+      "iteration_source": "Per distinct ?field= value",
+      "coverage": {
+        "kind": "state_branches",
+        "variants": [
+          "known field -> its category selected, Advanced disclosure opened when needed, control focused via data-config-path",
+          "handled once per field value (handledFieldRef) until ?field= changes or clears"
+        ]
+      },
+      "risk_tier": "read",
+      "expected_ui": "Focuses the requested field control after the editor model resolves",
+      "polling": "not_applicable",
+      "client_only_reason": "Client-side URL search param handling and focus management",
+      "atomic_request_ids": [],
+      "requests": [],
       "applicability": {
         "latest_source": true,
         "production": "pending_deployed_delta"
@@ -13570,7 +13764,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useSubscriptionQuotaLatest",
-            "line": 807
+            "line": 801
           },
           "side_effect_notes": "None (read-only)",
           "id": "UI-UP-02",
@@ -14020,7 +14214,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useSubscriptionQuotaSeries",
-            "line": 838
+            "line": 832
           },
           "side_effect_notes": "None (read-only)",
           "id": "UI-UP-08A",
@@ -14100,7 +14294,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useSubscriptionQuotaAnalysis",
-            "line": 882
+            "line": 876
           },
           "side_effect_notes": "None (read-only)",
           "id": "UI-UP-08B",
@@ -14184,7 +14378,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useSubscriptionQuotaSeries",
-            "line": 838
+            "line": 832
           },
           "side_effect_notes": "None",
           "id": "UI-UP-09A",
@@ -14210,7 +14404,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useSubscriptionQuotaAnalysis",
-            "line": 882
+            "line": 876
           },
           "side_effect_notes": "None",
           "id": "UI-UP-09B",
@@ -14343,7 +14537,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateUpstream",
-            "line": 1053
+            "line": 1047
           },
           "side_effect_notes": "Updates database record with If-Match: spec_revision header (server returns 409 stale_revision or upstream_name_conflict on conflict); invalidates ['upstreams'] and ['upstream', id]",
           "id": "UI-UP-11",
@@ -14425,7 +14619,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateUpstreamWarmupSettings",
-            "line": 1129
+            "line": 1123
           },
           "side_effect_notes": "Updates enabled flag in database; triggers engine reconfiguration",
           "id": "UI-UP-12",
@@ -14521,7 +14715,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateUpstream",
-            "line": 1053
+            "line": 1047
           },
           "side_effect_notes": "Updates the spec with If-Match revision protection and invalidates upstream queries. base_url omitted or explicit null preserves the override; a URL string sets it; clear_base_url: true clears it (the server rejects base_url plus clear_base_url together with 400 conflicting_base_url). The form captures the Base URL baseline when editing begins, so a mid-edit props refetch cannot turn an untouched field into a clear; on success the editor closes only when a requested clear is confirmed by response base_url === null. Blank API-key inputs remain no-change and secrets are never repopulated; api_key_env provenance is not persisted or returned.",
           "id": "UI-UP-13",
@@ -14678,7 +14872,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateUpstreamWarmupSettings",
-            "line": 1129
+            "line": 1123
           },
           "side_effect_notes": "Updates warmup_enabled flag in database with If-Match revision header",
           "id": "UI-UP-15",
@@ -14758,7 +14952,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useUpdateUpstreamWarmupSettings",
-            "line": 1129
+            "line": 1123
           },
           "side_effect_notes": "Attaches dialect plugin config in database with If-Match revision check",
           "id": "UI-UP-16",
@@ -14836,7 +15030,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useClearUpstreamWarmupDialectPlugin",
-            "line": 1108
+            "line": 1102
           },
           "side_effect_notes": "Deletes plugin attachment from upstream record with If-Match revision check",
           "id": "UI-UP-17",
@@ -14917,7 +15111,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useFireNowUpstreamWarmup",
-            "line": 1076
+            "line": 1070
           },
           "side_effect_notes": "CRITICAL / MUTATION & EXTERNAL BILLING: Sends live /messages request to Anthropic upstream; consumes real quota tokens; creates attempt record in DB; resets warmup schedule",
           "id": "UI-UP-18",
@@ -14998,7 +15192,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useWarmupAttempts",
-            "line": 1783
+            "line": 1811
           },
           "side_effect_notes": "None (read-only)",
           "id": "UI-UP-19",
@@ -15120,7 +15314,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useOAuthStart",
-            "line": 1154
+            "line": 1148
           },
           "side_effect_notes": "Generates PKCE state in memory; returns authorize URL",
           "id": "UI-UP-22",
@@ -15202,7 +15396,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useOAuthComplete",
-            "line": 1163
+            "line": 1157
           },
           "side_effect_notes": "Exchanges code with Anthropic upstream; writes encrypted OAuth credentials to database; updates spec revision",
           "id": "UI-UP-23",
@@ -15280,7 +15474,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useDeleteUpstream",
-            "line": 1016
+            "line": 1010
           },
           "side_effect_notes": "Soft-deletes upstream record (sets deleted_at); updates proxy routing tables",
           "id": "UI-UP-24",
@@ -15412,7 +15606,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCreateUpstream",
-            "line": 1008
+            "line": 1002
           },
           "side_effect_notes": "Inserts upstream into database; updates dynamic router. base_url is nullable; blank input sends null, storing no override (default endpoint applies). api_key_env is write-only: the server resolves it to ciphertext and never returns the env name.",
           "id": "UI-UP-26",
@@ -15483,7 +15677,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useStartOauthDraft",
-            "line": 1638
+            "line": 1666
           },
           "side_effect_notes": "Creates draft OAuth state in memory",
           "id": "UI-UP-27",
@@ -15558,7 +15752,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCompleteOauthDraft",
-            "line": 1645
+            "line": 1673
           },
           "side_effect_notes": "Exchanges code for Anthropic tokens; queries metadata; caches draft credentials",
           "id": "UI-UP-28",
@@ -15631,7 +15825,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useCreateFromOauthDraft",
-            "line": 1653
+            "line": 1681
           },
           "side_effect_notes": "Creates new upstream row and commits bound OAuth credentials to database; response is parsed through UpstreamSchema (base_url nullable, api_key_env optional) before the upstreams query is invalidated",
           "id": "UI-UP-29",
@@ -15790,7 +15984,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useWarmupSummary",
-            "line": 1770
+            "line": 1798
           },
           "side_effect_notes": "None (read-only)",
           "id": "UI-UP-31",
@@ -16027,7 +16221,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useWarmupAttempts",
-            "line": 1783
+            "line": 1811
           },
           "side_effect_notes": "None",
           "id": "UI-UP-34",
@@ -16109,7 +16303,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useWarmupAttempts",
-            "line": 1783
+            "line": 1811
           },
           "side_effect_notes": "None",
           "id": "UI-UP-35",
@@ -16646,7 +16840,7 @@
           "source": {
             "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
             "symbol": "useInsertChainEntry",
-            "line": 1515
+            "line": 1509
           },
           "side_effect_notes": "slot='observability_hook'; invalidates the principal plugin-chain query.",
           "id": "UI-PR-19",
@@ -17190,17 +17384,17 @@
       "source_contract": "Settings",
       "gap_id": "GAP-SET-01",
       "id": "GAP-SET-01",
-      "title": "No Config Diff Modal in UI (Backend-Only Endpoint)",
-      "description": "GET /admin/config/diff?from={revA}&to={revB} and qk.configDiff query key exist, but there is NO UI caller, modal, or comparison button in Admin Web. History rows in ConfigHistorySection are static table rows with no expansion or comparison triggers.",
-      "resolution": "Confirmed absent in UI. Marked as API-BACKEND-CONFIG-DIFF with Web-Unreachable status; no fake UI modal should be generated."
+      "title": "Config Diff Endpoint Removed (Backend and UI)",
+      "description": "The legacy inventory documented GET /admin/config/diff?from={revA}&to={revB} with no UI caller. In the merged candidate the diff route and the qk.configDiff query key are deleted entirely; revision comparison is superseded by the save-file ConfirmDialog change review (config-review-list).",
+      "resolution": "Endpoint absent from merged routes.rs; no UI modal ever existed. Superseded by the review list in the save confirmation."
     },
     {
       "source_contract": "Settings",
       "gap_id": "GAP-SET-02",
       "id": "GAP-SET-02",
       "title": "No Config Draft Discard API or UI Action",
-      "description": "Neither the backend axum routes (routes.rs) nor the frontend (settings.tsx) implements a draft discard / rollback endpoint or button. An operator must manually overwrite the draft text with the current configuration to discard draft changes.",
-      "resolution": "Documented in state transition rules; no discard button exists in current source."
+      "description": "Neither the backend axum routes (routes.rs) nor the frontend (ConfigEditor.tsx) implements a draft discard/delete endpoint or button; a saved draft can only be overwritten by a new PUT or by saving to the config file.",
+      "resolution": "Documented in state transition rules; no discard button exists in merged source."
     },
     {
       "source_contract": "Settings",
@@ -17284,6 +17478,46 @@
       "line": 209,
       "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL clear contract is now implemented via explicit clear_base_url: true (omitted or null base_url preserves the override); the form captures the edit-time baseline so a mid-edit refetch cannot fabricate a clear, and an unconfirmed clear keeps the editor open with an error toast. Historical null-as-clear evidence remains a baseline limitation.",
       "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:169-179 (UpstreamResponse fields), :1203-1207 (clear_base_url maps to Some(None); base_url maps to Some(url))"
+    },
+    {
+      "source_contract": "Settings",
+      "gap_id": "GAP-SET-03",
+      "id": "GAP-SET-03",
+      "title": "Admin Token Guidance Card Removed",
+      "description": "The static-token admin guidance card (previously settings.tsx#SettingsPage:admin_token_view, item UI-SRC-0744A60F49D3) is absent from the merged route. Admin provider guidance now lives in the config editor Identity & access category (admin.auth.providers) and the self-lockout confirmation on save.",
+      "resolution": "Retired item UI-SRC-0744A60F49D3; replacement coverage via ConfigEditorSection admin provider editing and save confirmation."
+    },
+    {
+      "source_contract": "Settings",
+      "gap_id": "GAP-SET-04",
+      "id": "GAP-SET-04",
+      "title": "Runtime Apply and Hot Reload Actions Removed",
+      "description": "Apply Draft (UI-SRC-EDE5449D42BD / UI-SET-06 POST /admin/config/apply) and Trigger Daemon Reload (UI-SRC-EA3DE5874C4D / UI-SET-07 POST /admin/config/reload) are removed: master makes configuration startup-fixed. Replacement: Save to config file (UI-SET-15 POST /admin/v1/config/save) plus restart, with restart_required and the restart-drift banner communicating pending state.",
+      "resolution": "Retired UI-SET-06 and UI-SET-07 in legacy_id_mapping; replacement action UI-SRC-9A3432FEB525."
+    },
+    {
+      "source_contract": "Settings",
+      "gap_id": "GAP-SET-05",
+      "id": "GAP-SET-05",
+      "title": "Schema Coverage Checklist Removed",
+      "description": "The collapsible schema coverage checklist (UI-SET-13, settings.tsx#ConfigDraftSection:toggle_checklist) was removed with the raw-JSON textarea editor. The structured editor replaces it with per-section Advanced disclosures and category modified/overrides/error counts.",
+      "resolution": "Retired UI-SET-13; replacement action UI-SRC-5F12838E8F4B (toggle_advanced)."
+    },
+    {
+      "source_contract": "Settings",
+      "gap_id": "GAP-SET-06",
+      "id": "GAP-SET-06",
+      "title": "Restart-Required Static Matrix Removed",
+      "description": "The static RestartRequiredMatrix table (UI-SRC-625C96B0933F) listing 15 restart-required keys is removed. Restart semantics are now data-driven: ConfigEditorResponse.restart_required plus the \"Saved ... not applied yet — restart cc-lb\" banner driven by saved_at vs process uptime.",
+      "resolution": "Retired item; replacement is the restart-drift Notice inside ConfigEditorSection."
+    },
+    {
+      "source_contract": "Settings",
+      "gap_id": "GAP-SET-07",
+      "id": "GAP-SET-07",
+      "title": "Raw JSON Draft Textarea Replaced by Structured Editor",
+      "description": "The free-text JSON textarea draft editor was replaced by schema-driven structured field controls (components/settings-config/ConfigEditor.tsx + lib/configEditorModel.ts). UI-SET-14 is retained as the semantic draft-editing action (edit_field); malformed-JSON input classes no longer exist — invalid values surface via server validation issues instead.",
+      "resolution": "UI-SET-14 re-anchored to ConfigEditorSection:edit_field; coverage dimension config_draft_text replaced by config_field_value."
     }
   ]
 }

@@ -46,31 +46,21 @@ pub fn build_router(state: AdminState) -> Router {
         )
         .route("/admin/audit", get(query_audit))
         .route("/admin/v1/audit", get(query_audit))
-        .route("/admin/config/current", get(get_config))
-        .route("/admin/v1/config/current", get(get_config))
-        .route("/admin/config/schema", get(get_config_schema))
-        .route("/admin/v1/config/schema", get(get_config_schema))
-        .route(
-            "/admin/config/draft",
-            get(get_config_draft).put(put_config_draft),
-        )
+        .route("/admin/v1/config/editor", get(get_config_editor))
         .route(
             "/admin/v1/config/draft",
             get(get_config_draft).put(put_config_draft),
         )
-        .route("/admin/config/draft/validate", post(validate_config_draft))
         .route(
             "/admin/v1/config/draft/validate",
             post(validate_config_draft),
         )
-        .route("/admin/config/apply", post(apply_config_draft))
-        .route("/admin/v1/config/apply", post(apply_config_draft))
-        .route("/admin/config/history", get(get_config_history))
+        .route("/admin/v1/config/save", post(save_config_file))
+        .route(
+            "/admin/v1/config/draft/download",
+            post(download_config_draft),
+        )
         .route("/admin/v1/config/history", get(get_config_history))
-        .route("/admin/config/diff", get(get_config_diff))
-        .route("/admin/v1/config/diff", get(get_config_diff))
-        .route("/admin/config/reload", post(reload_config))
-        .route("/admin/v1/config/reload", post(reload_config))
         .route(
             "/admin/v1/dashboard/summary",
             get(crate::dashboard_routes::handle_dashboard_summary),
@@ -415,39 +405,38 @@ async fn query_audit(
     Json(json!({ "entries": entries })).into_response()
 }
 
-async fn get_config(
+async fn get_config_editor(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
 ) -> axum::response::Response {
     if authorize(&identity, AdminAction::SensitiveRead).is_err() {
         return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
     }
-    let config = state.config.current_config();
-    let mut config_json = match serde_json::to_value(&*config) {
-        Ok(config_json) => config_json,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    crate::settings::mask_secret_like_values(&mut config_json);
-    let action = "config_read";
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action,
-            route: "/admin/v1/config/current",
-            target_principal_id: None,
-            target_upstream: None,
-            api_key_id: None,
-            status: StatusCode::OK.as_u16(),
-            payload: None,
-        },
-    )
-    .await
-    {
-        return audit_write_failed_response(action, &error);
+    match crate::settings::editor_response(&state).await {
+        Ok(response) => {
+            let action = "config_editor_read";
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/editor",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: None,
+                },
+            )
+            .await
+            {
+                return audit_write_failed_response(action, &error);
+            }
+            ([(header::CACHE_CONTROL, "no-store")], Json(response)).into_response()
+        }
+        Err(error) => settings_error_response(error, false),
     }
-    Json(config_json).into_response()
 }
 
 async fn put_config_draft(
@@ -459,107 +448,11 @@ async fn put_config_draft(
         Ok(storage) => storage,
         Err(error) => return settings_error_response(error, true),
     };
-    let draft_value = request.draft.clone();
     match crate::settings::put_draft(storage, request, cc_lb_clock::unix_secs(state.clock.now()))
         .await
     {
         Ok(response) => {
-            if let Ok(config) = serde_json::from_value::<cc_lb_config::Config>(draft_value) {
-                let _ = state.config.put_draft_config(config);
-            }
             let action = "config_draft_put";
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action,
-                    route: "/admin/v1/config/draft",
-                    target_principal_id: None,
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: 200,
-                    payload: None,
-                },
-            )
-            .await
-            {
-                return audit_write_failed_response(action, &error);
-            }
-            Json(response).into_response()
-        }
-        Err(error) => settings_error_response(error, true),
-    }
-}
-
-async fn apply_config_draft(
-    State(state): State<AdminState>,
-    Extension(identity): Extension<AdminIdentity>,
-) -> axum::response::Response {
-    match state.config.apply_draft_config() {
-        Ok(_config) => {
-            let action = "config_apply";
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action,
-                    route: "/admin/v1/config/apply",
-                    target_principal_id: None,
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: 200,
-                    payload: None,
-                },
-            )
-            .await
-            {
-                return audit_write_failed_response(action, &error);
-            }
-            Json(json!({
-                "status": "applied",
-            }))
-            .into_response()
-        }
-        Err(error) => config_draft_error_response(error),
-    }
-}
-
-fn config_draft_error_response(error: crate::ConfigDraftError) -> axum::response::Response {
-    let status = match error {
-        crate::ConfigDraftError::Unavailable => StatusCode::NOT_IMPLEMENTED,
-        crate::ConfigDraftError::MissingDraft => StatusCode::NOT_FOUND,
-        crate::ConfigDraftError::Invalid(_) => StatusCode::BAD_REQUEST,
-    };
-    (
-        status,
-        Json(json!({ "error": { "message": error.to_string() } })),
-    )
-        .into_response()
-}
-
-async fn get_config_schema() -> axum::response::Response {
-    match crate::settings::schema_response() {
-        Ok(response) => ([(header::CACHE_CONTROL, "max-age=60")], Json(response)).into_response(),
-        Err(error) => settings_error_response(error, false),
-    }
-}
-
-async fn get_config_draft(
-    State(state): State<AdminState>,
-    Extension(identity): Extension<AdminIdentity>,
-) -> axum::response::Response {
-    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
-        return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
-    }
-    let storage = match config_storage(&state) {
-        Ok(storage) => storage,
-        Err(error) => return settings_error_response(error, false),
-    };
-    match crate::settings::get_draft(storage, &*state.clock, state.config.supports_apply()).await {
-        Ok(response) => {
-            let action = "config_draft_read";
             if let Err(error) = record_admin_audit(
                 &state,
                 AdminAuditEvent {
@@ -580,6 +473,44 @@ async fn get_config_draft(
             }
             Json(response).into_response()
         }
+        Err(error) => settings_error_response(error, true),
+    }
+}
+
+async fn get_config_draft(
+    State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
+) -> axum::response::Response {
+    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
+        return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
+    }
+    let storage = match config_storage(&state) {
+        Ok(storage) => storage,
+        Err(error) => return settings_error_response(error, false),
+    };
+    match crate::settings::get_draft(storage, &*state.clock).await {
+        Ok(response) => {
+            let action = "config_draft_read";
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/draft",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: None,
+                },
+            )
+            .await
+            {
+                return audit_write_failed_response(action, &error);
+            }
+            ([(header::CACHE_CONTROL, "no-store")], Json(response)).into_response()
+        }
         Err(error) => settings_error_response(error, false),
     }
 }
@@ -589,21 +520,8 @@ async fn validate_config_draft(
     Extension(identity): Extension<AdminIdentity>,
     Json(request): Json<crate::settings::ValidateConfigDraftRequest>,
 ) -> axum::response::Response {
-    let storage = match config_storage(&state) {
-        Ok(storage) => storage,
-        Err(crate::settings::SettingsError::StorageUnavailable) => {
-            return Json(crate::settings::ValidateConfigDraftResponse {
-                valid: false,
-                revision: request.expected_revision,
-                error: Some("draft_missing".to_owned()),
-            })
-            .into_response();
-        }
-        Err(error) => return settings_error_response(error, false),
-    };
-    match crate::settings::validate_draft(storage, request).await {
+    match crate::settings::validate_draft(&state, request).await {
         Ok(response) => {
-            let status = if response.valid { 200 } else { 400 };
             let action = "config_draft_validate";
             if let Err(error) = record_admin_audit(
                 &state,
@@ -615,7 +533,7 @@ async fn validate_config_draft(
                     target_principal_id: None,
                     target_upstream: None,
                     api_key_id: None,
-                    status,
+                    status: StatusCode::OK.as_u16(),
                     payload: None,
                 },
             )
@@ -625,7 +543,128 @@ async fn validate_config_draft(
             }
             Json(response).into_response()
         }
-        Err(error) => settings_error_response(error, false),
+        Err(error) => settings_error_response(error, true),
+    }
+}
+
+async fn save_config_file(
+    State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
+    Json(request): Json<crate::settings::SaveConfigFileRequest>,
+) -> axum::response::Response {
+    if authorize(&identity, AdminAction::Write).is_err() {
+        return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
+    }
+    let saved_at_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
+    match crate::settings::save_config_file(
+        &state,
+        &identity.provider_id,
+        request,
+        saved_at_unix_secs,
+    )
+    .await
+    {
+        Ok(response) => {
+            let action = "config_save";
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/save",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: Some(json!({
+                        "revision": response.revision,
+                        "saved_at_unix_secs": response.saved_at_unix_secs,
+                        "fingerprint": response.fingerprint.clone(),
+                        "restart_required": true,
+                    })),
+                },
+            )
+            .await
+            {
+                tracing::error!(
+                    %error,
+                    action,
+                    "config file was saved but its success audit could not be recorded"
+                );
+            }
+            Json(response).into_response()
+        }
+        Err(error) => {
+            let status = settings_error_status(&error);
+            let reason = settings_error_code(&error);
+            let action = "config_save_failed";
+            if let Err(audit_error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/save",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: status.as_u16(),
+                    payload: Some(json!({ "reason": reason })),
+                },
+            )
+            .await
+            {
+                return audit_write_failed_response(action, &audit_error);
+            }
+            settings_error_response(error, true)
+        }
+    }
+}
+
+async fn download_config_draft(
+    State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
+    Json(request): Json<crate::settings::DownloadConfigDraftRequest>,
+) -> axum::response::Response {
+    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
+        return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
+    }
+    match crate::settings::download_config_draft(&state, request).await {
+        Ok(bytes) => {
+            let action = "config_download";
+            if let Err(error) = record_admin_audit(
+                &state,
+                AdminAuditEvent {
+                    identity: Some(&identity),
+                    system_component: None,
+                    action,
+                    route: "/admin/v1/config/draft/download",
+                    target_principal_id: None,
+                    target_upstream: None,
+                    api_key_id: None,
+                    status: StatusCode::OK.as_u16(),
+                    payload: None,
+                },
+            )
+            .await
+            {
+                return audit_write_failed_response(action, &error);
+            }
+            (
+                [
+                    (header::CACHE_CONTROL, "no-store"),
+                    (header::CONTENT_TYPE, "application/toml; charset=utf-8"),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"cc-lb.toml\"",
+                    ),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(error) => settings_error_response(error, true),
     }
 }
 
@@ -674,54 +713,6 @@ async fn get_config_history(
     }
 }
 
-#[derive(Deserialize)]
-struct ConfigDiffQuery {
-    from_revision: u64,
-    to_revision: u64,
-}
-
-async fn get_config_diff(
-    State(state): State<AdminState>,
-    Extension(identity): Extension<AdminIdentity>,
-    Query(query): Query<ConfigDiffQuery>,
-) -> axum::response::Response {
-    if authorize(&identity, AdminAction::SensitiveRead).is_err() {
-        return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
-    }
-    let storage = match config_storage(&state) {
-        Ok(storage) => storage,
-        Err(error) => return settings_error_response(error, false),
-    };
-    match crate::settings::diff_history(storage, query.from_revision, query.to_revision).await {
-        Ok(response) => {
-            let action = "config_diff_read";
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action,
-                    route: "/admin/v1/config/diff",
-                    target_principal_id: None,
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: Some(json!({
-                        "from_revision": query.from_revision,
-                        "to_revision": query.to_revision,
-                    })),
-                },
-            )
-            .await
-            {
-                return audit_write_failed_response(action, &error);
-            }
-            Json(response).into_response()
-        }
-        Err(error) => settings_error_response(error, false),
-    }
-}
-
 fn config_storage(state: &AdminState) -> Result<&dyn Storage, crate::settings::SettingsError> {
     state
         .storage
@@ -752,37 +743,83 @@ fn settings_error_response(
                 dashboard_error(StatusCode::CONFLICT, "stale_draft_revision")
             }
         }
-        crate::settings::SettingsError::UnvalidatedRevision => {
-            dashboard_error(StatusCode::CONFLICT, "unvalidated_revision")
+        crate::settings::SettingsError::DraftNotValidated => {
+            dashboard_error(StatusCode::CONFLICT, "draft_not_validated")
         }
-        crate::settings::SettingsError::ValidationFailed { detail } => (
+        crate::settings::SettingsError::FileChanged {
+            current_fingerprint,
+        } => (
             StatusCode::CONFLICT,
-            Json(json!({ "error": "validation_failed", "detail": detail })),
+            Json(json!({
+                "error": "file_changed",
+                "current_fingerprint": current_fingerprint,
+            })),
+        )
+            .into_response(),
+        crate::settings::SettingsError::FileNotWritable(reason) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "file_not_writable", "reason": reason })),
         )
             .into_response(),
         crate::settings::SettingsError::ConfigPathMissing => {
-            dashboard_error(StatusCode::SERVICE_UNAVAILABLE, "config_path_missing")
+            dashboard_error(StatusCode::CONFLICT, "config_path_missing")
         }
-        crate::settings::SettingsError::ConfigWatcherMissing => {
-            dashboard_error(StatusCode::SERVICE_UNAVAILABLE, "config_watcher_missing")
+        crate::settings::SettingsError::SelfLockoutConfirmationRequired => {
+            dashboard_error(StatusCode::CONFLICT, "self_lockout_confirmation_required")
         }
-        crate::settings::SettingsError::ApplyWriteFailed { detail } => {
-            tracing::error!(error = %detail, "admin config apply write failed");
-            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "apply_write_failed")
-        }
-        crate::settings::SettingsError::ReloadFailed { detail } => {
-            tracing::error!(error = %detail, "admin config apply reload failed");
-            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "reload_failed")
-        }
-        crate::settings::SettingsError::UnknownRevision { missing } => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "unknown_revision", "missing": missing })),
+        crate::settings::SettingsError::Validation(report) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "validation_failed", "validation": report })),
         )
             .into_response(),
+        crate::settings::SettingsError::Io(source) => {
+            tracing::error!(error = %source, "admin config file operation failed");
+            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "config_io_error")
+        }
+        crate::settings::SettingsError::Config(_) => {
+            tracing::error!("admin config processing failed");
+            dashboard_error(StatusCode::BAD_REQUEST, "config_invalid")
+        }
         crate::settings::SettingsError::Schema(source) => {
             tracing::error!(error = %source, "admin config schema serialization failed");
             dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "schema_error")
         }
+    }
+}
+
+fn settings_error_status(error: &crate::settings::SettingsError) -> StatusCode {
+    match error {
+        crate::settings::SettingsError::StorageUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        crate::settings::SettingsError::Storage(_)
+        | crate::settings::SettingsError::Io(_)
+        | crate::settings::SettingsError::Schema(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        crate::settings::SettingsError::StaleDraftRevision { .. }
+        | crate::settings::SettingsError::DraftNotValidated
+        | crate::settings::SettingsError::FileChanged { .. }
+        | crate::settings::SettingsError::FileNotWritable(_)
+        | crate::settings::SettingsError::ConfigPathMissing
+        | crate::settings::SettingsError::SelfLockoutConfirmationRequired => StatusCode::CONFLICT,
+        crate::settings::SettingsError::Validation(_)
+        | crate::settings::SettingsError::Config(_) => StatusCode::BAD_REQUEST,
+    }
+}
+
+fn settings_error_code(error: &crate::settings::SettingsError) -> &'static str {
+    match error {
+        crate::settings::SettingsError::StorageUnavailable => "storage_unavailable",
+        crate::settings::SettingsError::Storage(_) => "storage_error",
+        crate::settings::SettingsError::StaleDraftRevision { .. } => "stale_draft_revision",
+        crate::settings::SettingsError::DraftNotValidated => "draft_not_validated",
+        crate::settings::SettingsError::FileChanged { .. } => "file_changed",
+        crate::settings::SettingsError::FileNotWritable(_) => "file_not_writable",
+        crate::settings::SettingsError::ConfigPathMissing => "config_path_missing",
+        crate::settings::SettingsError::SelfLockoutConfirmationRequired => {
+            "self_lockout_confirmation_required"
+        }
+        crate::settings::SettingsError::Validation(_) => "validation_failed",
+        crate::settings::SettingsError::Io(_) => "config_io_error",
+        crate::settings::SettingsError::Config(_) => "config_invalid",
+        crate::settings::SettingsError::Schema(_) => "schema_error",
     }
 }
 
@@ -802,60 +839,6 @@ fn storage_unavailable_response(error: &str) -> axum::response::Response {
 
 fn dashboard_error(status: StatusCode, error: &str) -> axum::response::Response {
     (status, Json(json!({ "error": error }))).into_response()
-}
-
-async fn reload_config(
-    State(state): State<AdminState>,
-    Extension(identity): Extension<AdminIdentity>,
-) -> axum::response::Response {
-    let action = "config_reload_signal";
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action,
-            route: "/admin/v1/config/reload",
-            target_principal_id: None,
-            target_upstream: None,
-            api_key_id: None,
-            status: StatusCode::OK.as_u16(),
-            payload: None,
-        },
-    )
-    .await
-    {
-        return audit_write_failed_response(action, &error);
-    }
-
-    #[cfg(unix)]
-    {
-        if let Err(error) =
-            nix::sys::signal::kill(nix::unistd::Pid::this(), nix::sys::signal::Signal::SIGHUP)
-        {
-            tracing::error!(%error, "failed to send SIGHUP");
-            if let Err(audit_error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action,
-                    route: "/admin/v1/config/reload",
-                    target_principal_id: None,
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: 500,
-                    payload: None,
-                },
-            )
-            .await
-            {
-                return audit_write_failed_response(action, &audit_error);
-            }
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    }
-    Json(json!({ "status": "ok", "reloading": true })).into_response()
 }
 
 fn audit_write_failed_response(action: &str, error: &StorageError) -> axum::response::Response {

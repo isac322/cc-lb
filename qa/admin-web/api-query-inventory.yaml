@@ -3,12 +3,12 @@
 
 "version": "3.0.0"
 "system": "cc-lb Admin Web & API Surface"
-"source_commit": "19b05570"
+"source_commit": "a9da5c3c"
 "metadata":
   "source_state":
     "kind": "approved_uncommitted_candidate"
-    "base_commit": "19b055708f3b9814b517158bfbb196aabb5dea81"
-    "note": "Source hashes and references describe the approved uncommitted candidate worktree; source_commit identifies its base, not an updated production deployment."
+    "base_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086"
+    "note": "Source hashes and references describe the approved uncommitted merge candidate worktree (HEAD a9da5c3c + master b07b25eebe7bbee7e882643c6776c82015d49689); source_commit identifies the PR-side base, not an updated production deployment."
   "response_observability":
     "scope": "server_admin_listener"
     "response_header": "x-request-id"
@@ -19,7 +19,7 @@
     "span": "admin.request"
     "event": "admin_response_head_ready"
     "handler_timing": "response_head_generation"
-    "source": "crates/cc-lb-server/src/app.rs:2822-2873"
+    "source": "crates/cc-lb-server/src/app.rs:2724-2775"
   "source_reconciled": true
   "runtime_status": "runtime_pending"
   "production_applicability": "reconciled_from_deployed_delta"
@@ -29,10 +29,10 @@
     - "It does not verify rendered reachability, runtime entity counts, pagination termination, polling cycles, SSE behavior, latency, or the deployed commit."
     - "TanStack Query cache hits and request coalescing can suppress a potential request occurrence at runtime; each item records the condition."
   "counts":
-    "total": 433
-    "ui_action": 215
-    "network_request": 162
-    "backend_endpoint": 56
+    "total": 426
+    "ui_action": 219
+    "network_request": 161
+    "backend_endpoint": 46
 "coverage_dimensions":
   - "id": "theme"
     "kind": "finite_enum"
@@ -397,16 +397,16 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/components/ui/TimeRangeBounds.tsx"
       "symbol": "TimeRangeBounds"
-  - "id": "config_draft_text"
+  - "id": "config_field_value"
     "kind": "equivalence_classes"
     "classes":
-      - "valid_schema_compliant_json"
-      - "valid_json_schema_violation"
-      - "malformed_json_client_rejected"
-      - "empty_string"
+      - "valid_value_within_schema"
+      - "value_violating_schema_constraint"
+      - "unset_or_nullable_cleared"
+      - "reset_to_schema_default"
     "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "ConfigDraftSection"
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "ScalarField"
   - "id": "upstream_name"
     "kind": "equivalence_classes"
     "classes":
@@ -1805,7 +1805,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useSubscriptionQuotaAggregate"
-      "line": 917
+      "line": 911
     "http":
       "method": "GET"
       "path": "/admin/v1/subscription-quotas/aggregate"
@@ -1913,7 +1913,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useSubscriptionQuotaPoolHistory"
-      "line": 951
+      "line": 945
     "http":
       "method": "GET"
       "path": "/admin/v1/subscription-quotas/pool-history"
@@ -6270,7 +6270,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCreatePrincipal"
-      "line": 1207
+      "line": 1201
     "http":
       "method": "POST"
       "path": "/admin/v1/principals"
@@ -6369,7 +6369,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useTogglePrincipal"
-      "line": 1245
+      "line": 1239
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/enable"
@@ -6425,7 +6425,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useTogglePrincipal"
-      "line": 1245
+      "line": 1239
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/disable"
@@ -6525,7 +6525,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeletePrincipal"
-      "line": 1232
+      "line": 1226
     "http":
       "method": "DELETE"
       "path": "/admin/v1/principals/{id}"
@@ -6668,7 +6668,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useSetAllowedModels"
-      "line": 1268
+      "line": 1262
     "http":
       "method": "PUT"
       "path": "/admin/v1/principals/{id}/allowed_models"
@@ -6789,7 +6789,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdatePrincipalDefaultLimits"
-      "line": 1290
+      "line": 1284
     "http":
       "method": "PATCH"
       "path": "/admin/v1/principals/{id}"
@@ -7207,7 +7207,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useInsertChainEntry"
-      "line": 1515
+      "line": 1509
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain"
@@ -7264,7 +7264,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeleteChainEntry"
-      "line": 1556
+      "line": 1550
     "http":
       "method": "DELETE"
       "path": "/admin/v1/plugin-chain-entries/{id}"
@@ -7366,7 +7366,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateRouterTerminalStrategy"
-      "line": 1564
+      "line": 1558
     "http":
       "method": "PUT"
       "path": "/admin/v1/principals/{id}/router-terminal"
@@ -7468,7 +7468,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useInsertChainEntry"
-      "line": 1515
+      "line": 1509
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain"
@@ -7570,7 +7570,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useReorderChain"
-      "line": 1541
+      "line": 1535
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain/reorder"
@@ -7662,7 +7662,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeleteChainEntry"
-      "line": 1556
+      "line": 1550
     "http":
       "method": "DELETE"
       "path": "/admin/v1/plugin-chain-entries/{id}"
@@ -7800,7 +7800,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeleteChainEntry"
-      "line": 1556
+      "line": 1550
     "http":
       "method": "DELETE"
       "path": "/admin/v1/plugin-chain-entries/{id}"
@@ -7856,7 +7856,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useInsertChainEntry"
-      "line": 1515
+      "line": 1509
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain"
@@ -7955,7 +7955,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useReorderChain"
-      "line": 1541
+      "line": 1535
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain/reorder"
@@ -8049,7 +8049,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeleteChainEntry"
-      "line": 1556
+      "line": 1550
     "http":
       "method": "DELETE"
       "path": "/admin/v1/plugin-chain-entries/{id}"
@@ -8251,7 +8251,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useIssueKey"
-      "line": 1338
+      "line": 1332
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/keys"
@@ -8355,7 +8355,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useRevokeKey"
-      "line": 1350
+      "line": 1344
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/keys/{key_id}/revoke"
@@ -8458,7 +8458,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCacheKeepaliveSummary"
-      "line": 1831
+      "line": 1859
     "http":
       "method": "GET"
       "path": "/admin/v1/principals/{id}/cache-keepalive"
@@ -8560,7 +8560,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdatePrincipalCacheKeepalive"
-      "line": 1314
+      "line": 1308
     "http":
       "method": "PATCH"
       "path": "/admin/v1/principals/{id}"
@@ -8671,7 +8671,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdatePrincipalCacheKeepalive"
-      "line": 1314
+      "line": 1308
     "http":
       "method": "PATCH"
       "path": "/admin/v1/principals/{id}"
@@ -8786,7 +8786,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCacheKeepaliveSessions"
-      "line": 1809
+      "line": 1837
     "http":
       "method": "GET"
       "path": "/admin/v1/principals/{id}/cache-keepalive"
@@ -9100,7 +9100,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCacheKeepaliveSessions"
-      "line": 1809
+      "line": 1837
     "http":
       "method": "GET"
       "path": "/admin/v1/principals/{id}/cache-keepalive"
@@ -9215,7 +9215,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCacheKeepaliveSessionDetail"
-      "line": 1843
+      "line": 1871
     "http":
       "method": "GET"
       "path": "/admin/v1/principals/{id}/cache-keepalive/{session_id}"
@@ -9562,7 +9562,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useGcPlugins"
-      "line": 1504
+      "line": 1498
     "http":
       "method": "POST"
       "path": "/admin/v1/plugins/wasm/gc"
@@ -9663,7 +9663,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUploadWasm"
-      "line": 1369
+      "line": 1363
     "http":
       "method": "POST"
       "path": "/admin/v1/plugins/wasm"
@@ -9766,7 +9766,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUploadWasm"
-      "line": 1369
+      "line": 1363
     "http":
       "method": "POST"
       "path": "/admin/v1/plugins/wasm"
@@ -10057,7 +10057,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeletePlugin"
-      "line": 1435
+      "line": 1429
     "http":
       "method": "DELETE"
       "path": "/admin/v1/plugins/registry/{id}"
@@ -10312,7 +10312,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "usePatchPlugin"
-      "line": 1484
+      "line": 1478
     "http":
       "method": "PATCH"
       "path": "/admin/v1/plugins/registry/{id}"
@@ -10489,7 +10489,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "SettingsPage"
-      "line": 202
+      "line": 200
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -10542,42 +10542,6 @@
     "production_applicability":
       "status": "available"
       "reason": null
-  - "id": "UI-SRC-0744A60F49D3"
-    "aliases": []
-    "entry_type": "ui_action"
-    "source_id": "settings.tsx#SettingsPage:admin_token_view"
-    "category": "settings"
-    "page": "Settings"
-    "component": "Admin Token Card"
-    "name": "Admin Token Guidance View"
-    "trigger_steps":
-      - "Mount SettingsPage with authSession.auth_mode === 'static_token'"
-    "preconditions":
-      - "authSession context has auth_mode === 'static_token'"
-    "variants":
-      - "static_token present (card rendered)"
-      - "non-static_token (null/hidden)"
-    "scope": "once"
-    "iteration_source": "Single execution"
-    "coverage":
-      "kind": "state_branches"
-      "variants":
-        - "static_token present (card rendered)"
-        - "non-static_token (null/hidden)"
-    "atomic_request_ids": []
-    "risk_tier": "read"
-    "expected_ui": "Displays static-token provider guidance for token_env and daemon restart"
-    "polling": "not_applicable"
-    "client_only_reason": "Conditional informational card rendered solely based on client AuthSessionContext"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "SettingsPage"
-      "line": 326
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
   - "id": "UI-SET-10"
     "aliases": []
     "entry_type": "ui_action"
@@ -10608,7 +10572,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "SettingsPage"
-      "line": 360
+      "line": 329
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -10644,7 +10608,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "SettingsPage"
-      "line": 377
+      "line": 345
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -10678,7 +10642,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "SettingsPage"
-      "line": 182
+      "line": 213
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -10687,73 +10651,131 @@
   - "id": "UI-SET-03"
     "aliases": []
     "entry_type": "ui_action"
-    "source_id": "settings.tsx#ConfigDraftSection:mount"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:mount"
     "category": "settings"
     "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Load Configuration Draft Pipeline Data"
+    "component": "ConfigEditorSection"
+    "name": "Load Configuration Editor & Draft Data"
     "trigger_steps":
-      - "Mount ConfigDraftSection"
+      - "Mount ConfigEditorSection inside SettingsPage"
     "preconditions":
       - "Authenticated session"
     "variants":
-      - "draft exists (uses draft)"
-      - "draft null (uses current as baseline)"
-      - "schema loaded (checklist available)"
+      - "editor + draft loaded -> structured editor seeded from draft ?? file_config at server revision"
+      - "draft null -> editor seeded from file_config; hasSavedDraft=false shows \"Start with a saved draft\" notice"
+      - "editor or draft query error -> \"Configuration editor unavailable\" danger Notice with Retry"
+      - "loading -> ConfigEditorSkeleton placeholder"
+      - "server revision advanced past pinned editor revision -> \"Draft revision changed\" stale notice locks save/validate/save-file/download"
     "scope": "once"
     "iteration_source": "Single execution"
     "coverage":
       "kind": "state_branches"
       "variants":
-        - "draft exists (uses draft)"
-        - "draft null (uses current as baseline)"
-        - "schema loaded (checklist available)"
+        - "editor + draft loaded -> structured editor seeded from draft ?? file_config at server revision"
+        - "draft null -> editor seeded from file_config; hasSavedDraft=false shows \"Start with a saved draft\" notice"
+        - "editor or draft query error -> \"Configuration editor unavailable\" danger Notice with Retry"
+        - "loading -> ConfigEditorSkeleton placeholder"
+        - "server revision advanced past pinned editor revision -> \"Draft revision changed\" stale notice locks save/validate/save-file/download"
     "atomic_request_ids":
+      - "UI-SET-17"
       - "UI-SET-03B"
-      - "UI-SET-03A"
-      - "UI-SET-03C"
     "risk_tier": "read"
-    "expected_ui": "Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation."
+    "expected_ui": "Populates revision/file-path metadata, running summary, category nav, and the structured field editor; restart drift banner appears when the latest saved revision post-dates process start."
     "polling": "not_applicable"
     "client_only_reason": null
     "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "ConfigDraftSection"
-      "line": 435
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "ConfigEditorSection"
+      "line": 726
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
-      "status": "available"
-      "reason": null
+      "status": "partially_deployed"
+      "reason": "At least one atomic request branch is absent from the deployed API."
+  - "id": "UI-SET-17"
+    "aliases": []
+    "entry_type": "network_request"
+    "parent_action_id": "UI-SET-03"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:mount"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Load Configuration Editor & Draft Data — useConfigEditor"
+    "trigger_steps":
+      - "Mount ConfigEditorSection inside SettingsPage"
+    "preconditions":
+      - "Authenticated session"
+    "variants":
+      - "editor + draft loaded -> structured editor seeded from draft ?? file_config at server revision"
+      - "draft null -> editor seeded from file_config; hasSavedDraft=false shows \"Start with a saved draft\" notice"
+      - "editor or draft query error -> \"Configuration editor unavailable\" danger Notice with Retry"
+      - "loading -> ConfigEditorSkeleton placeholder"
+      - "server revision advanced past pinned editor revision -> \"Draft revision changed\" stale notice locks save/validate/save-file/download"
+    "scope": "once"
+    "iteration_source": "Single execution"
+    "risk_tier": "read_with_audit"
+    "expected_ui": "Populates revision/file-path metadata, running summary, category nav, and the structured field editor; restart drift banner appears when the latest saved revision post-dates process start."
+    "polling": "not_applicable"
+    "source":
+      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
+      "symbol": "useConfigEditor"
+      "line": 781
+    "http":
+      "method": "GET"
+      "path": "/admin/v1/config/editor"
+      "path_bindings": []
+      "query_fields": []
+      "body_fields": []
+      "header_fields": []
+      "condition": null
+    "client_symbol": "useConfigEditor"
+    "api_handler": "get_config_editor"
+    "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
+    "storage_operation_ids":
+      - "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft"
+      - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
+      - "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft"
+      - "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft"
+      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
+      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
+    "cache_or_no_query": "Aggregates the editor payload in settings::editor_response: schemars JSON schema, Config::default(), file_config parsed from the on-disk TOML (partial_file_json), effective_config from state.config plus startup overrides, the unexpired DB draft row, ConfigFileInfo (path/exists/mode/reason/sha256 fingerprint via atomic-replace capability probe), env/CLI override provenance, and restart_required: true. storage.url is redacted in file_config, effective_config, default_config and draft; sensitive override effective_value is omitted. Response Cache-Control: no-store. A stale invalid draft older than 24h is cleared via conditional put_config_draft before the response is built."
+    "side_effects": "Audit log write: record_admin_audit(\"config_editor_read\", \"/admin/v1/config/editor\"); conditional draft reset write when an invalid draft is expired (>24h)."
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "not_deployed"
+      "reason": "Endpoint added after deployed commit e56d029e"
   - "id": "UI-SET-03B"
     "aliases": []
     "entry_type": "network_request"
     "parent_action_id": "UI-SET-03"
-    "source_id": "settings.tsx#ConfigDraftSection:mount"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:mount"
     "category": "settings"
     "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Load Configuration Draft Pipeline Data — useConfigDraft"
+    "component": "ConfigEditorSection"
+    "name": "Load Configuration Editor & Draft Data — useConfigDraft"
     "trigger_steps":
-      - "Mount ConfigDraftSection"
+      - "Mount ConfigEditorSection inside SettingsPage"
     "preconditions":
       - "Authenticated session"
     "variants":
-      - "draft exists (uses draft)"
-      - "draft null (uses current as baseline)"
-      - "schema loaded (checklist available)"
+      - "editor + draft loaded -> structured editor seeded from draft ?? file_config at server revision"
+      - "draft null -> editor seeded from file_config; hasSavedDraft=false shows \"Start with a saved draft\" notice"
+      - "editor or draft query error -> \"Configuration editor unavailable\" danger Notice with Retry"
+      - "loading -> ConfigEditorSkeleton placeholder"
+      - "server revision advanced past pinned editor revision -> \"Draft revision changed\" stale notice locks save/validate/save-file/download"
     "scope": "once"
     "iteration_source": "Single execution"
     "risk_tier": "read_with_audit"
-    "expected_ui": "Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation."
+    "expected_ui": "Populates revision/file-path metadata, running summary, category nav, and the structured field editor; restart drift banner appears when the latest saved revision post-dates process start."
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useConfigDraft"
-      "line": 793
+      "line": 787
     "http":
       "method": "GET"
-      "path": "/admin/config/draft"
+      "path": "/admin/v1/config/draft"
       "path_bindings": []
       "query_fields": []
       "body_fields": []
@@ -10765,102 +10787,12 @@
     "storage_operation_ids":
       - "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft"
       - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
+      - "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft"
+      - "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query."
+    "cache_or_no_query": "Reads the singleton config draft row via ConfigStore::get_config_draft; when the stored draft is invalid and older than 24h, get_unexpired_draft clears it with a conditional ConfigStore::put_config_draft reset and re-reads. Response is Cache-Control: no-store; draft and storage.url are redacted (STORAGE_URL_REDACTION_SENTINEL) before serialization. ConfigDraftResponse fields: draft, revision, last_validated_revision, last_validation (full stored ConfigValidationReport JSON), saved_at_unix_secs; the PR-era apply_supported field is removed with the CurrentConfig abstraction."
     "side_effects": "Audit log write: record_admin_audit(\"config_draft_read\", \"/admin/v1/config/draft\")"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SET-03A"
-    "aliases": []
-    "entry_type": "network_request"
-    "parent_action_id": "UI-SET-03"
-    "source_id": "settings.tsx#ConfigDraftSection:mount"
-    "category": "settings"
-    "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Load Configuration Draft Pipeline Data — useConfigCurrent"
-    "trigger_steps":
-      - "Mount ConfigDraftSection"
-    "preconditions":
-      - "Authenticated session"
-    "variants":
-      - "draft exists (uses draft)"
-      - "draft null (uses current as baseline)"
-      - "schema loaded (checklist available)"
-    "scope": "once"
-    "iteration_source": "Single execution"
-    "risk_tier": "read_with_audit"
-    "expected_ui": "Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation."
-    "polling": "not_applicable"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
-      "symbol": "useConfigCurrent"
-      "line": 781
-    "http":
-      "method": "GET"
-      "path": "/admin/config/current"
-      "path_bindings": []
-      "query_fields": []
-      "body_fields": []
-      "header_fields": []
-      "condition": null
-    "client_symbol": "useConfigCurrent"
-    "api_handler": "get_config"
-    "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "storage_operation_ids":
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "In-memory state.config.current_config() Arc clone; secrets are masked via mask_secret_like_values before serialization."
-    "side_effects": "Audit log write: record_admin_audit(\"config_read\", \"/admin/v1/config/current\")"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SET-03C"
-    "aliases": []
-    "entry_type": "network_request"
-    "parent_action_id": "UI-SET-03"
-    "source_id": "settings.tsx#ConfigDraftSection:mount"
-    "category": "settings"
-    "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Load Configuration Draft Pipeline Data — useConfigSchema"
-    "trigger_steps":
-      - "Mount ConfigDraftSection"
-    "preconditions":
-      - "Authenticated session"
-    "variants":
-      - "draft exists (uses draft)"
-      - "draft null (uses current as baseline)"
-      - "schema loaded (checklist available)"
-    "scope": "once"
-    "iteration_source": "Single execution"
-    "risk_tier": "read"
-    "expected_ui": "Populates draft editor, revision badges, and schema checklist; provider apply_supported controls Apply availability independently of draft validation."
-    "polling": "not_applicable"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
-      "symbol": "useConfigSchema"
-      "line": 787
-    "http":
-      "method": "GET"
-      "path": "/admin/config/schema"
-      "path_bindings": []
-      "query_fields": []
-      "body_fields": []
-      "header_fields": []
-      "condition": null
-    "client_symbol": "useConfigSchema"
-    "api_handler": "get_config_schema"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids": []
-    "cache_or_no_query": "In-memory schemars schema generation; HTTP Cache-Control: max-age=60"
-    "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -10869,38 +10801,43 @@
   - "id": "UI-SET-14"
     "aliases": []
     "entry_type": "ui_action"
-    "source_id": "settings.tsx#ConfigDraftSection:edit_draft"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:edit_field"
     "category": "settings"
     "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Edit Draft Textarea"
+    "component": "ConfigEditorSection"
+    "name": "Edit Configuration Field Value"
     "trigger_steps":
-      - "Type or paste in JSON config textarea"
+      - "Change a field control (text/number input, enum select, ToggleSwitch, string-array row, tagged-union kind select, admin provider row, recurring job row) inside the structured editor"
+      - "Click Reset/Unset/Set value on a field, or toggle a nullable object section"
     "preconditions":
-      - "Editor initialized and not locked by configPending"
+      - "Editor loaded (editorData && state && model)"
     "variants":
-      - "valid JSON input"
-      - "invalid JSON syntax"
-      - "dirty state"
-      - "revert back to savedText"
+      - "scalar edit -> setConfigValue writes path; dirty=true"
+      - "clearing a nullable text field -> unsetConfigValue removes the key"
+      - "Reset -> restores schema default (or unsets when no default)"
+      - "Unset -> removes the path from the draft object"
+      - "tagged-union kind switch -> replaces subtree with new variant skeleton; stale-variant keys become removals"
+      - "any change -> clears localValidation, actionError, downloadError; \"Draft has unsaved changes\" notice appears"
     "scope": "once"
-    "iteration_source": "Equivalence classes: [valid JSON modification, invalid syntax string, empty string]"
+    "iteration_source": "Per-field edit; equivalence classes per leaf kind (string/integer/number/boolean/enum/array/nullable object/tagged union)"
     "coverage":
       "kind": "state_branches"
       "variants":
-        - "valid JSON input"
-        - "invalid JSON syntax"
-        - "dirty state"
-        - "revert back to savedText"
+        - "scalar edit -> setConfigValue writes path; dirty=true"
+        - "clearing a nullable text field -> unsetConfigValue removes the key"
+        - "Reset -> restores schema default (or unsets when no default)"
+        - "Unset -> removes the path from the draft object"
+        - "tagged-union kind switch -> replaces subtree with new variant skeleton; stale-variant keys become removals"
+        - "any change -> clears localValidation, actionError, downloadError; \"Draft has unsaved changes\" notice appears"
     "atomic_request_ids": []
     "risk_tier": "read"
-    "expected_ui": "Updates editor.text state; sets editorDirty=true; updates guidance text"
+    "expected_ui": "Updates editor state.value; marks leaf Modified; enables Save draft; locks Validate/Save to file/Download until re-saved"
     "polling": "not_applicable"
-    "client_only_reason": "Controlled React textarea local state"
+    "client_only_reason": "Controlled React editor state; no request until Save draft"
     "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "ConfigDraftSection"
-      "line": 756
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "updateValue"
+      "line": 1035
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -10909,39 +10846,37 @@
   - "id": "UI-SRC-67C497520AA2"
     "aliases": []
     "entry_type": "ui_action"
-    "source_id": "settings.tsx#ConfigDraftSection:save_draft"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:save_draft"
     "category": "settings"
     "page": "Settings"
-    "component": "ConfigDraftSection"
+    "component": "ConfigEditorSection"
     "name": "Save Draft"
     "trigger_steps":
-      - "Click Save button"
+      - "Click \"Save draft\" button"
     "preconditions":
-      - "canSave === true: editor != null && (editorDirty || (!editor.hasSavedDraft && !serverRevisionChanged)) && !configPending"
+      - "canSaveDraft === true: state && (dirty || !state.hasSavedDraft) && !stale"
     "variants":
-      - "invalid JSON -> client toast 'Draft is not valid JSON' (no request)"
-      - "valid JSON -> PUT /admin/config/draft with { draft, expected_revision }"
-      - "200 OK -> updates editor savedText, revision, savedAtUnixSecs, hasSavedDraft=true, clears localValidation, invalidates configDraft, toast 'Draft saved'"
-      - "409 Conflict / Revision mismatch -> error toast"
+      - "valid -> PUT /admin/v1/config/draft with { draft: normalizeConfigDraft(schema, value), expected_revision }"
+      - "200 -> updates saved snapshot, revision, savedAtUnixSecs, hasSavedDraft=true, clears localValidation, invalidates configEditor+configDraft, toast \"Configuration draft saved\""
+      - "409 stale revision / error -> danger Notice \"Configuration action failed\" with response message"
     "scope": "once"
     "iteration_source": "Single execution per draft edit"
     "coverage":
       "kind": "state_branches"
       "variants":
-        - "invalid JSON -> client toast 'Draft is not valid JSON' (no request)"
-        - "valid JSON -> PUT /admin/config/draft with { draft, expected_revision }"
-        - "200 OK -> updates editor savedText, revision, savedAtUnixSecs, hasSavedDraft=true, clears localValidation, invalidates configDraft, toast 'Draft saved'"
-        - "409 Conflict / Revision mismatch -> error toast"
+        - "valid -> PUT /admin/v1/config/draft with { draft: normalizeConfigDraft(schema, value), expected_revision }"
+        - "200 -> updates saved snapshot, revision, savedAtUnixSecs, hasSavedDraft=true, clears localValidation, invalidates configEditor+configDraft, toast \"Configuration draft saved\""
+        - "409 stale revision / error -> danger Notice \"Configuration action failed\" with response message"
     "atomic_request_ids":
       - "UI-SET-04"
     "risk_tier": "reversible_write"
-    "expected_ui": "Displays saving spinner; on success updates revision counter and saved time, toast 'Draft saved'"
+    "expected_ui": "Displays saving spinner; on success updates revision/saved metadata and toast; unsaved-changes notice clears"
     "polling": "not_applicable"
     "client_only_reason": null
     "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "ConfigDraftSection"
-      "line": 568
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "handleSaveDraft"
+      "line": 1074
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -10951,32 +10886,31 @@
     "aliases": []
     "entry_type": "network_request"
     "parent_action_id": "UI-SRC-67C497520AA2"
-    "source_id": "settings.tsx#ConfigDraftSection:save_draft"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:save_draft"
     "category": "settings"
     "page": "Settings"
-    "component": "ConfigDraftSection"
+    "component": "ConfigEditorSection"
     "name": "Save Draft — useSaveDraft"
     "trigger_steps":
-      - "Click Save button"
+      - "Click \"Save draft\" button"
     "preconditions":
-      - "canSave === true: editor != null && (editorDirty || (!editor.hasSavedDraft && !serverRevisionChanged)) && !configPending"
+      - "canSaveDraft === true: state && (dirty || !state.hasSavedDraft) && !stale"
     "variants":
-      - "invalid JSON -> client toast 'Draft is not valid JSON' (no request)"
-      - "valid JSON -> PUT /admin/config/draft with { draft, expected_revision }"
-      - "200 OK -> updates editor savedText, revision, savedAtUnixSecs, hasSavedDraft=true, clears localValidation, invalidates configDraft, toast 'Draft saved'"
-      - "409 Conflict / Revision mismatch -> error toast"
+      - "valid -> PUT /admin/v1/config/draft with { draft: normalizeConfigDraft(schema, value), expected_revision }"
+      - "200 -> updates saved snapshot, revision, savedAtUnixSecs, hasSavedDraft=true, clears localValidation, invalidates configEditor+configDraft, toast \"Configuration draft saved\""
+      - "409 stale revision / error -> danger Notice \"Configuration action failed\" with response message"
     "scope": "once"
     "iteration_source": "Single execution per draft edit"
     "risk_tier": "reversible_write"
-    "expected_ui": "Displays saving spinner; on success updates revision counter and saved time, toast 'Draft saved'"
+    "expected_ui": "Displays saving spinner; on success updates revision/saved metadata and toast; unsaved-changes notice clears"
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useSaveDraft"
-      "line": 1611
+      "line": 1606
     "http":
       "method": "PUT"
-      "path": "/admin/config/draft"
+      "path": "/admin/v1/config/draft"
       "path_bindings": []
       "query_fields": []
       "body_fields":
@@ -10996,8 +10930,8 @@
       - "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Stores in-memory draft copy via CurrentConfig::put_draft_config; invalidates TanStack queryKey ['config', 'draft']"
-    "side_effects": "Audit event `config_draft_put`; increments draft revision in DB and resets last_validated_revision to null QA restore: Re-put previous draft configuration or clear draft."
+    "cache_or_no_query": "Writes the draft JSON to the singleton config_draft row via ConfigStore::put_config_draft with optimistic revision check (expected_revision must equal stored revision; stale -> 409 stale_draft_revision with current_revision). Draft is normalized (null fields stripped) and storage.url redacted before persistence; last_validated_revision and last_validation reset to null. Invalidates TanStack queryKey ['config','editor'] and ['config','draft']."
+    "side_effects": "Audit event `config_draft_put`; increments draft revision in DB and clears validation state QA restore: Re-put previous draft configuration or clear draft."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11006,37 +10940,39 @@
   - "id": "UI-SRC-BFD8C956C3C5"
     "aliases": []
     "entry_type": "ui_action"
-    "source_id": "settings.tsx#ConfigDraftSection:validate_draft"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:validate_draft"
     "category": "settings"
     "page": "Settings"
-    "component": "ConfigDraftSection"
+    "component": "ConfigEditorSection"
     "name": "Validate Draft"
     "trigger_steps":
       - "Click Validate button"
     "preconditions":
-      - "canValidate === true: editor.hasSavedDraft === true && !editorDirty && !serverRevisionChanged && !configPending"
+      - "canValidate === true: state.hasSavedDraft === true && !dirty && !stale"
     "variants":
-      - "valid configuration -> { valid: true, revision }, toast 'Draft valid', sets localValidation { revision, error: null }"
-      - "invalid configuration -> { valid: false, revision, error }, toast 'Invalid: ...', sets localValidation { revision, error }"
-      - "network error / failure -> error toast"
+      - "report valid -> toast \"Configuration is valid\"; ValidationSummary success Notice"
+      - "report invalid -> toast \"Configuration needs attention\"; ValidationSummary lists file/effective/filesystem/override issues; focus moves to summary"
+      - "storage_url_replacement set -> sent as storage_url_replacement in body"
+      - "error -> danger Notice \"Configuration action failed\""
     "scope": "once"
     "iteration_source": "Single execution per saved revision"
     "coverage":
       "kind": "state_branches"
       "variants":
-        - "valid configuration -> { valid: true, revision }, toast 'Draft valid', sets localValidation { revision, error: null }"
-        - "invalid configuration -> { valid: false, revision, error }, toast 'Invalid: ...', sets localValidation { revision, error }"
-        - "network error / failure -> error toast"
+        - "report valid -> toast \"Configuration is valid\"; ValidationSummary success Notice"
+        - "report invalid -> toast \"Configuration needs attention\"; ValidationSummary lists file/effective/filesystem/override issues; focus moves to summary"
+        - "storage_url_replacement set -> sent as storage_url_replacement in body"
+        - "error -> danger Notice \"Configuration action failed\""
     "atomic_request_ids":
       - "UI-SET-05"
     "risk_tier": "reversible_write"
-    "expected_ui": "Displays validating spinner; on success updates last validated revision slot (green or red with error text)"
+    "expected_ui": "Displays validating spinner; stores localValidation for the pinned revision; enables Save to config file and Download TOML when all sections pass"
     "polling": "not_applicable"
     "client_only_reason": null
     "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "ConfigDraftSection"
-      "line": 605
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "handleValidate"
+      "line": 1109
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11046,35 +10982,37 @@
     "aliases": []
     "entry_type": "network_request"
     "parent_action_id": "UI-SRC-BFD8C956C3C5"
-    "source_id": "settings.tsx#ConfigDraftSection:validate_draft"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:validate_draft"
     "category": "settings"
     "page": "Settings"
-    "component": "ConfigDraftSection"
+    "component": "ConfigEditorSection"
     "name": "Validate Draft — useValidateConfig"
     "trigger_steps":
       - "Click Validate button"
     "preconditions":
-      - "canValidate === true: editor.hasSavedDraft === true && !editorDirty && !serverRevisionChanged && !configPending"
+      - "canValidate === true: state.hasSavedDraft === true && !dirty && !stale"
     "variants":
-      - "valid configuration -> { valid: true, revision }, toast 'Draft valid', sets localValidation { revision, error: null }"
-      - "invalid configuration -> { valid: false, revision, error }, toast 'Invalid: ...', sets localValidation { revision, error }"
-      - "network error / failure -> error toast"
+      - "report valid -> toast \"Configuration is valid\"; ValidationSummary success Notice"
+      - "report invalid -> toast \"Configuration needs attention\"; ValidationSummary lists file/effective/filesystem/override issues; focus moves to summary"
+      - "storage_url_replacement set -> sent as storage_url_replacement in body"
+      - "error -> danger Notice \"Configuration action failed\""
     "scope": "once"
     "iteration_source": "Single execution per saved revision"
     "risk_tier": "reversible_write"
-    "expected_ui": "Displays validating spinner; on success updates last validated revision slot (green or red with error text)"
+    "expected_ui": "Displays validating spinner; stores localValidation for the pinned revision; enables Save to config file and Download TOML when all sections pass"
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useValidateConfig"
-      "line": 1602
+      "line": 1581
     "http":
       "method": "POST"
-      "path": "/admin/config/draft/validate"
+      "path": "/admin/v1/config/draft/validate"
       "path_bindings": []
       "query_fields": []
       "body_fields":
         - "expected_revision"
+        - "storage_url_replacement"
       "header_fields":
         - "authorization"
         - "content-type"
@@ -11085,190 +11023,12 @@
     "storage_operation_ids":
       - "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft"
       - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
-      - "sqlite:ConfigStore::set_last_validated_revision:SqliteStorage::set_last_validated_revision"
-      - "postgres:ConfigStore::set_last_validated_revision:PostgresStorage::set_last_validated_revision"
+      - "sqlite:ConfigStore::set_config_validation:SqliteStorage::set_config_validation"
+      - "postgres:ConfigStore::set_config_validation:PostgresStorage::set_config_validation"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "No cache write; updates last_validated_revision in storage"
-    "side_effects": "Audit event `config_draft_validate`; checks TOML/JSON schema and semantic validity; marks revision as validated or stores validation error QA restore: Re-validate previous revision."
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SRC-EDE5449D42BD"
-    "aliases": []
-    "entry_type": "ui_action"
-    "source_id": "settings.tsx#ConfigDraftSection:apply_draft"
-    "category": "settings"
-    "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Apply Draft Revision"
-    "trigger_steps":
-      - "Click Apply button"
-    "preconditions":
-      - "canApply === true: editor != null && canValidate && lastValidatedRevision != null && lastValidationError == null && lastValidatedRevision === editor.revision && !configPending"
-    "variants":
-      - "provider apply_supported=false -> Apply disabled with a provider-specific unsupported explanation; no request"
-      - "capability loading, unavailable, or unconfirmed -> Apply disabled; explanation distinguishes loading from query errors"
-      - "provider apply_supported=true with matching validated revision -> existing Apply request path"
-      - "supported-provider response remains {status: applied}; revision-labelled success toast expects fields not supplied by this handler (pre-existing contract mismatch)"
-      - "conflict / validation stale -> existing error handling"
-    "scope": "once"
-    "iteration_source": "Single execution per validated revision"
-    "coverage":
-      "kind": "state_branches"
-      "variants":
-        - "provider apply_supported=false -> Apply disabled with a provider-specific unsupported explanation; no request"
-        - "capability loading, unavailable, or unconfirmed -> Apply disabled; explanation distinguishes loading from query errors"
-        - "provider apply_supported=true with matching validated revision -> existing Apply request path"
-        - "supported-provider response remains {status: applied}; revision-labelled success toast expects fields not supplied by this handler (pre-existing contract mismatch)"
-        - "conflict / validation stale -> existing error handling"
-    "atomic_request_ids":
-      - "UI-SET-06"
-    "risk_tier": "reversible_write"
-    "expected_ui": "Unsupported or unconfirmed provider capability disables Apply without disabling Save or Validate. Apply-only guidance is outside the aria-live pipeline and referenced only by Apply. Supported mode retains its existing request and refresh behavior; success-revision metadata compatibility is a separately recorded pre-existing limitation."
-    "polling": "not_applicable"
-    "client_only_reason": null
-    "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "ConfigDraftSection"
-      "line": 622
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SET-06"
-    "aliases": []
-    "entry_type": "network_request"
-    "parent_action_id": "UI-SRC-EDE5449D42BD"
-    "source_id": "settings.tsx#ConfigDraftSection:apply_draft"
-    "category": "settings"
-    "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Apply Draft Revision — useApplyConfig"
-    "trigger_steps":
-      - "Click Apply button"
-    "preconditions":
-      - "canApply === true: editor != null && canValidate && lastValidatedRevision != null && lastValidationError == null && lastValidatedRevision === editor.revision && !configPending"
-    "variants":
-      - "provider apply_supported=false -> Apply disabled with a provider-specific unsupported explanation; no request"
-      - "capability loading, unavailable, or unconfirmed -> Apply disabled; explanation distinguishes loading from query errors"
-      - "provider apply_supported=true with matching validated revision -> existing Apply request path"
-      - "supported-provider response remains {status: applied}; revision-labelled success toast expects fields not supplied by this handler (pre-existing contract mismatch)"
-      - "conflict / validation stale -> existing error handling"
-    "scope": "once"
-    "iteration_source": "Single execution per validated revision"
-    "risk_tier": "destructive_write"
-    "expected_ui": "Unsupported or unconfirmed provider capability disables Apply without disabling Save or Validate. Apply-only guidance is outside the aria-live pipeline and referenced only by Apply. Supported mode retains its existing request and refresh behavior; success-revision metadata compatibility is a separately recorded pre-existing limitation."
-    "polling": "not_applicable"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
-      "symbol": "useApplyConfig"
-      "line": 1587
-    "http":
-      "method": "POST"
-      "path": "/admin/config/apply"
-      "path_bindings": []
-      "query_fields": []
-      "body_fields":
-        - "expected_revision"
-      "header_fields":
-        - "authorization"
-      "condition": null
-    "client_symbol": "useApplyConfig"
-    "api_handler": "apply_config_draft"
-    "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "storage_operation_ids":
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Atomically swaps DynamicView and CurrentConfig; clears in-memory draft; invalidates TanStack queryKey ['config', 'draft'], ['config', 'current']"
-    "side_effects": "Audit event `config_apply`; activates new runtime proxy state in memory without database entity mutation QA restore: Re-apply previous configuration draft or reload original config."
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SRC-EA3DE5874C4D"
-    "aliases": []
-    "entry_type": "ui_action"
-    "source_id": "settings.tsx#ConfigDraftSection:reload_daemon"
-    "category": "settings"
-    "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Trigger Daemon Configuration Hot Reload"
-    "trigger_steps":
-      - "Click Reload button"
-    "preconditions":
-      - "!configPending"
-    "variants":
-      - "success -> { status, reloading }, toast 'Reload triggered'"
-      - "error -> error toast"
-    "scope": "once"
-    "iteration_source": "Single execution"
-    "coverage":
-      "kind": "state_branches"
-      "variants":
-        - "success -> { status, reloading }, toast 'Reload triggered'"
-        - "error -> error toast"
-    "atomic_request_ids":
-      - "UI-SET-07"
-    "risk_tier": "external_action"
-    "expected_ui": "Displays reloading spinner; toast 'Reload triggered'"
-    "polling": "not_applicable"
-    "client_only_reason": null
-    "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "ConfigDraftSection"
-      "line": 672
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SET-07"
-    "aliases": []
-    "entry_type": "network_request"
-    "parent_action_id": "UI-SRC-EA3DE5874C4D"
-    "source_id": "settings.tsx#ConfigDraftSection:reload_daemon"
-    "category": "settings"
-    "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Trigger Daemon Configuration Hot Reload — useReloadConfig"
-    "trigger_steps":
-      - "Click Reload button"
-    "preconditions":
-      - "!configPending"
-    "variants":
-      - "success -> { status, reloading }, toast 'Reload triggered'"
-      - "error -> error toast"
-    "scope": "once"
-    "iteration_source": "Single execution"
-    "risk_tier": "external_action"
-    "expected_ui": "Displays reloading spinner; toast 'Reload triggered'"
-    "polling": "not_applicable"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
-      "symbol": "useReloadConfig"
-      "line": 1628
-    "http":
-      "method": "POST"
-      "path": "/admin/config/reload"
-      "path_bindings": []
-      "query_fields": []
-      "body_fields": []
-      "header_fields":
-        - "authorization"
-      "condition": null
-    "client_symbol": "useReloadConfig"
-    "api_handler": "reload_config"
-    "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "storage_operation_ids":
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "No database storage entity modified (only audit entry written)"
-    "side_effects": "Audit event `config_reload_signal`; sends UNIX SIGHUP signal to pid (nix::sys::signal::kill) to trigger process config re-read from disk QA restore: Ensure valid configuration file exists on disk and send SIGHUP again."
+    "cache_or_no_query": "Materializes the stored draft to TOML (restoring the redacted storage.url from the current file or the optional storage_url_replacement), validates file + effective + filesystem + override dimensions, and persists the full ConfigValidationReport via ConfigStore::set_config_validation (sets last_validated_revision only when valid). No response cache."
+    "side_effects": "Audit event `config_draft_validate`; stores validation report and marks revision validated when clean QA restore: Re-validate previous revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11277,170 +11037,140 @@
   - "id": "UI-SET-12"
     "aliases": []
     "entry_type": "ui_action"
-    "source_id": "settings.tsx#ConfigDraftSection:retry_editor"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load"
     "category": "settings"
     "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Retry Draft Editor Loading"
+    "component": "ConfigEditorSection"
+    "name": "Retry Configuration Editor Loading"
     "trigger_steps":
       - "Click Retry button in error banner"
     "preconditions":
-      - "editorLoadError === true (either draft or current failed) && !editorRetrying && !configPending"
+      - "loadError === true (editor or draft query failed)"
     "variants":
-      - "draftUnavailable (refetches draft)"
-      - "currentUnavailable (refetches current)"
-      - "both unavailable (refetches both)"
+      - "editor query failed -> refetches GET /admin/v1/config/editor"
+      - "draft query failed -> refetches GET /admin/v1/config/draft"
+      - "both failed -> refetches both"
     "scope": "once"
     "iteration_source": "Single execution upon error"
     "coverage":
       "kind": "state_branches"
       "variants":
-        - "draftUnavailable (refetches draft)"
-        - "currentUnavailable (refetches current)"
-        - "both unavailable (refetches both)"
+        - "editor query failed -> refetches GET /admin/v1/config/editor"
+        - "draft query failed -> refetches GET /admin/v1/config/draft"
+        - "both failed -> refetches both"
     "atomic_request_ids":
-      - "UI-SET-12B"
       - "UI-SET-12A"
+      - "UI-SET-12B"
     "risk_tier": "read"
-    "expected_ui": "Banner displays 'Retrying...'; triggers refetch of failed queries"
+    "expected_ui": "Notice action shows fetching spinner; triggers refetch of failed queries"
     "polling": "not_applicable"
     "client_only_reason": null
     "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "ConfigDraftSection"
-      "line": 550
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "ConfigEditorSection"
+      "line": 1250
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SET-12B"
+      "status": "partially_deployed"
+      "reason": "At least one atomic request branch is absent from the deployed API."
+  - "id": "UI-SET-12A"
     "aliases": []
     "entry_type": "network_request"
     "parent_action_id": "UI-SET-12"
-    "source_id": "settings.tsx#ConfigDraftSection:retry_editor"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load"
     "category": "settings"
     "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Retry Draft Editor Loading — draft.refetch"
+    "component": "ConfigEditorSection"
+    "name": "Retry Configuration Editor Loading — editorQuery.refetch"
     "trigger_steps":
       - "Click Retry button in error banner"
     "preconditions":
-      - "editorLoadError === true (either draft or current failed) && !editorRetrying && !configPending"
+      - "loadError === true (editor or draft query failed)"
     "variants":
-      - "draftUnavailable (refetches draft)"
-      - "currentUnavailable (refetches current)"
-      - "both unavailable (refetches both)"
+      - "editor query failed -> refetches GET /admin/v1/config/editor"
+      - "draft query failed -> refetches GET /admin/v1/config/draft"
+      - "both failed -> refetches both"
     "scope": "once"
     "iteration_source": "Single execution upon error"
     "risk_tier": "read_with_audit"
-    "expected_ui": "Banner displays 'Retrying...'; triggers refetch of failed queries"
+    "expected_ui": "Notice action shows fetching spinner; triggers refetch of failed queries"
     "polling": "not_applicable"
     "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "handleRetryEditor"
-      "line": 562
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "editorQuery.refetch"
+      "line": 1251
     "http":
       "method": "GET"
-      "path": "/admin/config/draft"
+      "path": "/admin/v1/config/editor"
       "path_bindings": []
       "query_fields": []
       "body_fields": []
       "header_fields": []
       "condition": null
-    "client_symbol": "draft.refetch"
+    "client_symbol": "editorQuery.refetch"
+    "api_handler": "get_config_editor"
+    "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
+    "storage_operation_ids":
+      - "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft"
+      - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
+      - "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft"
+      - "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft"
+      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
+      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
+    "cache_or_no_query": "Aggregates the editor payload in settings::editor_response: schemars JSON schema, Config::default(), file_config parsed from the on-disk TOML (partial_file_json), effective_config from state.config plus startup overrides, the unexpired DB draft row, ConfigFileInfo (path/exists/mode/reason/sha256 fingerprint via atomic-replace capability probe), env/CLI override provenance, and restart_required: true. storage.url is redacted in file_config, effective_config, default_config and draft; sensitive override effective_value is omitted. Response Cache-Control: no-store. A stale invalid draft older than 24h is cleared via conditional put_config_draft before the response is built."
+    "side_effects": "Audit log write: record_admin_audit(\"config_editor_read\", \"/admin/v1/config/editor\"); conditional draft reset write when an invalid draft is expired (>24h)."
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "not_deployed"
+      "reason": "Endpoint added after deployed commit e56d029e"
+  - "id": "UI-SET-12B"
+    "aliases": []
+    "entry_type": "network_request"
+    "parent_action_id": "UI-SET-12"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:retry_load"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Retry Configuration Editor Loading — draftQuery.refetch"
+    "trigger_steps":
+      - "Click Retry button in error banner"
+    "preconditions":
+      - "loadError === true (editor or draft query failed)"
+    "variants":
+      - "editor query failed -> refetches GET /admin/v1/config/editor"
+      - "draft query failed -> refetches GET /admin/v1/config/draft"
+      - "both failed -> refetches both"
+    "scope": "once"
+    "iteration_source": "Single execution upon error"
+    "risk_tier": "read_with_audit"
+    "expected_ui": "Notice action shows fetching spinner; triggers refetch of failed queries"
+    "polling": "not_applicable"
+    "source":
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "draftQuery.refetch"
+      "line": 1252
+    "http":
+      "method": "GET"
+      "path": "/admin/v1/config/draft"
+      "path_bindings": []
+      "query_fields": []
+      "body_fields": []
+      "header_fields": []
+      "condition": null
+    "client_symbol": "draftQuery.refetch"
     "api_handler": "get_config_draft"
     "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
     "storage_operation_ids":
       - "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft"
       - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
+      - "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft"
+      - "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query."
+    "cache_or_no_query": "Reads the singleton config draft row via ConfigStore::get_config_draft; when the stored draft is invalid and older than 24h, get_unexpired_draft clears it with a conditional ConfigStore::put_config_draft reset and re-reads. Response is Cache-Control: no-store; draft and storage.url are redacted (STORAGE_URL_REDACTION_SENTINEL) before serialization. ConfigDraftResponse fields: draft, revision, last_validated_revision, last_validation (full stored ConfigValidationReport JSON), saved_at_unix_secs; the PR-era apply_supported field is removed with the CurrentConfig abstraction."
     "side_effects": "Audit log write: record_admin_audit(\"config_draft_read\", \"/admin/v1/config/draft\")"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SET-12A"
-    "aliases": []
-    "entry_type": "network_request"
-    "parent_action_id": "UI-SET-12"
-    "source_id": "settings.tsx#ConfigDraftSection:retry_editor"
-    "category": "settings"
-    "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Retry Draft Editor Loading — current.refetch"
-    "trigger_steps":
-      - "Click Retry button in error banner"
-    "preconditions":
-      - "editorLoadError === true (either draft or current failed) && !editorRetrying && !configPending"
-    "variants":
-      - "draftUnavailable (refetches draft)"
-      - "currentUnavailable (refetches current)"
-      - "both unavailable (refetches both)"
-    "scope": "once"
-    "iteration_source": "Single execution upon error"
-    "risk_tier": "read_with_audit"
-    "expected_ui": "Banner displays 'Retrying...'; triggers refetch of failed queries"
-    "polling": "not_applicable"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "handleRetryEditor"
-      "line": 564
-    "http":
-      "method": "GET"
-      "path": "/admin/config/current"
-      "path_bindings": []
-      "query_fields": []
-      "body_fields": []
-      "header_fields": []
-      "condition": null
-    "client_symbol": "current.refetch"
-    "api_handler": "get_config"
-    "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "storage_operation_ids":
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "In-memory state.config.current_config() Arc clone; secrets are masked via mask_secret_like_values before serialization."
-    "side_effects": "Audit log write: record_admin_audit(\"config_read\", \"/admin/v1/config/current\")"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SET-13"
-    "aliases": []
-    "entry_type": "ui_action"
-    "source_id": "settings.tsx#ConfigDraftSection:toggle_checklist"
-    "category": "settings"
-    "page": "Settings"
-    "component": "ConfigDraftSection"
-    "name": "Toggle Schema Coverage Checklist"
-    "trigger_steps":
-      - "Click Coverage checklist trigger"
-    "preconditions":
-      - "schema.data available"
-    "variants":
-      - "collapsed"
-      - "expanded"
-    "scope": "once"
-    "iteration_source": "Toggle action"
-    "coverage":
-      "kind": "state_branches"
-      "variants":
-        - "collapsed"
-        - "expanded"
-    "atomic_request_ids": []
-    "risk_tier": "read"
-    "expected_ui": "Expands or collapses BaseCollapsible panel showing list of schema coverage fields"
-    "polling": "not_applicable"
-    "client_only_reason": "Client UI collapsible state managed by @base-ui/react/collapsible"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "ConfigDraftSection"
-      "line": 772
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11456,30 +11186,33 @@
     "name": "Load Configuration History"
     "trigger_steps":
       - "Mount ConfigHistorySection"
+      - "Click \"Retry history\" button in error state"
     "preconditions":
       - "Authenticated session"
     "variants":
       - "loading (4 skeleton rows)"
-      - "empty ('No history available.')"
-      - "populated (rows with Rev, Applied relative time, TLS StatusBadge)"
+      - "empty (\"No saved config history available.\")"
+      - "error -> role=alert row with \"Retry history\" button refetching the same query"
+      - "populated (rows with Rev and Saved relative time)"
     "scope": "once"
     "iteration_source": "Single execution"
     "coverage":
       "kind": "state_branches"
       "variants":
         - "loading (4 skeleton rows)"
-        - "empty ('No history available.')"
-        - "populated (rows with Rev, Applied relative time, TLS StatusBadge)"
+        - "empty (\"No saved config history available.\")"
+        - "error -> role=alert row with \"Retry history\" button refetching the same query"
+        - "populated (rows with Rev and Saved relative time)"
     "atomic_request_ids":
       - "UI-SET-08"
     "risk_tier": "read"
-    "expected_ui": "Renders table of up to 20 last applied revisions"
+    "expected_ui": "Renders table of up to 20 last saved revisions; error state offers retry"
     "polling": "not_applicable"
     "client_only_reason": null
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
       "symbol": "ConfigHistorySection"
-      "line": 801
+      "line": 438
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11496,24 +11229,26 @@
     "name": "Load Configuration History — useConfigHistory"
     "trigger_steps":
       - "Mount ConfigHistorySection"
+      - "Click \"Retry history\" button in error state"
     "preconditions":
       - "Authenticated session"
     "variants":
       - "loading (4 skeleton rows)"
-      - "empty ('No history available.')"
-      - "populated (rows with Rev, Applied relative time, TLS StatusBadge)"
+      - "empty (\"No saved config history available.\")"
+      - "error -> role=alert row with \"Retry history\" button refetching the same query"
+      - "populated (rows with Rev and Saved relative time)"
     "scope": "once"
     "iteration_source": "Single execution"
     "risk_tier": "read_with_audit"
-    "expected_ui": "Renders table of up to 20 last applied revisions"
+    "expected_ui": "Renders table of up to 20 last saved revisions; error state offers retry"
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useConfigHistory"
-      "line": 799
+      "line": 793
     "http":
       "method": "GET"
-      "path": "/admin/config/history"
+      "path": "/admin/v1/config/history"
       "path_bindings": []
       "query_fields":
         - "limit=20"
@@ -11528,42 +11263,8 @@
       - "postgres:ConfigStore::list_config_history:PostgresStorage::list_config_history"
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Query parameter limit defaults to 20 and is passed through to storage SQL without a maximum clamp; limit=0 short-circuits to an empty result."
+    "cache_or_no_query": "Query parameter limit defaults to 20 and is clamped to 100 by settings::list_history before reaching storage SQL; limit=0 short-circuits to an empty result. HistoryEntry now carries only revision + applied_at_unix_secs (config_toml payload and HistorySummary removed; migration 0119/0087 purged stored payloads), so ConfigHistoryItem exposes revision and saved_at_unix_secs only."
     "side_effects": "Audit log write: record_admin_audit(\"config_history_read\", \"/admin/v1/config/history\")"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SRC-625C96B0933F"
-    "aliases": []
-    "entry_type": "ui_action"
-    "source_id": "settings.tsx#RestartRequiredMatrix:render"
-    "category": "settings"
-    "page": "Settings"
-    "component": "RestartRequiredMatrix"
-    "name": "Restart-Required Fields Matrix View"
-    "trigger_steps":
-      - "Mount SettingsPage"
-    "preconditions":
-      - "SettingsPage mounted"
-    "variants":
-      - "static list of 15 restart-required configuration keys with reasons"
-    "scope": "once"
-    "iteration_source": "15 static field definitions"
-    "coverage":
-      "kind": "state_branches"
-      "variants":
-        - "static list of 15 restart-required configuration keys with reasons"
-    "atomic_request_ids": []
-    "risk_tier": "read"
-    "expected_ui": "Renders table listing fields where Hot reload = 'No' (danger badge) and explanation"
-    "polling": "not_applicable"
-    "client_only_reason": "Static client-side reference matrix"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "RestartRequiredMatrix"
-      "line": 892
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11572,37 +11273,37 @@
   - "id": "UI-SRC-49B5404AC804"
     "aliases": []
     "entry_type": "ui_action"
-    "source_id": "settings.tsx#SettingsPage:download_export"
+    "source_id": "settings.tsx#SettingsPage:download_database_snapshot"
     "category": "settings"
     "page": "Settings"
-    "component": "Configuration Export Card"
-    "name": "Download Configuration Export Snapshot"
+    "component": "Database Resources Snapshot Card"
+    "name": "Download Database Resources Snapshot"
     "trigger_steps":
-      - "Click Download export.json button"
+      - "Click \"Download database snapshot\" button"
     "preconditions":
-      - "SettingsPage mounted && !exportingRef.current"
+      - "SettingsPage mounted && !downloadingDatabaseSnapshotRef.current"
     "variants":
-      - "in-flight: Button disabled with 'Downloading...'"
-      - "success: Triggers browser file download of cc-lb-export-{timestamp}.json; toast 'Export downloaded'"
-      - "error: toast 'Export failed: ...'"
+      - "in-flight: Button disabled with \"Downloading...\""
+      - "success: Triggers browser file download of cc-lb-database-resources-{timestamp}.json; toast \"Database snapshot downloaded\""
+      - "error: toast \"Database snapshot download failed: ...\""
     "scope": "once"
     "iteration_source": "Single execution"
     "coverage":
       "kind": "state_branches"
       "variants":
-        - "in-flight: Button disabled with 'Downloading...'"
-        - "success: Triggers browser file download of cc-lb-export-{timestamp}.json; toast 'Export downloaded'"
-        - "error: toast 'Export failed: ...'"
+        - "in-flight: Button disabled with \"Downloading...\""
+        - "success: Triggers browser file download of cc-lb-database-resources-{timestamp}.json; toast \"Database snapshot downloaded\""
+        - "error: toast \"Database snapshot download failed: ...\""
     "atomic_request_ids":
       - "UI-SET-02"
     "risk_tier": "read"
-    "expected_ui": "Initiates browser blob download and shows feedback toast"
+    "expected_ui": "Initiates browser blob download of upstreams, principals, plugins, and chains stored in the database; shows feedback toast"
     "polling": "not_applicable"
     "client_only_reason": null
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/settings.tsx"
-      "symbol": "handleDownloadExport"
-      "line": 191
+      "symbol": "handleDownloadDatabaseSnapshot"
+      "line": 220
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -11612,23 +11313,23 @@
     "aliases": []
     "entry_type": "network_request"
     "parent_action_id": "UI-SRC-49B5404AC804"
-    "source_id": "settings.tsx#SettingsPage:download_export"
+    "source_id": "settings.tsx#SettingsPage:download_database_snapshot"
     "category": "settings"
     "page": "Settings"
-    "component": "Configuration Export Card"
-    "name": "Download Configuration Export Snapshot — downloadJson"
+    "component": "Database Resources Snapshot Card"
+    "name": "Download Database Resources Snapshot — downloadJson"
     "trigger_steps":
-      - "Click Download export.json button"
+      - "Click \"Download database snapshot\" button"
     "preconditions":
-      - "SettingsPage mounted && !exportingRef.current"
+      - "SettingsPage mounted && !downloadingDatabaseSnapshotRef.current"
     "variants":
-      - "in-flight: Button disabled with 'Downloading...'"
-      - "success: Triggers browser file download of cc-lb-export-{timestamp}.json; toast 'Export downloaded'"
-      - "error: toast 'Export failed: ...'"
+      - "in-flight: Button disabled with \"Downloading...\""
+      - "success: Triggers browser file download of cc-lb-database-resources-{timestamp}.json; toast \"Database snapshot downloaded\""
+      - "error: toast \"Database snapshot download failed: ...\""
     "scope": "once"
     "iteration_source": "Single execution"
     "risk_tier": "read_with_audit"
-    "expected_ui": "Initiates browser blob download and shows feedback toast"
+    "expected_ui": "Initiates browser blob download of upstreams, principals, plugins, and chains stored in the database; shows feedback toast"
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/api.ts"
@@ -11660,6 +11361,480 @@
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
     "cache_or_no_query": "Database-backed export: paginates all upstreams, principals, plugin registry entries, blob bytes, and each principal plugin-chain slot; then appends an audit record."
     "side_effects": "Audit log write: record_admin_audit(\"config_export\", \"/admin/v1/export\")"
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "available"
+      "reason": null
+  - "id": "UI-SRC-9A3432FEB525"
+    "aliases": []
+    "entry_type": "ui_action"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:save_file"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Save Draft to Config File"
+    "trigger_steps":
+      - "Click \"Save to config file\" button"
+      - "Confirm in the overwrite/lockout ConfirmDialog (check \"I confirmed another valid admin access path exists\" when required)"
+    "preconditions":
+      - "canSaveFile === true: validationCurrent && file.valid && effective.valid && no filesystem errors && file.mode === \"writable\""
+    "variants":
+      - "file absent and no provider change -> POST /admin/v1/config/save immediately"
+      - "file exists -> ConfirmDialog \"Overwrite the current config file?\" listing grouped change review (dangerous first)"
+      - "admin.auth.providers changed or prior self_lockout_confirmation_required -> destructive ConfirmDialog requires checkbox acknowledgement; confirmDisabled until checked"
+      - "200 -> toast \"Configuration file saved\"; restart-drift banner appears (saved revision newer than process start)"
+      - "409 self_lockout_confirmation_required -> dialog reopens with acknowledgement required"
+      - "error with embedded validation report -> localValidation updated; danger Notice \"Configuration action failed\""
+    "scope": "once"
+    "iteration_source": "Single execution per validated revision"
+    "coverage":
+      "kind": "state_branches"
+      "variants":
+        - "file absent and no provider change -> POST /admin/v1/config/save immediately"
+        - "file exists -> ConfirmDialog \"Overwrite the current config file?\" listing grouped change review (dangerous first)"
+        - "admin.auth.providers changed or prior self_lockout_confirmation_required -> destructive ConfirmDialog requires checkbox acknowledgement; confirmDisabled until checked"
+        - "200 -> toast \"Configuration file saved\"; restart-drift banner appears (saved revision newer than process start)"
+        - "409 self_lockout_confirmation_required -> dialog reopens with acknowledgement required"
+        - "error with embedded validation report -> localValidation updated; danger Notice \"Configuration action failed\""
+    "atomic_request_ids":
+      - "UI-SET-15"
+    "risk_tier": "reversible_write"
+    "expected_ui": "Atomically replaces the TOML config file; saved draft stays server-side; restart required to apply"
+    "polling": "not_applicable"
+    "client_only_reason": null
+    "source":
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "handleSaveFileRequest"
+      "line": 1193
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "not_deployed"
+      "reason": "Every atomic request for this action is absent from the deployed API."
+  - "id": "UI-SET-15"
+    "aliases": []
+    "entry_type": "network_request"
+    "parent_action_id": "UI-SRC-9A3432FEB525"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:save_file"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Save Draft to Config File — useSaveConfigFile"
+    "trigger_steps":
+      - "Click \"Save to config file\" button"
+      - "Confirm in the overwrite/lockout ConfirmDialog (check \"I confirmed another valid admin access path exists\" when required)"
+    "preconditions":
+      - "canSaveFile === true: validationCurrent && file.valid && effective.valid && no filesystem errors && file.mode === \"writable\""
+    "variants":
+      - "file absent and no provider change -> POST /admin/v1/config/save immediately"
+      - "file exists -> ConfirmDialog \"Overwrite the current config file?\" listing grouped change review (dangerous first)"
+      - "admin.auth.providers changed or prior self_lockout_confirmation_required -> destructive ConfirmDialog requires checkbox acknowledgement; confirmDisabled until checked"
+      - "200 -> toast \"Configuration file saved\"; restart-drift banner appears (saved revision newer than process start)"
+      - "409 self_lockout_confirmation_required -> dialog reopens with acknowledgement required"
+      - "error with embedded validation report -> localValidation updated; danger Notice \"Configuration action failed\""
+    "scope": "once"
+    "iteration_source": "Single execution per validated revision"
+    "risk_tier": "destructive_write"
+    "expected_ui": "Atomically replaces the TOML config file; saved draft stays server-side; restart required to apply"
+    "polling": "not_applicable"
+    "source":
+      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
+      "symbol": "useSaveConfigFile"
+      "line": 1628
+    "http":
+      "method": "POST"
+      "path": "/admin/v1/config/save"
+      "path_bindings": []
+      "query_fields": []
+      "body_fields":
+        - "expected_revision"
+        - "expected_fingerprint"
+        - "storage_url_replacement"
+        - "confirm_self_lockout"
+      "header_fields":
+        - "authorization"
+        - "content-type"
+      "condition": null
+    "client_symbol": "useSaveConfigFile"
+    "api_handler": "save_config_file"
+    "auth": "require_admin_auth + authorize(AdminAction::Write)"
+    "storage_operation_ids":
+      - "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft"
+      - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
+      - "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft"
+      - "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft"
+      - "sqlite:ConfigStore::append_config_history:SqliteStorage::append_config_history"
+      - "postgres:ConfigStore::append_config_history:PostgresStorage::append_config_history"
+      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
+      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
+    "cache_or_no_query": "Writes the validated draft to the config file on disk, not to runtime state: requires expected_revision match and last_validated_revision == expected_revision (409 draft_not_validated otherwise), re-materializes and re-validates, checks expected_fingerprint against the current file sha256 (409 file_changed), refuses non-writable paths (409 file_not_writable) and active admin-auth provider removal unless confirm_self_lockout (409 self_lockout_confirmation_required), then atomic_replace writes a 0600 temp file, fsyncs, re-checks fingerprint, and renames. Afterwards clears the draft via put_config_draft and records metadata-only history via append_config_history; both are best-effort after the file write (failures logged, not rolled back). Response: revision, saved_at_unix_secs, restart_required: true, fingerprint."
+    "side_effects": "Audit event `config_save` on success (payload: revision, saved_at_unix_secs, fingerprint, restart_required) and `config_save_failed` on failure (payload: reason); success-audit failure is logged, not fatal. Atomically replaces the config file on disk; runtime keeps running the old config until restart. QA restore: restore previous file contents and restart."
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "not_deployed"
+      "reason": "Endpoint added after deployed commit e56d029e"
+  - "id": "UI-SRC-228C90EA6F13"
+    "aliases": []
+    "entry_type": "ui_action"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:download_toml"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Download Validated Draft as TOML"
+    "trigger_steps":
+      - "Click \"Download TOML\" button"
+      - "Click \"Retry\" in the download-failed Notice"
+    "preconditions":
+      - "canDownload === true: validationCurrent && file.valid; downloadLock prevents concurrent downloads"
+    "variants":
+      - "success -> browser download of validated TOML via Content-Disposition filename; toast \"Validated TOML downloaded\""
+      - "failure -> danger Notice \"Download failed\" with Retry and \"Copy draft JSON\" fallback actions"
+      - "second click while in-flight -> deduplicated by pendingConfigDraftDownload/downloadLock"
+    "scope": "once"
+    "iteration_source": "Single execution per validated revision"
+    "coverage":
+      "kind": "state_branches"
+      "variants":
+        - "success -> browser download of validated TOML via Content-Disposition filename; toast \"Validated TOML downloaded\""
+        - "failure -> danger Notice \"Download failed\" with Retry and \"Copy draft JSON\" fallback actions"
+        - "second click while in-flight -> deduplicated by pendingConfigDraftDownload/downloadLock"
+    "atomic_request_ids":
+      - "UI-SET-16"
+    "risk_tier": "read_with_audit"
+    "expected_ui": "Initiates browser blob download of the validated draft rendered as TOML"
+    "polling": "not_applicable"
+    "client_only_reason": null
+    "source":
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "handleDownload"
+      "line": 1202
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "not_deployed"
+      "reason": "Every atomic request for this action is absent from the deployed API."
+  - "id": "UI-SET-16"
+    "aliases": []
+    "entry_type": "network_request"
+    "parent_action_id": "UI-SRC-228C90EA6F13"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:download_toml"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Download Validated Draft as TOML — downloadConfigDraft"
+    "trigger_steps":
+      - "Click \"Download TOML\" button"
+      - "Click \"Retry\" in the download-failed Notice"
+    "preconditions":
+      - "canDownload === true: validationCurrent && file.valid; downloadLock prevents concurrent downloads"
+    "variants":
+      - "success -> browser download of validated TOML via Content-Disposition filename; toast \"Validated TOML downloaded\""
+      - "failure -> danger Notice \"Download failed\" with Retry and \"Copy draft JSON\" fallback actions"
+      - "second click while in-flight -> deduplicated by pendingConfigDraftDownload/downloadLock"
+    "scope": "once"
+    "iteration_source": "Single execution per validated revision"
+    "risk_tier": "read_with_audit"
+    "expected_ui": "Initiates browser blob download of the validated draft rendered as TOML"
+    "polling": "not_applicable"
+    "source":
+      "file": "crates/cc-lb-admin/web/src/lib/api.ts"
+      "symbol": "downloadConfigDraft"
+      "line": 299
+    "http":
+      "method": "POST"
+      "path": "/admin/v1/config/draft/download"
+      "path_bindings": []
+      "query_fields": []
+      "body_fields":
+        - "expected_revision"
+        - "storage_url_replacement"
+      "header_fields":
+        - "authorization"
+        - "content-type"
+      "condition": null
+    "client_symbol": "downloadConfigDraft"
+    "api_handler": "download_config_draft"
+    "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
+    "storage_operation_ids":
+      - "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft"
+      - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
+      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
+      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
+    "cache_or_no_query": "Reads the singleton draft row, requires expected_revision match and a validated revision (last_validated_revision == expected_revision, or a stored last_validation report whose revision matches and file.valid is true), re-materializes the draft to TOML with storage.url restored, and requires report.file.valid. Returns raw TOML bytes as application/toml attachment (filename cc-lb.toml) with Cache-Control: no-store; no JSON body."
+    "side_effects": "Audit event `config_download`; no persistent mutation QA restore: n/a (read-only download)."
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "not_deployed"
+      "reason": "Endpoint added after deployed commit e56d029e"
+  - "id": "UI-SRC-089FBD95699E"
+    "aliases": []
+    "entry_type": "ui_action"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:select_category"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Select Configuration Category"
+    "trigger_steps":
+      - "Click a category in the left nav (Network & requests, Storage & data, Scheduling, Routing & resilience, Identity & access, Pricing & quotas, Runtime & observability)"
+      - "Open /settings?category={id} deep link"
+    "preconditions":
+      - "Editor loaded with model categories"
+    "variants":
+      - "select -> activeCategory switches; URL search updated {category, q}; field deep-link dropped"
+      - "unknown ?category= value -> falls back to \"network\""
+      - "category counts show modified/overridden/error badges from visible leaves"
+    "scope": "once"
+    "iteration_source": "Per category selection"
+    "coverage":
+      "kind": "state_branches"
+      "variants":
+        - "select -> activeCategory switches; URL search updated {category, q}; field deep-link dropped"
+        - "unknown ?category= value -> falls back to \"network\""
+        - "category counts show modified/overridden/error badges from visible leaves"
+    "atomic_request_ids": []
+    "risk_tier": "read"
+    "expected_ui": "Switches the rendered category panel and syncs ?category= into the URL without scroll reset"
+    "polling": "not_applicable"
+    "client_only_reason": "Client-side navigation state synced to URL search params via TanStack Router"
+    "source":
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "selectCategory"
+      "line": 1042
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "available"
+      "reason": null
+  - "id": "UI-SRC-FA4533F02DD6"
+    "aliases": []
+    "entry_type": "ui_action"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:search_settings"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Search Settings Fields"
+    "trigger_steps":
+      - "Type in \"Search settings\" combobox"
+      - "ArrowDown/ArrowUp to move active option; Enter or click to activate"
+      - "Escape, clear button, or outside pointerdown closes the overlay"
+    "preconditions":
+      - "Editor loaded; non-empty trimmed query"
+    "variants":
+      - "results -> up to 24 matching visible leaves with breadcrumb + path; aria-activedescendant highlight"
+      - "no match -> \"No settings match this search.\" option and sr-only status"
+      - "activate -> selects result category, opens its Advanced disclosure when needed, sets ?field= deep link, focuses the field control"
+      - "clear/Escape -> overlay closes, focus returns to input without reopening"
+    "scope": "once"
+    "iteration_source": "Per keystroke/activation; results capped at 24"
+    "coverage":
+      "kind": "state_branches"
+      "variants":
+        - "results -> up to 24 matching visible leaves with breadcrumb + path; aria-activedescendant highlight"
+        - "no match -> \"No settings match this search.\" option and sr-only status"
+        - "activate -> selects result category, opens its Advanced disclosure when needed, sets ?field= deep link, focuses the field control"
+        - "clear/Escape -> overlay closes, focus returns to input without reopening"
+    "atomic_request_ids": []
+    "risk_tier": "read"
+    "expected_ui": "Filters config leaves client-side and deep-links the chosen field"
+    "polling": "not_applicable"
+    "client_only_reason": "Client-side search over the in-memory editor model; URL ?q=/field= sync only"
+    "source":
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "activateSearchResult"
+      "line": 1059
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "available"
+      "reason": null
+  - "id": "UI-SRC-5F12838E8F4B"
+    "aliases": []
+    "entry_type": "ui_action"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:toggle_advanced"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Toggle Advanced Settings Disclosure"
+    "trigger_steps":
+      - "Click \"Advanced (n)\" summary inside a section card"
+    "preconditions":
+      - "Section has advanced-classified leaves"
+    "variants":
+      - "open -> advanced field grid rendered; openAdvanced[sectionId]=true"
+      - "close -> grid collapsed; state retained"
+      - "deep-link/search activation can force-open the disclosure for the target field"
+    "scope": "once"
+    "iteration_source": "Per section disclosure"
+    "coverage":
+      "kind": "state_branches"
+      "variants":
+        - "open -> advanced field grid rendered; openAdvanced[sectionId]=true"
+        - "close -> grid collapsed; state retained"
+        - "deep-link/search activation can force-open the disclosure for the target field"
+    "atomic_request_ids": []
+    "risk_tier": "read"
+    "expected_ui": "Expands or collapses the section's advanced field group"
+    "polling": "not_applicable"
+    "client_only_reason": "Client UI disclosure state (details/summary)"
+    "source":
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "SectionCard"
+      "line": 2457
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "available"
+      "reason": null
+  - "id": "UI-SRC-2DBACF6A00B0"
+    "aliases": []
+    "entry_type": "ui_action"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:reveal_issue"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Reveal Field from Validation Issue"
+    "trigger_steps":
+      - "Click a validation issue row in ValidationSummary"
+    "preconditions":
+      - "Validation report present with issue.path"
+    "variants":
+      - "issue in another category -> category switches and field is focused"
+      - "issue in advanced section -> disclosure opens then field focused"
+      - "issue without path -> row not clickable"
+    "scope": "once"
+    "iteration_source": "Per issue click"
+    "coverage":
+      "kind": "state_branches"
+      "variants":
+        - "issue in another category -> category switches and field is focused"
+        - "issue in advanced section -> disclosure opens then field focused"
+        - "issue without path -> row not clickable"
+    "atomic_request_ids": []
+    "risk_tier": "read"
+    "expected_ui": "Navigates to and focuses the offending field control"
+    "polling": "not_applicable"
+    "client_only_reason": "Client-side navigation and focus management"
+    "source":
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "revealConfigPath"
+      "line": 1049
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "available"
+      "reason": null
+  - "id": "UI-SRC-6C749C277F0A"
+    "aliases": []
+    "entry_type": "ui_action"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:storage_url_replacement"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Replace Opaque Storage URL"
+    "trigger_steps":
+      - "Click \"Replace URL\" on the storage.url field"
+      - "Type the replacement URL"
+      - "Click \"Cancel replacement\" or \"Unset\""
+    "preconditions":
+      - "storage.url leaf rendered; value is opaque sentinel"
+    "variants":
+      - "replace -> storageUrlReplacement state set; included in validate/save/download request bodies"
+      - "cancel -> replacement cleared; sentinel restored"
+      - "unset -> replacement cleared and storage.url removed from draft"
+      - "any change -> clears localValidation/actionError/downloadError"
+    "scope": "once"
+    "iteration_source": "Per replacement edit"
+    "coverage":
+      "kind": "state_branches"
+      "variants":
+        - "replace -> storageUrlReplacement state set; included in validate/save/download request bodies"
+        - "cancel -> replacement cleared; sentinel restored"
+        - "unset -> replacement cleared and storage.url removed from draft"
+        - "any change -> clears localValidation/actionError/downloadError"
+    "atomic_request_ids": []
+    "risk_tier": "read"
+    "expected_ui": "Holds the real storage URL client-side so it is never rendered; forwarded only inside mutation request bodies"
+    "polling": "not_applicable"
+    "client_only_reason": "Client-only state that leads to storage_url_replacement on later validate/save/download requests"
+    "source":
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "ScalarField"
+      "line": 2964
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "available"
+      "reason": null
+  - "id": "UI-SRC-6349C47F4250"
+    "aliases": []
+    "entry_type": "ui_action"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:copy_draft_json"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Copy Draft JSON to Clipboard"
+    "trigger_steps":
+      - "Click \"Copy draft JSON\" inside the download-failed Notice"
+    "preconditions":
+      - "downloadError shown; editor state present"
+    "variants":
+      - "success -> toast \"Draft JSON copied\""
+      - "clipboard failure -> toast \"Could not copy draft JSON\""
+    "scope": "once"
+    "iteration_source": "Single execution"
+    "coverage":
+      "kind": "state_branches"
+      "variants":
+        - "success -> toast \"Draft JSON copied\""
+        - "clipboard failure -> toast \"Could not copy draft JSON\""
+    "atomic_request_ids": []
+    "risk_tier": "read"
+    "expected_ui": "Copies the current draft object as formatted JSON for manual recovery"
+    "polling": "not_applicable"
+    "client_only_reason": "Client-only navigator.clipboard write"
+    "source":
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "ConfigEditorSection"
+      "line": 1323
+    "source_reconciled": true
+    "runtime_status": "runtime_pending"
+    "production_applicability":
+      "status": "available"
+      "reason": null
+  - "id": "UI-SRC-E5CC6F8E2B14"
+    "aliases": []
+    "entry_type": "ui_action"
+    "source_id": "components/settings-config/ConfigEditor.tsx#ConfigEditorSection:deep_link_field"
+    "category": "settings"
+    "page": "Settings"
+    "component": "ConfigEditorSection"
+    "name": "Deep-Link Field Focus via ?field="
+    "trigger_steps":
+      - "Open /settings?field={path} (or activate a search result / issue that sets ?field=)"
+    "preconditions":
+      - "Editor model loaded; field param present and not yet handled"
+    "variants":
+      - "known field -> its category selected, Advanced disclosure opened when needed, control focused via data-config-path"
+      - "handled once per field value (handledFieldRef) until ?field= changes or clears"
+    "scope": "once"
+    "iteration_source": "Per distinct ?field= value"
+    "coverage":
+      "kind": "state_branches"
+      "variants":
+        - "known field -> its category selected, Advanced disclosure opened when needed, control focused via data-config-path"
+        - "handled once per field value (handledFieldRef) until ?field= changes or clears"
+    "atomic_request_ids": []
+    "risk_tier": "read"
+    "expected_ui": "Focuses the requested field control after the editor model resolves"
+    "polling": "not_applicable"
+    "client_only_reason": "Client-side URL search param handling and focus management"
+    "source":
+      "file": "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx"
+      "symbol": "ConfigEditorSection"
+      "line": 935
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -12802,7 +12977,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useSubscriptionQuotaLatest"
-      "line": 807
+      "line": 801
     "http":
       "method": "GET"
       "path": "/admin/v1/subscription-quotas/latest"
@@ -13323,7 +13498,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useSubscriptionQuotaSeries"
-      "line": 838
+      "line": 832
     "http":
       "method": "GET"
       "path": "/admin/v1/subscription-quotas/series"
@@ -13420,7 +13595,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useSubscriptionQuotaAnalysis"
-      "line": 882
+      "line": 876
     "http":
       "method": "GET"
       "path": "/admin/v1/subscription-quotas/analysis"
@@ -13519,7 +13694,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useSubscriptionQuotaSeries"
-      "line": 838
+      "line": 832
     "http":
       "method": "GET"
       "path": "/admin/v1/subscription-quotas/series"
@@ -13574,7 +13749,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useSubscriptionQuotaAnalysis"
-      "line": 882
+      "line": 876
     "http":
       "method": "GET"
       "path": "/admin/v1/subscription-quotas/analysis"
@@ -13724,7 +13899,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateUpstream"
-      "line": 1053
+      "line": 1047
     "http":
       "method": "PUT"
       "path": "/admin/v1/upstreams/{id}"
@@ -13820,7 +13995,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateUpstreamWarmupSettings"
-      "line": 1129
+      "line": 1123
     "http":
       "method": "PATCH"
       "path": "/admin/v1/upstreams/{id}"
@@ -13936,7 +14111,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateUpstream"
-      "line": 1053
+      "line": 1047
     "http":
       "method": "PUT"
       "path": "/admin/v1/upstreams/{id}"
@@ -14128,7 +14303,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateUpstreamWarmupSettings"
-      "line": 1129
+      "line": 1123
     "http":
       "method": "PATCH"
       "path": "/admin/v1/upstreams/{id}"
@@ -14223,7 +14398,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useUpdateUpstreamWarmupSettings"
-      "line": 1129
+      "line": 1123
     "http":
       "method": "PATCH"
       "path": "/admin/v1/upstreams/{id}"
@@ -14318,7 +14493,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useClearUpstreamWarmupDialectPlugin"
-      "line": 1108
+      "line": 1102
     "http":
       "method": "DELETE"
       "path": "/admin/v1/upstreams/{id}/warmup-dialect-plugin"
@@ -14416,7 +14591,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useFireNowUpstreamWarmup"
-      "line": 1076
+      "line": 1070
     "http":
       "method": "POST"
       "path": "/admin/v1/upstreams/{id}/warmup/fire-now"
@@ -14508,7 +14683,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useWarmupAttempts"
-      "line": 1783
+      "line": 1811
     "http":
       "method": "GET"
       "path": "/admin/v1/upstreams/{id}/warmup/attempts"
@@ -14635,7 +14810,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useOAuthStart"
-      "line": 1154
+      "line": 1148
     "http":
       "method": "POST"
       "path": "/admin/v1/upstreams/{id}/oauth/start"
@@ -14728,7 +14903,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useOAuthComplete"
-      "line": 1163
+      "line": 1157
     "http":
       "method": "POST"
       "path": "/admin/v1/upstreams/{id}/oauth/complete"
@@ -14823,7 +14998,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useDeleteUpstream"
-      "line": 1016
+      "line": 1010
     "http":
       "method": "DELETE"
       "path": "/admin/v1/upstreams/{id}"
@@ -14956,7 +15131,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCreateUpstream"
-      "line": 1008
+      "line": 1002
     "http":
       "method": "POST"
       "path": "/admin/v1/upstreams"
@@ -15050,7 +15225,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useStartOauthDraft"
-      "line": 1638
+      "line": 1666
     "http":
       "method": "POST"
       "path": "/admin/v1/oauth/draft/start"
@@ -15138,7 +15313,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCompleteOauthDraft"
-      "line": 1645
+      "line": 1673
     "http":
       "method": "POST"
       "path": "/admin/v1/oauth/draft/complete"
@@ -15226,7 +15401,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useCreateFromOauthDraft"
-      "line": 1653
+      "line": 1681
     "http":
       "method": "POST"
       "path": "/admin/v1/upstreams/from-oauth-draft"
@@ -15427,7 +15602,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useWarmupSummary"
-      "line": 1770
+      "line": 1798
     "http":
       "method": "GET"
       "path": "/admin/v1/upstreams/{id}/warmup"
@@ -15712,7 +15887,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useWarmupAttempts"
-      "line": 1783
+      "line": 1811
     "http":
       "method": "GET"
       "path": "/admin/v1/upstreams/{id}/warmup/attempts"
@@ -15805,7 +15980,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useWarmupAttempts"
-      "line": 1783
+      "line": 1811
     "http":
       "method": "GET"
       "path": "/admin/v1/upstreams/{id}/warmup/attempts"
@@ -16303,7 +16478,7 @@
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
       "symbol": "useInsertChainEntry"
-      "line": 1515
+      "line": 1509
     "http":
       "method": "POST"
       "path": "/admin/v1/principals/{id}/plugin-chain"
@@ -17752,7 +17927,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:123"
+    "source": "crates/cc-lb-admin/src/routes.rs:113"
     "api_handler": "serve_index"
     "auth": "None (Public)"
     "storage_operation_ids": []
@@ -17789,7 +17964,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:124"
+    "source": "crates/cc-lb-admin/src/routes.rs:114"
     "api_handler": "serve_asset"
     "auth": "None (Public)"
     "storage_operation_ids": []
@@ -17824,7 +17999,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-server/src/app.rs:2371"
+    "source": "crates/cc-lb-server/src/app.rs:2273"
     "api_handler": "admin_server_state"
     "auth": "None (Unauthenticated listener state check)"
     "storage_operation_ids": []
@@ -17867,239 +18042,6 @@
     "storage_operation_ids": []
     "cache_or_no_query": "PostgreSQL-only conditional mount: the server creates InternalPartialsState only for Postgres storage and merges this router only when that state exists. Handler reads the in-memory retained-partial snapshot ring; SQLite deployments receive router-level not-found behavior."
     "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-E5535B2DF6A8"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "get_config"
-    "name": "GET /admin/v1/config/current"
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/config/current"
-      "parameters":
-        "path": []
-        "query": []
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read_with_audit"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:50"
-    "api_handler": "get_config"
-    "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "storage_operation_ids":
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "In-memory state.config.current_config() Arc clone; secrets are masked via mask_secret_like_values before serialization."
-    "side_effects": "Audit log write: record_admin_audit(\"config_read\", \"/admin/v1/config/current\")"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-CA5516D80DC5"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "get_config_schema"
-    "name": "GET /admin/v1/config/schema"
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/config/schema"
-      "parameters":
-        "path": []
-        "query": []
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:52"
-    "api_handler": "get_config_schema"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids": []
-    "cache_or_no_query": "In-memory schemars schema generation; HTTP Cache-Control: max-age=60"
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-51C67C36397F"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "get_config_draft"
-    "name": "GET /admin/v1/config/draft"
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/config/draft"
-      "parameters":
-        "path": []
-        "query": []
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read_with_audit"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:58"
-    "api_handler": "get_config_draft"
-    "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "storage_operation_ids":
-      - "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft"
-      - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Reads singleton config draft from DB Returns required apply_supported from the actual CurrentConfig provider; this capability does not bypass validation, revision checks, or authorization and adds no SQL query."
-    "side_effects": "Audit log write: record_admin_audit(\"config_draft_read\", \"/admin/v1/config/draft\")"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-E9BB1496F09E"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "get_config_history"
-    "name": "GET /admin/v1/config/history"
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/config/history"
-      "parameters":
-        "path": []
-        "query":
-          - "limit"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read_with_audit"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:69"
-    "api_handler": "get_config_history"
-    "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "storage_operation_ids":
-      - "sqlite:ConfigStore::list_config_history:SqliteStorage::list_config_history"
-      - "postgres:ConfigStore::list_config_history:PostgresStorage::list_config_history"
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Query parameter limit defaults to 20 and is passed through to storage SQL without a maximum clamp; limit=0 short-circuits to an empty result."
-    "side_effects": "Audit log write: record_admin_audit(\"config_history_read\", \"/admin/v1/config/history\")"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-BACKEND-CONFIG-DIFF"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "get_config_diff"
-    "name": "GET /admin/config/diff"
-    "http":
-      "method": "GET"
-      "path": "/admin/config/diff"
-      "parameters":
-        "path": []
-        "query":
-          - "from_revision"
-          - "to_revision"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read_with_audit"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:70"
-    "api_handler": "get_config_diff"
-    "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "storage_operation_ids":
-      - "sqlite:ConfigStore::get_config_history:SqliteStorage::get_config_history"
-      - "postgres:ConfigStore::get_config_history:PostgresStorage::get_config_history"
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Fetches two revisions from DB, calculates structural JSON diff in memory"
-    "side_effects": "Audit log write: record_admin_audit(\"config_diff_read\", \"/admin/v1/config/diff\")"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-903AA90CBF0D"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "get_config_diff"
-    "name": "GET /admin/v1/config/diff"
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/config/diff"
-      "parameters":
-        "path": []
-        "query":
-          - "from_revision"
-          - "to_revision"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read_with_audit"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:71"
-    "api_handler": "get_config_diff"
-    "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "storage_operation_ids":
-      - "sqlite:ConfigStore::get_config_history:SqliteStorage::get_config_history"
-      - "postgres:ConfigStore::get_config_history:PostgresStorage::get_config_history"
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Fetches two revisions from DB, calculates diff in memory"
-    "side_effects": "Audit log write: record_admin_audit(\"config_diff_read\", \"/admin/v1/config/diff\")"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -18178,7 +18120,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:75"
+    "source": "crates/cc-lb-admin/src/routes.rs:64"
     "api_handler": "crate::dashboard_routes::handle_dashboard_summary"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18225,7 +18167,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:79"
+    "source": "crates/cc-lb-admin/src/routes.rs:68"
     "api_handler": "crate::dashboard_routes::handle_dashboard_usage"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18325,7 +18267,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:83"
+    "source": "crates/cc-lb-admin/src/routes.rs:72"
     "api_handler": "crate::events_routes::handle_recent_events"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18372,7 +18314,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:91"
+    "source": "crates/cc-lb-admin/src/routes.rs:80"
     "api_handler": "crate::events_routes::handle_events_histogram"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18465,7 +18407,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:99"
+    "source": "crates/cc-lb-admin/src/routes.rs:88"
     "api_handler": "crate::events_routes::handle_events_stream"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18595,7 +18537,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:65"
+    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:64"
     "api_handler": "handle_aggregate"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18691,7 +18633,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:78"
+    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:77"
     "api_handler": "handle_pool_history"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18810,7 +18752,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/v1/plugins.rs:41"
+    "source": "crates/cc-lb-admin/src/v1/plugins.rs:40"
     "api_handler": "get_registry"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18850,7 +18792,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/v1/plugins.rs:59"
+    "source": "crates/cc-lb-admin/src/v1/plugins.rs:58"
     "api_handler": "get_chain"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18890,7 +18832,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/v1/principals.rs:37"
+    "source": "crates/cc-lb-admin/src/v1/principals.rs:35"
     "api_handler": "get_principal"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18928,7 +18870,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/v1/principals.rs:50"
+    "source": "crates/cc-lb-admin/src/v1/principals.rs:48"
     "api_handler": "get_allowed_models"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -19164,7 +19106,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:45"
+    "source": "crates/cc-lb-admin/src/routes.rs:43"
     "api_handler": "principal_key_usage"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -19204,7 +19146,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/v1/upstreams.rs:89"
+    "source": "crates/cc-lb-admin/src/v1/upstreams.rs:87"
     "api_handler": "get_upstream"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -19253,7 +19195,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "destructive_write"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:32"
+    "source": "crates/cc-lb-admin/src/routes.rs:31"
     "api_handler": "revoke_api_key"
     "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
     "storage_operation_ids":
@@ -19304,7 +19246,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "reversible_write"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:36"
+    "source": "crates/cc-lb-admin/src/routes.rs:35"
     "api_handler": "disable_api_key"
     "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
     "storage_operation_ids":
@@ -19355,7 +19297,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "reversible_write"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:40"
+    "source": "crates/cc-lb-admin/src/routes.rs:39"
     "api_handler": "enable_api_key"
     "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
     "storage_operation_ids":
@@ -19367,198 +19309,6 @@
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
     "cache_or_no_query": "Updates KeyStore cached status to Active"
     "side_effects": "Audit event `principal_key_enable`; permits incoming proxy requests authenticating with this key QA restore: Call POST /admin/principals/{id}/keys/{key_id}/disable."
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-EE67A2692EE2"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "put_config_draft"
-    "name": "PUT /admin/v1/config/draft"
-    "http":
-      "method": "PUT"
-      "path": "/admin/v1/config/draft"
-      "parameters":
-        "path": []
-        "query": []
-        "header":
-          - "name": "authorization"
-            "type": "String"
-            "required": true
-            "description": "Bearer admin auth token"
-          - "name": "content-type"
-            "type": "String"
-            "required": true
-            "description": "application/json"
-        "body":
-          - "name": "draft"
-            "type": "Value"
-            "required": true
-            "description": "Configuration object or TOML-compatible JSON structure"
-          - "name": "expected_revision"
-            "type": "u64"
-            "required": true
-            "description": "Current expected draft revision for optimistic locking"
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "reversible_write"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:58"
-    "api_handler": "put_config_draft"
-    "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "storage_operation_ids":
-      - "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft"
-      - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
-      - "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft"
-      - "postgres:ConfigStore::put_config_draft:PostgresStorage::put_config_draft"
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Stores in-memory draft copy via CurrentConfig::put_draft_config; invalidates TanStack queryKey ['config', 'draft']"
-    "side_effects": "Audit event `config_draft_put`; increments draft revision in DB and resets last_validated_revision to null QA restore: Re-put previous draft configuration or clear draft."
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-EEA580024B08"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "validate_config_draft"
-    "name": "POST /admin/v1/config/draft/validate"
-    "http":
-      "method": "POST"
-      "path": "/admin/v1/config/draft/validate"
-      "parameters":
-        "path": []
-        "query": []
-        "header":
-          - "name": "authorization"
-            "type": "String"
-            "required": true
-            "description": "Bearer admin auth token"
-          - "name": "content-type"
-            "type": "String"
-            "required": true
-            "description": "application/json"
-        "body":
-          - "name": "expected_revision"
-            "type": "u64"
-            "required": true
-            "description": "Expected revision of draft being validated"
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "reversible_write"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:63"
-    "api_handler": "validate_config_draft"
-    "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "storage_operation_ids":
-      - "sqlite:ConfigStore::get_config_draft:SqliteStorage::get_config_draft"
-      - "postgres:ConfigStore::get_config_draft:PostgresStorage::get_config_draft"
-      - "sqlite:ConfigStore::set_last_validated_revision:SqliteStorage::set_last_validated_revision"
-      - "postgres:ConfigStore::set_last_validated_revision:PostgresStorage::set_last_validated_revision"
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "No cache write; updates last_validated_revision in storage"
-    "side_effects": "Audit event `config_draft_validate`; checks TOML/JSON schema and semantic validity; marks revision as validated or stores validation error QA restore: Re-validate previous revision."
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-B9B9B5853D97"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "apply_config_draft"
-    "name": "POST /admin/v1/config/apply"
-    "http":
-      "method": "POST"
-      "path": "/admin/v1/config/apply"
-      "parameters":
-        "path": []
-        "query": []
-        "header":
-          - "name": "authorization"
-            "type": "String"
-            "required": true
-            "description": "Bearer admin auth token"
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "destructive_write"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:67"
-    "api_handler": "apply_config_draft"
-    "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "storage_operation_ids":
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Atomically swaps DynamicView and CurrentConfig; clears in-memory draft; invalidates TanStack queryKey ['config', 'draft'], ['config', 'current']"
-    "side_effects": "Audit event `config_apply`; activates new runtime proxy state in memory without database entity mutation QA restore: Re-apply previous configuration draft or reload original config."
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-D6B9EEC29AA6"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "reload_config"
-    "name": "POST /admin/v1/config/reload"
-    "http":
-      "method": "POST"
-      "path": "/admin/v1/config/reload"
-      "parameters":
-        "path": []
-        "query": []
-        "header":
-          - "name": "authorization"
-            "type": "String"
-            "required": true
-            "description": "Bearer admin auth token"
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "external_action"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:73"
-    "api_handler": "reload_config"
-    "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "storage_operation_ids":
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "No database storage entity modified (only audit entry written)"
-    "side_effects": "Audit event `config_reload_signal`; sends UNIX SIGHUP signal to pid (nix::sys::signal::kill) to trigger process config re-read from disk QA restore: Ensure valid configuration file exists on disk and send SIGHUP again."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -19600,7 +19350,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "reversible_write"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/v1/plugins.rs:55"
+    "source": "crates/cc-lb-admin/src/v1/plugins.rs:54"
     "api_handler": "rebalance_chain"
     "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
     "storage_operation_ids":
@@ -19671,7 +19421,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "reversible_write"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/v1/plugins.rs:59"
+    "source": "crates/cc-lb-admin/src/v1/plugins.rs:58"
     "api_handler": "update_chain"
     "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
     "storage_operation_ids":
@@ -19746,7 +19496,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "reversible_write"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/v1/principals.rs:36"
+    "source": "crates/cc-lb-admin/src/v1/principals.rs:35"
     "api_handler": "update_principal"
     "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
     "storage_operation_ids":
@@ -20364,32 +20114,29 @@
   - "UI-PLUG-22"
   - "UI-SRC-DF3F46767D73"
   - "UI-SET-01"
-  - "UI-SRC-0744A60F49D3"
   - "UI-SET-10"
   - "UI-SET-11"
   - "UI-SRC-5A139160911F"
   - "UI-SET-03"
   - "UI-SET-03B"
-  - "UI-SET-03A"
-  - "UI-SET-03C"
   - "UI-SET-14"
   - "UI-SRC-67C497520AA2"
   - "UI-SET-04"
   - "UI-SRC-BFD8C956C3C5"
   - "UI-SET-05"
-  - "UI-SRC-EDE5449D42BD"
-  - "UI-SET-06"
-  - "UI-SRC-EA3DE5874C4D"
-  - "UI-SET-07"
   - "UI-SET-12"
   - "UI-SET-12B"
-  - "UI-SET-12A"
-  - "UI-SET-13"
   - "UI-SRC-C9DD3E291979"
   - "UI-SET-08"
-  - "UI-SRC-625C96B0933F"
   - "UI-SRC-49B5404AC804"
   - "UI-SET-02"
+  - "UI-SRC-089FBD95699E"
+  - "UI-SRC-FA4533F02DD6"
+  - "UI-SRC-5F12838E8F4B"
+  - "UI-SRC-2DBACF6A00B0"
+  - "UI-SRC-6C749C277F0A"
+  - "UI-SRC-6349C47F4250"
+  - "UI-SRC-E5CC6F8E2B14"
   - "UI-SRC-2FC5E3F9B148"
   - "UI-AUD-01"
   - "UI-AUD-07"
@@ -20524,12 +20271,6 @@
   - "API-SRC-276F2E8B8B8D"
   - "API-SRC-7A787CD5C3CF"
   - "API-SYS-02"
-  - "API-SRC-E5535B2DF6A8"
-  - "API-SRC-CA5516D80DC5"
-  - "API-SRC-51C67C36397F"
-  - "API-SRC-E9BB1496F09E"
-  - "API-BACKEND-CONFIG-DIFF"
-  - "API-SRC-903AA90CBF0D"
   - "API-SRC-15D90407F542"
   - "API-SRC-C2E19B96F128"
   - "API-SRC-6272C4C4303C"
@@ -20559,10 +20300,6 @@
   - "API-SRC-5E2D298E32DE"
   - "API-SRC-D05CE36481FC"
   - "API-SRC-EECEBC08D3B2"
-  - "API-SRC-EE67A2692EE2"
-  - "API-SRC-EEA580024B08"
-  - "API-SRC-B9B9B5853D97"
-  - "API-SRC-D6B9EEC29AA6"
   - "API-SYS-06"
   - "API-SRC-B624778A38FE"
   - "API-SRC-B1B43DF36688"
@@ -21202,56 +20939,36 @@
     "source":
       "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
       "symbol": "PostgresStorage::get_config_draft"
-      "line_start": 15
-      "line_end": 28
-      "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
+      "line_start": 13
+      "line_end": 26
+      "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
     "statements":
       - "kind": "literal"
         "text": "SELECT config FROM config_draft_v1 WHERE id = 'singleton'"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
           "symbol": "get_config_draft"
-          "line_start": 17
-          "line_end": 17
+          "line_start": 15
+          "line_end": 15
         "branches": []
         "bind_parameters": []
-  - "id": "postgres:ConfigStore::get_config_history:PostgresStorage::get_config_history"
-    "engine": "postgres"
-    "trait_method": "ConfigStore::get_config_history"
-    "source":
-      "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
-      "symbol": "PostgresStorage::get_config_history"
-      "line_start": 158
-      "line_end": 171
-      "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
-    "statements":
-      - "kind": "literal"
-        "text": "SELECT config FROM config_history_v1 WHERE revision = $1"
-        "source":
-          "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
-          "symbol": "get_config_history"
-          "line_start": 160
-          "line_end": 160
-        "branches": []
-        "bind_parameters":
-          - "162: .bind(u64_to_i64(revision, \"history revision\")?)"
   - "id": "postgres:ConfigStore::list_config_history:PostgresStorage::list_config_history"
     "engine": "postgres"
     "trait_method": "ConfigStore::list_config_history"
     "source":
       "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
       "symbol": "PostgresStorage::list_config_history"
-      "line_start": 140
-      "line_end": 156
-      "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
+      "line_start": 138
+      "line_end": 154
+      "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
     "statements":
       - "kind": "literal"
         "text": "SELECT config FROM config_history_v1 ORDER BY revision DESC LIMIT $1"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
           "symbol": "list_config_history"
-          "line_start": 146
-          "line_end": 146
+          "line_start": 144
+          "line_end": 144
         "branches": []
         "bind_parameters":
           - "148: .bind(u64_to_i64(limit as u64, \"history limit\")?)"
@@ -23114,57 +22831,37 @@
     "source":
       "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
       "symbol": "SqliteStorage::get_config_draft"
-      "line_start": 14
-      "line_end": 27
-      "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
+      "line_start": 12
+      "line_end": 25
+      "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
     "statements":
       - "kind": "literal"
         "text": "SELECT payload FROM config_drafts_v1 WHERE id = ?"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
           "symbol": "get_config_draft"
-          "line_start": 16
-          "line_end": 16
+          "line_start": 14
+          "line_end": 14
         "branches": []
         "bind_parameters":
           - "17: .bind(CONFIG_DRAFT_ID)"
-  - "id": "sqlite:ConfigStore::get_config_history:SqliteStorage::get_config_history"
-    "engine": "sqlite"
-    "trait_method": "ConfigStore::get_config_history"
-    "source":
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
-      "symbol": "SqliteStorage::get_config_history"
-      "line_start": 157
-      "line_end": 169
-      "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
-    "statements":
-      - "kind": "literal"
-        "text": "SELECT payload FROM config_history_v1 WHERE id = ?"
-        "source":
-          "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
-          "symbol": "get_config_history"
-          "line_start": 159
-          "line_end": 159
-        "branches": []
-        "bind_parameters":
-          - "160: .bind(revision.to_string())"
   - "id": "sqlite:ConfigStore::list_config_history:SqliteStorage::list_config_history"
     "engine": "sqlite"
     "trait_method": "ConfigStore::list_config_history"
     "source":
       "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
       "symbol": "SqliteStorage::list_config_history"
-      "line_start": 134
-      "line_end": 155
-      "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
+      "line_start": 122
+      "line_end": 143
+      "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
     "statements":
       - "kind": "literal"
         "text": "SELECT payload FROM config_history_v1 ORDER BY CAST(id AS INTEGER) DESC LIMIT ?"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
           "symbol": "list_config_history"
-          "line_start": 140
-          "line_end": 140
+          "line_start": 128
+          "line_end": 128
         "branches": []
         "bind_parameters":
           - "142: .bind(u64_to_i64(limit as u64, \"config history limit\")?)"
@@ -24207,55 +23904,69 @@
     "source":
       "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
       "symbol": "PostgresStorage::put_config_draft"
-      "line_start": 30
-      "line_end": 57
-      "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
+      "line_start": 28
+      "line_end": 65
+      "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
     "statements":
       - "kind": "literal"
-        "text": "INSERT INTO config_draft_v1 (id, config, revision, updated_at)              SELECT 'singleton', $1, $2, NOW() WHERE $3 = 0              ON CONFLICT (id) DO UPDATE              SET config = EXCLUDED.config, updated_at = NOW(),              revision = config_draft_v1.revision + 1              WHERE config_draft_v1.revision = $3              RETURNING revision"
+        "text": "INSERT INTO config_draft_v1 (id, config, revision, updated_at) VALUES ('singleton', $1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, revision = EXCLUDED.revision, updated_at = NOW() WHERE config_draft_v1.revision = $3 RETURNING revision"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
-          "symbol": "PostgresStorage::put_config_draft"
-          "line_start": 46
-          "line_end": 46
+          "symbol": "put_config_draft"
+          "line_start": 44
+          "line_end": 49
         "branches":
-          - "atomic compare-and-swap on config_draft_v1.revision = $3"
+          - "selected when expected_revision == 0 (first draft insert or guarded upsert)"
         "bind_parameters":
-          - "config"
-          - "revision (expected_revision + 1)"
-          - "expected_revision"
-  - "id": "postgres:ConfigStore::set_last_validated_revision:PostgresStorage::set_last_validated_revision"
-    "engine": "postgres"
-    "trait_method": "ConfigStore::set_last_validated_revision"
+          - "56: .bind(config)"
+          - "57: .bind(u64_to_i64(revision, \"config revision\")?)"
+          - "58: .bind(u64_to_i64(expected_revision, \"expected config revision\")?)"
+      - "kind": "literal"
+        "text": "UPDATE config_draft_v1 SET config = $1, revision = $2, updated_at = NOW() WHERE id = 'singleton' AND revision = $3 RETURNING revision"
+        "source":
+          "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
+          "symbol": "put_config_draft"
+          "line_start": 51
+          "line_end": 53
+        "branches":
+          - "selected when expected_revision != 0 (compare-and-swap on existing singleton row)"
+        "bind_parameters":
+          - "56: .bind(config)"
+          - "57: .bind(u64_to_i64(revision, \"config revision\")?)"
+          - "58: .bind(u64_to_i64(expected_revision, \"expected config revision\")?)"
+  - "id": "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft"
+    "engine": "sqlite"
+    "trait_method": "ConfigStore::put_config_draft"
     "source":
-      "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
-      "symbol": "PostgresStorage::set_last_validated_revision"
-      "line_start": 59
-      "line_end": 103
-      "sha256": "f320963ada2deb67cfb76ff765f6090622584002f7ab7ffc9c8b494b1ca29aee"
+      "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
+      "symbol": "SqliteStorage::put_config_draft"
+      "line_start": 27
+      "line_end": 60
+      "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
     "statements":
       - "kind": "literal"
-        "text": "SELECT config FROM config_draft_v1 WHERE id = 'singleton' FOR UPDATE"
+        "text": "SELECT payload FROM config_drafts_v1 WHERE id = ?"
         "source":
-          "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
-          "symbol": "PostgresStorage::set_last_validated_revision"
-          "line_start": 66
-          "line_end": 66
+          "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
+          "symbol": "read_config_draft_in_tx"
+          "line_start": 149
+          "line_end": 149
         "branches":
-          - "row-lock in transaction"
-        "bind_parameters": []
-      - "kind": "literal"
-        "text": "INSERT INTO config_draft_v1 (id, config, revision, updated_at)              VALUES ('singleton', $1, $2, NOW())              ON CONFLICT (id) DO UPDATE              SET config = EXCLUDED.config, revision = EXCLUDED.revision, updated_at = NOW()"
-        "source":
-          "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
-          "symbol": "PostgresStorage::set_last_validated_revision"
-          "line_start": 94
-          "line_end": 94
-        "branches":
-          - "updates last_validated_revision or last_validation_error"
+          - "read within immediate transaction for optimistic concurrency validation"
         "bind_parameters":
-          - "config"
-          - "revision"
+          - "150: .bind(CONFIG_DRAFT_ID) — \"singleton\""
+      - "kind": "literal"
+        "text": "INSERT INTO config_drafts_v1 (id, payload, created_at, updated_at) VALUES (?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at"
+        "source":
+          "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
+          "symbol": "put_config_draft"
+          "line_start": 50
+          "line_end": 50
+        "branches":
+          - "upsert draft payload on revision match"
+        "bind_parameters":
+          - "52: .bind(CONFIG_DRAFT_ID)"
+          - "53: .bind(payload)"
   - "id": "postgres:ManagedKeyStore::issue:PostgresManagedKeyStore::issue"
     "engine": "postgres"
     "trait_method": "ManagedKeyStore::issue"
@@ -25886,72 +25597,6 @@
           - "attempt.upstream_spec_revision"
           - "attempt.dialect_plugin_snapshot.as_ref()"
           - "attempt.error_detail.as_deref()"
-  - "id": "sqlite:ConfigStore::put_config_draft:SqliteStorage::put_config_draft"
-    "engine": "sqlite"
-    "trait_method": "ConfigStore::put_config_draft"
-    "source":
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
-      "symbol": "SqliteStorage::put_config_draft"
-      "line_start": 29
-      "line_end": 62
-      "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
-    "statements":
-      - "kind": "literal"
-        "text": "SELECT payload FROM config_drafts_v1 WHERE id = ?"
-        "source":
-          "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
-          "symbol": "read_config_draft_in_tx"
-          "line_start": 175
-          "line_end": 175
-        "branches":
-          - "read within immediate transaction for optimistic concurrency validation"
-        "bind_parameters":
-          - "CONFIG_DRAFT_ID (\"singleton\")"
-      - "kind": "literal"
-        "text": "INSERT INTO config_drafts_v1 (id, payload, created_at, updated_at) VALUES (?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at"
-        "source":
-          "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
-          "symbol": "SqliteStorage::put_config_draft"
-          "line_start": 52
-          "line_end": 52
-        "branches":
-          - "upsert draft payload on revision match"
-        "bind_parameters":
-          - "CONFIG_DRAFT_ID (\"singleton\")"
-          - "payload"
-  - "id": "sqlite:ConfigStore::set_last_validated_revision:SqliteStorage::set_last_validated_revision"
-    "engine": "sqlite"
-    "trait_method": "ConfigStore::set_last_validated_revision"
-    "source":
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
-      "symbol": "SqliteStorage::set_last_validated_revision"
-      "line_start": 64
-      "line_end": 96
-      "sha256": "6c8befbe9014dac55005fda481bcdaf4df3a32e8258eef22fab02b07a1d5bff6"
-    "statements":
-      - "kind": "literal"
-        "text": "SELECT payload FROM config_drafts_v1 WHERE id = ?"
-        "source":
-          "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
-          "symbol": "read_config_draft_in_tx"
-          "line_start": 175
-          "line_end": 175
-        "branches":
-          - "read within immediate transaction"
-        "bind_parameters":
-          - "CONFIG_DRAFT_ID (\"singleton\")"
-      - "kind": "literal"
-        "text": "INSERT INTO config_drafts_v1 (id, payload, created_at, updated_at) VALUES (?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at"
-        "source":
-          "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
-          "symbol": "SqliteStorage::set_last_validated_revision"
-          "line_start": 87
-          "line_end": 87
-        "branches":
-          - "updates last_validated_revision or last_validation_error"
-        "bind_parameters":
-          - "CONFIG_DRAFT_ID (\"singleton\")"
-          - "payload"
   - "id": "sqlite:ManagedKeyStore::issue:SqliteStorage::issue"
     "engine": "sqlite"
     "trait_method": "ManagedKeyStore::issue"
@@ -27328,6 +26973,136 @@
           - "attempt.upstream_spec_revision"
           - "json_to_db(attempt.dialect_plugin_snapshot.as_ref())?"
           - "attempt.error_detail.as_deref()"
+  - "id": "postgres:ConfigStore::set_config_validation:PostgresStorage::set_config_validation"
+    "engine": "postgres"
+    "trait_method": "ConfigStore::set_config_validation"
+    "source":
+      "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
+      "symbol": "PostgresStorage::set_config_validation"
+      "line_start": 67
+      "line_end": 105
+      "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
+    "statements":
+      - "kind": "literal"
+        "text": "SELECT config FROM config_draft_v1 WHERE id = 'singleton' FOR UPDATE"
+        "source":
+          "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
+          "symbol": "PostgresStorage::set_config_validation"
+          "line_start": 75
+          "line_end": 75
+        "branches":
+          - "row-lock in transaction"
+        "bind_parameters": []
+      - "kind": "literal"
+        "text": "INSERT INTO config_draft_v1 (id, config, revision, updated_at) VALUES ('singleton', $1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, revision = EXCLUDED.revision, updated_at = NOW()"
+        "source":
+          "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
+          "symbol": "PostgresStorage::set_config_validation"
+          "line_start": 96
+          "line_end": 96
+        "branches":
+          - "persists last_validated_revision (valid only) and full last_validation report JSON"
+        "bind_parameters":
+          - "88: .bind(config)"
+          - "89: .bind(u64_to_i64(revision, \"config revision\")?)"
+  - "id": "sqlite:ConfigStore::set_config_validation:SqliteStorage::set_config_validation"
+    "engine": "sqlite"
+    "trait_method": "ConfigStore::set_config_validation"
+    "source":
+      "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
+      "symbol": "SqliteStorage::set_config_validation"
+      "line_start": 62
+      "line_end": 88
+      "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
+    "statements":
+      - "kind": "literal"
+        "text": "SELECT payload FROM config_drafts_v1 WHERE id = ?"
+        "source":
+          "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
+          "symbol": "read_config_draft_in_tx"
+          "line_start": 149
+          "line_end": 149
+        "branches":
+          - "read within immediate transaction"
+        "bind_parameters":
+          - "150: .bind(CONFIG_DRAFT_ID) — \"singleton\""
+      - "kind": "literal"
+        "text": "INSERT INTO config_drafts_v1 (id, payload, created_at, updated_at) VALUES (?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at"
+        "source":
+          "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
+          "symbol": "SqliteStorage::set_config_validation"
+          "line_start": 79
+          "line_end": 79
+        "branches":
+          - "persists last_validated_revision (valid only) and full last_validation report JSON"
+        "bind_parameters":
+          - "81: .bind(CONFIG_DRAFT_ID)"
+          - "82: .bind(payload)"
+  - "id": "postgres:ConfigStore::append_config_history:PostgresStorage::append_config_history"
+    "engine": "postgres"
+    "trait_method": "ConfigStore::append_config_history"
+    "source":
+      "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
+      "symbol": "PostgresStorage::append_config_history"
+      "line_start": 107
+      "line_end": 136
+      "sha256": "0c20334fde1aabafcdf5034fbe8990375ab5661bb5dc570e9a6441fc853ec8bd"
+    "statements":
+      - "kind": "literal"
+        "text": "INSERT INTO config_history_v1 (revision, config, created_at)              VALUES ($1, $2, NOW())"
+        "source":
+          "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
+          "symbol": "append_config_history"
+          "line_start": 120
+          "line_end": 120
+        "branches":
+          - "metadata-only history row: config JSON carries {revision, applied_at_unix_secs} — no config_toml payload"
+        "bind_parameters":
+          - "112: .bind(u64_to_i64(revision, \"history revision\")?)"
+          - "113: .bind(config)"
+      - "kind": "literal"
+        "text": "DELETE FROM config_history_v1              WHERE revision NOT IN (                  SELECT revision FROM config_history_v1 ORDER BY revision DESC LIMIT 50              )"
+        "source":
+          "file": "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
+          "symbol": "append_config_history"
+          "line_start": 129
+          "line_end": 129
+        "branches":
+          - "retention prune keeps newest 50 revisions in the same transaction"
+        "bind_parameters": []
+  - "id": "sqlite:ConfigStore::append_config_history:SqliteStorage::append_config_history"
+    "engine": "sqlite"
+    "trait_method": "ConfigStore::append_config_history"
+    "source":
+      "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
+      "symbol": "SqliteStorage::append_config_history"
+      "line_start": 90
+      "line_end": 120
+      "sha256": "2701159ae9975ed269f068f7117df09fbc81517090923e2299fb892b06837464"
+    "statements":
+      - "kind": "literal"
+        "text": "INSERT INTO config_history_v1 (id, payload, created_at, updated_at) VALUES (?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at"
+        "source":
+          "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
+          "symbol": "append_config_history"
+          "line_start": 103
+          "line_end": 103
+        "branches":
+          - "metadata-only history row: payload JSON carries {revision, applied_at_unix_secs} — no config_toml payload"
+        "bind_parameters":
+          - "105: .bind(revision.to_string())"
+          - "106: .bind(payload)"
+      - "kind": "literal"
+        "text": "DELETE FROM config_history_v1 WHERE id NOT IN (SELECT id FROM config_history_v1 ORDER BY CAST(id AS INTEGER) DESC LIMIT ?)"
+        "source":
+          "file": "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs"
+          "symbol": "append_config_history"
+          "line_start": 112
+          "line_end": 112
+        "branches":
+          - "retention prune keeps newest 50 revisions in the same transaction"
+        "bind_parameters":
+          - "114: .bind(u64_to_i64(CONFIG_HISTORY_LIMIT as u64, \"config history limit\")?) — 50"
 "classification_notes":
   - "source_contract": "api-write.json"
     "area": "legacy_key_routes"
@@ -27339,14 +27114,17 @@
     "area": "read_only_post"
     "description": "POST /admin/v1/router/preview is intentionally a read-only POST because its simulation input is a JSON body. It performs no storage query, audit append, external request, cache mutation, or persistent side effect."
   - "source_contract": "api-write.json"
-    "area": "config_apply_runtime_only"
-    "description": "The registered POST /admin[/v1]/config/apply handler calls CurrentConfig::apply_draft_config and appends an admin audit event. It does not call the separate settings::apply_config file/history workflow, so no ConfigStore::append_config_history SQL is attributed to these endpoints."
+    "area": "config_save_file_write"
+    "description": "POST /admin/v1/config/save writes the validated draft to the config file on disk via atomic replace and clears the draft; it does not mutate runtime state (restart_required: true). The previous apply/reload/current/diff/schema routes and the CurrentConfig in-memory apply path are removed by the master Settings rework; ConfigStore::append_config_history is now invoked by save (metadata-only rows) and ConfigStore::get_config_history is removed."
   - "source_contract": "api-write.json"
     "area": "plugin_registry_patch_audit"
     "description": "PATCH /admin/v1/plugins/registry/{id} updates the registry label and dynamic view but does not call record_admin_audit; no audit operation is attributed."
   - "source_contract": "api-write.json"
     "area": "plugin_wasm_gc_audit"
     "description": "POST /admin/v1/plugins/wasm/gc deletes only orphan blobs (sha256 absent from wasm_registry_v2) and their local cache files — registry-referenced blobs are kept even at refcount 0 — and does not emit an admin audit event."
+  - "source_contract": "api-write.json"
+    "area": "settings_routes_retired"
+    "description": "Removed by merge with master b07b25ee: GET /admin[/v1]/config/current, GET /admin[/v1]/config/schema, GET /admin[/v1]/config/diff, GET /admin/config/draft, POST /admin[/v1]/config/apply, POST /admin[/v1]/config/reload, POST /admin/config/draft/validate, PUT /admin/config/draft. Replacements: GET /admin/v1/config/editor (supersedes current+schema), POST /admin/v1/config/save (supersedes apply), POST /admin/v1/config/draft/download (supersedes diff/export of draft), remaining config routes are v1-only."
   - "classification": "changed_since_deploy"
     "target": "GET /admin/v1/status"
     "deployed_behavior": "Returns full status object including principals, plugin_chain_summary, killswitch, last_reload_status, restart_required_changes."
@@ -27378,10 +27156,11 @@
     "latest_behavior": "Requires SensitiveRead permission (403 if unauthorized) and logs 'principal_keys_list' audit event."
     "impact": "Protected by RBAC in latest."
   - "classification": "changed_since_deploy"
-    "target": "POST /admin/v1/config/apply"
+    "target": "POST /admin/v1/config/apply (removed) -> POST /admin/v1/config/save"
     "deployed_behavior": "Logs audit record with hardcoded actor 'admin' and principal_id 'admin'."
-    "latest_behavior": "Logs audit record with resolved actor metadata (actor_authority, actor_subject, actor_kind, actor_email)."
-    "impact": "Audit records contain structured actor identity in latest."
+    "latest_behavior": "Route removed by master b07b25ee. Replacement POST /admin/v1/config/save writes the validated draft to the config file (atomic replace, fingerprint + self-lockout checks), clears the draft, records metadata-only history, and logs 'config_save'/'config_save_failed' audit events with resolved actor metadata; restart_required: true."
+    "impact": "Apply semantics replaced by file save + restart; audit records contain structured actor identity."
+    "candidate_uncommitted": true
   - "classification": "changed_since_deploy"
     "target": "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx"
     "deployed_behavior": "Synchronously checks localStorage for cclb_admin_token. If found, mounts children immediately. Form submit sets localStorage and unblocks without API validation."
@@ -27436,19 +27215,19 @@
   - "classification": "changed_since_deploy"
     "type": "api_contract"
     "name": "Explicit clear_base_url Base URL override reset"
-    "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81"
+    "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086"
     "candidate_uncommitted": true
     "production_applicability": false
     "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-160"
     "description": "Approved on 2026-09-16: PUT/PATCH omission or explicit null preserves base_url, a URL sets it, and clear_base_url: true clears it; sending a non-null base_url together with clear_base_url returns 400 conflicting_base_url (a stale If-Match still wins with 409). The SettingsCard form captures the Base URL baseline when editing begins so a mid-edit props refetch cannot turn an untouched field into a clear, and treats a clear as unconfirmed (error toast, editor stays open) when the response base_url is not null. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
   - "classification": "changed_since_deploy"
     "type": "api_and_ui_capability"
-    "name": "Provider-aware configuration draft Apply availability"
-    "source_commit": "19b055708f3b9814b517158bfbb196aabb5dea81"
+    "name": "File-backed Settings editor contract (master b07b25ee)"
+    "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086"
     "candidate_uncommitted": true
     "production_applicability": false
-    "reference": "crates/cc-lb-admin/src/lib.rs:132; crates/cc-lb-admin/src/settings.rs:82; crates/cc-lb-admin/web/src/routes/settings.tsx:551"
-    "description": "Approved on 2026-09-16: draft responses expose required apply_supported from the real provider. Only explicit true may enable Apply alongside existing validation/revision checks. Unsupported and unconfirmed states show Apply-specific accessible guidance. Existing apply/reload implementations are unchanged; file-backed provider remains unsupported."
+    "reference": "crates/cc-lb-admin/src/settings.rs:203; crates/cc-lb-admin/src/routes.rs:49-63; crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:732"
+    "description": "Supersedes the PR-era apply_supported capability: the CurrentConfig abstraction is removed; GET /admin/v1/config/editor exposes file mode/fingerprint, override provenance and restart_required; save writes the config file and requires restart. Non-v1 /admin/config/* aliases removed."
   - "classification": "removed_since_deploy"
     "type": "route"
     "path": "crates/cc-lb-admin/web/src/routes/credentials.tsx"
@@ -27512,6 +27291,49 @@
     "elements":
       - "RestartRequiredMatrix: fully dynamic row"
       - "ConfigHistory: Upstreams, Principals, Plugins columns"
+  - "classification": "removed_since_deploy"
+    "type": "api"
+    "endpoints":
+      - "GET /admin/config/current"
+      - "GET /admin/v1/config/current"
+      - "GET /admin/config/schema"
+      - "GET /admin/v1/config/schema"
+      - "GET /admin/config/diff"
+      - "GET /admin/v1/config/diff"
+      - "POST /admin/config/apply"
+      - "POST /admin/v1/config/apply"
+      - "POST /admin/config/reload"
+      - "POST /admin/v1/config/reload"
+      - "GET /admin/config/draft"
+      - "PUT /admin/config/draft"
+      - "POST /admin/config/draft/validate"
+      - "GET /admin/config/history"
+    "reason": "Master b07b25ee Settings rework: file-backed editor contract replaces in-memory current/apply/reload/diff; remaining config routes are v1-only (no non-v1 aliases). Replacements: GET /admin/v1/config/editor, POST /admin/v1/config/save, POST /admin/v1/config/draft/download."
+    "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086"
+    "candidate_uncommitted": true
+  - "classification": "removed_since_deploy"
+    "type": "storage_operation"
+    "trait_methods":
+      - "ConfigStore::get_config_history"
+      - "ConfigStore::set_last_validated_revision"
+    "reason": "Master b07b25ee: get_config_history removed with the /config/diff route; set_last_validated_revision replaced by set_config_validation storing the full validation report."
+    "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086"
+    "candidate_uncommitted": true
+  - "classification": "removed_since_deploy"
+    "type": "schema_field"
+    "endpoint": "GET /admin/v1/config/draft"
+    "removed_fields":
+      - "apply_supported (PR-era field removed with the CurrentConfig abstraction); last_validation_error replaced by last_validation report object"
+    "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086"
+    "candidate_uncommitted": true
+  - "classification": "removed_since_deploy"
+    "type": "schema_field"
+    "endpoint": "GET /admin/v1/config/history"
+    "removed_fields":
+      - "config_toml"
+      - "summary (HistorySummary removed; entries carry revision + saved_at_unix_secs only)"
+    "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086"
+    "candidate_uncommitted": true
 "gaps":
   - "source_contract": "Global"
     "gap_id": "GAP-GLOBAL-01"
@@ -27606,15 +27428,15 @@
   - "source_contract": "Settings"
     "gap_id": "GAP-SET-01"
     "id": "GAP-SET-01"
-    "title": "No Config Diff Modal in UI (Backend-Only Endpoint)"
-    "description": "GET /admin/config/diff?from={revA}&to={revB} and qk.configDiff query key exist, but there is NO UI caller, modal, or comparison button in Admin Web. History rows in ConfigHistorySection are static table rows with no expansion or comparison triggers."
-    "resolution": "Confirmed absent in UI. Marked as API-BACKEND-CONFIG-DIFF with Web-Unreachable status; no fake UI modal should be generated."
+    "title": "Config Diff Endpoint Removed (Backend and UI)"
+    "description": "The legacy inventory documented GET /admin/config/diff?from={revA}&to={revB} with no UI caller. In the merged candidate the diff route and the qk.configDiff query key are deleted entirely; revision comparison is superseded by the save-file ConfirmDialog change review (config-review-list)."
+    "resolution": "Endpoint absent from merged routes.rs; no UI modal ever existed. Superseded by the review list in the save confirmation."
   - "source_contract": "Settings"
     "gap_id": "GAP-SET-02"
     "id": "GAP-SET-02"
     "title": "No Config Draft Discard API or UI Action"
-    "description": "Neither the backend axum routes (routes.rs) nor the frontend (settings.tsx) implements a draft discard / rollback endpoint or button. An operator must manually overwrite the draft text with the current configuration to discard draft changes."
-    "resolution": "Documented in state transition rules; no discard button exists in current source."
+    "description": "Neither the backend axum routes (routes.rs) nor the frontend (ConfigEditor.tsx) implements a draft discard/delete endpoint or button; a saved draft can only be overwritten by a new PUT or by saving to the config file."
+    "resolution": "Documented in state transition rules; no discard button exists in merged source."
   - "source_contract": "Settings"
     "gap_id": "GAP-AUD-01"
     "id": "GAP-AUD-01"
@@ -27674,3 +27496,33 @@
     "line": 209
     "description": "The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL clear contract is now implemented via explicit clear_base_url: true (omitted or null base_url preserves the override); the form captures the edit-time baseline so a mid-edit refetch cannot fabricate a clear, and an unconfirmed clear keeps the editor open with an error toast. Historical null-as-clear evidence remains a baseline limitation."
     "evidence": "crates/cc-lb-admin/src/v1/upstreams.rs:169-179 (UpstreamResponse fields), :1203-1207 (clear_base_url maps to Some(None); base_url maps to Some(url))"
+  - "source_contract": "Settings"
+    "gap_id": "GAP-SET-03"
+    "id": "GAP-SET-03"
+    "title": "Admin Token Guidance Card Removed"
+    "description": "The static-token admin guidance card (previously settings.tsx#SettingsPage:admin_token_view, item UI-SRC-0744A60F49D3) is absent from the merged route. Admin provider guidance now lives in the config editor Identity & access category (admin.auth.providers) and the self-lockout confirmation on save."
+    "resolution": "Retired item UI-SRC-0744A60F49D3; replacement coverage via ConfigEditorSection admin provider editing and save confirmation."
+  - "source_contract": "Settings"
+    "gap_id": "GAP-SET-04"
+    "id": "GAP-SET-04"
+    "title": "Runtime Apply and Hot Reload Actions Removed"
+    "description": "Apply Draft (UI-SRC-EDE5449D42BD / UI-SET-06 POST /admin/config/apply) and Trigger Daemon Reload (UI-SRC-EA3DE5874C4D / UI-SET-07 POST /admin/config/reload) are removed: master makes configuration startup-fixed. Replacement: Save to config file (UI-SET-15 POST /admin/v1/config/save) plus restart, with restart_required and the restart-drift banner communicating pending state."
+    "resolution": "Retired UI-SET-06 and UI-SET-07 in legacy_id_mapping; replacement action UI-SRC-9A3432FEB525."
+  - "source_contract": "Settings"
+    "gap_id": "GAP-SET-05"
+    "id": "GAP-SET-05"
+    "title": "Schema Coverage Checklist Removed"
+    "description": "The collapsible schema coverage checklist (UI-SET-13, settings.tsx#ConfigDraftSection:toggle_checklist) was removed with the raw-JSON textarea editor. The structured editor replaces it with per-section Advanced disclosures and category modified/overrides/error counts."
+    "resolution": "Retired UI-SET-13; replacement action UI-SRC-5F12838E8F4B (toggle_advanced)."
+  - "source_contract": "Settings"
+    "gap_id": "GAP-SET-06"
+    "id": "GAP-SET-06"
+    "title": "Restart-Required Static Matrix Removed"
+    "description": "The static RestartRequiredMatrix table (UI-SRC-625C96B0933F) listing 15 restart-required keys is removed. Restart semantics are now data-driven: ConfigEditorResponse.restart_required plus the \"Saved ... not applied yet — restart cc-lb\" banner driven by saved_at vs process uptime."
+    "resolution": "Retired item; replacement is the restart-drift Notice inside ConfigEditorSection."
+  - "source_contract": "Settings"
+    "gap_id": "GAP-SET-07"
+    "id": "GAP-SET-07"
+    "title": "Raw JSON Draft Textarea Replaced by Structured Editor"
+    "description": "The free-text JSON textarea draft editor was replaced by schema-driven structured field controls (components/settings-config/ConfigEditor.tsx + lib/configEditorModel.ts). UI-SET-14 is retained as the semantic draft-editing action (edit_field); malformed-JSON input classes no longer exist — invalid values surface via server validation issues instead."
+    "resolution": "UI-SET-14 re-anchored to ConfigEditorSection:edit_field; coverage dimension config_draft_text replaced by config_field_value."

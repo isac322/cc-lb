@@ -11,8 +11,8 @@ use cc_lb_storage_api::{
     ApiKeyRecord, AuditEntry, BackendKind, BucketKind, CacheKeepaliveConfig,
     CacheKeepaliveConfigSnapshot, CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord,
     CacheKeepaliveSessionStatus, CacheKeepaliveTerminalReason, CacheTtl, ClassifierConfig,
-    ConfigDraftState, HistoryEntry, HistorySummary, IssuedKey, JudgeResponseFormat, KeyStatus,
-    LlmJudgeConfig, OAuthCredentials, PrincipalCreate, PrincipalKind, PrincipalKindLite,
+    ConfigDraftState, HistoryEntry, IssuedKey, JudgeResponseFormat, KeyStatus, LlmJudgeConfig,
+    OAuthCredentials, PrincipalCreate, PrincipalKind, PrincipalKindLite,
     PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RequestCacheBreakpoint,
     RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventUpstream,
     StorageError, StoredApiKeyRecord, UsageRollup, UsageRollupKey, UsageRollupResolution,
@@ -195,18 +195,33 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         })),
         revision: 7,
         last_validated_revision: Some(6),
-        last_validation_error: Some("plugin missing".to_owned()),
+        last_validation: Some(json!({
+            "file": {
+                "valid": false,
+                "issues": [{
+                    "path": "plugins.entries[0].kind",
+                    "code": "unknown_variant",
+                    "message": "plugin missing",
+                    "severity": "error"
+                }]
+            },
+            "effective": { "valid": false, "issues": [] },
+            "filesystem": [],
+            "overrides": []
+        })),
         saved_at_unix_secs: Some(1_716_000_004),
     });
 
-    let summary = HistorySummary { tls_enabled: true };
-    assert_json_roundtrip(summary.clone());
-    assert_json_roundtrip(HistoryEntry {
-        revision: 8,
-        config_toml: "[timeouts]\nupstream_total_secs = 30".to_owned(),
-        applied_at_unix_secs: 1_716_000_005,
-        summary: summary.clone(),
-    });
+    assert_wire(
+        HistoryEntry {
+            revision: 8,
+            applied_at_unix_secs: 1_716_000_005,
+        },
+        json!({
+            "revision": 8,
+            "applied_at_unix_secs": 1_716_000_005
+        }),
+    );
 
     assert_json_roundtrip(UsageRollupKey {
         resolution: UsageRollupResolution::Hour,
@@ -358,6 +373,20 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
     });
     assert_json_roundtrip(CacheKeepaliveTerminalReason::UnsupportedProvider);
     assert_json_roundtrip(CacheTtl::Ttl1h);
+}
+
+#[test]
+fn config_draft_state_accepts_legacy_rows_without_validation_details() {
+    let state = serde_json::from_value::<ConfigDraftState>(json!({
+        "draft": { "timeouts": { "upstream_total_secs": 30 } },
+        "revision": 7,
+        "last_validated_revision": 6,
+        "saved_at_unix_secs": 1_716_000_004
+    }))
+    .unwrap();
+
+    assert_eq!(state.last_validation, None);
+    assert_eq!(state.last_validated_revision, Some(6));
 }
 
 #[test]

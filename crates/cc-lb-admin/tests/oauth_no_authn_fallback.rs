@@ -15,13 +15,16 @@ use tower::ServiceExt;
 fn test_state(storage: Arc<Storage>) -> AdminState {
     let config = Config::default();
     AdminState {
+        config_path: None,
+        startup_config_overrides: Default::default(),
         storage: Some(storage.clone()),
         key_store: Some(Arc::new(KeyStore::new(storage.clone()))),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
-        config: Arc::new(Config::default()),
+        config: Arc::new(config),
+        dynamic_view_rebinder: None,
         scheduler: None,
         admin_auth: crate::admin_test_common::static_token_auth("test-token"),
         lazy_refresher: None,
@@ -50,7 +53,7 @@ async fn admin_401_sleeps_100ms() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/config/current")
+        .uri("/admin/v1/config/editor")
         .header("Authorization", "Bearer wrong-token")
         .body(Body::empty())
         .unwrap();
