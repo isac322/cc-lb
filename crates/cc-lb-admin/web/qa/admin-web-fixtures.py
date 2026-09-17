@@ -34,7 +34,7 @@ from typing import Any, Iterable, Mapping, Sequence
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_ROOT = ROOT / "target" / "keepalive-qa" / "admin-web-fixtures"
 DEFAULT_MANIFEST = DEFAULT_ROOT / "fixture-manifest.json"
-FIXTURE_VERSION = 1
+FIXTURE_VERSION = 2
 TOKEN_ENV = "CC_LB_ADMIN_TOKEN"
 MASTER_KEY_ENV = "CC_LB_MASTER_KEY"
 CLUSTER_TOKEN_ENV = "CC_LB_CLUSTER_TOKEN"
@@ -277,15 +277,109 @@ def fixture_root(raw: str) -> Path:
     return path
 
 
+def owned_path(root: Path, path: Path) -> Path:
+    if path == root or root not in path.parents:
+        raise FixtureError("fixture state path must be strictly beneath its root")
+    current = root
+    for part in path.relative_to(root).parts:
+        current = current / part
+        if current.is_symlink():
+            raise FixtureError(f"fixture state cannot contain symlinks: {current}")
+    return path
+
+
+def require_fixture_paths(manifest: Mapping[str, Any], root: Path) -> None:
+    expected = [
+        (Path(manifest["config"]["path"]), root / "cc-lb.toml"),
+        (Path(manifest.get("runtime_data_dir", "")), root / "data"),
+    ]
+    if manifest["engine"] == "sqlite":
+        expected.append((Path(manifest["database"]["sqlite_path"]), root / "storage.sqlite"))
+        owned_path(root, root / "storage.scheduler.sqlite")
+        for name in ("storage.sqlite", "storage.scheduler.sqlite"):
+            for suffix in ("-wal", "-shm"):
+                owned_path(root, root / (name + suffix))
+    for actual, canonical in expected:
+        if actual != canonical:
+            raise FixtureError(f"fixture state path must be {canonical}")
+        owned_path(root, actual)
+    for key, filename in (
+        (TOKEN_ENV, "admin-token"),
+        (MASTER_KEY_ENV, "master-key"),
+        (CLUSTER_TOKEN_ENV, "cluster-token"),
+    ):
+        value = manifest.get("secret_refs", {}).get(key)
+        if value is not None:
+            if Path(value) != root / filename:
+                raise FixtureError("fixture credential reference escapes its canonical location")
+            owned_path(root, Path(value))
+
+
+def runtime_inventory(root: Path, directory: Path) -> dict[str, Any]:
+    owned_path(root, directory)
+    if not directory.exists():
+        return {"present": False, "entries": []}
+    if not directory.is_dir():
+        raise FixtureError("fixture runtime state must be a directory")
+    entries: list[dict[str, Any]] = []
+
+    def visit(parent: Path) -> None:
+        for child in sorted(parent.iterdir()):
+            owned_path(root, child)
+            relative = str(child.relative_to(directory))
+            if child.is_dir():
+                entries.append({"path": relative, "kind": "directory"})
+                visit(child)
+            elif child.is_file():
+                entries.append({
+                    "path": relative,
+                    "kind": "file",
+                    "sha256": sha256_bytes(child.read_bytes()),
+                })
+            else:
+                raise FixtureError(f"unsupported runtime state entry: {child}")
+
+    visit(directory)
+    return {"present": True, "entries": entries}
+
+
+def backup_sqlite(source: Path, target: Path) -> None:
+    source_connection = sqlite3.connect(
+        source.as_uri() + "?mode=ro", uri=True, timeout=30
+    )
+    target_connection = sqlite3.connect(target)
+    try:
+        source_connection.backup(target_connection)
+    finally:
+        target_connection.close()
+        source_connection.close()
+    os.chmod(target, 0o600)
+
+
+def require_snapshot_config(path: Path, root: Path, engine: str) -> None:
+    with path.open("rb") as stream:
+        config = tomllib.load(stream)
+    if config.get("runtime", {}).get("data_dir") != str(root / "data"):
+        raise FixtureError("snapshot config must keep runtime.data_dir inside its fixture")
+    storage = config.get("storage", {})
+    if storage.get("kind") != engine:
+        raise FixtureError("snapshot storage engine does not match the fixture")
+    if engine == "sqlite" and storage.get("path") != str(root / "storage.sqlite"):
+        raise FixtureError("snapshot config must keep the SQLite path inside its fixture")
+
+
 def load_manifest(raw: str) -> tuple[Path, dict[str, Any]]:
     path = Path(raw).expanduser().resolve()
     manifest = load_json(path)
     if manifest.get("fixture_version") != FIXTURE_VERSION:
-        raise FixtureError(f"fixture version must be {FIXTURE_VERSION}")
+        raise FixtureError(
+            f"fixture version must be {FIXTURE_VERSION}; recreate legacy fixtures because their snapshots omit scheduler/runtime state"
+        )
     root = fixture_root(str(manifest.get("root", "")))
     if root not in path.parents:
         raise FixtureError("manifest must be beneath its declared fixture root")
-    manifest["source_contracts"] = SOURCE_CONTRACTS
+    require_fixture_paths(manifest, root)
+    manifest.pop("source_contracts", None)
     manifest["inventory_reconciliation"] = INVENTORY_RECONCILIATION
     manifest["coverage_groups"] = COVERAGE_GROUPS
     manifest["get_side_effects"] = GET_SIDE_EFFECTS
@@ -456,6 +550,9 @@ def config_text(
 ) -> str:
     lines = [
         "# Generated disposable Admin Web QA configuration.",
+        "[runtime]",
+        f"data_dir = {toml_string(str(root / 'data'))}",
+        "",
         "[listener]",
         f"proxy_addr = {toml_string(proxy_addr)}",
         f"admin_addr = {toml_string(admin_addr)}",
@@ -667,6 +764,7 @@ def init_fixture(args: argparse.Namespace) -> None:
             }
         ),
         "config": {"path": str(config_path), "sha256": sha256_bytes(config_path.read_bytes())},
+        "runtime_data_dir": str(root / "data"),
         "admin_origin": f"http://{admin_host}:{admin_port}",
         "secret_refs": {
             TOKEN_ENV: str(token_path),
@@ -1426,9 +1524,9 @@ def snapshot_fixture(args: argparse.Namespace) -> None:
     if name in manifest.get("snapshots", {}):
         raise FixtureError(f"snapshot is already registered: {name}")
     root = fixture_root(manifest["root"])
-    snapshots = root / "snapshots"
+    snapshots = owned_path(root, root / "snapshots")
     snapshots.mkdir(mode=0o700, exist_ok=True)
-    final_directory = snapshots / name
+    final_directory = owned_path(root, snapshots / name)
     if final_directory.exists():
         raise FixtureError(f"snapshot directory already exists: {final_directory}")
     stage_directory = snapshots / f".{name}.{uuid.uuid4().hex}.tmp"
@@ -1442,6 +1540,8 @@ def snapshot_fixture(args: argparse.Namespace) -> None:
     try:
         staged_config = stage_directory / "cc-lb.toml"
         copy_mode_0600(Path(manifest["config"]["path"]), staged_config)
+        require_snapshot_config(staged_config, root, manifest["engine"])
+        scheduler: dict[str, Any] = {"present": False}
         if manifest["engine"] == "sqlite":
             source = Path(manifest["database"]["sqlite_path"])
             if not source.exists():
@@ -1449,24 +1549,28 @@ def snapshot_fixture(args: argparse.Namespace) -> None:
                     "SQLite database does not exist; start the isolated app once to apply migrations"
                 )
             staged_database = stage_directory / "storage.sqlite"
-            source_connection = sqlite3.connect(
-                f"file:{source}?mode=ro",
-                uri=True,
-                timeout=30,
-            )
-            target_connection = sqlite3.connect(staged_database)
-            try:
-                source_connection.backup(target_connection)
-            finally:
-                target_connection.close()
-                source_connection.close()
-            os.chmod(staged_database, 0o600)
+            backup_sqlite(source, staged_database)
+            scheduler_source = root / "storage.scheduler.sqlite"
+            if scheduler_source.exists():
+                scheduler_copy = stage_directory / "storage.scheduler.sqlite"
+                backup_sqlite(scheduler_source, scheduler_copy)
+                scheduler = {
+                    "present": True,
+                    "path": str(final_directory / scheduler_copy.name),
+                    "sha256": sha256_bytes(scheduler_copy.read_bytes()),
+                }
             database_extra: dict[str, Any] = {}
         else:
             parts = postgres_parts(postgres_url(manifest))
             staged_database = stage_directory / "database.pgdump"
             postgres_dump(manifest, parts, staged_database)
             database_extra = {"database": parts["database"]}
+        runtime_source = Path(manifest["runtime_data_dir"])
+        runtime = runtime_inventory(root, runtime_source)
+        if runtime["present"]:
+            shutil.copytree(runtime_source, stage_directory / "data")
+            if runtime_inventory(root, stage_directory / "data") != runtime:
+                raise FixtureError("runtime state changed during snapshot")
         config_sha = sha256_bytes(staged_config.read_bytes())
         database_sha = sha256_bytes(staged_database.read_bytes())
         stage_directory.replace(final_directory)
@@ -1476,6 +1580,9 @@ def snapshot_fixture(args: argparse.Namespace) -> None:
     final_config = final_directory / staged_config.name
     final_database = final_directory / staged_database.name
     snapshot = {
+        "snapshot_version": FIXTURE_VERSION,
+        "scheduler_database": scheduler,
+        "runtime": runtime,
         "created_at_utc": utc_now(),
         "state": snapshot_state,
         "fixture_sha256": manifest.get("fixture_sha256"),
@@ -1548,45 +1655,121 @@ def reset_fixture(args: argparse.Namespace) -> None:
     snapshot = manifest.get("snapshots", {}).get(name)
     if not isinstance(snapshot, dict):
         raise FixtureError(f"unknown snapshot {name}")
-    config_source = Path(snapshot["config"]["path"])
-    if sha256_bytes(config_source.read_bytes()) != snapshot["config"]["sha256"]:
-        raise FixtureError("config snapshot checksum mismatch")
-    config_target = Path(manifest["config"]["path"])
-    restore_file(config_source, config_target)
-    database_source = Path(snapshot["database"]["path"])
-    if sha256_bytes(database_source.read_bytes()) != snapshot["database"]["sha256"]:
-        raise FixtureError("database snapshot checksum mismatch")
-    if manifest["engine"] == "sqlite":
-        target = Path(manifest["database"]["sqlite_path"])
-        restore_file(database_source, target)
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(str(target) + suffix)
-            if sidecar.exists():
-                sidecar.unlink()
-    else:
-        parts = postgres_parts(postgres_url(manifest))
-        if parts["database"] != snapshot["database"]["database"]:
+    if snapshot.get("snapshot_version") != FIXTURE_VERSION:
+        raise FixtureError("legacy snapshot is incomplete; recreate the fixture and snapshot")
+    root = fixture_root(manifest["root"])
+    snapshot_directory = owned_path(root, root / "snapshots" / name)
+    if snapshot.get("atomic_directory") != str(snapshot_directory):
+        raise FixtureError("snapshot directory does not match its registered name")
+    artifacts: dict[str, Path] = {}
+    for key, filename in (
+        ("config", "cc-lb.toml"),
+        ("database", "storage.sqlite" if manifest["engine"] == "sqlite" else "database.pgdump"),
+    ):
+        source = owned_path(root, snapshot_directory / filename)
+        if snapshot[key]["path"] != str(source):
+            raise FixtureError("snapshot artifact path escapes its registered directory")
+        if not source.is_file() or sha256_bytes(source.read_bytes()) != snapshot[key]["sha256"]:
+            raise FixtureError(f"{key} snapshot checksum mismatch")
+        artifacts[key] = source
+    require_snapshot_config(artifacts["config"], root, manifest["engine"])
+    scheduler = snapshot.get("scheduler_database")
+    runtime = snapshot.get("runtime")
+    if (
+        not isinstance(scheduler, dict)
+        or type(scheduler.get("present")) is not bool
+        or not isinstance(runtime, dict)
+        or type(runtime.get("present")) is not bool
+        or not isinstance(runtime.get("entries"), list)
+    ):
+        raise FixtureError("snapshot is missing explicit auxiliary-state presence metadata")
+    scheduler_source = owned_path(root, snapshot_directory / "storage.scheduler.sqlite")
+    if scheduler["present"]:
+        if manifest["engine"] != "sqlite" or scheduler.get("path") != str(scheduler_source):
+            raise FixtureError("invalid scheduler snapshot path or engine")
+        if not scheduler_source.is_file() or sha256_bytes(scheduler_source.read_bytes()) != scheduler.get("sha256"):
+            raise FixtureError("scheduler snapshot checksum mismatch")
+    elif scheduler_source.exists():
+        raise FixtureError("unexpected scheduler artifact in absent-state snapshot")
+    runtime_source = owned_path(root, snapshot_directory / "data")
+    if runtime_inventory(root, runtime_source) != runtime:
+        raise FixtureError("runtime snapshot contents do not match their manifest")
+    runtime_target = Path(manifest["runtime_data_dir"])
+    runtime_inventory(root, runtime_target)
+    # Validate every source and destination before changing config, either DB,
+    # or runtime state. A tampered auxiliary snapshot cannot partially reset.
+    stage = owned_path(root, root / f".restore-{uuid.uuid4().hex}")
+    stage.mkdir(mode=0o700)
+    backups = stage / "previous"
+    backups.mkdir(mode=0o700)
+    replacements: list[tuple[Path, Path | None]] = []
+    moved: list[tuple[Path, Path]] = []
+    installed: list[Path] = []
+    cleanup_stage = False
+    try:
+        staged_config = stage / "cc-lb.toml"
+        copy_mode_0600(artifacts["config"], staged_config)
+        replacements.append((Path(manifest["config"]["path"]), staged_config))
+        if manifest["engine"] == "sqlite":
+            staged_database = stage / "storage.sqlite"
+            copy_mode_0600(artifacts["database"], staged_database)
+            replacements.append((Path(manifest["database"]["sqlite_path"]), staged_database))
+            staged_scheduler = None
+            if scheduler["present"]:
+                staged_scheduler = stage / "storage.scheduler.sqlite"
+                copy_mode_0600(scheduler_source, staged_scheduler)
+            replacements.append((root / "storage.scheduler.sqlite", staged_scheduler))
+            for filename in ("storage.sqlite", "storage.scheduler.sqlite"):
+                for suffix in ("-wal", "-shm"):
+                    replacements.append((root / (filename + suffix), None))
+        staged_runtime = None
+        if runtime["present"]:
+            staged_runtime = stage / "data"
+            shutil.copytree(runtime_source, staged_runtime)
+        replacements.append((runtime_target, staged_runtime))
+        if manifest["engine"] == "postgres":
+            parts = postgres_parts(postgres_url(manifest))
+            if parts["database"] != snapshot["database"]["database"]:
+                raise FixtureError("snapshot database name does not match current QA database")
+            postgres_restore(manifest, parts, artifacts["database"])
+        for target, staged in replacements:
+            owned_path(root, target)
+            if target.exists():
+                backup = backups / target.name
+                target.replace(backup)
+                moved.append((target, backup))
+            if staged is not None:
+                staged.replace(target)
+                installed.append(target)
+        manifest["state"] = snapshot.get("state", "restored")
+        manifest["last_reset"] = {
+            "name": name,
+            "at_utc": utc_now(),
+            "fixture_sha256": snapshot.get("fixture_sha256"),
+        }
+        atomic_json(manifest_path, manifest)
+        cleanup_stage = True
+    except Exception:
+        try:
+            for target in reversed(installed):
+                if target.is_dir():
+                    shutil.rmtree(target)
+                elif target.exists():
+                    target.unlink()
+            for target, backup in reversed(moved):
+                backup.replace(target)
+        except Exception as rollback_error:
             raise FixtureError(
-                "snapshot database name does not match current QA database"
-            )
-        postgres_restore(manifest, parts, database_source)
-    manifest["state"] = snapshot.get("state", "restored")
-    manifest["last_reset"] = {
-        "name": name,
-        "at_utc": utc_now(),
-        "fixture_sha256": snapshot.get("fixture_sha256"),
-    }
-    atomic_json(manifest_path, manifest)
+                f"reset rollback incomplete; recovery files retained at {stage}"
+            ) from rollback_error
+        cleanup_stage = True
+        raise
+    finally:
+        if cleanup_stage:
+            shutil.rmtree(stage, ignore_errors=True)
     print(f"restored isolated snapshot {name}; restart cc-lb before use")
 
 
-def restore_file(source: Path, target: Path) -> None:
-    if not source.exists():
-        raise FixtureError(f"snapshot artifact missing: {source}")
-    temporary = target.with_suffix(target.suffix + f".{uuid.uuid4().hex}.restore")
-    shutil.copyfile(source, temporary)
-    os.chmod(temporary, 0o600)
-    temporary.replace(target)
 
 
 def proof_fixture(args: argparse.Namespace) -> None:
