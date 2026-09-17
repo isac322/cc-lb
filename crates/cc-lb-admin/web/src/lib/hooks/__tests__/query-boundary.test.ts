@@ -15,9 +15,15 @@ import { createElement, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   type PluginChainEntry,
+  type Principal,
   type Upstream,
   useDeletePlugin,
   usePluginChain,
+  usePrincipals,
+  usePrincipalWritePending,
+  useRouterTerminalStrategy,
+  useSetAllowedModels,
+  useUpdateRouterTerminalStrategy,
   useUpstreams,
 } from '../../queries';
 import { usePolledData } from '../../usePolledData';
@@ -237,6 +243,149 @@ describe('query observer boundaries', () => {
       expect(result.current.chainEntries).toEqual([]);
       expect(result.current.upstream?.spec_revision).toBe(8);
       expect(result.current.upstream?.warmup_dialect_plugin).toBeNull();
+    });
+  });
+
+  it('keeps principal writes pending until Router has the new server revision', async () => {
+    const principalId = 'principal-1';
+    const principalRecord = (revision: number): Principal => ({
+      id: principalId,
+      name: 'Principal 1',
+      kind: 'machine',
+      enabled: true,
+      revision,
+      allowed_models: revision > 7 ? ['claude-sonnet'] : [],
+      allowed_upstreams: [],
+      default_limits: [],
+      cache_keepalive: null,
+    });
+    let revision = 7;
+    let strategy = 'first-pick';
+    let terminalGetCount = 0;
+    let resolveTerminalRefresh: ((response: Response) => void) | undefined;
+    let terminalUpdateIfMatch: string | null = null;
+
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+
+        if (method === 'GET' && url === '/admin/v1/principals') {
+          return jsonResponse({ principals: [principalRecord(revision)] });
+        }
+        if (
+          method === 'GET' &&
+          url === `/admin/v1/principals/${principalId}/router-terminal`
+        ) {
+          terminalGetCount += 1;
+          if (terminalGetCount === 2) {
+            return new Promise<Response>((resolve) => {
+              resolveTerminalRefresh = resolve;
+            });
+          }
+          return jsonResponse({ strategy, revision });
+        }
+        if (
+          method === 'PUT' &&
+          url === `/admin/v1/principals/${principalId}/allowed_models`
+        ) {
+          revision = 8;
+          return jsonResponse(principalRecord(revision));
+        }
+        if (
+          method === 'PUT' &&
+          url === `/admin/v1/principals/${principalId}/router-terminal`
+        ) {
+          terminalUpdateIfMatch = new Headers(init?.headers).get('If-Match');
+          if (terminalUpdateIfMatch !== 'W/"8"') {
+            return new Response(JSON.stringify({ error: 'stale_revision' }), {
+              status: 409,
+              headers: { 'Content-Type': 'application/json' },
+            });
+          }
+          strategy = 'random';
+          revision = 9;
+          return jsonResponse({ strategy, revision });
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+    const { result } = renderHook(
+      () => {
+        const principals = usePrincipals();
+        const principalWritePending = usePrincipalWritePending(principalId);
+        const terminal = useRouterTerminalStrategy(principalId);
+        const setAllowed = useSetAllowedModels();
+        const updateTerminal = useUpdateRouterTerminalStrategy();
+        return {
+          principalRevision: principals.data?.principals[0]?.revision,
+          terminalRevision: terminal.data?.revision,
+          terminalStrategy: terminal.data?.strategy,
+          principalWritePending,
+          setAllowed: setAllowed.mutateAsync,
+          updateTerminal: updateTerminal.mutateAsync,
+        };
+      },
+      {
+        wrapper: ({ children }: { readonly children: ReactNode }) =>
+          createElement(QueryClientProvider, { client }, children),
+      },
+    );
+
+    await waitFor(() => {
+      expect(result.current.principalRevision).toBe(7);
+      expect(result.current.terminalRevision).toBe(7);
+    });
+
+    let allowedWrite!: Promise<Principal>;
+    act(() => {
+      allowedWrite = result.current.setAllowed({
+        id: principalId,
+        models: ['claude-sonnet'],
+        expected_revision: 7,
+      });
+    });
+
+    await waitFor(() => {
+      expect(resolveTerminalRefresh).toBeDefined();
+      expect(result.current.principalRevision).toBe(8);
+      expect(result.current.terminalRevision).toBe(7);
+      expect(result.current.principalWritePending).toBe(1);
+    });
+
+    await act(async () => {
+      resolveTerminalRefresh?.(jsonResponse({ strategy, revision }));
+      await allowedWrite;
+    });
+
+    await waitFor(() => {
+      expect(result.current.terminalRevision).toBe(8);
+      expect(result.current.principalWritePending).toBe(0);
+    });
+
+    await act(async () => {
+      await result.current.updateTerminal({
+        id: principalId,
+        strategy: 'random',
+        revision: result.current.terminalRevision!,
+      });
+    });
+
+    expect(terminalUpdateIfMatch).toBe('W/"8"');
+    await waitFor(() => {
+      expect(result.current.terminalRevision).toBe(9);
+      expect(result.current.terminalStrategy).toBe('random');
     });
   });
 });
