@@ -13,6 +13,8 @@ use tower::ServiceExt;
 fn test_state() -> AdminState {
     let config = Config::default();
     AdminState {
+        config_path: None,
+        startup_config_overrides: Default::default(),
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
@@ -20,6 +22,7 @@ fn test_state() -> AdminState {
         lifecycle: None,
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),
+        dynamic_view_rebinder: None,
         scheduler: None,
         admin_auth: crate::admin_test_common::static_token_auth("test-token"),
         lazy_refresher: None,

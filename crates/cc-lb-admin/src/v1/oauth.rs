@@ -212,9 +212,8 @@ async fn start_oauth(
     }
     let upstream_revision = upstream.revision;
 
-    let config = state.config.current_config();
     let claude_default;
-    let oauth = match config.oauth.anthropic.as_ref() {
+    let oauth = match state.config.oauth.anthropic.as_ref() {
         Some(oauth) => oauth,
         None => {
             claude_default = claude_code_default_oauth();
@@ -314,9 +313,8 @@ async fn start_oauth_draft(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
 ) -> Response {
-    let config = state.config.current_config();
     let claude_default;
-    let oauth = match config.oauth.anthropic.as_ref() {
+    let oauth = match state.config.oauth.anthropic.as_ref() {
         Some(oauth) => oauth,
         None => {
             claude_default = claude_code_default_oauth();

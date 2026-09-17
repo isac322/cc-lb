@@ -55,6 +55,8 @@ impl Fixture {
         let aead = Arc::new(AeadService::from_master_key(MASTER_KEY));
         let config = test_config(oauth_addr);
         let state = AdminState {
+            config_path: None,
+            startup_config_overrides: Default::default(),
             storage: Some(storage.clone()),
             key_store: Some(admin_test_common::key_store(storage.clone())),
             aead: Arc::clone(&aead),
@@ -66,6 +68,7 @@ impl Fixture {
             data_dir: None,
             warmup_dialect_dispatcher: None,
             dynamic_view: admin_test_common::dynamic_view_holder(&config),
+            dynamic_view_rebinder: None,
             config: Arc::new(config),
             scheduler: None,
             admin_auth: crate::admin_test_common::static_token_auth("test-token"),

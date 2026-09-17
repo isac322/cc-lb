@@ -169,6 +169,14 @@ fn storage_roundtrips_postgres() {
 }
 
 #[test]
+fn config_draft_optimistic_revision_postgres() {
+    run_postgres_scenario(
+        "config_draft_optimistic_revision",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::config_draft_optimistic_revision,
+    );
+}
+
+#[test]
 fn pool_quota_history_fable_roundtrip_postgres() {
     run_postgres_scenario(
         "pool_quota_history_fable_roundtrip",

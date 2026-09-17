@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{
-    ConfigDraftState, ConfigStore, HistoryEntry, HistorySummary, StorageError, StorageResult,
-};
+use cc_lb_storage_api::{ConfigDraftState, ConfigStore, HistoryEntry, StorageError, StorageResult};
 use sqlx::Row;
 
 use crate::{SqliteStorage, map_sqlx_error};
@@ -45,7 +43,7 @@ impl ConfigStore for SqliteStorage {
             })?;
         new.revision = revision;
         new.last_validated_revision = None;
-        new.last_validation_error = None;
+        new.last_validation = None;
 
         let payload = serde_json::to_string(&new)?;
         sqlx::query(
@@ -61,10 +59,11 @@ impl ConfigStore for SqliteStorage {
         Ok(revision)
     }
 
-    async fn set_last_validated_revision(
+    async fn set_config_validation(
         &self,
         revision: u64,
-        error: Option<String>,
+        valid: bool,
+        validation: serde_json::Value,
     ) -> StorageResult<()> {
         let mut tx = self.begin_immediate().await?;
         let mut state = read_config_draft_in_tx(&mut tx).await?;
@@ -72,15 +71,8 @@ impl ConfigStore for SqliteStorage {
             return Err(conflict("stale config draft revision"));
         }
 
-        match error {
-            Some(error) => {
-                state.last_validation_error = Some(error);
-            }
-            None => {
-                state.last_validated_revision = Some(revision);
-                state.last_validation_error = None;
-            }
-        }
+        state.last_validated_revision = valid.then_some(revision);
+        state.last_validation = Some(validation);
 
         let payload = serde_json::to_string(&state)?;
         sqlx::query(
@@ -98,15 +90,11 @@ impl ConfigStore for SqliteStorage {
     async fn append_config_history(
         &self,
         revision: u64,
-        config_toml: String,
         applied_at_unix_secs: u64,
-        summary: HistorySummary,
     ) -> StorageResult<()> {
         let entry = HistoryEntry {
             revision,
-            config_toml,
             applied_at_unix_secs,
-            summary,
         };
         let payload = serde_json::to_string(&entry)?;
         let mut tx = self.begin_immediate().await?;
@@ -152,20 +140,6 @@ impl ConfigStore for SqliteStorage {
                 serde_json::from_str(&payload).map_err(Into::into)
             })
             .collect()
-    }
-
-    async fn get_config_history(&self, revision: u64) -> StorageResult<Option<HistoryEntry>> {
-        let payload: Option<String> =
-            sqlx::query_scalar("SELECT payload FROM config_history_v1 WHERE id = ?")
-                .bind(revision.to_string())
-                .fetch_optional(self.pool())
-                .await
-                .map_err(map_sqlx_error)?;
-
-        payload
-            .map(|payload| serde_json::from_str(&payload))
-            .transpose()
-            .map_err(Into::into)
     }
 }
 

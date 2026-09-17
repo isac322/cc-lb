@@ -22,8 +22,6 @@ fn describes_all_required_metrics() {
             "cc_lb_panic_total",
             "cc_lb_drain_in_progress",
             "cc_lb_drain_force_closed_total",
-            "cc_lb_config_reload_total",
-            "cc_lb_config_reload_failed_total",
             "cc_lb_tls_reload_total",
             "cc_lb_sse_events_total",
             "cc_lb_plugin_call_duration_seconds",
@@ -69,7 +67,7 @@ fn describes_all_required_metrics() {
         ]
     );
 
-    assert_eq!(definitions.len(), 53);
+    assert_eq!(definitions.len(), 51);
     assert_eq!(definitions[0].kind, MetricKind::Counter);
     assert_eq!(definitions[1].kind, MetricKind::Histogram);
     assert_eq!(definitions[2].kind, MetricKind::Gauge);

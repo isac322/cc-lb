@@ -97,8 +97,15 @@ pub struct AdminPorts {
     pub replica_identity: Option<ReplicaIdentity>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct StartupConfigOverrides {
+    pub runtime_data_dir: Option<PathBuf>,
+}
+
 #[derive(Clone)]
 pub struct AdminState {
+    pub config_path: Option<PathBuf>,
+    pub startup_config_overrides: StartupConfigOverrides,
     pub storage: Option<Arc<dyn Storage>>,
     pub key_store: Option<Arc<KeyStore>>,
     pub aead: Arc<AeadService>,
@@ -110,55 +117,14 @@ pub struct AdminState {
     pub data_dir: Option<PathBuf>,
     pub warmup_dialect_dispatcher: Option<Arc<dyn WarmupDialectDispatcher>>,
     pub dynamic_view: Arc<DynamicViewHolder>,
-    pub config: Arc<dyn CurrentConfig>,
+    pub config: Arc<Config>,
+    pub dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,
     pub scheduler: Option<cc_lb_scheduler::admin::SchedulerAdminHandle>,
     pub admin_auth: Arc<auth::AdminAuthenticator>,
     pub start_time: std::time::Instant,
     pub event_bus: Option<Arc<dyn RequestEventBus>>,
     pub storage_tail: tokio::sync::broadcast::Sender<events::StorageTailUpdate>,
     pub clock: ClockHandle,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigDraftError {
-    #[error("config draft/apply is unavailable for this server configuration")]
-    Unavailable,
-    #[error("no config draft is pending")]
-    MissingDraft,
-    #[error("invalid draft config: {0}")]
-    Invalid(String),
-}
-
-pub trait CurrentConfig: Send + Sync {
-    fn current_config(&self) -> Arc<Config>;
-
-    /// Whether this provider supports applying saved drafts. Validation and
-    /// authorization requirements still apply independently.
-    fn supports_apply(&self) -> bool {
-        false
-    }
-
-    fn put_draft_config(&self, _config: Config) -> Result<(), ConfigDraftError> {
-        Err(ConfigDraftError::Unavailable)
-    }
-
-    fn apply_draft_config(&self) -> Result<Arc<Config>, ConfigDraftError> {
-        Err(ConfigDraftError::Unavailable)
-    }
-
-    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
-        None
-    }
-}
-
-pub trait ConfigReloader: Send + Sync {
-    fn reload_now(&self) -> Result<(), String>;
-}
-
-impl CurrentConfig for Config {
-    fn current_config(&self) -> Arc<Config> {
-        Arc::new(self.clone())
-    }
 }
 
 pub fn router(state: AdminState) -> Router {

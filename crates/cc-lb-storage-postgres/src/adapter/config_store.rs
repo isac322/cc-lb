@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{
-    ConfigDraftState, ConfigStore, HistoryEntry, HistorySummary, StorageResult,
-};
+use cc_lb_storage_api::{ConfigDraftState, ConfigStore, HistoryEntry, StorageResult};
 use serde_json::Value;
 use sqlx::Row;
 
@@ -39,27 +37,38 @@ impl ConfigStore for PostgresStorage {
         })?;
         new.revision = revision;
         new.last_validated_revision = None;
-        new.last_validation_error = None;
+        new.last_validation = None;
         let config = serde_json::to_value(&new)?;
 
-        let stored_revision = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO config_draft_v1 (id, config, revision, updated_at)              SELECT 'singleton', $1, $2, NOW() WHERE $3 = 0              ON CONFLICT (id) DO UPDATE              SET config = EXCLUDED.config, updated_at = NOW(),              revision = config_draft_v1.revision + 1              WHERE config_draft_v1.revision = $3              RETURNING revision",
-        )
-        .bind(config)
-        .bind(u64_to_i64(revision, "config revision")?)
-        .bind(u64_to_i64(expected_revision, "expected config revision")?)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
-        .ok_or_else(|| conflict("stale config draft revision"))?;
+        let statement = if expected_revision == 0 {
+            "INSERT INTO config_draft_v1 (id, config, revision, updated_at)
+             VALUES ('singleton', $1, $2, NOW())
+             ON CONFLICT (id) DO UPDATE
+             SET config = EXCLUDED.config, revision = EXCLUDED.revision, updated_at = NOW()
+             WHERE config_draft_v1.revision = $3
+             RETURNING revision"
+        } else {
+            "UPDATE config_draft_v1 SET config = $1, revision = $2, updated_at = NOW()
+             WHERE id = 'singleton' AND revision = $3
+             RETURNING revision"
+        };
+        let stored_revision = sqlx::query_scalar::<_, i64>(statement)
+            .bind(config)
+            .bind(u64_to_i64(revision, "config revision")?)
+            .bind(u64_to_i64(expected_revision, "expected config revision")?)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?
+            .ok_or_else(|| conflict("stale config draft revision"))?;
 
         Ok(i64_to_u64(stored_revision, "config revision")?)
     }
 
-    async fn set_last_validated_revision(
+    async fn set_config_validation(
         &self,
         revision: u64,
-        error: Option<String>,
+        valid: bool,
+        validation: Value,
     ) -> StorageResult<()> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let row =
@@ -79,19 +88,12 @@ impl ConfigStore for PostgresStorage {
             return Err(conflict("stale config draft revision"));
         }
 
-        match error {
-            Some(error) => {
-                state.last_validation_error = Some(error);
-            }
-            None => {
-                state.last_validated_revision = Some(revision);
-                state.last_validation_error = None;
-            }
-        }
+        state.last_validated_revision = valid.then_some(revision);
+        state.last_validation = Some(validation);
 
         let config = serde_json::to_value(&state)?;
         sqlx::query(
-            "INSERT INTO config_draft_v1 (id, config, revision, updated_at)              VALUES ('singleton', $1, $2, NOW())              ON CONFLICT (id) DO UPDATE              SET config = EXCLUDED.config, revision = EXCLUDED.revision, updated_at = NOW()",
+            "INSERT INTO config_draft_v1 (id, config, revision, updated_at) VALUES ('singleton', $1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config, revision = EXCLUDED.revision, updated_at = NOW()",
         )
         .bind(config)
         .bind(u64_to_i64(revision, "config revision")?)
@@ -105,15 +107,11 @@ impl ConfigStore for PostgresStorage {
     async fn append_config_history(
         &self,
         revision: u64,
-        config_toml: String,
         applied_at_unix_secs: u64,
-        summary: HistorySummary,
     ) -> StorageResult<()> {
         let entry = HistoryEntry {
             revision,
-            config_toml,
             applied_at_unix_secs,
-            summary,
         };
         let config = serde_json::to_value(&entry)?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
@@ -153,20 +151,5 @@ impl ConfigStore for PostgresStorage {
         rows.into_iter()
             .map(|config| serde_json::from_value(config).map_err(Into::into))
             .collect()
-    }
-
-    async fn get_config_history(&self, revision: u64) -> StorageResult<Option<HistoryEntry>> {
-        let config = sqlx::query_scalar::<_, Value>(
-            "SELECT config FROM config_history_v1 WHERE revision = $1",
-        )
-        .bind(u64_to_i64(revision, "history revision")?)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        config
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(Into::into)
     }
 }

@@ -179,6 +179,8 @@ pub async fn spawn_admin_server_with_clock_and_auth(
     let config = Config::default();
     let dynamic_view = dynamic_view_holder(&config);
     let state = cc_lb_admin::AdminState {
+        config_path: None,
+        startup_config_overrides: Default::default(),
         storage: Some(storage.clone()),
         key_store: Some(key_store(storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
@@ -191,6 +193,7 @@ pub async fn spawn_admin_server_with_clock_and_auth(
         warmup_dialect_dispatcher: None,
         dynamic_view: dynamic_view.clone(),
         config: Arc::new(config),
+        dynamic_view_rebinder: None,
         scheduler: None,
         admin_auth,
         start_time: std::time::Instant::now(),

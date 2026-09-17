@@ -46,6 +46,31 @@ cert_path = "/definitely/missing/cert.pem"
 }
 
 #[test]
+fn missing_sqlite_parent_fails_with_field_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let sqlite_path = dir.path().join("missing").join("storage.sqlite");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[storage]
+kind = "sqlite"
+path = "{}"
+"#,
+            crate::common::toml_path(&sqlite_path)
+        ),
+    )
+    .unwrap();
+
+    let error = Config::load(&config_path).unwrap_err().to_string();
+
+    assert!(
+        error.contains("storage.path: parent directory does not exist"),
+        "{error}"
+    );
+}
+
+#[test]
 fn encrypted_storage_retains_master_key_env_name() {
     let _guard = EnvGuard::set("CC_LB_TEST_MASTER_KEY_INVALID", "not-a-32-byte-hex-key");
     let dir = tempfile::tempdir().unwrap();
