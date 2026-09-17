@@ -4,10 +4,7 @@ use async_trait::async_trait;
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_storage_api::{
     ManagedKeyStore, StorageError, StorageResult,
-    types::{
-        ApiKeyMutation, IssueParams, KeyStatus, Limit, PrincipalKindLite, StoredApiKeyRecord,
-        UpstreamKind,
-    },
+    types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, StoredApiKeyRecord},
     validate_identifier,
 };
 use serde_json::Value;
@@ -39,58 +36,13 @@ impl PostgresManagedKeyStore {
 impl ManagedKeyStore for PostgresManagedKeyStore {
     async fn issue(
         &self,
-        principal_id: &str,
-        key_id: &str,
-        params: IssueParams,
+        _principal_id: &str,
+        _key_id: &str,
+        _params: IssueParams,
     ) -> StorageResult<StoredApiKeyRecord> {
-        validate_identifier("principal_id", principal_id)?;
-        validate_identifier("key_id", key_id)?;
-        validate_identifier("label", &params.label)?;
-        if let Some(desc) = &params.description {
-            validate_identifier("description", desc)?;
-        }
-
-        let record = StoredApiKeyRecord {
-            label: params.label,
-            issued_at_unix_secs: unix_secs(self.clock.now()),
-            revoked_at_unix_secs: None,
-            key_hash_b64: base64_url_no_pad(&params.verify_hash),
-            verify_hash: params.verify_hash,
-            secret_salt: params.secret_salt,
-            upstream_kind: params.upstream_kind,
-            limit_overrides: params.limit_overrides,
-            status: KeyStatus::Active,
-            expires_at_unix_secs: params.expires_at_unix_secs,
-            last_4: params.last_4,
-            description: params.description,
-            principal_kind: params.principal_kind,
-            index_hash: params.index_hash,
-        };
-        let stored_record = record.clone();
-
-        retry::with_retry(&self.retry_policy, || {
-            let pool = self.pool.clone();
-            let record = stored_record.clone();
-            async move {
-                let mut tx = pool.begin().await?;
-                insert_record(principal_id, key_id, &record, &mut tx).await?;
-                sqlx::query(
-                    "INSERT INTO managed_api_key_index_v1 (index_hash, principal_id, key_id) VALUES ($1, $2, $3)",
-                )
-                .bind(record.index_hash.as_slice())
-                .bind(principal_id)
-                .bind(key_id)
-                .execute(&mut *tx)
-                .await?;
-                notify_principal_changed(&mut tx, principal_id).await?;
-                tx.commit().await?;
-                Ok(())
-            }
+        Err(StorageError::Unavailable {
+            message: "api key issuance is paused".to_owned(),
         })
-        .await
-        .map_err(map_sqlx_error)?;
-
-        Ok(record)
     }
 
     async fn get(
@@ -123,9 +75,8 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
         let row = retry::with_retry(&self.retry_policy, || async {
             sqlx::query(
                 "SELECT k.principal_id, k.key_id, k.label, k.issued_at_unix_secs, k.revoked_at_unix_secs, \
-                 k.key_hash_b64, k.verify_hash, k.secret_salt, k.upstream_kind, \
-                 k.limit_overrides, k.status, k.expires_at_unix_secs, k.last_4, k.description, \
-                 k.principal_kind, k.index_hash \
+                 k.key_hash_b64, k.verify_hash, k.secret_salt, k.limit_overrides, k.status, \
+                 k.expires_at_unix_secs, k.last_4, k.description, k.index_hash \
                  FROM managed_api_keys_v1 k \
                  INNER JOIN managed_api_key_index_v1 i \
                  ON k.principal_id = i.principal_id AND k.key_id = i.key_id \
@@ -282,63 +233,17 @@ async fn notify_principal_changed(
 }
 
 const SELECT_BY_KEY_SQL: &str = "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, \
-     key_hash_b64, verify_hash, secret_salt, upstream_kind, \
-     limit_overrides, status, expires_at_unix_secs, last_4, description, principal_kind, \
-     index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 AND key_id = $2";
+     key_hash_b64, verify_hash, secret_salt, limit_overrides, status, expires_at_unix_secs, \
+     last_4, description, index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 AND key_id = $2";
 const SELECT_BY_KEY_FOR_UPDATE_SQL: &str = "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, \
-     key_hash_b64, verify_hash, secret_salt, upstream_kind, \
-     limit_overrides, status, expires_at_unix_secs, last_4, description, principal_kind, \
-     index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 AND key_id = $2 FOR UPDATE";
+     key_hash_b64, verify_hash, secret_salt, limit_overrides, status, expires_at_unix_secs, \
+     last_4, description, index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 AND key_id = $2 FOR UPDATE";
 const SELECT_BY_PRINCIPAL_SQL: &str = "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, \
-     key_hash_b64, verify_hash, secret_salt, upstream_kind, \
-     limit_overrides, status, expires_at_unix_secs, last_4, description, principal_kind, \
-     index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 ORDER BY key_id ASC";
+     key_hash_b64, verify_hash, secret_salt, limit_overrides, status, expires_at_unix_secs, \
+     last_4, description, index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 ORDER BY key_id ASC";
 const SELECT_ALL_SQL: &str = "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, \
-     key_hash_b64, verify_hash, secret_salt, upstream_kind, \
-     limit_overrides, status, expires_at_unix_secs, last_4, description, principal_kind, \
-     index_hash FROM managed_api_keys_v1 ORDER BY principal_id ASC, key_id ASC";
-
-async fn insert_record(
-    principal_id: &str,
-    key_id: &str,
-    record: &StoredApiKeyRecord,
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO managed_api_keys_v1 \
-         (principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, key_hash_b64, \
-          verify_hash, secret_salt, upstream_kind, limit_overrides, \
-          status, expires_at_unix_secs, last_4, description, principal_kind, index_hash, \
-          created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())",
-    )
-    .bind(principal_id)
-    .bind(key_id)
-    .bind(&record.label)
-    .bind(u64_to_i64_sqlx(record.issued_at_unix_secs, "issued_at_unix_secs")?)
-    .bind(option_u64_to_i64_sqlx(
-        record.revoked_at_unix_secs,
-        "revoked_at_unix_secs",
-    )?)
-    .bind(&record.key_hash_b64)
-    .bind(record.verify_hash.as_slice())
-    .bind(record.secret_salt.as_slice())
-    .bind(upstream_kind_as_str(record.upstream_kind))
-    .bind(serde_json::to_value(&record.limit_overrides).map_err(|error| sqlx::Error::Encode(Box::new(error)))?)
-    .bind(key_status_as_str(record.status))
-    .bind(option_u64_to_i64_sqlx(
-        record.expires_at_unix_secs,
-        "expires_at_unix_secs",
-    )?)
-    .bind(&record.last_4)
-    .bind(&record.description)
-    .bind(principal_kind_as_str(record.principal_kind))
-    .bind(record.index_hash.as_slice())
-    .execute(&mut **tx)
-    .await?;
-
-    Ok(())
-}
+     key_hash_b64, verify_hash, secret_salt, limit_overrides, status, expires_at_unix_secs, \
+     last_4, description, index_hash FROM managed_api_keys_v1 ORDER BY principal_id ASC, key_id ASC";
 
 async fn update_record(
     principal_id: &str,
@@ -349,9 +254,8 @@ async fn update_record(
     sqlx::query(
         "UPDATE managed_api_keys_v1 SET \
          label = $3, revoked_at_unix_secs = $4, key_hash_b64 = $5, verify_hash = $6, \
-         secret_salt = $7, upstream_kind = $8, limit_overrides = $9, status = $10, \
-         expires_at_unix_secs = $11, last_4 = $12, description = $13, principal_kind = $14, \
-         index_hash = $15, updated_at = NOW() \
+         secret_salt = $7, limit_overrides = $8, status = $9, expires_at_unix_secs = $10, \
+         last_4 = $11, description = $12, index_hash = $13, updated_at = NOW() \
          WHERE principal_id = $1 AND key_id = $2",
     )
     .bind(principal_id)
@@ -364,7 +268,6 @@ async fn update_record(
     .bind(&record.key_hash_b64)
     .bind(record.verify_hash.as_slice())
     .bind(record.secret_salt.as_slice())
-    .bind(upstream_kind_as_str(record.upstream_kind))
     .bind(
         serde_json::to_value(&record.limit_overrides)
             .map_err(|error| sqlx::Error::Encode(Box::new(error)))?,
@@ -376,7 +279,6 @@ async fn update_record(
     )?)
     .bind(&record.last_4)
     .bind(&record.description)
-    .bind(principal_kind_as_str(record.principal_kind))
     .bind(record.index_hash.as_slice())
     .execute(&mut **tx)
     .await?;
@@ -416,7 +318,6 @@ fn row_to_record_inner(row: PgRow) -> Result<StoredApiKeyRecord, sqlx::Error> {
         key_hash_b64: row.try_get("key_hash_b64")?,
         verify_hash,
         secret_salt,
-        upstream_kind: parse_upstream_kind(&row.try_get::<String, _>("upstream_kind")?)?,
         limit_overrides,
         status: parse_key_status(&row.try_get::<String, _>("status")?)?,
         expires_at_unix_secs: expires_at_unix_secs
@@ -424,7 +325,6 @@ fn row_to_record_inner(row: PgRow) -> Result<StoredApiKeyRecord, sqlx::Error> {
             .transpose()?,
         last_4: row.try_get("last_4")?,
         description: row.try_get("description")?,
-        principal_kind: parse_principal_kind(&row.try_get::<String, _>("principal_kind")?)?,
         index_hash,
     })
 }
@@ -461,12 +361,12 @@ fn vec_to_array<const N: usize>(value: Vec<u8>, field: &str) -> Result<[u8; N], 
         })
 }
 
-fn u64_to_i64_sqlx(value: u64, field: &str) -> Result<i64, sqlx::Error> {
-    u64_to_i64(value, field).map_err(|error| sqlx::Error::Encode(Box::new(error)))
-}
-
 fn option_u64_to_i64_sqlx(value: Option<u64>, field: &str) -> Result<Option<i64>, sqlx::Error> {
     value.map(|value| u64_to_i64_sqlx(value, field)).transpose()
+}
+
+fn u64_to_i64_sqlx(value: u64, field: &str) -> Result<i64, sqlx::Error> {
+    u64_to_i64(value, field).map_err(|error| sqlx::Error::Encode(Box::new(error)))
 }
 
 fn u64_from_i64_sqlx(value: i64, field: &str) -> Result<u64, sqlx::Error> {
@@ -476,28 +376,12 @@ fn u64_from_i64_sqlx(value: i64, field: &str) -> Result<u64, sqlx::Error> {
     })
 }
 
-fn parse_upstream_kind(value: &str) -> Result<UpstreamKind, sqlx::Error> {
-    match value {
-        "anthropic_key" => Ok(UpstreamKind::AnthropicKey),
-        "anthropic_oauth" => Ok(UpstreamKind::AnthropicOAuth),
-        value => Err(corrupted_enum("upstream_kind", value)),
-    }
-}
-
 fn parse_key_status(value: &str) -> Result<KeyStatus, sqlx::Error> {
     match value {
         "active" => Ok(KeyStatus::Active),
         "disabled" => Ok(KeyStatus::Disabled),
         "revoked" => Ok(KeyStatus::Revoked),
         value => Err(corrupted_enum("status", value)),
-    }
-}
-
-fn parse_principal_kind(value: &str) -> Result<PrincipalKindLite, sqlx::Error> {
-    match value {
-        "human" => Ok(PrincipalKindLite::Human),
-        "machine" => Ok(PrincipalKindLite::Machine),
-        value => Err(corrupted_enum("principal_kind", value)),
     }
 }
 
@@ -510,13 +394,6 @@ fn corrupted_enum(field: &str, value: &str) -> sqlx::Error {
     }
 }
 
-fn upstream_kind_as_str(value: UpstreamKind) -> &'static str {
-    match value {
-        UpstreamKind::AnthropicKey => "anthropic_key",
-        UpstreamKind::AnthropicOAuth => "anthropic_oauth",
-    }
-}
-
 fn key_status_as_str(value: KeyStatus) -> &'static str {
     match value {
         KeyStatus::Active => "active",
@@ -525,13 +402,7 @@ fn key_status_as_str(value: KeyStatus) -> &'static str {
     }
 }
 
-fn principal_kind_as_str(value: PrincipalKindLite) -> &'static str {
-    match value {
-        PrincipalKindLite::Human => "human",
-        PrincipalKindLite::Machine => "machine",
-    }
-}
-
+#[cfg(test)]
 fn base64_url_no_pad(value: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(value.len().div_ceil(3) * 4);
@@ -564,44 +435,65 @@ mod tests {
 
     use super::*;
 
+    const LEGACY_MIGRATIONS: &[&str] = &[
+        include_str!("../../migrations/0013_managed_api_keys.sql"),
+        include_str!("../../migrations/0014_managed_api_key_index.sql"),
+        include_str!("../../migrations/0020_drop_per_key_pin.sql"),
+    ];
+    const DROP_KIND_COLUMNS_MIGRATION: &str =
+        include_str!("../../migrations/0117_drop_managed_key_kind_columns.sql");
     const MIGRATIONS: &[&str] = &[
         include_str!("../../migrations/0013_managed_api_keys.sql"),
         include_str!("../../migrations/0014_managed_api_key_index.sql"),
         include_str!("../../migrations/0020_drop_per_key_pin.sql"),
+        DROP_KIND_COLUMNS_MIGRATION,
     ];
 
     type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
     #[tokio::test]
-    async fn issue_get_lookup_update_list_and_revoke() -> TestResult<()> {
+    async fn issue_returns_unavailable_while_paused() -> TestResult<()> {
+        let pool = PgPool::connect_lazy("postgres://localhost/cc_lb_managed_keys_test")?;
+        let store = PostgresManagedKeyStore::new(
+            pool,
+            Arc::new(retry::RetryPolicy::default()),
+            Arc::new(cc_lb_clock::SystemClock),
+        );
+
+        let error = store
+            .issue("principal-a", "key-a", issue_params(7))
+            .await
+            .err()
+            .ok_or("issuance should be unavailable")?;
+        assert!(matches!(error, StorageError::Unavailable { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_lookup_update_list_and_revoke() -> TestResult<()> {
         let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
             eprintln!("skip: CI_POSTGRES_URL not set");
             return Ok(());
         };
         let fixture = Fixture::create(&url).await?;
         let store = fixture.store();
-        let params = issue_params(11);
-        let index_hash = params.index_hash;
-
-        let issued = store.issue("principal-a", "key-a", params.clone()).await?;
-        assert_eq!(issued.label, "label-11");
-        assert_eq!(issued.status, KeyStatus::Active);
-        assert_eq!(issued.verify_hash, params.verify_hash);
+        let record = stored_record(11);
+        let index_hash = record.index_hash;
+        seed_key(&fixture.pool, "principal-a", "key-a", &record).await?;
 
         let fetched = store.get("principal-a", "key-a").await?;
-        assert_eq!(fetched.as_ref(), Some(&issued));
+        assert_eq!(fetched.as_ref(), Some(&record));
 
         let lookup = store
             .lookup_by_index_hash(&index_hash)
             .await?
-            .ok_or("lookup should find issued key")?;
+            .ok_or("lookup should find seeded key")?;
         assert_eq!(lookup.0, "principal-a");
         assert_eq!(lookup.1, "key-a");
-        assert_eq!(lookup.2, issued);
+        assert_eq!(lookup.2, record);
 
-        let second = store
-            .issue("principal-b", "key-b", issue_params(22))
-            .await?;
+        let second = stored_record(22);
+        seed_key(&fixture.pool, "principal-b", "key-b", &second).await?;
         assert_eq!(store.list_by_principal("principal-a").await?.len(), 1);
         let all = store.list_all().await?;
         assert_eq!(all.len(), 2);
@@ -646,28 +538,7 @@ mod tests {
         assert_eq!(revoked.index_hash, [0; 32]);
         assert_eq!(revoked.verify_hash, [0; 32]);
         assert_eq!(revoked.secret_salt, [0; 16]);
-        assert_eq!(revoked.last_4, params.last_4);
-
-        fixture.drop_schema().await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn duplicate_index_hash_surfaces_conflict() -> TestResult<()> {
-        let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
-            eprintln!("skip: CI_POSTGRES_URL not set");
-            return Ok(());
-        };
-        let fixture = Fixture::create(&url).await?;
-        let store = fixture.store();
-        let params = issue_params(33);
-        store.issue("principal-a", "key-a", params.clone()).await?;
-        let error = store
-            .issue("principal-a", "key-b", params)
-            .await
-            .err()
-            .ok_or("duplicate index hash should fail")?;
-        assert!(matches!(error, StorageError::Conflict { .. }));
+        assert_eq!(revoked.last_4, record.last_4);
 
         fixture.drop_schema().await?;
         Ok(())
@@ -692,6 +563,174 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn migration_drops_kind_columns_and_preserves_managed_key_data() -> TestResult<()> {
+        let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+            eprintln!("skip: CI_POSTGRES_URL not set");
+            return Ok(());
+        };
+        let fixture = Fixture::create_with_migrations(&url, LEGACY_MIGRATIONS).await?;
+        sqlx::query(
+            "INSERT INTO managed_api_keys_v1 (\
+                principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, \
+                key_hash_b64, verify_hash, secret_salt, upstream_kind, limit_overrides, \
+                status, expires_at_unix_secs, last_4, description, principal_kind, index_hash, \
+                created_at, updated_at\
+             ) VALUES (\
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, \
+                to_timestamp(1700000200), to_timestamp(1700000300)\
+             )",
+        )
+        .bind("principal-preserved")
+        .bind("key-preserved")
+        .bind("preserved label")
+        .bind(1_700_000_000_i64)
+        .bind(Some(1_700_000_100_i64))
+        .bind("preserved-key-hash")
+        .bind(vec![0x11_u8; 32])
+        .bind(vec![0x22_u8; 16])
+        .bind("anthropic_oauth")
+        .bind(serde_json::json!([{
+            "kind": "requests",
+            "window_secs": 60,
+            "cap_micros": 17
+        }]))
+        .bind("disabled")
+        .bind(Some(1_800_000_000_i64))
+        .bind("1234")
+        .bind(Some("preserved description"))
+        .bind("human")
+        .bind(vec![0x33_u8; 32])
+        .execute(&fixture.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO managed_api_key_index_v1 (index_hash, principal_id, key_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(vec![0x33_u8; 32])
+        .bind("principal-preserved")
+        .bind("key-preserved")
+        .execute(&fixture.pool)
+        .await?;
+
+        let store = fixture.store();
+        let legacy_record = store
+            .get("principal-preserved", "key-preserved")
+            .await?
+            .ok_or("seeded legacy key should be readable before migration")?;
+        assert_eq!(legacy_record.label, "preserved label");
+        assert_eq!(legacy_record.status, KeyStatus::Disabled);
+
+        sqlx::raw_sql(DROP_KIND_COLUMNS_MIGRATION)
+            .execute(&fixture.pool)
+            .await?;
+
+        let dropped_kind_column_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) \
+             FROM information_schema.columns \
+             WHERE table_schema = current_schema() \
+               AND table_name = 'managed_api_keys_v1' \
+               AND column_name IN ('upstream_kind', 'principal_kind')",
+        )
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(dropped_kind_column_count, 0);
+
+        let migrated_record = store
+            .get("principal-preserved", "key-preserved")
+            .await?
+            .ok_or("preserved key should be readable after migration")?;
+        assert_eq!(migrated_record, legacy_record);
+
+        let row = sqlx::query(
+            "SELECT label, issued_at_unix_secs, revoked_at_unix_secs, key_hash_b64, \
+                    verify_hash, secret_salt, limit_overrides, status, expires_at_unix_secs, \
+                    last_4, description, index_hash, \
+                    EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at_unix_secs, \
+                    EXTRACT(EPOCH FROM updated_at)::BIGINT AS updated_at_unix_secs \
+             FROM managed_api_keys_v1 \
+             WHERE principal_id = $1 AND key_id = $2",
+        )
+        .bind("principal-preserved")
+        .bind("key-preserved")
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(row.try_get::<String, _>("label")?, "preserved label");
+        assert_eq!(row.try_get::<i64, _>("issued_at_unix_secs")?, 1_700_000_000);
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("revoked_at_unix_secs")?,
+            Some(1_700_000_100)
+        );
+        assert_eq!(
+            row.try_get::<String, _>("key_hash_b64")?,
+            "preserved-key-hash"
+        );
+        assert_eq!(row.try_get::<Vec<u8>, _>("verify_hash")?, vec![0x11; 32]);
+        assert_eq!(row.try_get::<Vec<u8>, _>("secret_salt")?, vec![0x22; 16]);
+        assert_eq!(
+            row.try_get::<Value, _>("limit_overrides")?,
+            serde_json::json!([{
+                "kind": "requests",
+                "window_secs": 60,
+                "cap_micros": 17
+            }])
+        );
+        assert_eq!(row.try_get::<String, _>("status")?, "disabled");
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("expires_at_unix_secs")?,
+            Some(1_800_000_000)
+        );
+        assert_eq!(row.try_get::<String, _>("last_4")?, "1234");
+        assert_eq!(
+            row.try_get::<Option<String>, _>("description")?,
+            Some("preserved description".to_owned())
+        );
+        assert_eq!(row.try_get::<Vec<u8>, _>("index_hash")?, vec![0x33; 32]);
+        assert_eq!(
+            row.try_get::<i64, _>("created_at_unix_secs")?,
+            1_700_000_200
+        );
+        assert_eq!(
+            row.try_get::<i64, _>("updated_at_unix_secs")?,
+            1_700_000_300
+        );
+
+        let indexed_key = sqlx::query_as::<_, (String, String)>(
+            "SELECT principal_id, key_id \
+             FROM managed_api_key_index_v1 \
+             WHERE index_hash = $1",
+        )
+        .bind(vec![0x33_u8; 32])
+        .fetch_one(&fixture.pool)
+        .await?;
+        assert_eq!(
+            indexed_key,
+            ("principal-preserved".to_owned(), "key-preserved".to_owned())
+        );
+
+        let indexes = sqlx::query_scalar::<_, String>(
+            "SELECT indexname \
+             FROM pg_indexes \
+             WHERE schemaname = current_schema() \
+               AND tablename = 'managed_api_keys_v1'",
+        )
+        .fetch_all(&fixture.pool)
+        .await?;
+        assert!(
+            indexes
+                .iter()
+                .any(|name| name == "managed_api_keys_v1_principal_id")
+        );
+        assert!(
+            indexes
+                .iter()
+                .any(|name| name == "managed_api_keys_v1_active_idx")
+        );
+
+        fixture.drop_schema().await?;
+        Ok(())
+    }
+
     struct Fixture {
         url: String,
         schema: String,
@@ -700,6 +739,13 @@ mod tests {
 
     impl Fixture {
         async fn create(url: &str) -> TestResult<Self> {
+            Self::create_with_migrations(url, MIGRATIONS).await
+        }
+
+        async fn create_with_migrations(
+            url: &str,
+            migrations: &'static [&'static str],
+        ) -> TestResult<Self> {
             let schema = format!("test_managed_keys_{}", Uuid::new_v4().simple());
             let admin_pool = PgPoolOptions::new()
                 .max_connections(1)
@@ -716,7 +762,7 @@ mod tests {
                     PgConnectOptions::from_str(url)?.options([("search_path", schema.as_str())]),
                 )
                 .await?;
-            for migration in MIGRATIONS {
+            for migration in migrations {
                 sqlx::raw_sql(*migration).execute(&pool).await?;
             }
 
@@ -752,11 +798,84 @@ mod tests {
         }
     }
 
+    async fn seed_key(
+        pool: &PgPool,
+        principal_id: &str,
+        key_id: &str,
+        record: &StoredApiKeyRecord,
+    ) -> TestResult<()> {
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO managed_api_keys_v1 \
+             (principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, key_hash_b64, \
+              verify_hash, secret_salt, limit_overrides, status, expires_at_unix_secs, last_4, \
+              description, index_hash, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())",
+        )
+        .bind(principal_id)
+        .bind(key_id)
+        .bind(&record.label)
+        .bind(i64::try_from(record.issued_at_unix_secs)?)
+        .bind(
+            record
+                .revoked_at_unix_secs
+                .map(i64::try_from)
+                .transpose()?,
+        )
+        .bind(&record.key_hash_b64)
+        .bind(record.verify_hash.as_slice())
+        .bind(record.secret_salt.as_slice())
+        .bind(serde_json::to_value(&record.limit_overrides)?)
+        .bind(key_status_as_str(record.status))
+        .bind(
+            record
+                .expires_at_unix_secs
+                .map(i64::try_from)
+                .transpose()?,
+        )
+        .bind(&record.last_4)
+        .bind(&record.description)
+        .bind(record.index_hash.as_slice())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO managed_api_key_index_v1 (index_hash, principal_id, key_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(record.index_hash.as_slice())
+        .bind(principal_id)
+        .bind(key_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    fn stored_record(seed: u8) -> StoredApiKeyRecord {
+        StoredApiKeyRecord {
+            label: format!("label-{seed}"),
+            issued_at_unix_secs: 1_700_000_000 + u64::from(seed),
+            revoked_at_unix_secs: None,
+            key_hash_b64: base64_url_no_pad(&[seed; 32]),
+            verify_hash: [seed; 32],
+            secret_salt: [seed; 16],
+            limit_overrides: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: i64::from(seed),
+            }],
+            status: KeyStatus::Active,
+            expires_at_unix_secs: Some(1_800_000_000 + u64::from(seed)),
+            last_4: format!("{seed:04}"),
+            description: Some(format!("description-{seed}")),
+            index_hash: [seed.wrapping_add(100); 32],
+        }
+    }
+
     fn issue_params(seed: u8) -> IssueParams {
         IssueParams {
             label: format!("label-{seed}"),
             description: Some(format!("description-{seed}")),
-            upstream_kind: UpstreamKind::AnthropicKey,
             expires_at_unix_secs: Some(1_800_000_000 + u64::from(seed)),
             limit_overrides: vec![Limit {
                 kind: LimitKind::Requests,
@@ -766,7 +885,6 @@ mod tests {
             secret_salt: [seed; 16],
             verify_hash: [seed; 32],
             last_4: format!("{seed:04}"),
-            principal_kind: PrincipalKindLite::Machine,
             index_hash: [seed.wrapping_add(100); 32],
         }
     }

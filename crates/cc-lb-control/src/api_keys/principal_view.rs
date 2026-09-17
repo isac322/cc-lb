@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cc_lb_domain::TerminalStrategy;
+use cc_lb_domain::{PrincipalKindLite, TerminalStrategy};
 use cc_lb_observability::ObservabilityHook;
 use cc_lb_routing::FilterPlugin;
 use cc_lb_storage_api::principal::Limit as DbLimit;
@@ -217,6 +217,14 @@ impl PrincipalView {
         } else {
             PrincipalStatus::Disabled
         }
+    }
+
+    pub fn principal_kind(&self, principal_id: &str) -> Option<PrincipalKindLite> {
+        self.get(principal_id)
+            .map(|spec| match spec.principal_type {
+                PrincipalType::Human => PrincipalKindLite::Human,
+                PrincipalType::Machine => PrincipalKindLite::Machine,
+            })
     }
 
     pub fn has_any_active_principal(&self) -> bool {

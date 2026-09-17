@@ -1,6 +1,7 @@
 #![cfg(feature = "postgres")]
 
-use std::collections::HashSet;
+use crate::common::managed_key_fixture_postgres;
+
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
@@ -34,7 +35,7 @@ use url::Url;
 const ADMIN_TOKEN: &str = "test-token";
 const PRINCIPAL_ID: &str = "multi-instance-principal";
 const TASKS_PER_INSTANCE: usize = 50;
-const EXPECTED_ISSUED_KEYS: usize = TASKS_PER_INSTANCE * 2;
+const EXPECTED_PAUSED_REQUESTS: usize = TASKS_PER_INSTANCE * 2;
 const READY_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -124,7 +125,8 @@ async fn cross_instance_issue_auth_revoke() -> TestResult<()> {
     let (instance_a, instance_b) = spawn_two_instances(&database_url, upstream.addr).await?;
 
     let mut issue_rebinds = rebind_completions.subscribe();
-    let issued = issue_key(instance_a.admin_addr, "issued-on-instance-a").await?;
+    assert_issue_paused(instance_a.admin_addr, "paused-on-instance-a").await?;
+    let issued = seed_existing_key(&database_url, "existing-before-bridge").await?;
     assert_eq!(issued.principal_id, PRINCIPAL_ID);
     let authenticated = wait_for_proxy_status(
         instance_b.proxy_addr,
@@ -172,31 +174,40 @@ async fn concurrent_cross_instance_issue() -> TestResult<()> {
     let upstream = spawn_ok_upstream().await?;
     let (instance_a, instance_b) = spawn_two_instances(&database_url, upstream.addr).await?;
 
-    let mut tasks = Vec::with_capacity(EXPECTED_ISSUED_KEYS);
+    let mut tasks = Vec::with_capacity(EXPECTED_PAUSED_REQUESTS);
     for index in 0..TASKS_PER_INSTANCE {
         let admin_addr = instance_a.admin_addr;
         tasks.push(tokio::task::spawn(async move {
-            issue_key(admin_addr, &format!("instance-a-{index}")).await
+            assert_issue_paused(admin_addr, &format!("instance-a-{index}")).await
         }));
     }
     for index in 0..TASKS_PER_INSTANCE {
         let admin_addr = instance_b.admin_addr;
         tasks.push(tokio::task::spawn(async move {
-            issue_key(admin_addr, &format!("instance-b-{index}")).await
+            assert_issue_paused(admin_addr, &format!("instance-b-{index}")).await
         }));
     }
 
-    let mut key_ids = HashSet::with_capacity(EXPECTED_ISSUED_KEYS);
+    assert_eq!(tasks.len(), EXPECTED_PAUSED_REQUESTS);
     for task in tasks {
-        let issued = task.await??;
-        assert!(
-            key_ids.insert(issued.key_id),
-            "duplicate key_id issued by concurrent requests"
-        );
+        task.await??;
     }
-
-    assert_eq!(key_ids.len(), EXPECTED_ISSUED_KEYS);
-    println!("issued={} unique={}", EXPECTED_ISSUED_KEYS, key_ids.len());
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?;
+    let key_count: i64 = sqlx::query_scalar("SELECT count(*) FROM managed_api_keys_v1")
+        .fetch_one(&pool)
+        .await?;
+    let index_count: i64 = sqlx::query_scalar("SELECT count(*) FROM managed_api_key_index_v1")
+        .fetch_one(&pool)
+        .await?;
+    pool.close().await;
+    assert_eq!(key_count, 0, "paused issuance must not persist keys");
+    assert_eq!(
+        index_count, 0,
+        "paused issuance must not persist key indexes"
+    );
 
     Ok(())
 }
@@ -406,27 +417,27 @@ struct IssuedKey {
     plaintext_key: String,
 }
 
-async fn issue_key(admin_addr: SocketAddr, label: &str) -> TestResult<IssuedKey> {
+async fn assert_issue_paused(admin_addr: SocketAddr, label: &str) -> TestResult<()> {
     let response = admin_post_json(
         admin_addr,
         &format!("/admin/v1/principals/{PRINCIPAL_ID}/keys"),
-        json!({
-            "label": label,
-            "upstream_kind": "anthropic_key",
-        }),
+        json!({ "label": label }),
     )
     .await?;
-    assert_eq!(
-        response.status, 201,
-        "issue key failed for {label}: body={}",
-        response.body
-    );
-
+    assert_eq!(response.status, 503);
     let payload: Value = serde_json::from_str(&response.body)?;
+    assert_eq!(payload["error"], "key_issuance_paused");
+    assert!(payload.get("plaintext_key").is_none());
+    Ok(())
+}
+
+async fn seed_existing_key(database_url: &str, label: &str) -> TestResult<IssuedKey> {
+    let (key_id, plaintext_key) =
+        managed_key_fixture_postgres::seed_existing(database_url, PRINCIPAL_ID, label).await?;
     Ok(IssuedKey {
-        principal_id: json_string(&payload, "principal_id")?,
-        key_id: json_string(&payload, "key_id")?,
-        plaintext_key: json_string(&payload, "plaintext_key")?,
+        principal_id: PRINCIPAL_ID.to_owned(),
+        key_id,
+        plaintext_key,
     })
 }
 
@@ -619,14 +630,6 @@ fn decode_chunked_body(body: &str) -> Option<String> {
     }
 
     String::from_utf8(decoded).ok()
-}
-
-fn json_string(payload: &Value, field: &str) -> TestResult<String> {
-    payload
-        .get(field)
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| error(format!("response missing {field}: {payload}")))
 }
 
 fn error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {

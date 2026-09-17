@@ -4,13 +4,6 @@ pub use cc_lb_storage_api::{KeyStatus, Limit, LimitKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum UpstreamKind {
-    AnthropicKey,
-    AnthropicOAuth,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum PrincipalType {
     Human,
     Machine,
@@ -53,15 +46,6 @@ mod tests {
                 .expect("decode value");
         assert_eq!(consumed, encoded.len());
         decoded
-    }
-
-    #[test]
-    fn upstream_kind_bincode_roundtrip() {
-        let value = UpstreamKind::AnthropicOAuth;
-
-        let decoded: UpstreamKind = bincode_roundtrip(&value);
-
-        assert_eq!(decoded, value);
     }
 
     #[test]

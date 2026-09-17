@@ -15,6 +15,7 @@ pub mod cache_keepalive_sessions;
 pub mod config_store;
 pub mod managed_keys;
 pub mod meta;
+mod migration_gate;
 pub mod notifier;
 pub mod oauth_credentials;
 pub mod organization_metadata;

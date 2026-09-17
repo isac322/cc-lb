@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
+use cc_lb_config::{DownstreamAuthMode, NoneModeConfig};
 use cc_lb_storage_api::{
     StorageError,
-    types::{KeyStatus, StoredApiKeyRecord, UpstreamKind},
+    types::{KeyStatus, StoredApiKeyRecord},
 };
 
 use crate::api_keys::{
@@ -25,7 +25,6 @@ pub struct BuiltinAuthn {
 pub struct AuthnSuccess {
     pub principal_id: String,
     pub key_id: String,
-    pub upstream_kind: UpstreamKind,
     pub record: StoredApiKeyRecord,
     pub last_4: String,
     pub api_key: Option<String>,
@@ -131,7 +130,6 @@ impl BuiltinAuthn {
         Ok(AuthnSuccess {
             principal_id,
             key_id: key_id_storage,
-            upstream_kind: record.upstream_kind,
             record: record.clone(),
             last_4: record.last_4.clone(),
             api_key: Some(input.to_owned()),
@@ -146,7 +144,6 @@ impl BuiltinAuthn {
         let none_mode = self.none_mode.as_ref()?;
         let record = StoredApiKeyRecord {
             status: KeyStatus::Active,
-            upstream_kind: map_none_mode_upstream_kind(none_mode.upstream_kind.clone()),
             verify_hash: [0; 32],
             secret_salt: [0; 16],
             last_4: String::new(),
@@ -162,7 +159,6 @@ impl BuiltinAuthn {
         Some(AuthnSuccess {
             principal_id: none_mode.principal_id.clone(),
             key_id: "none-mode".to_owned(),
-            upstream_kind: record.upstream_kind,
             record,
             last_4: String::new(),
             api_key,
@@ -195,16 +191,9 @@ fn map_lookup_error(error: KeyStoreError) -> BuiltinAuthError {
         KeyStoreError::Storage(
             StorageError::Unavailable { .. } | StorageError::Transient { .. },
         ) => BuiltinAuthError::Unavailable,
-        KeyStoreError::Storage(_) | KeyStoreError::KeyAlreadyRevoked { .. } => {
-            BuiltinAuthError::NotFound
-        }
-    }
-}
-
-pub fn map_none_mode_upstream_kind(kind: NoneModeUpstreamKind) -> UpstreamKind {
-    match kind {
-        NoneModeUpstreamKind::AnthropicKey => UpstreamKind::AnthropicKey,
-        NoneModeUpstreamKind::AnthropicOAuth => UpstreamKind::AnthropicOAuth,
+        KeyStoreError::Storage(_)
+        | KeyStoreError::KeyAlreadyRevoked { .. }
+        | KeyStoreError::IssuancePaused => BuiltinAuthError::NotFound,
     }
 }
 
@@ -215,9 +204,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use cc_lb_config::NoneModeUpstreamKind;
     use cc_lb_storage_api::{
         ManagedKeyStore, StorageResult,
-        types::{ApiKeyMutation, IssueParams, PrincipalKindLite},
+        types::{ApiKeyMutation, IssueParams},
     };
     use http::{HeaderMap, HeaderValue};
 
@@ -246,7 +236,6 @@ mod tests {
 
         assert_eq!(success.principal_id, "principal-1");
         assert_eq!(success.key_id, generated.key_id);
-        assert_eq!(success.upstream_kind, UpstreamKind::AnthropicKey);
         assert_eq!(success.last_4, generated.last_4);
         assert_eq!(
             success.api_key.as_deref(),
@@ -450,7 +439,6 @@ mod tests {
 
         assert_eq!(success.principal_id, "principal-none");
         assert_eq!(success.key_id, "none-mode");
-        assert_eq!(success.upstream_kind, UpstreamKind::AnthropicOAuth);
         assert_eq!(success.api_key.as_deref(), Some("passthrough-key"));
     }
 
@@ -518,11 +506,9 @@ mod tests {
             key_hash_b64: generated.key_id.clone(),
             verify_hash: generated.verify_hash,
             secret_salt: generated.secret_salt,
-            upstream_kind: UpstreamKind::AnthropicKey,
             status: KeyStatus::Active,
             expires_at_unix_secs: Some(4_102_444_800),
             last_4: generated.last_4.clone(),
-            principal_kind: PrincipalKindLite::Machine,
             index_hash: generated.index_hash,
             ..StoredApiKeyRecord::default()
         }

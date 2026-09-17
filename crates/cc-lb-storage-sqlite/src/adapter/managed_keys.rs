@@ -2,10 +2,7 @@ use async_trait::async_trait;
 use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_storage_api::{
     ManagedKeyStore, StorageError, StorageResult,
-    types::{
-        ApiKeyMutation, IssueParams, KeyStatus, Limit, PrincipalKindLite, StoredApiKeyRecord,
-        UpstreamKind,
-    },
+    types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, StoredApiKeyRecord},
     validate_identifier,
 };
 use sqlx::{Row, sqlite::SqliteRow};
@@ -16,36 +13,13 @@ use crate::{SqliteStorage, map_sqlx_error};
 impl ManagedKeyStore for SqliteStorage {
     async fn issue(
         &self,
-        principal_id: &str,
-        key_id: &str,
-        params: IssueParams,
+        _principal_id: &str,
+        _key_id: &str,
+        _params: IssueParams,
     ) -> StorageResult<StoredApiKeyRecord> {
-        validate_identifier("principal_id", principal_id)?;
-        validate_identifier("key_id", key_id)?;
-        validate_identifier("label", &params.label)?;
-        if let Some(description) = &params.description {
-            validate_identifier("description", description)?;
-        }
-
-        let record = StoredApiKeyRecord {
-            label: params.label,
-            issued_at_unix_secs: unix_secs(self.clock().now()),
-            revoked_at_unix_secs: None,
-            key_hash_b64: base64_url_no_pad(&params.verify_hash),
-            verify_hash: params.verify_hash,
-            secret_salt: params.secret_salt,
-            upstream_kind: params.upstream_kind,
-            limit_overrides: params.limit_overrides,
-            status: KeyStatus::Active,
-            expires_at_unix_secs: params.expires_at_unix_secs,
-            last_4: params.last_4,
-            description: params.description,
-            principal_kind: params.principal_kind,
-            index_hash: params.index_hash,
-        };
-
-        insert_record(self, principal_id, key_id, &record).await?;
-        Ok(record)
+        Err(StorageError::Unavailable {
+            message: "api key issuance is paused".to_owned(),
+        })
     }
 
     async fn get(
@@ -141,65 +115,17 @@ impl ManagedKeyStore for SqliteStorage {
 }
 
 const SELECT_BY_KEY_SQL: &str = "SELECT principal_id, key_id, label, created_at, revoked_at, secret_hash, \
-     verify_hash, secret_salt, upstream_kind, limit_overrides, status, expires_at, last_4, \
-     description, principal_kind, index_hash FROM managed_keys_v1 WHERE principal_id = ? AND key_id = ?";
+     verify_hash, secret_salt, limit_overrides, status, expires_at, last_4, \
+     description, index_hash FROM managed_keys_v1 WHERE principal_id = ? AND key_id = ?";
 const SELECT_BY_INDEX_HASH_SQL: &str = "SELECT principal_id, key_id, label, created_at, revoked_at, secret_hash, \
-     verify_hash, secret_salt, upstream_kind, limit_overrides, status, expires_at, last_4, \
-     description, principal_kind, index_hash FROM managed_keys_v1 WHERE index_hash = ? AND status != 'revoked'";
+     verify_hash, secret_salt, limit_overrides, status, expires_at, last_4, \
+     description, index_hash FROM managed_keys_v1 WHERE index_hash = ? AND status != 'revoked'";
 const SELECT_BY_PRINCIPAL_SQL: &str = "SELECT principal_id, key_id, label, created_at, revoked_at, secret_hash, \
-     verify_hash, secret_salt, upstream_kind, limit_overrides, status, expires_at, last_4, \
-     description, principal_kind, index_hash FROM managed_keys_v1 WHERE principal_id = ? ORDER BY key_id ASC";
+     verify_hash, secret_salt, limit_overrides, status, expires_at, last_4, \
+     description, index_hash FROM managed_keys_v1 WHERE principal_id = ? ORDER BY key_id ASC";
 const SELECT_ALL_SQL: &str = "SELECT principal_id, key_id, label, created_at, revoked_at, secret_hash, \
-     verify_hash, secret_salt, upstream_kind, limit_overrides, status, expires_at, last_4, \
-     description, principal_kind, index_hash FROM managed_keys_v1 ORDER BY principal_id ASC, key_id ASC";
-
-async fn insert_record(
-    storage: &SqliteStorage,
-    principal_id: &str,
-    key_id: &str,
-    record: &StoredApiKeyRecord,
-) -> StorageResult<()> {
-    let id = composite_id(principal_id, key_id);
-    let limit_overrides = serde_json::to_string(&record.limit_overrides)?;
-    let issued_at = u64_to_i64(record.issued_at_unix_secs, "issued_at_unix_secs")?;
-    let expires_at = option_u64_to_i64(record.expires_at_unix_secs, "expires_at_unix_secs")?;
-    let now = now_i64(storage.clock())?;
-
-    sqlx::query(
-        "INSERT INTO managed_keys_v1 \
-         (id, name, secret_hash, created_at, expires_at, status, principal_id, key_id, label, \
-          revoked_at, verify_hash, secret_salt, upstream_kind, limit_overrides, last_4, description, \
-          principal_kind, index_hash, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(&id)
-    .bind(&record.key_hash_b64)
-    .bind(issued_at)
-    .bind(expires_at)
-    .bind(key_status_as_str(record.status))
-    .bind(principal_id)
-    .bind(key_id)
-    .bind(&record.label)
-    .bind(option_u64_to_i64(
-        record.revoked_at_unix_secs,
-        "revoked_at_unix_secs",
-    )?)
-    .bind(record.verify_hash.as_slice())
-    .bind(record.secret_salt.as_slice())
-    .bind(upstream_kind_as_str(record.upstream_kind))
-    .bind(limit_overrides)
-    .bind(&record.last_4)
-    .bind(&record.description)
-    .bind(principal_kind_as_str(record.principal_kind))
-    .bind(record.index_hash.as_slice())
-    .bind(now)
-    .execute(storage.pool())
-    .await
-    .map_err(map_managed_sqlx_error)?;
-
-    Ok(())
-}
+     verify_hash, secret_salt, limit_overrides, status, expires_at, last_4, \
+     description, index_hash FROM managed_keys_v1 ORDER BY principal_id ASC, key_id ASC";
 
 async fn update_record(
     storage: &SqliteStorage,
@@ -212,8 +138,8 @@ async fn update_record(
     sqlx::query(
         "UPDATE managed_keys_v1 SET \
          secret_hash = ?, expires_at = ?, status = ?, label = ?, revoked_at = ?, verify_hash = ?, \
-         secret_salt = ?, upstream_kind = ?, limit_overrides = ?, last_4 = ?, description = ?, \
-         principal_kind = ?, index_hash = ?, updated_at = ? \
+         secret_salt = ?, limit_overrides = ?, last_4 = ?, description = ?, \
+         index_hash = ?, updated_at = ? \
          WHERE principal_id = ? AND key_id = ?",
     )
     .bind(&record.key_hash_b64)
@@ -229,11 +155,9 @@ async fn update_record(
     )?)
     .bind(record.verify_hash.as_slice())
     .bind(record.secret_salt.as_slice())
-    .bind(upstream_kind_as_str(record.upstream_kind))
     .bind(limit_overrides)
     .bind(&record.last_4)
     .bind(&record.description)
-    .bind(principal_kind_as_str(record.principal_kind))
     .bind(record.index_hash.as_slice())
     .bind(now_i64(storage.clock())?)
     .bind(principal_id)
@@ -284,10 +208,6 @@ fn row_to_record(row: SqliteRow) -> StorageResult<StoredApiKeyRecord> {
             row.try_get("secret_salt").map_err(map_sqlx_error)?,
             "secret_salt",
         )?,
-        upstream_kind: parse_upstream_kind(
-            &row.try_get::<String, _>("upstream_kind")
-                .map_err(map_sqlx_error)?,
-        )?,
         limit_overrides,
         status: parse_key_status(&row.try_get::<String, _>("status").map_err(map_sqlx_error)?)?,
         expires_at_unix_secs: expires_at_unix_secs
@@ -295,10 +215,6 @@ fn row_to_record(row: SqliteRow) -> StorageResult<StoredApiKeyRecord> {
             .transpose()?,
         last_4: row.try_get("last_4").map_err(map_sqlx_error)?,
         description: row.try_get("description").map_err(map_sqlx_error)?,
-        principal_kind: parse_principal_kind(
-            &row.try_get::<String, _>("principal_kind")
-                .map_err(map_sqlx_error)?,
-        )?,
         index_hash: vec_to_array(
             row.try_get("index_hash").map_err(map_sqlx_error)?,
             "index_hash",
@@ -351,14 +267,6 @@ fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
     })
 }
 
-fn parse_upstream_kind(value: &str) -> StorageResult<UpstreamKind> {
-    match value {
-        "anthropic_key" => Ok(UpstreamKind::AnthropicKey),
-        "anthropic_oauth" => Ok(UpstreamKind::AnthropicOAuth),
-        value => Err(corrupted_enum("upstream_kind", value)),
-    }
-}
-
 fn parse_key_status(value: &str) -> StorageResult<KeyStatus> {
     match value {
         "active" => Ok(KeyStatus::Active),
@@ -368,24 +276,9 @@ fn parse_key_status(value: &str) -> StorageResult<KeyStatus> {
     }
 }
 
-fn parse_principal_kind(value: &str) -> StorageResult<PrincipalKindLite> {
-    match value {
-        "human" => Ok(PrincipalKindLite::Human),
-        "machine" => Ok(PrincipalKindLite::Machine),
-        value => Err(corrupted_enum("principal_kind", value)),
-    }
-}
-
 fn corrupted_enum(field: &str, value: &str) -> StorageError {
     StorageError::Corrupted {
         message: format!("invalid {field} value {value}"),
-    }
-}
-
-fn upstream_kind_as_str(value: UpstreamKind) -> &'static str {
-    match value {
-        UpstreamKind::AnthropicKey => "anthropic_key",
-        UpstreamKind::AnthropicOAuth => "anthropic_oauth",
     }
 }
 
@@ -395,36 +288,6 @@ fn key_status_as_str(value: KeyStatus) -> &'static str {
         KeyStatus::Disabled => "disabled",
         KeyStatus::Revoked => "revoked",
     }
-}
-
-fn principal_kind_as_str(value: PrincipalKindLite) -> &'static str {
-    match value {
-        PrincipalKindLite::Human => "human",
-        PrincipalKindLite::Machine => "machine",
-    }
-}
-
-fn composite_id(principal_id: &str, key_id: &str) -> String {
-    format!("{principal_id}/{key_id}")
-}
-
-fn base64_url_no_pad(value: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity(value.len().div_ceil(3) * 4);
-    for chunk in value.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        out.push(ALPHABET[(b0 >> 2) as usize] as char);
-        out.push(ALPHABET[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(ALPHABET[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
-            if chunk.len() > 2 {
-                out.push(ALPHABET[(b2 & 0b0011_1111) as usize] as char);
-            }
-        }
-    }
-    out
 }
 
 fn now_i64(clock: &dyn Clock) -> StorageResult<i64> {
@@ -440,4 +303,220 @@ fn map_managed_sqlx_error(error: sqlx::Error) -> StorageError {
         };
     }
     map_sqlx_error(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+    use std::sync::Arc;
+
+    use cc_lb_storage_api::{ManagedKeyStore, types::LimitKind};
+    use sqlx::{Connection, Row, SqliteConnection, SqlitePool, sqlite::SqliteConnectOptions};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn issue_returns_unavailable_while_paused() {
+        let pool = SqlitePool::connect_lazy("sqlite::memory:").expect("lazy sqlite pool");
+        let storage = SqliteStorage::new(pool, Arc::new(cc_lb_clock::SystemClock));
+
+        let error = storage
+            .issue("principal-a", "key-a", issue_params(7))
+            .await
+            .expect_err("issuance should be unavailable");
+        assert!(matches!(error, StorageError::Unavailable { .. }));
+    }
+
+    #[tokio::test]
+    async fn migration_drops_kind_columns_and_preserves_managed_key_data() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let database_url = format!(
+            "sqlite://{}",
+            temp_dir
+                .path()
+                .join("managed-key-kind-columns.sqlite")
+                .display()
+        );
+        let options = SqliteConnectOptions::from_str(&database_url)
+            .expect("sqlite connect options")
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let mut connection = SqliteConnection::connect_with(&options)
+            .await
+            .expect("connect sqlite database");
+        let migrator = sqlx::migrate!("./migrations");
+
+        migrator
+            .run_direct(None, &mut connection, false)
+            .await
+            .expect("apply migrations before kind-column drop");
+        sqlx::query(
+            "INSERT INTO managed_keys_v1 (
+                id, name, secret_hash, created_at, expires_at, status, principal_id, key_id,
+                label, revoked_at, verify_hash, secret_salt, upstream_kind, limit_overrides,
+                last_4, description, principal_kind, index_hash, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("principal-preserved/key-preserved")
+        .bind("principal-preserved/key-preserved")
+        .bind("preserved-key-hash")
+        .bind(1_700_000_000_i64)
+        .bind(Some(1_800_000_000_i64))
+        .bind("disabled")
+        .bind("principal-preserved")
+        .bind("key-preserved")
+        .bind("preserved label")
+        .bind(Some(1_700_000_100_i64))
+        .bind(vec![0x11_u8; 32])
+        .bind(vec![0x22_u8; 16])
+        .bind("anthropic_oauth")
+        .bind(r#"[{"kind":"requests","window_secs":60,"cap_micros":17}]"#)
+        .bind("1234")
+        .bind(Some("preserved description"))
+        .bind("human")
+        .bind(vec![0x33_u8; 32])
+        .bind(1_700_000_200_i64)
+        .execute(&mut connection)
+        .await
+        .expect("seed legacy managed key");
+
+        sqlx::raw_sql(include_str!(
+            "../../../../tests/fixtures/sqlite_drop_managed_key_kind_columns.sql"
+        ))
+        .execute(&mut connection)
+        .await
+        .expect("apply managed key kind-column migration");
+
+        let columns = sqlx::query("PRAGMA table_info(managed_keys_v1)")
+            .fetch_all(&mut connection)
+            .await
+            .expect("read managed key columns")
+            .into_iter()
+            .map(|row| row.try_get::<String, _>("name").expect("column name"))
+            .collect::<Vec<_>>();
+        assert!(!columns.iter().any(|name| name == "upstream_kind"));
+        assert!(!columns.iter().any(|name| name == "principal_kind"));
+
+        let row = sqlx::query(
+            "SELECT id, name, secret_hash, created_at, expires_at, status, principal_id, key_id,
+                    label, revoked_at, verify_hash, secret_salt, limit_overrides, last_4,
+                    description, index_hash, updated_at
+             FROM managed_keys_v1
+             WHERE principal_id = ? AND key_id = ?",
+        )
+        .bind("principal-preserved")
+        .bind("key-preserved")
+        .fetch_one(&mut connection)
+        .await
+        .expect("read preserved managed key");
+        assert_eq!(
+            row.try_get::<String, _>("id").expect("id"),
+            "principal-preserved/key-preserved"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("name").expect("name"),
+            "principal-preserved/key-preserved"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("secret_hash")
+                .expect("secret_hash"),
+            "preserved-key-hash"
+        );
+        assert_eq!(
+            row.try_get::<i64, _>("created_at").expect("created_at"),
+            1_700_000_000
+        );
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("expires_at")
+                .expect("expires_at"),
+            Some(1_800_000_000)
+        );
+        assert_eq!(
+            row.try_get::<String, _>("status").expect("status"),
+            "disabled"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("principal_id")
+                .expect("principal_id"),
+            "principal-preserved"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("key_id").expect("key_id"),
+            "key-preserved"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("label").expect("label"),
+            "preserved label"
+        );
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("revoked_at")
+                .expect("revoked_at"),
+            Some(1_700_000_100)
+        );
+        assert_eq!(
+            row.try_get::<Vec<u8>, _>("verify_hash")
+                .expect("verify_hash"),
+            vec![0x11; 32]
+        );
+        assert_eq!(
+            row.try_get::<Vec<u8>, _>("secret_salt")
+                .expect("secret_salt"),
+            vec![0x22; 16]
+        );
+        assert_eq!(
+            row.try_get::<String, _>("limit_overrides")
+                .expect("limit_overrides"),
+            r#"[{"kind":"requests","window_secs":60,"cap_micros":17}]"#
+        );
+        assert_eq!(row.try_get::<String, _>("last_4").expect("last_4"), "1234");
+        assert_eq!(
+            row.try_get::<Option<String>, _>("description")
+                .expect("description"),
+            Some("preserved description".to_owned())
+        );
+        assert_eq!(
+            row.try_get::<Vec<u8>, _>("index_hash").expect("index_hash"),
+            vec![0x33; 32]
+        );
+        assert_eq!(
+            row.try_get::<i64, _>("updated_at").expect("updated_at"),
+            1_700_000_200
+        );
+
+        let indexes = sqlx::query_scalar::<_, String>(
+            "SELECT name
+             FROM sqlite_master
+             WHERE type = 'index' AND tbl_name = 'managed_keys_v1'",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .expect("read managed key indexes");
+        assert!(
+            indexes
+                .iter()
+                .any(|name| name == "managed_keys_v1_active_index_hash")
+        );
+        assert!(
+            indexes
+                .iter()
+                .any(|name| name == "managed_keys_v1_principal_id")
+        );
+    }
+
+    fn issue_params(seed: u8) -> IssueParams {
+        IssueParams {
+            label: format!("label-{seed}"),
+            description: Some(format!("description-{seed}")),
+            expires_at_unix_secs: Some(1_800_000_000 + u64::from(seed)),
+            limit_overrides: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: i64::from(seed),
+            }],
+            secret_salt: [seed; 16],
+            verify_hash: [seed; 32],
+            last_4: format!("{seed:04}"),
+            index_hash: [seed.wrapping_add(100); 32],
+        }
+    }
 }

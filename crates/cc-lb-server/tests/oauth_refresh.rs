@@ -2,11 +2,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::common::managed_key_fixture;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+
 use cc_lb_config::{
     AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
 };
@@ -36,8 +38,7 @@ use cc_lb_signer_anthropic_oauth::{
 };
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamRecord,
-    UpstreamStore,
-    types::{KeyStatus, PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
+    UpstreamStore, types::KeyStatus,
 };
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,

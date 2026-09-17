@@ -9,12 +9,16 @@ use std::thread::JoinHandle as ThreadJoinHandle;
 
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
-    UpstreamStore,
-    principal::Limit,
-    types::{PrincipalKindLite, UpstreamKind as ManagedUpstreamKind},
+    UpstreamStore, principal::Limit,
 };
 
-use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_engine::api_keys::key_store::CreateParams;
+
+#[path = "../../../tests/fixtures/managed_key_fixture.rs"]
+pub(crate) mod managed_key_fixture;
+#[cfg(feature = "postgres")]
+#[path = "../../../tests/fixtures/managed_key_fixture_postgres.rs"]
+pub(crate) mod managed_key_fixture_postgres;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::open_sqlite;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
@@ -519,21 +523,18 @@ async fn seed_storage(
     match auth_config {
         AuthConfig::NoneMode => None,
         AuthConfig::ApiKey => {
-            let key_store = KeyStore::new(storage.clone());
-            let (_record, plaintext) = key_store
-                .create(
-                    "api-key",
-                    CreateParams {
-                        upstream_kind: ManagedUpstreamKind::AnthropicKey,
-                        label: "live-qa".to_owned(),
-                        description: None,
-                        expires_at_unix_secs: None,
-                        limit_overrides: Vec::new(),
-                        principal_kind: PrincipalKindLite::Machine,
-                    },
-                )
-                .await
-                .expect("seed managed key");
+            let (_record, plaintext) = managed_key_fixture::create_existing(
+                storage.as_ref(),
+                "api-key",
+                CreateParams {
+                    label: "live-qa".to_owned(),
+                    description: None,
+                    expires_at_unix_secs: None,
+                    limit_overrides: Vec::new(),
+                },
+            )
+            .await
+            .expect("seed managed key");
             let (key_id, _) = cc_lb_engine::api_keys::secret::parse(plaintext.expose())
                 .expect("generated key parses");
             Some(ManagedTestKey {

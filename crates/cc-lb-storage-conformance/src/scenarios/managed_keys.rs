@@ -6,15 +6,202 @@ use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     ManagedKeyStore, StorageError,
-    types::{
-        ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind, PrincipalKindLite, UpstreamKind,
-    },
+    types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind},
 };
-use futures::future::try_join_all;
+#[cfg(feature = "postgres")]
+use cc_lb_storage_postgres::PostgresManagedKeyStore;
+#[cfg(feature = "sqlite")]
+use cc_lb_storage_sqlite::SqliteStorage;
+use futures::future::{join_all, try_join_all};
+
+/// Test-only seeding for keys issued before the issuance pause.
+///
+/// Production `issue` intentionally returns [`StorageError::Unavailable`];
+/// scenarios that exercise existing-key behavior seed rows directly instead.
+#[async_trait]
+pub trait ManagedKeySeed: ManagedKeyStore {
+    async fn seed_existing(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        params: &IssueParams,
+        issued_at_unix_secs: u64,
+    ) -> Result<()>;
+}
+
+#[cfg(feature = "sqlite")]
+#[async_trait]
+impl ManagedKeySeed for SqliteStorage {
+    async fn seed_existing(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        params: &IssueParams,
+        issued_at_unix_secs: u64,
+    ) -> Result<()> {
+        super::managed_key_seed::seed_sqlite(
+            self.pool(),
+            principal_id,
+            key_id,
+            params,
+            i64::try_from(issued_at_unix_secs)?,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// Postgres managed-key store plus the pool needed for test-only seeding.
+///
+/// `PostgresManagedKeyStore` keeps its pool private, so the conformance suite
+/// wraps it; every `ManagedKeyStore` call delegates to the real store.
+#[cfg(feature = "postgres")]
+pub struct SeededPostgresStore {
+    inner: PostgresManagedKeyStore,
+    pool: sqlx::PgPool,
+}
+
+#[cfg(feature = "postgres")]
+impl SeededPostgresStore {
+    pub fn new(inner: PostgresManagedKeyStore, pool: sqlx::PgPool) -> Self {
+        Self { inner, pool }
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[async_trait]
+impl ManagedKeyStore for SeededPostgresStore {
+    async fn issue(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        params: IssueParams,
+    ) -> cc_lb_storage_api::StorageResult<cc_lb_storage_api::StoredApiKeyRecord> {
+        self.inner.issue(principal_id, key_id, params).await
+    }
+
+    async fn get(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+    ) -> cc_lb_storage_api::StorageResult<Option<cc_lb_storage_api::StoredApiKeyRecord>> {
+        self.inner.get(principal_id, key_id).await
+    }
+
+    async fn lookup_by_index_hash(
+        &self,
+        index_hash: &[u8; 32],
+    ) -> cc_lb_storage_api::StorageResult<
+        Option<(String, String, cc_lb_storage_api::StoredApiKeyRecord)>,
+    > {
+        self.inner.lookup_by_index_hash(index_hash).await
+    }
+
+    async fn list_by_principal(
+        &self,
+        principal_id: &str,
+    ) -> cc_lb_storage_api::StorageResult<Vec<cc_lb_storage_api::StoredApiKeyRecord>> {
+        self.inner.list_by_principal(principal_id).await
+    }
+
+    async fn list_all(
+        &self,
+    ) -> cc_lb_storage_api::StorageResult<
+        Vec<(String, String, cc_lb_storage_api::StoredApiKeyRecord)>,
+    > {
+        self.inner.list_all().await
+    }
+
+    async fn update(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        mutation: ApiKeyMutation,
+    ) -> cc_lb_storage_api::StorageResult<()> {
+        self.inner.update(principal_id, key_id, mutation).await
+    }
+
+    async fn revoke_zero_secrets(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+    ) -> cc_lb_storage_api::StorageResult<()> {
+        self.inner.revoke_zero_secrets(principal_id, key_id).await
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[async_trait]
+impl ManagedKeySeed for SeededPostgresStore {
+    async fn seed_existing(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        params: &IssueParams,
+        issued_at_unix_secs: u64,
+    ) -> Result<()> {
+        let legacy: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) = 2 \
+             FROM information_schema.columns \
+             WHERE table_schema = current_schema() \
+               AND table_name = 'managed_api_keys_v1' \
+               AND column_name IN ('upstream_kind', 'principal_kind')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        let mut tx = self.pool.begin().await?;
+        let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO managed_api_keys_v1 (principal_id, key_id, label, \
+             issued_at_unix_secs, revoked_at_unix_secs, key_hash_b64, verify_hash, \
+             secret_salt, limit_overrides, status, expires_at_unix_secs, last_4, \
+             description, index_hash, created_at, updated_at",
+        );
+        if legacy {
+            query.push(", upstream_kind, principal_kind");
+        }
+        query.push(") VALUES (");
+        {
+            let mut values = query.separated(",");
+            values
+                .push_bind(principal_id)
+                .push_bind(key_id)
+                .push_bind(&params.label)
+                .push_bind(i64::try_from(issued_at_unix_secs)?)
+                .push_bind(Option::<i64>::None)
+                .push_bind(base64_url_no_pad(&params.verify_hash))
+                .push_bind(params.verify_hash.as_slice())
+                .push_bind(params.secret_salt.as_slice())
+                .push_bind(serde_json::to_value(&params.limit_overrides)?)
+                .push_bind("active")
+                .push_bind(params.expires_at_unix_secs.map(i64::try_from).transpose()?)
+                .push_bind(&params.last_4)
+                .push_bind(&params.description)
+                .push_bind(params.index_hash.as_slice())
+                .push("NOW()")
+                .push("NOW()");
+            if legacy {
+                values.push_bind("anthropic_key").push_bind("machine");
+            }
+        }
+        query.push(")").build().execute(&mut *tx).await?;
+        sqlx::query(
+            "INSERT INTO managed_api_key_index_v1 (index_hash, principal_id, key_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(params.index_hash.as_slice())
+        .bind(principal_id)
+        .bind(key_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
 
 #[async_trait]
 pub trait ManagedKeyBackend: Send + Sync + 'static {
-    type Store: ManagedKeyStore;
+    type Store: ManagedKeySeed;
     type Fixture: Send + Sync;
 
     async fn create_fixture(&self) -> Result<Self::Fixture>;
@@ -72,7 +259,13 @@ where
     with_fixture(backend, |store| async move {
         let params = issue_params(11);
         let index_hash = params.index_hash;
-        let issued = store.issue("principal-a", "key-a", params.clone()).await?;
+        store
+            .seed_existing("principal-a", "key-a", &params, 1_700_000_000)
+            .await?;
+        let issued = store
+            .get("principal-a", "key-a")
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("seeded key should be readable"))?;
         let expected = expected_record(&params, issued.issued_at_unix_secs);
         assert_record_bytes_eq(&issued, &expected)?;
 
@@ -197,7 +390,7 @@ where
 {
     with_fixture(backend, |store| async move {
         let principal_error = store
-            .issue("bad\0principal", "key-a", issue_params(21))
+            .update("bad\0principal", "key-a", ApiKeyMutation::default())
             .await
             .expect_err("NUL principal id should be rejected");
         assert_invalid_field(principal_error, "principal_id")?;
@@ -226,54 +419,96 @@ where
     const KEY_COUNT: u8 = 100;
 
     with_fixture(backend, |store| async move {
+        // Issuance is paused: every concurrent issue must report Unavailable.
         let issues = (0..KEY_COUNT).map(|seed| {
             let store = Arc::clone(&store);
             async move {
                 let key_id = format!("key-{seed:02}");
                 let params = issue_params(seed.wrapping_add(40));
-                let index_hash = params.index_hash;
-                let issued = store.issue("principal-concurrent", &key_id, params).await?;
-                Ok::<_, StorageError>((key_id, index_hash, issued))
+                store.issue("principal-concurrent", &key_id, params).await
             }
         });
-        let issued = try_join_all(issues).await?;
+        let results = join_all(issues).await;
         ensure!(
-            issued.len() == usize::from(KEY_COUNT),
+            results.len() == usize::from(KEY_COUNT),
             "all concurrent issues should complete"
         );
-        let unique: HashSet<&str> = issued
+        let mut unavailable = 0_usize;
+        for result in &results {
+            match result {
+                Err(StorageError::Unavailable { .. }) => unavailable += 1,
+                other => anyhow::bail!("paused issue should be Unavailable, got {other:?}"),
+            }
+        }
+        ensure!(
+            unavailable == usize::from(KEY_COUNT),
+            "every concurrent issue should be Unavailable"
+        );
+        ensure!(
+            store
+                .list_by_principal("principal-concurrent")
+                .await?
+                .is_empty(),
+            "paused issuance should persist no rows"
+        );
+
+        // Preseed existing keys, then exercise concurrent index lookups.
+        let mut seeded = Vec::with_capacity(usize::from(KEY_COUNT));
+        for seed in 0..KEY_COUNT {
+            let key_id = format!("key-{seed:02}");
+            let params = issue_params(seed.wrapping_add(40));
+            let index_hash = params.index_hash;
+            store
+                .seed_existing("principal-concurrent", &key_id, &params, 1_700_000_000)
+                .await?;
+            let record = store
+                .get("principal-concurrent", &key_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("seeded key {key_id} should be readable"))?;
+            seeded.push((key_id, index_hash, record));
+        }
+
+        let lookups = seeded.iter().map(|(_, index_hash, _)| {
+            let store = Arc::clone(&store);
+            let index_hash = *index_hash;
+            async move { store.lookup_by_index_hash(&index_hash).await }
+        });
+        let looked_up = try_join_all(lookups).await?;
+        ensure!(
+            looked_up.len() == usize::from(KEY_COUNT),
+            "all concurrent lookups should complete"
+        );
+        let unique: HashSet<&str> = seeded
             .iter()
             .map(|(key_id, _, _)| key_id.as_str())
             .collect();
-        println!(
-            "managed_keys_concurrent_issue_no_index_collision: {}/100 unique key_ids",
-            unique.len()
-        );
         assert_eq!(unique.len(), 100);
 
         let listed = store.list_by_principal("principal-concurrent").await?;
         ensure!(
             listed.len() == usize::from(KEY_COUNT),
-            "principal list should contain every concurrent key"
+            "principal list should contain every seeded key"
         );
 
-        for (key_id, index_hash, issued_record) in issued {
+        for ((key_id, index_hash, seeded_record), lookup) in seeded.iter().zip(looked_up) {
             let fetched = store
-                .get("principal-concurrent", &key_id)
+                .get("principal-concurrent", key_id)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("missing concurrently issued key {key_id}"))?;
-            assert_record_bytes_eq(&fetched, &issued_record)?;
+                .ok_or_else(|| anyhow::anyhow!("missing seeded key {key_id}"))?;
+            assert_record_bytes_eq(&fetched, seeded_record)?;
 
-            let lookup = store
-                .lookup_by_index_hash(&index_hash)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("missing index lookup for {key_id}"))?;
+            let lookup =
+                lookup.ok_or_else(|| anyhow::anyhow!("missing index lookup for {key_id}"))?;
             ensure!(
                 lookup.0 == "principal-concurrent",
                 "concurrent lookup principal mismatch"
             );
-            ensure!(lookup.1 == key_id, "concurrent lookup key mismatch");
-            assert_record_bytes_eq(&lookup.2, &issued_record)?;
+            ensure!(&lookup.1 == key_id, "concurrent lookup key mismatch");
+            ensure!(
+                lookup.2.index_hash == *index_hash,
+                "concurrent lookup index hash mismatch"
+            );
+            assert_record_bytes_eq(&lookup.2, seeded_record)?;
         }
 
         Ok(())
@@ -282,24 +517,41 @@ where
 }
 
 pub async fn managed_keys_cross_backend_equivalence(
-    sqlite: &dyn ManagedKeyStore,
-    postgres: &dyn ManagedKeyStore,
+    sqlite: &dyn ManagedKeySeed,
+    postgres: &dyn ManagedKeySeed,
 ) -> Result<()> {
     let params = issue_params(121);
+    sqlite
+        .seed_existing(
+            "principal-cross-backend-equivalence",
+            "key-cross-backend-equivalence",
+            &params,
+            1_700_000_000,
+        )
+        .await?;
+    postgres
+        .seed_existing(
+            "principal-cross-backend-equivalence",
+            "key-cross-backend-equivalence",
+            &params,
+            1_700_000_000,
+        )
+        .await?;
+
     let sqlite_record = sqlite
-        .issue(
+        .get(
             "principal-cross-backend-equivalence",
             "key-cross-backend-equivalence",
-            params.clone(),
         )
-        .await?;
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("sqlite seeded key should be readable"))?;
     let postgres_record = postgres
-        .issue(
+        .get(
             "principal-cross-backend-equivalence",
             "key-cross-backend-equivalence",
-            params,
         )
-        .await?;
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("postgres seeded key should be readable"))?;
 
     assert_record_bytes_eq(&sqlite_record, &postgres_record)
 }
@@ -311,13 +563,31 @@ where
     with_fixture(backend, |store| async move {
         let first_params = issue_params(91);
         let first_index_hash = first_params.index_hash;
-        let first = store
-            .issue("principal-equivalence", "key-a", first_params)
+        store
+            .seed_existing(
+                "principal-equivalence",
+                "key-a",
+                &first_params,
+                1_700_000_000,
+            )
             .await?;
         let second_params = issue_params(92);
-        let second = store
-            .issue("principal-equivalence", "key-b", second_params)
+        store
+            .seed_existing(
+                "principal-equivalence",
+                "key-b",
+                &second_params,
+                1_700_000_100,
+            )
             .await?;
+        let first = store
+            .get("principal-equivalence", "key-a")
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("key-a should be readable"))?;
+        let second = store
+            .get("principal-equivalence", "key-b")
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("key-b should be readable"))?;
 
         let fetched = store
             .get("principal-equivalence", "key-a")
@@ -373,11 +643,6 @@ fn issue_params(seed: u8) -> IssueParams {
     IssueParams {
         label: format!("managed-key-{seed}"),
         description: Some(format!("description-{seed}")),
-        upstream_kind: if seed.is_multiple_of(2) {
-            UpstreamKind::AnthropicOAuth
-        } else {
-            UpstreamKind::AnthropicKey
-        },
         expires_at_unix_secs: Some(1_900_000_000 + u64::from(seed)),
         limit_overrides: vec![
             Limit {
@@ -394,11 +659,6 @@ fn issue_params(seed: u8) -> IssueParams {
         secret_salt: [seed; 16],
         verify_hash: [seed.wrapping_add(1); 32],
         last_4: format!("{seed:04}"),
-        principal_kind: if seed.is_multiple_of(2) {
-            PrincipalKindLite::Human
-        } else {
-            PrincipalKindLite::Machine
-        },
         index_hash: [seed.wrapping_add(2); 32],
     }
 }
@@ -414,13 +674,11 @@ fn expected_record(
         key_hash_b64: base64_url_no_pad(&params.verify_hash),
         verify_hash: params.verify_hash,
         secret_salt: params.secret_salt,
-        upstream_kind: params.upstream_kind,
         limit_overrides: params.limit_overrides.clone(),
         status: KeyStatus::Active,
         expires_at_unix_secs: params.expires_at_unix_secs,
         last_4: params.last_4.clone(),
         description: params.description.clone(),
-        principal_kind: params.principal_kind,
         index_hash: params.index_hash,
     }
 }

@@ -3,6 +3,9 @@ pub mod anthropic_compatibility_kv_store;
 pub mod append_ordering;
 pub mod atomicity;
 pub mod cache_keepalive_session_reads;
+#[cfg(feature = "sqlite")]
+#[path = "../../../../tests/fixtures/managed_key_seed.rs"]
+pub(crate) mod managed_key_seed;
 pub mod managed_keys;
 pub mod organization_metadata_store;
 pub mod plan_tier_store;

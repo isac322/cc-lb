@@ -17,6 +17,23 @@ See [docs/runtime-management.md](docs/runtime-management.md) for the full API an
 - [Upstream warm-up](./docs/upstream-warmup.md): keep Anthropic 5h windows ticking
 - [Distributed Scheduler](./docs/scheduler.md): topology, retry classes, metrics, and runbook
 
+### 0.4.9 호환 릴리스
+
+이 브랜치는 PostgreSQL 운영 0.4.9에서 관리 키의 legacy kind 컬럼을 제거하기 전에 배포할 중간 버전이다. 일반 최신 릴리스나 운영 배포 승인을 의미하지 않는다.
+
+- 기존 키의 인증·조회·상태 변경·폐기는 유지한다. 새 키 발급은 secret 생성이나 저장 전에 거절하며 Admin API는 `503`과 `key_issuance_paused`를 반환한다. 신규 키가 필요한 회전도 제한된다. 이 제한은 호환 버전을 사용하는 동안 지속되며 최종 버전으로 전환해야 해제된다.
+- PostgreSQL startup은 migration 114까지만 실행한다. 123까지의 원본 manifest를 포함하되, 이미 적용된 후속 migration도 버전·체크섬을 검증한다. 알 수 없는 버전, 변경된 체크섬, 실패 이력은 startup 오류다. migration을 실행한 것처럼 기록하거나 검증을 건너뛰지 않는다.
+- migration 연결은 pool 설정을 적용받은 뒤 pool에서 분리한다. 검증·실행 오류 후 잠금을 가진 연결이 pool에 반환되지 않도록 닫는다.
+- SQLite의 startup migration 범위는 바꾸지 않았다. SQLite 키 어댑터의 컬럼 제거 전후 동작은 별도 fixture로 검증하며, PostgreSQL의 후속 migration 이력 허용 정책을 SQLite에 적용했다고 주장하지 않는다.
+
+운영 전환 순서는 별도 승인을 전제로 한다.
+
+1. 컬럼을 남긴 상태에서 모든 0.4.9 replica를 이 호환 버전으로 교체하고 실제 proxy 요청을 확인한다.
+2. 구버전 replica가 더 이상 요청을 처리하지 않는 것을 확인한 뒤, 별도로 검토·승인한 스키마/인덱스 준비와 최종 버전 전환을 수행한다.
+3. 컬럼 제거 후 롤백 대상은 원래 0.4.9가 아니라 검증된 호환 버전이다. 후속 manifest가 달라지거나 123을 넘으면 이 호환 버전을 그대로 재사용하지 않는다.
+
+새 키 발급을 유지하려고 가짜 kind 기본값을 넣거나, `_sqlx_migrations`를 수동 수정하거나, 0117을 구버전 replica가 남아 있는 동안 실행하지 않는다. 인덱스의 쓰기 비용과 startup 잠금, 기타 pending migration의 부작용은 별도의 운영 전환 검토 대상이다.
+
 ### Stream diagnostics
 
 HTTP 200 means response headers were sent, not that the response body completed. Use `cc_lb_stream_terminations_total{outcome,cause}` to distinguish `completed`, `upstream_error`, `proxy_error`, and `client_cancelled`. Causes are bounded categories such as `unexpected_eof`, `h2_cancel`, and `affinity_error`; request IDs and error messages are never metric labels.

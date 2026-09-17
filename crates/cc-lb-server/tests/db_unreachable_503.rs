@@ -7,6 +7,7 @@ use std::process::{Command, Output};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::common::managed_key_fixture_postgres;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::{Request, Response, StatusCode};
@@ -21,8 +22,7 @@ use cc_lb_storage_api::{BackendKind, ManagedKeyStore, Storage as StorageTrait};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
 use http::header::RETRY_AFTER;
-use http_body_util::BodyExt;
-use serde_json::{Value, json};
+
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -64,7 +64,7 @@ async fn db_unreachable_returns_503_with_retry_after() -> TestResult<()> {
     ensure_postgres_up(&url).await?;
     let _guard = PostgresRestartGuard;
     let (app, _upstream) = build_api_key_app_for_testing_postgres(&url).await?;
-    let api_key = issue_key(&app).await?;
+    let api_key = issue_key(&url).await?;
 
     let before = proxy_messages(&app, &api_key).await?;
     assert_eq!(before.status(), StatusCode::OK);
@@ -96,7 +96,7 @@ async fn db_recovery_after_restart() -> TestResult<()> {
     ensure_postgres_up(&url).await?;
     let _guard = PostgresRestartGuard;
     let (app, _upstream) = build_api_key_app_for_testing_postgres(&url).await?;
-    let api_key = issue_key(&app).await?;
+    let api_key = issue_key(&url).await?;
 
     let before = proxy_messages(&app, &api_key).await?;
     assert_eq!(before.status(), StatusCode::OK);
@@ -300,36 +300,14 @@ async fn spawn_ok_upstream() -> TestResult<RunningUpstream> {
     Ok(RunningUpstream { addr, task })
 }
 
-async fn issue_key(app: &App) -> TestResult<String> {
-    let response = app
-        .admin_router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/admin/v1/principals/{PRINCIPAL_ID}/keys"))
-                .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "label": "db unreachable chaos key",
-                        "upstream_kind": "anthropic_key",
-                    })
-                    .to_string(),
-                ))?,
-        )
-        .await?;
-    assert_eq!(response.status(), StatusCode::CREATED);
-
-    let body = response.into_body().collect().await?.to_bytes();
-    let payload: Value = serde_json::from_slice(&body)?;
-    let Some(plaintext_key) = payload.get("plaintext_key").and_then(Value::as_str) else {
-        return Err(error(format!(
-            "issue key response missing plaintext_key: {payload}"
-        )));
-    };
-
-    Ok(plaintext_key.to_owned())
+async fn issue_key(database_url: &str) -> TestResult<String> {
+    let (_, plaintext) = managed_key_fixture_postgres::seed_existing(
+        database_url,
+        PRINCIPAL_ID,
+        "existing database-outage test key",
+    )
+    .await?;
+    Ok(plaintext)
 }
 
 async fn proxy_messages(app: &App, api_key: &str) -> TestResult<Response<Body>> {

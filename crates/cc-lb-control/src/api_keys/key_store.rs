@@ -2,14 +2,11 @@ use std::sync::Arc;
 
 use cc_lb_storage_api::{
     ManagedKeyStore, StorageError,
-    types::{
-        ApiKeyMutation, IssueParams, KeyStatus, Limit, PrincipalKindLite, StoredApiKeyRecord,
-        UpstreamKind,
-    },
+    types::{ApiKeyMutation, KeyStatus, Limit, StoredApiKeyRecord},
 };
 use thiserror::Error;
 
-use super::secret::{self, NewKeyOutput, RedactedSecret};
+use super::secret::RedactedSecret;
 
 pub type Result<T> = std::result::Result<T, KeyStoreError>;
 
@@ -20,18 +17,18 @@ pub struct KeyStore {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateParams {
-    pub upstream_kind: UpstreamKind,
     pub label: String,
     pub description: Option<String>,
     pub expires_at_unix_secs: Option<u64>,
     pub limit_overrides: Vec<Limit>,
-    pub principal_kind: PrincipalKindLite,
 }
 
 #[derive(Debug, Error)]
 pub enum KeyStoreError {
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error("new API key issuance is paused in this compatibility release")]
+    IssuancePaused,
     #[error("api key {principal_id}/{key_id} is already revoked")]
     KeyAlreadyRevoked {
         principal_id: String,
@@ -46,37 +43,12 @@ impl KeyStore {
 
     pub async fn create(
         &self,
-        principal_id: &str,
-        params: CreateParams,
+        _principal_id: &str,
+        _params: CreateParams,
     ) -> Result<(StoredApiKeyRecord, RedactedSecret)> {
-        let NewKeyOutput {
-            plaintext,
-            key_id,
-            secret_salt,
-            index_hash,
-            verify_hash,
-            last_4,
-        } = secret::generate_new();
-
-        let issue_params = IssueParams {
-            label: params.label,
-            description: params.description,
-            upstream_kind: params.upstream_kind,
-            expires_at_unix_secs: params.expires_at_unix_secs,
-            limit_overrides: params.limit_overrides,
-            secret_salt,
-            verify_hash,
-            last_4,
-            principal_kind: params.principal_kind,
-            index_hash,
-        };
-
-        let record = self
-            .storage
-            .issue(principal_id, &key_id, issue_params)
-            .await?;
-
-        Ok((record, plaintext))
+        // This compatibility release intentionally pauses new key issuance.
+        // Reject before generating a secret or touching either schema.
+        Err(KeyStoreError::IssuancePaused)
     }
 
     pub async fn lookup_by_index_hash(

@@ -12,6 +12,30 @@ use cc_lb_storage_api::{AuditStore, RequestEvent, RequestEventStore};
 use serde_json::json;
 use tower::ServiceExt;
 
+#[path = "../../../tests/fixtures/managed_key_fixture.rs"]
+mod managed_key_fixture;
+
+async fn seed_existing_key(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+    principal_id: &str,
+    label: &str,
+) -> (String, String) {
+    let (_, secret) = managed_key_fixture::create_existing(
+        storage,
+        principal_id,
+        cc_lb_control::api_keys::key_store::CreateParams {
+            label: label.to_owned(),
+            description: None,
+            expires_at_unix_secs: None,
+            limit_overrides: Vec::new(),
+        },
+    )
+    .await
+    .expect("seed a key issued before the bridge release");
+    let (key_id, _) = cc_lb_control::api_keys::secret::parse(secret.expose()).unwrap();
+    (key_id, secret.expose().to_owned())
+}
+
 fn test_state() -> AdminState {
     let config = Config::default();
     AdminState {
@@ -67,17 +91,23 @@ async fn revoked_key_list_preserves_key_id_last4_and_audit_rows() {
     let principal_id = principal["id"].as_str().unwrap();
     admin_test_common::set_dynamic_principal(&server.dynamic_view, principal_id);
 
-    let (status, _, issued) = server
-        .client
-        .post_json(
-            &format!("/admin/v1/principals/{principal_id}/keys"),
-            json!({ "label": "qa-revoked-shape" }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CREATED);
-    let key_id = issued["key_id"].as_str().unwrap();
-    let plaintext = issued["plaintext_key"].as_str().unwrap();
+    let (key_id, plaintext) =
+        seed_existing_key(&server.storage, principal_id, "qa-revoked-shape").await;
     let expected_last4 = &plaintext[plaintext.len() - 4..];
+    // Preserve the pre-bridge issuance history while testing real revocation.
+    server
+        .storage
+        .append_audit(&cc_lb_storage_api::AuditEntry {
+            ts: cc_lb_clock::unix_secs(std::time::SystemTime::now()),
+            request_id: "fixture-before-bridge-issuance".to_owned(),
+            principal_id: principal_id.to_owned(),
+            api_key_id: Some(key_id.clone()),
+            admin_action: Some("principal_key_issue".to_owned()),
+            status: 201,
+            ..Default::default()
+        })
+        .await
+        .expect("seed historical key issuance audit");
 
     let (status, _, _) = server
         .client
@@ -100,8 +130,8 @@ async fn revoked_key_list_preserves_key_id_last4_and_audit_rows() {
     assert_eq!(keys[0]["key_id"], key_id);
     assert_eq!(keys[0]["last_4"], expected_last4);
 
-    wait_for_audit_action(&server.storage, "principal_key_issue", key_id).await;
-    wait_for_audit_action(&server.storage, "principal_key_revoke", key_id).await;
+    wait_for_audit_action(&server.storage, "principal_key_issue", &key_id).await;
+    wait_for_audit_action(&server.storage, "principal_key_revoke", &key_id).await;
 }
 
 #[tokio::test]
@@ -117,15 +147,7 @@ async fn principal_key_usage_uses_persisted_request_events() {
     let principal_id = principal["id"].as_str().unwrap();
     admin_test_common::set_dynamic_principal(&server.dynamic_view, principal_id);
 
-    let (status, _, issued) = server
-        .client
-        .post_json(
-            &format!("/admin/v1/principals/{principal_id}/keys"),
-            json!({ "label": "usage" }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CREATED);
-    let key_id = issued["key_id"].as_str().unwrap();
+    let (key_id, _) = seed_existing_key(&server.storage, principal_id, "usage").await;
     let event_ts = cc_lb_clock::unix_secs(std::time::SystemTime::now());
     let event_ts_ms = event_ts.saturating_mul(1_000);
 
@@ -178,6 +200,33 @@ async fn principal_key_usage_uses_persisted_request_events() {
     assert_eq!(observed["input_tokens"], 60);
     assert_eq!(observed["output_tokens"], 40);
     assert_eq!(observed["cost_usd_micros"], 50);
+}
+
+#[tokio::test]
+async fn bridge_key_issuance_returns_explicit_pause_without_persisting_a_key() {
+    use cc_lb_storage_api::ManagedKeyStore;
+    let server = admin_test_common::spawn_admin_server().await;
+    let (_, _, principal) = server.client.post_json(
+        "/admin/v1/principals",
+        json!({ "name": "paused-keys", "kind": "machine", "allowed_models": [], "default_limits": [] }),
+    ).await;
+    let principal_id = principal["id"].as_str().unwrap();
+    let (status, _, response) = server
+        .client
+        .post_json(
+            &format!("/admin/v1/principals/{principal_id}/keys"),
+            json!({ "label": "must-not-exist" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response["error"], "key_issuance_paused");
+    assert!(response.get("plaintext_key").is_none());
+    assert!(
+        ManagedKeyStore::list_all(server.storage.as_ref())
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 async fn wait_for_audit_action(

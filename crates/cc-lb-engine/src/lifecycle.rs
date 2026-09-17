@@ -2458,9 +2458,9 @@ impl Lifecycle {
                 result: Ok(cc_lb_lifecycle::AuthInfo {
                     principal_id: principal_id.clone(),
                     key_id: Some(success.key_id.clone()),
-                    principal_kind: Some(
-                        principal_kind_lite_as_str(&success.record.principal_kind).to_owned(),
-                    ),
+                    principal_kind: principal_view
+                        .principal_kind(&principal_id)
+                        .map(|kind| principal_kind_lite_as_str(&kind).to_owned()),
                     auth_ms: Some(auth_ms),
                 }),
             });
@@ -2565,7 +2565,12 @@ impl Lifecycle {
             return Ok(response);
         }
         if let Some(o) = observer.as_ref() {
-            o.emit_authentication_completed(principal.id.clone(), success.record.principal_kind);
+            o.emit_authentication_completed(
+                principal.id.clone(),
+                principal_view
+                    .principal_kind(&principal.id)
+                    .unwrap_or_default(),
+            );
         }
 
         let route_start = Instant::now();

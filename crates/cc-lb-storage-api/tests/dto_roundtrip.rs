@@ -6,7 +6,6 @@ use cc_lb_domain::{
 };
 use cc_lb_request_log::{CostBreakdown, RequestCacheLookbackPrefix, RequestEventUpdate};
 use cc_lb_storage_api::principal::{Limit, LimitKind};
-use cc_lb_storage_api::types::UpstreamKind;
 use cc_lb_storage_api::types::{Limit as TypesLimit, LimitKind as TypesLimitKind};
 use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyRecord, AuditEntry, BackendKind, BucketKind,
@@ -289,7 +288,6 @@ backend = 'sqlite'"
         key_hash_b64: "YWJjMTIz".to_owned(),
         verify_hash: [1; 32],
         secret_salt: [2; 16],
-        upstream_kind: UpstreamKind::AnthropicKey,
         limit_overrides: vec![TypesLimit {
             kind: TypesLimitKind::Requests,
             window_secs: 60,
@@ -299,7 +297,6 @@ backend = 'sqlite'"
         expires_at_unix_secs: Some(1_800_000_000),
         last_4: "c123".to_owned(),
         description: Some("default key".to_owned()),
-        principal_kind: PrincipalKindLite::Machine,
         index_hash: [3; 32],
     });
 

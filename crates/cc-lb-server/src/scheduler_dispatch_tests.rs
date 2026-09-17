@@ -23,10 +23,13 @@ use cc_lb_scheduler::worker::CronJob;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, Limit,
-    LimitKind, PrincipalKindLite, RequestEventStore,
+    LimitKind, RequestEventStore,
 };
 use serde_json::Value;
 use std::sync::Mutex;
+
+#[path = "../../../tests/fixtures/managed_key_fixture.rs"]
+mod managed_key_fixture;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
@@ -636,25 +639,22 @@ async fn saturated_lifecycle_bus_still_persists_and_reconciles_once() {
 async fn renewal_response_persists_one_attributed_event_and_projection_set() {
     // Given
     let fixture = Fixture::new().await;
-    let key_store = KeyStore::new(fixture.storage.clone());
-    let (_key, secret) = key_store
-        .create(
-            "principal",
-            CreateParams {
-                upstream_kind: cc_lb_storage_api::types::UpstreamKind::AnthropicKey,
-                label: "renewal accounting".to_owned(),
-                description: None,
-                expires_at_unix_secs: None,
-                limit_overrides: vec![Limit {
-                    kind: LimitKind::Requests,
-                    window_secs: 60,
-                    cap_micros: 10,
-                }],
-                principal_kind: PrincipalKindLite::Machine,
-            },
-        )
-        .await
-        .expect("create renewal accounting key");
+    let (_key, secret) = managed_key_fixture::create_existing(
+        fixture.storage.as_ref(),
+        "principal",
+        CreateParams {
+            label: "renewal accounting".to_owned(),
+            description: None,
+            expires_at_unix_secs: None,
+            limit_overrides: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 10,
+            }],
+        },
+    )
+    .await
+    .expect("create renewal accounting key");
     let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     let mut request = fixture.enqueue_request();
@@ -796,25 +796,22 @@ fn api_key_id(secret: &str) -> String {
 }
 
 async fn create_accounting_key(fixture: &Fixture, kind: LimitKind, cap_micros: i64) -> String {
-    let key_store = KeyStore::new(fixture.storage.clone());
-    let (_, secret) = key_store
-        .create(
-            "principal",
-            CreateParams {
-                upstream_kind: cc_lb_storage_api::types::UpstreamKind::AnthropicKey,
-                label: "renewal accounting".to_owned(),
-                description: None,
-                expires_at_unix_secs: None,
-                limit_overrides: vec![Limit {
-                    kind,
-                    window_secs: 60,
-                    cap_micros,
-                }],
-                principal_kind: PrincipalKindLite::Machine,
-            },
-        )
-        .await
-        .expect("create renewal accounting key");
+    let (_, secret) = managed_key_fixture::create_existing(
+        fixture.storage.as_ref(),
+        "principal",
+        CreateParams {
+            label: "renewal accounting".to_owned(),
+            description: None,
+            expires_at_unix_secs: None,
+            limit_overrides: vec![Limit {
+                kind,
+                window_secs: 60,
+                cap_micros,
+            }],
+        },
+    )
+    .await
+    .expect("create renewal accounting key");
     api_key_id(secret.expose())
 }
 
@@ -1042,25 +1039,22 @@ async fn cache_keepalive_missing_accounting_key_terminalizes_without_dispatch() 
 #[tokio::test]
 async fn cache_keepalive_accounting_key_uses_real_reserve_before_dispatch() {
     let fixture = Fixture::new().await;
-    let key_store = KeyStore::new(fixture.storage.clone());
-    let (record, _) = key_store
-        .create(
-            "principal",
-            CreateParams {
-                upstream_kind: cc_lb_storage_api::types::UpstreamKind::AnthropicKey,
-                label: "renewal accounting".to_owned(),
-                description: None,
-                expires_at_unix_secs: None,
-                limit_overrides: vec![Limit {
-                    kind: LimitKind::Requests,
-                    window_secs: 60,
-                    cap_micros: 0,
-                }],
-                principal_kind: PrincipalKindLite::Machine,
-            },
-        )
-        .await
-        .expect("create accounting key");
+    let (record, _) = managed_key_fixture::create_existing(
+        fixture.storage.as_ref(),
+        "principal",
+        CreateParams {
+            label: "renewal accounting".to_owned(),
+            description: None,
+            expires_at_unix_secs: None,
+            limit_overrides: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 0,
+            }],
+        },
+    )
+    .await
+    .expect("create accounting key");
     let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     let mut request = fixture.enqueue_request();

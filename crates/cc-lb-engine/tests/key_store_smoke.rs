@@ -2,17 +2,18 @@ use std::sync::Arc;
 
 use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore, KeyStoreError};
 use cc_lb_engine::api_keys::secret;
-use cc_lb_storage_api::types::{
-    ApiKeyMutation, KeyStatus, Limit, LimitKind, PrincipalKindLite, UpstreamKind,
-};
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind};
+use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore};
+
+#[path = "../../../tests/fixtures/managed_key_seed.rs"]
+mod managed_key_seed;
 
 #[tokio::test]
-async fn create_lists_principal() -> Result<(), Box<dyn std::error::Error>> {
+async fn existing_key_lists_principal() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, store) = new_store().await?;
 
     store
-        .create("principal-1", create_params("managed key"))
+        .seed_existing("principal-1", create_params("managed key"))
         .await?;
 
     let listed = store.list_by_principal("principal-1").await?;
@@ -26,7 +27,7 @@ async fn create_lists_principal() -> Result<(), Box<dyn std::error::Error>> {
 async fn lookup_by_index_hash_returns_matching_key() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, store) = new_store().await?;
     let (record, secret) = store
-        .create("principal-1", create_params("managed key"))
+        .seed_existing("principal-1", create_params("managed key"))
         .await?;
     let (key_id, _) = secret::parse(secret.expose())?;
 
@@ -46,7 +47,7 @@ async fn lookup_by_index_hash_returns_matching_key() -> Result<(), Box<dyn std::
 async fn revoke_removes_index() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, store) = new_store().await?;
     let (record, secret) = store
-        .create("principal-1", create_params("managed key"))
+        .seed_existing("principal-1", create_params("managed key"))
         .await?;
     let (key_id, _) = secret::parse(secret.expose())?;
     let index_hash = record.index_hash;
@@ -71,7 +72,7 @@ async fn revoke_removes_index() -> Result<(), Box<dyn std::error::Error>> {
 async fn disable_keeps_index() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, store) = new_store().await?;
     let (record, secret) = store
-        .create("principal-1", create_params("managed key"))
+        .seed_existing("principal-1", create_params("managed key"))
         .await?;
     let (key_id, _) = secret::parse(secret.expose())?;
 
@@ -90,7 +91,7 @@ async fn disable_keeps_index() -> Result<(), Box<dyn std::error::Error>> {
 async fn patch_label_change_reflected_in_list() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, store) = new_store().await?;
     let (_record, secret) = store
-        .create("principal-1", create_params("managed key"))
+        .seed_existing("principal-1", create_params("managed key"))
         .await?;
     let (key_id, _) = secret::parse(secret.expose())?;
 
@@ -116,7 +117,7 @@ async fn patch_label_change_reflected_in_list() -> Result<(), Box<dyn std::error
 async fn enable_on_revoked_returns_err() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, store) = new_store().await?;
     let (_record, secret) = store
-        .create("principal-1", create_params("managed key"))
+        .seed_existing("principal-1", create_params("managed key"))
         .await?;
     let (key_id, _) = secret::parse(secret.expose())?;
 
@@ -131,19 +132,26 @@ async fn enable_on_revoked_returns_err() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-async fn new_store() -> Result<(tempfile::TempDir, KeyStore), Box<dyn std::error::Error>> {
+async fn new_store() -> Result<(tempfile::TempDir, ExistingKeyFixture), Box<dyn std::error::Error>>
+{
     let dir = tempfile::tempdir()?;
     let database_url = format!("sqlite://{}", dir.path().join("key_store.sqlite").display());
     let storage =
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
             .await?;
     storage.initialize(BackendKind::Sqlite).await?;
-    Ok((dir, KeyStore::new(Arc::new(storage))))
+    let storage = Arc::new(storage);
+    Ok((
+        dir,
+        ExistingKeyFixture {
+            store: KeyStore::new(storage.clone()),
+            storage,
+        },
+    ))
 }
 
 fn create_params(label: &str) -> CreateParams {
     CreateParams {
-        upstream_kind: UpstreamKind::AnthropicKey,
         label: label.to_owned(),
         description: Some("test key".to_owned()),
         expires_at_unix_secs: Some(1_800_000_000),
@@ -152,6 +160,71 @@ fn create_params(label: &str) -> CreateParams {
             window_secs: 60,
             cap_micros: 100,
         }],
-        principal_kind: PrincipalKindLite::Machine,
     }
+}
+
+struct ExistingKeyFixture {
+    store: KeyStore,
+    storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+}
+
+impl std::ops::Deref for ExistingKeyFixture {
+    type Target = KeyStore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.store
+    }
+}
+
+impl ExistingKeyFixture {
+    async fn seed_existing(
+        &self,
+        principal_id: &str,
+        params: CreateParams,
+    ) -> Result<
+        (
+            cc_lb_storage_api::StoredApiKeyRecord,
+            secret::RedactedSecret,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let generated = secret::generate_new();
+        let issue = IssueParams {
+            label: params.label,
+            description: params.description,
+            expires_at_unix_secs: params.expires_at_unix_secs,
+            limit_overrides: params.limit_overrides,
+            secret_salt: generated.secret_salt,
+            verify_hash: generated.verify_hash,
+            last_4: generated.last_4,
+            index_hash: generated.index_hash,
+        };
+        managed_key_seed::seed_sqlite(
+            self.storage.pool(),
+            principal_id,
+            &generated.key_id,
+            &issue,
+            1_700_000_000,
+        )
+        .await?;
+        let record = self
+            .storage
+            .get(principal_id, &generated.key_id)
+            .await?
+            .ok_or("seeded key is missing")?;
+        Ok((record, generated.plaintext))
+    }
+}
+
+#[tokio::test]
+async fn issuance_is_paused_without_creating_a_key() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, fixture) = new_store().await?;
+    let error = fixture
+        .store
+        .create("principal-1", create_params("paused"))
+        .await
+        .expect_err("bridge must refuse issuance");
+    assert!(matches!(error, KeyStoreError::IssuancePaused));
+    assert!(fixture.store.list_all().await?.is_empty());
+    Ok(())
 }

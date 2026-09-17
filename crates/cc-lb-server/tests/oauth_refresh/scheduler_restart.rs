@@ -27,20 +27,18 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
     .await;
     fixture.create_principal("oauth-principal").await;
     let key_store = Arc::new(KeyStore::new(fixture.storage.clone()));
-    let (_key_record, key_secret) = key_store
-        .create(
-            "oauth-principal",
-            CreateParams {
-                upstream_kind: ManagedUpstreamKind::AnthropicOAuth,
-                label: "scheduler-restart-oauth-proxy".to_owned(),
-                description: None,
-                expires_at_unix_secs: None,
-                limit_overrides: Vec::new(),
-                principal_kind: PrincipalKindLite::Machine,
-            },
-        )
-        .await
-        .expect("managed key created");
+    let (_key_record, key_secret) = managed_key_fixture::create_existing(
+        fixture.storage.as_ref(),
+        "oauth-principal",
+        CreateParams {
+            label: "scheduler-restart-oauth-proxy".to_owned(),
+            description: None,
+            expires_at_unix_secs: None,
+            limit_overrides: Vec::new(),
+        },
+    )
+    .await
+    .expect("managed key created");
     let mut stored_keys = key_store.list_all().await.expect("managed keys listed");
     let stored_key_count = stored_keys.len();
     let (stored_principal_id, key_id, _) = stored_keys.pop().expect("managed key exists");

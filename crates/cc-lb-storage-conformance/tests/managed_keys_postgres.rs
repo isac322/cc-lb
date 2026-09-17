@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use cc_lb_engine::{ClockHandle, SystemClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::scenarios::managed_keys::{
-    ManagedKeyBackend, managed_keys_concurrent_issue_no_index_collision,
+    ManagedKeyBackend, SeededPostgresStore, managed_keys_concurrent_issue_no_index_collision,
     managed_keys_equivalent_records, managed_keys_happy_path, managed_keys_nul_byte_rejected,
 };
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage, adapter::retry};
@@ -28,7 +28,7 @@ struct PostgresFixture {
 
 #[async_trait]
 impl ManagedKeyBackend for PostgresManagedKeyBackend {
-    type Store = PostgresManagedKeyStore;
+    type Store = SeededPostgresStore;
     type Fixture = PostgresFixture;
 
     async fn create_fixture(&self) -> anyhow::Result<Self::Fixture> {
@@ -63,10 +63,13 @@ impl ManagedKeyBackend for PostgresManagedKeyBackend {
     }
 
     async fn open(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Store> {
-        Ok(PostgresManagedKeyStore::new(
+        Ok(SeededPostgresStore::new(
+            PostgresManagedKeyStore::new(
+                fixture.pool.clone(),
+                Arc::new(retry::RetryPolicy::default()),
+                system_clock(),
+            ),
             fixture.pool.clone(),
-            Arc::new(retry::RetryPolicy::default()),
-            system_clock(),
         ))
     }
 

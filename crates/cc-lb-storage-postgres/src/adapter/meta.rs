@@ -8,12 +8,7 @@ use crate::{adapter::PostgresStorage, error_map::map_sqlx_error};
 #[async_trait]
 impl MetaStore for PostgresStorage {
     async fn initialize(&self, requested: BackendKind) -> StorageResult<()> {
-        sqlx::migrate!("./migrations")
-            .run(&self.pool)
-            .await
-            .map_err(|error| StorageError::Fatal {
-                message: error.to_string(),
-            })?;
+        super::migration_gate::run_capped_migrations(&self.pool).await?;
 
         sqlx::query(
             "INSERT INTO meta (key, value) VALUES ('backend_kind', $1)              ON CONFLICT (key) DO NOTHING",

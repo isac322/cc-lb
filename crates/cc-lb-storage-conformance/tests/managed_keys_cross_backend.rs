@@ -4,7 +4,9 @@ use std::{str::FromStr, sync::Arc};
 
 use cc_lb_engine::{ClockHandle, SystemClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
-use cc_lb_storage_conformance::scenarios::managed_keys::managed_keys_cross_backend_equivalence;
+use cc_lb_storage_conformance::scenarios::managed_keys::{
+    SeededPostgresStore, managed_keys_cross_backend_equivalence,
+};
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage, adapter::retry};
 use cc_lb_storage_sqlite::open_sqlite;
 use sqlx::{
@@ -39,12 +41,14 @@ async fn run_cross_backend_equivalence(url: String) -> anyhow::Result<()> {
     let clock = system_clock();
     let sqlite_store = open_sqlite(&sqlite_url, Arc::clone(&clock)).await?;
     sqlite_store.initialize(BackendKind::Sqlite).await?;
-
     let fixture = create_postgres_fixture(url).await?;
-    let postgres_store = PostgresManagedKeyStore::new(
+    let postgres_store = SeededPostgresStore::new(
+        PostgresManagedKeyStore::new(
+            fixture.pool.clone(),
+            Arc::new(retry::RetryPolicy::default()),
+            clock,
+        ),
         fixture.pool.clone(),
-        Arc::new(retry::RetryPolicy::default()),
-        clock,
     );
 
     let result = managed_keys_cross_backend_equivalence(&sqlite_store, &postgres_store).await;

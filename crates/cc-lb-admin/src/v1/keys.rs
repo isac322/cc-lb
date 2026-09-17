@@ -6,10 +6,10 @@ use axum::{
     routing::{get, post},
 };
 use cc_lb_control::AuditEntry;
-use cc_lb_control::api_keys::key_store::CreateParams;
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStoreError};
 use cc_lb_control::api_keys::secret;
 use cc_lb_storage_api::RequestEventKeyLastUsedQuery;
-use cc_lb_storage_api::types::{KeyStatus, PrincipalKindLite, UpstreamKind};
+use cc_lb_storage_api::types::KeyStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -91,12 +91,10 @@ async fn issue_key(
     };
 
     let params = CreateParams {
-        upstream_kind: UpstreamKind::AnthropicKey,
         label: body.label.unwrap_or_default(),
         description: None,
         expires_at_unix_secs: None,
         limit_overrides: vec![],
-        principal_kind: PrincipalKindLite::Machine,
     };
 
     match key_store.create(&id, params).await {
@@ -114,6 +112,14 @@ async fn issue_key(
             add_dynamic_rebind_headers(&mut http_response, &state).await;
             http_response
         }
+        Err(KeyStoreError::IssuancePaused) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "key_issuance_paused",
+                "message": "New API key issuance is paused in this compatibility release; existing keys remain usable."
+            })),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Failed to issue key: {}", e);
             (
