@@ -211,4 +211,3 @@ describe('SettingsCard base URL contract', () => {
     expect(screen.getByTestId('upstream-settings-edit-form')).toBeDefined();
   });
 });
-
