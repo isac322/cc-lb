@@ -13,6 +13,7 @@ export function InlineNameEditor({ upstream, className }: Props) {
   const [isEditing, setIsEditing] = useState(false);
   const [name, setName] = useState(upstream.name);
   const inputRef = useRef<HTMLInputElement>(null);
+  const saveStartedRef = useRef(false);
   const updateUpstream = useUpdateUpstream();
 
   useEffect(() => {
@@ -28,7 +29,10 @@ export function InlineNameEditor({ upstream, className }: Props) {
   }, [upstream.name, isEditing]);
 
   const handleSave = () => {
+    if (saveStartedRef.current) return;
+
     const trimmedNewName = name.trim();
+    saveStartedRef.current = true;
 
     if (!trimmedNewName || trimmedNewName === upstream.name) {
       setIsEditing(false);
@@ -61,6 +65,7 @@ export function InlineNameEditor({ upstream, className }: Props) {
       handleSave();
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      saveStartedRef.current = true;
       setName(upstream.name);
       setIsEditing(false);
     }
@@ -98,7 +103,11 @@ export function InlineNameEditor({ upstream, className }: Props) {
         'text-xl font-mono cursor-text hover:border-b-dotted hover:border-text-faint border-b border-transparent transition-colors',
         className,
       )}
-      onClick={() => setIsEditing(true)}
+      onClick={() => {
+        saveStartedRef.current = false;
+        setName(upstream.name);
+        setIsEditing(true);
+      }}
       title="Click to edit name"
     >
       {upstream.name}

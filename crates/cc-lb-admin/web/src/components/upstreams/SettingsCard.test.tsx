@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { Upstream } from '../../lib/queries';
 import * as queries from '../../lib/queries';
+import { InlineNameEditor } from './InlineNameEditor';
 import { SettingsCard } from './SettingsCard';
 
 vi.mock('../../lib/queries', async () => {
@@ -209,5 +210,59 @@ describe('SettingsCard base URL contract', () => {
     expect(success).not.toHaveBeenCalled();
     expect(error).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('upstream-settings-edit-form')).toBeDefined();
+  });
+});
+
+describe('InlineNameEditor commit boundary', () => {
+  test('submits one rename when Enter is followed by blur', () => {
+    render(<InlineNameEditor upstream={upstream} />);
+
+    fireEvent.click(screen.getByText(upstream.name));
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: 'Renamed upstream' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    fireEvent.blur(input);
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(mutate).toHaveBeenCalledWith(
+      {
+        id: upstream.id,
+        body: { name: 'Renamed upstream' },
+        spec_revision: upstream.spec_revision,
+      },
+      expect.anything(),
+    );
+  });
+
+  test('still saves a changed name on blur', () => {
+    render(<InlineNameEditor upstream={upstream} />);
+
+    fireEvent.click(screen.getByText(upstream.name));
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: 'Blurred rename' } });
+    fireEvent.blur(input);
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(mutate).toHaveBeenCalledWith(
+      {
+        id: upstream.id,
+        body: { name: 'Blurred rename' },
+        spec_revision: upstream.spec_revision,
+      },
+      expect.anything(),
+    );
+  });
+
+  test('cancels an edited name with Escape without saving on blur', () => {
+    render(<InlineNameEditor upstream={upstream} />);
+
+    fireEvent.click(screen.getByText(upstream.name));
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: 'Do not save' } });
+    fireEvent.keyDown(input, { key: 'Escape', code: 'Escape' });
+    fireEvent.blur(input);
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(screen.getByText(upstream.name)).toBeDefined();
   });
 });
