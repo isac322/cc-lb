@@ -5,6 +5,7 @@ import { ConfirmDialog, Skeleton } from '../ui/primitives';
 export function PluginDeleteDialog({
   pendingDelete,
   onClose,
+  onDeleted,
 }: {
   pendingDelete: {
     id: string;
@@ -13,6 +14,7 @@ export function PluginDeleteDialog({
     refcount: number;
   } | null;
   onClose: () => void;
+  onDeleted?: () => void;
 }) {
   const del = useDeletePlugin();
   const refs = usePluginReferences(
@@ -113,22 +115,25 @@ export function PluginDeleteDialog({
       confirmDisabled={fingerprintPending}
       pending={del.isPending}
       closeOnConfirm={false}
-      onConfirm={() => {
+      onConfirm={async () => {
         if (!pendingDelete || del.isPending || fingerprintPending) return;
-        del.mutate(
-          {
+        try {
+          await del.mutateAsync({
             id: pendingDelete.id,
             revision: pendingDelete.revision,
             cascade,
             referenceFingerprint,
-          },
-          {
-            onSuccess: () => {
-              toast.success('Plugin deleted');
-              onClose();
-            },
-          },
-        );
+          });
+        } catch {
+          // The shared MutationCache owns the error toast.
+          return;
+        }
+        toast.success('Plugin deleted');
+        if (onDeleted) {
+          onDeleted();
+        } else {
+          onClose();
+        }
       }}
     />
   );
