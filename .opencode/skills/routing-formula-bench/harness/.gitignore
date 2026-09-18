@@ -1,7 +1,0 @@
-# Captured traffic and benchmark outputs are sensitive runtime artifacts.
-*.sqlite
-*.csv
-__pycache__/
-dynamic-quota-cache-v1/
-out/
-artifacts/

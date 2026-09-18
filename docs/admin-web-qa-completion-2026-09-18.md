@@ -137,3 +137,17 @@ Three defects made the UI look broken when it was not:
 - Playwright's click could land while its own acknowledgement timed out, and the fallback
   mouse sequence then clicked a second time, producing a duplicate save. The fallback now
   runs only when no click was observed.
+
+## Skill path migration completed
+
+The requested move of every skill from `.opencode/skills` to `.agents/skills` is finished.
+`.agents/skills` holds all seven skills (38 files): the five that existed before this work
+plus `web-qa-inventory-extractor` and `web-performance-qa`. `.opencode/skills` is deleted,
+so a skill has exactly one source.
+
+Three `user-flow-qa` scenario files had already diverged between the two trees; the
+`.agents` copies carried the newer content (the router-revision and shared-preference
+boundary cases, the WASM GC contract, and the API-key label contract), so nothing is lost.
+No file outside the skill tree still points at `.opencode/skills` except the audit-time
+evidence rows in `docs/admin-web-qa-completion-plan-2026-09-15.md`, which record the
+historical state on purpose.
