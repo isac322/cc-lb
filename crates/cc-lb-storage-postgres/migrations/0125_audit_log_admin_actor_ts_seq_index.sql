@@ -4,7 +4,7 @@
 -- makes this partial index applicable.
 --
 -- Plain CREATE INDEX, not CONCURRENTLY: see
--- 0121_audit_log_principal_ts_seq_index.sql for the advisory-lock rationale,
+-- 0126_audit_log_principal_ts_seq_index.sql for the advisory-lock rationale,
 -- the one-index-per-file split, and the operator pre-create requirement for
 -- large tables.
 SET LOCAL lock_timeout = '1s';
