@@ -40,16 +40,26 @@ impl ConfigStore for PostgresStorage {
         new.last_validation = None;
         let config = serde_json::to_value(&new)?;
 
-        let stored_revision = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO config_draft_v1 (id, config, revision, updated_at)              SELECT 'singleton', $1, $2, NOW() WHERE $3 = 0              ON CONFLICT (id) DO UPDATE              SET config = EXCLUDED.config, updated_at = NOW(),              revision = config_draft_v1.revision + 1              WHERE config_draft_v1.revision = $3              RETURNING revision",
-        )
-        .bind(config)
-        .bind(u64_to_i64(revision, "config revision")?)
-        .bind(u64_to_i64(expected_revision, "expected config revision")?)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
-        .ok_or_else(|| conflict("stale config draft revision"))?;
+        let statement = if expected_revision == 0 {
+            "INSERT INTO config_draft_v1 (id, config, revision, updated_at)
+             VALUES ('singleton', $1, $2, NOW())
+             ON CONFLICT (id) DO UPDATE
+             SET config = EXCLUDED.config, revision = EXCLUDED.revision, updated_at = NOW()
+             WHERE config_draft_v1.revision = $3
+             RETURNING revision"
+        } else {
+            "UPDATE config_draft_v1 SET config = $1, revision = $2, updated_at = NOW()
+             WHERE id = 'singleton' AND revision = $3
+             RETURNING revision"
+        };
+        let stored_revision = sqlx::query_scalar::<_, i64>(statement)
+            .bind(config)
+            .bind(u64_to_i64(revision, "config revision")?)
+            .bind(u64_to_i64(expected_revision, "expected config revision")?)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?
+            .ok_or_else(|| conflict("stale config draft revision"))?;
 
         Ok(i64_to_u64(stored_revision, "config revision")?)
     }
