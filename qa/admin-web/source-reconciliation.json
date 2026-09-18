@@ -410,19 +410,19 @@
         "classification": "removed_since_deploy",
         "type": "api",
         "endpoints": [
-          "GET /admin/status",
-          "GET /admin/killswitch",
-          "POST /admin/killswitch",
           "DELETE /admin/killswitch",
-          "GET /admin/v1/killswitch",
-          "POST /admin/v1/killswitch",
           "DELETE /admin/v1/killswitch",
           "GET /admin/credentials",
-          "GET /admin/v1/credentials",
+          "GET /admin/killswitch",
           "GET /admin/oauth/status",
+          "GET /admin/status",
+          "GET /admin/v1/credentials",
+          "GET /admin/v1/killswitch",
           "GET /admin/v1/oauth/status",
+          "POST /admin/credentials/{principal_id}/{provider}/revoke",
           "POST /admin/credentials/{principal_id}/{provider}/rotate",
-          "POST /admin/credentials/{principal_id}/{provider}/revoke"
+          "POST /admin/killswitch",
+          "POST /admin/v1/killswitch"
         ]
       },
       {
@@ -430,10 +430,10 @@
         "type": "schema_field",
         "endpoint": "GET /admin/v1/status",
         "removed_fields": [
-          "principals",
-          "plugin_chain_summary",
           "killswitch",
           "last_reload_status",
+          "plugin_chain_summary",
+          "principals",
           "restart_required_changes"
         ]
       },
@@ -442,9 +442,9 @@
         "type": "schema_field",
         "endpoint": "GET /admin/config/history",
         "removed_fields": [
-          "summary.upstreams",
+          "summary.plugin_count",
           "summary.principals",
-          "summary.plugin_count"
+          "summary.upstreams"
         ]
       },
       {
@@ -478,8 +478,8 @@
         "type": "ui_element",
         "location": "crates/cc-lb-admin/web/src/routes/settings.tsx",
         "elements": [
-          "RestartRequiredMatrix: fully dynamic row",
-          "ConfigHistory: Upstreams, Principals, Plugins columns"
+          "ConfigHistory: Upstreams, Principals, Plugins columns",
+          "RestartRequiredMatrix: fully dynamic row"
         ]
       },
       {
@@ -487,19 +487,19 @@
         "type": "api",
         "endpoints": [
           "GET /admin/config/current",
-          "GET /admin/v1/config/current",
-          "GET /admin/config/schema",
-          "GET /admin/v1/config/schema",
           "GET /admin/config/diff",
-          "GET /admin/v1/config/diff",
-          "POST /admin/config/apply",
-          "POST /admin/v1/config/apply",
-          "POST /admin/config/reload",
-          "POST /admin/v1/config/reload",
           "GET /admin/config/draft",
-          "PUT /admin/config/draft",
+          "GET /admin/config/history",
+          "GET /admin/config/schema",
+          "GET /admin/v1/config/current",
+          "GET /admin/v1/config/diff",
+          "GET /admin/v1/config/schema",
+          "POST /admin/config/apply",
           "POST /admin/config/draft/validate",
-          "GET /admin/config/history"
+          "POST /admin/config/reload",
+          "POST /admin/v1/config/apply",
+          "POST /admin/v1/config/reload",
+          "PUT /admin/config/draft"
         ],
         "reason": "Master b07b25ee Settings rework: file-backed editor contract replaces in-memory current/apply/reload/diff; remaining config routes are v1-only (no non-v1 aliases). Replacements: GET /admin/v1/config/editor, POST /admin/v1/config/save, POST /admin/v1/config/draft/download.",
         "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
@@ -2602,19 +2602,19 @@
       "classification": "removed_since_deploy",
       "type": "api",
       "endpoints": [
-        "GET /admin/status",
-        "GET /admin/killswitch",
-        "POST /admin/killswitch",
         "DELETE /admin/killswitch",
-        "GET /admin/v1/killswitch",
-        "POST /admin/v1/killswitch",
         "DELETE /admin/v1/killswitch",
         "GET /admin/credentials",
-        "GET /admin/v1/credentials",
+        "GET /admin/killswitch",
         "GET /admin/oauth/status",
+        "GET /admin/status",
+        "GET /admin/v1/credentials",
+        "GET /admin/v1/killswitch",
         "GET /admin/v1/oauth/status",
+        "POST /admin/credentials/{principal_id}/{provider}/revoke",
         "POST /admin/credentials/{principal_id}/{provider}/rotate",
-        "POST /admin/credentials/{principal_id}/{provider}/revoke"
+        "POST /admin/killswitch",
+        "POST /admin/v1/killswitch"
       ]
     },
     {
@@ -2622,10 +2622,10 @@
       "type": "schema_field",
       "endpoint": "GET /admin/v1/status",
       "removed_fields": [
-        "principals",
-        "plugin_chain_summary",
         "killswitch",
         "last_reload_status",
+        "plugin_chain_summary",
+        "principals",
         "restart_required_changes"
       ]
     },
@@ -2634,9 +2634,9 @@
       "type": "schema_field",
       "endpoint": "GET /admin/config/history",
       "removed_fields": [
-        "summary.upstreams",
+        "summary.plugin_count",
         "summary.principals",
-        "summary.plugin_count"
+        "summary.upstreams"
       ]
     },
     {
@@ -2670,8 +2670,8 @@
       "type": "ui_element",
       "location": "crates/cc-lb-admin/web/src/routes/settings.tsx",
       "elements": [
-        "RestartRequiredMatrix: fully dynamic row",
-        "ConfigHistory: Upstreams, Principals, Plugins columns"
+        "ConfigHistory: Upstreams, Principals, Plugins columns",
+        "RestartRequiredMatrix: fully dynamic row"
       ]
     },
     {
@@ -2679,19 +2679,19 @@
       "type": "api",
       "endpoints": [
         "GET /admin/config/current",
-        "GET /admin/v1/config/current",
-        "GET /admin/config/schema",
-        "GET /admin/v1/config/schema",
         "GET /admin/config/diff",
-        "GET /admin/v1/config/diff",
-        "POST /admin/config/apply",
-        "POST /admin/v1/config/apply",
-        "POST /admin/config/reload",
-        "POST /admin/v1/config/reload",
         "GET /admin/config/draft",
-        "PUT /admin/config/draft",
+        "GET /admin/config/history",
+        "GET /admin/config/schema",
+        "GET /admin/v1/config/current",
+        "GET /admin/v1/config/diff",
+        "GET /admin/v1/config/schema",
+        "POST /admin/config/apply",
         "POST /admin/config/draft/validate",
-        "GET /admin/config/history"
+        "POST /admin/config/reload",
+        "POST /admin/v1/config/apply",
+        "POST /admin/v1/config/reload",
+        "PUT /admin/config/draft"
       ],
       "reason": "Master b07b25ee Settings rework: file-backed editor contract replaces in-memory current/apply/reload/diff; remaining config routes are v1-only (no non-v1 aliases). Replacements: GET /admin/v1/config/editor, POST /admin/v1/config/save, POST /admin/v1/config/draft/download.",
       "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",

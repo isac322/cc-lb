@@ -169,7 +169,18 @@ function routeCallAt(text, routeIndex) {
   return null;
 }
 
-function scanRouteRegistrations(text, file, baseLine, routes) {
+function collectRouteConstants(text) {
+  const constants = new Map();
+  for (const match of text.matchAll(
+    /const\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*&(?:'static\s+)?str\s*=\s*"([^"]+)"\s*;/g,
+  )) {
+    constants.set(match[1], match[2]);
+  }
+  return constants;
+}
+
+function scanRouteRegistrations(text, file, baseLine, routes, constants) {
+  const routeConstants = constants ?? collectRouteConstants(text);
   let offset = 0;
   while (true) {
     const index = text.indexOf('.route', offset);
@@ -177,8 +188,16 @@ function scanRouteRegistrations(text, file, baseLine, routes) {
     offset = index + 6;
     const call = routeCallAt(text, index);
     if (!call) continue;
-    const pathMatch = call.match(/^\s*"([^"]+)"\s*,/);
-    if (!pathMatch) continue;
+    const literalMatch = call.match(/^\s*"([^"]+)"\s*,/);
+    const constantMatch = call.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*,/);
+    // A route path registered through a `const NAME: &str` must still reach the
+    // scan, or the independent denominator silently loses that endpoint.
+    const routePath = literalMatch
+      ? literalMatch[1]
+      : constantMatch
+        ? routeConstants.get(constantMatch[1])
+        : undefined;
+    if (!routePath) continue;
     const methods = [
       ...call.matchAll(
         /(?:^|[.\s])(get|post|put|patch|delete|head|options)\s*\(/g,
@@ -187,7 +206,7 @@ function scanRouteRegistrations(text, file, baseLine, routes) {
     for (const method of new Set(methods)) {
       routes.push({
         method,
-        path: pathMatch[1],
+        path: routePath,
         source: { file, line: baseLine + lineNumberAt(text, index) - 1 },
       });
     }
@@ -263,7 +282,13 @@ function discoverBackendRoutes() {
         );
         continue;
       }
-      scanRouteRegistrations(body.text, serverFile, body.startLine, routes);
+      scanRouteRegistrations(
+        body.text,
+        serverFile,
+        body.startLine,
+        routes,
+        collectRouteConstants(serverText),
+      );
       for (const match of body.text.matchAll(
         /\.merge\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
       )) {
