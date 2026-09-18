@@ -1,7 +1,12 @@
-use std::{str::FromStr, time::Duration};
+use std::{
+    collections::HashMap,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use cc_lb_clock::{Clock, ClockHandle};
-use cc_lb_storage_api::{StorageError, StorageResult};
+use cc_lb_storage_api::{StorageError, StorageResult, StoredOAuthPkceFlow};
 use sqlx::{
     Sqlite, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
@@ -13,11 +18,16 @@ pub mod adapter;
 pub struct SqliteStorage {
     pool: SqlitePool,
     clock: ClockHandle,
+    pkce_flows: Arc<Mutex<HashMap<String, StoredOAuthPkceFlow>>>,
 }
 
 impl SqliteStorage {
     pub fn new(pool: SqlitePool, clock: ClockHandle) -> Self {
-        Self { pool, clock }
+        Self {
+            pool,
+            clock,
+            pkce_flows: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn pool(&self) -> &SqlitePool {
@@ -39,6 +49,10 @@ impl SqliteStorage {
 
     pub(crate) fn clock(&self) -> &dyn Clock {
         &*self.clock
+    }
+
+    pub(crate) fn pkce_flows(&self) -> &Mutex<HashMap<String, StoredOAuthPkceFlow>> {
+        &self.pkce_flows
     }
 }
 
