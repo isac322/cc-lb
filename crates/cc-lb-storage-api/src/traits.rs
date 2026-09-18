@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::{
-    BackendKind, CacheKeepaliveDecisionRow, RequestEventHistogramBucket,
+    AuditQueryScope, BackendKind, CacheKeepaliveDecisionRow, RequestEventHistogramBucket,
     RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
     RequestEventKeyUsageBucket, RequestEventKeyUsageQuery, RequestEventPrincipalCostBucket,
     RequestEventPrincipalCostQuery, RequestEventProjections, RuntimeChangeNotifier, StorageError,
@@ -40,6 +40,18 @@ pub trait AuditStore: Send + Sync {
         since: u64,
         until: u64,
         limit: usize,
+    ) -> StorageResult<Vec<AuditEntry>>;
+
+    /// Returns matching entries newest first, with newer insertions first on timestamp ties.
+    /// When `admin_only` is true, only entries with an admin action or kind are matched,
+    /// and that filter applies before `limit`.
+    async fn query_recent_audit(
+        &self,
+        scope: AuditQueryScope<'_>,
+        since: u64,
+        until: u64,
+        limit: usize,
+        admin_only: bool,
     ) -> StorageResult<Vec<AuditEntry>>;
 
     async fn query_audit_by_actor(

@@ -5,6 +5,22 @@ pub trait AuditSink: Send + Sync {
     fn sink_audit(&self, entry: AuditEntry);
 }
 
+/// Filters a recent-first audit query before its limit is applied.
+#[derive(Debug, Clone, Copy)]
+pub enum AuditQueryScope<'a> {
+    /// Include every audit entry in the requested time range.
+    All,
+    /// Include entries for one principal.
+    Principal(&'a str),
+    /// Include entries attributed to one actor identity.
+    Actor {
+        /// Actor identity authority.
+        authority: &'a str,
+        /// Actor identity subject.
+        subject: &'a str,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AuditEntry {
     pub ts: u64,

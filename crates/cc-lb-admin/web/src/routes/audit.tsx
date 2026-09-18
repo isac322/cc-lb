@@ -138,6 +138,7 @@ function AuditPage() {
   const principals = usePrincipals();
   const audit = useAudit({
     limit: '200',
+    admin_only: 'true',
     principal_id: filters.principal_id,
     since: filters.since?.toString(),
     until: filters.until?.toString(),

@@ -92,6 +92,7 @@ test('audit loading reserves the resolved count width and keeps the nine-column 
   expect(screen.queryByLabelText('Status')).toBeNull();
   expect(queries.useAudit).toHaveBeenLastCalledWith({
     limit: '200',
+    admin_only: 'true',
     principal_id: undefined,
     since: undefined,
     until: undefined,
@@ -145,6 +146,7 @@ test('audit sends only supported principal and time filters and clears them toge
 
   expect(queries.useAudit).toHaveBeenLastCalledWith({
     limit: '200',
+    admin_only: 'true',
     principal_id: 'principal-1',
     since: '1718665200',
     until: '1718668800',
@@ -249,6 +251,7 @@ test('audit preserves duplicate request-id events across filter result transitio
   rerender(<AuditComponent />);
   expect(queries.useAudit).toHaveBeenLastCalledWith({
     limit: '200',
+    admin_only: 'true',
     principal_id: 'principal-1',
     since: undefined,
     until: undefined,
@@ -276,6 +279,7 @@ test('audit preserves duplicate request-id events across filter result transitio
   rerender(<AuditComponent />);
   expect(queries.useAudit).toHaveBeenLastCalledWith({
     limit: '200',
+    admin_only: 'true',
     principal_id: 'principal-1',
     since: '1750204800',
     until: '1750204801',

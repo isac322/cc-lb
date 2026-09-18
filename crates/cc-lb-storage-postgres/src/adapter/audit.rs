@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{AuditEntry, AuditStore, StorageResult};
+use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, StorageResult};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
@@ -13,6 +13,8 @@ use crate::{
 };
 
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
+
+const RECENT_AUDIT_SELECT: &str = "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ";
 
 struct AuditInsertRow<'a> {
     ts: DateTime<Utc>,
@@ -185,6 +187,60 @@ impl AuditStore for PostgresStorage {
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
+
+        rows.into_iter().map(row_to_audit_entry).collect()
+    }
+
+    async fn query_recent_audit(
+        &self,
+        scope: AuditQueryScope<'_>,
+        since: u64,
+        until: u64,
+        limit: usize,
+        admin_only: bool,
+    ) -> StorageResult<Vec<AuditEntry>> {
+        if limit == 0 || until < since {
+            return Ok(Vec::new());
+        }
+        let Some(since) = unix_secs_to_datetime_lower(since, "audit since")? else {
+            return Ok(Vec::new());
+        };
+        let until = unix_secs_to_datetime_upper(until, "audit until")?;
+        let limit = u64_to_i64(limit as u64, "audit limit")?;
+
+        let mut query = QueryBuilder::<Postgres>::new(RECENT_AUDIT_SELECT);
+        query
+            .push_bind(since)
+            .push(" AND (")
+            .push_bind(until)
+            .push("::timestamptz IS NULL OR ts <= ")
+            .push_bind(until)
+            .push(")");
+        match scope {
+            AuditQueryScope::All => {}
+            AuditQueryScope::Principal(principal_id) => {
+                query.push(" AND principal_id = ").push_bind(principal_id);
+            }
+            AuditQueryScope::Actor { authority, subject } => {
+                query
+                    .push(" AND actor_authority = ")
+                    .push_bind(authority)
+                    .push(" AND actor_subject = ")
+                    .push_bind(subject);
+            }
+        }
+        if admin_only {
+            query.push(" AND (admin_action IS NOT NULL OR kind IS NOT NULL)");
+        }
+        query
+            .push(" ORDER BY ts DESC, seq DESC LIMIT ")
+            .push_bind(limit);
+
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
 
         rows.into_iter().map(row_to_audit_entry).collect()
     }
