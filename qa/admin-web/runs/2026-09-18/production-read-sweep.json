@@ -1,0 +1,570 @@
+{
+ "schema": "cc-lb-production-read-sweep/v1",
+ "target": "https://cc-lb.runbear.io (Cloudflare Access, edge ICN, tunnel iad03/iad19, origin on the operator workstation)",
+ "origin_process": {
+  "binary": "target/debug/cc-lb",
+  "profile": "debug",
+  "built": "2026-09-14",
+  "source_worktree_commit": "01f6e654",
+  "config": "/data/data/cc-lb/master-9c420b4a/cc-lb.toml",
+  "storage": "sqlite 14.9 MB, wal 5.8 MB",
+  "listeners": {
+   "proxy": "127.0.0.1:8080",
+   "admin": "10.222.0.7:9090",
+   "metrics": "127.0.0.1:9091"
+  }
+ },
+ "runs": 3,
+ "endpoints_per_run": 39,
+ "rows": [
+  {
+   "id": "subscription-quotas-aggregate-24h",
+   "path": "/admin/v1/subscription-quotas/aggregate?range=24h",
+   "status": [
+    200
+   ],
+   "med_ms": 660,
+   "max_ms": 770,
+   "med_ttfb": 651,
+   "bytes": 1964,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "subscription-quotas-analysis-24h",
+   "path": "/admin/v1/subscription-quotas/analysis?since_unix_secs=1789659314&until_unix_secs=1789745714",
+   "status": [
+    200
+   ],
+   "med_ms": 641,
+   "max_ms": 643,
+   "med_ttfb": 631,
+   "bytes": 1971,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "subscription-quotas-series-24h",
+   "path": "/admin/v1/subscription-quotas/series?since_unix_secs=1789659314&until_unix_secs=1789745714",
+   "status": [
+    200
+   ],
+   "med_ms": 635,
+   "max_ms": 641,
+   "med_ttfb": 631,
+   "bytes": 6774,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "principal-keys",
+   "path": "/admin/v1/principals/efc13c74-5bac-4b87-a6cf-859dec6ee352/keys",
+   "status": [
+    200
+   ],
+   "med_ms": 525,
+   "max_ms": 547,
+   "med_ttfb": 504,
+   "bytes": 437,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "v1-status",
+   "path": "/admin/v1/status",
+   "status": [
+    200
+   ],
+   "med_ms": 357,
+   "max_ms": 390,
+   "med_ttfb": 376,
+   "bytes": 1602,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "subscription-quotas-pool-history-24h",
+   "path": "/admin/v1/subscription-quotas/pool-history?range=24h",
+   "status": [
+    200
+   ],
+   "med_ms": 334,
+   "max_ms": 335,
+   "med_ttfb": 317,
+   "bytes": 7027,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "dashboard-summary-7d",
+   "path": "/admin/dashboard/summary?range=7d",
+   "status": [
+    200
+   ],
+   "med_ms": 276,
+   "max_ms": 277,
+   "med_ttfb": 263,
+   "bytes": 15612,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "dashboard-summary-6h",
+   "path": "/admin/dashboard/summary?range=6h",
+   "status": [
+    200
+   ],
+   "med_ms": 272,
+   "max_ms": 280,
+   "med_ttfb": 260,
+   "bytes": 21503,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "events-histogram-24h",
+   "path": "/admin/events/histogram?since_unix_secs=1789659314&until_unix_secs=1789745714&bucket_ms=3600000",
+   "status": [
+    200
+   ],
+   "med_ms": 252,
+   "max_ms": 823,
+   "med_ttfb": 246,
+   "bytes": 565,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "v1-events-recent",
+   "path": "/admin/v1/events/recent?limit=50",
+   "status": [
+    200
+   ],
+   "med_ms": 251,
+   "max_ms": 260,
+   "med_ttfb": 247,
+   "bytes": 8537,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "v1-dashboard-usage-24h",
+   "path": "/admin/v1/dashboard/usage?range=24h",
+   "status": [
+    200
+   ],
+   "med_ms": 249,
+   "max_ms": 251,
+   "med_ttfb": 236,
+   "bytes": 2703,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "plugins-registry",
+   "path": "/admin/v1/plugins/registry",
+   "status": [
+    200
+   ],
+   "med_ms": 249,
+   "max_ms": 628,
+   "med_ttfb": 620,
+   "bytes": 1695,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "config-draft",
+   "path": "/admin/config/draft",
+   "status": [
+    200
+   ],
+   "med_ms": 249,
+   "max_ms": 258,
+   "med_ttfb": 232,
+   "bytes": 381,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "upstream-warmup-attempts",
+   "path": "/admin/v1/upstreams/0e0c5772-1fb3-4339-ac52-c84392a7b7a4/warmup/attempts?limit=20",
+   "status": [
+    200
+   ],
+   "med_ms": 248,
+   "max_ms": 265,
+   "med_ttfb": 235,
+   "bytes": 1940,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "v1-events-histogram-24h",
+   "path": "/admin/v1/events/histogram?since_unix_secs=1789659314&until_unix_secs=1789745714&bucket_ms=3600000",
+   "status": [
+    200
+   ],
+   "med_ms": 248,
+   "max_ms": 257,
+   "med_ttfb": 247,
+   "bytes": 565,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "upstream-warmup",
+   "path": "/admin/v1/upstreams/0e0c5772-1fb3-4339-ac52-c84392a7b7a4/warmup",
+   "status": [
+    200
+   ],
+   "med_ms": 247,
+   "max_ms": 249,
+   "med_ttfb": 238,
+   "bytes": 1445,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "v1-audit",
+   "path": "/admin/v1/audit?limit=50",
+   "status": [
+    200
+   ],
+   "med_ms": 247,
+   "max_ms": 250,
+   "med_ttfb": 240,
+   "bytes": 2437,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "config-schema",
+   "path": "/admin/config/schema",
+   "status": [
+    200
+   ],
+   "med_ms": 247,
+   "max_ms": 251,
+   "med_ttfb": 236,
+   "bytes": 4023,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "principal-router-terminal",
+   "path": "/admin/v1/principals/efc13c74-5bac-4b87-a6cf-859dec6ee352/router-terminal",
+   "status": [
+    200
+   ],
+   "med_ms": 246,
+   "max_ms": 247,
+   "med_ttfb": 232,
+   "bytes": 341,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "dashboard-summary-1h",
+   "path": "/admin/dashboard/summary?range=1h",
+   "status": [
+    200
+   ],
+   "med_ms": 244,
+   "max_ms": 254,
+   "med_ttfb": 242,
+   "bytes": 4829,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "v1-dashboard-summary-24h",
+   "path": "/admin/v1/dashboard/summary?range=24h",
+   "status": [
+    200
+   ],
+   "med_ms": 244,
+   "max_ms": 252,
+   "med_ttfb": 236,
+   "bytes": 2855,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "events-recent",
+   "path": "/admin/events/recent?limit=50",
+   "status": [
+    200
+   ],
+   "med_ms": 244,
+   "max_ms": 260,
+   "med_ttfb": 247,
+   "bytes": 8537,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "config-current",
+   "path": "/admin/config/current",
+   "status": [
+    200
+   ],
+   "med_ms": 244,
+   "max_ms": 280,
+   "med_ttfb": 233,
+   "bytes": 1947,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "upstreams-list",
+   "path": "/admin/v1/upstreams",
+   "status": [
+    200
+   ],
+   "med_ms": 242,
+   "max_ms": 271,
+   "med_ttfb": 234,
+   "bytes": 859,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "upstream-subscription-metadata",
+   "path": "/admin/v1/upstreams/0e0c5772-1fb3-4339-ac52-c84392a7b7a4/subscription-metadata",
+   "status": [
+    200
+   ],
+   "med_ms": 242,
+   "max_ms": 657,
+   "med_ttfb": 650,
+   "bytes": 1165,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "subscription-quotas-latest",
+   "path": "/admin/v1/subscription-quotas/latest",
+   "status": [
+    200
+   ],
+   "med_ms": 240,
+   "max_ms": 244,
+   "med_ttfb": 234,
+   "bytes": 1634,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "principals-list",
+   "path": "/admin/v1/principals",
+   "status": [
+    200
+   ],
+   "med_ms": 239,
+   "max_ms": 243,
+   "med_ttfb": 234,
+   "bytes": 1286,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "plugins-wasm",
+   "path": "/admin/v1/plugins/wasm",
+   "status": [
+    405
+   ],
+   "med_ms": 238,
+   "max_ms": 247,
+   "med_ttfb": 230,
+   "bytes": 300,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "dashboard-summary-24h",
+   "path": "/admin/dashboard/summary?range=24h",
+   "status": [
+    200
+   ],
+   "med_ms": 237,
+   "max_ms": 249,
+   "med_ttfb": 242,
+   "bytes": 2855,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "dashboard-usage-24h",
+   "path": "/admin/usage?range=24h",
+   "status": [
+    200
+   ],
+   "med_ms": 237,
+   "max_ms": 252,
+   "med_ttfb": 238,
+   "bytes": 2703,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "upstream-oauth-status",
+   "path": "/admin/v1/upstreams/0e0c5772-1fb3-4339-ac52-c84392a7b7a4/oauth/status",
+   "status": [
+    200
+   ],
+   "med_ms": 236,
+   "max_ms": 240,
+   "med_ttfb": 232,
+   "bytes": 485,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "principal-limits",
+   "path": "/admin/v1/principals/efc13c74-5bac-4b87-a6cf-859dec6ee352/limits",
+   "status": [
+    200
+   ],
+   "med_ms": 236,
+   "max_ms": 239,
+   "med_ttfb": 229,
+   "bytes": 505,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "principal-plugin-chain-router",
+   "path": "/admin/v1/principals/efc13c74-5bac-4b87-a6cf-859dec6ee352/plugin-chain?slot=router",
+   "status": [
+    200
+   ],
+   "med_ms": 236,
+   "max_ms": 239,
+   "med_ttfb": 232,
+   "bytes": 495,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "audit",
+   "path": "/admin/audit?limit=50",
+   "status": [
+    200
+   ],
+   "med_ms": 235,
+   "max_ms": 248,
+   "med_ttfb": 240,
+   "bytes": 2437,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "config-diff",
+   "path": "/admin/config/diff",
+   "status": [
+    400
+   ],
+   "med_ms": 233,
+   "max_ms": 252,
+   "med_ttfb": 231,
+   "bytes": 397,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "health",
+   "path": "/admin/health",
+   "status": [
+    200
+   ],
+   "med_ms": 232,
+   "max_ms": 259,
+   "med_ttfb": 251,
+   "bytes": 364,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "config-history",
+   "path": "/admin/config/history?limit=20",
+   "status": [
+    200
+   ],
+   "med_ms": 231,
+   "max_ms": 238,
+   "med_ttfb": 234,
+   "bytes": 314,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "v1-auth-session",
+   "path": "/admin/v1/auth/session",
+   "status": [
+    404
+   ],
+   "med_ms": 230,
+   "max_ms": 236,
+   "med_ttfb": 229,
+   "bytes": 300,
+   "rows": null,
+   "rid_count": 0
+  },
+  {
+   "id": "scheduler-status",
+   "path": "/admin/v1/scheduler/status",
+   "status": [
+    404
+   ],
+   "med_ms": 227,
+   "max_ms": 227,
+   "med_ttfb": 219,
+   "bytes": 300,
+   "rows": null,
+   "rid_count": 0
+  }
+ ],
+ "non_2xx": [
+  {
+   "path": "/admin/v1/auth/session",
+   "status": 404
+  },
+  {
+   "path": "/admin/v1/scheduler/status",
+   "status": 404
+  },
+  {
+   "path": "/admin/v1/plugins/wasm",
+   "status": 405,
+   "reason": "POST-only route probed with GET"
+  },
+  {
+   "path": "/admin/config/diff",
+   "status": 400,
+   "reason": "route requires from/to parameters"
+  }
+ ],
+ "load_holds": [
+  {
+   "requests": 95,
+   "window_ms": 60490,
+   "median_ms": 622,
+   "p95_ms": 674,
+   "max_ms": 1062
+  },
+  {
+   "requests": 123,
+   "window_ms": 75585,
+   "median_ms": 620,
+   "p95_ms": 667,
+   "max_ms": 1008
+  }
+ ],
+ "edge_headers": {
+  "cf_cache_status": "DYNAMIC on every endpoint",
+  "content_encoding": "br",
+  "framing": "content-length, never chunked",
+  "server_timing": "absent: the deployed binary predates the request-id instrumentation"
+ }
+}
