@@ -14,6 +14,8 @@ mod hydrate_50k_under_500ms;
 mod migration_0037_warmup;
 #[path = "migration_0040_wasm_registry_wire_version.rs"]
 mod migration_0040_wasm_registry_wire_version;
+#[path = "migration_versions.rs"]
+mod migration_versions;
 #[path = "plan_tier_concurrency.rs"]
 mod plan_tier_concurrency;
 #[path = "principal_terminal_strategy.rs"]
