@@ -2,13 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    StorageError, StorageResult, SubscriptionQuotaBucket, SubscriptionQuotaCheckpointRange,
-    SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaLatestRecord, SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery,
-    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSemanticFingerprint,
-    SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSlimCheckpoint,
-    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
+    ChangeChannel, StorageError, StorageResult, SubscriptionQuotaBucket,
+    SubscriptionQuotaCheckpointRange, SubscriptionQuotaCheckpointRangeQuery,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaLatestRecord, SubscriptionQuotaProviderLot,
+    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
+    SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
     UpstreamSubscriptionQuotaStore,
 };
 use sqlx::{PgConnection, Row, postgres::PgRow};
@@ -39,6 +39,22 @@ impl UpstreamSubscriptionQuotaStore for PostgresStorage {
             }
         }
         tx.commit().await.map_err(map_sqlx_error)?;
+
+        // The batch is committed; a failed NOTIFY only delays peer hydration,
+        // so log instead of reporting the write as failed.
+        let upstream_ids: BTreeSet<Uuid> =
+            records.iter().map(|record| record.upstream_id).collect();
+        for upstream_id in upstream_ids {
+            if let Err(error) = sqlx::query("SELECT pg_notify($1, $2)")
+                .bind(ChangeChannel::SubscriptionQuota.postgres_channel())
+                .bind(upstream_id.to_string())
+                .execute(&self.pool)
+                .await
+            {
+                tracing::warn!(%error, "subscription quota change notify failed");
+            }
+        }
+
         Ok(())
     }
 

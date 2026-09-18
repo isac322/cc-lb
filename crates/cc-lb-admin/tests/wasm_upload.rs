@@ -631,6 +631,56 @@ async fn rejects_legacy_slot_kind_not_derived_from_artifact() {
     assert_eq!(value["slot"], "observability_hook");
 }
 
+#[tokio::test]
+async fn rate_limits_uploads_via_shared_audit_store() {
+    // The `upload` helper builds a fresh router (and therefore a fresh
+    // in-memory limiter) per call, so only the shared audit store can
+    // accumulate across these requests — this exercises the storage-backed
+    // path that keeps replicas under the 10/60s cap.
+    let server = spawn_admin_server().await;
+    for attempt in 0..10 {
+        let name = format!("rate-limited-plugin-{attempt}");
+        let wasm = wat_with_sections(
+            &minimal_filter_wat(),
+            &[
+                (&schema_section_name(), &schema_section_bytes()),
+                ("cc_lb.plugin.v1", metadata(&name).as_bytes()),
+            ],
+        );
+        let filename = format!("{name}.wasm");
+        let body = multipart_body(&[
+            ("name", name.as_bytes()),
+            ("original_filename", filename.as_bytes()),
+            ("slot_kind", b"filter"),
+            ("bytes", &wasm),
+        ]);
+        let (status, value) = upload(&server, body).await;
+        assert!(
+            status.is_success(),
+            "attempt {attempt} expected success; got {status} body={value}"
+        );
+    }
+    let wasm = wat_with_sections(
+        &minimal_filter_wat(),
+        &[
+            (&schema_section_name(), &schema_section_bytes()),
+            (
+                "cc_lb.plugin.v1",
+                metadata("rate-limited-plugin-final").as_bytes(),
+            ),
+        ],
+    );
+    let body = multipart_body(&[
+        ("name", b"rate-limited-plugin-final"),
+        ("original_filename", b"rate-limited-plugin-final.wasm"),
+        ("slot_kind", b"filter"),
+        ("bytes", &wasm),
+    ]);
+    let (status, value) = upload(&server, body).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body={value}");
+    assert_eq!(value["error"], "rate_limited");
+}
+
 // === server hookup that bypasses the private AdminClient internals ===
 
 async fn upload(

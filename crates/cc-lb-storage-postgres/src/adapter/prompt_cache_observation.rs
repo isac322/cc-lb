@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::{
-    PromptCacheObservationRecord, PromptCacheObservationStore, StorageError, StorageResult,
+    ChangeChannel, PromptCacheObservationRecord, PromptCacheObservationStore, StorageError,
+    StorageResult,
 };
 use sqlx::{Row, postgres::PgRow};
 
@@ -45,6 +46,17 @@ impl PromptCacheObservationStore for PostgresStorage {
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
+
+        // The row is already committed; a failed NOTIFY only delays peer
+        // hydration, so log instead of reporting the write as failed.
+        if let Err(error) = sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(ChangeChannel::PromptCacheObservation.postgres_channel())
+            .bind(record.upstream_id.to_string())
+            .execute(&self.pool)
+            .await
+        {
+            tracing::warn!(%error, "prompt cache observation change notify failed");
+        }
         Ok(())
     }
 

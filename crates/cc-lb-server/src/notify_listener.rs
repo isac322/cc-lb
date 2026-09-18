@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,6 +13,7 @@ use cc_lb_storage_api::{ChangeChannel, ChangeEvent, RuntimeChangeNotifier};
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::dynamic_view_builder::{self, Stores};
 use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
@@ -86,6 +88,9 @@ impl NotifyListener {
                 event = rx.recv() => {
                     match event {
                         Ok(event) if is_rebind_channel(event.channel) => self.debounce_and_rebuild(&mut rx).await,
+                        Ok(event) if is_hydrate_channel(event.channel) => {
+                            self.debounce_and_hydrate(&mut rx, event).await
+                        }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "runtime change listener lagged; rebuilding from latest storage state");
@@ -184,6 +189,102 @@ impl NotifyListener {
             }
         }
     }
+    /// Collapse a burst of hydrate-only change events, then refresh the
+    /// affected in-process caches in place. These channels never trigger a
+    /// dynamic-view rebuild; a rebind event observed while debouncing takes
+    /// precedence and routes through `debounce_and_rebuild`, which rebuilds
+    /// every cache from storage anyway.
+    async fn debounce_and_hydrate(
+        &self,
+        rx: &mut broadcast::Receiver<ChangeEvent>,
+        first: ChangeEvent,
+    ) {
+        let mut pending: HashMap<ChangeChannel, HydrateScope> = HashMap::new();
+        let mut saw_rebind = false;
+        collect_pending_event(&first, &mut pending, &mut saw_rebind);
+        tokio::select! {
+            _ = self.cancel.cancelled() => return,
+            _ = sleep(Duration::from_millis(250)) => {}
+        }
+        drain_pending_events(rx, &mut pending, &mut saw_rebind);
+
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        if saw_rebind {
+            self.debounce_and_rebuild(rx).await;
+            return;
+        }
+
+        for (channel, scope) in pending {
+            self.hydrate_channel(channel, scope).await;
+        }
+    }
+
+    async fn hydrate_channel(&self, channel: ChangeChannel, scope: HydrateScope) {
+        let upstream_ids = self.resolve_hydrate_upstream_ids(&scope);
+        if upstream_ids.is_empty() {
+            return;
+        }
+        match channel {
+            ChangeChannel::UpstreamRateLimit => {
+                match self
+                    .stores
+                    .upstream_rate_limits
+                    .list_for_upstream_ids(&upstream_ids)
+                    .await
+                {
+                    Ok(records) => {
+                        let view = self.holder.load();
+                        let mut cache = view.upstream_rate_limit_cache.write();
+                        for record in records {
+                            cache.upsert_record(record);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "upstream rate limit cache hydrate failed");
+                    }
+                }
+            }
+            ChangeChannel::SubscriptionQuota => {
+                if let Err(error) = self
+                    .subscription_quota_cache
+                    .hydrate_from_store(&self.stores, &upstream_ids)
+                    .await
+                {
+                    tracing::warn!(%error, "subscription quota cache hydrate failed");
+                }
+            }
+            ChangeChannel::PromptCacheObservation => {
+                let Some(cache) = &self.prompt_cache_observation_cache else {
+                    return;
+                };
+                if let Err(error) = cache
+                    .hydrate_from_store(
+                        self.stores.prompt_cache_observations.as_ref(),
+                        &upstream_ids,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "prompt cache observation cache hydrate failed");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn resolve_hydrate_upstream_ids(&self, scope: &HydrateScope) -> Vec<Uuid> {
+        match scope {
+            HydrateScope::All => self
+                .holder
+                .load()
+                .upstreams_snapshot()
+                .iter()
+                .map(|upstream| upstream.id)
+                .collect(),
+            HydrateScope::Ids(ids) => ids.iter().copied().collect(),
+        }
+    }
 }
 
 fn drain_pending_rebind_events(rx: &mut broadcast::Receiver<ChangeEvent>) {
@@ -206,5 +307,70 @@ fn is_rebind_channel(channel: ChangeChannel) -> bool {
             | ChangeChannel::Principal
             | ChangeChannel::PluginRegistry
             | ChangeChannel::PluginChain
+    )
+}
+
+/// Which upstreams a hydrate event should refresh. `All` covers events whose
+/// payload does not name a single upstream.
+enum HydrateScope {
+    All,
+    Ids(HashSet<Uuid>),
+}
+
+impl HydrateScope {
+    fn merge(&mut self, upstream_id: Option<Uuid>) {
+        match upstream_id {
+            Some(id) => {
+                if let Self::Ids(ids) = self {
+                    ids.insert(id);
+                }
+            }
+            None => *self = Self::All,
+        }
+    }
+}
+
+fn collect_pending_event(
+    event: &ChangeEvent,
+    pending: &mut HashMap<ChangeChannel, HydrateScope>,
+    saw_rebind: &mut bool,
+) {
+    if is_rebind_channel(event.channel) {
+        *saw_rebind = true;
+        return;
+    }
+    if !is_hydrate_channel(event.channel) {
+        return;
+    }
+    let upstream_id = Uuid::parse_str(event.payload.trim()).ok();
+    pending
+        .entry(event.channel)
+        .or_insert_with(|| HydrateScope::Ids(HashSet::new()))
+        .merge(upstream_id);
+}
+
+fn drain_pending_events(
+    rx: &mut broadcast::Receiver<ChangeEvent>,
+    pending: &mut HashMap<ChangeChannel, HydrateScope>,
+    saw_rebind: &mut bool,
+) {
+    loop {
+        match rx.try_recv() {
+            Ok(event) => collect_pending_event(&event, pending, saw_rebind),
+            // Missed events may include rebinds; rebuild to stay safe.
+            Err(broadcast::error::TryRecvError::Lagged(_)) => *saw_rebind = true,
+            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
+                break;
+            }
+        }
+    }
+}
+
+fn is_hydrate_channel(channel: ChangeChannel) -> bool {
+    matches!(
+        channel,
+        ChangeChannel::UpstreamRateLimit
+            | ChangeChannel::SubscriptionQuota
+            | ChangeChannel::PromptCacheObservation
     )
 }

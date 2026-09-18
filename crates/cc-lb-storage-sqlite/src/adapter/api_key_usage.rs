@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use cc_lb_clock::unix_secs;
 use cc_lb_storage_api::{
-    ApiKeyUsage, ApiKeyUsageBucket, ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey,
-    ApiKeyUsageBucketQuery, ApiKeyUsageBucketStore, ApiKeyUsageCompactionRun, ApiKeyUsageFlush,
-    ApiKeyUsageFlushResult, StorageError, StorageResult,
+    ApiKeyConcurrencyHold, ApiKeyConcurrencyHoldStore, ApiKeyUsage, ApiKeyUsageBucket,
+    ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey, ApiKeyUsageBucketQuery, ApiKeyUsageBucketStore,
+    ApiKeyUsageCompactionRun, ApiKeyUsageFlush, ApiKeyUsageFlushResult, StorageError,
+    StorageResult,
 };
 use sqlx::{QueryBuilder, Row, Sqlite};
 use uuid::Uuid;
@@ -185,6 +186,44 @@ impl ApiKeyUsageBucketStore for SqliteStorage {
             folded_rows: stale.len() as u64,
             pruned_rows: pruned,
         })
+    }
+}
+
+/// No-op hold store: SQLite is single-instance, so the `Concurrent` limit
+/// stays on the in-process `KeyConcurrencyManager` counter and the engine
+/// never consults this path (gated on `BackendKind::Postgres`).
+#[async_trait]
+impl ApiKeyConcurrencyHoldStore for SqliteStorage {
+    async fn insert_api_key_concurrency_hold(
+        &self,
+        hold: &ApiKeyConcurrencyHold,
+    ) -> StorageResult<()> {
+        let _ = hold;
+        Ok(())
+    }
+
+    async fn delete_api_key_concurrency_hold(&self, hold_id: Uuid) -> StorageResult<()> {
+        let _ = hold_id;
+        Ok(())
+    }
+
+    async fn count_api_key_concurrency_holds(
+        &self,
+        key_id: &str,
+        now_unix_secs: u64,
+        max_age_secs: u64,
+    ) -> StorageResult<u64> {
+        let _ = (key_id, now_unix_secs, max_age_secs);
+        Ok(0)
+    }
+
+    async fn delete_expired_api_key_concurrency_holds(
+        &self,
+        now_unix_secs: u64,
+        max_age_secs: u64,
+    ) -> StorageResult<u64> {
+        let _ = (now_unix_secs, max_age_secs);
+        Ok(0)
     }
 }
 
