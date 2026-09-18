@@ -18,7 +18,13 @@ concurrency:
 
 jobs:
   bun-checks:
-    runs-on: cc-lb-1
+    # vitest runs one worker, but the bun runtime, GC, and jsdom timers still
+    # want more than a single core. On cc-lb-1 (cpu quota 1) the suite spends
+    # most periods CFS-throttled, which stretches per-test wall time past the
+    # 5s test budget on the slower pool nodes. Measured on the runner image at
+    # commit 970ff5d7 with the CI command: 1 core = 170.6s wall / 156.6s
+    # throttled, 2 cores = 70.5s / 20.2s, 4 cores = 59.0s / 0.8s.
+    runs-on: cc-lb-2
     defaults:
       run:
         working-directory: crates/cc-lb-admin/web
