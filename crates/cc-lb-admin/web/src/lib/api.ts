@@ -884,6 +884,31 @@ export interface ConfigHistoryResponse {
   entries: ConfigHistoryItem[];
 }
 
+export const UpstreamSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  kind: z.enum(['anthropic_api_key', 'anthropic_oauth']),
+  enabled: z.boolean(),
+  base_url: z.string().nullable(),
+  api_key_env: z.string().nullable().optional(),
+  warmup_enabled: z.boolean(),
+  warmup_dialect_plugin: z
+    .object({
+      wasm_registry_id: z.string(),
+      config: z.record(z.string(), z.unknown()),
+      wire_version: z.number().int().optional(),
+    })
+    .nullable(),
+  spec_revision: z.number().int().nonnegative(),
+  status: z.object({
+    last_apply_error: z.string().nullable(),
+    last_apply_at_unix_secs: z.number().int().nonnegative().nullable(),
+    last_warmup_at_unix_secs: z.number().int().nonnegative().nullable(),
+  }),
+});
+
+export type Upstream = z.infer<typeof UpstreamSchema>;
+
 export interface UpstreamOAuthStatusResponse {
   upstream_id: string;
   kind: string;
@@ -1200,10 +1225,14 @@ export function completeOauthDraft(body: {
   return postJson('/admin/v1/oauth/draft/complete', body);
 }
 
-export function createUpstreamFromOauthDraft(body: {
+export async function createUpstreamFromOauthDraft(body: {
   state_token: string;
   name: string;
   base_url?: string | null;
-}): Promise<any> {
-  return postJson('/admin/v1/upstreams/from-oauth-draft', body);
+}): Promise<Upstream> {
+  const response = await postJson<unknown, typeof body>(
+    '/admin/v1/upstreams/from-oauth-draft',
+    body,
+  );
+  return UpstreamSchema.parse(response);
 }
