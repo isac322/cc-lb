@@ -144,7 +144,7 @@ function mockPluginPageDependencies() {
     isLoading: false,
   } as never);
   vi.mocked(queries.useDeletePlugin).mockReturnValue({
-    mutate: vi.fn(),
+    mutateAsync: vi.fn(),
   } as never);
   vi.mocked(queries.useGcPlugins).mockReturnValue({
     mutate: vi.fn(),
@@ -414,8 +414,10 @@ test('keeps deferred inline replacement confirmation actionable after the upload
   });
 });
 
-test('shows references preview and cascade deletes', async () => {
+test('shows references, cascade deletes, and returns a deleted detail to catalog', async () => {
+  initialSearch = { plugin: pluginEntry.id };
   const deleteMutateMock = vi.fn();
+  deleteMutateMock.mockResolvedValue(undefined);
   vi.mocked(queries.usePluginRegistry).mockReturnValue({
     data: {
       entries: [
@@ -431,8 +433,9 @@ test('shows references preview and cascade deletes', async () => {
     isPending: false,
   } as unknown as ReturnType<typeof queries.useUploadWasm>);
   vi.mocked(queries.useDeletePlugin).mockReturnValue({
-    mutate: deleteMutateMock,
-  } as unknown as ReturnType<typeof queries.useDeletePlugin>);
+    mutateAsync: deleteMutateMock,
+    isPending: false,
+  } as never);
   vi.mocked(queries.useGcPlugins).mockReturnValue({
     mutate: vi.fn(),
   } as unknown as ReturnType<typeof queries.useGcPlugins>);
@@ -462,7 +465,7 @@ test('shows references preview and cascade deletes', async () => {
 
   renderWithProviders();
 
-  const deleteBtn = screen.getByRole('button', { name: 'Delete plugin' });
+  const deleteBtn = screen.getByRole('button', { name: 'Delete Plugin' });
   fireEvent.click(deleteBtn);
 
   expect(
@@ -476,15 +479,17 @@ test('shows references preview and cascade deletes', async () => {
   );
 
   await waitFor(() => {
-    expect(deleteMutateMock).toHaveBeenCalledWith(
-      {
-        id: 'plugin-1',
-        revision: 1,
-        cascade: true,
-        referenceFingerprint: 'fingerprint-123',
-      },
-      expect.anything(),
-    );
+    expect(deleteMutateMock).toHaveBeenCalledWith({
+      id: 'plugin-1',
+      revision: 1,
+      cascade: true,
+      referenceFingerprint: 'fingerprint-123',
+    });
+  });
+  await waitFor(() => {
+    expect(currentSearch.plugin).toBeUndefined();
+    expect(toast.success).toHaveBeenCalledWith('Plugin deleted');
+    expect(screen.getByText('Plugin library')).toBeDefined();
   });
 });
 
@@ -514,8 +519,8 @@ test('shows catalog and opens detail view', async () => {
     isPending: false,
   } as unknown as ReturnType<typeof queries.useUploadWasm>);
   vi.mocked(queries.useDeletePlugin).mockReturnValue({
-    mutate: vi.fn(),
-  } as unknown as ReturnType<typeof queries.useDeletePlugin>);
+    mutateAsync: vi.fn(),
+  } as never);
   vi.mocked(queries.useGcPlugins).mockReturnValue({
     mutate: vi.fn(),
   } as unknown as ReturnType<typeof queries.useGcPlugins>);
