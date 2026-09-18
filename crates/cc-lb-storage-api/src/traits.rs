@@ -302,6 +302,38 @@ pub trait ApiKeyUsageBucketStore: Send + Sync {
     ) -> StorageResult<crate::ApiKeyUsageCompactionRun>;
 }
 
+/// Cluster-wide concurrent-request hold store (issue 807).
+///
+/// Postgres implements this against `api_key_concurrency_holds_v1` so the
+/// `Concurrent` limit is enforced across replicas. The SQLite adapter is a
+/// no-op: single-instance deployments keep the local in-process counter.
+#[async_trait]
+pub trait ApiKeyConcurrencyHoldStore: Send + Sync {
+    async fn insert_api_key_concurrency_hold(
+        &self,
+        hold: &crate::ApiKeyConcurrencyHold,
+    ) -> StorageResult<()>;
+
+    async fn delete_api_key_concurrency_hold(&self, hold_id: uuid::Uuid) -> StorageResult<()>;
+
+    /// Counts live holds for `key_id`, excluding rows older than
+    /// `max_age_secs` relative to `now_unix_secs` (crash leftovers).
+    async fn count_api_key_concurrency_holds(
+        &self,
+        key_id: &str,
+        now_unix_secs: u64,
+        max_age_secs: u64,
+    ) -> StorageResult<u64>;
+
+    /// Deletes every hold older than `max_age_secs` relative to
+    /// `now_unix_secs`. Returns the number of rows removed.
+    async fn delete_expired_api_key_concurrency_holds(
+        &self,
+        now_unix_secs: u64,
+        max_age_secs: u64,
+    ) -> StorageResult<u64>;
+}
+
 #[async_trait]
 pub trait UsageTokenIntervalStore: Send + Sync {
     /// Sums all token columns for each interval. Both boundaries are inclusive:
@@ -440,6 +472,7 @@ pub trait Storage:
     + CacheKeepaliveSessionReadStore
     + UsageRollupStore
     + ApiKeyUsageBucketStore
+    + ApiKeyConcurrencyHoldStore
     + UsageTokenIntervalStore
     + PriceCatalogCache
     + ConfigStore
@@ -476,6 +509,7 @@ impl<T> Storage for T where
         + UsageRollupStore
         + UsageTokenIntervalStore
         + ApiKeyUsageBucketStore
+        + ApiKeyConcurrencyHoldStore
         + PriceCatalogCache
         + ConfigStore
         + MetaStore

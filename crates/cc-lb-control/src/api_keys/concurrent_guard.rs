@@ -10,6 +10,8 @@ use std::sync::atomic::Ordering;
 
 use dashmap::DashMap;
 
+use cc_lb_storage_api::Storage;
+
 pub struct KeyConcurrencyManager {
     counters: Arc<DashMap<String, Arc<AtomicU32>>>,
 }
@@ -92,6 +94,52 @@ impl Drop for KeyConcurrencyGuard {
     }
 }
 
+/// RAII guard for a cluster-wide concurrency hold row
+/// (`api_key_concurrency_holds_v1`, issue 807).
+///
+/// Dropping the guard deletes the hold row on a spawned task so the slot is
+/// released for every replica. If no Tokio runtime is available at drop time
+/// the row is left to expire via the writer-lease age cutoff.
+pub struct DurableConcurrencyHold {
+    storage: Arc<dyn Storage>,
+    hold_id: uuid::Uuid,
+    key_id: String,
+}
+
+impl DurableConcurrencyHold {
+    pub fn new(storage: Arc<dyn Storage>, hold_id: uuid::Uuid, key_id: String) -> Self {
+        Self {
+            storage,
+            hold_id,
+            key_id,
+        }
+    }
+
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+}
+
+impl Drop for DurableConcurrencyHold {
+    fn drop(&mut self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                hold_id = %self.hold_id,
+                key_id = %self.key_id,
+                "no Tokio runtime to release API-key concurrency hold; leaving it to expire"
+            );
+            return;
+        };
+        let storage = Arc::clone(&self.storage);
+        let hold_id = self.hold_id;
+        let key_id = self.key_id.clone();
+        handle.spawn(async move {
+            if let Err(error) = storage.delete_api_key_concurrency_hold(hold_id).await {
+                tracing::warn!(%error, %hold_id, %key_id, "failed to release API-key concurrency hold");
+            }
+        });
+    }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConcurrencyRejected {
     Limit(u32),
