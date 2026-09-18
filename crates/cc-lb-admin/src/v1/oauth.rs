@@ -22,9 +22,9 @@ use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
-    AuditActorFields, OAuthPkceStore, OrganizationMetadataRecord, Storage, StorageError,
-    StoredOAuthPkceFlow, UpstreamCreate, UpstreamRecord, UpstreamStore,
-    UpstreamSubscriptionMetadataRecord, validate_identifier,
+    AuditActorFields, OrganizationMetadataRecord, Storage, StorageError, StoredOAuthPkceFlow,
+    UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    validate_identifier,
 };
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
@@ -1015,6 +1015,7 @@ async fn get_oauth_status(
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn persist_pkce_flow(
     state: &AdminState,
     storage: &dyn Storage,
@@ -1038,6 +1039,7 @@ async fn persist_pkce_flow(
         .map_err(|error| storage_error_response(&error))
 }
 
+#[allow(clippy::result_large_err)]
 async fn load_pkce_flow(
     state: &AdminState,
     storage: &dyn Storage,
@@ -1059,6 +1061,7 @@ async fn load_pkce_flow(
     Ok(Some(in_flight))
 }
 
+#[allow(clippy::result_large_err)]
 async fn delete_pkce_flow(storage: &dyn Storage, state_token: &str) -> Result<(), Response> {
     storage
         .delete_pkce_flow(state_token)
