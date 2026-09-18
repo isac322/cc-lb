@@ -116,7 +116,7 @@ describe('plugin loading geometry', () => {
     expect(screen.queryByTestId('loaded-plugin-detail')).toBeNull();
   });
 
-  test('shows GC progress and locks the action while deletion is pending', () => {
+  test('shows orphan cleanup progress and locks only the cleanup action while pending', () => {
     registryState = {
       data: {
         entries: [
@@ -129,17 +129,42 @@ describe('plugin loading geometry', () => {
 
     render(<PluginCatalog onSelectPlugin={vi.fn()} />);
 
-    const deleting = screen.getByRole('button', { name: 'Deleting...' });
-    expect(deleting.hasAttribute('disabled')).toBe(true);
-    expect(deleting.getAttribute('aria-busy')).toBe('true');
-    expect(deleting.querySelector('svg.animate-spin')).not.toBeNull();
+    const cleaning = screen.getByRole('button', { name: 'Cleaning...' });
+    expect(cleaning.hasAttribute('disabled')).toBe(true);
+    expect(cleaning.getAttribute('aria-busy')).toBe('true');
+    expect(cleaning.querySelector('svg.animate-spin')).not.toBeNull();
 
     const progress = screen.getByTestId('plugin-gc-progress');
     expect(progress.textContent).toBe(
-      'Deleting unused uploads — waiting for the server.',
+      'Cleaning orphaned uploads — waiting for the server.',
     );
     expect(progress.getAttribute('aria-live')).toBe('polite');
-    expect(screen.queryByText('Delete unused uploads')).toBeNull();
+    expect(screen.queryByText('Clean orphaned uploads')).toBeNull();
+    expect(
+      screen
+        .getByRole('button', { name: 'Delete plugin' })
+        .hasAttribute('disabled'),
+    ).toBe(false);
+  });
+
+  test('offers orphan cleanup without treating registered usage as its target count', () => {
+    registryState = {
+      data: { entries: [pluginEntry('used-plugin', 'Used plugin')] },
+      isLoading: false,
+    };
+
+    render(<PluginCatalog onSelectPlugin={vi.fn()} />);
+
+    const cleanupAction = screen.getByRole('button', {
+      name: 'Clean orphaned uploads',
+    });
+    expect(cleanupAction.hasAttribute('disabled')).toBe(false);
+    expect(cleanupAction.getAttribute('title')).toContain(
+      'Registered plugins remain available',
+    );
+    expect(screen.getByTestId('plugin-count-slot').textContent).toContain(
+      '0 not used anywhere',
+    );
   });
 
   test('keeps catalog geometry stable while counts and rows load', () => {
