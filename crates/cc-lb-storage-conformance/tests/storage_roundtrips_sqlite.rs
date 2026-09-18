@@ -15,7 +15,7 @@ use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
-        anthropic_compatibility_kv_store, atomicity, cache_keepalive_session_reads,
+        anthropic_compatibility_kv_store, atomicity, cache_keepalive_session_reads, managed_keys,
         organization_metadata_store, plan_tier_store, plan_tier_store_backfill,
         plugin_registry_store, pool_quota_history_store, price_catalog, principal_store,
         prompt_cache_observation_store, request_event_key_usage, request_event_list,
@@ -66,6 +66,24 @@ impl ConformanceBackend for SqliteConformanceBackend {
 }
 
 #[async_trait]
+impl managed_keys::ManagedKeyBackend for SqliteConformanceBackend {
+    type Store = SqliteStorage;
+    type Fixture = SqliteFixture;
+
+    async fn create_fixture(&self) -> anyhow::Result<SqliteFixture> {
+        <Self as ConformanceBackend>::create_fixture(self).await
+    }
+
+    async fn open(&self, fixture: &SqliteFixture) -> anyhow::Result<SqliteStorage> {
+        <Self as ConformanceBackend>::open(self, fixture).await
+    }
+
+    async fn teardown(&self, fixture: SqliteFixture) -> anyhow::Result<()> {
+        <Self as ConformanceBackend>::teardown(self, fixture).await
+    }
+}
+
+#[async_trait]
 impl price_catalog::PriceCatalogCorruptionBackend for SqliteConformanceBackend {
     async fn corrupt_latest_price_catalog_hash(
         &self,
@@ -89,6 +107,22 @@ impl price_catalog::PriceCatalogCorruptionBackend for SqliteConformanceBackend {
 #[test]
 fn storage_roundtrips_sqlite() {
     run_sqlite_scenario("storage_roundtrips", storage_roundtrips::run_all);
+}
+
+#[test]
+fn managed_keys_empty_label_roundtrip_sqlite() {
+    run_sqlite_scenario(
+        "managed_keys_empty_label_roundtrip",
+        managed_keys::managed_keys_empty_label_roundtrip,
+    );
+}
+
+#[test]
+fn managed_keys_nul_byte_rejected_sqlite() {
+    run_sqlite_scenario(
+        "managed_keys_nul_byte_rejected",
+        managed_keys::managed_keys_nul_byte_rejected,
+    );
 }
 
 #[test]

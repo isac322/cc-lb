@@ -42,7 +42,9 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
     ) -> StorageResult<StoredApiKeyRecord> {
         validate_identifier("principal_id", principal_id)?;
         validate_identifier("key_id", key_id)?;
-        validate_identifier("label", &params.label)?;
+        if !params.label.is_empty() {
+            validate_identifier("label", &params.label)?;
+        }
         if let Some(desc) = &params.description {
             validate_identifier("description", desc)?;
         }

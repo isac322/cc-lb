@@ -4,6 +4,7 @@ use std::{collections::HashSet, future::Future, sync::Arc};
 
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
+use cc_lb_engine::api_keys::secret;
 use cc_lb_storage_api::{
     ManagedKeyStore, StorageError,
     types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind},
@@ -56,6 +57,7 @@ where
     B: ManagedKeyBackend,
 {
     managed_keys_happy_path(Arc::clone(&backend)).await?;
+    managed_keys_empty_label_roundtrip(Arc::clone(&backend)).await?;
     managed_keys_nul_byte_rejected(Arc::clone(&backend)).await?;
     managed_keys_concurrent_issue_no_index_collision(Arc::clone(&backend)).await?;
     managed_keys_equivalent_records(backend).await?;
@@ -189,6 +191,70 @@ where
     .await
 }
 
+pub async fn managed_keys_empty_label_roundtrip<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ManagedKeyBackend,
+{
+    with_fixture(backend, |store| async move {
+        let generated = secret::generate_new();
+        let params = IssueParams {
+            label: String::new(),
+            description: None,
+            expires_at_unix_secs: None,
+            limit_overrides: Vec::new(),
+            secret_salt: generated.secret_salt,
+            verify_hash: generated.verify_hash,
+            last_4: generated.last_4.clone(),
+            index_hash: generated.index_hash,
+        };
+        let issued = store
+            .issue("principal-empty-label", &generated.key_id, params)
+            .await?;
+        ensure!(issued.label.is_empty(), "issued label should remain empty");
+
+        let fetched = store
+            .get("principal-empty-label", &generated.key_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("empty-label key should be readable"))?;
+        ensure!(
+            fetched.label.is_empty(),
+            "fetched label should remain empty"
+        );
+
+        let (parsed_key_id, secret_bytes) = secret::parse(generated.plaintext.expose())?;
+        ensure!(
+            parsed_key_id == generated.key_id,
+            "plaintext key id should match stored key id"
+        );
+        let lookup = store
+            .lookup_by_index_hash(&secret::compute_index_hash(&secret_bytes))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("empty-label key should be usable by index lookup"))?;
+        ensure!(
+            lookup.0 == "principal-empty-label",
+            "empty-label lookup principal mismatch"
+        );
+        ensure!(
+            lookup.1 == generated.key_id,
+            "empty-label lookup key mismatch"
+        );
+        ensure!(
+            secret::verify_secret(&secret_bytes, &lookup.2.verify_hash, &lookup.2.secret_salt),
+            "empty-label key should pass secret verification"
+        );
+
+        let listed = store.list_by_principal("principal-empty-label").await?;
+        ensure!(listed.len() == 1, "empty-label key should be listed");
+        ensure!(
+            listed[0].label.is_empty(),
+            "listed empty label should remain empty"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
 pub async fn managed_keys_nul_byte_rejected<B>(backend: Arc<B>) -> Result<()>
 where
     B: ManagedKeyBackend,
@@ -205,6 +271,22 @@ where
             .await
             .expect_err("NUL key id should be rejected");
         assert_invalid_field(key_error, "key_id")?;
+
+        let mut label_params = issue_params(22);
+        label_params.label = "bad\0label".to_owned();
+        let label_error = store
+            .issue("principal-a", "key-label", label_params)
+            .await
+            .expect_err("NUL label should be rejected");
+        assert_invalid_field(label_error, "label")?;
+
+        let mut reserved_label_params = issue_params(23);
+        reserved_label_params.label = "system.reserved-label".to_owned();
+        let reserved_label_error = store
+            .issue("principal-a", "key-reserved-label", reserved_label_params)
+            .await
+            .expect_err("reserved label should be rejected");
+        assert_invalid_field_reason(reserved_label_error, "label", "system")?;
 
         let list_error = store
             .list_by_principal("bad\0principal")
@@ -429,12 +511,20 @@ fn normalized_record_bytes(record: &cc_lb_storage_api::StoredApiKeyRecord) -> Re
 }
 
 fn assert_invalid_field(error: StorageError, expected_field: &str) -> Result<()> {
+    assert_invalid_field_reason(error, expected_field, "NUL")
+}
+
+fn assert_invalid_field_reason(
+    error: StorageError,
+    expected_field: &str,
+    expected_reason: &str,
+) -> Result<()> {
     match error {
         StorageError::InvalidInput { field, reason } => {
             ensure!(field == expected_field, "invalid input field mismatch");
             ensure!(
-                reason.contains("NUL"),
-                "invalid input reason should mention NUL"
+                reason.contains(expected_reason),
+                "invalid input reason should mention {expected_reason}"
             );
             Ok(())
         }

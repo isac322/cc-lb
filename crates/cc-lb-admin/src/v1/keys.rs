@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_control::api_keys::key_store::CreateParams;
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStoreError};
 use cc_lb_control::api_keys::secret;
 use cc_lb_storage_api::types::KeyStatus;
 use cc_lb_storage_api::{RequestEventKeyLastUsedQuery, StorageError};
@@ -158,8 +158,19 @@ async fn issue_key(
             add_dynamic_rebind_headers(&mut http_response, &state).await;
             http_response
         }
-        Err(e) => {
-            tracing::error!("Failed to issue key: {}", e);
+        Err(error) => issue_key_error_response(error),
+    }
+}
+
+fn issue_key_error_response(error: KeyStoreError) -> axum::response::Response {
+    match error {
+        KeyStoreError::Storage(StorageError::InvalidInput { field, reason }) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_input", "field": field, "reason": reason })),
+        )
+            .into_response(),
+        source => {
+            tracing::error!(error = %source, "failed to issue key");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "internal_error" })),
@@ -388,14 +399,15 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+    use axum::http::StatusCode;
+    use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore, KeyStoreError};
     use cc_lb_storage_api::types::KeyStatus;
     use cc_lb_storage_api::{
         AuditEntry, AuditQueryScope, AuditStore, BackendKind, MetaStore, StorageError,
         StorageResult,
     };
 
-    use super::{record_issue_audit_or_revoke, secret};
+    use super::{issue_key_error_response, record_issue_audit_or_revoke, secret};
 
     struct FailingAppendAuditStore {
         inner: Arc<dyn AuditStore>,
@@ -460,6 +472,22 @@ mod tests {
                 .prune_audit_before(cutoff_ts_x_1m, batch_size)
                 .await
         }
+    }
+
+    #[test]
+    fn issue_key_error_mapping_preserves_client_and_server_boundaries() {
+        let invalid =
+            issue_key_error_response(KeyStoreError::Storage(StorageError::InvalidInput {
+                field: "label".to_owned(),
+                reason: "identifier cannot contain NUL bytes".to_owned(),
+            }));
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let unavailable =
+            issue_key_error_response(KeyStoreError::Storage(StorageError::Unavailable {
+                message: "injected storage failure".to_owned(),
+            }));
+        assert_eq!(unavailable.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
