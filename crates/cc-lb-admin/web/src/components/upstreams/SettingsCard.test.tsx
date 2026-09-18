@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { toast } from 'sonner';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { Upstream } from '../../lib/queries';
 import * as queries from '../../lib/queries';
@@ -95,5 +96,118 @@ describe('SettingsCard pending state', () => {
 
     fireEvent.click(saving);
     expect(mutate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SettingsCard base URL contract', () => {
+  test('omits base_url and clear_base_url when the field is unchanged', () => {
+    render(<SettingsCard upstream={upstream} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    const body = mutate.mock.calls[0][0].body;
+    expect(body).not.toHaveProperty('base_url');
+    expect(body).not.toHaveProperty('clear_base_url');
+  });
+
+  test('sends clear_base_url only when the user empties a set Base URL', () => {
+    render(<SettingsCard upstream={upstream} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(
+      screen.getByPlaceholderText('e.g. https://api.anthropic.com'),
+      { target: { value: '' } },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    const body = mutate.mock.calls[0][0].body;
+    expect(body.clear_base_url).toBe(true);
+    expect(body).not.toHaveProperty('base_url');
+  });
+
+  test('does not send clear_base_url when Base URL was already unset', () => {
+    render(<SettingsCard upstream={{ ...upstream, base_url: null }} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    const body = mutate.mock.calls[0][0].body;
+    expect(body).not.toHaveProperty('base_url');
+    expect(body).not.toHaveProperty('clear_base_url');
+  });
+
+  test('does not clear when props change underneath an untouched edit', () => {
+    const view = render(
+      <SettingsCard upstream={{ ...upstream, base_url: null }} />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    // A background refetch supplies a non-null base_url and a new
+    // revision while the field stays blank and untouched.
+    view.rerender(
+      <SettingsCard
+        upstream={{
+          ...upstream,
+          base_url: 'https://refetched.example.com',
+          spec_revision: 8,
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    const body = mutate.mock.calls[0][0].body;
+    expect(body).not.toHaveProperty('base_url');
+    expect(body).not.toHaveProperty('clear_base_url');
+  });
+
+  test('keeps editing when the server does not confirm an explicit clear', () => {
+    const success = vi.spyOn(toast, 'success');
+    const error = vi.spyOn(toast, 'error');
+    // An old backend ignores clear_base_url and returns the stored URL.
+    mutate.mockImplementationOnce((_args, options) =>
+      options.onSuccess({ ...upstream, spec_revision: 8 }),
+    );
+    render(<SettingsCard upstream={upstream} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(
+      screen.getByPlaceholderText('e.g. https://api.anthropic.com'),
+      { target: { value: '' } },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(mutate.mock.calls[0][0].body.clear_base_url).toBe(true);
+    expect(success).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('upstream-settings-edit-form')).toBeDefined();
+  });
+
+  test('treats a missing base_url field as an unconfirmed clear', () => {
+    const success = vi.spyOn(toast, 'success');
+    const error = vi.spyOn(toast, 'error');
+    // An even older DTO omits base_url entirely from the response.
+    const { base_url: _omitted, ...withoutBaseUrl } = upstream;
+    mutate.mockImplementationOnce((_args, options) =>
+      options.onSuccess(withoutBaseUrl as Upstream),
+    );
+    render(<SettingsCard upstream={upstream} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(
+      screen.getByPlaceholderText('e.g. https://api.anthropic.com'),
+      { target: { value: '' } },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(success).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('upstream-settings-edit-form')).toBeDefined();
   });
 });

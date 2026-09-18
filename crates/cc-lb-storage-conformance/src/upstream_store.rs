@@ -107,7 +107,7 @@ impl UpstreamStore for MemoryUpstreamStore {
                 record.name = name;
             }
             if let Some(base_url) = update.base_url {
-                record.base_url = Some(base_url);
+                record.base_url = base_url;
             }
             if let Some(enabled) = update.enabled {
                 record.enabled = enabled;
@@ -156,7 +156,7 @@ impl UpstreamStore for MemoryUpstreamStore {
                 record.name = name;
             }
             if let Some(base_url) = update.base_url {
-                record.base_url = Some(base_url);
+                record.base_url = base_url;
             }
             if let Some(enabled) = update.enabled {
                 record.enabled = enabled;

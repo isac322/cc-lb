@@ -173,7 +173,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
             key_store,
             Arc::new(cc_lb_engine::SystemClock),
         )),
-        holder,
+        holder.clone(),
         recording,
         LifecycleConfig::default(),
         Arc::new(cc_lb_engine::SystemClock),
@@ -212,6 +212,46 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         "/v1/messages",
         "dispatched path must be /v1/messages, got {url}",
     );
+
+    let cleared = UpstreamStore::update(
+        storage.as_ref(),
+        target.id,
+        target.revision,
+        UpstreamUpdate {
+            base_url: Some(None),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("base URL override cleared");
+    assert_eq!(cleared.base_url, None);
+    let refreshed = build_dynamic_view(
+        stores.as_ref(),
+        oauth_cfg.as_ref(),
+        aead,
+        None,
+        holder.generation(),
+        &runtime,
+        dir.path(),
+        Arc::new(SubscriptionQuotaCache::new()),
+        None,
+        None,
+        1800,
+        Arc::new(cc_lb_engine::SystemClock),
+    )
+    .await
+    .expect("dynamic view rebuilds after clearing");
+    assert!(holder.try_store_if_newer(refreshed));
+
+    let response = lifecycle
+        .handle(message_request(key_secret.expose()))
+        .await
+        .expect("lifecycle response after clearing");
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.expect("response body");
+    let urls = captured.lock().expect("captured lock").clone();
+    assert_eq!(urls.len(), 2, "one dispatch per client request");
+    assert_eq!(urls[1].as_str(), "https://api.anthropic.com/v1/messages");
 
     // Keep handles alive until the assertions complete.
     let _ = primary;
