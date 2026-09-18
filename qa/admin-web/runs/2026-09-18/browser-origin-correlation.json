@@ -1,0 +1,432 @@
+{
+ "schema": "cc-lb-browser-origin-correlation/v1",
+ "method": "Browser medians come from three authenticated sweeps through Cloudflare Access. Origin medians come from the same binary and a copy of the live database on localhost. Path overhead is the difference; it covers the Cloudflare edge, the us-east4 tunnel, the PSC hop, and the return to the Korean origin.",
+ "path_overhead_ms": {
+  "median": 247.6,
+  "min": 230.8,
+  "max": 653.0,
+  "endpoints": 14
+ },
+ "sql_and_runtime": {
+  "instrumented_storage_ms_per_request": 0.7,
+  "all_reads_for_the_slowest_endpoint_ms": 5.8,
+  "sqlx_pool": "in_use 1 of 3 through a 60 s saturating loop",
+  "process_cpu_ms_per_request": 9,
+  "scheduler_job_wall_secs": "0-1"
+ },
+ "rows": [
+  {
+   "path": "/admin/v1/subscription-quotas/aggregate?range=24h",
+   "browser_med_ms": 660,
+   "origin_replica_med_ms": 7.01,
+   "path_overhead_ms": 653.0,
+   "browser_bytes": 1964,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/subscription-quotas/analysis?since_unix_secs=1789659314&until_unix_secs=1789745714",
+   "browser_med_ms": 641,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 1971,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/subscription-quotas/series?since_unix_secs=1789659314&until_unix_secs=1789745714",
+   "browser_med_ms": 635,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 6774,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/principals/efc13c74-5bac-4b87-a6cf-859dec6ee352/keys",
+   "browser_med_ms": 525,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 437,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/status",
+   "browser_med_ms": 357,
+   "origin_replica_med_ms": 1.32,
+   "path_overhead_ms": 355.7,
+   "browser_bytes": 1602,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/subscription-quotas/pool-history?range=24h",
+   "browser_med_ms": 334,
+   "origin_replica_med_ms": 9.31,
+   "path_overhead_ms": 324.7,
+   "browser_bytes": 7027,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/dashboard/summary?range=7d",
+   "browser_med_ms": 276,
+   "origin_replica_med_ms": 3.12,
+   "path_overhead_ms": 272.9,
+   "browser_bytes": 15612,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/dashboard/summary?range=6h",
+   "browser_med_ms": 272,
+   "origin_replica_med_ms": 3.12,
+   "path_overhead_ms": 268.9,
+   "browser_bytes": 21503,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/events/histogram?since_unix_secs=1789659314&until_unix_secs=1789745714&bucket_ms=3600000",
+   "browser_med_ms": 252,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 565,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/events/recent?limit=50",
+   "browser_med_ms": 251,
+   "origin_replica_med_ms": 1.2,
+   "path_overhead_ms": 249.8,
+   "browser_bytes": 8537,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/dashboard/usage?range=24h",
+   "browser_med_ms": 249,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 2703,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/plugins/registry",
+   "browser_med_ms": 249,
+   "origin_replica_med_ms": 1.43,
+   "path_overhead_ms": 247.6,
+   "browser_bytes": 1695,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/config/draft",
+   "browser_med_ms": 249,
+   "origin_replica_med_ms": 1.36,
+   "path_overhead_ms": 247.6,
+   "browser_bytes": 381,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/upstreams/0e0c5772-1fb3-4339-ac52-c84392a7b7a4/warmup/attempts?limit=20",
+   "browser_med_ms": 248,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 1940,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/events/histogram?since_unix_secs=1789659314&until_unix_secs=1789745714&bucket_ms=3600000",
+   "browser_med_ms": 248,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 565,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/upstreams/0e0c5772-1fb3-4339-ac52-c84392a7b7a4/warmup",
+   "browser_med_ms": 247,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 1445,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/audit?limit=50",
+   "browser_med_ms": 247,
+   "origin_replica_med_ms": 2.23,
+   "path_overhead_ms": 244.8,
+   "browser_bytes": 2437,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/config/schema",
+   "browser_med_ms": 247,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 4023,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/principals/efc13c74-5bac-4b87-a6cf-859dec6ee352/router-terminal",
+   "browser_med_ms": 246,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 341,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/dashboard/summary?range=1h",
+   "browser_med_ms": 244,
+   "origin_replica_med_ms": 3.12,
+   "path_overhead_ms": 240.9,
+   "browser_bytes": 4829,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/dashboard/summary?range=24h",
+   "browser_med_ms": 244,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 2855,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/events/recent?limit=50",
+   "browser_med_ms": 244,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 8537,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/config/current",
+   "browser_med_ms": 244,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 1947,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/upstreams",
+   "browser_med_ms": 242,
+   "origin_replica_med_ms": 1.26,
+   "path_overhead_ms": 240.7,
+   "browser_bytes": 859,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/upstreams/0e0c5772-1fb3-4339-ac52-c84392a7b7a4/subscription-metadata",
+   "browser_med_ms": 242,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 1165,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/subscription-quotas/latest",
+   "browser_med_ms": 240,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 1634,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/principals",
+   "browser_med_ms": 239,
+   "origin_replica_med_ms": 1.2,
+   "path_overhead_ms": 237.8,
+   "browser_bytes": 1286,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/plugins/wasm",
+   "browser_med_ms": 238,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 300,
+   "status": [
+    405
+   ]
+  },
+  {
+   "path": "/admin/dashboard/summary?range=24h",
+   "browser_med_ms": 237,
+   "origin_replica_med_ms": 3.12,
+   "path_overhead_ms": 233.9,
+   "browser_bytes": 2855,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/usage?range=24h",
+   "browser_med_ms": 237,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 2703,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/upstreams/0e0c5772-1fb3-4339-ac52-c84392a7b7a4/oauth/status",
+   "browser_med_ms": 236,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 485,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/principals/efc13c74-5bac-4b87-a6cf-859dec6ee352/limits",
+   "browser_med_ms": 236,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 505,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/principals/efc13c74-5bac-4b87-a6cf-859dec6ee352/plugin-chain?slot=router",
+   "browser_med_ms": 236,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 495,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/audit?limit=50",
+   "browser_med_ms": 235,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 2437,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/config/diff",
+   "browser_med_ms": 233,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 397,
+   "status": [
+    400
+   ]
+  },
+  {
+   "path": "/admin/health",
+   "browser_med_ms": 232,
+   "origin_replica_med_ms": 1.2,
+   "path_overhead_ms": 230.8,
+   "browser_bytes": 364,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/config/history?limit=20",
+   "browser_med_ms": 231,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 314,
+   "status": [
+    200
+   ]
+  },
+  {
+   "path": "/admin/v1/auth/session",
+   "browser_med_ms": 230,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 300,
+   "status": [
+    404
+   ]
+  },
+  {
+   "path": "/admin/v1/scheduler/status",
+   "browser_med_ms": 227,
+   "origin_replica_med_ms": null,
+   "path_overhead_ms": null,
+   "browser_bytes": 300,
+   "status": [
+    404
+   ]
+  }
+ ],
+ "unmeasured": [
+  {
+   "item": "per-request server timing on production",
+   "reason": "the deployed binary predates the request-id and Server-Timing instrumentation",
+   "unblock": "deploy current master, then repeat this sweep"
+  },
+  {
+   "item": "production write endpoints",
+   "reason": "writes against live credentials and live principals are not reversible",
+   "substitute": "all 41 write endpoints measured on the isolated replica"
+  },
+  {
+   "item": "real provider OAuth handshakes",
+   "reason": "completing one would mutate live credentials",
+   "substitute": "reachability and rejection latency only"
+  },
+  {
+   "item": "the residual ~400 ms on the subscription-quota endpoints",
+   "reason": "the replica cannot reconstruct the live in-memory quota cache from the database alone",
+   "unblock": "the same deployment supplies per-request handler timing"
+  }
+ ],
+ "prior_scale_evidence": "qa/admin-web/runs/2026-09-18/scale-experiment.json holds the seeded 300k-row comparison for the audit and event read paths."
+}

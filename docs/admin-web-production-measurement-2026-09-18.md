@@ -138,3 +138,39 @@ The remaining OAuth write endpoints were probed for reachability and rejection l
 completing a real provider handshake would mutate live credentials and was not executed.
 
 Artifact: `qa/admin-web/runs/2026-09-18/write-path-fixture-timings.json`.
+
+## Browser, API, and SQL correlated per endpoint
+
+For the 14 endpoints measured on both legs, the difference between the browser median and the
+same handler on the localhost replica isolates the delivery path.
+
+| Endpoint | Browser | Origin | Path overhead |
+|---|---|---|---|
+| `/admin/v1/subscription-quotas/aggregate?range=24h` | 660 ms | 7.01 ms | 653 ms |
+| `/admin/v1/status` | 357 ms | 1.32 ms | 356 ms |
+| `/admin/v1/subscription-quotas/pool-history?range=24h` | 334 ms | 9.31 ms | 325 ms |
+| `/admin/dashboard/summary?range=7d` | 276 ms | 3.12 ms | 273 ms |
+| `/admin/v1/events/recent?limit=50` | 251 ms | 1.20 ms | 250 ms |
+| `/admin/v1/audit?limit=50` | 247 ms | 2.23 ms | 245 ms |
+| `/admin/v1/upstreams` | 242 ms | 1.26 ms | 241 ms |
+| `/admin/health` | 232 ms | 1.20 ms | 231 ms |
+
+Path overhead is 231-273 ms for every endpoint except the two subscription-quota routes, whose
+653 ms and 325 ms carry the unattributed residual. Within the origin, per request: 0.7 ms of
+instrumented storage time, 5.8 ms for every table the slowest endpoint reads, 9 ms of process
+CPU, a pool that never exceeded 1 of 3 connections, and scheduler jobs that finish in 0-1 s.
+
+Artifact: `qa/admin-web/runs/2026-09-18/browser-origin-correlation.json`.
+
+## What was not measured, and why
+
+| Item | Reason | How to close it |
+|---|---|---|
+| Per-request server timing in production | The deployed binary predates the request-id and `Server-Timing` instrumentation | Deploy current master, repeat this sweep |
+| Production write endpoints | Writes against live credentials and principals are not reversible | All 41 write endpoints were measured on the isolated replica instead |
+| Real provider OAuth handshakes | Completing one mutates live credentials | Reachability and rejection latency only |
+| The residual ~400 ms on quota endpoints | The replica cannot reconstruct the live in-memory quota cache from the database | The same deployment supplies per-request handler timing |
+
+Seeded-scale evidence for the audit and event read paths, including the effect of the
+read-order indexes, is preserved in `qa/admin-web/runs/2026-09-18/scale-experiment.json`
+(300,000 seeded rows, 42,807 in the 24-hour window).
