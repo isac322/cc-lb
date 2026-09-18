@@ -67,7 +67,7 @@ async fn test_audit_pagination() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/audit?limit=5")
+        .uri("/admin/audit?principal_id=alice&limit=5")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();
@@ -78,10 +78,13 @@ async fn test_audit_pagination() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["entries"].as_array().unwrap().len(), 5);
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries[0]["ts"], 1009);
+    assert_eq!(entries[4]["ts"], 1005);
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/audit?since=1002&until=1005")
+        .uri("/admin/audit?principal_id=alice&since=1002&until=1005")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();
@@ -93,12 +96,12 @@ async fn test_audit_pagination() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let entries = json["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 4);
-    assert_eq!(entries[0]["ts"], 1002);
-    assert_eq!(entries[3]["ts"], 1005);
+    assert_eq!(entries[0]["ts"], 1005);
+    assert_eq!(entries[3]["ts"], 1002);
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/audit?after=1005&limit=2")
+        .uri("/admin/audit?principal_id=alice&after=1005&limit=2")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();
@@ -110,6 +113,128 @@ async fn test_audit_pagination() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let entries = json["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0]["ts"], 1006);
-    assert_eq!(entries[1]["ts"], 1007);
+    assert_eq!(entries[0]["ts"], 1009);
+    assert_eq!(entries[1]["ts"], 1008);
+}
+
+#[tokio::test]
+async fn audit_http_aliases_return_the_most_recent_200_matching_entries() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = admin_test_common::sqlite_storage(temp_dir.path(), "recent.sqlite").await;
+
+    for i in 0..263 {
+        storage
+            .append_audit(&AuditEntry {
+                ts: 10_000 + i,
+                request_id: format!("bulk-{i}"),
+                principal_id: "bulk-principal".to_owned(),
+                route: "test".to_owned(),
+                upstream: "test".to_owned(),
+                status: 200,
+                duration_ms: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    let app = router(test_state(storage));
+    for path in ["/admin/audit", "/admin/v1/audit"] {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("{path}?until=10262&limit=200"))
+            .header("Authorization", "Bearer test-token")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let entries = json["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 200);
+        assert_eq!(entries.first().unwrap()["request_id"], "bulk-262");
+        assert_eq!(entries.last().unwrap()["request_id"], "bulk-63");
+    }
+}
+
+#[tokio::test]
+async fn audit_admin_only_keeps_older_admin_actions_visible() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = admin_test_common::sqlite_storage(temp_dir.path(), "admin_only.sqlite").await;
+
+    // Reproduces the observed window failure: one older admin action followed
+    // by more newer non-admin rows than the query limit.
+    storage
+        .append_audit(&AuditEntry {
+            ts: 10_000,
+            request_id: "older-admin-action".to_owned(),
+            principal_id: "qa-safety-principal".to_owned(),
+            route: "/admin/v1/principals".to_owned(),
+            upstream: "admin".to_owned(),
+            status: 200,
+            admin_action: Some("principal_update".to_owned()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for i in 0..250 {
+        storage
+            .append_audit(&AuditEntry {
+                ts: 10_001 + i,
+                request_id: format!("nonadmin-{i}"),
+                principal_id: "qa-safety-principal".to_owned(),
+                route: "/v1/messages".to_owned(),
+                upstream: "upstream".to_owned(),
+                status: 429,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    let app = router(test_state(storage));
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/admin/audit?principal_id=qa-safety-principal&admin_only=true&limit=200")
+        .header("Authorization", "Bearer test-token")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["request_id"] == "older-admin-action"),
+        "admin_only must surface the older admin action past newer non-admin rows"
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|entry| { !entry["admin_action"].is_null() || !entry["kind"].is_null() })
+    );
+
+    // The default query keeps returning non-admin rows.
+    let request = Request::builder()
+        .method("GET")
+        .uri("/admin/audit?principal_id=qa-safety-principal&limit=200")
+        .header("Authorization", "Bearer test-token")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 200);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["admin_action"].is_null() && entry["kind"].is_null())
+    );
 }

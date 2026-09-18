@@ -391,7 +391,8 @@ mod tests {
     use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
     use cc_lb_storage_api::types::KeyStatus;
     use cc_lb_storage_api::{
-        AuditEntry, AuditStore, BackendKind, MetaStore, StorageError, StorageResult,
+        AuditEntry, AuditQueryScope, AuditStore, BackendKind, MetaStore, StorageError,
+        StorageResult,
     };
 
     use super::{record_issue_audit_or_revoke, secret};
@@ -417,6 +418,19 @@ mod tests {
         ) -> StorageResult<Vec<AuditEntry>> {
             self.inner
                 .query_audit(principal_id, since, until, limit)
+                .await
+        }
+
+        async fn query_recent_audit(
+            &self,
+            scope: AuditQueryScope<'_>,
+            since: u64,
+            until: u64,
+            limit: usize,
+            admin_only: bool,
+        ) -> StorageResult<Vec<AuditEntry>> {
+            self.inner
+                .query_recent_audit(scope, since, until, limit, admin_only)
                 .await
         }
 
