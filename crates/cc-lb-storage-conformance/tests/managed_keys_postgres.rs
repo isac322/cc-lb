@@ -7,7 +7,8 @@ use cc_lb_engine::{ClockHandle, SystemClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::scenarios::managed_keys::{
     ManagedKeyBackend, managed_keys_concurrent_issue_no_index_collision,
-    managed_keys_equivalent_records, managed_keys_happy_path, managed_keys_nul_byte_rejected,
+    managed_keys_empty_label_roundtrip, managed_keys_equivalent_records, managed_keys_happy_path,
+    managed_keys_nul_byte_rejected,
 };
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage, adapter::retry};
 use sqlx::{
@@ -90,6 +91,14 @@ impl ManagedKeyBackend for PostgresManagedKeyBackend {
 #[test]
 fn managed_keys_happy_path_postgres() {
     run_postgres_scenario("managed_keys_happy_path", managed_keys_happy_path);
+}
+
+#[test]
+fn managed_keys_empty_label_roundtrip_postgres() {
+    run_postgres_scenario(
+        "managed_keys_empty_label_roundtrip",
+        managed_keys_empty_label_roundtrip,
+    );
 }
 
 #[test]
