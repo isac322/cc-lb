@@ -8,6 +8,9 @@
 #
 # Keep ARG RUNNER_VERSION in lockstep with the runner tarball digest. CI reads
 # that ARG for GHCR tags.
+#
+# gnutar must stay installed: busybox tar rejects the -P flag that
+# actions/cache passes, so cache restore and save both fail on this image.
 
 FROM cgr.dev/chainguard/wolfi-base:latest@sha256:103eb3f4444c68ea2453bf3aad09d860eaa5a698effb3e656cd607f630f0e46d
 LABEL org.opencontainers.image.source="https://github.com/isac322/cc-lb"
@@ -44,6 +47,7 @@ RUN set -eux; \
       gcc \
       git \
       glibc-2.44-dev \
+      gnutar \
       grep \
       icu \
       jq \
@@ -71,6 +75,7 @@ RUN set -eux; \
     cc --version; \
     rg --version; \
     grep --version; \
+    case "$(tar --version)" in "tar (GNU tar)"*) ;; *) exit 1 ;; esac; \
     mold --version; \
     psql --version; \
     python3 --version
