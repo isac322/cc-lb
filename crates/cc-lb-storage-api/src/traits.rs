@@ -8,6 +8,7 @@ use crate::{
     StorageResult,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
     cache_keepalive_sessions::{CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore},
+    oauth_pkce::OAuthPkceStore,
     organization_metadata::OrganizationMetadataStore,
     prompt_cache_observation::PromptCacheObservationStore,
     types::*,
@@ -433,6 +434,7 @@ pub trait Storage:
     + MetaStore
     + RuntimeChangeNotifier
     + crate::PluginBlobRepo
+    + OAuthPkceStore
     + Send
     + Sync
     + 'static
@@ -467,12 +469,7 @@ impl<T> Storage for T where
         + MetaStore
         + RuntimeChangeNotifier
         + crate::PluginBlobRepo
-        + Send
-        + Sync
-        + 'static
-        + ConfigStore
-        + MetaStore
-        + RuntimeChangeNotifier
+        + OAuthPkceStore
         + Send
         + Sync
         + 'static

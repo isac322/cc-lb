@@ -15,6 +15,7 @@ pub mod config_store;
 pub mod managed_keys;
 pub mod meta;
 pub mod notifier;
+pub mod oauth_pkce;
 pub mod organization_metadata;
 pub mod plan_tiers;
 pub mod plugin_registry;

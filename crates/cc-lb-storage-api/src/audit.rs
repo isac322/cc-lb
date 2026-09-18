@@ -44,7 +44,7 @@ pub struct AuditEntry {
     pub payload: Option<JsonValue>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AuditActorFields {
     pub actor: String,
     pub authority: String,
