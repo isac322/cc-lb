@@ -821,7 +821,8 @@ curl -s http://127.0.0.1:8080/v1/messages \
       <tr><td><code>GET /admin/v1/principals</code></td><td>DB principal 목록</td></tr>
       <tr><td><code>GET /admin/v1/principals/{id}/limits</code></td><td>principal의 DB 저장 기본 한도</td></tr>
       <tr><td><code>GET /admin/v1/audit?from=&amp;to=&amp;limit=</code></td><td>감사 로그</td></tr>
-      <tr><td><code>GET /admin/v1/upstreams</code></td><td>DB upstream 목록과 상태</td></tr>
+      <tr><td><code>GET /admin/v1/upstreams</code></td><td>DB upstream 목록과 상태 — <code>base_url</code> 포함(미설정 시 <code>null</code>)</td></tr>
+      <tr><td><code>PUT/PATCH /admin/v1/upstreams/{id}</code></td><td><code>base_url</code> 생략·<code>null</code>은 기존 override 유지, URL 문자열은 설정. <code>clear_base_url: true</code>만 override를 제거하고 기본 endpoint를 사용하며, URL 설정과 초기화의 동시 요청은 거절. 구버전 폼의 무편집 저장이 override를 지우지 않도록 초기화 의도를 구분한다. <code>If-Match</code> revision 보호와 API 키·OAuth 토큰의 null 처리는 유지</td></tr>
       <tr><td><code>POST /admin/v1/upstreams/{id}/disable</code></td><td>upstream 비활성화</td></tr>
       <tr><td><code>GET /admin/v1/config/editor</code></td><td>Config editor 메타데이터와 현재 파일 상태</td></tr>
       <tr><td><code>GET /admin/v1/config/draft</code> · <code>PUT /admin/v1/config/draft</code></td><td>버전이 지정된 편집 초안 조회·저장</td></tr>

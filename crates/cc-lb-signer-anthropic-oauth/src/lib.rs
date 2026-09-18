@@ -745,7 +745,7 @@ mod tests {
                     record.name = name;
                 }
                 if let Some(base_url) = update.base_url {
-                    record.base_url = Some(base_url);
+                    record.base_url = base_url;
                 }
                 if let Some(api_key_ciphertext) = update.api_key_ciphertext {
                     record.api_key_ciphertext = Some(api_key_ciphertext);

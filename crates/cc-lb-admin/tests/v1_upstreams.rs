@@ -294,6 +294,105 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
     )
     .await;
     assert_eq!(stale_preserve.status, StatusCode::CONFLICT);
+
+    // Legacy clients send `base_url: null` on every save; it must
+    // preserve the override rather than clear it. A preserve-only
+    // update does not bump the spec revision.
+    let preserved = request(
+        app.clone(),
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "base_url": null })),
+        Some("W/\"3\""),
+    )
+    .await;
+    assert_eq!(preserved.status, StatusCode::OK);
+    assert_eq!(
+        body(&preserved)["base_url"],
+        "https://replacement.example.com/api/"
+    );
+    assert!(!body(&preserved).to_string().contains(secret));
+
+    // A non-null base_url combined with clear_base_url is rejected
+    // before any mutation.
+    let contradictory = request(
+        app.clone(),
+        "PUT",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({
+            "base_url": "https://contradiction.example.com/",
+            "clear_base_url": true
+        })),
+        Some("W/\"3\""),
+    )
+    .await;
+    assert_eq!(contradictory.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body(&contradictory)["error"], "conflicting_base_url");
+
+    // A stale precondition wins over body validation: the same
+    // contradictory body with an old If-Match conflicts and leaves
+    // the record untouched.
+    let stale_contradictory = request(
+        app.clone(),
+        "PUT",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({
+            "base_url": "https://contradiction.example.com/",
+            "clear_base_url": true
+        })),
+        Some("W/\"2\""),
+    )
+    .await;
+    assert_eq!(stale_contradictory.status, StatusCode::CONFLICT);
+
+    let after_reject = request(
+        app.clone(),
+        "GET",
+        &format!("/admin/v1/upstreams/{id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(after_reject.status, StatusCode::OK);
+    assert_eq!(
+        body(&after_reject)["base_url"],
+        "https://replacement.example.com/api/"
+    );
+
+    // Clearing requires the explicit flag.
+    let cleared = request(
+        app.clone(),
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "clear_base_url": true })),
+        Some("W/\"3\""),
+    )
+    .await;
+    assert_eq!(cleared.status, StatusCode::OK);
+    assert_eq!(body(&cleared)["base_url"], Value::Null);
+    assert!(!body(&cleared).to_string().contains(secret));
+
+    let cleared_detail = request(
+        app.clone(),
+        "GET",
+        &format!("/admin/v1/upstreams/{id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(cleared_detail.status, StatusCode::OK);
+    assert_eq!(body(&cleared_detail)["base_url"], Value::Null);
+
+    let restored = request(
+        app,
+        "PUT",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "base_url": "https://restored.example.com/" })),
+        Some("W/\"4\""),
+    )
+    .await;
+    assert_eq!(restored.status, StatusCode::OK);
+    assert_eq!(body(&restored)["base_url"], "https://restored.example.com/");
 }
 
 #[tokio::test]
