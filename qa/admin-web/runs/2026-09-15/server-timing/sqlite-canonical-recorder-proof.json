@@ -1,0 +1,36 @@
+{
+ "recorded_at_utc": "2026-09-15T15:48:35.886900+00:00",
+ "step": "sqlite-canonical-recorder-proof",
+ "origin_asserted": "http://127.0.0.1:56152",
+ "fresh_document": true,
+ "prior_global_absent": true,
+ "canonical_sha256": "43a425d6b4b4e069ad847e621a729be83da8ea364d39900e6ec520ec2ce33b68",
+ "canonical_source": "/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/qa/admin-web-browser-recorder.js",
+ "recorder_version": "1.0.7",
+ "action": "beginAction(UI-PL-01:nav) -> native click Plugins nav -> endAction -> drain",
+ "result": {
+  "records": 3,
+  "types": [
+   "collector_notice",
+   "action_window"
+  ],
+  "fetch_observation_count": 0,
+  "notices": [
+   "installed",
+   "observer_task_failed"
+  ],
+  "capture_complete": true,
+  "ui_rid_captured": 0
+ },
+ "blocker": {
+  "summary": "canonical recorder cannot run in Camoufox evaluate sandbox realm",
+  "failures": [
+   "sha256Text: crypto.subtle.digest returns page-realm ArrayBuffer; new Uint8Array(digest) iteration throws 'Accessing TypedArray data over Xrays is slow, and forbidden' -> observer_task_failed",
+   "matchExpected: parsed.searchParams.keys() throws 'not iterable' (Xray-wrapped URLSearchParams iterator)",
+   "scanTextForSecrets: for..of over URLSearchParams same iterator issue"
+  ],
+  "no_main_world_injection": "camofox server exposes only page.evaluate (sandbox); no addScriptTag/addInitScript/evaluateOnNewDocument route",
+  "window_eval": "runs callback in page realm but returned values are Xray-wrapped; recorder internals still execute in sandbox realm"
+ },
+ "note": "fresh document, no prior global, canonical source loaded. UI RID count = 0 (BLOCKED, not fabricated)."
+}

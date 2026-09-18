@@ -1,0 +1,24 @@
+{
+  "name": "settings_true_null_default_and_writeonly_literal",
+  "verdict": "PASS",
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/upstreams",
+      "status": 201
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/upstreams",
+      "status": 200
+    }
+  ],
+  "detail": {
+    "get_base_url": null,
+    "default_metadata": true,
+    "settings_dash": true,
+    "literal_source_ui": true,
+    "secret_input_blank": true,
+    "secret_value_recorded": false
+  }
+}

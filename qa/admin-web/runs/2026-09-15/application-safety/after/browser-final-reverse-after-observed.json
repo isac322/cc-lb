@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-16T08:48:29.976Z",
+  "stage": "reverse_stage_b_new_ui_against_old_backend_19",
+  "environment": "local_fixture_only",
+  "origin": "http://127.0.0.1:56152",
+  "old_backend_candidate": "19b0557",
+  "ui_observation": {
+    "edit_form_still_open": true,
+    "toasts": [
+      "Server did not confirm the Base URL clear; the stored URL may still be set."
+    ],
+    "save_btn_is_pending": false
+  },
+  "independent_api_state": {
+    "id": "01b20b9f-9b53-43f8-b161-35b10d30a1bb",
+    "name": "qa-safety-upgrade",
+    "base_url": "http://127.0.0.1:19991/",
+    "spec_revision": 6,
+    "enabled": false
+  },
+  "validations": {
+    "edit_form_kept_open": true,
+    "no_settings_updated_success_toast": true,
+    "loopback_url_retained_in_storage": true,
+    "error_toast_displayed": false,
+    "guard_successfully_prevented_silent_failure": true
+  },
+  "explanation": "When the new UI submitted an explicit clear against old backend 19b0557 (which ignores clear_base_url and returns 200 with the non-null URL), the response confirmation guard in the new UI detected that response.base_url !== null. As expected, it kept the edit form open, displayed an error toast, and did NOT show a 'Settings updated' success toast. The independent API GET confirmed the stored loopback URL was retained."
+}

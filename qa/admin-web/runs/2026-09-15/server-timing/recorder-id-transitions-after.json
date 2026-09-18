@@ -1,0 +1,22 @@
+[
+  {
+    "case": "late_same_id_entry",
+    "initial": "unique_server_request_id_match",
+    "final": "ambiguous_same_url_time_window",
+    "expected": "not unique_server_request_id_match"
+  },
+  {
+    "case": "contradiction_without_alternative",
+    "final": "not_observed_in_snapshot",
+    "matched": [],
+    "expected": "contradicted entry not retained as unique match"
+  },
+  {
+    "case": "promotion_keeps_weak_match",
+    "final": "unique_server_request_id_match",
+    "matched": [
+      "strong"
+    ],
+    "expected": "only strong is authoritative"
+  }
+]

@@ -1,0 +1,17 @@
+{
+  "expected": {
+    "step": "baseline",
+    "upstream_id": "c804fce8-2b1a-4d3a-a149-878886bee631",
+    "upstream_name": "qa-usage-display",
+    "expected_base_url": "http://127.0.0.1:19080/",
+    "expected_settings_display": "http://127.0.0.1:19080/"
+  },
+  "observed": {
+    "settings_base_url": "http://127.0.0.1:19080/",
+    "header_line": "Base URL: http://127.0.0.1:19080/",
+    "full_url": "http://127.0.0.1:56352/upstreams?selectedId=c804fce8-2b1a-4d3a-a149-878886bee631"
+  },
+  "validations": {
+    "settings_matches_19080": true
+  }
+}

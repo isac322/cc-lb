@@ -1,0 +1,3 @@
+$ tsgo -b --noEmit
+/etc/profiles/per-user/bhyoo/bin/bash: 줄 1: tsgo: 명령을 찾을 수 없음
+error: script "typecheck" exited with code 127

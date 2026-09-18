@@ -1,0 +1,79 @@
+{
+  "schema": "cc-lb-upstream-usage-status-local-qa/v1",
+  "environment": "fresh isolated SQLite fixture",
+  "observed_transition_at_utc": "2026-09-16T01:26:08.333Z",
+  "candidate_binary_sha256": "db564601fbc351b33750ef3f766b916d829264004a5fd2a11b0ce2aeb5652de5",
+  "cases": [
+    {
+      "id": "UPSTREAM-004",
+      "result": "functional_state_transition_verified",
+      "source_id": "routes/upstreams.tsx#UpstreamsPage:listUsage",
+      "storage_path": "usage_rollups_v2, explicit isolated rollup seeds; not a request-ingestion test",
+      "before": {
+        "cost_micros": 1250000,
+        "total_tokens": 2000,
+        "ui_text": "$1.25 · 2.0K tok"
+      },
+      "after": {
+        "cost_micros": 2000000,
+        "total_tokens": 3000,
+        "ui_text": "$2.00 · 3.0K tok"
+      },
+      "layers_verified": [
+        "stored aggregate rows",
+        "actual Admin API totals",
+        "real compiled SPA DOM",
+        "original screenshots",
+        "new UI usage request IDs joined to actual SQL/acquire events"
+      ]
+    },
+    {
+      "id": "UPSTREAM-006",
+      "result": "functional_state_transition_verified",
+      "source_id": "routes/upstreams.tsx#UpstreamsPage:status",
+      "producer": "dynamic_view_builder::validate_upstream and apply_upstreams",
+      "before": {
+        "status": "error",
+        "enabled": true,
+        "last_apply_error": "anthropic oauth upstream missing oauth credentials",
+        "dot_class": "status-dot danger"
+      },
+      "after": {
+        "status": "disabled",
+        "enabled": false,
+        "last_apply_error": null,
+        "dot_class": "status-dot neutral"
+      },
+      "tooltip_scope": "HTML title attribute verified; native tooltip pixels were not verified.",
+      "layers_verified": [
+        "upstream_spec_v1 and upstream_status_v1",
+        "actual /admin/v1/status",
+        "real sidebar DOM",
+        "original screenshots"
+      ]
+    }
+  ],
+  "incorrect_prior_hypotheses_rejected": [
+    "An unreachable base URL alone does not create an apply-status error; credential validation is the actual source.",
+    "The old db-before-reset evidence contains no request-event seed recipe.",
+    "The source usage polling interval is 5000ms, not the previously suggested 15000ms."
+  ],
+  "capture_correction": "Baseline/transition RT selection used /admin/v1 and omitted /admin/usage. Corrected ephemeral runner to same-origin /admin/ and retained a new window; old raw files remain unchanged.",
+  "ui_refresh": "Natural polling observed; no browser reload/direct fetch substituted for the transition.",
+  "limits": [
+    "One isolated fixture and two source variants; not exhaustive production QA.",
+    "Rollup storage was seeded directly; ingestion/rollup worker correctness was not tested.",
+    "Query elapsed is driver lifetime; acquire duration is total acquisition, not pure queue wait.",
+    "No poll-latency claim: exact mutation-to-DOM timing was not captured."
+  ],
+  "cleanup": {
+    "all_owned_app_ports_closed": true,
+    "browser_worker_reported_tabs_empty": true,
+    "private_fixture_retained": true,
+    "original_fixtures_untouched": true
+  },
+  "production_requests": 0,
+  "application_code_changes": 0,
+  "git_or_pr_changes": 0,
+  "full_runtime_qa_complete": false
+}

@@ -1,0 +1,11 @@
+{
+  "mode": "fresh_omp_session",
+  "cwd": "/data/tmp/cc-lb-admin-web-qa-completion",
+  "command": "omp --cwd=<worktree> --skills=web-qa-inventory-extractor,web-performance-qa --no-session -p <read-only skill discovery prompt>",
+  "exit_code": 0,
+  "verified_paths": [
+    "/data/tmp/cc-lb-admin-web-qa-completion/.agents/skills/web-qa-inventory-extractor/SKILL.md",
+    "/data/tmp/cc-lb-admin-web-qa-completion/.agents/skills/web-performance-qa/SKILL.md"
+  ],
+  "standalone_read_subcommand_result": "Unknown skill; empty registry. Not used as successful discovery proof."
+}

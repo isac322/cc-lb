@@ -1,0 +1,17 @@
+{
+  "expected_ui_keys": 81,
+  "unique_ledger_keys": 81,
+  "ui_pass": 0,
+  "ui_fail": 0,
+  "ui_blocked": 81,
+  "direct_keys": 81,
+  "direct_functional_pass": 81,
+  "all_direct_request_ids_joined": true,
+  "correlated_event_rows": 7776,
+  "raw_event_sha256": "3c4068bc572d0f06a9840abb881e429ca04a41b8748af0a3f54e4232e16b2f3e",
+  "known_fixture_secret_matches": 0,
+  "synthetic_upstream_secret_pattern_matches": 0,
+  "public_screenshots_included": false,
+  "production_mutations": false,
+  "full_qa_complete": false
+}

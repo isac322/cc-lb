@@ -1,0 +1,31 @@
+{
+  "test_target": "http://127.0.0.1:49691/",
+  "tab_id": "f591516b-e99b-495d-9b07-c9b8eac51f74",
+  "click_invocation": {
+    "tool": "mcp__camofox_click",
+    "args": {
+      "selector": "#probe",
+      "tabId": "f591516b-e99b-495d-9b07-c9b8eac51f74"
+    }
+  },
+  "pre_click_state": {
+    "count": 0,
+    "events": []
+  },
+  "click_result": {
+    "status": "FAILED",
+    "error_code": 410,
+    "error_body": {
+      "error": "native mouse move timed out after 24928ms",
+      "retryable": true,
+      "code": "tab_timeout",
+      "recovery": "create_new_tab"
+    }
+  },
+  "post_click_state": {
+    "evaluate_status": "FAILED",
+    "evaluate_error": "404 Tab not found",
+    "tab_crashed_or_closed": true
+  },
+  "final_tabs": []
+}

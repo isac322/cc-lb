@@ -1,0 +1,88 @@
+{
+  "schema_before": 114,
+  "schema_after": 124,
+  "historical_checksums_unchanged": true,
+  "old_key_proxy_before": 200,
+  "old_key_proxy_after": 200,
+  "startup_seconds_disposable_fixture": 1.229,
+  "binary_sha256": "c7faa74f30ec61f66dd2ae44cc6134ce84cf0da0f3181bb859ae7ce9a6709a3d",
+  "legacy_invalid_save": 400,
+  "legacy_invalid_draft_download": 400,
+  "legacy_draft_read_redacted": true,
+  "legacy_revision_preserved": true,
+  "history_logical_payload_removed": true,
+  "trace_headers_present": true,
+  "fixed_binary_sha256": "1200b6845af9ef32b9c92f9bcc8166646c4dc479b9b7e24212fd2b59e63924c1",
+  "legacy_matching_revision_update": 200,
+  "stale_revision_rejected": 409,
+  "stored_revision_matches_payload": true,
+  "sqlite_upgrade": {
+    "from": 81,
+    "to": 88,
+    "historical_checksums_unchanged": true,
+    "history_logical_payload_removed": true
+  },
+  "sqlite_settings": {
+    "legacy_read_redacted": true,
+    "download": 200,
+    "atomic_file_replace": true,
+    "runtime_unchanged_until_restart": true,
+    "restart_activates_saved_file": true,
+    "post_save_draft_cleared_revision": 9,
+    "expired_invalid_draft_cleared_revision": 11,
+    "repeated_expiry_read_stable": true
+  },
+  "postgres_settings": {
+    "repeated_draft_saves": [
+      1,
+      2
+    ],
+    "download": 200,
+    "atomic_file_replace": true,
+    "runtime_unchanged_until_restart": true,
+    "restart_activates_saved_file": true,
+    "post_save_draft_cleared_revision": 3,
+    "expired_invalid_draft_cleared_revision": 5,
+    "repeated_expiry_read_stable": true
+  },
+  "migration_index": {
+    "postgres": {
+      "indexed_files": 123,
+      "max_version": 124,
+      "unique_versions": true
+    },
+    "sqlite": {
+      "indexed_files": 84,
+      "max_version": 88,
+      "unique_versions": true
+    }
+  },
+  "retained_base_url_contract": {
+    "unchanged_preserves": 200,
+    "contradictory_rejected": 400,
+    "explicit_clear": 200,
+    "restored_loopback": 200,
+    "upstream_disabled": true
+  },
+  "source_identity": {
+    "pr_base": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+    "integrated_master": "b07b25eebe7bbee7e882643c6776c82015d49689",
+    "runtime_diff_sha256": "43cc6fffcc6337fcdaa0b09dd69e43dfec184b3d90f963ece2d348fb3661b327",
+    "binary_reports_base_sha_not_final_commit": true
+  },
+  "native_postcheck": {
+    "settings_restored_to_info": true,
+    "upstream_restored_to_loopback": true,
+    "old_key_proxy_after_browser": 200,
+    "cleared_draft_revision": 12
+  },
+  "cleanup": {
+    "owned_runtime_services_stopped": true,
+    "owned_pg18_container_removed": true,
+    "private_auth_configs_and_fixture_database_removed": true,
+    "binary_snapshots_removed_after_hash_recording": true,
+    "browser_tabs_closed_reported": true,
+    "preexisting_database_container_untouched": true,
+    "production_mutations": false
+  }
+}

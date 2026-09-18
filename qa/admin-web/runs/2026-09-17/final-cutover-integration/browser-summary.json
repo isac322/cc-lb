@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-17T08:03:03.873Z",
+  "candidate": "PR793_master_b07_final_cutover",
+  "origin": "http://127.0.0.1:57722",
+  "tasks_completed": {
+    "settings_save_to_file_and_restart_banner": {
+      "restart_banner_displayed": true,
+      "effective_config_stays_info": true,
+      "draft_shows_debug": true
+    },
+    "upstream_base_url_clear_and_restore": {
+      "cleared_to_null": true,
+      "restored_to_56466": true
+    },
+    "native_audit": true,
+    "router_revision_mutation": true,
+    "plugins_builtin_basics": true,
+    "settings_file_restore_confirmed": {
+      "file_config_tracing_level": "info",
+      "draft_cleared": true,
+      "restored_to_info": true
+    }
+  },
+  "artifacts": [
+    "browser-settings-save-file.json",
+    "browser-settings-save-file-screen.png",
+    "browser-settings-restored-screen.png",
+    "browser-upstream-clear-restore.json",
+    "browser-upstream-clear-screen.png",
+    "browser-upstream-restored-screen.png",
+    "browser-audit.json",
+    "browser-audit-screen.png",
+    "browser-router.json",
+    "browser-router-screen.png",
+    "browser-plugins.json",
+    "browser-plugins-screen.png"
+  ]
+}

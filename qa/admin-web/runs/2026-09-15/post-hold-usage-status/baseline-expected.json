@@ -1,0 +1,20 @@
+{
+  "qa_usage_display": {
+    "name": "qa-usage-display",
+    "usage_text": "$1.25 · 2.0K tok",
+    "components": {
+      "input_tokens": 1000,
+      "output_tokens": 200,
+      "cache_creation_tokens": 300,
+      "cache_read_tokens": 500,
+      "virtual_cost_micro_usd": 1250000
+    }
+  },
+  "qa_status_missing_credentials": {
+    "name": "qa-status-missing-credentials",
+    "runtime_status": "error",
+    "status_dot_class": "status-dot danger",
+    "button_title": "anthropic oauth upstream missing oauth credentials",
+    "error_reason": "enabled_oauth_missing_credentials_not_unreachable_url"
+  }
+}

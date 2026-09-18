@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-17T08:02:52.287Z",
+  "task": "upstream_base_url_clear_and_restore",
+  "upstream_id": "391c58b8-082f-468a-9425-81569db949fe",
+  "upstream_name": "cutover-owned-upstream",
+  "initial_base_url": "http://127.0.0.1:56466/",
+  "after_clear": {
+    "api_base_url": null,
+    "spec_revision": 2
+  },
+  "after_restore": {
+    "api_base_url": "http://127.0.0.1:56466/",
+    "spec_revision": 3
+  },
+  "validations": {
+    "cleared_to_null": true,
+    "restored_to_56466": true
+  }
+}

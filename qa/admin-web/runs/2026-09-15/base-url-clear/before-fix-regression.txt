@@ -1,0 +1,10 @@
+    Starting 1 test across 1 binary (291 tests skipped)
+        FAIL [   0.334s] (1/1) cc-lb-admin::integration v1_upstreams::base_url_roundtrips_across_create_list_get_and_update_without_exposing_secret
+    test v1_upstreams::base_url_roundtrips_across_create_list_get_and_update_without_exposing_secret ... FAILED
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 291 filtered out; finished in 0.26s
+    thread 'v1_upstreams::base_url_roundtrips_across_create_list_get_and_update_without_exposing_secret' (17495906) panicked at crates/cc-lb-admin/tests/v1_upstreams.rs:302:5:
+      left: String("https://replacement.example.com/api/")
+     right: Null
+     Summary [   0.365s] 1 test run: 0 passed, 1 failed, 291 skipped
+        FAIL [   0.334s] (1/1) cc-lb-admin::integration v1_upstreams::base_url_roundtrips_across_create_list_get_and_update_without_exposing_secret
+[base-url-clear-before-fix: failed; cursor=1693]

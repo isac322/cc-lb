@@ -1,0 +1,42 @@
+{
+  "schema": "cc-lb-readonly-preflight-evidence/v1",
+  "full_runtime_qa_complete": false,
+  "public_origin_to_specific_pod_join": "not_observed",
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-17/post-integration-reassessment/denominators.json",
+      "sha256": "3fe2b1311d8d1cab2d4479416c86fcdb167c8008fcac7703d61e04616c61b4f0",
+      "bytes": 7422
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/post-integration-reassessment/deployed-source-delta.json",
+      "sha256": "4cb55ef888d2fe351e57e313310a7c0aea6026857b66acbd3bd2a7c529c56d10",
+      "bytes": 195
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/post-integration-reassessment/image-identity.json",
+      "sha256": "fb277eb03c25cf4528b4b56298cbf00f5d81a0e5c4618b6f8caafe4837be9d94",
+      "bytes": 715
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/post-integration-reassessment/image-provenance.json",
+      "sha256": "6f01394fc68604686c3d70c5c3422f15d60c05fa977fff0e532a4f99507ab5fd",
+      "bytes": 998
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/post-integration-reassessment/preflight_result.json",
+      "sha256": "8dbaa49c9b3d8a102c1b623ab4abe763bea218ed8f6b955200d6ab4e6150945d",
+      "bytes": 480
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/post-integration-reassessment/reassessment.json",
+      "sha256": "d1e4657a2849a347a8f53830e7b9e0dad9e0877a42c5838344c7a13aa2bea61f",
+      "bytes": 2190
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/post-integration-reassessment/runtime-preflight.json",
+      "sha256": "2c50d97f0cd343b142e86eb90c75a3062ffd5009d55966d4a4dad82f0b4bd2ea",
+      "bytes": 1289
+    }
+  ]
+}

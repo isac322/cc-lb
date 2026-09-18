@@ -1,0 +1,36 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv5.0.0 [39m[90m/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web[39m
+
+ [31m❯[39m [30m[45m components [49m[39m src/routes/-settings-loading.test.tsx [2m([22m[2m11 tests[22m[2m | [22m[31m1 failed[39m[2m | [22m[33m10 skipped[39m[2m)[22m[32m 94[2mms[22m[39m
+[31m   [31m×[31m Apply requires confirmed server support for a validated draft[39m[32m 94[2mms[22m[39m
+   [2m[90m↓[39m[22m settings cold load skeletonizes fixed metadata, checklist, and history slots
+   [2m[90m↓[39m[22m settings empty and loaded checklist/history states retain their slots
+   [2m[90m↓[39m[22m settings editor loads the saved draft and documents static-token secret replacement
+   [2m[90m↓[39m[22m settings editor initializes from current config when no saved draft exists
+   [2m[90m↓[39m[22m settings editor recovers from an initial draft failure without losing its revision context
+   [2m[90m↓[39m[22m pristine editor follows an expired server draft at the new revision
+   [2m[90m↓[39m[22m dirty editor survives background revisions and conflict mutation states while saving its starting revision
+   [2m[90m↓[39m[22m save response advances the editor revision used by validate and apply
+   [2m[90m↓[39m[22m config mutations mutually lock the pipeline and retain the owning progress label
+   [2m[90m↓[39m[22m configuration export exposes download progress and blocks duplicate clicks
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[33m10 skipped[39m[90m (11)[39m
+[2m   Start at [22m 12:57:25
+[2m   Duration [22m 1.06s[2m (environment 46%, import 29%, tests 9%, transform 8%, setup 7%)[22m
+
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m [30m[45m components [49m[39m src/routes/-settings-loading.test.tsx[2m > [22mApply requires confirmed server support for a validated draft
+[31m[1mError[22m: Invalid Chai property: toBeDisabled[39m
+[36m [2m❯[22m src/routes/-settings-loading.test.tsx:[2m160:16[22m[39m
+    [90m158|[39m   const { rerender } = render(<SettingsComponent />);
+    [90m159|[39m   const button = screen.getByRole('button', { name: 'Apply' });
+    [90m160|[39m   expect(button).toBeDisabled();
+    [90m   |[39m                [31m^[39m
+    [90m161|[39m   fireEvent.click(button);
+    [90m162|[39m   expect(apply.mutate).not.toHaveBeenCalled();
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+

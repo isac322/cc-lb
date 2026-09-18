@@ -1,0 +1,27 @@
+{
+  "observed_at_utc": "2026-09-17T08:36:46.215400+00:00",
+  "pods": [
+    {
+      "pod": "cc-lb-f5b96c57-l89lp",
+      "containers": [
+        {
+          "name": "cc-lb",
+          "image": "ghcr.io/isac322/cc-lb:0.4.9",
+          "image_id": "ghcr.io/isac322/cc-lb@sha256:e035b270638aa6a65e72b5328a181772aeba7407e2e419983542827a20a8b87d",
+          "ready": true
+        }
+      ]
+    },
+    {
+      "pod": "cc-lb-f5b96c57-vk57t",
+      "containers": [
+        {
+          "name": "cc-lb",
+          "image": "ghcr.io/isac322/cc-lb:0.4.9",
+          "image_id": "ghcr.io/isac322/cc-lb@sha256:e035b270638aa6a65e72b5328a181772aeba7407e2e419983542827a20a8b87d",
+          "ready": true
+        }
+      ]
+    }
+  ]
+}

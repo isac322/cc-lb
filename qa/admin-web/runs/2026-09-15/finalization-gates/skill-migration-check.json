@@ -1,0 +1,10 @@
+{
+  "legacy_files": 36,
+  "missing_destinations": [],
+  "byte_equal": 33,
+  "updated_for_approved_contracts": [
+    ".agents/skills/user-flow-qa/references/scenarios/frontend-state-boundaries.md",
+    ".agents/skills/user-flow-qa/references/scenarios/plugin-upload-replacement-and-refs.md",
+    ".agents/skills/user-flow-qa/references/scenarios/principal-api-key-issuance.md"
+  ]
+}

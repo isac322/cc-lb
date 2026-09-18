@@ -1,0 +1,15 @@
+{
+  "id": "c804fce8-2b1a-4d3a-a149-878886bee631",
+  "name": "qa-usage-display",
+  "kind": "anthropic_api_key",
+  "base_url": "http://127.0.0.1:19080/",
+  "enabled": true,
+  "warmup_enabled": false,
+  "warmup_dialect_plugin": null,
+  "spec_revision": 1,
+  "status": {
+    "last_apply_error": null,
+    "last_apply_at_unix_secs": 1789526416,
+    "last_warmup_at_unix_secs": null
+  }
+}

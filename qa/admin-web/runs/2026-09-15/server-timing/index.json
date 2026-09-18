@@ -1,0 +1,123 @@
+{
+  "schema": "cc-lb-server-timing-evidence-index/v1",
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/verification-summary.json",
+      "sha256": "127f2a4732ffd79b8a3b8effad10ca65b337ee309bdef1b3e2d49b79fcf24669",
+      "bytes": 1349
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/postgres-canonical-recorder-join.json",
+      "sha256": "04e7410ee10183be43068d68e41f61783eca50e3044943d8986f23ceec3bd53b",
+      "bytes": 8094
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/postgres-canonical-recorder-proof.json",
+      "sha256": "2bc2647f6d178b41aefa138fcbaa848b67b6afc6008b8c88711513c49869511a",
+      "bytes": 1145
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/postgres-canonical-recorder-proof-raw.json",
+      "sha256": "24b02e647cfeee4eeca0e7111975db5293dae190d1aa07f568ac3d6449d4f614",
+      "bytes": 62616
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/recorder-verification.json",
+      "sha256": "f4d3866934315b14ff0ac1f586bbb5a0f6a5322014dc5f7a161e58a23a703b12",
+      "bytes": 1397
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/sqlite-canonical-recorder-join.json",
+      "sha256": "49544ca3fc879582252b57fb7f05829f0cd88ef445f7c5dfb51d34a282264784",
+      "bytes": 7356
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/sqlite-canonical-recorder-proof-v2-raw.json",
+      "sha256": "773b850692a7947b69ec4026d03370034aed60db7d1f2c9d52898efdb2c24a8e",
+      "bytes": 55390
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/sqlite-canonical-recorder-proof-v2.json",
+      "sha256": "cc059c91857f2838cc38baad581d7b75a8429045a96a37744977609f27b0ceaa",
+      "bytes": 1420
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/sqlite-canonical-recorder-proof.json",
+      "sha256": "0de0302b961a3b7f5f121da0de3dc57f35f71e50bce95bd225da218f4d54c6c4",
+      "bytes": 1663
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/library-regressions.txt",
+      "sha256": "1aa7de9abd49b4b69e5e2fad4356fd76206a935e229a9c4c9df562c8ea07efb1",
+      "bytes": 261
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/direct-header-proof.json",
+      "sha256": "325288e4583b9716b26c3ccf327bb5e405f7cbb97381281b84f3b1aec6b1844a",
+      "bytes": 551
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/sqlite-browser-scoped-logs.jsonl",
+      "sha256": "da44fab4da297b7a094a0959d5d7a0046781b64f920ca40b23e85aa72e39da90",
+      "bytes": 202360
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/browser-proof.json",
+      "sha256": "b83f2f180cefa17d4d71320752653d5a60c8d40e2f2defd217a5e94c23af0847",
+      "bytes": 8754
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/recorder-id-transitions-before.json",
+      "sha256": "ca8797a0d33bf5206913b0ff18271256c53c83d5ebf2b3a00fa8abd272d56b5c",
+      "bytes": 604
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/recorder-id-transitions-after.json",
+      "sha256": "4e8ae8266c03a44279007fe003f006fd6b2a955e38b035999217a3cd1940db1c",
+      "bytes": 563
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/recorder-xray-iterator-check.json",
+      "sha256": "2db7eafde9e04bcecd71c7441d3ac1f2a4c05fbb994d6f1bf9e145764459240d",
+      "bytes": 122
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/recorder-xray-hash-and-failure-gate.json",
+      "sha256": "87cd644f86403e8ce60571057a645b06ab0168eb2d15f1323d91554ebac512ce",
+      "bytes": 141
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/recorder-all-observer-failure-gates.json",
+      "sha256": "9b6b738b174b0265c1375000a07188365411fff88aff97771ce378501c78d36d",
+      "bytes": 190
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/server-timing-browser-capability.json",
+      "sha256": "3dc6673e2e42e5a59982d4f30452b4c3b3698066b302c7f1ecae62b4c9c00701",
+      "bytes": 1833
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/server-timing-server-proof.json",
+      "sha256": "ad257898b4a02bd678bada25e6628f86f9f3ca0b615920861ef1d60e2b3960be",
+      "bytes": 464
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/sqlite-canonical-joined-log-events.jsonl",
+      "sha256": "14d0c797c64ab6478b60cd84d862cf941ffd2d30b0f222bc31841c54c5f33611",
+      "bytes": 22108,
+      "events": 29,
+      "scope": "Parsed/serialized subset of complete private logs for the retained canonical recorder IDs; no unrelated background log records."
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/server-timing/postgres-canonical-joined-log-events.jsonl",
+      "sha256": "138be02daef3362d3b8329516329786aef40bba2f1d58b3520f2a38ea7ff28da",
+      "bytes": 23165,
+      "events": 35,
+      "scope": "Parsed/serialized subset of complete private logs for the retained canonical recorder IDs; no unrelated background log records."
+    }
+  ],
+  "current_recorder_source_sha256": "46549022a93371bb4e27c2f1c25a1ec1568b9c609cde8f1e382c00723c7b9a6e",
+  "post_browser_source_change": "Failure completeness gate additionally covers fetch observer registration and monitor failures; all three failure codes tested independently.",
+  "raw_server_output_files_included": false,
+  "full_runtime_qa_complete": false
+}

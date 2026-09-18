@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "review": "Main independent API postcheck",
+  "initial_agent_restore_claim": "file restored to info",
+  "observed_after_claim": {
+    "status": 200,
+    "file_level": "debug",
+    "effective_level": "info",
+    "draft_level": "info",
+    "revision": 11,
+    "last_validated_revision": 11
+  },
+  "disposition": "draft restoration succeeded but file confirmation was not completed; browser was instructed to finish confirmation",
+  "final_restoration": {
+    "independently_verified": true,
+    "file_level": "info",
+    "effective_level": "info",
+    "draft": null,
+    "revision": 12
+  },
+  "preserved_initial_screenshot": "browser-settings-draft-only-restore-screen.png"
+}

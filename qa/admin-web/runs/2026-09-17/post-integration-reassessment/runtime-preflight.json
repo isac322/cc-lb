@@ -1,0 +1,61 @@
+{
+  "observed_at_utc": "2026-09-17T08:33:56.711639+00:00",
+  "clusters": [
+    {
+      "context": "runbear-operation",
+      "deployment": {
+        "replicas": 0,
+        "ready": 0,
+        "images": [
+          "ghcr.io/isac322/cc-lb:0.4.9"
+        ],
+        "strategy": {
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          },
+          "type": "RollingUpdate"
+        }
+      },
+      "pods": [],
+      "endpoint_count": 0
+    },
+    {
+      "context": "runbear-local",
+      "deployment": {
+        "replicas": 2,
+        "ready": 2,
+        "images": [
+          "ghcr.io/isac322/cc-lb:0.4.9"
+        ],
+        "strategy": {
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          },
+          "type": "RollingUpdate"
+        }
+      },
+      "pods": [
+        {
+          "name": "cc-lb-f5b96c57-l89lp",
+          "phase": "Running",
+          "terminating": false,
+          "ready": true
+        },
+        {
+          "name": "cc-lb-f5b96c57-vk57t",
+          "phase": "Running",
+          "terminating": false,
+          "ready": true
+        }
+      ],
+      "endpoint_count": 2
+    }
+  ],
+  "public_admin_health": {
+    "curl_exit": 0,
+    "http_status": "302"
+  },
+  "writes": false
+}

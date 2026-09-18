@@ -1,0 +1,92 @@
+{
+  "schema": "cc-lb-independent-page-oracle-check/v1",
+  "result": "bounded_page_navigation_verified",
+  "expectation_fixed_before_click": {
+    "pathname": "/plugins",
+    "heading": "Plugins"
+  },
+  "dom_observed_after_click": {
+    "pathname": "/plugins",
+    "heading": "Plugins"
+  },
+  "expected_state_sha256": "b486ab9bbf030bb31e549ac044cec797e68a9a7c7e5040ec9990d8d1cb61a47f",
+  "observed_state_sha256": "b486ab9bbf030bb31e549ac044cec797e68a9a7c7e5040ec9990d8d1cb61a47f",
+  "original_screenshot_sha256": "4f88996eb916558aaf59132c7326316f4a32ec8cb4384b9e6b2ebb3ad361ae72",
+  "main_screenshot_inspection": "Plugins heading, selected Plugins navigation, upload section and plugin library are visibly rendered. This is not an empty-registry claim.",
+  "action_closed": true,
+  "capture": {
+    "complete": true,
+    "incomplete_reasons": [],
+    "overflow": {
+      "dropped_records": 0,
+      "first_dropped_sequence": null,
+      "last_dropped_sequence": null
+    },
+    "observer_dropped_entries": 0
+  },
+  "server_joins": [
+    {
+      "rid": "req_admin_01a0a7bd-ab87-7d13-b154-c3480922f85c",
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 0.718458,
+      "query_events": 0,
+      "query_elapsed_secs": [],
+      "acquire_events": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "rid": "req_admin_01a0a7bd-ab93-7b01-a2fc-6744b00c0a4d",
+      "route": "/admin/v1/plugins/registry",
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 13.73325,
+      "query_events": 3,
+      "query_elapsed_secs": [
+        0.003435375,
+        0.004625083,
+        0.001411291
+      ],
+      "acquire_events": 3,
+      "acquire_total_secs": [
+        0.000310292,
+        0.000684875,
+        0.000468791
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-reassessment/independent-oracle-expected.json",
+      "sha256": "485731572619cda8a5fbdf411aa7a698c85631e780fc7d1149af554179f60413",
+      "bytes": 52
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-reassessment/independent-oracle-observed.json",
+      "sha256": "485731572619cda8a5fbdf411aa7a698c85631e780fc7d1149af554179f60413",
+      "bytes": 52
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-reassessment/independent-oracle-screen.png",
+      "sha256": "4f88996eb916558aaf59132c7326316f4a32ec8cb4384b9e6b2ebb3ad361ae72",
+      "bytes": 95043
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-reassessment/independent-oracle-raw.json",
+      "sha256": "cdcfdc0c538a1a33312c475ec848ef06e7bec9896d7fee78f6289571a5c98264",
+      "bytes": 13277
+    }
+  ],
+  "limits": [
+    "This is one isolated PostgreSQL page-navigation scenario, not the full source/entity/state/page/poll matrix.",
+    "Action duration includes observation and capture work; it is not pure rendering latency.",
+    "Driver query elapsed and acquire-total are not pure DB execution and queue-wait measurements.",
+    "Original earlier tautological oracle record remains preserved and is not relabeled."
+  ],
+  "production_requests": 0,
+  "pr_mutations": 0,
+  "owned_server_stopped": true,
+  "browser_worker_reported_tabs_empty": true,
+  "full_runtime_qa_complete": false
+}

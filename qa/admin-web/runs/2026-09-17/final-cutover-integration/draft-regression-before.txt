@@ -1,0 +1,60 @@
+   Compiling hickory-net v0.26.2
+   Compiling fancy-regex v0.17.0
+   Compiling futures-lite v2.6.1
+   Compiling tower-http v0.6.11
+   Compiling faststr v0.2.34
+   Compiling async-stream-impl v0.3.6
+   Compiling serde_path_to_error v0.1.20
+   Compiling wait-timeout v0.2.1
+   Compiling sonic-simd v0.1.4
+   Compiling sonic-number v0.1.2
+   Compiling bumpalo v3.20.3
+   Compiling bincode v2.0.1
+   Compiling rusty-fork v0.3.1
+   Compiling sonic-rs v0.5.8
+   Compiling hickory-resolver v0.26.2
+   Compiling tiktoken-rs v0.12.0
+   Compiling axum v0.8.9
+   Compiling async-stream v0.3.6
+   Compiling zstd v0.14.0
+   Compiling cc-lb-pricing v0.4.9 (/data/tmp/cc-lb-final-cutover-integration/crates/cc-lb-pricing)
+   Compiling reqwest v0.12.28
+   Compiling eventsource-stream v0.2.3
+   Compiling flate2 v1.1.9
+   Compiling cc-lb-quota v0.4.9 (/data/tmp/cc-lb-final-cutover-integration/crates/cc-lb-quota)
+   Compiling rand_xorshift v0.4.0
+   Compiling proptest v1.11.0
+   Compiling cc-lb-storage-postgres v0.4.9 (/data/tmp/cc-lb-final-cutover-integration/crates/cc-lb-storage-postgres)
+   Compiling cc-lb-storage-sqlite v0.4.9 (/data/tmp/cc-lb-final-cutover-integration/crates/cc-lb-storage-sqlite)
+   Compiling futures v0.3.34
+   Compiling cc-lb-engine v0.4.9 (/data/tmp/cc-lb-final-cutover-integration/crates/cc-lb-engine)
+   Compiling cc-lb-storage-conformance v0.4.9 (/data/tmp/cc-lb-final-cutover-integration/crates/cc-lb-storage-conformance)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 16s
+────────────
+ Nextest run ID 8827634b-a82d-49d8-b660-b250a833f125 with nextest profile: default
+    Starting 2 tests across 2 binaries (174 tests skipped)
+        PASS [   0.322s] (1/2) cc-lb-storage-conformance::integration storage_roundtrips_sqlite::config_draft_optimistic_revision_sqlite
+        FAIL [   5.416s] (2/2) cc-lb-storage-conformance::integration storage_roundtrips_postgres::config_draft_optimistic_revision_postgres
+  stdout ───
+
+    running 1 test
+    test storage_roundtrips_postgres::config_draft_optimistic_revision_postgres ... FAILED
+
+    failures:
+
+    failures:
+        storage_roundtrips_postgres::config_draft_optimistic_revision_postgres
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 148 filtered out; finished in 5.34s
+
+  stderr ───
+
+    thread 'storage_roundtrips_postgres::config_draft_optimistic_revision_postgres' (28766870) panicked at crates/cc-lb-storage-conformance/tests/storage_roundtrips_postgres.rs:620:33:
+    config_draft_optimistic_revision postgres: conflict: stale config draft revision
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   5.418s] 2 tests run: 1 passed, 1 failed, 174 skipped
+        FAIL [   5.416s] (2/2) cc-lb-storage-conformance::integration storage_roundtrips_postgres::config_draft_optimistic_revision_postgres
+error: test run failed
+[cutover-draft-regression-before: failed; cursor=12839]

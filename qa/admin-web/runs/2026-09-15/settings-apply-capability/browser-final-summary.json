@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "environment": "local_fixture_only",
+  "origin": "http://127.0.0.1:56452",
+  "page": "/settings",
+  "prebuilt_spa_index_sha256": "9d1f2b21eb548a969ecbb6f6011c42f1c4ec6d49a800e38ed92d2a2f114a9d55",
+  "backend_binary_sha_prefix": "253cc510",
+  "validations": {
+    "apply_is_disabled": true,
+    "apply_has_disabled_attr": true,
+    "apply_support_id_matches": true,
+    "apply_support_is_outside_pipeline_status": true,
+    "apply_support_has_no_aria_live": true,
+    "new_wording_exposed": true,
+    "apply_describedby_matches": true,
+    "validate_describedby_matches": true,
+    "api_apply_supported_is_false": true,
+    "api_last_validated_matches_revision": true
+  },
+  "all_validations_passed": true,
+  "artifacts": {
+    "expected_json": "browser-final-expected.json",
+    "observed_json": "browser-final-observed.json",
+    "screen_png": "browser-final-screen.png",
+    "rt_json": "browser-final-rt.json"
+  }
+}

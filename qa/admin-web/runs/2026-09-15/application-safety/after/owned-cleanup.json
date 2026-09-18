@@ -1,0 +1,9 @@
+{
+  "new_postgres_databases_removed": 5,
+  "active_connections_before_drop": 0,
+  "absence_verified": true,
+  "new_private_dsn_configs_removed": 3,
+  "existing_postgres_fixture_preserved": true,
+  "sqlite_snapshots_and_evidence_preserved": true,
+  "production_changes": 0
+}

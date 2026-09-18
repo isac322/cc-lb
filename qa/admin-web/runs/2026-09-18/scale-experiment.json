@@ -1,0 +1,3926 @@
+{
+ "schema": "cc-lb-admin-read-scale/v1",
+ "environment": {
+  "kind": "isolated_sqlite_fixture",
+  "origin": "http://127.0.0.1:52047",
+  "engine": "sqlite",
+  "seeded_table": "request_events_v1",
+  "seeded_rows": 300000,
+  "window_days": 7,
+  "rows_in_24h_window": 42807,
+  "binary_sha256": "afbc0a74fcfde73f374768b8465eb8b3876b74923831d91f07cc58d28b2b60bc"
+ },
+ "api_measurements": {
+  "cells": 43,
+  "repeats": 5,
+  "per_endpoint": [
+   {
+    "endpoint": "/admin/v1/events/recent",
+    "cells": 8,
+    "baseline_warm_median_ms": 0.94,
+    "seeded_cold_median_ms": 432.49,
+    "seeded_warm_median_ms": 425.85,
+    "seeded_warm_p95_ms": 1093.04,
+    "seeded_max_ms": 2425.95,
+    "max_bytes": 175949,
+    "max_rows": 100
+   },
+   {
+    "endpoint": "/admin/v1/events/histogram",
+    "cells": 2,
+    "baseline_warm_median_ms": 1.03,
+    "seeded_cold_median_ms": 228.36,
+    "seeded_warm_median_ms": 229.13,
+    "seeded_warm_p95_ms": 395.44,
+    "seeded_max_ms": 395.49,
+    "max_bytes": 1873,
+    "max_rows": null
+   },
+   {
+    "endpoint": "/admin/v1/audit",
+    "cells": 5,
+    "baseline_warm_median_ms": 1.76,
+    "seeded_cold_median_ms": 2.18,
+    "seeded_warm_median_ms": 2.21,
+    "seeded_warm_p95_ms": 5.53,
+    "seeded_max_ms": 8.37,
+    "max_bytes": 51080,
+    "max_rows": 100
+   },
+   {
+    "endpoint": "/admin/v1/export",
+    "cells": 1,
+    "baseline_warm_median_ms": 4.39,
+    "seeded_cold_median_ms": 3.12,
+    "seeded_warm_median_ms": 3.44,
+    "seeded_warm_p95_ms": 3.67,
+    "seeded_max_ms": 3.68,
+    "max_bytes": 2213,
+    "max_rows": null
+   },
+   {
+    "endpoint": "/admin/v1/dashboard/summary",
+    "cells": 3,
+    "baseline_warm_median_ms": 1.96,
+    "seeded_cold_median_ms": 3.39,
+    "seeded_warm_median_ms": 2.48,
+    "seeded_warm_p95_ms": 3.54,
+    "seeded_max_ms": 9.0,
+    "max_bytes": 83451,
+    "max_rows": null
+   },
+   {
+    "endpoint": "/admin/v1/status",
+    "cells": 1,
+    "baseline_warm_median_ms": 1.48,
+    "seeded_cold_median_ms": 2.21,
+    "seeded_warm_median_ms": 1.6,
+    "seeded_warm_p95_ms": 1.61,
+    "seeded_max_ms": 2.21,
+    "max_bytes": 881,
+    "max_rows": null
+   },
+   {
+    "endpoint": "/admin/v1/dashboard/usage",
+    "cells": 9,
+    "baseline_warm_median_ms": 1.02,
+    "seeded_cold_median_ms": 1.19,
+    "seeded_warm_median_ms": 1.13,
+    "seeded_warm_p95_ms": 1.43,
+    "seeded_max_ms": 1.99,
+    "max_bytes": 152,
+    "max_rows": 0
+   },
+   {
+    "endpoint": "/admin/scheduler/status",
+    "cells": 1,
+    "baseline_warm_median_ms": 1.08,
+    "seeded_cold_median_ms": 1.63,
+    "seeded_warm_median_ms": 1.29,
+    "seeded_warm_p95_ms": 1.31,
+    "seeded_max_ms": 1.63,
+    "max_bytes": 879,
+    "max_rows": null
+   },
+   {
+    "endpoint": "/admin/v1/upstreams/{id}/oauth/status",
+    "cells": 4,
+    "baseline_warm_median_ms": 0.96,
+    "seeded_cold_median_ms": 1.23,
+    "seeded_warm_median_ms": 1.14,
+    "seeded_warm_p95_ms": 1.25,
+    "seeded_max_ms": 1.95,
+    "max_bytes": 239,
+    "max_rows": null
+   },
+   {
+    "endpoint": "/admin/v1/principals/{id}/usage",
+    "cells": 9,
+    "baseline_warm_median_ms": 0.93,
+    "seeded_cold_median_ms": 0.97,
+    "seeded_warm_median_ms": 0.96,
+    "seeded_warm_p95_ms": 1.15,
+    "seeded_max_ms": 1.24,
+    "max_bytes": 148,
+    "max_rows": 0
+   }
+  ],
+  "rows": [
+   {
+    "endpoint_id": "/admin/v1/status",
+    "path": "/admin/v1/status",
+    "dims": {},
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 2.21,
+    "bytes": 881,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca83-7f71-962c-d92b9c7affb8",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/status",
+    "path": "/admin/v1/status",
+    "dims": {},
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.932,
+    "bytes": 881,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca85-7ee3-8f03-e99bf846d3ec",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/status",
+    "path": "/admin/v1/status",
+    "dims": {},
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.613,
+    "bytes": 881,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca87-75f0-a18d-b9911f274b64",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/status",
+    "path": "/admin/v1/status",
+    "dims": {},
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.593,
+    "bytes": 881,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca89-7e22-9869-8b2f0afda0c9",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/status",
+    "path": "/admin/v1/status",
+    "dims": {},
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.365,
+    "bytes": 881,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca8b-73c1-bd88-f89b6f2e8d7e",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/scheduler/status",
+    "path": "/admin/scheduler/status",
+    "dims": {},
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.627,
+    "bytes": 879,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca8c-7740-bb34-48adce99d202",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/scheduler/status",
+    "path": "/admin/scheduler/status",
+    "dims": {},
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.307,
+    "bytes": 879,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca8e-79f0-8d35-c793356855a9",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/scheduler/status",
+    "path": "/admin/scheduler/status",
+    "dims": {},
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.267,
+    "bytes": 879,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca8f-7033-8fd4-c3a206a5137d",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/scheduler/status",
+    "path": "/admin/scheduler/status",
+    "dims": {},
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.156,
+    "bytes": 879,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca91-7002-b17c-59e5fa310a30",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/scheduler/status",
+    "path": "/admin/scheduler/status",
+    "dims": {},
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.43,
+    "bytes": 879,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca92-7fa2-96b3-39573ce6caea",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/export",
+    "path": "/admin/v1/export",
+    "dims": {},
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 3.117,
+    "bytes": 2213,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca94-7171-9dc2-8e86acf74d26",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/export",
+    "path": "/admin/v1/export",
+    "dims": {},
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 3.68,
+    "bytes": 2213,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca97-75c2-adb2-5e534b36e65f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/export",
+    "path": "/admin/v1/export",
+    "dims": {},
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 3.208,
+    "bytes": 2213,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca9b-7ce1-866b-291fc60b0257",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/export",
+    "path": "/admin/v1/export",
+    "dims": {},
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 2.768,
+    "bytes": 2213,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-ca9e-7ea2-b6e2-551210936b3c",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/export",
+    "path": "/admin/v1/export",
+    "dims": {},
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 3.667,
+    "bytes": 2213,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-caa1-7e42-abdb-c39a19639e79",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=1h",
+    "dims": {
+     "range": "1h"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 4.085,
+    "bytes": 30101,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-caa5-7742-b4d8-bb39d01b6e46",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=1h",
+    "dims": {
+     "range": "1h"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 8.996,
+    "bytes": 30101,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-caaa-7031-b54a-7f6c7ee9f1af",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=1h",
+    "dims": {
+     "range": "1h"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 2.744,
+    "bytes": 30101,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-cab3-7171-b062-9932d278c86f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=1h",
+    "dims": {
+     "range": "1h"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 2.222,
+    "bytes": 30101,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-cab6-7ef2-a34f-eba56e768b39",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=1h",
+    "dims": {
+     "range": "1h"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.868,
+    "bytes": 30101,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-cab9-7e13-9f43-e7c34978c8d9",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=upstream",
+    "dims": {
+     "range": "1h",
+     "group_by": "upstream"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.205,
+    "bytes": 151,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cabb-7461-a940-3289bd8b6a1a",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=upstream",
+    "dims": {
+     "range": "1h",
+     "group_by": "upstream"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.248,
+    "bytes": 151,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cabc-70d3-97d1-c7cdc1201700",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=upstream",
+    "dims": {
+     "range": "1h",
+     "group_by": "upstream"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.222,
+    "bytes": 151,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cabd-74d0-87ce-98d773fcb50c",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=upstream",
+    "dims": {
+     "range": "1h",
+     "group_by": "upstream"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.047,
+    "bytes": 151,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cabf-72c1-8214-ba79d7626a35",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=upstream",
+    "dims": {
+     "range": "1h",
+     "group_by": "upstream"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.269,
+    "bytes": 151,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cac0-7701-88d5-90315badecdc",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=principal",
+    "dims": {
+     "range": "1h",
+     "group_by": "principal"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.273,
+    "bytes": 152,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cac1-72e3-872d-14254a7c0481",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=principal",
+    "dims": {
+     "range": "1h",
+     "group_by": "principal"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.433,
+    "bytes": 152,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cac3-78a3-a19d-58f9ee26efa8",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=principal",
+    "dims": {
+     "range": "1h",
+     "group_by": "principal"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.987,
+    "bytes": 152,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cac4-7dc3-bea2-6f1724e51221",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=principal",
+    "dims": {
+     "range": "1h",
+     "group_by": "principal"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.578,
+    "bytes": 152,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cac7-7fa0-8df2-d5639b8bc1bd",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=principal",
+    "dims": {
+     "range": "1h",
+     "group_by": "principal"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.282,
+    "bytes": 152,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cac8-7b80-915f-bc2d3eb05cc1",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=model",
+    "dims": {
+     "range": "1h",
+     "group_by": "model"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.187,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cac9-7cd0-a92e-d2d7eab21732",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=model",
+    "dims": {
+     "range": "1h",
+     "group_by": "model"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.27,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cacb-7381-a18b-23136f059e91",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=model",
+    "dims": {
+     "range": "1h",
+     "group_by": "model"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.392,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cacc-7ba0-a22e-55f98d913657",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=model",
+    "dims": {
+     "range": "1h",
+     "group_by": "model"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.129,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cace-7183-9674-742df50660b1",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=1h&group_by=model",
+    "dims": {
+     "range": "1h",
+     "group_by": "model"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.057,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cacf-7573-adef-c4ee7c9ea3d3",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=24h",
+    "dims": {
+     "range": "24h"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.724,
+    "bytes": 12316,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-cad0-78a0-a7a2-79762d9801f6",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=24h",
+    "dims": {
+     "range": "24h"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.599,
+    "bytes": 12316,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-cad2-7eb0-9ae0-422ffc571819",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=24h",
+    "dims": {
+     "range": "24h"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.47,
+    "bytes": 12316,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-cad4-78c1-a2b4-0e16a068338d",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=24h",
+    "dims": {
+     "range": "24h"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.648,
+    "bytes": 12316,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-cad5-77d2-ba1a-f944002a4a35",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=24h",
+    "dims": {
+     "range": "24h"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.889,
+    "bytes": 12316,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-cad7-76a3-94da-6c63d5dbe58f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=upstream",
+    "dims": {
+     "range": "24h",
+     "group_by": "upstream"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.296,
+    "bytes": 150,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cad9-78b3-84ca-5e4ee65f8e01",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=upstream",
+    "dims": {
+     "range": "24h",
+     "group_by": "upstream"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.34,
+    "bytes": 150,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cada-78f1-b236-0d37bc473166",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=upstream",
+    "dims": {
+     "range": "24h",
+     "group_by": "upstream"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.222,
+    "bytes": 150,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cadc-7132-9551-f4017b0468a7",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=upstream",
+    "dims": {
+     "range": "24h",
+     "group_by": "upstream"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.145,
+    "bytes": 150,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cadd-7bc3-83ce-f2580b06721f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=upstream",
+    "dims": {
+     "range": "24h",
+     "group_by": "upstream"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.163,
+    "bytes": 150,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cadf-7113-a1bf-1c3c63142b89",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=principal",
+    "dims": {
+     "range": "24h",
+     "group_by": "principal"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.096,
+    "bytes": 151,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cae0-7180-aa2c-1de925298439",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=principal",
+    "dims": {
+     "range": "24h",
+     "group_by": "principal"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.058,
+    "bytes": 151,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cae1-7e21-b124-c0d1eb897797",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=principal",
+    "dims": {
+     "range": "24h",
+     "group_by": "principal"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.112,
+    "bytes": 151,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cae2-72d3-ae03-8b06a69f1bef",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=principal",
+    "dims": {
+     "range": "24h",
+     "group_by": "principal"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.058,
+    "bytes": 151,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cae3-7973-9ee8-7d59ef185649",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=principal",
+    "dims": {
+     "range": "24h",
+     "group_by": "principal"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.118,
+    "bytes": 151,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cae4-7940-b700-9ad3d940828e",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=model",
+    "dims": {
+     "range": "24h",
+     "group_by": "model"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.229,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cae6-7400-a354-f15a3cc94c53",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=model",
+    "dims": {
+     "range": "24h",
+     "group_by": "model"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.002,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cae7-7e83-937a-1dd3399fcfb1",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=model",
+    "dims": {
+     "range": "24h",
+     "group_by": "model"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.212,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cae8-7db3-8475-57f5c547e14a",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=model",
+    "dims": {
+     "range": "24h",
+     "group_by": "model"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.09,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cae9-74d0-8f29-9a32eaee9c53",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=24h&group_by=model",
+    "dims": {
+     "range": "24h",
+     "group_by": "model"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.08,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-caea-7fe3-a255-dda16919ea30",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=7d",
+    "dims": {
+     "range": "7d"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 3.388,
+    "bytes": 83451,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-caec-7f50-ba88-2bc6006ed233",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=7d",
+    "dims": {
+     "range": "7d"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 3.537,
+    "bytes": 83451,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-caf0-7701-a35f-a181e8cd0daf",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=7d",
+    "dims": {
+     "range": "7d"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 3.384,
+    "bytes": 83451,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-caf4-72b0-96dd-e55665e90ffa",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=7d",
+    "dims": {
+     "range": "7d"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 2.982,
+    "bytes": 83451,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-caf8-7123-8eee-7950651291a3",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/summary",
+    "path": "/admin/v1/dashboard/summary?range=7d",
+    "dims": {
+     "range": "7d"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 2.898,
+    "bytes": 83451,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37b-cafb-71e1-bec6-21da83d6164a",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=upstream",
+    "dims": {
+     "range": "7d",
+     "group_by": "upstream"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.156,
+    "bytes": 149,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-caff-73e0-8c64-65723271a475",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=upstream",
+    "dims": {
+     "range": "7d",
+     "group_by": "upstream"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.024,
+    "bytes": 149,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb00-7540-8ab2-1c72ab9570b7",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=upstream",
+    "dims": {
+     "range": "7d",
+     "group_by": "upstream"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.108,
+    "bytes": 149,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb01-7862-a94b-a2a26f68f8cb",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=upstream",
+    "dims": {
+     "range": "7d",
+     "group_by": "upstream"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.135,
+    "bytes": 149,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb02-77b1-9363-bde126ab726d",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=upstream",
+    "dims": {
+     "range": "7d",
+     "group_by": "upstream"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.075,
+    "bytes": 149,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb04-74a2-b566-498bc2fe352f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=principal",
+    "dims": {
+     "range": "7d",
+     "group_by": "principal"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.01,
+    "bytes": 150,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb05-72e0-a4a8-a7801bf18bfe",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=principal",
+    "dims": {
+     "range": "7d",
+     "group_by": "principal"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.987,
+    "bytes": 150,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb06-7e10-b16c-6a1d53019730",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=principal",
+    "dims": {
+     "range": "7d",
+     "group_by": "principal"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.042,
+    "bytes": 150,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb07-7d33-9b5b-8dfa5e4eb020",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=principal",
+    "dims": {
+     "range": "7d",
+     "group_by": "principal"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.066,
+    "bytes": 150,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb08-73d1-bc3c-06247167b021",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=principal",
+    "dims": {
+     "range": "7d",
+     "group_by": "principal"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.299,
+    "bytes": 150,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb09-7240-b95e-84210f7f5ee6",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=model",
+    "dims": {
+     "range": "7d",
+     "group_by": "model"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.006,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb0a-73b0-8395-a0d2f6cb2612",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=model",
+    "dims": {
+     "range": "7d",
+     "group_by": "model"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.054,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb0c-7c80-80e6-b566032beac2",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=model",
+    "dims": {
+     "range": "7d",
+     "group_by": "model"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.021,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb0d-7e60-95ee-1a440b681cfd",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=model",
+    "dims": {
+     "range": "7d",
+     "group_by": "model"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.137,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb0e-76a1-9610-0a4aa5e93efb",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/dashboard/usage",
+    "path": "/admin/v1/dashboard/usage?range=7d&group_by=model",
+    "dims": {
+     "range": "7d",
+     "group_by": "model"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.123,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37b-cb0f-7f92-b241-993508220f16",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25",
+    "dims": {
+     "limit": 25
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 806.439,
+    "bytes": 44000,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-cb10-78c3-90f7-7424d02150ff",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25",
+    "dims": {
+     "limit": 25
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 797.235,
+    "bytes": 44000,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-ce37-7fd2-a01a-46b25678b3c2",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25",
+    "dims": {
+     "limit": 25
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 782.108,
+    "bytes": 44000,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-d155-7c11-ac58-d1112d92b310",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25",
+    "dims": {
+     "limit": 25
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 791.541,
+    "bytes": 44000,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-d463-7b23-b64f-70c4ff1dd5c6",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25",
+    "dims": {
+     "limit": 25
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 795.893,
+    "bytes": 44000,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-d77b-7f22-b9e7-700a214940a8",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b",
+    "dims": {
+     "limit": 25,
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 328.671,
+    "bytes": 44025,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-da97-7b33-8c43-b21f845be9f5",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b",
+    "dims": {
+     "limit": 25,
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 334.142,
+    "bytes": 44025,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-dbe0-7643-b793-9a6045ec2684",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b",
+    "dims": {
+     "limit": 25,
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 331.305,
+    "bytes": 44025,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-dd2f-7671-ab38-4862f2b61eca",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b",
+    "dims": {
+     "limit": 25,
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 332.395,
+    "bytes": 44025,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-de7b-7442-8ea1-60e2af022d4f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b",
+    "dims": {
+     "limit": 25,
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 334.514,
+    "bytes": 44025,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-dfc7-70e0-a5d8-d9b7eedb947b",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=4807a66d-5897-4048-bc15-8ef11868211f",
+    "dims": {
+     "limit": 25,
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 319.238,
+    "bytes": 43975,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-e116-72d0-871c-948cb6bbde31",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=4807a66d-5897-4048-bc15-8ef11868211f",
+    "dims": {
+     "limit": 25,
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 335.461,
+    "bytes": 43975,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-e256-75c2-93b9-6f6a913a0cf3",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=4807a66d-5897-4048-bc15-8ef11868211f",
+    "dims": {
+     "limit": 25,
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 340.287,
+    "bytes": 43975,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-e3a6-7fc2-a1ec-c417ae50e5fc",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=4807a66d-5897-4048-bc15-8ef11868211f",
+    "dims": {
+     "limit": 25,
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 317.377,
+    "bytes": 43975,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-e4fa-71c0-903a-d83d51128121",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=4807a66d-5897-4048-bc15-8ef11868211f",
+    "dims": {
+     "limit": 25,
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 334.993,
+    "bytes": 43975,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-e638-7583-987f-4aab9888d7e9",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=a2f82670-a035-4a0e-b626-d266d7cab433",
+    "dims": {
+     "limit": 25,
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 329.976,
+    "bytes": 44000,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-e787-7910-9f64-002f5a09cb78",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=a2f82670-a035-4a0e-b626-d266d7cab433",
+    "dims": {
+     "limit": 25,
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 322.615,
+    "bytes": 44000,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-e8d2-7040-9eb5-5b7e5175336e",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=a2f82670-a035-4a0e-b626-d266d7cab433",
+    "dims": {
+     "limit": 25,
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 332.45,
+    "bytes": 44000,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-ea15-7c50-877c-18ec61842e35",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=a2f82670-a035-4a0e-b626-d266d7cab433",
+    "dims": {
+     "limit": 25,
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 330.913,
+    "bytes": 44000,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-eb62-7520-a85b-f3806d37cc22",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=25&principal_id=a2f82670-a035-4a0e-b626-d266d7cab433",
+    "dims": {
+     "limit": 25,
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 315.49,
+    "bytes": 44000,
+    "response_rows": 25,
+    "request_id": "req_admin_01a0b37b-ecad-7881-8b1b-c4947cbd82e4",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100",
+    "dims": {
+     "limit": 100
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 2425.955,
+    "bytes": 175852,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37b-ede9-7940-88a7-f2a45e0f41aa",
+    "server_log_rows": 2,
+    "sql_events": 1,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100",
+    "dims": {
+     "limit": 100
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1177.408,
+    "bytes": 175852,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37b-f764-7c41-813f-22ec778dac8e",
+    "server_log_rows": 2,
+    "sql_events": 1,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100",
+    "dims": {
+     "limit": 100
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1094.332,
+    "bytes": 175852,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37b-fbfe-79f1-a2d3-225b4a270c74",
+    "server_log_rows": 2,
+    "sql_events": 1,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100",
+    "dims": {
+     "limit": 100
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1090.147,
+    "bytes": 175852,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-0045-7fe2-b31d-fdae32432ee9",
+    "server_log_rows": 2,
+    "sql_events": 1,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100",
+    "dims": {
+     "limit": 100
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1093.044,
+    "bytes": 175852,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-0489-70a3-933e-8352e3a96b6d",
+    "server_log_rows": 2,
+    "sql_events": 1,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b",
+    "dims": {
+     "limit": 100,
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 432.778,
+    "bytes": 175949,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-08cf-7493-8d50-fff3c999bfbc",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b",
+    "dims": {
+     "limit": 100,
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 426.492,
+    "bytes": 175949,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-0a80-7b21-822d-3ab0bb687a97",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b",
+    "dims": {
+     "limit": 100,
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 426.036,
+    "bytes": 175949,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-0c2c-7ca0-b2d9-257ccbcb0c84",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b",
+    "dims": {
+     "limit": 100,
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 431.236,
+    "bytes": 175949,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-0dd7-70b1-9987-ba1cae858dba",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b",
+    "dims": {
+     "limit": 100,
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 421.981,
+    "bytes": 175949,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-0f87-7882-ba71-4ff805649289",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=4807a66d-5897-4048-bc15-8ef11868211f",
+    "dims": {
+     "limit": 100,
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 432.194,
+    "bytes": 175748,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-112e-7ca3-92a6-cee048229f44",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=4807a66d-5897-4048-bc15-8ef11868211f",
+    "dims": {
+     "limit": 100,
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 427.856,
+    "bytes": 175748,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-12df-7290-a381-37008615f48f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=4807a66d-5897-4048-bc15-8ef11868211f",
+    "dims": {
+     "limit": 100,
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 412.623,
+    "bytes": 175748,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-148c-7d32-b1f4-fb9486b7a31c",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=4807a66d-5897-4048-bc15-8ef11868211f",
+    "dims": {
+     "limit": 100,
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 432.384,
+    "bytes": 175748,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-1629-7be0-b442-128ba612133c",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=4807a66d-5897-4048-bc15-8ef11868211f",
+    "dims": {
+     "limit": 100,
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 425.66,
+    "bytes": 175748,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-17db-7b60-b668-21ed84c9ce19",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=a2f82670-a035-4a0e-b626-d266d7cab433",
+    "dims": {
+     "limit": 100,
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 438.276,
+    "bytes": 175849,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-1985-7ee1-b4d8-44fe2ed9ad40",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=a2f82670-a035-4a0e-b626-d266d7cab433",
+    "dims": {
+     "limit": 100,
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 428.91,
+    "bytes": 175849,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-1b3c-7b20-81e9-67631e2e08ea",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=a2f82670-a035-4a0e-b626-d266d7cab433",
+    "dims": {
+     "limit": 100,
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 432.16,
+    "bytes": 175849,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-1cea-7c11-8ff1-49b31cf15c2d",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=a2f82670-a035-4a0e-b626-d266d7cab433",
+    "dims": {
+     "limit": 100,
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 439.501,
+    "bytes": 175849,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-1e9b-7f71-9358-46e363c905ac",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/recent",
+    "path": "/admin/v1/events/recent?limit=100&principal_id=a2f82670-a035-4a0e-b626-d266d7cab433",
+    "dims": {
+     "limit": 100,
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 414.019,
+    "bytes": 175849,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-2054-7fd1-a873-ecc42365bd21",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?limit=100",
+    "dims": {
+     "limit": 100
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 8.37,
+    "bytes": 50263,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-21f3-7c73-8bec-0b86fbbc0eea",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?limit=100",
+    "dims": {
+     "limit": 100
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 7.803,
+    "bytes": 50211,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-21fb-7690-93f6-acf2f6edad03",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?limit=100",
+    "dims": {
+     "limit": 100
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 5.478,
+    "bytes": 50159,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-2204-7cc1-ae38-dee9e3997f21",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?limit=100",
+    "dims": {
+     "limit": 100
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 5.133,
+    "bytes": 50107,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-2209-7ea3-9ac9-ec990a78e5a8",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?limit=100",
+    "dims": {
+     "limit": 100
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 5.101,
+    "bytes": 50055,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-220f-7f20-8593-cf53222a0ec2",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b&limit=100",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.956,
+    "bytes": 7243,
+    "response_rows": 13,
+    "request_id": "req_admin_01a0b37c-2214-7053-948f-0682fe9284a0",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b&limit=100",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.909,
+    "bytes": 7243,
+    "response_rows": 13,
+    "request_id": "req_admin_01a0b37c-2216-7f63-9a3a-90cfbfa94f73",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b&limit=100",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.919,
+    "bytes": 7243,
+    "response_rows": 13,
+    "request_id": "req_admin_01a0b37c-2218-7770-9f87-4dea2b3d01df",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b&limit=100",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.73,
+    "bytes": 7243,
+    "response_rows": 13,
+    "request_id": "req_admin_01a0b37c-221a-7962-a044-c313a7e2d141",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=ce6d9b45-700c-488f-9355-bc4567a9610b&limit=100",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.755,
+    "bytes": 7243,
+    "response_rows": 13,
+    "request_id": "req_admin_01a0b37c-221c-7e93-83c4-959ee7910b55",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=4807a66d-5897-4048-bc15-8ef11868211f&limit=100",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.782,
+    "bytes": 7778,
+    "response_rows": 14,
+    "request_id": "req_admin_01a0b37c-221e-7da1-acac-2388c4fc840a",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=4807a66d-5897-4048-bc15-8ef11868211f&limit=100",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.917,
+    "bytes": 7778,
+    "response_rows": 14,
+    "request_id": "req_admin_01a0b37c-2220-73b2-a71f-aeb6bbe31068",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=4807a66d-5897-4048-bc15-8ef11868211f&limit=100",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.794,
+    "bytes": 7778,
+    "response_rows": 14,
+    "request_id": "req_admin_01a0b37c-2222-7fe0-93e2-2b78c006609d",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=4807a66d-5897-4048-bc15-8ef11868211f&limit=100",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.765,
+    "bytes": 7778,
+    "response_rows": 14,
+    "request_id": "req_admin_01a0b37c-2224-7d33-901d-105a424f4f04",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=4807a66d-5897-4048-bc15-8ef11868211f&limit=100",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.866,
+    "bytes": 7778,
+    "response_rows": 14,
+    "request_id": "req_admin_01a0b37c-2226-7761-8c7e-cbf1208bb99b",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=a2f82670-a035-4a0e-b626-d266d7cab433&limit=100",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 2.183,
+    "bytes": 12761,
+    "response_rows": 23,
+    "request_id": "req_admin_01a0b37c-2228-7d90-a37a-f5a55cbb15fd",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=a2f82670-a035-4a0e-b626-d266d7cab433&limit=100",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 2.158,
+    "bytes": 12761,
+    "response_rows": 23,
+    "request_id": "req_admin_01a0b37c-222a-7ae2-847e-c3b413e82b35",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=a2f82670-a035-4a0e-b626-d266d7cab433&limit=100",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 2.216,
+    "bytes": 12761,
+    "response_rows": 23,
+    "request_id": "req_admin_01a0b37c-222c-7033-b403-585b39d723a3",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=a2f82670-a035-4a0e-b626-d266d7cab433&limit=100",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 2.254,
+    "bytes": 12761,
+    "response_rows": 23,
+    "request_id": "req_admin_01a0b37c-222f-7c43-80e3-84f340c0981f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?principal_id=a2f82670-a035-4a0e-b626-d266d7cab433&limit=100",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 2.214,
+    "bytes": 12761,
+    "response_rows": 23,
+    "request_id": "req_admin_01a0b37c-2231-7d43-9ea3-14e1482e4f38",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?since=1789631069&limit=100",
+    "dims": {
+     "since": "24h"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 5.323,
+    "bytes": 50955,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-2234-73b3-bbbf-d86370c6202b",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?since=1789631069&limit=100",
+    "dims": {
+     "since": "24h"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 5.11,
+    "bytes": 51071,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-2239-7333-9e1f-c29d859f89c4",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?since=1789631069&limit=100",
+    "dims": {
+     "since": "24h"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 5.314,
+    "bytes": 51080,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-223f-79d3-92e3-bad1e3de40de",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?since=1789631069&limit=100",
+    "dims": {
+     "since": "24h"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 5.527,
+    "bytes": 51055,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-2244-75b1-ad1a-b0aec2578014",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/audit",
+    "path": "/admin/v1/audit?since=1789631069&limit=100",
+    "dims": {
+     "since": "24h"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 5.276,
+    "bytes": 51030,
+    "response_rows": 100,
+    "request_id": "req_admin_01a0b37c-224a-76d0-8292-939d84cb16a4",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=1h",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "1h"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.169,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2250-7ea3-9ab8-4d502adbce1a",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=1h",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "1h"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.241,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2251-7682-ab03-8cd0effbffae",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=1h",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "1h"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.206,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2253-7df3-befc-1dacb91357f8",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=1h",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "1h"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.055,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2254-7211-b408-90172b094cc4",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=1h",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "1h"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.022,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2255-7971-abad-6bda41333ede",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=24h",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "24h"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.077,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2256-75f2-8304-5fae81ef0bc5",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=24h",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "24h"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.004,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2257-7780-9068-f83b7f3fac30",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=24h",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "24h"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.019,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2258-7d63-8048-3981785fa4d4",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=24h",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "24h"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.154,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-225a-7361-b509-b77e822be4e0",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=24h",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "24h"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.957,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-225b-7f02-b1c4-1b83d240aabe",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=7d",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "7d"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 0.925,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-225c-7f80-ab65-b5912494041f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=7d",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "7d"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.925,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-225d-75a0-9577-c4855e6e272c",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=7d",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "7d"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.033,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-225e-7c12-b060-6dc03c86275c",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=7d",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "7d"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.077,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-225f-7ee3-b1f6-cb87cdf71934",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/ce6d9b45-700c-488f-9355-bc4567a9610b/usage?range=7d",
+    "dims": {
+     "principal_id": "ce6d9b45-700c-488f-9355-bc4567a9610b",
+     "range": "7d"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.835,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2260-7041-bf99-082aaed2b261",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=1h",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "1h"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 0.953,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2261-7fa1-b3fd-cf5e6393ff2f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=1h",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "1h"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.905,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2262-7180-9462-8a0544f9163b",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=1h",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "1h"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.931,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2263-7810-b84e-079efd6a98fa",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=1h",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "1h"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.937,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2264-70e1-a642-57fa8b1fd4f0",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=1h",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "1h"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.003,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2265-7b62-8eaa-51c85047a4ce",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=24h",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "24h"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 0.982,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2266-7cf1-84f6-d7a1d236c961",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=24h",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "24h"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.976,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2267-7603-8db8-0bc265d34720",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=24h",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "24h"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.912,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2268-7b72-9e5d-c0e0a6ead7bf",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=24h",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "24h"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.963,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2269-7ce3-a39e-ca4522c2afd0",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=24h",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "24h"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.909,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-226a-73c1-bf67-59ba63c7a286",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=7d",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "7d"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 0.988,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-226b-7290-b149-b802c8ea10d0",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=7d",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "7d"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.921,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-226c-7cc1-8d29-ba74a8f6284d",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=7d",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "7d"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.94,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-226d-7311-aef5-daa3796f4dd3",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=7d",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "7d"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.89,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-226e-7723-afe6-a0c30c481118",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/4807a66d-5897-4048-bc15-8ef11868211f/usage?range=7d",
+    "dims": {
+     "principal_id": "4807a66d-5897-4048-bc15-8ef11868211f",
+     "range": "7d"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.953,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-226f-7bd1-a20b-5c09a431c84f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=1h",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "1h"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 0.91,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2270-7983-8761-f371c0c70505",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=1h",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "1h"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.937,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2271-7db0-939c-123e83a9ade6",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=1h",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "1h"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.995,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2272-7563-88f5-be628def3907",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=1h",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "1h"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.934,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2273-70a3-a529-8095809a52e3",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=1h",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "1h"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.915,
+    "bytes": 148,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2274-7f11-932e-cff5609bc7be",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=24h",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "24h"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 0.915,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2275-7da2-8064-400a75a79d84",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=24h",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "24h"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.931,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2276-7c81-92f4-7626e6f189eb",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=24h",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "24h"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.962,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2277-77b2-b4f7-c23dd2712329",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=24h",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "24h"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.962,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2278-72b0-9cbb-5548fd5a610d",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=24h",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "24h"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.988,
+    "bytes": 147,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-2279-7f50-b1b1-1863a85e9a9e",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=7d",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "7d"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 0.973,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-227a-76a1-8511-ff95d9606a44",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=7d",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "7d"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.968,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-227b-7461-b014-e4a0af80b823",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=7d",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "7d"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.932,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-227c-7091-8dd3-cda7411d11bd",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=7d",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "7d"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.0,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-227d-7f10-9a7c-9ee9b802f7ab",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/principals/{id}/usage",
+    "path": "/admin/v1/principals/a2f82670-a035-4a0e-b626-d266d7cab433/usage?range=7d",
+    "dims": {
+     "principal_id": "a2f82670-a035-4a0e-b626-d266d7cab433",
+     "range": "7d"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.953,
+    "bytes": 146,
+    "response_rows": 0,
+    "request_id": "req_admin_01a0b37c-227e-77d2-841f-71c672bc1fd8",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/052f8b6a-44a5-4c32-be1f-3ef4b418e35a/oauth/status",
+    "dims": {
+     "upstream_id": "052f8b6a-44a5-4c32-be1f-3ef4b418e35a"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.299,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-227f-78c2-88fa-b0cde43416ec",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/052f8b6a-44a5-4c32-be1f-3ef4b418e35a/oauth/status",
+    "dims": {
+     "upstream_id": "052f8b6a-44a5-4c32-be1f-3ef4b418e35a"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.139,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2280-7383-95d2-703f3d806a37",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/052f8b6a-44a5-4c32-be1f-3ef4b418e35a/oauth/status",
+    "dims": {
+     "upstream_id": "052f8b6a-44a5-4c32-be1f-3ef4b418e35a"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.953,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2282-7073-9afc-06f5bff6d1c9",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/052f8b6a-44a5-4c32-be1f-3ef4b418e35a/oauth/status",
+    "dims": {
+     "upstream_id": "052f8b6a-44a5-4c32-be1f-3ef4b418e35a"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.193,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2284-78a3-8c3b-17a6352dc2e4",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/052f8b6a-44a5-4c32-be1f-3ef4b418e35a/oauth/status",
+    "dims": {
+     "upstream_id": "052f8b6a-44a5-4c32-be1f-3ef4b418e35a"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.227,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2285-7202-920f-62d05ed87b21",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/38be7541-7375-4e3c-8264-b124af4a4b87/oauth/status",
+    "dims": {
+     "upstream_id": "38be7541-7375-4e3c-8264-b124af4a4b87"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.326,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2286-7e22-b784-9e7089aa3e71",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/38be7541-7375-4e3c-8264-b124af4a4b87/oauth/status",
+    "dims": {
+     "upstream_id": "38be7541-7375-4e3c-8264-b124af4a4b87"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.248,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2288-7bb3-88a8-ae9bfb9e83a3",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/38be7541-7375-4e3c-8264-b124af4a4b87/oauth/status",
+    "dims": {
+     "upstream_id": "38be7541-7375-4e3c-8264-b124af4a4b87"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.138,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2289-75d2-8cc0-b1f98525d737",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/38be7541-7375-4e3c-8264-b124af4a4b87/oauth/status",
+    "dims": {
+     "upstream_id": "38be7541-7375-4e3c-8264-b124af4a4b87"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.2,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-228b-7752-81fa-de3a6afafbb8",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/38be7541-7375-4e3c-8264-b124af4a4b87/oauth/status",
+    "dims": {
+     "upstream_id": "38be7541-7375-4e3c-8264-b124af4a4b87"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.134,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-228c-7a80-8621-cda066ae7d13",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/3aedcb39-d818-4613-90eb-dbe4d4c5693a/oauth/status",
+    "dims": {
+     "upstream_id": "3aedcb39-d818-4613-90eb-dbe4d4c5693a"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.105,
+    "bytes": 234,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-228d-72a2-82a4-44d81940fa9a",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/3aedcb39-d818-4613-90eb-dbe4d4c5693a/oauth/status",
+    "dims": {
+     "upstream_id": "3aedcb39-d818-4613-90eb-dbe4d4c5693a"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.964,
+    "bytes": 234,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-228e-70a1-b728-1ea4a2b23ed6",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/3aedcb39-d818-4613-90eb-dbe4d4c5693a/oauth/status",
+    "dims": {
+     "upstream_id": "3aedcb39-d818-4613-90eb-dbe4d4c5693a"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.037,
+    "bytes": 234,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-228f-7002-bcfb-bfacea8c7a60",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/3aedcb39-d818-4613-90eb-dbe4d4c5693a/oauth/status",
+    "dims": {
+     "upstream_id": "3aedcb39-d818-4613-90eb-dbe4d4c5693a"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.043,
+    "bytes": 234,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2290-7031-b1e3-b241195238c4",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/3aedcb39-d818-4613-90eb-dbe4d4c5693a/oauth/status",
+    "dims": {
+     "upstream_id": "3aedcb39-d818-4613-90eb-dbe4d4c5693a"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.13,
+    "bytes": 234,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2291-7aa0-bd07-b70093786829",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/c910238c-c38a-4f8c-92eb-ed2c7ca34e68/oauth/status",
+    "dims": {
+     "upstream_id": "c910238c-c38a-4f8c-92eb-ed2c7ca34e68"
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 1.153,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2293-75e1-8801-f881b4b3776f",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/c910238c-c38a-4f8c-92eb-ed2c7ca34e68/oauth/status",
+    "dims": {
+     "upstream_id": "c910238c-c38a-4f8c-92eb-ed2c7ca34e68"
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.06,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2294-7422-ac0e-c9de9e3c969d",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/c910238c-c38a-4f8c-92eb-ed2c7ca34e68/oauth/status",
+    "dims": {
+     "upstream_id": "c910238c-c38a-4f8c-92eb-ed2c7ca34e68"
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 0.997,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2295-71d3-984f-7f108e9a725e",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/c910238c-c38a-4f8c-92eb-ed2c7ca34e68/oauth/status",
+    "dims": {
+     "upstream_id": "c910238c-c38a-4f8c-92eb-ed2c7ca34e68"
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.205,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2296-72e3-b091-7150edff56cd",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/upstreams/{id}/oauth/status",
+    "path": "/admin/v1/upstreams/c910238c-c38a-4f8c-92eb-ed2c7ca34e68/oauth/status",
+    "dims": {
+     "upstream_id": "c910238c-c38a-4f8c-92eb-ed2c7ca34e68"
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 1.085,
+    "bytes": 239,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2298-7882-a77a-fa532f1e8e10",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/histogram",
+    "path": "/admin/v1/events/histogram?since_unix_secs=1789631069&until_unix_secs=1789717469&bucket_ms=3600000",
+    "dims": {
+     "bucket_ms": 3600000,
+     "span_secs": 86400
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 61.794,
+    "bytes": 1873,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2299-72b1-b9ce-003591202e4d",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/histogram",
+    "path": "/admin/v1/events/histogram?since_unix_secs=1789631069&until_unix_secs=1789717469&bucket_ms=3600000",
+    "dims": {
+     "bucket_ms": 3600000,
+     "span_secs": 86400
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 60.364,
+    "bytes": 1873,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-22d7-7182-bc97-33c6b5e4359e",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/histogram",
+    "path": "/admin/v1/events/histogram?since_unix_secs=1789631069&until_unix_secs=1789717469&bucket_ms=3600000",
+    "dims": {
+     "bucket_ms": 3600000,
+     "span_secs": 86400
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 59.899,
+    "bytes": 1873,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2313-7513-8fd9-a9b4a4d6a08d",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/histogram",
+    "path": "/admin/v1/events/histogram?since_unix_secs=1789631069&until_unix_secs=1789717469&bucket_ms=3600000",
+    "dims": {
+     "bucket_ms": 3600000,
+     "span_secs": 86400
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 65.982,
+    "bytes": 1873,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-234f-7452-99c4-fc3b936e3632",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/histogram",
+    "path": "/admin/v1/events/histogram?since_unix_secs=1789631069&until_unix_secs=1789717469&bucket_ms=3600000",
+    "dims": {
+     "bucket_ms": 3600000,
+     "span_secs": 86400
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 61.107,
+    "bytes": 1873,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-2392-7133-a29b-63fcc995b7ba",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/histogram",
+    "path": "/admin/v1/events/histogram?since_unix_secs=1789112669&until_unix_secs=1789717469&bucket_ms=86400000",
+    "dims": {
+     "bucket_ms": 86400000,
+     "span_secs": 604800
+    },
+    "repeat": 1,
+    "phase": "cold",
+    "status": 200,
+    "client_ms": 394.93,
+    "bytes": 639,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-23cf-77b2-a03e-b0f2c68c51e4",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/histogram",
+    "path": "/admin/v1/events/histogram?since_unix_secs=1789112669&until_unix_secs=1789717469&bucket_ms=86400000",
+    "dims": {
+     "bucket_ms": 86400000,
+     "span_secs": 604800
+    },
+    "repeat": 2,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 392.27,
+    "bytes": 639,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-255a-75f2-8a25-0a700f419395",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/histogram",
+    "path": "/admin/v1/events/histogram?since_unix_secs=1789112669&until_unix_secs=1789717469&bucket_ms=86400000",
+    "dims": {
+     "bucket_ms": 86400000,
+     "span_secs": 604800
+    },
+    "repeat": 3,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 395.488,
+    "bytes": 639,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-26e2-7fe0-bee8-7321264fa188",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/histogram",
+    "path": "/admin/v1/events/histogram?since_unix_secs=1789112669&until_unix_secs=1789717469&bucket_ms=86400000",
+    "dims": {
+     "bucket_ms": 86400000,
+     "span_secs": 604800
+    },
+    "repeat": 4,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 393.902,
+    "bytes": 639,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-286e-7c13-a7d0-b1dacdf68a7a",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   },
+   {
+    "endpoint_id": "/admin/v1/events/histogram",
+    "path": "/admin/v1/events/histogram?since_unix_secs=1789112669&until_unix_secs=1789717469&bucket_ms=86400000",
+    "dims": {
+     "bucket_ms": 86400000,
+     "span_secs": 604800
+    },
+    "repeat": 5,
+    "phase": "warm",
+    "status": 200,
+    "client_ms": 395.441,
+    "bytes": 639,
+    "response_rows": null,
+    "request_id": "req_admin_01a0b37c-29f8-78e0-b3e4-9cd0b757989c",
+    "server_log_rows": 1,
+    "sql_events": 0,
+    "handler_head_ms": null
+   }
+  ]
+ },
+ "sql_findings": [
+  {
+   "name": "recent events list query sorts instead of seeking",
+   "source": "crates/cc-lb-storage-sqlite/src/adapter/request_event_list_sql.rs:13-113",
+   "observed_plan": "SEARCH request_events_v1 USING INDEX request_events_v1_v3_cache_key_ts (ANY(matched_v3_cache_key) AND ts>? AND ts<?) + USE TEMP B-TREE FOR ORDER BY",
+   "observed_sql_ms": [
+    118.2,
+    328.2,
+    142.2
+   ],
+   "api_warm_median_ms": 425.85,
+   "api_p95_ms": 1093.04,
+   "api_max_ms": 2425.95,
+   "proposed_change": "Add the widened list_ts_ms bound the histogram query already uses (request_events.rs:676-681) to the list query: AND list_ts_ms >= (?1 - 1) * 1000 AND list_ts_ms < (?2 + 2) * 1000",
+   "proposed_plan": "SEARCH request_events_v1 USING INDEX request_events_v1_list_order_idx (list_ts_ms>? AND list_ts_ms<?)",
+   "proposed_sql_ms": [
+    1.4,
+    0.8,
+    0.7
+   ],
+   "status": "proposed_not_applied",
+   "reason": "application code change; requires explicit approval before editing"
+  },
+  {
+   "name": "histogram aggregation already seeks the list-order index",
+   "source": "crates/cc-lb-storage-sqlite/src/adapter/request_events.rs:716-730",
+   "observed_plan": "SEARCH request_events_v1 USING INDEX request_events_v1_list_order_idx (list_ts_ms>? AND list_ts_ms<?) + USE TEMP B-TREE FOR GROUP BY",
+   "observed_sql_ms": [
+    25.1
+   ],
+   "api_warm_median_ms": 229.13,
+   "note": "SQL is bounded; the remaining API time is handler/bucket assembly and response size, not a missing index."
+  }
+ ],
+ "limits": [
+  "SQLite fixture; production runs PostgreSQL, where the planner and index usage differ.",
+  "Seeded rows are synthetic and uniformly distributed.",
+  "Measured on an Apple M3 Pro workstation, not production hardware.",
+  "Server-side vs database split is inferred from comparing API latency with the same SQL executed directly, not from in-process spans."
+ ]
+}

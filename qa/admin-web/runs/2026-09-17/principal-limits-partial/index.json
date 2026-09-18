@@ -1,0 +1,64 @@
+{
+  "schema": "cc-lb-partial-limits-evidence-index/v1",
+  "source_commit": "f3fa89bf81fecefbfd4dde399c2d771208e069ce",
+  "full_qa_complete": false,
+  "ui_cells_accepted": 0,
+  "direct_functional_cases_passed": 81,
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-17/principal-limits-partial/auxiliary-state-limitation.json",
+      "sha256": "4017ea850035bbbc275415f881c6055f8018db35c11e30946bf5bb0701eb2df0",
+      "bytes": 541
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/principal-limits-partial/direct-request-events.jsonl.gz",
+      "sha256": "e2b3a560441fe6385557381e94e3d5917624318c09e7c7518600cbdf965fce67",
+      "bytes": 280081
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/principal-limits-partial/matrix.json",
+      "sha256": "1c9bb1d67278029aeb6e636ab00ae2da108e37b4a9bf657b7bd7cc3acda54e42",
+      "bytes": 68503
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/principal-limits-partial/native-handoff-blocker.json",
+      "sha256": "a00751ab9d89987b365ea37d1d13dacefa21c122df928443fbfce81e4165c5e4",
+      "bytes": 678
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/principal-limits-partial/native-idle-reaper-log.json",
+      "sha256": "22d32d25bc37f816af1eda474cdd5acbcb055d8bfae640ae4cfaf7f5f19d9ef3",
+      "bytes": 179
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/principal-limits-partial/rejected-ui-attempts.json",
+      "sha256": "e4a8aa0a264169af939b4054d9bd7189f80ee7305ee14cbc231666a991535bcf",
+      "bytes": 8755
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/principal-limits-partial/security-and-coverage.json",
+      "sha256": "22e836ccba3b7c39ed39d702d0ec536b4c3f9de98a866d779ada4a4263b00ed4",
+      "bytes": 514
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/principal-limits-partial/status.json",
+      "sha256": "f1eadbb94254c3e63c5d64d6dc3233908c6a136de4e95ec9cc6f5d503f2334c5",
+      "bytes": 1725
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/principal-limits-partial/ui-ledger.jsonl",
+      "sha256": "2f2f2da7a7314cd469b142a34fa634417e5cc09b1670e4330d03e0536811885c",
+      "bytes": 43605
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/principal-limits-partial/unpaired-direct-results.json",
+      "sha256": "da7d2008e2d045cce41d4ff868ac5f506ea47e6a1766a00954f03cf327f447d7",
+      "bytes": 98635
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/principal-limits-partial/unpaired-direct-statistics.json",
+      "sha256": "65ed74442f50f2d5a7cd1ee242153ae0113342bf89ab79157229cfd8cc529a8f",
+      "bytes": 882
+    }
+  ]
+}

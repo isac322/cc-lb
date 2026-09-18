@@ -1,0 +1,39 @@
+{
+  "candidate_sha256": "f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8",
+  "old_client_preserve": [
+    "http://127.0.0.1:19991/",
+    4,
+    0,
+    0
+  ],
+  "explicit_clear": [
+    null,
+    5,
+    0,
+    0
+  ],
+  "restored_new_db": [
+    "http://127.0.0.1:19991/",
+    6,
+    0,
+    0
+  ],
+  "reverse_old_backend_after_save": [
+    "http://127.0.0.1:19991/",
+    6,
+    0,
+    0
+  ],
+  "column_order": [
+    "base_url",
+    "spec_revision",
+    "enabled",
+    "warmup_enabled"
+  ],
+  "old_backend_update_response_status": 200,
+  "old_backend_update_requests": 1,
+  "own_ports_closed": true,
+  "auth_handoff_removed": true,
+  "browser_tabs_closed_reported": true,
+  "production_changes": 0
+}

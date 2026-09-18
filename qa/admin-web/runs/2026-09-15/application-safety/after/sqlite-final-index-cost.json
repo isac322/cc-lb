@@ -1,0 +1,234 @@
+{
+  "migration_sha256": "3b8653f193766ff684abd20012a1d44aecd464bae35072017925102c8580d88f",
+  "data": "50k synthetic seed; non-admin actor columns NULL; admin actor present; 2000 autocommit writes per class",
+  "phases": [
+    {
+      "phase": "A",
+      "indexed": false,
+      "plans": [
+        {
+          "scope": "all",
+          "admin_only": false,
+          "rows": 200,
+          "hash": "2218a1c86a3bebc0eca9f40c7a0f089b6b30b282268ce958fcf7c5736786fb0f",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_ts (ts>? AND ts<?)"
+          ]
+        },
+        {
+          "scope": "all",
+          "admin_only": true,
+          "rows": 200,
+          "hash": "402b845f222e5f3d0224d3394bf3c00b4d6d6dab6bc0b47068d926ea916c6f74",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_ts (ts>? AND ts<?)"
+          ]
+        },
+        {
+          "scope": "principal",
+          "admin_only": false,
+          "rows": 200,
+          "hash": "cb778efc4015e9c56f514253477fe1476bc7046f25fa9b0d7ec9165744281036",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_principal_seq (principal_id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        },
+        {
+          "scope": "principal",
+          "admin_only": true,
+          "rows": 29,
+          "hash": "9e86edaa14398fb372300a18e42b443d1451407a225a85a5fe29c88feeff40c3",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_principal_seq (principal_id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        },
+        {
+          "scope": "actor",
+          "admin_only": false,
+          "rows": 29,
+          "hash": "9e86edaa14398fb372300a18e42b443d1451407a225a85a5fe29c88feeff40c3",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_actor_subject (actor_authority=? AND actor_subject=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        },
+        {
+          "scope": "actor",
+          "admin_only": true,
+          "rows": 29,
+          "hash": "9e86edaa14398fb372300a18e42b443d1451407a225a85a5fe29c88feeff40c3",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_actor_subject (actor_authority=? AND actor_subject=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        }
+      ],
+      "writes": [
+        {
+          "admin": false,
+          "rows": 2000,
+          "ms": 148.0125410016626
+        },
+        {
+          "admin": true,
+          "rows": 2000,
+          "ms": 142.16216700151563
+        }
+      ],
+      "bytes": 9109504
+    },
+    {
+      "phase": "B",
+      "indexed": true,
+      "plans": [
+        {
+          "scope": "all",
+          "admin_only": false,
+          "rows": 200,
+          "hash": "2218a1c86a3bebc0eca9f40c7a0f089b6b30b282268ce958fcf7c5736786fb0f",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_ts (ts>? AND ts<?)"
+          ]
+        },
+        {
+          "scope": "all",
+          "admin_only": true,
+          "rows": 200,
+          "hash": "402b845f222e5f3d0224d3394bf3c00b4d6d6dab6bc0b47068d926ea916c6f74",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_admin_ts_id (ts>? AND ts<?)"
+          ]
+        },
+        {
+          "scope": "principal",
+          "admin_only": false,
+          "rows": 200,
+          "hash": "cb778efc4015e9c56f514253477fe1476bc7046f25fa9b0d7ec9165744281036",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_principal_ts_id (principal_id=? AND ts>? AND ts<?)"
+          ]
+        },
+        {
+          "scope": "principal",
+          "admin_only": true,
+          "rows": 29,
+          "hash": "9e86edaa14398fb372300a18e42b443d1451407a225a85a5fe29c88feeff40c3",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_admin_principal_ts_id (principal_id=? AND ts>? AND ts<?)"
+          ]
+        },
+        {
+          "scope": "actor",
+          "admin_only": false,
+          "rows": 29,
+          "hash": "9e86edaa14398fb372300a18e42b443d1451407a225a85a5fe29c88feeff40c3",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_actor_ts_id (actor_authority=? AND actor_subject=? AND ts>? AND ts<?)"
+          ]
+        },
+        {
+          "scope": "actor",
+          "admin_only": true,
+          "rows": 29,
+          "hash": "9e86edaa14398fb372300a18e42b443d1451407a225a85a5fe29c88feeff40c3",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_admin_actor_ts_id (actor_authority=? AND actor_subject=? AND ts>? AND ts<?)"
+          ]
+        }
+      ],
+      "writes": [
+        {
+          "admin": false,
+          "rows": 2000,
+          "ms": 194.66341598308645
+        },
+        {
+          "admin": true,
+          "rows": 2000,
+          "ms": 333.0143329803832
+        }
+      ],
+      "bytes": 11218944
+    },
+    {
+      "phase": "A2",
+      "indexed": false,
+      "plans": [
+        {
+          "scope": "all",
+          "admin_only": false,
+          "rows": 200,
+          "hash": "2218a1c86a3bebc0eca9f40c7a0f089b6b30b282268ce958fcf7c5736786fb0f",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_ts (ts>? AND ts<?)"
+          ]
+        },
+        {
+          "scope": "all",
+          "admin_only": true,
+          "rows": 200,
+          "hash": "402b845f222e5f3d0224d3394bf3c00b4d6d6dab6bc0b47068d926ea916c6f74",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_ts (ts>? AND ts<?)"
+          ]
+        },
+        {
+          "scope": "principal",
+          "admin_only": false,
+          "rows": 200,
+          "hash": "cb778efc4015e9c56f514253477fe1476bc7046f25fa9b0d7ec9165744281036",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_principal_seq (principal_id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        },
+        {
+          "scope": "principal",
+          "admin_only": true,
+          "rows": 29,
+          "hash": "9e86edaa14398fb372300a18e42b443d1451407a225a85a5fe29c88feeff40c3",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_principal_seq (principal_id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        },
+        {
+          "scope": "actor",
+          "admin_only": false,
+          "rows": 29,
+          "hash": "9e86edaa14398fb372300a18e42b443d1451407a225a85a5fe29c88feeff40c3",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_actor_subject (actor_authority=? AND actor_subject=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        },
+        {
+          "scope": "actor",
+          "admin_only": true,
+          "rows": 29,
+          "hash": "9e86edaa14398fb372300a18e42b443d1451407a225a85a5fe29c88feeff40c3",
+          "plan": [
+            "SEARCH audit_log_v1 USING INDEX idx_audit_log_actor_subject (actor_authority=? AND actor_subject=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        }
+      ],
+      "writes": [
+        {
+          "admin": false,
+          "rows": 2000,
+          "ms": 144.85262500238605
+        },
+        {
+          "admin": true,
+          "rows": 2000,
+          "ms": 152.0854580157902
+        }
+      ],
+      "bytes": 9109504
+    }
+  ],
+  "limits": "Controlled local SQLite results, not production throughput"
+}

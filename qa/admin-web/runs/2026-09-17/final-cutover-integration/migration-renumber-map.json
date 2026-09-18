@@ -1,0 +1,15 @@
+{
+  "from_head": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+  "master": "b07b25eebe7bbee7e882643c6776c82015d49689",
+  "renames": {
+    "crates/cc-lb-storage-postgres/migrations/0119_audit_log_principal_ts_seq_index.sql": "crates/cc-lb-storage-postgres/migrations/0121_audit_log_principal_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0120_audit_log_actor_ts_seq_index.sql": "crates/cc-lb-storage-postgres/migrations/0122_audit_log_actor_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0121_audit_log_admin_ts_seq_index.sql": "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0122_audit_log_admin_principal_ts_seq_index.sql": "crates/cc-lb-storage-postgres/migrations/0124_audit_log_admin_principal_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_actor_ts_seq_index.sql": "crates/cc-lb-storage-postgres/migrations/0125_audit_log_admin_actor_ts_seq_index.sql",
+    "crates/cc-lb-storage-sqlite/migrations/0087_audit_log_read_order_indexes.sql": "crates/cc-lb-storage-sqlite/migrations/0088_audit_log_read_order_indexes.sql"
+  },
+  "index_sql_semantics_unchanged": true,
+  "master_migrations_unchanged": true,
+  "historical_evidence_not_rewritten": true
+}

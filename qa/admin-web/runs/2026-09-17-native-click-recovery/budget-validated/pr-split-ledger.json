@@ -1,0 +1,141 @@
+[
+  {
+    "pr": 794,
+    "branch": "fix/admin-base-url-response",
+    "base": "master",
+    "head": "9b853ede7770c8386a6dc6ee065c1ae11cf72a66",
+    "files": [
+      "crates/cc-lb-admin/src/v1/oauth.rs",
+      "crates/cc-lb-admin/src/v1/upstreams.rs",
+      "crates/cc-lb-admin/tests/admin_warmup_endpoints.rs",
+      "crates/cc-lb-admin/tests/v1_oauth.rs",
+      "crates/cc-lb-admin/tests/v1_upstreams.rs",
+      "crates/cc-lb-admin/web/src/lib/api.test.ts",
+      "crates/cc-lb-admin/web/src/lib/api.ts",
+      "crates/cc-lb-admin/web/src/lib/queries.ts",
+      "crates/cc-lb-admin/web/src/lib/test-utils/warmup-fixtures.ts"
+    ]
+  },
+  {
+    "pr": 795,
+    "branch": "fix/admin-base-url-clear",
+    "base": "fix/admin-base-url-response",
+    "head": "964073d76f32a86e6d3b010185cf7402cf65df6d",
+    "files": [
+      "crates/cc-lb-admin/src/v1/upstreams.rs",
+      "crates/cc-lb-admin/tests/v1_upstreams.rs",
+      "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.test.tsx",
+      "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx",
+      "crates/cc-lb-admin/web/src/lib/queries.ts",
+      "crates/cc-lb-server/tests/dispatch_uses_resolved_upstream_base_url.rs",
+      "crates/cc-lb-signer-anthropic-oauth/src/lib.rs",
+      "crates/cc-lb-storage-api/src/upstream.rs",
+      "crates/cc-lb-storage-conformance/src/scenarios/upstream_store.rs",
+      "crates/cc-lb-storage-conformance/src/upstream_store.rs",
+      "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs",
+      "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs",
+      "docs/cc-lb-guide.html"
+    ]
+  },
+  {
+    "pr": 796,
+    "branch": "fix/admin-audit-query",
+    "base": "fix/admin-base-url-clear",
+    "head": "494a03372ebe4efb05d3c76f4ffbda1f9cbfb070",
+    "files": [
+      "crates/cc-lb-admin/src/routes.rs",
+      "crates/cc-lb-admin/src/v1/keys.rs",
+      "crates/cc-lb-admin/tests/audit_pagination.rs",
+      "crates/cc-lb-admin/web/src/routes/-audit-loading.test.tsx",
+      "crates/cc-lb-admin/web/src/routes/audit.tsx",
+      "crates/cc-lb-engine/src/lifecycle_limit_rejection_audit_subscriber.rs",
+      "crates/cc-lb-engine/tests/storage_support/mod.rs",
+      "crates/cc-lb-storage-api/src/audit.rs",
+      "crates/cc-lb-storage-api/src/traits.rs",
+      "crates/cc-lb-storage-postgres/migrations/0121_audit_log_principal_ts_seq_index.sql",
+      "crates/cc-lb-storage-postgres/migrations/0122_audit_log_actor_ts_seq_index.sql",
+      "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_ts_seq_index.sql",
+      "crates/cc-lb-storage-postgres/migrations/0124_audit_log_admin_principal_ts_seq_index.sql",
+      "crates/cc-lb-storage-postgres/migrations/0125_audit_log_admin_actor_ts_seq_index.sql",
+      "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+      "crates/cc-lb-storage-postgres/tests/audit.rs",
+      "crates/cc-lb-storage-sqlite/migrations/0088_audit_log_read_order_indexes.sql",
+      "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+      "crates/cc-lb-storage-sqlite/tests/audit.rs",
+      "docs/cc-lb-guide.html"
+    ]
+  },
+  {
+    "pr": 797,
+    "branch": "fix/admin-key-label",
+    "base": "fix/admin-audit-query",
+    "head": "1a97e6d397c4333032802e16f9ee9a86caacea00",
+    "files": [
+      "crates/cc-lb-admin/src/v1/keys.rs",
+      "crates/cc-lb-admin/tests/principal_keys.rs",
+      "crates/cc-lb-storage-conformance/src/scenarios/managed_keys.rs",
+      "crates/cc-lb-storage-conformance/tests/managed_keys_postgres.rs",
+      "crates/cc-lb-storage-conformance/tests/storage_roundtrips_sqlite.rs",
+      "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
+      "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
+      "docs/cc-lb-guide.html"
+    ]
+  },
+  {
+    "pr": 798,
+    "branch": "fix/admin-draft-revision",
+    "base": "fix/admin-key-label",
+    "head": "0a2937a01cf311cb96b5d90b7ae6a37c18f205ec",
+    "files": [
+      "CHANGELOG.md",
+      "crates/cc-lb-storage-conformance/src/scenarios/revisioning_meta.rs",
+      "crates/cc-lb-storage-conformance/tests/storage_roundtrips_postgres.rs",
+      "crates/cc-lb-storage-conformance/tests/storage_roundtrips_sqlite.rs",
+      "crates/cc-lb-storage-postgres/src/adapter/config_store.rs"
+    ]
+  },
+  {
+    "pr": 799,
+    "branch": "fix/admin-router-revision",
+    "base": "fix/admin-draft-revision",
+    "head": "f30c98a1a3d3c09b39b9b23a9d1e957610626c5b",
+    "files": [
+      "crates/cc-lb-admin/web/src/lib/hooks/__tests__/query-boundary.test.ts",
+      "crates/cc-lb-admin/web/src/lib/queries.ts"
+    ]
+  },
+  {
+    "pr": 800,
+    "branch": "fix/admin-plugin-delete",
+    "base": "fix/admin-router-revision",
+    "head": "13d3fbed851ea035e9d4def470a09c029eb33fb0",
+    "files": [
+      "crates/cc-lb-admin/web/src/components/plugins/PluginDeleteDialog.tsx",
+      "crates/cc-lb-admin/web/src/components/plugins/PluginDetail.loading.test.tsx",
+      "crates/cc-lb-admin/web/src/components/plugins/PluginDetail.tsx",
+      "crates/cc-lb-admin/web/src/lib/hooks/__tests__/query-boundary.test.ts",
+      "crates/cc-lb-admin/web/src/lib/queries.ts",
+      "crates/cc-lb-admin/web/src/routes/-plugins.test.tsx"
+    ]
+  },
+  {
+    "pr": 801,
+    "branch": "fix/admin-plugin-gc-controls",
+    "base": "fix/admin-plugin-delete",
+    "head": "9ea5f44d2fd5705b10e57b73526b5835ad56030f",
+    "files": [
+      "crates/cc-lb-admin/web/src/components/plugins/PluginCatalog.loading.test.tsx",
+      "crates/cc-lb-admin/web/src/components/plugins/PluginCatalog.tsx"
+    ]
+  },
+  {
+    "pr": 802,
+    "branch": "fix/admin-rename-submit",
+    "base": "fix/admin-plugin-gc-controls",
+    "head": "970ff5d7a03a33d50fcf6a1c8ee3961cea5ec90d",
+    "files": [
+      "crates/cc-lb-admin/web/src/components/upstreams/InlineNameEditor.tsx",
+      "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.test.tsx"
+    ]
+  }
+]

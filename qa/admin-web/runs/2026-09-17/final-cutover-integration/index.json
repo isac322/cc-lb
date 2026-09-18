@@ -1,0 +1,156 @@
+{
+  "schema": "cc-lb-final-cutover-evidence-index/v1",
+  "date": "2026-09-17",
+  "pr": 793,
+  "pr_base": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+  "integrated_master": "b07b25eebe7bbee7e882643c6776c82015d49689",
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-audit-screen.png",
+      "sha256": "030bfb5ff6b88024cf458828ac9564900e5b7933cbd462b1837dd5a4b5968b98",
+      "bytes": 200573
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-audit.json",
+      "sha256": "e07d4db1173735a8d65813145cb6e0bebb426c6760699d5daeecb316bbf0502a",
+      "bytes": 1566
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-plugins-screen.png",
+      "sha256": "7613a34cb55695d6693fe8399a4cd92e1701699e1d31e5e093a506326c875128",
+      "bytes": 94258
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-plugins.json",
+      "sha256": "1e9bd288ef52b61901de71b5d276a4bde9677ebc78bda7b331bcfc69fe9e43ea",
+      "bytes": 408
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-restoration-review.json",
+      "sha256": "0f8e4bbf94cc20b28acc85b3a05f2677c8c59ab9861aabe00b227e21cc69f21d",
+      "bytes": 700
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-router-screen.png",
+      "sha256": "d1bc266985e07ce3f4c5904b41f2d496908fb0a31f86b30ff69864255b72518d",
+      "bytes": 128776
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-router.json",
+      "sha256": "908f3a7a3ef8d02a383ace6f6da76057bfa178aff8251fd8a6b644b8faa2f2e9",
+      "bytes": 747
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-settings-restored-screen.png",
+      "sha256": "d7381655a64f19125d74a15c25a6f5362ea4f84c90eabfe1f30d4b073231e418",
+      "bytes": 172923
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-settings-save-file-screen.png",
+      "sha256": "320c8386f916c0de5ae475f51a6ae3780a71365572917c229354179df9f23e42",
+      "bytes": 184322
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-settings-save-file.json",
+      "sha256": "0ebe7a33398e581ff0591b7f81372eabb680f4f2851ff6b87632b128098d38a5",
+      "bytes": 40347
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-summary.json",
+      "sha256": "9884566a2b857c2aadb5abbfc3d1dbd748a73ddd9daf243203fe168677639167",
+      "bytes": 1183
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-upstream-clear-restore.json",
+      "sha256": "3130c9d9c911e70a967947c534b4e1da1bae55d6b7de28565f4c0c1fb740a36f",
+      "bytes": 526
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-upstream-clear-screen.png",
+      "sha256": "3a97222297872d961a962ce5d60c31638bd1a9bf0c027c4ab5ddccd72b0326b6",
+      "bytes": 134851
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/browser-upstream-restored-screen.png",
+      "sha256": "67e752da252f02164826b54ed686b4573729a7f05285a1144bb4271b30f0da27",
+      "bytes": 138317
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/draft-regression-after.txt",
+      "sha256": "4cc38dbac820cbedde04b2937a7f351a180cfcc0fb034ec64fa8e1e4e6cd2881",
+      "bytes": 919
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/draft-regression-before.txt",
+      "sha256": "730b3e5b01cf0d63d33a516b18747414526edf96bdab255de92218bafa6077fd",
+      "bytes": 3016
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/inventory-check.txt",
+      "sha256": "363b8969ef120b32d39c4e20348beedb5f7af7b6626d29242cb6a28711f622f9",
+      "bytes": 140
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/inventory-generate.txt",
+      "sha256": "c5e27512178b07e53a2c6da22c4854830d2fa9be288b3b0b1e1fc0cdb26e4230",
+      "bytes": 142
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/linux-pdk-final.txt",
+      "sha256": "ba7c3b621bd1cda1a039c17b43b896335e398f57a11d37b6821a1c4d06756ebe",
+      "bytes": 1334
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/migration-renumber-map.json",
+      "sha256": "a7db39def7e00e8ca42c00dc69135dfc889132295c772962d458edb97639a24d",
+      "bytes": 1306
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/runtime-checks.json",
+      "sha256": "7533cccb2c8615c4afda5b4b50d3ba41ff4a8f48946135d0b443157cb6b5fb4b",
+      "bytes": 2837
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/rust-format.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/verification.json",
+      "sha256": "ea7caeb3b4788f1f49c81a62f775b45c7f807e0c4ed1af506b9717a56ab2862d",
+      "bytes": 4715
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/web-build.txt",
+      "sha256": "cfd996deb21a9536ff50ddc60986fa5e78a0f20effe80c80fa2a98a7b92595c2",
+      "bytes": 4937
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/web-lint.txt",
+      "sha256": "9f4335a9c4b349da1b497d16291d96fcc7ca9b607dbc256fe3e7bc0ec9e39754",
+      "bytes": 46
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/web-tests.txt",
+      "sha256": "2664854d5021c27d86ffb8733e04710549f22022ec612148addb1c7a335aa48b",
+      "bytes": 14125
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/web-typecheck.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/final-cutover-integration/workspace-tests-final.txt",
+      "sha256": "cb39f79ff7d7cce6ae489cfc6d2b77ddaa090db36b779db4c31e2383f542c19b",
+      "bytes": 11197
+    }
+  ],
+  "limits": [
+    "Local disposable fixtures only; no production migration or rollout.",
+    "Native macOS workspace has four baseline PDK crashes; final Linux PDK four cases pass.",
+    "Native Audit evidence covers rendered fixture administrator rows, not the complete production matrix.",
+    "The first claimed Settings restoration was draft-only; the review preserves this failure and records confirmed file restoration at revision12.",
+    "Private credentials, database files, binaries and downloaded TOML are excluded."
+  ]
+}

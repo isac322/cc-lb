@@ -1,0 +1,21 @@
+{
+  "accepted_ui_cells": 0,
+  "instrumented_tab": "dbbdb5e4-b13a-45d7-8bf0-9b79c0b5b0dc",
+  "last_observation": "native evaluate returned404 Tab not found",
+  "storage_after_missing_tab": {
+    "revision": 1,
+    "default_limits": [
+      {
+        "kind": "requests",
+        "window_secs": 120,
+        "cap_micros": 17
+      }
+    ]
+  },
+  "patch_responses_after_instrumentation": [],
+  "cause": "Confirmed in Camofox log: inactive tab reaped after300011ms (5-minute idle deadline), before any UI mutation.",
+  "controller_tools_withdrawn": true,
+  "ui_fixture_stopped": true,
+  "not_an_application_regression_claim": true,
+  "cause_evidence": "native-idle-reaper-log.json"
+}

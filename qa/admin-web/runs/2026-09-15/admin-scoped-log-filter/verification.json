@@ -1,0 +1,35 @@
+{
+  "schema": "cc-lb-admin-scoped-log-filter-verification/v1",
+  "status": "isolated_filter_mechanism_verified",
+  "tested_filter": "info,[admin.request]=debug",
+  "binary_sha256": "253cc5105cebfe759c76a4848a7b224da4cef272a9210e8106420b4a09ffff4f",
+  "acceptance": [
+    {
+      "engine": "sqlite",
+      "scoped_admin_query_and_acquire_requests_verified": 3,
+      "broad_sql_debug_events_outside_admin": 99,
+      "scoped_sql_debug_events_outside_admin": 0,
+      "root_info_events_retained": 11,
+      "other_debug_events_inside_admin_observed": 0,
+      "proxy_control_status": 401
+    },
+    {
+      "engine": "postgres",
+      "scoped_admin_query_and_acquire_requests_verified": 3,
+      "broad_sql_debug_events_outside_admin": 144,
+      "scoped_sql_debug_events_outside_admin": 0,
+      "root_info_events_retained": 27,
+      "other_debug_events_inside_admin_observed": 0,
+      "proxy_control_status": 401
+    }
+  ],
+  "limits": [
+    "The contextual directive enables DEBUG events inside admin.request, not exclusively SQL targets.",
+    "Only three authenticated upstream-list GETs and one unauthenticated proxy control per phase were exercised.",
+    "Startup/background SQL debug was present in broad-mode captures and absent in scoped-mode captures; no production log-volume estimate follows from this small comparison.",
+    "This does not prove secret-safe debug logging for every Admin endpoint or separate pure DB execution from pure pool queue wait.",
+    "No production setting, deployment, source code, or provider account was changed."
+  ],
+  "cleanup": "All four experiment processes stopped; fixture databases and snapshots retained.",
+  "full_runtime_qa_complete": false
+}

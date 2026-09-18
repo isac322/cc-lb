@@ -1,0 +1,37 @@
+{
+  "sqlite": {
+    "nonadmin": {
+      "baseline_ms_per_2000": 146.43258300202433,
+      "indexed_ms_per_2000": 194.66341598308645,
+      "increase_percent": 32.93722748877232
+    },
+    "admin": {
+      "baseline_ms_per_2000": 147.12381250865292,
+      "indexed_ms_per_2000": 333.0143329803832,
+      "increase_percent": 126.34971681473881
+    }
+  },
+  "postgres": {
+    "nonadmin": {
+      "baseline_execution_ms_per_10000": 36.116,
+      "indexed_execution_ms_per_10000": 62.33,
+      "increase_percent": 72.58278879167128,
+      "baseline_wal_bytes": 4349154,
+      "indexed_wal_bytes": 5524498
+    },
+    "admin": {
+      "baseline_execution_ms_per_10000": 50.138,
+      "indexed_execution_ms_per_10000": 125.889,
+      "increase_percent": 151.085005385137,
+      "baseline_wal_bytes": 4859642,
+      "indexed_wal_bytes": 10506338
+    }
+  },
+  "limits": [
+    "Local synthetic A/B/A; not production throughput.",
+    "SQLite uses2000 single-statement autocommit writes per class.",
+    "Postgres uses10000-row INSERT SELECT execution+WAL; commit/client/pool time excluded.",
+    "Durable PG single-row measurements were noisy; not used to claim isolated index overhead.",
+    "Large live PG requires separately approved concurrent precreate and exact definition+validity check before deploy."
+  ]
+}

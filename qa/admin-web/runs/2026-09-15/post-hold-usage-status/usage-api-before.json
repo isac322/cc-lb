@@ -1,0 +1,40 @@
+{
+  "range": "7d",
+  "step": "hour",
+  "group_by": "upstream",
+  "window_start_unix_secs": 1788919200,
+  "window_end_unix_secs": 1789524000,
+  "series": [
+    {
+      "key": "c804fce8-2b1a-4d3a-a149-878886bee631",
+      "upstream_name": "qa-usage-display",
+      "buckets": [
+        {
+          "bucket_start_unix_secs": 1788919200,
+          "request_count": 2,
+          "input_tokens": 1000,
+          "output_tokens": 200,
+          "cache_creation_input_tokens": 300,
+          "cache_read_input_tokens": 500,
+          "error_count": 0,
+          "virtual_cost_micros": 1250000,
+          "latency_ms_sum": 0,
+          "latency_count": 0,
+          "latency_ms_min": null,
+          "latency_ms_max": null,
+          "proxy_setup_ms_sum": 0,
+          "proxy_setup_ms_count": 0,
+          "shape_ms_sum": 0,
+          "shape_ms_count": 0,
+          "sign_ms_sum": 0,
+          "sign_ms_count": 0,
+          "upstream_ttfb_ms_sum": 0,
+          "upstream_ttfb_ms_count": 0,
+          "upstream_body_ms_sum": 0,
+          "upstream_body_ms_count": 0
+        }
+      ]
+    }
+  ],
+  "observed": true
+}

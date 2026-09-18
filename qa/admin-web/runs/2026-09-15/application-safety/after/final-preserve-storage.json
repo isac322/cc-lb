@@ -1,0 +1,22 @@
+{
+  "candidate_sha256": "f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8",
+  "before": [
+    "http://127.0.0.1:19991/",
+    4,
+    0,
+    0
+  ],
+  "after_old_client_unedited_save": [
+    "http://127.0.0.1:19991/",
+    4,
+    0,
+    0
+  ],
+  "column_order": [
+    "base_url",
+    "spec_revision",
+    "enabled",
+    "warmup_enabled"
+  ],
+  "same_state": true
+}

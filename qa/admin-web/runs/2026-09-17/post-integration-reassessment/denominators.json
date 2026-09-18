@@ -1,0 +1,227 @@
+{
+  "observed_utc": "2026-09-17T08:38:17Z",
+  "observation_type": "denominator_observation",
+  "note": "This is denominator observation\u2014not UI execution/performance PASS",
+  "source_version": {
+    "health_version": "0.4.9",
+    "git_sha": "unknown"
+  },
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/principals",
+      "status": 200,
+      "start": "2026-09-17T08:38:16.118Z",
+      "end": "2026-09-17T08:38:16.792Z",
+      "duration_ms": 674,
+      "bytes": 4613,
+      "wrapper_shape": "object(principals)",
+      "pagination": null,
+      "count": 22,
+      "unique_id_count": 22,
+      "items": [
+        {
+          "enabled": true,
+          "kind": "admin",
+          "entity_id_sha256": "35094d22a1b200dcef379f77c6e688c284996fb21661051c78c116d4d99432e6"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "d55b16ed6a3166744aea2ba6b720e1063aa61bab7d06e8f58f24fabb7dacb858"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "93410fa2825b1d4151889c289e63ef6422f85dae72f3ee203e7dd81b81e9253a"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "c2941ba22c5dd7e8cd249927c98ce772c0e585633ebc286d783fb27b1b99c57c"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "ae4425301274ed8a7f46a6b0ee35d73a7e017ab8bf2c4932461885bf624a9ad2"
+        },
+        {
+          "enabled": true,
+          "kind": "machine",
+          "entity_id_sha256": "b2d60eb246d7e62ed5d4ab3bd2a58929246fa1fdb0a8f711a8116ef15b4440dd"
+        },
+        {
+          "enabled": true,
+          "kind": "machine",
+          "entity_id_sha256": "c2aa06a79510ef8337bfb1163d4cb765aeaf19bcd39ca8757f59ede906b3507d"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "3b384dc8b3afa5e1d07f748036174de4c5cb4fcbf65bb8a60f605e28c7b086f8"
+        },
+        {
+          "enabled": true,
+          "kind": "machine",
+          "entity_id_sha256": "4bba3b989630fb96e37435cf49953182133e3985d845c1acd6fc65cdd2cbd87e"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "26b7a9472f81861964d66b59420bd805d3fe231b887edd3bd17ddd093529ae39"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "8ee326edd5bfd09fb17e48e971a99849fe70a5259cf628d94a2f00671214f61c"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "22fb9f873014aabb69e72e764ef0aadbc1bf58ff44a2db6e40121eee87c0a779"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "4b35ed9d025ff20a1f79daeca9837688f2e9664f36f72fde0f5f22bca37fd9e7"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "4a6ee327c82e50f1355d98d7b5f84026b56531cb8a49fe93e59aeed48a81b753"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "882a50b909a4bbed1f94cf1517f2682bfeebfc06e1f9ab9f62f1db9fde78b13d"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "4cffad572190fc5c12ab4ca3d2417183045ab28c3ede75a7a5583672b7cfa618"
+        },
+        {
+          "enabled": true,
+          "kind": "machine",
+          "entity_id_sha256": "6447ac18b7b25e8921786ebee14c6da5c7005375c755e345d1c6f6fb2a9e5a43"
+        },
+        {
+          "enabled": true,
+          "kind": "machine",
+          "entity_id_sha256": "1d1ac019483823e1d70a52fecdcdd12f209cf0607f1b81efd3c5552e9d736d8e"
+        },
+        {
+          "enabled": true,
+          "kind": "machine",
+          "entity_id_sha256": "0fbbfb68b666930aa309dba350f63333906d10b6fb2a7fc830f5411f89106cb6"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "810a146e01db274bca6fb8b6ccdba084dd95915c18211a4a813214f619c75c18"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "5d3347e800e1d06d1c660bf9f2aa68ed0d626ae6c3880940636cc93e0b4e4e5a"
+        },
+        {
+          "enabled": true,
+          "kind": "human",
+          "entity_id_sha256": "a9d1ec769d670fbfb3772d3758bff782273216d0400f574217d6d8332b8201c6"
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/upstreams",
+      "status": 200,
+      "start": "2026-09-17T08:38:16.797Z",
+      "end": "2026-09-17T08:38:17.030Z",
+      "duration_ms": 233,
+      "bytes": 3189,
+      "wrapper_shape": "object(upstreams)",
+      "pagination": null,
+      "count": 9,
+      "unique_id_count": 9,
+      "items": [
+        {
+          "enabled": true,
+          "kind": "anthropic_oauth",
+          "entity_id_sha256": "82fec025cf3abf37d4474c3894b4984cbdbbd6dee7312c5f70b1bbc1743690bd"
+        },
+        {
+          "enabled": true,
+          "kind": "anthropic_oauth",
+          "entity_id_sha256": "cece8a14eefb8a94bb007ee51ade6f04855c36f63bea57c5c723435c265164bf"
+        },
+        {
+          "enabled": true,
+          "kind": "anthropic_oauth",
+          "entity_id_sha256": "f01a75dea4c2032e1487917288ebc21d87f41b1a1c1c676f902e90357dfab20c"
+        },
+        {
+          "enabled": true,
+          "kind": "anthropic_oauth",
+          "entity_id_sha256": "290cb908be11418c91d8df6264d225d8d9db85afaf6fd78f392d5b83843e6eaa"
+        },
+        {
+          "enabled": true,
+          "kind": "anthropic_oauth",
+          "entity_id_sha256": "282a2fb1d063d3ac83683f6962be89d7771a669c282fcdcd00ee9cc414305487"
+        },
+        {
+          "enabled": true,
+          "kind": "anthropic_oauth",
+          "entity_id_sha256": "1bb08e0c70092ee9ccdb7dd71f29f617c634fa9e8dd52ec2977cde7a2800407f"
+        },
+        {
+          "enabled": true,
+          "kind": "anthropic_oauth",
+          "entity_id_sha256": "accf53ab7b1e02b7e3370f523965fff62c8c1bdd2d592bd82d8e2f391f93670a"
+        },
+        {
+          "enabled": true,
+          "kind": "anthropic_oauth",
+          "entity_id_sha256": "7228fc48864e71b5d99919fb5885759ef9ff9f812d89e107feab7509fa1d5fb6"
+        },
+        {
+          "enabled": true,
+          "kind": "anthropic_oauth",
+          "entity_id_sha256": "e86a8b4f2af436bec4b1c05e32732f65c47700a23152b23e2929e2383a9b108d"
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/plugins/registry",
+      "status": 200,
+      "start": "2026-09-17T08:38:17.031Z",
+      "end": "2026-09-17T08:38:17.271Z",
+      "duration_ms": 240,
+      "bytes": 3761,
+      "wrapper_shape": "object(entries)",
+      "pagination": null,
+      "count": 2,
+      "unique_id_count": 2,
+      "items": [
+        {
+          "enabled": null,
+          "kind": "filter",
+          "entity_id_sha256": "90d5b0a26955772ebda61cd86cef90ec4f0a4efd29b8a7099df640bc94a8cc0a"
+        },
+        {
+          "enabled": null,
+          "kind": "filter",
+          "entity_id_sha256": "f07356750af9d4dce7fcc7279e1c78ccb784c2a8e6e6a78ded159e939f50edb1"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "principals_count": 22,
+    "upstreams_count": 9,
+    "plugins_registry_count": 2
+  },
+  "privacy": "Entity IDs are represented by SHA-256; unredacted source remains outside Git. No names, credentials or response payloads are included."
+}

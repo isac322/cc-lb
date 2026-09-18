@@ -1,0 +1,64 @@
+{
+  "head": "19b055708f3b9814b517158bfbb196aabb5dea81",
+  "candidate_sha256": "7a4e39614eef18795877710337e34b56a0624d586336af6911ab917d6712413c",
+  "application_source_modified_during_review": false,
+  "runtime_source_file_count": 25,
+  "source_files_with_test_only_hunks": 2,
+  "contract_regressions": {
+    "passed": 104,
+    "deselected": 873,
+    "postgres_database": "new disposable isolated database explicitly provided"
+  },
+  "frontend_regressions": {
+    "files": 7,
+    "passed": 53
+  },
+  "http_ab": {
+    "requests": 44,
+    "pairs": 22,
+    "result": "equal status/body/previous headers except Date; added Admin-only x-request-id and Server-Timing explicitly allowed",
+    "limits": "Does not exercise successful upstream forwarding or full streaming lifetime; SSE first line and post-cancellation request tested."
+  },
+  "verified_findings": [
+    {
+      "id": "base-url-upgrade-window",
+      "status": "confirmed with native browser and independent storage read",
+      "detail": "Editor mounted against ef70 response lacking base_url was retained across current19 deployment. One Save without text/credential edits changed stored loopback override to NULL, revision2->3. Disabled upstream remained disabled.",
+      "source": "crates/cc-lb-admin/web/src/components/upstreams/SettingsCard.tsx:26,42-47 plus newly introduced backend explicit-null semantics",
+      "limits": "Request body was not captured on the wire; null serialization follows source. UI action, independent GET, and persisted NULL are directly observed. No provider/proxy request was sent."
+    },
+    {
+      "id": "audit-window-filter",
+      "status": "confirmed with pristine/current real API comparison and native current UI screenshot",
+      "detail": "Same initial data: pristine base retains older admin action; head newest200 contains only newer non-admin records rejected by UI filter."
+    },
+    {
+      "id": "audit-scope-sort",
+      "status": "confirmed extra sorting on both SQLite and synthetic PostgreSQL plans; production performance impact unmeasured",
+      "detail": "SQLite adds TEMP B-TREE. PostgreSQL 100k-row temporary clone adds Incremental Sort and ts-index filtering for principal and actor scopes instead of scope-ordered index early stop."
+    }
+  ],
+  "retracted_review_findings": [
+    "PluginDeleteDialog second-click race: reviewer withdrew after checking query invalidation/notification and navigation order."
+  ],
+  "pending": [],
+  "full_application_safety_pass": false,
+  "production_changes": false,
+  "secret_bearing_debug_probe": {
+    "status": 201,
+    "raw_secrets_found": 0,
+    "scope": "Synthetic key create, warmup false, loopback destination; explicitly disabled after create before upgrade checks."
+  },
+  "current_ui_index_sha256": "9d1f2b21eb548a969ecbb6f6011c42f1c4ec6d49a800e38ed92d2a2f114a9d55",
+  "matches_prior_verified_ui_bundle": true,
+  "cleanup": {
+    "new_contract_test_database_removed": true,
+    "browser_tabs_closed_reported": true,
+    "owned_server_ports_closed_verified": true,
+    "synthetic_override_restored": true,
+    "restored_revision": 4,
+    "private_auth_handoff_removed": true,
+    "old_fixtures_preserved": true
+  },
+  "completion_gate_note": "Prior completed CI/review todo items remain historical in the task system; a new explicit blocked safety gate records the three reproduced issues. Current safety signoff is FAIL, despite green tests."
+}

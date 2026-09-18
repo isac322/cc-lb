@@ -1,0 +1,14 @@
+{
+  "observed_requests": [
+    {
+      "request_id": "qa_st_1de8658b14104ed5bf05328695636fc3",
+      "observed_at_unix": 1789478806.801802
+    },
+    {
+      "request_id": "qa_st_a4ff74c3925f417390a3c6a4f8564e9d",
+      "observed_at_unix": 1789478806.937682
+    }
+  ],
+  "browser_descriptions_match_server_ids": true,
+  "claim": "Opaque request ID is readable through Server-Timing in isolated-world Resource Timing; observed request count is 2, not assumed 1."
+}

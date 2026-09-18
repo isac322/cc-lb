@@ -1,0 +1,25 @@
+{
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-17/native-click-recovery/native-counter-proof.json",
+      "sha256": "e5ca76e373549ef1e898024da4d0e89ca651f2c75f4468db440c098c2e9d1992"
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/native-click-recovery/native-semantic-click-events.json",
+      "sha256": "4467b0cf4c9f830d417efb0932d136de3461b32b9ab72911a201308632fb96b0"
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/native-click-recovery/native-service-log-extract.json",
+      "sha256": "828a12615d1eb384cb111fa2937f523341ecd6b7f7e2288de6e6f280cfc7706c"
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/native-click-recovery/root-cause.json",
+      "sha256": "706a431b1ac8c60ca0b79a29cb64be1d0a276d98f8cd556e9b54da315fbd7dae"
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-17/native-click-recovery/summary.json",
+      "sha256": "7c3c9694beab3569899597611cb18b27489d4edeb990f61f971881fafd1b19c8"
+    }
+  ],
+  "full_qa_complete": false
+}

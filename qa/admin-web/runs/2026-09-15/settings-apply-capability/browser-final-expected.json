@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "step": "final_ui_reverification",
+  "prebuilt_spa_index_sha256": "9d1f2b21eb548a969ecbb6f6011c42f1c4ec6d49a800e38ed92d2a2f114a9d55",
+  "apply_supported": false,
+  "expected_apply_disabled": true,
+  "expected_apply_notice": {
+    "id": "config-apply-support",
+    "exact_wording_required": "Changes to startup-fixed settings must be made through the deployment configuration and restart workflow.",
+    "is_outside_pipeline_status": true,
+    "has_no_aria_live": true
+  },
+  "expected_aria_describedby": {
+    "apply_button_ids": [
+      "config-pipeline-status",
+      "config-apply-support"
+    ],
+    "validate_button_ids": [
+      "config-pipeline-status"
+    ]
+  }
+}

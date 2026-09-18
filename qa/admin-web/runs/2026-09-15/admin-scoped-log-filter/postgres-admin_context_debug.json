@@ -1,0 +1,39 @@
+{
+  "engine": "postgres",
+  "profile": "admin_context_debug",
+  "RUST_LOG": "info,[admin.request]=debug",
+  "admin_http_requests": 3,
+  "http_statuses": [
+    200,
+    200,
+    200
+  ],
+  "matched_requests": [
+    {
+      "rid": "req_admin_01a0a8dd-2f99-73c1-85a4-883a658798eb",
+      "query_debug_events": 1,
+      "acquire_debug_events": 1
+    },
+    {
+      "rid": "req_admin_01a0a8dd-2f9e-78a3-b108-1cd458829415",
+      "query_debug_events": 1,
+      "acquire_debug_events": 1
+    },
+    {
+      "rid": "req_admin_01a0a8dd-2fa1-7611-8651-428a9bd31bd9",
+      "query_debug_events": 1,
+      "acquire_debug_events": 1
+    }
+  ],
+  "sql_debug_events_total": 6,
+  "sql_debug_events_outside_admin_span": 0,
+  "full_log_bytes": 15646,
+  "proxy_control": {
+    "status": 401,
+    "request_id": "qa_proxy_header_control",
+    "x_request_id": null,
+    "body_sha256": "f5245aa94925bf141c7a3bdd9c9d21abd3f3571c12560701ba29a0c9caa91fcd"
+  },
+  "log_sha256": "1729122f95ddd1cf499c4d78601ab98cd0223d794e3aaf7ef8415f7769b1ab1c",
+  "production_changes": 0
+}

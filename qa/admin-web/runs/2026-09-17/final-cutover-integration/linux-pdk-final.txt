@@ -1,0 +1,17 @@
+info: syncing channel updates for 1.98.1-aarch64-unknown-linux-gnu
+error: could not download file from 'https://static.rust-lang.org/dist/channel-rust-1.98.1.toml.sha256' to '/usr/local/rustup/tmp/mvtxipvy5zzjl7h__file': error downloading file: error sending request for url (https://static.rust-lang.org/dist/channel-rust-1.98.1.toml.sha256): client error (Connect): dns error: failed to lookup address information: Temporary failure in name resolution
+   Compiling cc-lb-plugin-wire v0.8.0 (/work/crates/cc-lb-plugin-wire)
+   Compiling cc-lb-pdk-wasmtime-macros v0.1.2 (/work/crates/cc-lb-pdk-wasmtime-macros)
+   Compiling cc-lb-pdk-wasmtime v0.1.2 (/work/crates/cc-lb-pdk-wasmtime)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.85s
+     Running tests/all.rs (/target/debug/deps/integration-266351a8e496aa79)
+
+running 4 tests
+test filter_service_tier_dispatch::run_filter_dispatches_archived_service_tier ... ok
+test filter_service_tier_dispatch::run_filter_dispatches_owned_service_tier ... ok
+test response_transform_dispatch::run_transform_sse_event_dispatches_owned_request ... ok
+test response_transform_dispatch::run_transform_response_dispatches_owned_request ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[cutover-linux-pdk: exited; cursor=841]

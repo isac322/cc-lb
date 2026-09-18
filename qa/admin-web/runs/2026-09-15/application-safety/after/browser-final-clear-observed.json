@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-16T08:44:26.131Z",
+  "stage": "stage3_current_ui_explicit_clear",
+  "upstream_name": "qa-safety-upgrade",
+  "pre_clear_loaded_state": {
+    "form_rendered": true,
+    "loaded_base_url": "http://127.0.0.1:19991/",
+    "loads_stored_loopback": true
+  },
+  "post_clear_dom": {
+    "settings_base_url_display": "—",
+    "header_line": "Base URL: https://api.anthropic.com",
+    "form_closed": true
+  },
+  "independent_api_state": {
+    "id": "01b20b9f-9b53-43f8-b161-35b10d30a1bb",
+    "name": "qa-safety-upgrade",
+    "base_url": null,
+    "spec_revision": 5,
+    "enabled": false
+  },
+  "validations": {
+    "edit_form_loaded_stored_loopback": true,
+    "edit_form_closed_on_success": true,
+    "settings_displays_dash": true,
+    "api_base_url_is_null": true,
+    "api_spec_revision_is_5": true,
+    "enabled_remains_false": true
+  },
+  "explanation": "Under the new current UI, opening Settings Edit correctly loaded the stored loopback URL http://127.0.0.1:19991/. When Base URL was deliberately cleared and saved, the new clear_base_url contract successfully cleared the override to null and incremented revision to 5."
+}

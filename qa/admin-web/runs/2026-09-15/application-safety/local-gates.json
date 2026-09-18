@@ -1,0 +1,19 @@
+{
+  "candidate_sha256": "f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8",
+  "rust_tests": 112,
+  "web_tests": 706,
+  "web_test_files": 72,
+  "cargo_fmt_check_exit": 0,
+  "affected_all_features_clippy_exit": 0,
+  "typecheck_exit": 0,
+  "web_build_exit": 0,
+  "inventory_generate_exit": 0,
+  "inventory_check_exit": 0,
+  "standard_yaml_rows": 433,
+  "source_actions": 205,
+  "source_request_occurrences": 149,
+  "source_endpoints": 115,
+  "current_variant_labels": 597,
+  "production_calls": 0,
+  "full_runtime_qa_complete": false
+}

@@ -1,0 +1,267 @@
+{
+  "schema": "cc-lb-admin-correlation-smoke/v1",
+  "candidate_sha256": "132e831a2a8f2be936c7d92c79edd6cb37b6ed943ec5e93f11662054e60ee421",
+  "environment": "isolated SQLite and owned QA PostgreSQL database",
+  "records": [
+    {
+      "engine": "sqlite",
+      "case": "sql_read",
+      "status": 200,
+      "request_id": "req_admin_01a0a510-ee45-7f82-bfce-08b47688790e",
+      "head_ms": 10.674125,
+      "total_ms": 10.697417,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1",
+      "completion_events": 1,
+      "query_events": 1,
+      "acquire_events": 1,
+      "handler_ms": 6.963167,
+      "sql_elapsed_secs": [
+        6.5e-05
+      ],
+      "acquire_total_secs": [
+        8.9541e-05
+      ],
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    },
+    {
+      "engine": "sqlite",
+      "case": "sql_read_repeat",
+      "status": 200,
+      "request_id": "req_admin_01a0a510-ee4f-74a3-8cba-a197f30fa9a0",
+      "head_ms": 3.016917,
+      "total_ms": 3.032209,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1",
+      "completion_events": 1,
+      "query_events": 1,
+      "acquire_events": 1,
+      "handler_ms": 1.475708,
+      "sql_elapsed_secs": [
+        6.0667e-05
+      ],
+      "acquire_total_secs": [
+        5.0875e-05
+      ],
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    },
+    {
+      "engine": "sqlite",
+      "case": "unmatched_private_uri",
+      "status": 404,
+      "request_id": "req_admin_01a0a510-ee52-7d83-bb2e-dc3bd301da78",
+      "head_ms": 2.0415,
+      "total_ms": 2.052291,
+      "body_bytes": 0,
+      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "completion_events": 1,
+      "query_events": 0,
+      "acquire_events": 0,
+      "handler_ms": 0.805708,
+      "sql_elapsed_secs": [],
+      "acquire_total_secs": [],
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    },
+    {
+      "engine": "sqlite",
+      "case": "untrusted_method",
+      "status": 405,
+      "request_id": "req_admin_01a0a510-ee54-7ac1-ba02-2e792a69d3f5",
+      "head_ms": 1.526667,
+      "total_ms": 1.537042,
+      "body_bytes": 0,
+      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "completion_events": 1,
+      "query_events": 0,
+      "acquire_events": 0,
+      "handler_ms": 0.207375,
+      "sql_elapsed_secs": [],
+      "acquire_total_secs": [],
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    },
+    {
+      "engine": "sqlite",
+      "case": "unauthorized",
+      "status": 401,
+      "request_id": "req_admin_01a0a510-ee56-78e2-9605-8e1ea66299fb",
+      "head_ms": 104.625291,
+      "total_ms": 104.644375,
+      "body_bytes": 51,
+      "body_sha256": "5625e86f1dcaaeeca83baf8b80086ea87350f484d777095f5c90a22c86797374",
+      "completion_events": 1,
+      "query_events": 1,
+      "acquire_events": 1,
+      "handler_ms": 103.298459,
+      "sql_elapsed_secs": [
+        0.000147667
+      ],
+      "acquire_total_secs": [
+        5.1292e-05
+      ],
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    },
+    {
+      "engine": "sqlite",
+      "case": "sse_response_head",
+      "status": 200,
+      "request_id": "req_admin_01a0a510-eebf-79c1-9611-10809216aa4c",
+      "head_ms": 2.566667,
+      "total_ms": null,
+      "body_bytes": null,
+      "body_sha256": null,
+      "completion_events": 1,
+      "query_events": 0,
+      "acquire_events": 0,
+      "handler_ms": 0.93575,
+      "sql_elapsed_secs": [],
+      "acquire_total_secs": [],
+      "client_close_after_head_ms": 2.571375,
+      "body_read": false,
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    },
+    {
+      "engine": "postgres",
+      "case": "sql_read",
+      "status": 200,
+      "request_id": "req_admin_01a0a510-eec1-7172-b865-2f290272116b",
+      "head_ms": 5.070167,
+      "total_ms": 5.080667,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1",
+      "completion_events": 1,
+      "query_events": 1,
+      "acquire_events": 1,
+      "handler_ms": 3.898083,
+      "sql_elapsed_secs": [
+        0.001948667
+      ],
+      "acquire_total_secs": [
+        0.000852375
+      ],
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    },
+    {
+      "engine": "postgres",
+      "case": "sql_read_repeat",
+      "status": 200,
+      "request_id": "req_admin_01a0a510-eec6-7940-8013-bfc49079833a",
+      "head_ms": 3.560833,
+      "total_ms": 3.573625,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1",
+      "completion_events": 1,
+      "query_events": 1,
+      "acquire_events": 1,
+      "handler_ms": 2.3831249999999997,
+      "sql_elapsed_secs": [
+        0.000877833
+      ],
+      "acquire_total_secs": [
+        0.000525875
+      ],
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    },
+    {
+      "engine": "postgres",
+      "case": "unmatched_private_uri",
+      "status": 404,
+      "request_id": "req_admin_01a0a510-eeca-7211-846b-b134b96a23f9",
+      "head_ms": 1.257125,
+      "total_ms": 1.264667,
+      "body_bytes": 0,
+      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "completion_events": 1,
+      "query_events": 0,
+      "acquire_events": 0,
+      "handler_ms": 0.116583,
+      "sql_elapsed_secs": [],
+      "acquire_total_secs": [],
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    },
+    {
+      "engine": "postgres",
+      "case": "untrusted_method",
+      "status": 405,
+      "request_id": "req_admin_01a0a510-eecb-7292-a14a-054474a72e55",
+      "head_ms": 1.046458,
+      "total_ms": 1.053208,
+      "body_bytes": 0,
+      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "completion_events": 1,
+      "query_events": 0,
+      "acquire_events": 0,
+      "handler_ms": 0.05425,
+      "sql_elapsed_secs": [],
+      "acquire_total_secs": [],
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    },
+    {
+      "engine": "postgres",
+      "case": "unauthorized",
+      "status": 401,
+      "request_id": "req_admin_01a0a510-eecc-7e03-ab71-ff7cff1827fa",
+      "head_ms": 114.968875,
+      "total_ms": 114.988459,
+      "body_bytes": 51,
+      "body_sha256": "5625e86f1dcaaeeca83baf8b80086ea87350f484d777095f5c90a22c86797374",
+      "completion_events": 1,
+      "query_events": 1,
+      "acquire_events": 1,
+      "handler_ms": 113.750834,
+      "sql_elapsed_secs": [
+        0.009629667
+      ],
+      "acquire_total_secs": [
+        0.0011945
+      ],
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    },
+    {
+      "engine": "postgres",
+      "case": "sse_response_head",
+      "status": 200,
+      "request_id": "req_admin_01a0a510-ef40-7433-839a-8c73906839b8",
+      "head_ms": 1.445625,
+      "total_ms": null,
+      "body_bytes": null,
+      "body_sha256": null,
+      "completion_events": 1,
+      "query_events": 0,
+      "acquire_events": 0,
+      "handler_ms": 0.16245800000000002,
+      "sql_elapsed_secs": [],
+      "acquire_total_secs": [],
+      "client_close_after_head_ms": 1.450209,
+      "body_read": false,
+      "pure_db_execution_ms": null,
+      "pure_pool_wait_ms": null,
+      "measurement_boundary": "HTTP response head plus observed driver events; SQL elapsed includes streaming/consumption, acquisition includes wait/check/connect."
+    }
+  ],
+  "distinct_server_ids": 12,
+  "private_marker_in_scoped_logs": false,
+  "credential_values_in_scoped_logs": false,
+  "full_runtime_qa_complete": false
+}

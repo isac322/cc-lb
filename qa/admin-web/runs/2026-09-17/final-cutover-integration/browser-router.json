@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-17T08:03:01.307Z",
+  "task": "router_strategy_revision_mutation",
+  "observation": {
+    "subtitle_line": "rev 2",
+    "router_terminal_resource_entries": [
+      "http://127.0.0.1:57722/admin/v1/principals/006d1b4f-f880-4a06-91e6-f54b1d08905b/router-terminal",
+      "http://127.0.0.1:57722/admin/v1/principals/006d1b4f-f880-4a06-91e6-f54b1d08905b/router-terminal",
+      "http://127.0.0.1:57722/admin/v1/principals/006d1b4f-f880-4a06-91e6-f54b1d08905b/router-terminal",
+      "http://127.0.0.1:57722/admin/v1/principals/006d1b4f-f880-4a06-91e6-f54b1d08905b/router-terminal",
+      "http://127.0.0.1:57722/admin/v1/principals/006d1b4f-f880-4a06-91e6-f54b1d08905b/router-terminal"
+    ]
+  }
+}

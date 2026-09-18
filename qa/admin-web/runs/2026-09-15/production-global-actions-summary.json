@@ -1,0 +1,281 @@
+{
+  "run_id": "prod-global-subset-2026-09-15T055823Z",
+  "generated_at_utc": "2026-09-15T06:20:13.688059Z",
+  "environment": "production",
+  "observed_subset": true,
+  "not_exhaustive": true,
+  "owner_tab_id": "6c9e660b-b213-40a2-8db2-67c5ec85e14f",
+  "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+  "deployed_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+  "ledger_path": "/data/tmp/cc-lb-admin-web-qa-evidence/production-global-actions.jsonl",
+  "record_count": 74,
+  "completed_source_ids": [
+    "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#AuthRequiredGate:legacy_mount",
+    "crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:keyboard_open",
+    "crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:query_principals",
+    "crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:query_upstreams",
+    "crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:search_input",
+    "crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:select_upstream_or_principal",
+    "crates/cc-lb-admin/web/src/components/ThemeToggle.tsx#ThemeToggle:change_theme",
+    "crates/cc-lb-admin/web/src/components/layout/AppShell.tsx#AppShell:keyboard_shortcut_sidebar",
+    "crates/cc-lb-admin/web/src/components/layout/AppShell.tsx#Topbar:command_palette_trigger",
+    "crates/cc-lb-admin/web/src/components/layout/AppShell.tsx#Topbar:toggle_sidebar_desktop",
+    "crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx#SidebarNav:navigate",
+    "crates/cc-lb-admin/web/src/components/ui/RequestEventDrawer.tsx#RequestDetail:event_detail_query",
+    "crates/cc-lb-admin/web/src/components/ui/RequestEventsTable.tsx#RequestEventRow:click",
+    "crates/cc-lb-admin/web/src/routes/index.tsx#OverviewPage:live_event_stream",
+    "crates/cc-lb-admin/web/src/routes/index.tsx#OverviewPage:principal_name_map",
+    "crates/cc-lb-admin/web/src/routes/index.tsx#OverviewPage:quota_aggregate_query",
+    "crates/cc-lb-admin/web/src/routes/index.tsx#OverviewPage:quota_pool_history_query",
+    "crates/cc-lb-admin/web/src/routes/index.tsx#OverviewPage:range_toggle",
+    "crates/cc-lb-admin/web/src/routes/index.tsx#OverviewPage:recent_events_infinite_scroll",
+    "crates/cc-lb-admin/web/src/routes/index.tsx#OverviewPage:recent_events_initial",
+    "crates/cc-lb-admin/web/src/routes/index.tsx#OverviewPage:see_all_link",
+    "crates/cc-lb-admin/web/src/routes/index.tsx#OverviewPage:summary_query",
+    "crates/cc-lb-admin/web/src/routes/index.tsx#OverviewPage:upstream_name_map",
+    "crates/cc-lb-admin/web/src/routes/index.tsx#OverviewPage:usage_query",
+    "credentials.tsx#CredentialsPage:mount",
+    "settings.tsx#ConfigDraftSection:edit_draft",
+    "settings.tsx#ConfigDraftSection:mount",
+    "settings.tsx#ConfigDraftSection:toggle_checklist",
+    "settings.tsx#ConfigHistorySection:mount",
+    "settings.tsx#RestartRequiredMatrix:render",
+    "settings.tsx#SettingsPage:admin_token_view",
+    "settings.tsx#SettingsPage:live_preview_timer",
+    "settings.tsx#SettingsPage:mount",
+    "settings.tsx#SettingsPage:select_locale",
+    "settings.tsx#SettingsPage:select_timezone",
+    "status.tsx#StatusPage:mount"
+  ],
+  "completed_count": 36,
+  "incomplete": [
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#AuthRequiredGate:mount",
+      "status": "NOT_APPLICABLE_DEPLOYED",
+      "reason": "Current-source session verification endpoint is absent in deployed v0.4.9; legacy gate trusts token presence before protected GETs."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#handleSubmit:submit",
+      "status": "NOT_APPLICABLE_DEPLOYED",
+      "reason": "Current-source submit verifies /admin/v1/auth/session; deployed legacy submit only stores token. Active production credential was not disturbed."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#handleSubmit:validation_empty",
+      "status": "NOT_EXECUTED_SAFETY",
+      "reason": "Would require forcing the authenticated production tab into the credential gate; token state preserved."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#AuthRequiredGate:external_auth_retry",
+      "status": "NOT_APPLICABLE_DEPLOYED",
+      "reason": "Production uses legacy static bearer auth, not external auth mode."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#AuthRequiredGate:error_retry",
+      "status": "STATE_UNAVAILABLE",
+      "reason": "No auth verification error state occurred, and outage injection is outside production read-only scope."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/layout/AppShell.tsx#Topbar:health_poll",
+      "status": "PARTIAL",
+      "reason": "One automatic 200 poll observed in a 16.5s window; two-poll interval delta not yet captured."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/layout/AppShell.tsx#Topbar:open_mobile_menu",
+      "status": "BLOCKED_TOOL_CAPABILITY",
+      "reason": "Viewport stayed 1680x997 after window.resizeTo; Camofox surface exposes no resize control."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:select_page_or_action",
+      "status": "PARTIAL",
+      "reason": "Safe page selection verified; create-upstream/create-principal/plugin-upload action variants excluded from production."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:close",
+      "status": "PARTIAL",
+      "reason": "Escape and Close button verified; backdrop click not verified."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/routes/index.tsx#ValueTile:sparkline_hover",
+      "status": "BLOCKED_INTERACTION_ORACLE",
+      "reason": "Synthetic DOM hover reached the chart application, but no visible tooltip oracle was exposed; native Camofox pointer action times out."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/routes/index.tsx#PrincipalCostMeter:popover_hover",
+      "status": "BLOCKED_INTERACTION_ORACLE",
+      "reason": "Focus/mouseenter produced ambiguous popup state without the expected breakdown text; native pointer unavailable."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/routes/index.tsx#PoolQuotaStackedBar:popover_open",
+      "status": "BLOCKED_INTERACTION_ORACLE",
+      "reason": "Desktop click is not the hover contract and synthetic clicks did not expose the expected Util/Weight/Impact popover."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts#connect:delta_backfill",
+      "status": "STATE_UNAVAILABLE",
+      "reason": "No natural reconnect gap with a prior cursor occurred; outage injection was not performed."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:retry",
+      "status": "STATE_UNAVAILABLE",
+      "reason": "Permanent SSE failure state did not occur; failure injection is outside this production subset."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:dismiss",
+      "status": "STATE_UNAVAILABLE",
+      "reason": "Permanent SSE failure banner was not present."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/ui/RequestEventDrawer.tsx#RequestDetail:copy_id",
+      "status": "NOT_EXECUTED_PRIVACY",
+      "reason": "Clipboard copy variants would place operational identifiers/raw event JSON outside the evidence file."
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/ui/RequestEventDrawer.tsx#RequestDetail:close",
+      "status": "PARTIAL",
+      "reason": null
+    },
+    {
+      "source_id": "settings.tsx#ConfigDraftSection:save_draft",
+      "status": "BLOCKED_PRODUCTION_MUTATION",
+      "reason": "PUT /admin/config/draft forbidden."
+    },
+    {
+      "source_id": "settings.tsx#ConfigDraftSection:validate_draft",
+      "status": "BLOCKED_PRODUCTION_MUTATION",
+      "reason": "POST /admin/config/draft/validate forbidden."
+    },
+    {
+      "source_id": "settings.tsx#ConfigDraftSection:apply_draft",
+      "status": "BLOCKED_PRODUCTION_MUTATION",
+      "reason": "POST /admin/config/apply forbidden."
+    },
+    {
+      "source_id": "settings.tsx#ConfigDraftSection:reload_daemon",
+      "status": "BLOCKED_PRODUCTION_MUTATION",
+      "reason": "POST /admin/config/reload forbidden."
+    },
+    {
+      "source_id": "settings.tsx#ConfigDraftSection:retry_editor",
+      "status": "STATE_UNAVAILABLE",
+      "reason": "Draft/current GETs succeeded; retry banner was not present."
+    },
+    {
+      "source_id": "settings.tsx#SettingsPage:download_export",
+      "status": "NOT_EXECUTED_SECURITY",
+      "reason": "GET export would create a local configuration artifact; no sensitive export was downloaded in this subset."
+    },
+    {
+      "source_id": "audit.tsx#AuditPage:mount",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "audit.tsx#AuditPage:refresh",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "audit.tsx#AuditPage:filter_principal",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "audit.tsx#TimeRangeBounds:type_start_date",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "audit.tsx#TimeRangeBounds:type_end_date",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "audit.tsx#CalendarPopover:pick_start_date",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "audit.tsx#CalendarPopover:pick_end_date",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "audit.tsx#TimeRangeBounds:apply_bounds",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "audit.tsx#AuditPage:clear_filters",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "audit.tsx#AuditPage:empty_state_clear",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "audit.tsx#AuditPage:click_row",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "audit.tsx#AuditPage:close_detail_modal",
+      "status": "NOT_EXECUTED_SUBSET",
+      "reason": "Audit actions are outside the currently requested Global/Overview/Settings/Status/Credentials subset."
+    },
+    {
+      "source_id": "status.tsx#StatusPage:toggle_killswitch",
+      "status": "BLOCKED_PRODUCTION_MUTATION",
+      "reason": "Emergency traffic control was visible but never clicked."
+    },
+    {
+      "source_id": "credentials.tsx#CredentialsPage:rotate",
+      "status": "BLOCKED_PRODUCTION_MUTATION",
+      "reason": "POST credential rotate mutation forbidden in production; control not invoked."
+    },
+    {
+      "source_id": "credentials.tsx#CredentialsPage:revoke",
+      "status": "BLOCKED_PRODUCTION_MUTATION",
+      "reason": "POST credential revoke mutation forbidden in production; control not invoked."
+    }
+  ],
+  "incomplete_count": 38,
+  "behavior_status_counts": {
+    "NOT_APPLICABLE_DEPLOYED": 3,
+    "NOT_EXECUTED_SAFETY": 1,
+    "STATE_UNAVAILABLE": 5,
+    "PARTIAL": 4,
+    "VERIFIED": 26,
+    "BLOCKED_TOOL_CAPABILITY": 1,
+    "BLOCKED_INTERACTION_ORACLE": 3,
+    "VERIFIED_FIRST_NEXT_PAGE": 1,
+    "VERIFIED_INITIAL_CONNECTION": 1,
+    "BEHAVIOR_VERIFIED_MEASUREMENT_BLOCKED": 1,
+    "NOT_EXECUTED_PRIVACY": 1,
+    "VERIFIED_DEPLOYED_LEGACY_VARIANT": 1,
+    "VERIFIED_EQUIVALENCE_CLASSES": 2,
+    "VERIFIED_CLIENT_ONLY_RESTORED": 1,
+    "BLOCKED_PRODUCTION_MUTATION": 7,
+    "VERIFIED_RESTORED": 1,
+    "VERIFIED_DEPLOYED_VARIANT": 1,
+    "NOT_EXECUTED_SECURITY": 1,
+    "NOT_EXECUTED_SUBSET": 12,
+    "VERIFIED_EMPTY_STATE": 1
+  },
+  "measurement_status_counts": {
+    "BLOCKED_OR_NOT_OBSERVED": 20,
+    "CLIENT_ONLY_NOT_APPLICABLE": 33,
+    "BROWSER_RESOURCE_TIMING_OBSERVED_SERVER_SQL_BLOCKED": 17,
+    "BEHAVIOR_OBSERVED": 1,
+    "NOT_EXECUTED": 3
+  },
+  "production_mutation_count": 0,
+  "privacy": {
+    "raw_resource_ids": false,
+    "personal_data": false,
+    "secret_values": false,
+    "file_mode": "0600"
+  },
+  "known_measurement_blocker": "Browser ResourceTiming provided status/timing/transfer sizes but not response bodies; response hashes are null. Server SQL/pool correlation unavailable, so network actions are not completion PASS."
+}

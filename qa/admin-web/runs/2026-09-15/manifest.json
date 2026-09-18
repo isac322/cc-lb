@@ -1,0 +1,51 @@
+{
+  "run_date": "2026-09-15",
+  "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+  "deployed_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+  "status": "IN_PROGRESS",
+  "runtime_exhaustive": false,
+  "historical_run_replacement_complete": false,
+  "artifacts": [
+    {
+      "path": "production-preflight.json",
+      "sha256": "2eb3e4e74ce436995f1941d5ff18b24fbc89e41222f6a5a25564da5c758202bf",
+      "bytes": 7762
+    },
+    {
+      "path": "production-global-actions.jsonl",
+      "sha256": "bca38c6b4558aa2aa8af32fc5ec3ad9639854070fda539adcc34d798894c08f2",
+      "bytes": 75040
+    },
+    {
+      "path": "production-global-actions-summary.json",
+      "sha256": "425aa42fd83f5118f2d608389635f422dec2855cedce55dfc8f79dc9eedc0402",
+      "bytes": 13784
+    },
+    {
+      "path": "skill-migration-proof.json",
+      "sha256": "7a016c494aef086d1ef3c0ca1ab877bafdd7deaaf8186b78e7d4c5838af8b105",
+      "bytes": 227
+    },
+    {
+      "path": "skill-discovery.json",
+      "sha256": "c3017cfcb861e47b19ae75585a559d566629e23c685b4305aec3b2b4e0541d3f",
+      "bytes": 574
+    },
+    {
+      "path": "source-check-counterproof.json",
+      "sha256": "d6b6ae76571636d41f84d8a9f51ac3bddfadd2c77c1a64ba0fecb44b9bea003e",
+      "bytes": 1267
+    },
+    {
+      "path": "fixture-reset-proof.json",
+      "sha256": "e035df0023d8504c4adcf1a3064540d2bee5da86f406cd7593923e482af4849d",
+      "bytes": 1651
+    },
+    {
+      "path": "cache-control-verified.json",
+      "sha256": "5e2be48e0a09adca96e18b3c3c4fef73b38c2610d2e1c989a5a05403cf2b346b",
+      "bytes": 3035
+    }
+  ],
+  "missing": "Full runtime matrix, all required per-request measurements, mutation scenarios, and controlled database cache comparisons remain pending."
+}

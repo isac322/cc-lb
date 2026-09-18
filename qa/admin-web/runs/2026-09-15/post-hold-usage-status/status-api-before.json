@@ -1,0 +1,16 @@
+[
+  {
+    "id": "39358d12-bfdc-41aa-8381-49bd2c96be12",
+    "name": "qa-status-missing-credentials",
+    "status": "error",
+    "last_apply_at_unix_secs": 1789521474,
+    "last_apply_error": "anthropic oauth upstream missing oauth credentials"
+  },
+  {
+    "id": "c804fce8-2b1a-4d3a-a149-878886bee631",
+    "name": "qa-usage-display",
+    "status": "active",
+    "last_apply_at_unix_secs": 1789521474,
+    "last_apply_error": null
+  }
+]

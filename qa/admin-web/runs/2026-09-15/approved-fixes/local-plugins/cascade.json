@@ -1,0 +1,77 @@
+{
+  "mode": "cascade",
+  "status": "PASS",
+  "actual": {
+    "delete_status": 200,
+    "dispatch": 1,
+    "pending": {
+      "cancel_disabled": true,
+      "dialog_retained": true
+    },
+    "url_plugin_absent": true,
+    "registry_absent": true,
+    "browser_deleted_refs_get_count": 0,
+    "direct_refs_status": 404,
+    "chain_count": 0,
+    "warmup_plugin": null
+  },
+  "screen_sha256": "ffa83add65dffa98d14beb73babd99ac4b2377a463c52c6d758a180daef64568",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/auth/session",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/plugins/registry",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/health",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/upstreams",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/principals",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/plugins/registry/bb7dea6b-2d35-457b-9b7b-0ee6213c22a1/references",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/admin/v1/plugins/registry/bb7dea6b-2d35-457b-9b7b-0ee6213c22a1",
+      "query_names": [
+        "cascade"
+      ],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/plugins/registry",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/upstreams",
+      "query_names": [],
+      "status": 200
+    }
+  ]
+}

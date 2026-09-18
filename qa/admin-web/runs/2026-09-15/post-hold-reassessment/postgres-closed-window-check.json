@@ -1,0 +1,90 @@
+{
+  "schema": "cc-lb-post-hold-closed-window-check/v1",
+  "result": "closed_action_lifecycle_verified",
+  "raw_source_sha256": "13b730b446f7046a71bd32da1892abb57b75da3c2cf852d7100eac045b718370",
+  "action": {
+    "action_id": "e7eee397-0279-465e-87f9-70b8f16d47bd",
+    "begin": {
+      "epoch_ms": 1789520255821,
+      "monotonic_ms": 14084,
+      "time_origin_epoch_ms": 1789520241736
+    },
+    "end": {
+      "epoch_ms": 1789520278164,
+      "monotonic_ms": 36428,
+      "time_origin_epoch_ms": 1789520241736
+    },
+    "window_closed": true,
+    "ui_oracle_structure_present": true,
+    "ui_oracle_independently_validated": false
+  },
+  "collector_capture": {
+    "complete": true,
+    "incomplete_reasons": [],
+    "overflow": {
+      "dropped_records": 0,
+      "first_dropped_sequence": null,
+      "last_dropped_sequence": null
+    },
+    "observer_dropped_entries": 0
+  },
+  "server_joins": [
+    {
+      "source_entry_id": "8fadd00a-6ed8-4d66-b2e5-dbc0efc89629",
+      "server_request_id": "req_admin_01a0a7b8-1b60-7b53-81ab-0f676fe966ad",
+      "route": "/{*file}",
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 0.7537499999999999,
+      "query_events": 0,
+      "query_elapsed_secs": [],
+      "acquire_events": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "0690648a-4012-4a61-be1f-77738d2b38bc",
+      "server_request_id": "req_admin_01a0a7b8-1b69-7991-aeaa-d28d988fbf39",
+      "route": "/admin/v1/plugins/registry",
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 10.057292,
+      "query_events": 3,
+      "query_elapsed_secs": [
+        0.001066166,
+        0.001153875,
+        0.00158125
+      ],
+      "acquire_events": 3,
+      "acquire_total_secs": [
+        0.000997917,
+        0.000435292,
+        0.000648792
+      ]
+    },
+    {
+      "source_entry_id": "2fea442d-337d-4e7b-9f72-4c0a95fc776c",
+      "server_request_id": "req_admin_01a0a7b8-546a-7740-af12-9d761570bc45",
+      "route": "/admin/health",
+      "method": "GET",
+      "status": 200,
+      "handler_ms": 0.424708,
+      "query_events": 0,
+      "query_elapsed_secs": [],
+      "acquire_events": 0,
+      "acquire_total_secs": []
+    }
+  ],
+  "limitations": [
+    "The expected and observed UI hashes were both derived from the same observed outerHTML. Their equality is not independent UI correctness proof.",
+    "Original HTML and screenshot bytes were not retained by the browser worker. Do not reconstruct or claim visual verification from hashes alone.",
+    "The window duration includes observation and hashing; it is not pure rendering latency.",
+    "This new local window does not replace or repair historical raw snapshots and does not establish full production coverage."
+  ],
+  "cleanup": {
+    "owned_server_stopped": true,
+    "browser_worker_reported_tabs_empty": true
+  },
+  "production_requests": 0,
+  "pr_mutations": 0,
+  "full_runtime_qa_complete": false
+}

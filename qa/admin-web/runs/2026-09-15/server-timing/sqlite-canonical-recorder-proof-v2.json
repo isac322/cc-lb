@@ -1,0 +1,31 @@
+{
+ "recorded_at_utc": "2026-09-15T16:03:39.478372+00:00",
+ "step": "sqlite-canonical-recorder-proof-v2",
+ "origin_asserted": "http://127.0.0.1:56152",
+ "fresh_document": true,
+ "prior_global_absent": true,
+ "canonical_sha256": "003680dff36ca007387d966a7089f2e8ec6d032d803d9787421ac5ba6b8ac610",
+ "canonical_source": "/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/qa/admin-web-browser-recorder.js",
+ "recorder_version": "1.0.7",
+ "action": "beginAction(UI-PL-01:nav) -> native click Plugins nav -> endAction -> drain",
+ "result": {
+  "records": 105,
+  "types": [
+   "collector_notice",
+   "resource_timing",
+   "action_window"
+  ],
+  "fetch_observation_count": 0,
+  "notices": [
+   "installed"
+  ],
+  "capture_complete": true,
+  "ui_rid_captured": 0
+ },
+ "blocker": {
+  "summary": "recorder wraps globalThis.fetch in sandbox realm; app fetch calls use page-realm window.fetch \u2014 sandbox wrapper never intercepts",
+  "evidence": "installFetchWrapper assigns state.wrapped_fetch to globalThis.fetch (sandbox globalThis), but the SPA's fetch is bound to the page realm's window.fetch at module load time",
+  "previous_failures_resolved": "DataView sha256 fix works (no observer_task_failed); searchParams.forEach works; remaining gap is realm boundary, not code"
+ },
+ "note": "fresh document, no prior global, canonical v2 source loaded. UI RID count = 0 (BLOCKED by realm boundary, not code defect)."
+}

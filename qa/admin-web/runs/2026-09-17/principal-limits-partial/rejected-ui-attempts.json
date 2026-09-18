@@ -1,0 +1,242 @@
+{
+  "accepted_as_ui_pass": false,
+  "attempts": [
+    {
+      "attempt": "9c2b53e6a6cca4a3bd0e-auth-setup",
+      "files": [
+        {
+          "name": "direct-server-events.jsonl",
+          "sha256": "6c5a9217925120cb6f4be5cc11a64f8393f0fadcaa9682e814ccedab71b82f1d",
+          "bytes": 67966
+        },
+        {
+          "name": "dom-state.json",
+          "sha256": "ddccac02988118d4cfac10fbcf4457ab8a0beb11fc1a7e3c8cf2d752d37f04e9",
+          "bytes": 226
+        },
+        {
+          "name": "failure.json",
+          "sha256": "a3ed79fb95e66f7aef3dec08a5143b6d709fe5da810b929303e5c76a136b2492",
+          "bytes": 622
+        },
+        {
+          "name": "paired-proof.json",
+          "sha256": "33aa0c9714931425dc2d6443d3e24fb3d8985101fcb92e06689a5879dacaada1",
+          "bytes": 1240
+        },
+        {
+          "name": "recorder.json",
+          "sha256": "321141cd12bc0f307c79b856af023595de8581b667118500f7e4de8de41cc26b",
+          "bytes": 234
+        },
+        {
+          "name": "timing.json",
+          "sha256": "2273150a64be56b66f05fe68f5fcb913a2d23a756b5d8a8f85332f73677b2536",
+          "bytes": 150
+        },
+        {
+          "name": "ui-server-events.jsonl",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      ],
+      "paired-proof.json": {
+        "execution_key": "UI-PR-06|eddd4d51-d928-425d-bb5e-67fbba66f7b8|empty|page1|poll1|repeat1",
+        "entity_id": "eddd4d51-d928-425d-bb5e-67fbba66f7b8",
+        "variant": "empty",
+        "repeat": 1,
+        "baseline_database_sha256": "96858a28919feea87d2da3ed296f5e78d40d38aa8ea1481cf657e70e8a7d5ee7",
+        "before_revision": 1,
+        "ui_storage": {
+          "revision": 1,
+          "default_limits": [
+            {
+              "kind": "requests",
+              "window_secs": 120,
+              "cap_micros": 17
+            }
+          ]
+        },
+        "ui_api_status": 200,
+        "ui_patch_request_ids": [],
+        "ui_patch_count": 0,
+        "ui_storage_api_match": false,
+        "direct": {
+          "status": 200,
+          "request_id": "req_admin_01a0aedc-6db7-7413-b9f2-ea2e33578572",
+          "start_epoch_ns": 1789640076726872000,
+          "duration_ms": 35.063709,
+          "bytes": 255,
+          "storage": {
+            "revision": 2,
+            "default_limits": []
+          },
+          "storage_api_match": true
+        },
+        "ui_sql_events": 0,
+        "direct_sql_events": 51,
+        "status": "AWAITING_BROWSER_ORACLE",
+        "pure_database_execution_ms": null,
+        "pure_pool_queue_wait_ms": null,
+        "measurement_limits": [
+          "No pure DB/queue duration is fabricated from SQLx driver/acquire lifetime.",
+          "Process and target state reset; OS/DB cache equivalence is not claimed."
+        ]
+      },
+      "failure.json": {
+        "execution_key": "UI-PR-06|eddd4d51-d928-425d-bb5e-67fbba66f7b8|empty|page1|poll1|repeat1",
+        "outcome": "BLOCKED",
+        "reason": "AUTH_SETUP_FAILURE",
+        "detail": "qa_limits_pair was called prematurely before browser authenticated with admin token; browser was on unauthenticated landing page, resulting in 0 UI PATCH requests and database remaining at baseline rev 1 before direct PATCH.",
+        "auth_resolution": "Browser has now authenticated with cc-lb-admin-token in localStorage; GET /admin/v1/auth/session returns 200 static_token and DefaultLimitsCard is verified visible.",
+        "timestamp_epoch_ms": 1789640430046
+      }
+    },
+    {
+      "attempt": "9c2b53e6a6cca4a3bd0e-triple-save",
+      "files": [
+        {
+          "name": "direct-server-events.jsonl",
+          "sha256": "75d3616ae9f61afd9a556a43166ac40d2764768f7ecea6da10357bb2a06eff28",
+          "bytes": 67953
+        },
+        {
+          "name": "dom-state.json",
+          "sha256": "842497fafa5488b6689a4427c98439ab46a50d035ef1915abec5b4fa7c681995",
+          "bytes": 590
+        },
+        {
+          "name": "paired-proof.json",
+          "sha256": "b676e81340a3dcbac1dde3f3d971e1650bf3cdb8c1a69b78a89e165f382ce549",
+          "bytes": 1301
+        },
+        {
+          "name": "recorder.json",
+          "sha256": "eae537b3a1de816fc99c72d1d33377e92910049c662d947b5d3e7f5c98ae6204",
+          "bytes": 355983
+        },
+        {
+          "name": "screenshot.png",
+          "sha256": "94f6e60899667175308e93f2c69435672eac9ccafff9a2f79cf70a864c2c5587",
+          "bytes": 125565
+        },
+        {
+          "name": "timing.json",
+          "sha256": "99faa30c11a73882d04bf33cbcffaac3dc642b1796dec8ef8c84f2dbc775a15a",
+          "bytes": 567
+        },
+        {
+          "name": "ui-server-events.jsonl",
+          "sha256": "b95548d4107897b0a5c947d9315647b3b234f53c9edfe017da4bfa17d129b988",
+          "bytes": 203964
+        }
+      ],
+      "paired-proof.json": {
+        "execution_key": "UI-PR-06|eddd4d51-d928-425d-bb5e-67fbba66f7b8|empty|page1|poll1|repeat1",
+        "entity_id": "eddd4d51-d928-425d-bb5e-67fbba66f7b8",
+        "variant": "empty",
+        "repeat": 1,
+        "baseline_database_sha256": "96858a28919feea87d2da3ed296f5e78d40d38aa8ea1481cf657e70e8a7d5ee7",
+        "before_revision": 1,
+        "ui_storage": {
+          "revision": 4,
+          "default_limits": []
+        },
+        "ui_api_status": 200,
+        "ui_patch_request_ids": [
+          "req_admin_01a0aee6-4483-7de1-88a6-a462ed7fd9b6",
+          "req_admin_01a0aee7-a60b-7fd0-b79d-16abcb523004",
+          "req_admin_01a0aee8-d8cc-7171-b7df-10a73ce87116"
+        ],
+        "ui_patch_count": 3,
+        "ui_storage_api_match": false,
+        "direct": {
+          "status": 200,
+          "request_id": "req_admin_01a0aee9-db16-7f63-b3f2-a60e8a26b4d2",
+          "start_epoch_ns": 1789640956693437000,
+          "duration_ms": 32.618,
+          "bytes": 255,
+          "storage": {
+            "revision": 2,
+            "default_limits": []
+          },
+          "storage_api_match": true
+        },
+        "ui_sql_events": 153,
+        "direct_sql_events": 51,
+        "status": "AWAITING_BROWSER_ORACLE",
+        "pure_database_execution_ms": null,
+        "pure_pool_queue_wait_ms": null,
+        "measurement_limits": [
+          "No pure DB/queue duration is fabricated from SQLx driver/acquire lifetime.",
+          "Process and target state reset; OS/DB cache equivalence is not claimed."
+        ]
+      }
+    },
+    {
+      "attempt": "9c2b53e6a6cca4a3bd0e-two-saves",
+      "files": [
+        {
+          "name": "baseline-dom-state.json",
+          "sha256": "db3f800fec6d94b00dba57481eed3e6e1b6d87954ffd1c088de5d628a1d33c32",
+          "bytes": 512
+        },
+        {
+          "name": "dom-state.json",
+          "sha256": "e2e56e70700d09787fa0cfd149d9375c229d9b4b347056f16dfc7d2c5c620a0f",
+          "bytes": 504
+        },
+        {
+          "name": "invalid-ui-attempt.json",
+          "sha256": "bf528e51c54ce75133ce408f076e4e59da96c2397a0475d77c5eb3f93b447eb5",
+          "bytes": 561
+        },
+        {
+          "name": "recorder.json",
+          "sha256": "e68d363956526c542e55bb77c5b5b776e3669f8038e43e8705645f6a7d7cd032",
+          "bytes": 439975
+        },
+        {
+          "name": "screenshot.png",
+          "sha256": "55e22f4fd1eb43b069e6e9bfde9e2e20bdb0992962def66ba72ec9b7d86521d7",
+          "bytes": 129984
+        },
+        {
+          "name": "timing.json",
+          "sha256": "410487dde3e68a92c13aa2a85bd7f297cfcfc7ffac128f74f1e13b602c9aeadd",
+          "bytes": 435
+        },
+        {
+          "name": "ui-server-events.jsonl",
+          "sha256": "d7b04de7d83bc48fdd65416680727ad922b869b8ff34673c6ace97c17fbc8aba",
+          "bytes": 136068
+        },
+        {
+          "name": "ui-window-server-events.jsonl",
+          "sha256": "dc7c8e2f48f28c2c43b051e72bd84b36746ddb466d9dec16ae184e5c81bb3cb0",
+          "bytes": 799508
+        }
+      ],
+      "invalid-ui-attempt.json": {
+        "execution_key": "UI-PR-06|eddd4d51-d928-425d-bb5e-67fbba66f7b8|empty|page1|poll1|repeat1",
+        "status": "INVALID_UI_ATTEMPT",
+        "errors": [
+          "Expected exactly one native UI PATCH after baseline restoration",
+          "Stored/API state or revision does not match the declared transition"
+        ],
+        "before_revision": 1,
+        "ui_storage": {
+          "revision": 3,
+          "default_limits": []
+        },
+        "ui_patch_request_ids": [
+          "req_admin_01a0aef4-937e-7893-9ed1-2e676318a4cd",
+          "req_admin_01a0aef8-6c88-7480-a4f7-412c55effff9"
+        ],
+        "direct_request_executed": false
+      }
+    }
+  ],
+  "raw_artifacts_retained_privately": true,
+  "reason": "Authentication setup failure and repeated native Save actions invalidated the initial-state comparison."
+}

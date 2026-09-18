@@ -1,0 +1,128 @@
+{
+  "scope": "Isolated native Camofox input contract; not cc-lb application QA completion",
+  "baseline": {
+    "counter_css_repetitions": 3,
+    "counter_ref_repetitions": 3,
+    "observed_actions_per_call": 2,
+    "synthetic_actions": 0
+  },
+  "patched": {
+    "basic_cases": {
+      "budget-counter-css-1": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      },
+      "budget-counter-css-2": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      },
+      "budget-counter-css-3": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      },
+      "budget-counter-ref-1": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      },
+      "budget-counter-ref-2": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      },
+      "budget-counter-ref-3": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      },
+      "budget-replace-css-1": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      },
+      "budget-replace-css-2": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      },
+      "budget-replace-css-3": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      },
+      "budget-replace-ref-1": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      },
+      "budget-replace-ref-2": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      },
+      "budget-replace-ref-3": {
+        "ready": 1,
+        "trusted_actions": 1,
+        "untrusted_actions": 0
+      }
+    },
+    "edge_cases": {
+      "budget-download-1": {
+        "ready": 1,
+        "action": 1,
+        "trusted_actions": 1,
+        "download_received": 1
+      },
+      "budget-download-2": {
+        "ready": 1,
+        "action": 1,
+        "trusted_actions": 1,
+        "download_received": 1
+      },
+      "budget-held-1": {
+        "ready": 1,
+        "navigation_received": 1,
+        "action": 1,
+        "trusted_actions": 1
+      },
+      "budget-held-2": {
+        "ready": 1,
+        "navigation_received": 1,
+        "action": 1,
+        "trusted_actions": 1
+      },
+      "budget-blocked-1": {
+        "ready": 1
+      },
+      "budget-blocked-2": {
+        "ready": 1
+      }
+    },
+    "basic_success_count": 12,
+    "edge_contract_success_count": 6
+  },
+  "implementation": {
+    "canonical_package": "/etc/nix-darwin/pkgs/camofox-browser/package.nix",
+    "canonical_patch": "/etc/nix-darwin/pkgs/camofox-browser/click-timeout-no-replay.patch",
+    "patch_sha256": "638eb33cb91185cd9c5f0411e53dcd4153a1c1e863e3f4d1059f8a231f49b1c2",
+    "built_package": "/nix/store/a5wml04wcx5qpwarm50d3y7qfvplfngw-camofox-browser-1.16.0",
+    "behavior": "Do not redispatch after an ambiguous locator timeout; use the remaining handler budget minus existing post-click settlement reserve."
+  },
+  "verification": {
+    "extracted_function_cases_passed": 13,
+    "baseline_same_harness": "fails duplicate-click assertion",
+    "nix_package_build": "passed",
+    "package_nix_format": "passed",
+    "real_browser": "12 basic cases plus 2 downloads, 2 held navigations, 2 disabled controls"
+  },
+  "limits": [
+    "Download tool latency was about 38\u201339 seconds and was not optimized or causally decomposed.",
+    "Some runs overlapped background compilation; these are input-correctness probes, not application performance baselines.",
+    "Pure native input latency, Playwright actionability, and browser-process queueing were not separately instrumented.",
+    "No upstream release resolution is claimed.",
+    "Full cc-lb runtime inventory remains incomplete."
+  ]
+}

@@ -1,0 +1,18 @@
+[
+  {
+    "db": "sqlite",
+    "status": 200,
+    "rid": "req_admin_01a0a592-7744-7f23-ad79-b793b640778a",
+    "server_timing_same_id": true,
+    "server_timing_duration_absent": true,
+    "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+  },
+  {
+    "db": "postgres",
+    "status": 200,
+    "rid": "req_admin_01a0a592-7749-7be1-9375-a037fc2794cc",
+    "server_timing_same_id": true,
+    "server_timing_duration_absent": true,
+    "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+  }
+]

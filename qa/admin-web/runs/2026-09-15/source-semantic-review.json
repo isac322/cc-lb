@@ -1,0 +1,41 @@
+{
+  "scope": "source semantic mapping only, not runtime execution",
+  "source_commit": "ef70b347790c46fa9956435a820a51b60c547d04",
+  "read_endpoints": 70,
+  "write_endpoints": 45,
+  "unique_operations": 168,
+  "reviewed_read_slices": [
+    {
+      "agent": "ReviewReadInfrastructure",
+      "endpoints": 10,
+      "collected_findings": 5,
+      "resolution": "All five rechecked as resolved against current source."
+    },
+    {
+      "agent": "ReviewReadEventsConfig",
+      "endpoints": 21,
+      "collected_findings": 5,
+      "resolution": "All five rechecked as resolved against current source."
+    },
+    {
+      "agent": "ReviewReadResources",
+      "endpoints": 19,
+      "collected_findings": 6,
+      "resolution": "All six rechecked as resolved; SensitiveRead runtime no-op explicitly documented."
+    },
+    {
+      "agent": "ReviewReadUsage",
+      "endpoints": 20,
+      "collected_findings": 4,
+      "resolution": "All four rechecked as resolved including missing slim and usage interval SQL."
+    }
+  ],
+  "current_contract_sha256": {
+    "ui.json": "791a7e6b33b12b9f751ec099d3bc75d450ba05d1918f14253a08c2757347d4b7",
+    "api-read.json": "37b77c9695a2e1b29f8d4f46bf6cda9a89c634c10478af3f0f5e5fc8fd47f788",
+    "api-write.json": "caca1f29275cea4edb50eac2e640a59f8875be6274877d90ff139ee29e9e5f69",
+    "deployed-delta.json": "b7fbd98cab7786a627d83804f07a8d50dc57247ff322c09342806e1fec5ffb18"
+  },
+  "main_critical_mapping_assertions": "PASS",
+  "full_runtime_coverage": false
+}

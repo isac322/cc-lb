@@ -1,0 +1,13 @@
+{
+  "after_browser_clear": {
+    "status": 200,
+    "base_url": null,
+    "spec_revision": 2
+  },
+  "restored": {
+    "status": 200,
+    "base_url": "http://127.0.0.1:19080/",
+    "spec_revision": 3
+  },
+  "restoration_scope": "Original loopback URL restored through revision-guarded API; revision and audit history intentionally advance, not a byte-identical database restore."
+}

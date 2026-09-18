@@ -1,0 +1,26 @@
+    Starting 23 tests across 5 binaries (644 tests skipped)
+        PASS [   0.090s] ( 1/23) cc-lb-admin::integration config_apply::config_apply_current_admin_config_smoke
+        PASS [   0.341s] ( 2/23) cc-lb-admin::integration config_draft::get_draft_purges_expired_invalid_draft
+        PASS [   0.343s] ( 3/23) cc-lb-admin::integration config_apply::unsupported_provider_reports_apply_unavailable_after_validation
+        PASS [   0.324s] ( 4/23) cc-lb-admin::integration config_draft::get_no_draft_returns_zero_revision_and_null_payload
+        PASS [   0.582s] ( 5/23) cc-lb-admin::integration config_apply::config_apply_audit_records_static_token_actor_identity
+        PASS [   0.370s] ( 6/23) cc-lb-admin::integration config_draft::put_draft_from_zero_revision_saves_invalid_json_without_validation
+        PASS [   0.373s] ( 7/23) cc-lb-admin::integration config_draft::saving_new_draft_invalidates_last_validated_revision
+        PASS [   0.334s] ( 8/23) cc-lb-admin::integration config_draft::stale_put_returns_current_revision_conflict
+        PASS [   0.076s] ( 9/23) cc-lb-admin::integration config_draft_persists::config_draft_persists_current_admin_health_smoke
+        PASS [   0.077s] (10/23) cc-lb-admin::integration config_history::config_history_current_admin_config_smoke
+        PASS [   0.330s] (11/23) cc-lb-admin::integration config_draft::validate_accepts_top_level_retention_and_price_catalog
+        PASS [   0.326s] (12/23) cc-lb-admin::integration config_history::config_history_route_returns_applied_history
+        PASS [   0.323s] (13/23) cc-lb-admin::integration config_validate::invalid_draft_validate_reports_false_and_keeps_last_validated_revision
+        PASS [   0.333s] (14/23) cc-lb-admin::integration config_validate::stale_validate_revision_returns_conflict
+        PASS [   0.329s] (15/23) cc-lb-admin::integration config_validate::valid_draft_validate_marks_current_revision_valid
+        PASS [   0.077s] (16/23) cc-lb-admin::integration config_validate::validate_without_storage_returns_unavailable
+        PASS [   0.088s] (17/23) cc-lb-server::integration invalid_new_config_keeps_old::config_reload_accepts_config_only_change_and_keeps_runtime_view
+        PASS [   0.080s] (18/23) cc-lb-server::integration invalid_new_config_keeps_old::config_reload_accepts_plugin_unrelated_change_and_keeps_runtime_view
+        PASS [   0.324s] (19/23) cc-lb-admin::integration config_validate::zero_upstream_affinity_ttl_reports_exact_validation_path
+        PASS [   0.087s] (20/23) cc-lb-server::integration per_principal_reload_fault_injection::config_reload_is_storage_driven_and_keeps_runtime_view
+        PASS [   0.088s] (21/23) cc-lb-server::integration sighup_reloads_quota_defaults::sighup_reloads_body_defaults
+        PASS [   1.396s] (22/23) cc-lb-admin::integration config_draft::validate_rejects_database_owned_top_level_keys
+        PASS [   1.642s] (23/23) cc-lb-admin::integration config_draft::validate_rejects_removed_config_wrappers_and_price_refresh_interval
+     Summary [   2.359s] 23 tests run: 23 passed, 644 skipped
+[settings-capability-regressions: exited; cursor=4036]

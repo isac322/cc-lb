@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "run_id": "plugins-approved-candidate-2026-09-15",
+  "created_at_utc": "2026-09-15T08:18:00Z",
+  "status": "PASS",
+  "artifacts": [
+    {
+      "file": "cascade.json",
+      "sha256": "a58d15048eb8e0e141ddafacfaabdbfc7051df79179560daebd397e4372a79d6",
+      "bytes": 1680
+    },
+    {
+      "file": "cascade.png",
+      "sha256": "ffa83add65dffa98d14beb73babd99ac4b2377a463c52c6d758a180daef64568",
+      "bytes": 83031
+    },
+    {
+      "file": "gc-storage.json",
+      "sha256": "e2116c36b61f1e2dab1fc1aa8c0c30b10166350e170f1713e6f45e1e9a0f9ddd",
+      "bytes": 73
+    },
+    {
+      "file": "gc.json",
+      "sha256": "54e7940aed5a21ad4efd78d41fccf2a03565e0c7f15f7228705f774f3aa9426e",
+      "bytes": 1356
+    },
+    {
+      "file": "gc.png",
+      "sha256": "9f5dfaad24ed06134ac6df5385de95015efa63134855572ecbd1237350ca8841",
+      "bytes": 83089
+    },
+    {
+      "file": "simple.json",
+      "sha256": "a2be53d254515d3a4272e8cdb149c856aa323b19ba8b8d38479596f72bf5bb05",
+      "bytes": 1703
+    },
+    {
+      "file": "simple.png",
+      "sha256": "315e8e29058541bb6efcb99063be74eedc3abffdc44da984b1e1ae942045fcd0",
+      "bytes": 83031
+    },
+    {
+      "file": "summary.json",
+      "sha256": "29d59e75d090063df25bf781a6b1fd682f1d50a13c904a25738a80aaf25cfd25",
+      "bytes": 6994
+    }
+  ],
+  "summary_sha256": "29d59e75d090063df25bf781a6b1fd682f1d50a13c904a25738a80aaf25cfd25",
+  "fixture_root": "/data/tmp/cc-lb-admin-web-qa-completion/target/keepalive-qa/admin-web-local-plugins",
+  "restoration": {
+    "final_snapshot": "populated",
+    "app": "stopped",
+    "browsers": "closed",
+    "source_or_config_edits": false,
+    "production_access": false
+  }
+}

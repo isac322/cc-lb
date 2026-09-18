@@ -1,0 +1,63 @@
+{
+  "schema": "cc-lb-isolated-admin-instrumentation/v1",
+  "status": "isolated_scope_verified",
+  "candidate_sha256": "132e831a2a8f2be936c7d92c79edd6cb37b6ed943ec5e93f11662054e60ee421",
+  "baseline_sha256": "f564dcf57a4c2b914b2c690b8dee4e1c68f4fa472ae680bbe599d250dcd28f65",
+  "source_base": "ef70b347790c46fa9956435a820a51b60c547d04",
+  "source_files": [
+    {
+      "path": "crates/cc-lb-server/src/app.rs",
+      "sha256": "c74ea5a3f3c9076c2ceae386f3419ddf53af16b625c47edf6d4b380864dabe39"
+    },
+    {
+      "path": "crates/cc-lb-server/src/storage_factory.rs",
+      "sha256": "2d839cfc664d8fa5efc3cf3043518588ad510751eb778bf948075aed7aebd092"
+    },
+    {
+      "path": "crates/cc-lb-storage-sqlite/src/lib.rs",
+      "sha256": "84b15eb7402be9bc6866ea7f905a945e6af7cb8496cb1b0d5284a753b9bdd207"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "fec145d60813f9691ff51159cd46bd0aad04abb2c0652d444e23c9eaeaa9082f"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "ab967d155fc90911612e161f6f22a247c44b9613fc55f2ae32137e29888b6380"
+    },
+    {
+      "path": "crates/cc-lb-server/Cargo.toml",
+      "sha256": "516a567554674cbf0574771ed2bb05a213fbd4f71452cf89608ada1b7b8f0317"
+    },
+    {
+      "path": "crates/cc-lb-storage-sqlite/Cargo.toml",
+      "sha256": "99b2e16ad90ce394c5a5dcee2d5d87beea99235db1791ac01d1c2927cd93da25"
+    }
+  ],
+  "checks": {
+    "build": "cargo build --locked --offline -p cc-lb-server --features postgres: exit 0",
+    "correlation_requests": 12,
+    "body_privacy_probes": 2,
+    "overhead_measured_requests": 300,
+    "proxy_rejection_header_controls": 12,
+    "independent_review": "No blocking finding; response-head event naming corrected; server-generated Admin ID versus caller-supplied Proxy ID explicitly distinct.",
+    "library_regressions": {
+      "tests": 191,
+      "passed": 191,
+      "skipped": 0,
+      "duration_seconds": 8.551
+    }
+  },
+  "timing_contract": {
+    "handler_ms": "next.run until response head, fractional milliseconds",
+    "sql_elapsed_secs": "driver/query-stream lifetime, not pure DB execution",
+    "acquire_total_secs": "full acquire including queue/check/connect, not pure queue wait"
+  },
+  "cleanup": {
+    "all_owned_instrumentation_listeners_stopped": true,
+    "fixtures_retained_private_for_remaining_QA": true
+  },
+  "production_changes": 0,
+  "production_activation_requires_separate_approval": true,
+  "full_runtime_qa_complete": false
+}

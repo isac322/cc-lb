@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "observed_at_utc": "2026-09-16T08:39:06.973Z",
+  "stage": "final_replay_stage1_baseline",
+  "environment": "local_fixture_only",
+  "origin": "http://127.0.0.1:56152",
+  "backend_version": "pristine_ef70_pre_new_migration_snapshot",
+  "final_candidate_sha": "f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8",
+  "upstream_name": "qa-safety-upgrade",
+  "ui_observation": {
+    "form_rendered": true,
+    "upstream_name": "qa-safety-upgrade",
+    "base_url_input": {
+      "found": true,
+      "value": "",
+      "placeholder": "e.g. https://api.anthropic.com",
+      "is_blank": true
+    },
+    "secret_input": {
+      "found": true,
+      "value_length": 0,
+      "is_empty": true
+    },
+    "buttons": {
+      "save_found": true,
+      "save_disabled": false
+    }
+  },
+  "explanation": "Under pristine baseline ef70 backend, the GET upstream response omitted base_url. The client Settings edit form initialized with a blank string ('') for Base URL. Zero edits made. DO NOT Save yet. Keeping editor mounted.",
+  "validations": {
+    "form_rendered": true,
+    "base_url_is_blank": true,
+    "secret_input_is_empty": true,
+    "save_is_ready_but_not_clicked": true
+  }
+}

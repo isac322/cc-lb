@@ -1,0 +1,15 @@
+{
+  "resolution": "hour",
+  "bucket_start_unix_secs": 1789516800,
+  "principal_id": "10000000-0000-4000-8000-000000000004",
+  "upstream_id": "c804fce8-2b1a-4d3a-a149-878886bee631",
+  "upstream_name": "qa-usage-display",
+  "model": "qa-fixture-model",
+  "request_count": 1,
+  "input_tokens": 400,
+  "output_tokens": 100,
+  "cache_creation_input_tokens": 200,
+  "cache_read_input_tokens": 300,
+  "virtual_cost_micros": 750000,
+  "updated_at": 1789521911
+}

@@ -1,0 +1,628 @@
+{
+  "claim_boundary": "Only the fixed principalKeepalive endpoints and seeded fixture keys are measured; not all product queries.",
+  "condition_proof": {
+    "all_evictions_zero_resident_pages": true,
+    "cold_cycles": 48,
+    "eviction_resident_pages_after_values": [
+      0
+    ],
+    "keepalive_mincore_pages_post_request_by_endpoint": {
+      "detail": {
+        "max": 34,
+        "median": 34.0,
+        "min": 34
+      },
+      "list": {
+        "max": 1110,
+        "median": 1110.0,
+        "min": 1110
+      },
+      "summary": {
+        "max": 1110,
+        "median": 1110.0,
+        "min": 0
+      }
+    },
+    "keepalive_mincore_ratio_pre_request": {
+      "max": 0.0,
+      "min": 0.0
+    },
+    "keepalive_pg_buffer_pages_post_request_by_endpoint": {
+      "detail": {
+        "max": 9,
+        "median": 9.0,
+        "min": 9
+      },
+      "list": {
+        "max": 453,
+        "median": 453.0,
+        "min": 453
+      },
+      "summary": {
+        "max": 453,
+        "median": 453.0,
+        "min": 453
+      }
+    },
+    "keepalive_pg_buffer_pages_pre_app": {
+      "max": 0,
+      "min": 0
+    },
+    "keepalive_pg_buffer_pages_pre_request": {
+      "max": 0,
+      "min": 0
+    },
+    "selected_relation_files": 341,
+    "selected_relation_pages": 37684,
+    "transition_order": [
+      "cold-A",
+      "warm",
+      "cold-B"
+    ]
+  },
+  "created_at_utc": "2026-09-15T07:02:03.050Z",
+  "endpoints": {
+    "detail": {
+      "phases": {
+        "cold-A": {
+          "app_cache_classifications": [
+            "db_read_observed"
+          ],
+          "db_exec_ms": {
+            "max": 0.158124,
+            "mean": 0.1369165,
+            "median": 0.1347085,
+            "min": 0.120126,
+            "p95": 0.1578328
+          },
+          "db_shared_blks_hit": {
+            "max": 18.0,
+            "mean": 10.75,
+            "median": 9.0,
+            "min": 9.0,
+            "p95": 16.249999999999996
+          },
+          "db_shared_blks_read": {
+            "max": 9.0,
+            "mean": 9.0,
+            "median": 9.0,
+            "min": 9.0,
+            "p95": 9.0
+          },
+          "samples": 8,
+          "target_sql_calls": {
+            "max": 6.0,
+            "mean": 5.25,
+            "median": 5.0,
+            "min": 5.0,
+            "p95": 6.0
+          },
+          "ttfb_ms": {
+            "max": 27.90075,
+            "mean": 9.171979375,
+            "median": 6.5208545,
+            "min": 6.306583,
+            "p95": 20.47840219999999
+          },
+          "wall_ms": {
+            "max": 27.914125,
+            "mean": 9.18281775,
+            "median": 6.530416499999999,
+            "min": 6.317292,
+            "p95": 20.49214154999999
+          }
+        },
+        "cold-B": {
+          "app_cache_classifications": [
+            "db_read_observed"
+          ],
+          "db_exec_ms": {
+            "max": 0.494667,
+            "mean": 0.185666375,
+            "median": 0.143812,
+            "min": 0.114875,
+            "p95": 0.3790206999999999
+          },
+          "db_shared_blks_hit": {
+            "max": 12.0,
+            "mean": 11.125,
+            "median": 12.0,
+            "min": 9.0,
+            "p95": 12.0
+          },
+          "db_shared_blks_read": {
+            "max": 9.0,
+            "mean": 9.0,
+            "median": 9.0,
+            "min": 9.0,
+            "p95": 9.0
+          },
+          "samples": 8,
+          "target_sql_calls": {
+            "max": 6.0,
+            "mean": 5.25,
+            "median": 5.0,
+            "min": 5.0,
+            "p95": 6.0
+          },
+          "ttfb_ms": {
+            "max": 9.25525,
+            "mean": 7.437854125,
+            "median": 6.838021,
+            "min": 6.177416,
+            "p95": 9.05047095
+          },
+          "wall_ms": {
+            "max": 9.267541,
+            "mean": 7.450051875,
+            "median": 6.8497085,
+            "min": 6.187958,
+            "p95": 9.0638557
+          }
+        },
+        "warm": {
+          "app_cache_classifications": [
+            "db_read_observed"
+          ],
+          "db_exec_ms": {
+            "max": 0.145666,
+            "mean": 0.08682613333333333,
+            "median": 0.084729,
+            "min": 0.061249,
+            "p95": 0.1227657499999999
+          },
+          "db_shared_blks_hit": {
+            "max": 21.0,
+            "mean": 18.233333333333334,
+            "median": 18.0,
+            "min": 18.0,
+            "p95": 19.0
+          },
+          "db_shared_blks_read": {
+            "max": 0.0,
+            "mean": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "p95": 0.0
+          },
+          "samples": 30,
+          "target_sql_calls": {
+            "max": 6.0,
+            "mean": 5.133333333333334,
+            "median": 5.0,
+            "min": 5.0,
+            "p95": 6.0
+          },
+          "ttfb_ms": {
+            "max": 4.870125,
+            "mean": 3.840708333333333,
+            "median": 3.798687,
+            "min": 3.355833,
+            "p95": 4.15985015
+          },
+          "wall_ms": {
+            "max": 4.880584,
+            "mean": 3.8506388666666664,
+            "median": 3.808104,
+            "min": 3.364708,
+            "p95": 4.17007895
+          }
+        }
+      },
+      "semantic_hashes": [
+        "d50eeff7d8bd4622937525e089ac8db8b0b09c02d085f8f368fb425e28a9ea5e"
+      ],
+      "statuses": [
+        200
+      ]
+    },
+    "list": {
+      "phases": {
+        "cold-A": {
+          "app_cache_classifications": [
+            "db_read_observed"
+          ],
+          "db_exec_ms": {
+            "max": 4.926077999999999,
+            "mean": 4.603081375,
+            "median": 4.6701175,
+            "min": 4.146659,
+            "p95": 4.894650099999999
+          },
+          "db_shared_blks_hit": {
+            "max": 734.0,
+            "mean": 733.375,
+            "median": 733.0,
+            "min": 733.0,
+            "p95": 734.0
+          },
+          "db_shared_blks_read": {
+            "max": 456.0,
+            "mean": 456.0,
+            "median": 456.0,
+            "min": 456.0,
+            "p95": 456.0
+          },
+          "samples": 8,
+          "target_sql_calls": {
+            "max": 7.0,
+            "mean": 6.375,
+            "median": 6.0,
+            "min": 6.0,
+            "p95": 7.0
+          },
+          "ttfb_ms": {
+            "max": 24.14325,
+            "mean": 23.558140625,
+            "median": 23.490604,
+            "min": 23.03925,
+            "p95": 24.11914375
+          },
+          "wall_ms": {
+            "max": 24.15725,
+            "mean": 23.57219275,
+            "median": 23.504520499999998,
+            "min": 23.052125,
+            "p95": 24.13299815
+          }
+        },
+        "cold-B": {
+          "app_cache_classifications": [
+            "db_read_observed"
+          ],
+          "db_exec_ms": {
+            "max": 5.846032999999999,
+            "mean": 4.583232625,
+            "median": 4.303764,
+            "min": 3.9562440000000003,
+            "p95": 5.654291099999998
+          },
+          "db_shared_blks_hit": {
+            "max": 734.0,
+            "mean": 733.125,
+            "median": 733.0,
+            "min": 733.0,
+            "p95": 733.6500000000001
+          },
+          "db_shared_blks_read": {
+            "max": 456.0,
+            "mean": 456.0,
+            "median": 456.0,
+            "min": 456.0,
+            "p95": 456.0
+          },
+          "samples": 8,
+          "target_sql_calls": {
+            "max": 7.0,
+            "mean": 6.125,
+            "median": 6.0,
+            "min": 6.0,
+            "p95": 6.6499999999999995
+          },
+          "ttfb_ms": {
+            "max": 46.080417,
+            "mean": 28.59553625,
+            "median": 24.293854,
+            "min": 22.282125,
+            "p95": 41.886862599999986
+          },
+          "wall_ms": {
+            "max": 46.095084,
+            "mean": 28.6102135,
+            "median": 24.307354,
+            "min": 22.295875,
+            "p95": 41.90203989999999
+          }
+        },
+        "warm": {
+          "app_cache_classifications": [
+            "db_read_observed"
+          ],
+          "db_exec_ms": {
+            "max": 7.697406,
+            "mean": 5.5042439000000005,
+            "median": 6.144824,
+            "min": 1.893663,
+            "p95": 7.1139802
+          },
+          "db_shared_blks_hit": {
+            "max": 3772.0,
+            "mean": 3252.6,
+            "median": 3768.0,
+            "min": 1189.0,
+            "p95": 3770.65
+          },
+          "db_shared_blks_read": {
+            "max": 0.0,
+            "mean": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "p95": 0.0
+          },
+          "samples": 30,
+          "target_sql_calls": {
+            "max": 7.0,
+            "mean": 6.2,
+            "median": 6.0,
+            "min": 6.0,
+            "p95": 7.0
+          },
+          "ttfb_ms": {
+            "max": 27.1,
+            "mean": 20.57147216666667,
+            "median": 20.647083000000002,
+            "min": 17.345625,
+            "p95": 22.264258149999996
+          },
+          "wall_ms": {
+            "max": 27.119375,
+            "mean": 20.586416666666665,
+            "median": 20.663604,
+            "min": 17.359833,
+            "p95": 22.2791045
+          }
+        }
+      },
+      "semantic_hashes": [
+        "1f56c162fcef6a544bfcac2016db1a7ef6fb17cf2df56c05837a0e9fa8d4a32d"
+      ],
+      "statuses": [
+        200
+      ]
+    },
+    "summary": {
+      "phases": {
+        "cold-A": {
+          "app_cache_classifications": [
+            "db_read_observed"
+          ],
+          "db_exec_ms": {
+            "max": 4.632868,
+            "mean": 4.24123825,
+            "median": 4.2064725,
+            "min": 3.764661,
+            "p95": 4.581943000000001
+          },
+          "db_shared_blks_hit": {
+            "max": 690.0,
+            "mean": 689.125,
+            "median": 689.0,
+            "min": 689.0,
+            "p95": 689.6500000000001
+          },
+          "db_shared_blks_read": {
+            "max": 453.0,
+            "mean": 453.0,
+            "median": 453.0,
+            "min": 453.0,
+            "p95": 453.0
+          },
+          "samples": 8,
+          "target_sql_calls": {
+            "max": 5.0,
+            "mean": 4.125,
+            "median": 4.0,
+            "min": 4.0,
+            "p95": 4.6499999999999995
+          },
+          "ttfb_ms": {
+            "max": 21.040666,
+            "mean": 20.295375125,
+            "median": 20.354271,
+            "min": 19.411542,
+            "p95": 20.9647748
+          },
+          "wall_ms": {
+            "max": 21.051041,
+            "mean": 20.30889075,
+            "median": 20.368021,
+            "min": 19.425458,
+            "p95": 20.9770601
+          }
+        },
+        "cold-B": {
+          "app_cache_classifications": [
+            "db_read_observed"
+          ],
+          "db_exec_ms": {
+            "max": 4.9732,
+            "mean": 4.39622725,
+            "median": 4.3359305,
+            "min": 3.926034,
+            "p95": 4.95755255
+          },
+          "db_shared_blks_hit": {
+            "max": 696.0,
+            "mean": 690.25,
+            "median": 689.5,
+            "min": 689.0,
+            "p95": 693.9
+          },
+          "db_shared_blks_read": {
+            "max": 453.0,
+            "mean": 453.0,
+            "median": 453.0,
+            "min": 453.0,
+            "p95": 453.0
+          },
+          "samples": 8,
+          "target_sql_calls": {
+            "max": 5.0,
+            "mean": 4.5,
+            "median": 4.5,
+            "min": 4.0,
+            "p95": 5.0
+          },
+          "ttfb_ms": {
+            "max": 42.240167,
+            "mean": 23.769948,
+            "median": 21.577312,
+            "min": 19.7765,
+            "p95": 35.31548979999999
+          },
+          "wall_ms": {
+            "max": 42.251708,
+            "mean": 23.782312625,
+            "median": 21.5903955,
+            "min": 19.789417,
+            "p95": 35.32698739999999
+          }
+        },
+        "warm": {
+          "app_cache_classifications": [
+            "db_read_observed"
+          ],
+          "db_exec_ms": {
+            "max": 6.473572000000002,
+            "mean": 4.948486566666667,
+            "median": 5.541303,
+            "min": 1.5061220000000002,
+            "p95": 6.325319499999999
+          },
+          "db_shared_blks_hit": {
+            "max": 3724.0,
+            "mean": 3119.766666666667,
+            "median": 3721.0,
+            "min": 1142.0,
+            "p95": 3722.0
+          },
+          "db_shared_blks_read": {
+            "max": 0.0,
+            "mean": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "p95": 0.0
+          },
+          "samples": 30,
+          "target_sql_calls": {
+            "max": 5.0,
+            "mean": 4.233333333333333,
+            "median": 4.0,
+            "min": 4.0,
+            "p95": 5.0
+          },
+          "ttfb_ms": {
+            "max": 19.189042,
+            "mean": 17.817611166666666,
+            "median": 18.2438745,
+            "min": 15.4615,
+            "p95": 18.87851645
+          },
+          "wall_ms": {
+            "max": 19.2005,
+            "mean": 17.8298528,
+            "median": 18.2547705,
+            "min": 15.473208,
+            "p95": 18.88880015
+          }
+        }
+      },
+      "semantic_hashes": [
+        "b2474d3f2ec19bab3e5d49f7de3954f53332cc114a38d1ef49d54a6c13c52f92"
+      ],
+      "statuses": [
+        200
+      ]
+    }
+  },
+  "key_boundaries": {
+    "detail_id": "perf-detail-session",
+    "list": {
+      "horizon": "all",
+      "limit": 50,
+      "status": "all"
+    },
+    "principal_id": "00000000-0000-4000-8000-000000000005",
+    "summary": {
+      "horizon": "all",
+      "limit": 0,
+      "status": "all"
+    }
+  },
+  "limitations": [
+    "mincore measures only explicitly selected relation files, not WAL/metadata/temp/tablespaces/storage-controller cache",
+    "fadvise is advisory and success requires measured post-eviction residency",
+    "PostgreSQL restart controls shared_buffers; it does not prove hardware/storage-controller coldness",
+    "app startup may read non-target relations; target pg_buffercache/mincore proof is captured immediately before the request",
+    "pure pool wait is not observable and will be reported missing rather than zero-filled"
+  ],
+  "measurement_attribution": {
+    "app_database_user": "admin_web_qa",
+    "background_separation": {
+      "non_target_shared_blks_read_total": 0,
+      "non_target_statement_intervals": 13,
+      "observed_non_target_family": "api_key_usage_writers_v1 plus transaction/control statements",
+      "request_events_shared_blks_read_total": 0,
+      "request_events_supporting_intervals": 30
+    },
+    "method": "isolated_serial_pg_stat_statements_delta",
+    "not_protocol_request_id_tracing": true,
+    "same_family_background_residual": "No request-ID trace attribution was available. Fresh app per cold sample, concurrency=1, isolated database, and fixture run_at anchored six hours in the future suppress keepalive job execution, but an unobserved background task issuing an identical target SQL family cannot be excluded absolutely.",
+    "sequence": "pg_stat_statements_reset immediately before one concurrency-1 HTTP request; capture immediately after",
+    "shared_blks_read_meaning": "PostgreSQL buffers loaded into shared_buffers during the serial interval; not proof of physical device I/O, storage latency, or pool wait.",
+    "target_sql_family": "statements whose parsed/referenced SQL names include keepalive, principal, upstream, or request-events supporting relations"
+  },
+  "pure_pool_wait": {
+    "reason": "not observable from current app metrics/pg_stat_statements; not zero-filled",
+    "value": null
+  },
+  "response_boundaries": {
+    "detail": {
+      "body_bytes": 757,
+      "canonical_sha256": "d50eeff7d8bd4622937525e089ac8db8b0b09c02d085f8f368fb425e28a9ea5e",
+      "first_id": null,
+      "id": "perf-detail-session",
+      "last_id": null,
+      "next_cursor_sha256": null,
+      "row_count": null,
+      "state": "renewed",
+      "summary": null,
+      "turn_count": 0
+    },
+    "list": {
+      "body_bytes": 14109,
+      "canonical_sha256": "1f56c162fcef6a544bfcac2016db1a7ef6fb17cf2df56c05837a0e9fa8d4a32d",
+      "first_id": "perf-detail-session",
+      "id": null,
+      "last_id": "perf-000045",
+      "next_cursor_sha256": "9ddbe5bb18e48462d31a47cde5ae9fba2b7c628f9d2d1bc37b53702a6c93ea9c",
+      "row_count": 50,
+      "state": null,
+      "summary": {
+        "cost_saved": 0.0,
+        "renewals_fired": 3617,
+        "renewing_now": 517,
+        "sessions_last_5m": 1205
+      },
+      "turn_count": null
+    },
+    "summary": {
+      "body_bytes": 124,
+      "canonical_sha256": "b2474d3f2ec19bab3e5d49f7de3954f53332cc114a38d1ef49d54a6c13c52f92",
+      "first_id": null,
+      "id": null,
+      "last_id": null,
+      "next_cursor_sha256": null,
+      "row_count": 0,
+      "state": null,
+      "summary": {
+        "cost_saved": 0.0,
+        "renewals_fired": 3617,
+        "renewing_now": 517,
+        "sessions_last_5m": 1205
+      },
+      "turn_count": null
+    }
+  },
+  "sample_counts": {
+    "cold_A_per_endpoint": 8,
+    "cold_B_per_endpoint": 8,
+    "concurrency": 1,
+    "total_per_endpoint": 46,
+    "total_requests": 138,
+    "warm_per_endpoint": 30
+  },
+  "schema": "cc-lb-controlled-cache-result/v1",
+  "unresolved": [],
+  "verdict": "PASS"
+}
