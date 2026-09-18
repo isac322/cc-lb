@@ -1,7 +1,7 @@
 # cc-lb Admin Web & API/Query QA Inventory
 
-> **Source base commit:** `a9da5c3c`  
-> **Source state:** `approved_uncommitted_candidate` — Source hashes and references describe the approved uncommitted merge candidate worktree (HEAD a9da5c3c + master b07b25eebe7bbee7e882643c6776c82015d49689); source_commit identifies the PR-side base, not an updated production deployment.  
+> **Source base commit:** `fd3a15eb`  
+> **Source state:** `merged_master` — Source hashes and references describe merged master; every admin bug fix, the migration version-collision fix, and the skill-path consolidation are landed commits. deployed_commit still identifies the running production image, which lags this tree.  
 > **Source reconciliation:** `source_reconciled`  
 > **Runtime status:** `runtime_pending`  
 > **Production applicability:** `reconciled_from_deployed_delta`  
