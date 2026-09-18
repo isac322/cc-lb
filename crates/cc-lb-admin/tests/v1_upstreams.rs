@@ -121,6 +121,7 @@ async fn create_returns_201_with_body_and_location_header() {
     assert_eq!(body(&response)["kind"], "anthropic_oauth");
     assert_eq!(body(&response)["enabled"], true);
     assert_eq!(body(&response)["spec_revision"], 1);
+    assert!(body(&response)["base_url"].is_null());
     assert!(body(&response)["revision"].is_null());
     assert!(body(&response)["status"].is_object());
     let id = body(&response)["id"].as_str().unwrap();
@@ -170,6 +171,129 @@ async fn get_after_create_returns_etag_with_revision() {
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(body(&response)["id"], id);
     assert_eq!(response.headers.get(header::ETAG).unwrap(), "W/\"1\"");
+}
+
+#[tokio::test]
+async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_secret() {
+    let (_dir, storage) = new_store().await;
+    let app = router(test_state(storage));
+    let secret = "sk-ant-api03-base-url-roundtrip";
+    let created = request(
+        app.clone(),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "base-url-roundtrip",
+            "kind": "anthropic_api_key",
+            "base_url": "https://gateway.example.com/v1/",
+            "api_key_value": secret
+        })),
+        None,
+    )
+    .await;
+
+    assert_eq!(created.status, StatusCode::CREATED);
+    assert_eq!(
+        body(&created)["base_url"],
+        "https://gateway.example.com/v1/"
+    );
+    assert!(!body(&created).to_string().contains(secret));
+    assert!(body(&created).get("api_key_value").is_none());
+    assert!(body(&created).get("api_key_env").is_none());
+    let id = body(&created)["id"].as_str().unwrap();
+
+    let detail = request(
+        app.clone(),
+        "GET",
+        &format!("/admin/v1/upstreams/{id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_eq!(body(&detail)["base_url"], "https://gateway.example.com/v1/");
+    assert!(!body(&detail).to_string().contains(secret));
+
+    let list = request(app.clone(), "GET", "/admin/v1/upstreams", None, None).await;
+    assert_eq!(list.status, StatusCode::OK);
+    let listed = body(&list)["upstreams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|upstream| upstream["id"] == id)
+        .unwrap();
+    assert_eq!(listed["base_url"], "https://gateway.example.com/v1/");
+    assert!(!listed.to_string().contains(secret));
+
+    let updated = request(
+        app.clone(),
+        "PUT",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "base_url": "https://replacement.example.com/api/" })),
+        Some("W/\"1\""),
+    )
+    .await;
+    assert_eq!(updated.status, StatusCode::OK);
+    assert_eq!(
+        body(&updated)["base_url"],
+        "https://replacement.example.com/api/"
+    );
+    assert!(!body(&updated).to_string().contains(secret));
+
+    let reloaded = request(
+        app.clone(),
+        "GET",
+        &format!("/admin/v1/upstreams/{id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(reloaded.status, StatusCode::OK);
+    assert_eq!(
+        body(&reloaded)["base_url"],
+        "https://replacement.example.com/api/"
+    );
+    assert!(!body(&reloaded).to_string().contains(secret));
+
+    let reloaded_list = request(app.clone(), "GET", "/admin/v1/upstreams", None, None).await;
+    assert_eq!(reloaded_list.status, StatusCode::OK);
+    let reloaded_listed = body(&reloaded_list)["upstreams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|upstream| upstream["id"] == id)
+        .unwrap();
+    assert_eq!(
+        reloaded_listed["base_url"],
+        "https://replacement.example.com/api/"
+    );
+    assert!(!reloaded_listed.to_string().contains(secret));
+
+    let renamed = request(
+        app.clone(),
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "name": "base-url-renamed" })),
+        Some("W/\"2\""),
+    )
+    .await;
+    assert_eq!(renamed.status, StatusCode::OK);
+    assert_eq!(
+        body(&renamed)["base_url"],
+        "https://replacement.example.com/api/"
+    );
+
+    // A stale precondition still conflicts even when the body only
+    // preserves the override.
+    let stale_preserve = request(
+        app.clone(),
+        "PUT",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "base_url": null })),
+        Some("W/\"2\""),
+    )
+    .await;
+    assert_eq!(stale_preserve.status, StatusCode::CONFLICT);
 }
 
 #[tokio::test]

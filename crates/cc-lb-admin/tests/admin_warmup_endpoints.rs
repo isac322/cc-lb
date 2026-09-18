@@ -192,6 +192,7 @@ async fn test_upstream_detail_shape_unchanged() {
             "id",
             "name",
             "kind",
+            "base_url",
             "enabled",
             "warmup_enabled",
             "warmup_dialect_plugin",
