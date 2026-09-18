@@ -3,12 +3,12 @@
 
 "version": "3.0.0"
 "system": "cc-lb Admin Web & API Surface"
-"source_commit": "a9da5c3c"
+"source_commit": "fd3a15eb"
 "metadata":
   "source_state":
-    "kind": "approved_uncommitted_candidate"
-    "base_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086"
-    "note": "Source hashes and references describe the approved uncommitted merge candidate worktree (HEAD a9da5c3c + master b07b25eebe7bbee7e882643c6776c82015d49689); source_commit identifies the PR-side base, not an updated production deployment."
+    "kind": "merged_master"
+    "base_commit": "fd3a15eb19ae7b987aba897d59ea83a62e443c98"
+    "note": "Source hashes and references describe merged master; every admin bug fix, the migration version-collision fix, and the skill-path consolidation are landed commits. deployed_commit still identifies the running production image, which lags this tree."
   "response_observability":
     "scope": "server_admin_listener"
     "response_header": "x-request-id"

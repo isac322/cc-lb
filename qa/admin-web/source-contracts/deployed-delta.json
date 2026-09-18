@@ -1,18 +1,18 @@
 {
  "deployed_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
- "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+ "source_commit": "fd3a15eb19ae7b987aba897d59ea83a62e443c98",
  "source_state": {
-  "kind": "approved_uncommitted_candidate",
-  "base_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
-  "note": "Source hashes and references describe the approved uncommitted merge candidate worktree (HEAD a9da5c3c + master b07b25eebe7bbee7e882643c6776c82015d49689); source_commit identifies the PR-side base, not an updated production deployment."
+  "kind": "merged_master",
+  "base_commit": "fd3a15eb19ae7b987aba897d59ea83a62e443c98",
+  "note": "Source hashes and references describe merged master; every admin bug fix, the migration version-collision fix, and the skill-path consolidation are landed commits. deployed_commit still identifies the running production image, which lags this tree."
  },
  "candidate": {
-  "status": "uncommitted_approved_candidate",
-  "source_base": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
-  "candidate_uncommitted": true,
+  "status": "merged_master",
+  "source_base": "fd3a15eb19ae7b987aba897d59ea83a62e443c98",
+  "candidate_uncommitted": false,
   "scope": "Merge candidate (HEAD a9da5c3c + master b07b25ee): Audit latest + approved FIX01..05 + admin observability instrumentation + safety fixes (explicit clear_base_url upstream reset, admin_only audit filter before LIMIT, audit read-order index migrations renumbered PG 0120-0124 / SQLite 0088) + master Settings rework (editor/draft/validate/save/download file-backed contract; current/schema/diff/apply/reload routes removed; ConfigStore validation-report and metadata-only history; config history payload purge migrations PG 0119 / SQLite 0087)",
   "production_applicability": false,
-  "note": "Approved local candidate only; not committed and not deployed to production. Entries marked candidate_uncommitted describe candidate-vs-deployed behavior and must not be read as production state. Binary verification is recorded separately per candidate under qa/admin-web/runs; source_files hashes define this source catalog."
+  "note": "Merged into master; no longer a local candidate. Entries remain classified against the deployed commit, which still runs an older image, so rows added since that image stay not_deployed until production is rolled forward."
  },
  "added_since_deploy": [
   {
