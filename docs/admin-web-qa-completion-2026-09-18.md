@@ -93,3 +93,47 @@
 ### Camofox 도구 변경
 - `click-timeout-no-replay.patch`(타임아웃 시 폴백 제거)는 실제로 클릭이 전달되지 않게 만들어 되돌렸다.
 - 대신 `click-witness.patch`(클릭이 이미 전달됐는지 페이지에서 관측한 뒤 폴백)와 `press-tool.patch`(`camofox_press` 노출)를 추가했다. 두 번 전달 문제는 이 패치로도 해결되지 않았고 원인은 폴백 이전 단계에 있다.
+
+## Default Limits editor: full paired verification (2026-09-18)
+
+The Default Limits card is verified across every state variant, not sampled. Each cell
+restores the fixture, drives the real browser, saves once, then replays the same mutation
+directly against the admin API from the same restored state and compares the resulting
+database, scheduler, and runtime state.
+
+| Dimension | Coverage |
+|---|---|
+| Cells executed | 81 of 81 expected, 0 duplicate keys |
+| Principals | 3 (`qa-principal-primary`, `qa-principal-disabled`, `qa-principal-delete-target`) |
+| State variants | 9 (`requests`, `input_tokens`, `output_tokens`, `total_tokens`, `cost_usd`, `concurrent`, `cap_zero`, `window_one`, `empty`) |
+| Repeats per pair | 3 |
+| Result | 81 PASS, 0 FAIL, 0 BLOCKED |
+
+| Measurement | Median | Range |
+|---|---|---|
+| Save click to rendered card | 49 ms | 32-64 ms |
+| Same-state direct PATCH | 7.0 ms | 5.8-16.8 ms |
+
+Every cell asserts three things: the UI wrote exactly one `PATCH`, the post-save state
+fingerprint equals the direct-request fingerprint, and the mutation produced one matching
+audit row. Reads are audited and the scheduler enqueues its own work while a browser
+session is open, so `audit_log_v1` and `Jobs` are compared through the mutation's own audit
+rows rather than whole-table hashes.
+
+Ledger: `qa/admin-web/runs/2026-09-18/default-limits-paired-ledger.json`. Per-cell artifacts
+(baseline and post-save DOM plus screenshots, observer timings, recorder network log, paired
+proof) stay on the measurement host under
+`/data/tmp/cc-lb-qa-recovery-20260918/evidence/<cell>/`; 26 MB of screenshots are not
+committed.
+
+### Browser driver corrections this run
+
+Three defects made the UI look broken when it was not:
+
+- React re-renders dropped injected QA attributes, so clicks resolved to detached nodes.
+  Stable text selectors fixed delivery.
+- Camofox humanized every cursor path, costing seconds per click. A `CAMOFOX_HUMANIZE=0`
+  opt-out brought a click from 11.8 s to 0.7 s.
+- Playwright's click could land while its own acknowledgement timed out, and the fallback
+  mouse sequence then clicked a second time, producing a duplicate save. The fallback now
+  runs only when no click was observed.
