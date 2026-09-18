@@ -107,3 +107,34 @@ with a release build.
 
 Per-page screenshots and the raw browser sweep files stay on the measurement host under
 `/data/tmp/cc-lb-prod-sweep/`; they are not committed.
+
+## Write-path timings on an isolated replica
+
+All 41 declared admin write endpoints were exercised against the localhost replica: the same
+binary, a copy of the live database, and writes applied only to that copy. Production received
+no write.
+
+| Endpoint | Median | Status |
+|---|---|---|
+| `POST /admin/v1/upstreams/{id}/subscription-metadata/refresh` | **1,277 ms** | 200 |
+| `POST /admin/v1/plugins/wasm` | 31 ms | 201 |
+| `PUT /admin/v1/config/draft` | 17 ms | 200 |
+| `POST /admin/v1/principals` | 11 ms | 201 |
+| `DELETE /admin/v1/plugins/registry/{id}` | 6 ms | 204 |
+| `POST /admin/v1/upstreams` | 6 ms | 201 |
+| every other successful write | 1-5 ms | 2xx |
+
+Across the 39 endpoints that returned 2xx, the median endpoint costs 4.5 ms. One endpoint is
+three orders of magnitude slower: `subscription-metadata/refresh` spends 1.28 s because it
+performs a provider HTTP call inside the request. Any UI control bound to it should show
+progress and must not be issued on a render path.
+
+Two contract drifts surfaced: `POST /admin/v1/config/save` and
+`POST /admin/v1/config/draft/download` return 405 on the deployed binary although current
+master registers both. This is the same four-day staleness that removes the request-id header.
+
+The remaining OAuth write endpoints were probed for reachability and rejection latency only
+(`oauth/start` 2 ms, the three code-exchange routes reject an invalid `state_token` in 1-1.3 ms);
+completing a real provider handshake would mutate live credentials and was not executed.
+
+Artifact: `qa/admin-web/runs/2026-09-18/write-path-fixture-timings.json`.
