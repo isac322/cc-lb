@@ -73,3 +73,23 @@
 - 시작: 기존 실행 기록과 현재 GitHub 체크 확인. CI 조사와 QA 환경 복구를 독립적으로 진행한다.
 - 증거 감사 정정: 기존 browser worker가 6개 셀의 스크린샷을 과거 실행에서 복사하고 recorder를 부분 수정했음을 확인했다. 시작 상태의 6/81은 과거 보고값이며, 완전한 현재 셀 UI 증거로 인정하는 수는 0/81로 정정한다. API/DB 관측의 독립적 유효 범위는 보존한다. 원본을 삭제하지 않고 81개를 새 증거로 재실행한다. 근거: `qa/admin-web/runs/2026-09-18/evidence-provenance-audit.json`.
 - 작업트리 보호: 원본 `isac322/analyze-and-fix-perf`의 기존 다수 수정/미추적 파일은 건드리지 않는다. 실행 자산과 새 보고는 별도 `/data/tmp/cc-lb-qa-consolidated`에 통합한다.
+
+## 실행 결과 (2026-09-18)
+
+### 완료
+- CI 실패 근본 원인 확정과 수정: PR #805 (`cc-lb-2` 이동 + 러너 이미지 `gnutar`), 검증 후 squash merge (`864e801e`). 같은 명령을 고정 러너 이미지에서 quota만 바꿔 측정: 1코어 170.6s/156.6s throttle, 2코어 70.5s/20.2s, 4코어 59.0s/0.8s, 세 번 모두 775 테스트 통과. 머지 후 `bun-checks`는 `cc-lb-2`에서 73/73 파일 통과.
+- 버그 PR 스택 9건을 최신 master로 재배치하고 내부 리뷰 결과를 반영: Postgres 마이그레이션 버전 120 충돌을 0121~0125로 정정, `upstream` 상세 응답의 키 집합 단정을 되살리고 `base_url` 추가, Escape 취소 테스트가 blur까지 실행하도록 보강.
+- QA PR(#803)을 자산 전용으로 재작성: 운영 코드(요청 추적 미들웨어, 풀 acquire 계측, `log` 의존성)를 제외하고 인벤토리·스킬·fixture·증거만 남김. `bun scripts/generate-qa-inventory.mjs --check` 통과(426행 / UI 209 / 요청 148 / endpoint 104).
+- 격리 fixture 읽기 경로 전수 측정: 179 cell × 5회 = 895 요청 전부 200. 결과 `qa/admin-web/runs/2026-09-18/read-path-baseline.json`.
+- 규모 실험: `request_events_v1`에 300k행(7일) 주입 후 재측정. `/admin/v1/events/recent`가 median 425ms, p95 1093ms, 최대 2426ms로 악화. 동일 SQL 직접 실행 118~328ms, 계획은 `request_events_v1_v3_cache_key_ts` skip-scan + TEMP B-TREE 정렬. 히스토그램이 이미 쓰는 넓힌 `list_ts_ms` 경계를 목록 쿼리에 추가하면 계획이 `request_events_v1_list_order_idx` 탐색으로 바뀌고 0.7~1.4ms가 된다. 결과 `qa/admin-web/runs/2026-09-18/scale-experiment.json`.
+- 증거 감사: 기존 Default Limits 6개 셀의 스크린샷·recorder가 과거 실행 복사였음을 확인하고 UI 증거로 인정하지 않음. `qa/admin-web/runs/2026-09-18/evidence-provenance-audit.json`.
+
+### 미완료와 차단 사유
+- Default Limits 81 UI cell paired 검증: 0/81. 드라이버와 controller는 복구했고 단일 셀이 22초에 UI 증거 검증까지 통과했지만, Camofox 클릭이 한 번의 호출에서 약 130ms 간격으로 두 번 전달되어 두 번째 클릭이 저장 직후의 Edit 버튼을 눌러 편집기를 재열고, 한 번은 두 번째 PATCH까지 발생시켰다. 이후에는 `page.mouse.move`가 2.5초 안에 반환되지 않아 클릭 자체가 전달되지 않는 상태로 악화됐다. 근거: `qa/admin-web/runs/2026-09-18/...` 및 Camofox 서비스 로그.
+- 전체 426행 런타임 전수 실행: 읽기 경로는 측정했고 쓰기·UI 상태 전이는 위 입력 문제로 미완료.
+- 운영(`cc-lb.runbear.io`) 런타임 측정: Cloudflare Access 로그인이 필요하고 로그인 화면 조작도 같은 클릭 문제로 실패했다. 운영 자격증명 우회는 하지 않았다.
+- 목록 쿼리 개선(`list_ts_ms` 경계 추가): 애플리케이션 코드 변경이므로 제안만 기록했고 적용하지 않았다.
+
+### Camofox 도구 변경
+- `click-timeout-no-replay.patch`(타임아웃 시 폴백 제거)는 실제로 클릭이 전달되지 않게 만들어 되돌렸다.
+- 대신 `click-witness.patch`(클릭이 이미 전달됐는지 페이지에서 관측한 뒤 폴백)와 `press-tool.patch`(`camofox_press` 노출)를 추가했다. 두 번 전달 문제는 이 패치로도 해결되지 않았고 원인은 폴백 이전 단계에 있다.
