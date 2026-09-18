@@ -1,0 +1,216 @@
+{
+  "engine": "postgres",
+  "profile": "measurement_debug",
+  "phase": "baseline_A",
+  "binary_sha256": "f564dcf57a4c2b914b2c690b8dee4e1c68f4fa472ae680bbe599d250dcd28f65",
+  "warmups": 5,
+  "samples": [
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 4.105917,
+      "total_ms": 4.118667,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 4.043833,
+      "total_ms": 4.054708,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 3.387792,
+      "total_ms": 3.39475,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 3.16675,
+      "total_ms": 3.173084,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.523916,
+      "total_ms": 2.530083,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.481875,
+      "total_ms": 2.487625,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.55125,
+      "total_ms": 2.556917,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.932792,
+      "total_ms": 2.938542,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.211667,
+      "total_ms": 2.218375,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 3.139459,
+      "total_ms": 3.145375,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.848458,
+      "total_ms": 2.858167,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.727458,
+      "total_ms": 2.734875,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 1.986208,
+      "total_ms": 1.992666,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 4.122417,
+      "total_ms": 4.129917,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 4.742834,
+      "total_ms": 4.749667,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.645459,
+      "total_ms": 2.651917,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.48175,
+      "total_ms": 2.491167,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.2655,
+      "total_ms": 2.272958,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.178541,
+      "total_ms": 2.185208,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.18,
+      "total_ms": 2.186,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.202042,
+      "total_ms": 2.207917,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.12825,
+      "total_ms": 2.1345,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.41025,
+      "total_ms": 2.416042,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 2.294625,
+      "total_ms": 2.305208,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    },
+    {
+      "status": 200,
+      "request_id": null,
+      "head_ms": 3.591459,
+      "total_ms": 3.599,
+      "body_bytes": 16,
+      "body_sha256": "87ed0d03f884caaee9b55a733b3eb7757fb2a40f9c43fd230d5642c6c54ed1c1"
+    }
+  ],
+  "proxy_control": {
+    "status": 401,
+    "request_id": "qa_proxy_header_control",
+    "x_request_id": null,
+    "body_sha256": "f5245aa94925bf141c7a3bdd9c9d21abd3f3571c12560701ba29a0c9caa91fcd"
+  },
+  "scope": "Loopback empty-upstream listing, serial requests, warm connection/statement caches; not production throughput or pure CPU overhead."
+}

@@ -1,0 +1,30 @@
+{
+  "scratch": "/data/tmp/qa-source-check-jy9a_9w5",
+  "cases": [
+    {
+      "case": "unchanged-copy",
+      "exit": 0,
+      "diagnostic": "Checked 433 rows from 205 UI actions, 149 UI request occurrences, and 115 API endpoints; source=source_reconciled, runtime=runtime_pending.\n"
+    },
+    {
+      "case": "new-source-file",
+      "exit": 1,
+      "diagnostic": "QA inventory check failed with 1 error(s):\n- ui source denominator is missing new production source file: crates/cc-lb-admin/web/src/qa-new-surface.ts\n"
+    },
+    {
+      "case": "changed-existing-source",
+      "exit": 1,
+      "diagnostic": "QA inventory check failed with 2 error(s):\n- ui source hash is stale: crates/cc-lb-admin/web/src/routes/settings.tsx\n- ui.route_denominator does not match the independently discovered routes tree\n"
+    },
+    {
+      "case": "stale-generated-document",
+      "exit": 1,
+      "diagnostic": "QA inventory check failed with 1 error(s):\n- generated Markdown is stale; run bun scripts/generate-qa-inventory.mjs\n"
+    },
+    {
+      "case": "restored-copy",
+      "exit": 0,
+      "diagnostic": "Checked 433 rows from 205 UI actions, 149 UI request occurrences, and 115 API endpoints; source=source_reconciled, runtime=runtime_pending.\n"
+    }
+  ]
+}

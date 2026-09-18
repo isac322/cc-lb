@@ -1,0 +1,32 @@
+{
+  "negative_cases": [
+    {
+      "case": "mismatched_source_state",
+      "exit_code": 1,
+      "diagnostic": [
+        "QA inventory check failed with 1 error(s):",
+        "- api_read.source_state.note differs from the UI source state"
+      ]
+    },
+    {
+      "case": "missing_response_source",
+      "exit_code": 1,
+      "diagnostic": [
+        "QA inventory check failed with 3 error(s):",
+        "- api_read.response_observability.source is required",
+        "- api_read.response_observability.source must be a non-empty string",
+        "- api_read.response_observability.source must be a non-empty string"
+      ]
+    },
+    {
+      "case": "stale_middleware_hash",
+      "exit_code": 1,
+      "diagnostic": [
+        "QA inventory check failed with 1 error(s):",
+        "- deployed_delta.added_since_deploy[6].sources[0].sha256 is stale: crates/cc-lb-server/src/app.rs"
+      ]
+    }
+  ],
+  "restored_source_bytes_equal": true,
+  "restored_check_exit": 0
+}

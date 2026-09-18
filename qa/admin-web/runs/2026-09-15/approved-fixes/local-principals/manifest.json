@@ -1,0 +1,47 @@
+{
+  "schema": "cc-lb-approved-fixes-candidate-manifest/v1",
+  "candidate": {
+    "path": "/data/tmp/cc-lb-admin-web-qa-evidence/cc-lb-approved-fixes-candidate",
+    "sha256": "f564dcf57a4c2b914b2c690b8dee4e1c68f4fa472ae680bbe599d250dcd28f65",
+    "app_patch_sha256": "7ef937736bfb0432d3b5c22c1af90bace625c1df04a05201a475806f70a34166",
+    "source_commit": "ef70b347"
+  },
+  "root": "/data/tmp/cc-lb-admin-web-qa-completion/target/keepalive-qa/admin-web-local-principals",
+  "evidence": "/data/tmp/cc-lb-admin-web-qa-evidence/local-principals/approved-candidate",
+  "artifacts": {
+    "actions.jsonl": {
+      "sha256": "c90834f4b8ee9118bb2c4405b99a16fccfe3d3b55d4e5f701ad66bc66a7f0f78",
+      "bytes": 25599
+    },
+    "summary.json": {
+      "sha256": "bf03ffcdb8a25495bac568e8a1946896c848d5f0e8ba73e1cc0cbd542ec0b863",
+      "bytes": 2336
+    }
+  },
+  "browser_closed": true,
+  "app_cleanup_pending_parent": false,
+  "credentials_retained_0600": [
+    "/data/tmp/cc-lb-admin-web-qa-completion/target/keepalive-qa/admin-web-local-principals/admin-token",
+    "/data/tmp/cc-lb-admin-web-qa-completion/target/keepalive-qa/admin-web-local-principals/master-key"
+  ],
+  "production_access": false,
+  "repo_or_git_changes": false,
+  "created_at_utc": "2026-09-15T09:37:48.790Z",
+  "action_rows": 10,
+  "status_counts": {
+    "PASS": 10
+  },
+  "final_restore": {
+    "snapshot": "populated",
+    "app_stopped": true,
+    "browser_stopped": true,
+    "storage_sha256": "871a0a927f78f989bae3fee1762a4592527302ce2e24ee7a3cf6850f4d3e8108",
+    "snapshot_storage_sha256": "871a0a927f78f989bae3fee1762a4592527302ce2e24ee7a3cf6850f4d3e8108",
+    "config_sha256": "fc1d909d0c9e698dca600a65adedb56e8dd9f0334c1e953137fcc87939bf5fe7",
+    "snapshot_config_sha256": "fc1d909d0c9e698dca600a65adedb56e8dd9f0334c1e953137fcc87939bf5fe7",
+    "canonical_equal": true,
+    "restored_at_utc": "2026-09-15T09:40:06.386Z"
+  },
+  "app_stopped": true,
+  "updated_at_utc": "2026-09-15T09:40:06.388Z"
+}

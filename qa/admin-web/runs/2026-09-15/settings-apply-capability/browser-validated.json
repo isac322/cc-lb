@@ -1,0 +1,39 @@
+{
+  "expected": {
+    "step": "validated",
+    "apply_supported": false,
+    "apply_button_disabled": true,
+    "last_validated_matches_revision": true,
+    "notice_present": true
+  },
+  "observed": {
+    "dom": {
+      "save_disabled": true,
+      "validate_disabled": false,
+      "apply_disabled": true,
+      "pipeline_status_text": "This server does not support applying saved drafts. Use the deployment or restart workflow to change startup-fixed settings.",
+      "notice_present": true,
+      "revision": "1",
+      "last_validated": "rev 1"
+    },
+    "apply_click_attempt": {
+      "found": true,
+      "disabled_property": true,
+      "disabled_attribute": true,
+      "click_dispatched": true
+    },
+    "api_metadata": {
+      "revision": 1,
+      "last_validated_revision": 1,
+      "last_validation_error": null,
+      "apply_supported": false
+    }
+  },
+  "validations": {
+    "apply_button_is_disabled": true,
+    "notice_is_displayed": true,
+    "api_apply_supported_is_false": true,
+    "api_last_validated_revision_equals_revision": true,
+    "api_no_validation_error": true
+  }
+}

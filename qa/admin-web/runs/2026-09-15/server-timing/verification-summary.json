@@ -1,0 +1,31 @@
+{
+  "schema": "cc-lb-server-timing-correlation-verification/v1",
+  "candidate_sha256": "db564601fbc351b33750ef3f766b916d829264004a5fd2a11b0ce2aeb5652de5",
+  "recorder_version": "1.0.7",
+  "recorder_sha256": "003680dff36ca007387d966a7089f2e8ec6d032d803d9787421ac5ba6b8ac610",
+  "sqlite": {
+    "resource_entries_joined": 17,
+    "unique_server_ids": 17,
+    "sql_bearing_entries": 6,
+    "source_window": "Retained snapshot starting at sequence 106, not the earlier lost drain."
+  },
+  "postgres": {
+    "resource_entries_joined": 19,
+    "unique_server_ids": 19,
+    "sql_bearing_entries": 6,
+    "capture_complete": false,
+    "capture_incomplete_reasons": [
+      "action_window_still_open"
+    ]
+  },
+  "verified": "Canonical recorder ResourceTiming IDs joined to actual response-head, SQL and acquire events on both isolated backends.",
+  "limits": [
+    "fetch_observation=0 in the isolated world; no fake fetch lifecycle records were created.",
+    "PostgreSQL raw snapshot retains an open action window; it is not a complete UI-oracle run.",
+    "Earlier PostgreSQL UI rows without retained server logs were not substituted.",
+    "Pure DB execution and pure pool queue wait remain unmeasured.",
+    "No production activation or full runtime QA completion."
+  ],
+  "owned_capture_servers_stopped": true,
+  "full_runtime_qa_complete": false
+}

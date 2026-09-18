@@ -1,0 +1,30 @@
+{
+  "method": "Reconstructed after the run by reversing the two later source edits from recorded tool history; not a contemporaneous source snapshot.",
+  "historical_tool_snapshot_tag": "D210",
+  "historical_lines": 965,
+  "historical_bytes": 36278,
+  "contemporaneous_full_helper_sha_recorded": false,
+  "reconstructed_helper_sha256": "6b96b33f848db01c0a293325480cb480fb0635295c27a17330a3d85f2ebcaf7b",
+  "run_raw_utc_start": "2026-09-15T06:55:33.497Z",
+  "run_raw_utc_end": "2026-09-15T07:02:03.043Z",
+  "measurements_modified": false,
+  "files": [
+    {
+      "file": "helper-at-run.py",
+      "sha256": "6b96b33f848db01c0a293325480cb480fb0635295c27a17330a3d85f2ebcaf7b"
+    },
+    {
+      "file": "run-experiment.py",
+      "sha256": "a198e065aed02c0d5c3a304453809cb4c00cb4bd35b34e7c618d849d81415a51"
+    },
+    {
+      "file": "build-cache-manifest.py",
+      "sha256": "d79139acf396e95820f8656e345b68ec1e2299cc2d0d166273a4772be6df0ca8"
+    },
+    {
+      "file": "protocol.json",
+      "sha256": "c21c8f43695ea7d30304d982e4c58597f78bb35ce15db7e4fdaca0c56ed2a231"
+    }
+  ],
+  "limitation": "The full helper digest was computed during reconstruction, not recorded by the original run. Preserve this distinction when citing provenance."
+}

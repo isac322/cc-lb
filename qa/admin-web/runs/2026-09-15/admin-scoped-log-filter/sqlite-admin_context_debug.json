@@ -1,0 +1,39 @@
+{
+  "engine": "sqlite",
+  "profile": "admin_context_debug",
+  "RUST_LOG": "info,[admin.request]=debug",
+  "admin_http_requests": 3,
+  "http_statuses": [
+    200,
+    200,
+    200
+  ],
+  "matched_requests": [
+    {
+      "rid": "req_admin_01a0a8dd-24e3-7f03-b7c1-9b64ad34b52e",
+      "query_debug_events": 1,
+      "acquire_debug_events": 1
+    },
+    {
+      "rid": "req_admin_01a0a8dd-24e7-7010-88fe-ea3267ef1311",
+      "query_debug_events": 1,
+      "acquire_debug_events": 1
+    },
+    {
+      "rid": "req_admin_01a0a8dd-24ea-7ad1-965e-45cbc56c1471",
+      "query_debug_events": 1,
+      "acquire_debug_events": 1
+    }
+  ],
+  "sql_debug_events_total": 6,
+  "sql_debug_events_outside_admin_span": 0,
+  "full_log_bytes": 12826,
+  "proxy_control": {
+    "status": 401,
+    "request_id": "qa_proxy_header_control",
+    "x_request_id": null,
+    "body_sha256": "f5245aa94925bf141c7a3bdd9c9d21abd3f3571c12560701ba29a0c9caa91fcd"
+  },
+  "log_sha256": "460fc844312519227a434bc2e0c61f3fe88169dac85398f7eec2537aaa8d1354",
+  "production_changes": 0
+}

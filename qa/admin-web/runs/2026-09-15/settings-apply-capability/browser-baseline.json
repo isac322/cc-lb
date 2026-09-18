@@ -1,0 +1,25 @@
+{
+  "expected": {
+    "step": "baseline",
+    "apply_supported": false,
+    "expected_save_disabled": false,
+    "expected_validate_disabled": true,
+    "expected_apply_disabled": true,
+    "expected_notice": "This server does not support applying saved drafts. Use the deployment or restart workflow to change startup-fixed settings."
+  },
+  "observed": {
+    "save_disabled": false,
+    "validate_disabled": true,
+    "apply_disabled": true,
+    "pipeline_status_text": "Save this configuration as a server draft before validating or applying.This server does not support applying saved drafts. Use the deployment or restart workflow to change startup-fixed settings.",
+    "notice_present": true,
+    "revision": "0",
+    "last_validated": "—"
+  },
+  "validations": {
+    "save_is_enabled": true,
+    "validate_is_disabled": true,
+    "apply_is_disabled": true,
+    "notice_matches": true
+  }
+}

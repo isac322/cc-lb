@@ -4,7 +4,7 @@
 - 작성일: 2026-09-10
 - 대상: proxy request lifecycle, request event/storage/admin API, Logs latency UI, Prometheus/OTLP
 - 관련 문서: `docs/request-setup-timing-breakdown.md`
-- 실행 QA: `.opencode/skills/user-flow-qa/references/scenarios/request-log-observability.md`의 Cases F–K
+- 실행 QA: `.agents/skills/user-flow-qa/references/scenarios/request-log-observability.md`의 Cases F–K
 - 완료 검증일: 2026-09-10
 
 ## 1. 목적과 비목표

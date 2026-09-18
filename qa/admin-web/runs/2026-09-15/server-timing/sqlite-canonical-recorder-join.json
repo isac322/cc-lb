@@ -1,0 +1,236 @@
+{
+  "rows": [
+    {
+      "source_entry_id": "a9c4291d-b7f9-49b0-ac46-042161b3b7a2",
+      "rid": "req_admin_01a0a5ce-f38f-7f20-bd55-2bba45012670",
+      "backend_route": "/admin/v1/upstreams",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 1.814916,
+      "sql_event_count": 1,
+      "sql_elapsed_secs": [
+        8.5417e-05
+      ],
+      "acquire_event_count": 1,
+      "acquire_total_secs": [
+        7.3291e-05
+      ]
+    },
+    {
+      "source_entry_id": "66f2946f-c0f8-44a0-96eb-3754f82e289a",
+      "rid": "req_admin_01a0a5ce-fd01-71f2-84f7-91e17e947fa9",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.23125,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "1d494000-2818-4b41-a31c-f979fe3a735a",
+      "rid": "req_admin_01a0a5cf-37f9-76a1-941a-6f2570ae4e14",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.205125,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "4681e036-c354-4d8c-8a17-f88c27d79d0e",
+      "rid": "req_admin_01a0a5cf-68d8-7921-bc75-d37f57780f0f",
+      "backend_route": "/admin/v1/upstreams",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 2.11225,
+      "sql_event_count": 1,
+      "sql_elapsed_secs": [
+        0.000152042
+      ],
+      "acquire_event_count": 1,
+      "acquire_total_secs": [
+        9.9042e-05
+      ]
+    },
+    {
+      "source_entry_id": "f19cce1b-de20-479a-acfc-6d76dd0c8a51",
+      "rid": "req_admin_01a0a5cf-72d9-7060-8fb0-a40a2517f898",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.198667,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "b01b73b6-8892-457e-894c-50c642357151",
+      "rid": "req_admin_01a0a5cf-adec-7ff2-bce8-5caf7a048ff3",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.149709,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "cfc670ad-bdb1-4de2-9590-c5964fe7362b",
+      "rid": "req_admin_01a0a5cf-de81-72b2-9872-3be0a77c8afd",
+      "backend_route": "/admin/v1/upstreams",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 4.1808749999999995,
+      "sql_event_count": 1,
+      "sql_elapsed_secs": [
+        0.0002705
+      ],
+      "acquire_event_count": 1,
+      "acquire_total_secs": [
+        0.000241833
+      ]
+    },
+    {
+      "source_entry_id": "d3880d4c-b36c-452d-a986-dda63ebd9d0d",
+      "rid": "req_admin_01a0a5cf-e90c-7810-b29c-e6cc462714be",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.235792,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "573b4af2-a2f9-4282-8bfb-198810ea00c9",
+      "rid": "req_admin_01a0a5d0-2409-7000-ac3b-6d6c63c473bc",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.27587500000000004,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "26349893-7c28-428c-8367-237eaa41d84e",
+      "rid": "req_admin_01a0a5d0-5435-7c02-b93a-db053b50d9fe",
+      "backend_route": "/admin/v1/upstreams",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 1.943458,
+      "sql_event_count": 1,
+      "sql_elapsed_secs": [
+        0.000101792
+      ],
+      "acquire_event_count": 1,
+      "acquire_total_secs": [
+        0.000170625
+      ]
+    },
+    {
+      "source_entry_id": "3dd9ae46-4f19-49bb-adfc-3b5b05bbd0c2",
+      "rid": "req_admin_01a0a5d0-5ee9-7a52-818e-d6eef2cd1246",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.235208,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "1d8b76d3-9490-40bc-8b7a-c37f72641d8d",
+      "rid": "req_admin_01a0a5d0-99cd-7120-9682-97904c79c243",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.252708,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "d5141e64-d1f5-46a2-a69e-df892b927c08",
+      "rid": "req_admin_01a0a5d0-ca00-7620-8184-b574ff4c9346",
+      "backend_route": "/admin/v1/upstreams",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 3.074041,
+      "sql_event_count": 1,
+      "sql_elapsed_secs": [
+        9.5958e-05
+      ],
+      "acquire_event_count": 1,
+      "acquire_total_secs": [
+        0.000119
+      ]
+    },
+    {
+      "source_entry_id": "dec7c98e-d211-4455-b3b4-3e7ae8a001b2",
+      "rid": "req_admin_01a0a5d0-d4e8-7583-a97c-d2c2a1ac7a14",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.176208,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "b97bb858-a149-4f43-b0d6-fc31aa1f2855",
+      "rid": "req_admin_01a0a5d1-100f-79e1-ba4a-991e5f0cf363",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.44049999999999995,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "8b431f40-3a5e-489f-b7c4-71c372d8ade8",
+      "rid": "req_admin_01a0a5d1-3f42-76e1-aaab-5ad7fc737759",
+      "backend_route": "/admin/v1/upstreams",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 2.375375,
+      "sql_event_count": 1,
+      "sql_elapsed_secs": [
+        0.000104583
+      ],
+      "acquire_event_count": 1,
+      "acquire_total_secs": [
+        9.7417e-05
+      ]
+    },
+    {
+      "source_entry_id": "b93372ed-3214-484c-bc84-f062c71654ae",
+      "rid": "req_admin_01a0a5d1-4b44-7352-aa81-1fb5768ed80e",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.296666,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    }
+  ],
+  "observed_resource_entries": 17,
+  "unique_server_ids": 17,
+  "scope": "Subsequent retained snapshot, starting at recorder sequence 106; not recovery of the earlier drained 103 resource entries. Pure DB execution and pool queue wait remain unmeasured.",
+  "full_runtime_qa_complete": false
+}

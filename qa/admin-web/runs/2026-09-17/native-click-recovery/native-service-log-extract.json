@@ -1,0 +1,96 @@
+[
+  {
+    "line": 80510,
+    "ts": "2026-09-17T15:20:02.775Z",
+    "level": "info",
+    "msg": "req",
+    "reqId": "08dc7809",
+    "method": "POST",
+    "path": "/tabs/0f677022-adca-4016-818a-59dbf11e8886/click"
+  },
+  {
+    "line": 80511,
+    "ts": "2026-09-17T15:20:05.663Z",
+    "level": "info",
+    "msg": "req",
+    "reqId": "b6909c74",
+    "method": "POST",
+    "path": "/tabs/0f677022-adca-4016-818a-59dbf11e8886/evaluate"
+  },
+  {
+    "line": 80512,
+    "ts": "2026-09-17T15:20:05.778Z",
+    "level": "warn",
+    "msg": "click timeout, trying mouse sequence"
+  },
+  {
+    "line": 80513,
+    "ts": "2026-09-17T15:20:11.526Z",
+    "level": "info",
+    "msg": "mouse sequence dispatched",
+    "x": "1449",
+    "y": "635"
+  },
+  {
+    "line": 80514,
+    "ts": "2026-09-17T15:20:12.175Z",
+    "level": "info",
+    "msg": "clicked",
+    "reqId": "08dc7809",
+    "tabId": "0f677022-adca-4016-818a-59dbf11e8886"
+  },
+  {
+    "line": 80515,
+    "ts": "2026-09-17T15:20:12.175Z",
+    "level": "info",
+    "msg": "res",
+    "reqId": "08dc7809",
+    "status": 200
+  },
+  {
+    "line": 80543,
+    "ts": "2026-09-17T15:23:36.861Z",
+    "level": "info",
+    "msg": "req",
+    "reqId": "294309f8",
+    "method": "POST",
+    "path": "/tabs/f591516b-e99b-495d-9b07-c9b8eac51f74/click"
+  },
+  {
+    "line": 80544,
+    "ts": "2026-09-17T15:23:36.897Z",
+    "level": "info",
+    "msg": "click constrained selector to visible match"
+  },
+  {
+    "line": 80545,
+    "ts": "2026-09-17T15:23:39.899Z",
+    "level": "warn",
+    "msg": "click timeout, trying mouse sequence"
+  },
+  {
+    "line": 80546,
+    "ts": "2026-09-17T15:24:04.863Z",
+    "level": "warn",
+    "msg": "destroying timed-out tab",
+    "tabId": "f591516b-e99b-495d-9b07-c9b8eac51f74",
+    "reason": "operation_timeout"
+  },
+  {
+    "line": 80547,
+    "ts": "2026-09-17T15:24:04.871Z",
+    "level": "error",
+    "msg": "click failed",
+    "reqId": "294309f8",
+    "tabId": "f591516b-e99b-495d-9b07-c9b8eac51f74",
+    "error": "native mouse move timed out after 24928ms"
+  },
+  {
+    "line": 80548,
+    "ts": "2026-09-17T15:24:04.872Z",
+    "level": "info",
+    "msg": "res",
+    "reqId": "294309f8",
+    "status": 410
+  }
+]

@@ -1,0 +1,147 @@
+{
+  "schema": "cc-lb-settings-capability-evidence-index/v1",
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/verification.json",
+      "sha256": "74f38bb9dbe5706083ff80dd282513e236391b940d63807929f15011945cff22",
+      "bytes": 2335
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/before-fix-web-regression.txt",
+      "sha256": "259d513aacfd626b8c5ac9adb70719e97135ea2a6b8c042cb97534c7ef707785",
+      "bytes": 2680
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/before-fix-web-contract-failure.txt",
+      "sha256": "f8bd38d63f75f96406e1f40a13750393353ffc73a3b5687174272350988b64f6",
+      "bytes": 2831
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/after-fix-settings-tests.txt",
+      "sha256": "87cf2d76691005863b37cbfe23c606cc2c5d27a7fa67d83db76b32ddf9ec56d7",
+      "bytes": 541
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/after-fix-backend-tests.txt",
+      "sha256": "8e6980111e0ea381045e3c54984a85ea5fccd7fbf0674f99cf66c9aa36860d00",
+      "bytes": 3138
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/format-final.txt",
+      "sha256": "17c87ae271fc71f9541b9b27a7581a15dd0b417c52eba02077b6e61068eeb0a1",
+      "bytes": 43
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/typecheck-final.txt",
+      "sha256": "dd920e84d18ccf855e898aff1c8f951534641becef6422a7b88dd468bb3fcbb4",
+      "bytes": 146
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/typecheck-final-direct-pinned.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/web-final.txt",
+      "sha256": "a2fcaa1e2ebeae189783440980bcd8d4b5d06bfa8577a568eee847212c345ab2",
+      "bytes": 19965
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/build-final.txt",
+      "sha256": "7ec5de076375ad703b48403a5615c8fce197e02aa45ba36aff43eef4fb7546d6",
+      "bytes": 4561
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/clippy.txt",
+      "sha256": "09bd3c12e1f72695e432c59cd1f7535d1cc089dfde772446868711cc63f14495",
+      "bytes": 122
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/preexisting-supported-apply-limit.json",
+      "sha256": "ab4285caeb6cff74b937ec82bcc6d4d7087f12ba7328d39259c4881f229d7c78",
+      "bytes": 1696
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-baseline.json",
+      "sha256": "3b3a79cd235c91e9df7c75ffe9e30b0b7c928b95f65ccf0bf9d6689cd5e664ad",
+      "bytes": 899
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-baseline.png",
+      "sha256": "8aa7728435c89be941bf74855570cbcf7ebf4f6da72c3152cdefc23a0500055d",
+      "bytes": 126906
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-validated.json",
+      "sha256": "addd9a2a99044d093665969d82ff578f86a219f44f6135051a2e669a3c36695d",
+      "bytes": 1100
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-validated.png",
+      "sha256": "80a5786dc30836c8b25e780cc905522d57b3c5d9c47c112f729b1ce64a2b9c71",
+      "bytes": 130952
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-summary.json",
+      "sha256": "bd0c80cf7ca070781297e7744758d6239389906079fcfabaf45540c14dc656ef",
+      "bytes": 762
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-rt.json",
+      "sha256": "3a6b61bf72cfdbed7fdedb0141310c67260e7ff68b0d4b2840278723bbf90cc8",
+      "bytes": 5390
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-request-gate-proof.json",
+      "sha256": "ce49443911e07567dd4876c89a27714badfc95482c8f460b5010e2c076e33854",
+      "bytes": 7651
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-final-expected.json",
+      "sha256": "0d57a62ca755f2c6541d20466557a62a430dcaa556f23fef144627267df4cc2d",
+      "bytes": 698
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-final-observed.json",
+      "sha256": "bbc00f868483d06002f5ebeefb5742444b0ec696e196782d33773ecdc651d9ee",
+      "bytes": 1797
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-final-screen.png",
+      "sha256": "88a1e561bc984f4b3db1448eef929accfbae86af2d6fd6da9c76f2b9dae907ea",
+      "bytes": 96767
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-final-rt.json",
+      "sha256": "8ab4682df7ee3f07911bdc1da139de6ef33165f23905feecbe357055bb8d8890",
+      "bytes": 5340
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-final-summary.json",
+      "sha256": "19a89a4b96bfc7f8b8378d0778edbbf6c030d4953da6fa155762e019b8f954c8",
+      "bytes": 944
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-final-request-gate-proof.json",
+      "sha256": "88edb2de4d43d421e4b197a2c2c122d51d60bccc3105ec9843d0ab234f11fc7f",
+      "bytes": 5903
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-final-controls.json",
+      "sha256": "1b9371fe39198e9e7a5975d53cf203d2a7733b26c21f068658dd49b37b7ff4ff",
+      "bytes": 2383
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/browser-final-controls.png",
+      "sha256": "a31addf029bf5cb856515d7f3f39a457643e34e4f17adaef6b2a33fad38a6452",
+      "bytes": 77902
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/settings-apply-capability/final-gates.json",
+      "sha256": "b2f36711aa0221fcf971eac2eca87a4d533853e59347616505ebd509b8202685",
+      "bytes": 937
+    }
+  ],
+  "config_or_credentials_or_full_logs_included": false,
+  "full_runtime_qa_complete": false
+}

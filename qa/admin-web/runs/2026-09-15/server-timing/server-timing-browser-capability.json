@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "observed_at_utc": "2026-09-15T13:27:17.771516+00:00",
+  "experiment": "server-timing-browser-capability",
+  "fixture": "http://127.0.0.1:56282/ (Main-owned mock, strict CSP, external /client.js)",
+  "tab_id": "56f48f60-74ca-4d73-a01b-9b50b37d3164",
+  "action": "native click 'Run timing probe' x1 -> UI status 'complete'",
+  "result": "CAPABILITY PROVEN \u2014 performance.getEntriesByType('resource') entries for /probe expose serverTiming with rid.description readable from camofox_evaluate isolated world",
+  "probe_entries": [
+    {
+      "name": "http://127.0.0.1:56282/probe",
+      "startTime": 22232,
+      "duration": 4,
+      "serverTiming": [
+        {
+          "name": "rid",
+          "description": "qa_st_1de8658b14104ed5bf05328695636fc3",
+          "duration": 0
+        }
+      ]
+    },
+    {
+      "name": "http://127.0.0.1:56282/probe",
+      "startTime": 22366,
+      "duration": 6,
+      "serverTiming": [
+        {
+          "name": "rid",
+          "description": "qa_st_a4ff74c3925f417390a3c6a4f8564e9d",
+          "duration": 0
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "two /probe resource entries observed from one click (UI-issued GETs; not fetched by evaluate)",
+    "no direct fetch /probe from browser evaluate per constraint; /proof left to Main",
+    "rid values are dummy; no credentials; no production",
+    "product Server-Timing addition NOT approved \u2014 mock-only experiment"
+  ],
+  "writes_observed": 0,
+  "secret": false,
+  "observed_request_count": 2,
+  "request_count_note": "ONE camofox_click call produced TWO /probe GETs (134ms apart, distinct rids). client.js has exactly one listener -> one fetch per click; verified single tool call, no retry. Tool-level double dispatch reported via xd://report_issue. Do not assume 1 UI action = 1 HTTP request."
+}

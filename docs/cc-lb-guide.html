@@ -401,7 +401,7 @@ CC_LB_PROXY_KEY=$(curl -s -X POST &quot;http://127.0.0.1:9090/admin/v1/principal
   -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
   -H &quot;content-type: application/json&quot; \
   -d &#39;{&quot;label&quot;:&quot;quickstart&quot;}&#39; | jq -r .plaintext_key)</code></pre><button class="copy">복사</button></div>
-        <p>키 <code>label</code>은 생략하거나 빈 문자열로 둘 수 있고, 유효하지 않은 비어있지 않은 label(NUL 바이트, <code>system.</code> 접두사)은 400 <code>invalid_input</code>을 반환합니다. label 없는 키는 v1 목록에서 <code>null</code>, 레거시 <code>GET /admin/principals/{id}/keys/{key_id}</code>에서는 빈 문자열로 표시됩니다.</p>
+        <p><code>api_key_env</code>는 생성/수정 시점에만 읽는 환경변수 이름입니다 — 값은 즉시 암호화되어 저장되고 변수명 자체는 저장·반환되지 않으므로 secret을 나중에 복원할 방법은 없습니다. 키 <code>label</code>은 생략하거나 빈 문자열로 둘 수 있고, 유효하지 않은 비어있지 않은 label(NUL 바이트, <code>system.</code> 접두사)은 400 <code>invalid_input</code>을 반환합니다. label 없는 키는 v1 목록에서 <code>null</code>, 레거시 <code>GET /admin/principals/{id}/keys/{key_id}</code>에서는 빈 문자열로 표시됩니다.</p>
       </li>
 
       <li>

@@ -1,0 +1,39 @@
+{
+  "schema": "cc-lb-fixture-snapshot-proof/v1",
+  "application_source_commit": "f3fa89bf81fecefbfd4dde399c2d771208e069ce",
+  "qa_tool_sha256": "07147167c98eab6a01d6923cba2511442d430f51acc6481dda02cc1eeeb5c13d",
+  "fixture_version": 2,
+  "results": {
+    "owned_runtime_path": "PASS",
+    "full_state_roundtrip": "PASS",
+    "real_restart_after_restore": "PASS",
+    "restored_principal_count": 3,
+    "tampered_aux_rejected_before_any_target_change": "PASS",
+    "outside-runtime": "PASS",
+    "overlapping-config": "PASS",
+    "legacy-version": "PASS",
+    "snapshot_symlink_escape": "PASS",
+    "target_symlink_escape": "PASS",
+    "absent_aux_and_runtime_restored_as_absent": "PASS",
+    "filesystem_install_failure_rolls_back_all_owned_targets": "PASS",
+    "legacy_snapshot_format": "PASS",
+    "rollback_failure_preserves_recovery_files": "PASS"
+  },
+  "postgres_runtime_exercised": false,
+  "limits": [
+    "PostgreSQL restore retains its existing dump/restore path; this run exercises SQLite main/scheduler stores and shared filesystem guards.",
+    "No cross-PostgreSQL/filesystem crash-atomicity claim."
+  ],
+  "production_mutations": false,
+  "pr793_head_changed": false,
+  "independent_review": {
+    "result": "correct",
+    "blocking_findings": 0,
+    "scope": "source review of canonical paths, symlinks, absent state, WAL-aware backup, prevalidation and rollback"
+  },
+  "cleanup": {
+    "owned_fixture_and_outside_sentinel_removed": true,
+    "owned_server_stopped": true,
+    "production_untouched": true
+  }
+}

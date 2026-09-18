@@ -1,0 +1,290 @@
+{
+  "observed_response_heads": [
+    {
+      "method": "GET",
+      "route": "/",
+      "status": 200,
+      "rid": "req_admin_01a0a867-d7bc-7d91-862b-20a1fb112ece",
+      "handler_ms": 0.485583
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/config/draft",
+      "status": 200,
+      "rid": "req_admin_01a0a868-0450-73e1-a2ed-bfe3782e03dc",
+      "handler_ms": 2.391042
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9bf-7da0-b049-d287c11367c4",
+      "handler_ms": 0.253375
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9cf-7923-9553-bfcd7495f9fa",
+      "handler_ms": 3.0573750000000004
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9d4-7d60-8882-ea4e51cd3066",
+      "handler_ms": 0.17124999999999999
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9d4-7d60-8882-ea3192bc4b64",
+      "handler_ms": 0.238125
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9d5-7a73-864c-54a6c37768c3",
+      "handler_ms": 0.2325
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9d5-7a73-864c-54c0516b63ee",
+      "handler_ms": 0.117625
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9d5-7a73-864c-54e6eeb989b8",
+      "handler_ms": 0.163
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9d5-7a73-864c-54bd60a789df",
+      "handler_ms": 0.454166
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9d5-7a73-864c-54dd82c2c238",
+      "handler_ms": 0.245958
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9d6-77e0-ac0d-8b4408ec14ca",
+      "handler_ms": 0.48695900000000003
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9d6-77e0-ac0d-8b376052f3c0",
+      "handler_ms": 0.563125
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-c9d4-7d60-8882-ea5f06ce6a38",
+      "handler_ms": 3.003625
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-ca0a-72e3-8c5c-3a607ab88293",
+      "handler_ms": 0.383
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-ca0b-7142-876a-7503d751df43",
+      "handler_ms": 0.135875
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-ca0b-7142-876a-7513e78b994f",
+      "handler_ms": 0.142125
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-ca0c-7b42-93db-86bb82bd78df",
+      "handler_ms": 0.32570899999999997
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-ca0d-7931-8a94-01f51de6bb55",
+      "handler_ms": 0.161708
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-ca1b-76e3-b643-5a83e1ee1866",
+      "handler_ms": 0.379041
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/auth/session",
+      "status": 401,
+      "rid": "req_admin_01a0a868-ca0f-7c12-8c88-b2cfe64845be",
+      "handler_ms": 105.087417
+    },
+    {
+      "method": "GET",
+      "route": "/{*file}",
+      "status": 200,
+      "rid": "req_admin_01a0a868-ca91-7331-87cf-80825576a2e2",
+      "handler_ms": 0.519833
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/auth/session",
+      "status": 200,
+      "rid": "req_admin_01a0a868-e20f-7c10-9a6b-5680ec60bdb1",
+      "handler_ms": 0.246333
+    },
+    {
+      "method": "GET",
+      "route": "/admin/health",
+      "status": 200,
+      "rid": "req_admin_01a0a868-e2cd-7cc3-9878-b640948453bf",
+      "handler_ms": 0.1865
+    },
+    {
+      "method": "GET",
+      "route": "/admin/config/schema",
+      "status": 200,
+      "rid": "req_admin_01a0a868-e2cc-79a0-bdb5-0936cf24473a",
+      "handler_ms": 2.0605409999999997
+    },
+    {
+      "method": "GET",
+      "route": "/admin/config/current",
+      "status": 200,
+      "rid": "req_admin_01a0a868-e2cc-79a0-bdb5-092c8b9c476c",
+      "handler_ms": 2.22325
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/status",
+      "status": 200,
+      "rid": "req_admin_01a0a868-e2cd-7cc3-9878-b632ca083ab6",
+      "handler_ms": 2.628458
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/upstreams",
+      "status": 200,
+      "rid": "req_admin_01a0a868-e2cf-7453-972d-540a0c6c91de",
+      "handler_ms": 1.781875
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/principals",
+      "status": 200,
+      "rid": "req_admin_01a0a868-e2d0-7762-b7c7-d55d5f672316",
+      "handler_ms": 3.70125
+    },
+    {
+      "method": "GET",
+      "route": "/admin/config/draft",
+      "status": 200,
+      "rid": "req_admin_01a0a868-e2cc-79a0-bdb5-091646feebf3",
+      "handler_ms": 10.817042
+    },
+    {
+      "method": "GET",
+      "route": "/admin/config/history",
+      "status": 200,
+      "rid": "req_admin_01a0a868-e2cd-7cc3-9878-b61afe1c3f2b",
+      "handler_ms": 10.257083
+    },
+    {
+      "method": "GET",
+      "route": "/admin/health",
+      "status": 200,
+      "rid": "req_admin_01a0a869-1e00-7442-bd71-a135bfb0b461",
+      "handler_ms": 0.5139170000000001
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/status",
+      "status": 200,
+      "rid": "req_admin_01a0a869-1e03-73f0-aa2d-89401911edd4",
+      "handler_ms": 5.189834
+    },
+    {
+      "method": "PUT",
+      "route": "/admin/config/draft",
+      "status": 200,
+      "rid": "req_admin_01a0a869-5159-7f80-9647-da8dc4dfd2cd",
+      "handler_ms": 6.07375
+    },
+    {
+      "method": "GET",
+      "route": "/admin/config/draft",
+      "status": 200,
+      "rid": "req_admin_01a0a869-5161-7d02-8709-f9b195edb182",
+      "handler_ms": 2.0198329999999998
+    },
+    {
+      "method": "POST",
+      "route": "/admin/config/draft/validate",
+      "status": 200,
+      "rid": "req_admin_01a0a869-53ce-7321-bf16-87e5b864dbd6",
+      "handler_ms": 10.239333
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/config/draft",
+      "status": 200,
+      "rid": "req_admin_01a0a869-5725-7d50-bbb6-f4b090940472",
+      "handler_ms": 3.170625
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/upstreams",
+      "status": 200,
+      "rid": "req_admin_01a0a869-581f-7d43-bca6-431ab01bd5c6",
+      "handler_ms": 3.382166
+    },
+    {
+      "method": "GET",
+      "route": "/admin/health",
+      "status": 200,
+      "rid": "req_admin_01a0a869-5907-7071-91a1-b2f2152603c3",
+      "handler_ms": 0.196208
+    },
+    {
+      "method": "GET",
+      "route": "/admin/v1/status",
+      "status": 200,
+      "rid": "req_admin_01a0a869-5909-7bf0-ba0d-602f25f9f635",
+      "handler_ms": 2.414875
+    }
+  ],
+  "save_requests": 1,
+  "validate_requests": 1,
+  "apply_requests": 0,
+  "candidate_sha256": "253cc5105cebfe759c76a4848a7b224da4cef272a9210e8106420b4a09ffff4f",
+  "scope": "First functional browser candidate before final accessibility-message refinement.",
+  "full_runtime_qa_complete": false
+}

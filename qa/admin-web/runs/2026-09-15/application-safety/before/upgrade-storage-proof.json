@@ -1,0 +1,29 @@
+{
+  "before": [
+    "http://127.0.0.1:19991/",
+    2,
+    0,
+    0
+  ],
+  "after_unedited_save": [
+    null,
+    3,
+    0,
+    0
+  ],
+  "restored": [
+    "http://127.0.0.1:19991/",
+    4,
+    0,
+    0
+  ],
+  "column_order": [
+    "base_url",
+    "spec_revision",
+    "enabled",
+    "warmup_enabled"
+  ],
+  "owned_server_ports_closed": true,
+  "private_auth_handoff_file_removed": true,
+  "production_changes": 0
+}

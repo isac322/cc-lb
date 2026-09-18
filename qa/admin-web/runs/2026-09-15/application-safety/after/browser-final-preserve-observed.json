@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-16T08:41:17.997Z",
+  "stage": "final_replay_stage2_final_candidate_preserve_save",
+  "environment": "local_fixture_only",
+  "origin": "http://127.0.0.1:56152",
+  "final_candidate_sha": "f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8",
+  "upstream_name": "qa-safety-upgrade",
+  "pre_save_input": {
+    "base_url_input_value": "",
+    "edits_made": "none"
+  },
+  "post_save_dom": {
+    "settings_base_url_display": "http://127.0.0.1:19991/",
+    "header_line": "Base URL: http://127.0.0.1:19991/",
+    "form_open": false
+  },
+  "independent_api_get": {
+    "id": "01b20b9f-9b53-43f8-b161-35b10d30a1bb",
+    "name": "qa-safety-upgrade",
+    "base_url": "http://127.0.0.1:19991/",
+    "spec_revision": 4,
+    "enabled": false
+  },
+  "validations": {
+    "override_preserved": true,
+    "spec_revision_matches_pre_swap": true,
+    "enabled_remains_false": true,
+    "settings_display_shows_override": true
+  },
+  "explanation": "Under the final candidate f08348 backend, when the old client submits base_url: null from an unedited form loaded under ef70, the backend treats null as 'preserve existing override' rather than clearing it. The independent API GET confirms base_url remains http://127.0.0.1:19991/ at revision 4."
+}

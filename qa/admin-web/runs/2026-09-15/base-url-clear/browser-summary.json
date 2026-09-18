@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "environment": "local_fixture_only",
+  "origin": "http://127.0.0.1:56352",
+  "upstream_id": "c804fce8-2b1a-4d3a-a149-878886bee631",
+  "upstream_name": "qa-usage-display",
+  "operation": "clear_base_url_to_explicit_null",
+  "baseline": {
+    "ui_base_url": "http://127.0.0.1:19080/",
+    "api_base_url": "http://127.0.0.1:19080/"
+  },
+  "after_clear": {
+    "ui_base_url": "—",
+    "api_base_url": null
+  },
+  "reload": {
+    "ui_base_url": "—"
+  },
+  "artifacts": {
+    "baseline_json": "browser-baseline.json",
+    "baseline_png": "browser-baseline.png",
+    "after_json": "browser-after.json",
+    "after_png": "browser-after.png",
+    "reload_json": "browser-reload.json",
+    "reload_png": "browser-reload.png",
+    "rt_json": "browser-rt.json"
+  },
+  "all_validations_passed": true
+}

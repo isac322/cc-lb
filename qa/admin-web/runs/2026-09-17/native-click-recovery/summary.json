@@ -1,0 +1,19 @@
+{
+  "status": "BLOCKED",
+  "expected_ui_cells": 81,
+  "valid_ui_cells": 0,
+  "paired_comparisons": 0,
+  "application_source_commit": "f3fa89bf81fecefbfd4dde399c2d771208e069ce",
+  "binary_sha256": "afbc0a74fcfde73f374768b8465eb8b3876b74923831d91f07cc58d28b2b60bc",
+  "full_state_restore_verified": true,
+  "native_semantic_click_calls": 1,
+  "trusted_click_targets": [
+    "Edit",
+    "Save"
+  ],
+  "standalone_counter_result": "mouse_move_timeout_then_tab_missing",
+  "application_defect_established": false,
+  "cause": "native interaction behavior unresolved; stale refs alone cannot explain semantic selector reproduction",
+  "production_mutations": false,
+  "pr793_changed": false
+}

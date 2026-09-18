@@ -1,0 +1,27 @@
+{
+ "recorded_at_utc": "2026-09-15T16:10:24.216740+00:00",
+ "step": "postgres-canonical-recorder-proof",
+ "origin_asserted": "http://127.0.0.1:56162",
+ "fresh_document": true,
+ "prior_global_absent": true,
+ "canonical_sha256": "003680dff36ca007387d966a7089f2e8ec6d032d803d9787421ac5ba6b8ac610",
+ "canonical_source": "/data/tmp/cc-lb-admin-web-qa-completion/crates/cc-lb-admin/web/qa/admin-web-browser-recorder.js",
+ "recorder_version": "1.0.7",
+ "action": "beginAction(UI-PL-01:nav) -> native click Plugins nav -> endAction -> snapshot",
+ "result": {
+  "total_records": 21,
+  "resource_timing": 19,
+  "observed_rids": 19,
+  "sql_bearing_gets": 2,
+  "sql_bearing_routes": [
+   "/admin/v1/plugins/registry",
+   "/admin/v1/upstreams"
+  ],
+  "sql_bearing_rids": [
+   "req_admin_01a0a5d4-2353-7590-bdf9-4502b6703ddf",
+   "req_admin_01a0a5d4-4892-7e70-bd9e-318f83a2a47b"
+  ]
+ },
+ "raw_file": "/data/tmp/cc-lb-admin-web-qa-evidence/instrumentation-server-timing/postgres-canonical-recorder-proof-raw.json",
+ "note": "PG backend, fresh document, canonical v2 source. All RIDs observed via Server-Timing. SQL-bearing GETs confirmed by url_sha256 match."
+}

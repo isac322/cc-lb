@@ -1,0 +1,12 @@
+    Starting 9 tests across 1 binary (283 tests skipped)
+        PASS [   0.363s] (1/9) cc-lb-admin::integration admin_warmup_endpoints::test_attempts_404_unknown_upstream
+        PASS [   0.363s] (2/9) cc-lb-admin::integration admin_warmup_endpoints::test_attempts_pagination_returns_next_cursor
+        PASS [   0.363s] (3/9) cc-lb-admin::integration admin_warmup_endpoints::test_attempts_before_cursor_excludes_rows_at_or_before
+        PASS [   0.363s] (4/9) cc-lb-admin::integration admin_warmup_endpoints::test_attempts_outcome_filter
+        PASS [   0.352s] (5/9) cc-lb-admin::integration admin_warmup_endpoints::test_summary_404_unknown_upstream
+        PASS [   0.354s] (6/9) cc-lb-admin::integration admin_warmup_endpoints::test_summary_returns_expected_shape
+        PASS [   0.354s] (7/9) cc-lb-admin::integration admin_warmup_endpoints::test_upstream_detail_shape_unchanged
+        PASS [   0.317s] (8/9) cc-lb-admin::integration v1_upstreams::base_url_roundtrips_across_create_list_get_and_update_without_exposing_secret
+        PASS [   0.876s] (9/9) cc-lb-admin::integration v1_oauth::create_from_oauth_draft_returns_the_stored_base_url_without_secrets
+     Summary [   1.269s] 9 tests run: 9 passed, 283 skipped
+[admin-web-detail-contract-tests: exited; cursor=5546]

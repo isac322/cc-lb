@@ -1,0 +1,32 @@
+{
+  "schema": "cc-lb-settings-capability-final-gates/v1",
+  "source_base": "80e1180f0bedd2054450fb68e57444e035c59ef2",
+  "web_tests": {
+    "run": 700,
+    "passed": 700,
+    "files": 72
+  },
+  "backend_tests": {
+    "run": 23,
+    "passed": 23,
+    "selected_out": 644
+  },
+  "frontend_typecheck": {
+    "installed_compiler": "@typescript/native-preview 7.0.0-dev.20260707.2",
+    "command": "node_modules/.bin/tsgo -b --noEmit",
+    "exit_code": 0,
+    "package_script_resolution_issue_retained": true
+  },
+  "rust_all_targets_all_features_clippy_exit": 0,
+  "inventory_rows": 433,
+  "source_reconciliation": "source_reconciled",
+  "standard_yaml_parse": "passed",
+  "independent_review": {
+    "reviewer": "ReviewApprovedAuditFix",
+    "capability_scope_blocking_findings": 0,
+    "supported_response_revision_history_limit_remains": true
+  },
+  "production_changes": 0,
+  "pr_merge_held": true,
+  "full_runtime_qa_complete": false
+}

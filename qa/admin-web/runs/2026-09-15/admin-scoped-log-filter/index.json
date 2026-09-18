@@ -1,0 +1,57 @@
+{
+  "schema": "cc-lb-admin-log-filter-evidence-index/v1",
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-15/admin-scoped-log-filter/verification.json",
+      "sha256": "e8c721012b51794ae8d729b34c49d06427b55c44538add6a4e88d73d6f14b0be",
+      "bytes": 1698
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/admin-scoped-log-filter/sqlite-global_sql_debug.json",
+      "sha256": "ac096f1878ce6ed2e46c33bcad9023c9ac096054b9a0fcea3f8394132b636018",
+      "bytes": 1067
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/admin-scoped-log-filter/sqlite-admin_context_debug.json",
+      "sha256": "f8ef0bc69c0c3fd58f1014a3061327ba9fddbf2b7475c69f09376a95d64f292d",
+      "bytes": 1045
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/admin-scoped-log-filter/postgres-global_sql_debug.json",
+      "sha256": "4ebb08051f660abf23ca65df9cf2aa00a3d8e887ca03b90b6bd705af10274d7e",
+      "bytes": 1070
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/admin-scoped-log-filter/postgres-admin_context_debug.json",
+      "sha256": "d15a060c81ffa88974f9f28f42c3f1e68b7b5ac9cb3ec3f42752687623324d70",
+      "bytes": 1047
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/admin-scoped-log-filter/sqlite-global_sql_debug-event-index.jsonl",
+      "sha256": "0f0691ade0d355c81c5a21f8a3c7568a1c4eea96415cd2f9f57c999038e4dd72",
+      "bytes": 17376,
+      "scope": "Only timestamp, level, static target and opaque Admin request IDs. Full messages, SQL and payloads excluded."
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/admin-scoped-log-filter/sqlite-admin_context_debug-event-index.jsonl",
+      "sha256": "bff3149dc9144991299c187d0307fbcafd293c4036aa4a7ec577a843a564c5fd",
+      "bytes": 3864,
+      "scope": "Only timestamp, level, static target and opaque Admin request IDs. Full messages, SQL and payloads excluded."
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/admin-scoped-log-filter/postgres-global_sql_debug-event-index.jsonl",
+      "sha256": "96111bde3eb5a502f93c6ef9ea41971870eee8a1a88fd36f86058dce5f283fd1",
+      "bytes": 25413,
+      "scope": "Only timestamp, level, static target and opaque Admin request IDs. Full messages, SQL and payloads excluded."
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/admin-scoped-log-filter/postgres-admin_context_debug-event-index.jsonl",
+      "sha256": "519213e407632d75ce0ecd78d989e567f393c23efdd9e4ab560fd055512b6a9e",
+      "bytes": 5978,
+      "scope": "Only timestamp, level, static target and opaque Admin request IDs. Full messages, SQL and payloads excluded."
+    }
+  ],
+  "full_raw_logs_published": false,
+  "production_configuration_changed": false,
+  "full_runtime_qa_complete": false
+}

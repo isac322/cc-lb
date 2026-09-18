@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-16T07:24:49.568Z",
+  "environment": "local_fixture_only",
+  "origin": "http://127.0.0.1:56152",
+  "route": "/audit?principal_id=qa-safety-principal",
+  "ui_observation": {
+    "url": "http://127.0.0.1:56152/audit?principal_id=qa-safety-principal",
+    "audit_trail_heading": "Audit Trail",
+    "actions_count_text": "0admin actions · 1 filter active",
+    "table_rows_count": 1,
+    "empty_state": {
+      "is_empty": true,
+      "heading": "No audit entries",
+      "description": "No entries match the current filters."
+    }
+  },
+  "db_fixture_correlation": {
+    "older_admin_actions_count": 1,
+    "newer_nonadmin_rows_count": 250,
+    "api_query_limit": 200,
+    "root_cause_explanation": "The current API limit of 200 records is evaluated on the raw events before filtering for admin actions. Since there are 250 newer nonadmin 429 events, the 1 older principal_update admin action is cut off by the limit, causing 0 admin actions to be returned to the UI.",
+    "ui_outcome": "0 admin actions displayed; table shows empty state 'No audit entries'."
+  },
+  "validations": {
+    "shows_zero_admin_actions": false,
+    "shows_empty_table_state": true,
+    "confirms_filter_active": true
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "observed_at_utc": "2026-09-16T04:19:45.151Z",
+  "dom": {
+    "config_apply_support": {
+      "found": true,
+      "id": "config-apply-support",
+      "text": "This server does not support applying saved drafts. Changes to startup-fixed settings must be made through the deployment configuration and restart workflow.",
+      "has_aria_live": false,
+      "aria_live_value": null,
+      "is_outside_pipeline_status": true
+    },
+    "config_pipeline_status": {
+      "found": true,
+      "id": "config-pipeline-status",
+      "text": "",
+      "aria_live": "polite"
+    },
+    "buttons": {
+      "apply": {
+        "disabled": true,
+        "has_disabled_attribute": true,
+        "aria_describedby": "config-pipeline-status config-apply-support",
+        "click_attempt": {
+          "attempted": true,
+          "disabled_property_before": true,
+          "disabled_attribute_before": true,
+          "click_dispatched": true
+        }
+      },
+      "validate": {
+        "disabled": false,
+        "aria_describedby": "config-pipeline-status"
+      },
+      "save": {
+        "disabled": true
+      }
+    },
+    "metadata": {
+      "revision": "1",
+      "last_validated": "rev 1"
+    }
+  },
+  "api_metadata": {
+    "revision": 1,
+    "last_validated_revision": 1,
+    "last_validation_error": null,
+    "apply_supported": false
+  },
+  "validations": {
+    "apply_is_disabled": true,
+    "apply_has_disabled_attr": true,
+    "apply_support_id_matches": true,
+    "apply_support_is_outside_pipeline_status": true,
+    "apply_support_has_no_aria_live": true,
+    "new_wording_exposed": true,
+    "apply_describedby_matches": true,
+    "validate_describedby_matches": true,
+    "api_apply_supported_is_false": true,
+    "api_last_validated_matches_revision": true
+  }
+}

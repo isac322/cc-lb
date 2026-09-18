@@ -1,0 +1,70 @@
+{
+  "candidate_sha256": "f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8",
+  "checks": [
+    {
+      "case": "create",
+      "status": 201,
+      "base_url": "http://127.0.0.1:19992/",
+      "spec_revision": 1
+    },
+    {
+      "case": "disable",
+      "status": 200,
+      "base_url": "http://127.0.0.1:19992/",
+      "spec_revision": 2
+    },
+    {
+      "case": "legacy-null-preserve",
+      "status": 200,
+      "base_url": "http://127.0.0.1:19992/",
+      "spec_revision": 2
+    },
+    {
+      "case": "conflicting-intents",
+      "status": 400,
+      "base_url": null,
+      "spec_revision": null
+    },
+    {
+      "case": "stale-conflicting-intents",
+      "status": 409,
+      "base_url": null,
+      "spec_revision": null
+    },
+    {
+      "case": "explicit-clear",
+      "status": 200,
+      "base_url": null,
+      "spec_revision": 3
+    },
+    {
+      "case": "restore-loopback",
+      "status": 200,
+      "base_url": "http://127.0.0.1:19992/",
+      "spec_revision": 4
+    },
+    {
+      "case": "audit-admin-only",
+      "status": 500,
+      "base_url": null,
+      "spec_revision": null
+    },
+    {
+      "case": "audit-admin-only-valid-fixture",
+      "status": 200,
+      "base_url": null,
+      "spec_revision": null
+    },
+    {
+      "case": "audit-default-includes-nonadmin",
+      "status": 200,
+      "base_url": null,
+      "spec_revision": null
+    }
+  ],
+  "fixture_correction": "Raw seed omitted token columns and inserted NULL, unlike Postgres append_audit which writes0 and row_to_audit_entry expects nonnull i64. That invalid fixture caused the preserved500 observation. Only owned syntheticrows corrected to0; no app code changed. Both Audit HTTP requests then returned200.",
+  "clear_then_loopback_restored": true,
+  "upstream_disabled": true,
+  "literal_key_not_in_log": true,
+  "production_calls": 0
+}

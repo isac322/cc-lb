@@ -1,0 +1,61 @@
+{
+  "events": [
+    {
+      "type": "pointerdown",
+      "text": "Edit",
+      "trusted": true,
+      "detail": 0,
+      "t": 53718
+    },
+    {
+      "type": "pointerup",
+      "text": "Edit",
+      "trusted": true,
+      "detail": 0,
+      "t": 53734
+    },
+    {
+      "type": "click",
+      "text": "Edit",
+      "trusted": true,
+      "detail": 1,
+      "t": 53735
+    },
+    {
+      "type": "pointerdown",
+      "text": "Save",
+      "trusted": true,
+      "detail": 0,
+      "t": 53802
+    },
+    {
+      "type": "pointerup",
+      "text": "Save",
+      "trusted": true,
+      "detail": 0,
+      "t": 53868
+    },
+    {
+      "type": "click",
+      "text": "Save",
+      "trusted": true,
+      "detail": 1,
+      "t": 53869
+    }
+  ],
+  "card": "Default Limits\nPer-principal rate caps applied to every API key\nEdit\nKIND\tWINDOW\tCAP\nRequests\t2m\t17",
+  "execution_key": "UI-PR-06|ce6d9b45-700c-488f-9355-bc4567a9610b|empty|page1|poll1|repeat1",
+  "native_click_calls": 1,
+  "explicit_remove_calls": 0,
+  "explicit_save_calls": 0,
+  "stored": {
+    "revision": 2,
+    "default_limits": [
+      {
+        "kind": "requests",
+        "window_secs": 120,
+        "cap_micros": 17
+      }
+    ]
+  }
+}

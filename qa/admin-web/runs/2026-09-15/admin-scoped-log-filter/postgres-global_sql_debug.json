@@ -1,0 +1,39 @@
+{
+  "engine": "postgres",
+  "profile": "global_sql_debug",
+  "RUST_LOG": "info,sqlx::query=debug,sqlx::pool::acquire=debug",
+  "admin_http_requests": 3,
+  "http_statuses": [
+    200,
+    200,
+    200
+  ],
+  "matched_requests": [
+    {
+      "rid": "req_admin_01a0a8dd-2a9a-7880-b213-847321ccc30e",
+      "query_debug_events": 1,
+      "acquire_debug_events": 1
+    },
+    {
+      "rid": "req_admin_01a0a8dd-2aa1-79f1-9cad-26c5500c6040",
+      "query_debug_events": 1,
+      "acquire_debug_events": 1
+    },
+    {
+      "rid": "req_admin_01a0a8dd-2aa6-7351-989f-865f9efd749d",
+      "query_debug_events": 1,
+      "acquire_debug_events": 1
+    }
+  ],
+  "sql_debug_events_total": 150,
+  "sql_debug_events_outside_admin_span": 144,
+  "full_log_bytes": 67708,
+  "proxy_control": {
+    "status": 401,
+    "request_id": "qa_proxy_header_control",
+    "x_request_id": null,
+    "body_sha256": "f5245aa94925bf141c7a3bdd9c9d21abd3f3571c12560701ba29a0c9caa91fcd"
+  },
+  "log_sha256": "043bae928dc0cfca794b2c61825e906873623ccfdf5432035408c940c129ad3c",
+  "production_changes": 0
+}

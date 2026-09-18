@@ -1,0 +1,25 @@
+{
+  "measurement_scope": "unpaired direct API and SQLite transitions only",
+  "expected": 81,
+  "executed": 81,
+  "functional_pass": 81,
+  "functional_fail": 0,
+  "all_request_ids_joined_to_sql": true,
+  "sql_events_min": 51,
+  "sql_events_max": 51,
+  "request_duration_ms": {
+    "median": 34.62425,
+    "p95_interpolated": 38.56175,
+    "max": 40.152959
+  },
+  "ui_completion_credit": 0,
+  "paired_ui_direct_comparisons": 0,
+  "pure_db_execution_ms": null,
+  "pure_queue_wait_ms": null,
+  "state_control": {
+    "restored_before_every_request": "main storage.sqlite snapshot",
+    "auxiliary_scheduler_database": "persisted across independent direct cases; discovered during cleanup",
+    "whole_runtime_snapshot_equivalence": false,
+    "consequence": "Valid API/storage transition evidence and observed latencies, not a controlled paired UI/direct performance comparison."
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "observed_utc": "2026-09-17T08:35:17Z",
+  "target_url": "https://cc-lb.runbear.io/admin/health",
+  "final_url": "https://cc-lb.runbear.io/admin/health",
+  "final_host": "cc-lb.runbear.io",
+  "http_status": 200,
+  "navigation_ok": true,
+  "reachable": true,
+  "health_body": {
+    "git_sha": "unknown",
+    "status": "ok",
+    "uptime_secs": 17931,
+    "version": "0.4.9"
+  },
+  "protocol": "h3",
+  "cf_cache_status": "DYNAMIC",
+  "auth_blocker": null,
+  "redirect_count": 0
+}

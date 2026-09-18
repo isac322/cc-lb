@@ -1,0 +1,227 @@
+[
+  {
+    "name": "http://127.0.0.1:56452/admin/v1/auth/session",
+    "pathname": "/admin/v1/auth/session",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 94,
+    "duration": 2,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-a0b2-7373-ae47-c68bed467957",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/config/draft",
+    "pathname": "/admin/config/draft",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 111,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-a0c3-7750-a7d1-1532e05e3714",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/config/current",
+    "pathname": "/admin/config/current",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 111,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-a0c4-7040-95d1-e0d1dda67588",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/config/schema",
+    "pathname": "/admin/config/schema",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 111,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-a0c4-7040-95d1-e11e6932f89f",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/config/history?limit=20",
+    "pathname": "/admin/config/history",
+    "search": "?limit=20",
+    "initiatorType": "fetch",
+    "startTime": 111,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-a0c4-7040-95d1-e1012cdb5bec",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/v1/status",
+    "pathname": "/admin/v1/status",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 111,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-a0c4-7040-95d1-e1282468475e",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/health",
+    "pathname": "/admin/health",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 111,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-a0c4-7040-95d1-e0f1432e51ae",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/v1/upstreams",
+    "pathname": "/admin/v1/upstreams",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 111,
+    "duration": 8,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-a0c6-7091-b5fc-c55679bfebbf",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/v1/principals",
+    "pathname": "/admin/v1/principals",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 112,
+    "duration": 6,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-a0c6-7091-b5fc-c56c86b78cea",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/v1/auth/session",
+    "pathname": "/admin/v1/auth/session",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 5666,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-b677-7793-951b-2c2ee6b3d55e",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/v1/status",
+    "pathname": "/admin/v1/status",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 20748,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-f162-7071-a5f3-46a8bb818ceb",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/health",
+    "pathname": "/admin/health",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 20749,
+    "duration": 4,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a870-f163-7a50-95d2-7c9530a2ee00",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/v1/upstreams",
+    "pathname": "/admin/v1/upstreams",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 35740,
+    "duration": 5,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a871-2bf2-7fa3-8b93-0dab9b580b3f",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/health",
+    "pathname": "/admin/health",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 35788,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a871-2c20-7070-a54e-e37134011267",
+        "duration": 0
+      }
+    ]
+  },
+  {
+    "name": "http://127.0.0.1:56452/admin/v1/status",
+    "pathname": "/admin/v1/status",
+    "search": "",
+    "initiatorType": "fetch",
+    "startTime": 35789,
+    "duration": 3,
+    "serverTiming": [
+      {
+        "name": "rid",
+        "description": "req_admin_01a0a871-2c21-7f80-88b3-a72dfd0671a8",
+        "duration": 0
+      }
+    ]
+  }
+]

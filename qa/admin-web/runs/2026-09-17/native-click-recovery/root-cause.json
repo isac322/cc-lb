@@ -1,0 +1,33 @@
+{
+  "verdict": "CONFIRMED_CURRENT",
+  "scope": "installed Camofox click retry contract",
+  "installed_version": "1.16.0",
+  "source_path": "/nix/store/198h09xm1bf2s4a5c4lh9kaa814ccw84-camofox-browser-1.16.0/lib/node_modules/@askjo/camofox-browser/server.js",
+  "source_lines": [
+    3893,
+    3905,
+    3907,
+    3919,
+    3922
+  ],
+  "mechanism": "locator.click timeout enters native mouse-sequence fallback without proving first attempt did not dispatch input",
+  "observations": [
+    "one click request",
+    "timeout fallback warning",
+    "two trusted click sequences targeting Edit then Save",
+    "unchanged limits stored with revision increment"
+  ],
+  "unknowns": [
+    "reason initial locator click timed out",
+    "precise dispatch completion relative to timeout",
+    "independent counter mouse-move timeout cause"
+  ],
+  "rejected_shortcuts": [
+    "noWaitAfter without proving navigation-wait cause",
+    "QA wrapper or DOM modification to suppress tool duplication"
+  ],
+  "proposed_fix": "remove automatic replay after ambiguous timeout; return failure/unknown outcome without another pointer sequence",
+  "fix_applied": false,
+  "system_modified": false,
+  "application_modified": false
+}

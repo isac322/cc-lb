@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-16T07:30:45.259Z",
+  "stage": "stage3_save_under_current19",
+  "upstream_id": "01b20b9f-9b53-43f8-b161-35b10d30a1bb",
+  "upstream_name": "qa-safety-upgrade",
+  "pre_save_input_state": {
+    "base_url_input_value": "",
+    "edits_made": "none"
+  },
+  "captured_request": null,
+  "post_save_dom": {
+    "settings_base_url_display": "—",
+    "header_line": "Base URL: https://api.anthropic.com",
+    "form_still_open": false
+  },
+  "independent_api_after_save": {
+    "id": "01b20b9f-9b53-43f8-b161-35b10d30a1bb",
+    "name": "qa-safety-upgrade",
+    "base_url": null,
+    "spec_revision": 3,
+    "enabled": false
+  },
+  "explanation": "Because pristine ef70 omitted base_url on GET, the mounted edit form held a blank string. When Save was clicked unchanged under current19, the frontend sent base_url: null, clearing the database override from http://127.0.0.1:19991/ to null and bumping spec_revision from 2 to 3. This empirically proves the upgrade regression where saving an unedited form loaded under the old backend clears the database override."
+}

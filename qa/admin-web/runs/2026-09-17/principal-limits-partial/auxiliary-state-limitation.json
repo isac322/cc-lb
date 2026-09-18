@@ -1,0 +1,12 @@
+{
+  "discovered_files": [
+    "storage.scheduler.sqlite",
+    "storage.scheduler.sqlite-wal",
+    "storage.scheduler.sqlite-shm",
+    "data/replica_id"
+  ],
+  "main_snapshot_did_not_include_auxiliary_state": true,
+  "accepted_ui_or_paired_measurements": 0,
+  "independent_direct_functional_results_remain_valid": true,
+  "required_before_claiming_controlled_paired_state": "Snapshot/reset the auxiliary scheduler database and stable replica identity as well as the main database; prove both copies before repeating controlled comparisons."
+}

@@ -1,0 +1,101 @@
+{
+  "schema": "cc-lb-instrumentation-evidence-index/v1",
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/manifest.json",
+      "sha256": "47907a1dc07343290b6693ee48e18e894c8f6f9423825a1348caf71bdda95c11",
+      "bytes": 2436
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/request-correlation.json",
+      "sha256": "ae86b3b5c1175c10025e50176e99418ca3908a5025d947ca21fb1fa46bdbf120",
+      "bytes": 9617
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/sqlite-request-scoped-logs.jsonl",
+      "sha256": "ef9bee1880c08e97d44cc91178e155a787c7b70b4102a7ffb2ae7511def75594",
+      "bytes": 9056
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/postgres-request-scoped-logs.jsonl",
+      "sha256": "b04e5035f3de127b5933ee1cc5d2e283d806677bddde2005f26f8e38cda6e3fc",
+      "bytes": 9147
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/overhead-summary.json",
+      "sha256": "b7e4b26932988216e876a164027c68d7328b7a988d5c6eeac3b756ef8629c6e6",
+      "bytes": 3262
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/body-privacy-proof.json",
+      "sha256": "b5a4cd18926a3a4d26fb9556408f3bc40b20281f1f6e160c7a4203828578dd4e",
+      "bytes": 445
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/library-regressions.txt",
+      "sha256": "03b5940a732305a1319038cd1aeb4ab52559366a929b743c416d7dd48b9976c8",
+      "bytes": 158
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-sqlite-default_info-baseline_A.json",
+      "sha256": "6ceb03c559f4469d26ec281a8dfec0e7832863e4e879deca70ee64399e1c82e2",
+      "bytes": 6207
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-sqlite-default_info-instrumented_B.json",
+      "sha256": "8c9e41dfd8aa0ac48f6fe0839667fd599143dbec936ed9ad98684a8d8cddb2f5",
+      "bytes": 7314
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-sqlite-default_info-baseline_A2.json",
+      "sha256": "16c3ebf754eb5d9cc6b3239605609baa9b0fab92de86439c8bcfbaa3a1a34ddb",
+      "bytes": 6208
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-sqlite-measurement_debug-baseline_A.json",
+      "sha256": "bb969a150e90443a3a7d540048724c956aa6ee3731085ca9efaf8272b1ce134f",
+      "bytes": 6214
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-sqlite-measurement_debug-instrumented_B.json",
+      "sha256": "bd4113934d79bebff61cd69c62315b140c635c75929dea476187edd432d006b0",
+      "bytes": 7313
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-sqlite-measurement_debug-baseline_A2.json",
+      "sha256": "030a9f35bd10bf54af737bb76a79ed198861713453390bdf101eb5d1f3b175fb",
+      "bytes": 6222
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-postgres-default_info-baseline_A.json",
+      "sha256": "e9f1647214220b6164e16b76ed1c03017ee75e8a4d8e04e78115065d92b78ab5",
+      "bytes": 6210
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-postgres-default_info-instrumented_B.json",
+      "sha256": "ae6eea8b8a39cba1df68105d6c83d462e09c0d7347e562cbbb3434424c83e552",
+      "bytes": 7323
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-postgres-default_info-baseline_A2.json",
+      "sha256": "79f6bc56e996155ab7b6f1a9f4433a5e36f77cb96fa891d6a8e9a1c0b1b30a22",
+      "bytes": 6211
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-postgres-measurement_debug-baseline_A.json",
+      "sha256": "afa0d199ea0e7fe1ec6c998c7a299eca83d73b3809fc075b8acf8b0f51a3e0b2",
+      "bytes": 6211
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-postgres-measurement_debug-instrumented_B.json",
+      "sha256": "0fc21d53a09724d5b4d360d1fe0db4d00640d65dc65495d0c3c34a58b7a83c8d",
+      "bytes": 7323
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/instrumentation/benchmark-postgres-measurement_debug-baseline_A2.json",
+      "sha256": "c2c6150303e07ea049db982873a55a4a60b7e67ed7f3307177f1db55c496fabd",
+      "bytes": 6216
+    }
+  ],
+  "scope": "Isolated proof only; no production deployment or full-matrix PASS"
+}

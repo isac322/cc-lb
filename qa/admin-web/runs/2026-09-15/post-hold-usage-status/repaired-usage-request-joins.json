@@ -1,0 +1,63 @@
+{
+  "query": {
+    "range": "7d",
+    "step": "hour",
+    "group_by": "upstream",
+    "projection": "totals"
+  },
+  "rows": [
+    {
+      "rid": "req_admin_01a0a7d6-c970-7f23-b016-631277f4b833",
+      "resource_duration_ms": 3,
+      "start_monotonic_ms": 110,
+      "status": 200,
+      "handler_ms": 1.8014590000000001,
+      "query_events": 2,
+      "driver_query_elapsed_secs": [
+        3.8e-05,
+        4.3e-05
+      ],
+      "acquire_events": 2,
+      "acquire_total_secs": [
+        4.7042e-05,
+        2.9792e-05
+      ]
+    },
+    {
+      "rid": "req_admin_01a0a7d6-dd4a-74f3-bb17-bb676d806eef",
+      "resource_duration_ms": 13,
+      "start_monotonic_ms": 5186,
+      "status": 200,
+      "handler_ms": 4.402917,
+      "query_events": 2,
+      "driver_query_elapsed_secs": [
+        0.000120708,
+        9.6292e-05
+      ],
+      "acquire_events": 2,
+      "acquire_total_secs": [
+        9.9791e-05,
+        5.1333e-05
+      ]
+    },
+    {
+      "rid": "req_admin_01a0a7d6-f0e7-7633-b438-9dbc7ae18af9",
+      "resource_duration_ms": 16,
+      "start_monotonic_ms": 10204,
+      "status": 200,
+      "handler_ms": 4.529208,
+      "query_events": 2,
+      "driver_query_elapsed_secs": [
+        0.00019375,
+        0.000151708
+      ],
+      "acquire_events": 2,
+      "acquire_total_secs": [
+        8.2917e-05,
+        8.7375e-05
+      ]
+    }
+  ],
+  "prior_capture_limitation": "Earlier /admin/v1-only capture omitted this endpoint. These are new UI requests, not reconstructed historic timing.",
+  "full_runtime_qa_complete": false
+}

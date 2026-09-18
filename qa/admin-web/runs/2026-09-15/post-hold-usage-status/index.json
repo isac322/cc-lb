@@ -1,0 +1,118 @@
+{
+  "schema": "cc-lb-local-usage-status-evidence-index/v1",
+  "files": [
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/fixture-public.json",
+      "sha256": "1687b18650d6f6d50d8d8cbc5eb44975b61214a091bcda15fa6cf711ad24de11",
+      "bytes": 488
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/usage-seed-before.json",
+      "sha256": "48ed5d057a103b31cd660cc1ea4779c9a511ce5402e2f2b8d78cb0b4a5d6f393",
+      "bytes": 456
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/usage-api-before.json",
+      "sha256": "efa73527a725bd358cfe52bb7a5c8349b597d1efbdba94b1060825be736f4646",
+      "bytes": 1106
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/status-api-before.json",
+      "sha256": "35f0972df21b15a05220f65a3134cc6b27aa3feb59b4b37bf6eb97f125368deb",
+      "bytes": 437
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/usage-seed-added.json",
+      "sha256": "6ac784cdfea4a2c594bf7608778b791fda0a8353d002fc02129e162d5cacdad4",
+      "bytes": 454
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/usage-api-after.json",
+      "sha256": "969507f37d49d9fece2b277696c9c8360470df5f410094b43f4ddffcafce7b2a",
+      "bytes": 1106
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/status-api-after.json",
+      "sha256": "23948a19930c80135e3a29f6cacab73709af8f6fde524dfe80d6b964781cb839",
+      "bytes": 392
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/baseline-expected.json",
+      "sha256": "d3c6fe5e64f66944ee4d43679345984235397086e6edb9747a2b01bcd4f5f0e2",
+      "bytes": 605
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/baseline-observed.json",
+      "sha256": "5e72aaff886a65d9eb4b3e94ec763eda541ed9925f84e9635d4dc8f5a58b9fe4",
+      "bytes": 466
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/baseline-screen.png",
+      "sha256": "4b33b43016d98d6689f61a29ccdf7f6cf55c2261390a7a06beaac59f98a8e9dc",
+      "bytes": 113074
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/baseline-rt.json",
+      "sha256": "ca5ce3752e9c1be68bde69df06ae64b9c8ced9541ab055f0d1ab168f0c28e245",
+      "bytes": 11002
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/transition-expected.json",
+      "sha256": "be3d5acc611813d8d782611fae8a225b205d75462ae466f87a44da6a47667242",
+      "bytes": 513
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/transition-observed.json",
+      "sha256": "03690f99bbd04c9a7d1da2c31ee39cf119ff8e68a4873043aa698185f481d8c8",
+      "bytes": 539
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/transition-screen.png",
+      "sha256": "5451a05260e985c957c021f77dc22cc7a970d7055735257001fc05f730724568",
+      "bytes": 112603
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/transition-rt.json",
+      "sha256": "231375c291a93b654098fa217697866d9c63454218d3ac840afc27042b5e258b",
+      "bytes": 41236
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/ui-request-server-joins.json",
+      "sha256": "0519e90c0dabebdcdca9c639ccc51ffc3769a33dff77a1f3bf3afb5476912739",
+      "bytes": 13391
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/repaired-capture-rt.json",
+      "sha256": "520acfe4658c47319342d833a6cff7834535eb7b2f18dc3c1e4e3b8bdbd7f2a9",
+      "bytes": 15891
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/repaired-capture-screen.png",
+      "sha256": "5451a05260e985c957c021f77dc22cc7a970d7055735257001fc05f730724568",
+      "bytes": 112603
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/repaired-capture-observed.json",
+      "sha256": "5907f231d1f2aa95b47b7d4d53a5afdf40d255d91a7104a3735812288d45b0cf",
+      "bytes": 569
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/repaired-usage-request-joins.json",
+      "sha256": "c13af6e2ee0bf8e768c39f35f9aa48e42f075cdca38fd8054b9de8f7557958d3",
+      "bytes": 1549
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/verification.json",
+      "sha256": "6e00390f8a31bba0cc8bcdc92e5b8c0825fad9f36b7a41f2e648c875029f7cdc",
+      "bytes": 3262
+    },
+    {
+      "path": "qa/admin-web/runs/2026-09-15/post-hold-usage-status/usage-matched-log-events.jsonl",
+      "sha256": "fe6877dd4cd4bdfc2a2c53fd56ae36418160f64ca833246c0052eb1684621568",
+      "bytes": 10632
+    }
+  ],
+  "original_raw_evidence_modified": false,
+  "full_process_log_included": false,
+  "full_runtime_qa_complete": false
+}

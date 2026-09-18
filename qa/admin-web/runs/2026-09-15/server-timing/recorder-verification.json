@@ -1,0 +1,21 @@
+{
+  "schema": "cc-lb-recorder-1.0.7-verification/v1",
+  "collector_version": "1.0.7",
+  "source": "crates/cc-lb-admin/web/qa/admin-web-browser-recorder.js",
+  "source_sha256": "003680dff36ca007387d966a7089f2e8ec6d032d803d9787421ac5ba6b8ac610",
+  "checks": {
+    "syntax": "node --check passed",
+    "attribution_transitions": "late same-ID ambiguity demotes, contradicted entry retracts without alternative, strong match excludes weak prior attribution",
+    "xray_iteration": "URLSearchParams forEach preserves query-name sorting/deduplication and form-key checks without DOM iterator access",
+    "xray_hashing": "DataView conversion matches native SHA256 for four vectors and avoids TypedArray output access",
+    "observer_failure_gate": "observer_task_failed forces capture.complete=false",
+    "sqlite_actual_browser": "17 retained resource IDs joined to complete server logs; 6 SQL-bearing entries; fetch_observation=0 is the expected isolated-world limitation"
+  },
+  "limitations": [
+    "The first 103 drained resource entries were not retained in the available raw snapshot; later sequence-106+ entries are a distinct window.",
+    "PostgreSQL canonical browser proof is pending.",
+    "A cached RID is not a fresh server execution.",
+    "Pure DB execution, pure pool queue wait, and complete production matrix coverage are not established."
+  ],
+  "full_runtime_qa_complete": false
+}

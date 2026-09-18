@@ -1,0 +1,9 @@
+[
+  {
+    "ts": "2026-09-17T11:48:27.996Z",
+    "msg": "tab reaped (inactive)",
+    "tabId": "dbbdb5e4-b13a-45d7-8bf0-9b79c0b5b0dc",
+    "idleMs": 300011,
+    "toolCalls": 8
+  }
+]

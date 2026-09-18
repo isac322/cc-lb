@@ -1,0 +1,117 @@
+[
+  {
+    "case": "warm",
+    "exit": 0,
+    "totals": {
+      "bytes": 16777216,
+      "cache_state_after": "fully_resident",
+      "cache_state_before": "fully_resident",
+      "file_count": 1,
+      "measured_pages_after": 4096,
+      "measured_pages_before": 4096,
+      "pages": 4096,
+      "resident_pages_after": 4096,
+      "resident_pages_before": 4096,
+      "resident_ratio_after": 1.0,
+      "resident_ratio_before": 1.0
+    }
+  },
+  {
+    "case": "evict",
+    "exit": 0,
+    "totals": {
+      "bytes": 16777216,
+      "cache_state_after": "not_resident",
+      "cache_state_before": "fully_resident",
+      "file_count": 1,
+      "measured_pages_after": 4096,
+      "measured_pages_before": 4096,
+      "pages": 4096,
+      "resident_pages_after": 0,
+      "resident_pages_before": 4096,
+      "resident_ratio_after": 0.0,
+      "resident_ratio_before": 1.0
+    }
+  },
+  {
+    "case": "inspect",
+    "exit": 0,
+    "totals": {
+      "bytes": 16777216,
+      "cache_state_after": "not_measured",
+      "cache_state_before": "not_resident",
+      "file_count": 1,
+      "measured_pages_after": 0,
+      "measured_pages_before": 4096,
+      "pages": 4096,
+      "resident_pages_after": null,
+      "resident_pages_before": 0,
+      "resident_ratio_after": null,
+      "resident_ratio_before": 0.0
+    }
+  },
+  {
+    "case": "warm",
+    "exit": 0,
+    "totals": {
+      "bytes": 16777216,
+      "cache_state_after": "fully_resident",
+      "cache_state_before": "not_resident",
+      "file_count": 1,
+      "measured_pages_after": 4096,
+      "measured_pages_before": 4096,
+      "pages": 4096,
+      "resident_pages_after": 4096,
+      "resident_pages_before": 0,
+      "resident_ratio_after": 1.0,
+      "resident_ratio_before": 0.0
+    }
+  },
+  {
+    "case": "inspect",
+    "exit": 0,
+    "totals": {
+      "bytes": 16777216,
+      "cache_state_after": "not_measured",
+      "cache_state_before": "fully_resident",
+      "file_count": 1,
+      "measured_pages_after": 0,
+      "measured_pages_before": 4096,
+      "pages": 4096,
+      "resident_pages_after": null,
+      "resident_pages_before": 4096,
+      "resident_ratio_after": null,
+      "resident_ratio_before": 1.0
+    }
+  },
+  {
+    "case": "wrong-nonce",
+    "exit": 2,
+    "stderr": "error: --nonce must contain 16 to 256 non-whitespace characters\n"
+  },
+  {
+    "case": "symlink",
+    "exit": 2,
+    "stderr": "error: [Errno 40] Too many levels of symbolic links: 'link.sqlite'\n"
+  },
+  {
+    "case": "traversal",
+    "exit": 2,
+    "stderr": "error: target file 1 must name a file below --root\n"
+  },
+  {
+    "case": "unquiesced",
+    "exit": 2,
+    "stderr": "error: evict requires --files-quiesced after Main stops writers and completes database-specific flush/checkpoint work\n"
+  },
+  {
+    "case": "inspect-hash",
+    "exit": 2,
+    "stderr": "error: --sha256 is not allowed with inspect because hashing would warm target pages\n"
+  },
+  {
+    "case": "global-root",
+    "exit": 2,
+    "stderr": "error: --root must not be the filesystem root\n"
+  }
+]

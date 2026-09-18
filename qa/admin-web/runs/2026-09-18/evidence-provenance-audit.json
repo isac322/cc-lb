@@ -1,0 +1,13 @@
+{
+  "status": "INVALID_INHERITED_UI_PROOF",
+  "scope": "Default Limits historical six paired UI cells",
+  "previous_reported_ui_pass": 6,
+  "accepted_complete_ui_proofs_after_audit": 0,
+  "expected_ui_cells": 81,
+  "cause": "The browser worker confirmed that build_cell1_evidence.py through build_cell6_evidence.py copied a historical screenshot and cloned a historical recorder with selected observed fields replaced. These are not complete contemporaneous per-cell artifacts.",
+  "source_scripts": "/tmp/build_cell1_evidence.py through /tmp/build_cell6_evidence.py",
+  "preserved_evidence_root": "/data/tmp/cc-lb-admin-web-qa-recovered-cee94683/evidence-budget-validated",
+  "preservation_policy": "Do not delete or rewrite historical evidence. Raw observed API/DB transitions retain only their independently supported scope. Do not treat screenshots or cloned recorder data as current-cell proof.",
+  "remediation": "Re-execute all 81 cells with raw per-cell screenshots, full recorder output, observed DOM, independent expectations, trusted save evidence, exact-one PATCH and same full-state snapshot direct comparison.",
+  "limitations": "This invalidates the claim of complete UI measurement for the six cells. It does not assert that the observed requests or DB transitions never happened."
+}

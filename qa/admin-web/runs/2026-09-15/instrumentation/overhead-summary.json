@@ -1,0 +1,121 @@
+{
+  "schema": "cc-lb-admin-instrumentation-overhead/v1",
+  "comparison": "A/B/A, 5 warmups and 25 measured GETs per phase",
+  "measured_requests": 300,
+  "groups": [
+    {
+      "engine": "sqlite",
+      "profile": "default_info",
+      "phases": {
+        "baseline_A": {
+          "samples": 25,
+          "median_ms": 0.768375,
+          "p95_ms": 0.8503171999999999
+        },
+        "instrumented_B": {
+          "samples": 25,
+          "median_ms": 1.05025,
+          "p95_ms": 1.2334756
+        },
+        "baseline_A2": {
+          "samples": 25,
+          "median_ms": 0.824667,
+          "p95_ms": 0.8781671999999999
+        }
+      },
+      "observed_median_difference_ms_range": [
+        0.22558299999999987,
+        0.2818749999999999
+      ],
+      "response_body_equal": true,
+      "proxy_rejection_and_header_control_equal": true
+    },
+    {
+      "engine": "sqlite",
+      "profile": "measurement_debug",
+      "phases": {
+        "baseline_A": {
+          "samples": 25,
+          "median_ms": 1.451709,
+          "p95_ms": 1.6499000000000001
+        },
+        "instrumented_B": {
+          "samples": 25,
+          "median_ms": 1.899833,
+          "p95_ms": 2.1340420000000004
+        },
+        "baseline_A2": {
+          "samples": 25,
+          "median_ms": 1.435917,
+          "p95_ms": 1.5230336
+        }
+      },
+      "observed_median_difference_ms_range": [
+        0.4481240000000002,
+        0.463916
+      ],
+      "response_body_equal": true,
+      "proxy_rejection_and_header_control_equal": true
+    },
+    {
+      "engine": "postgres",
+      "profile": "default_info",
+      "phases": {
+        "baseline_A": {
+          "samples": 25,
+          "median_ms": 1.71625,
+          "p95_ms": 2.6711922000000006
+        },
+        "instrumented_B": {
+          "samples": 25,
+          "median_ms": 1.98575,
+          "p95_ms": 2.680192
+        },
+        "baseline_A2": {
+          "samples": 25,
+          "median_ms": 1.43475,
+          "p95_ms": 1.7704662000000002
+        }
+      },
+      "observed_median_difference_ms_range": [
+        0.26949999999999985,
+        0.5509999999999999
+      ],
+      "response_body_equal": true,
+      "proxy_rejection_and_header_control_equal": true
+    },
+    {
+      "engine": "postgres",
+      "profile": "measurement_debug",
+      "phases": {
+        "baseline_A": {
+          "samples": 25,
+          "median_ms": 2.556917,
+          "p95_ms": 4.127667
+        },
+        "instrumented_B": {
+          "samples": 25,
+          "median_ms": 3.115,
+          "p95_ms": 4.6796169999999995
+        },
+        "baseline_A2": {
+          "samples": 25,
+          "median_ms": 2.245,
+          "p95_ms": 2.7327335999999995
+        }
+      },
+      "observed_median_difference_ms_range": [
+        0.5580830000000003,
+        0.8700000000000001
+      ],
+      "response_body_equal": true,
+      "proxy_rejection_and_header_control_equal": true
+    }
+  ],
+  "limits": [
+    "Loopback empty-upstream endpoint only; no production traffic.",
+    "Roundtrip includes client/transport/server/logging; not pure CPU cost.",
+    "No throughput, memory, or pure pool-wait claim.",
+    "Proxy control covers unauthenticated 401 and request-ID response semantics, not upstream routing/signing."
+  ]
+}

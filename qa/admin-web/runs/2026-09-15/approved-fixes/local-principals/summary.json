@@ -1,0 +1,61 @@
+{
+  "schema": "cc-lb-approved-fixes-candidate-summary/v1",
+  "run_id": "approved-fixes-principals-2026-09-15",
+  "candidate": {
+    "path": "/data/tmp/cc-lb-admin-web-qa-evidence/cc-lb-approved-fixes-candidate",
+    "sha256": "f564dcf57a4c2b914b2c690b8dee4e1c68f4fa472ae680bbe599d250dcd28f65",
+    "app_patch_sha256": "7ef937736bfb0432d3b5c22c1af90bace625c1df04a05201a475806f70a34166",
+    "source_commit": "ef70b347"
+  },
+  "fixture_manifest": "/data/tmp/cc-lb-admin-web-qa-completion/target/keepalive-qa/admin-web-local-principals/fixture-manifest.json",
+  "actions": 10,
+  "status_counts": {
+    "PASS": 10
+  },
+  "acceptance": {
+    "blank_ui_issue_exact_one": "PASS",
+    "blank_list_null_display": "PASS",
+    "real_proxy_use": "PASS",
+    "revoke": "PASS",
+    "nul_400_zero_key": "PASS",
+    "two_setting_terminal_refetch": [
+      "PASS",
+      "PASS"
+    ],
+    "terminal_save_no_stale_put": "PASS",
+    "genuine_concurrent_409": "PASS",
+    "omitted_label_api_parity": "PASS"
+  },
+  "plaintext_policy": {
+    "dom_presence_only": true,
+    "value_written": false,
+    "value_hashed": false,
+    "screenshot_while_visible": false,
+    "network_response_body_read_or_hashed": false,
+    "runner_memory_cleared_after_proxy": true
+  },
+  "observed_notes": [
+    "Issue success status is the endpoint-defined exact 201 Created, not a normalized 200.",
+    "Revoked rows may be omitted by the current list contract; this candidate run does not classify the prior source-only Revoked badge variant as a new bug."
+  ],
+  "completed_at_utc": "2026-09-15T09:37:48.789Z",
+  "final_restore": {
+    "snapshot": "populated",
+    "app_stopped": true,
+    "browser_stopped": true,
+    "storage_sha256": "871a0a927f78f989bae3fee1762a4592527302ce2e24ee7a3cf6850f4d3e8108",
+    "snapshot_storage_sha256": "871a0a927f78f989bae3fee1762a4592527302ce2e24ee7a3cf6850f4d3e8108",
+    "config_sha256": "fc1d909d0c9e698dca600a65adedb56e8dd9f0334c1e953137fcc87939bf5fe7",
+    "snapshot_config_sha256": "fc1d909d0c9e698dca600a65adedb56e8dd9f0334c1e953137fcc87939bf5fe7",
+    "canonical_equal": true,
+    "restored_at_utc": "2026-09-15T09:40:06.386Z"
+  },
+  "cleanup": {
+    "app_stopped": true,
+    "browser_stopped": true,
+    "credentials_retained_0600": true,
+    "production_access": false,
+    "repo_or_git_changes": false
+  },
+  "verdict": "PASS"
+}

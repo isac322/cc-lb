@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "environment": "local_fixture_only",
+  "origin": "http://127.0.0.1:56452",
+  "page": "/settings",
+  "provider_type": "file",
+  "feature": "settings_apply_capability",
+  "baseline": {
+    "save_disabled": false,
+    "validate_disabled": true,
+    "apply_disabled": true,
+    "notice_present": true
+  },
+  "validated": {
+    "revision": 1,
+    "last_validated_revision": 1,
+    "apply_supported": false,
+    "apply_disabled": true,
+    "notice_present": true
+  },
+  "artifacts": {
+    "baseline_json": "browser-baseline.json",
+    "baseline_png": "browser-baseline.png",
+    "validated_json": "browser-validated.json",
+    "validated_png": "browser-validated.png",
+    "rt_json": "browser-rt.json"
+  },
+  "all_validations_passed": true
+}

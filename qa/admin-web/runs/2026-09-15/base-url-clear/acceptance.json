@@ -1,0 +1,41 @@
+{
+  "schema": "cc-lb-base-url-clear-acceptance/v1",
+  "approved_at_date": "2026-09-16",
+  "authorization": "User selected explicit-null removal approval; PR #793 merge remains held.",
+  "http_update": {
+    "absent": "preserve current override",
+    "null": "remove current override",
+    "url": "set override"
+  },
+  "storage_update": {
+    "None": "preserve",
+    "Some(None)": "clear",
+    "Some(Some(url))": "set"
+  },
+  "required_checks": [
+    "PUT and PATCH preserve missing base_url and clear explicit null",
+    "GET and list reflect persisted null after clearing",
+    "Stale revision rejects clear without changing state",
+    "URL can be set again after clearing",
+    "API-key ciphertext and OAuth token behavior remain unchanged",
+    "SQLite and PostgreSQL share the same observable contract",
+    "Real browser blank-save, fresh GET, reload display agree",
+    "Actual proxy dispatch seam resolves default Anthropic destination after clearing, without network request to Anthropic"
+  ],
+  "non_goals": [
+    "Key or token null handling",
+    "Warmup dialect clearing semantics",
+    "Routing selection changes",
+    "Production data or configuration changes",
+    "PR merge or deployment"
+  ],
+  "runtime_mutation_boundary": [
+    "crates/cc-lb-admin/src/v1/upstreams.rs",
+    "crates/cc-lb-storage-api/src/upstream.rs",
+    "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs",
+    "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs",
+    "Necessary callers and test mocks of the changed UpstreamUpdate contract"
+  ],
+  "before_fix_proof": "before-fix-regression.txt",
+  "full_goal_complete": false
+}

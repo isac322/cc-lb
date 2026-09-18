@@ -1,0 +1,36 @@
+{
+  "schema": "cc-lb-baseline-source-archive/v1",
+  "archive": "qa/admin-web/runs/2026-09-15/baseline-source-catalog.zip",
+  "sha256": "1b58d641712dcb11e78cb2dfeceb029ecc93fb95b7eb3ab78e58f1c9bdb850c9",
+  "claim_boundary": "Historical pre-approved-fix catalog, preserved before refresh. The archived YAML contains the observed empty-key serialization defect; it is not a valid current execution inventory.",
+  "members": [
+    {
+      "name": "ui.json",
+      "sha256": "791a7e6b33b12b9f751ec099d3bc75d450ba05d1918f14253a08c2757347d4b7"
+    },
+    {
+      "name": "api-read.json",
+      "sha256": "37b77c9695a2e1b29f8d4f46bf6cda9a89c634c10478af3f0f5e5fc8fd47f788"
+    },
+    {
+      "name": "api-write.json",
+      "sha256": "caca1f29275cea4edb50eac2e640a59f8875be6274877d90ff139ee29e9e5f69"
+    },
+    {
+      "name": "deployed-delta.json",
+      "sha256": "b7fbd98cab7786a627d83804f07a8d50dc57247ff322c09342806e1fec5ffb18"
+    },
+    {
+      "name": "api-query-inventory.yaml",
+      "sha256": "d873bbdd93fc7ea1d0d25fa35324274ea6bcdffa111d0ebce27f8049d76437db"
+    },
+    {
+      "name": "api-query-inventory.md",
+      "sha256": "4a8c5a5e76c560ccb07bd102463e73510091b45d9ad8fc865309be638192f947"
+    },
+    {
+      "name": "source-reconciliation.json",
+      "sha256": "bdb444f8e9b4b4f137fe014815c4eb21443c0030f1f674769320c68cb20d9f82"
+    }
+  ]
+}

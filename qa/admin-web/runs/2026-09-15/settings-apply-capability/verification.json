@@ -1,0 +1,48 @@
+{
+  "schema": "cc-lb-settings-apply-capability-verification/v1",
+  "candidate_binary_sha256": "253cc5105cebfe759c76a4848a7b224da4cef272a9210e8106420b4a09ffff4f",
+  "spa_index_sha256": "9d1f2b21eb548a969ecbb6f6011c42f1c4ec6d49a800e38ed92d2a2f114a9d55",
+  "source_base": "80e1180f0bedd2054450fb68e57444e035c59ef2",
+  "candidate_uncommitted_at_capture": true,
+  "contract": {
+    "provider_support": "Explicit true only enables Apply alongside existing validation/revision conditions.",
+    "unsupported_or_unknown": "Apply disabled; Save/Validate semantics unchanged.",
+    "authorization": "Capability is not permission and does not bypass backend authorization."
+  },
+  "regressions": {
+    "pre_fix": "Validated unsupported draft still enabled Apply; exact old-runtime UI assertion failure preserved separately from an initial test-matcher setup error.",
+    "backend": {
+      "run": 23,
+      "passed": 23,
+      "selected_out": 644
+    },
+    "web": {
+      "files": 72,
+      "run": 700,
+      "passed": 700
+    },
+    "rust_clippy_affected_all_targets_all_features": "passed",
+    "typecheck": "Pinned installed tsgo -b --noEmit passed; package-script invocation separately failed shell command resolution. No global environment or dependency changes made."
+  },
+  "browser": {
+    "environment": "Actual file-backed isolated SQLite server",
+    "saved_revision": 1,
+    "validated_revision": 1,
+    "apply_supported": false,
+    "save_requests_observed": 1,
+    "validate_requests_observed": 1,
+    "apply_requests_observed": 0,
+    "final_description_scope": "Apply-specific paragraph outside shared aria-live status; Validate retains its original description.",
+    "main_visible_controls_screenshot": "browser-final-controls.png",
+    "limits": "Earlier full-page screenshot did not show the changed controls; it is preserved but not used as controls-visibility proof. Only the explicit supported/missing-value UI unit transitions and supported-provider HTTP path were verified for supported mode."
+  },
+  "existing_supported_flow_limit": "preexisting-supported-apply-limit.json",
+  "cleanup": {
+    "owned_server_ports_closed": true,
+    "browser_worker_reported_tabs_empty": true,
+    "private_fixture_retained": true
+  },
+  "production_changes": 0,
+  "pr_merge_hold_continues": true,
+  "full_runtime_qa_complete": false
+}

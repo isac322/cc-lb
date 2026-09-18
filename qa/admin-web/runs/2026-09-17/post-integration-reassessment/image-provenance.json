@@ -1,0 +1,33 @@
+{
+  "image": "ghcr.io/isac322/cc-lb@sha256:e035b270638aa6a65e72b5328a181772aeba7407e2e419983542827a20a8b87d",
+  "platforms": [
+    {
+      "platform": "linux/amd64",
+      "architecture": "amd64",
+      "revision": "5e8f74a01c74d7e3c160dc7f7c7129bb4eaa13f9",
+      "version": "0.4.9",
+      "source": "https://github.com/isac322/cc-lb"
+    },
+    {
+      "platform": "linux/arm/v7",
+      "architecture": "arm",
+      "revision": "5e8f74a01c74d7e3c160dc7f7c7129bb4eaa13f9",
+      "version": "0.4.9",
+      "source": "https://github.com/isac322/cc-lb"
+    },
+    {
+      "platform": "linux/arm64",
+      "architecture": "arm64",
+      "revision": "5e8f74a01c74d7e3c160dc7f7c7129bb4eaa13f9",
+      "version": "0.4.9",
+      "source": "https://github.com/isac322/cc-lb"
+    },
+    {
+      "platform": "linux/ppc64le",
+      "architecture": "ppc64le",
+      "revision": "5e8f74a01c74d7e3c160dc7f7c7129bb4eaa13f9",
+      "version": "0.4.9",
+      "source": "https://github.com/isac322/cc-lb"
+    }
+  ]
+}

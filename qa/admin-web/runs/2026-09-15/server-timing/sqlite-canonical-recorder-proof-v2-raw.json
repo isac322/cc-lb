@@ -1,0 +1,1934 @@
+{
+ "schema_version": 1,
+ "collector_version": "1.0.7",
+ "installed": true,
+ "capabilities": {
+  "browser_user_agent_sha256": {
+   "value": null,
+   "reason": "user agent is not collected because it is not required evidence"
+  },
+  "crypto_random_uuid": true,
+  "crypto_subtle_sha256": true,
+  "performance_time_origin": true,
+  "performance_observer": true,
+  "performance_observer_supported_entry_types": [
+   "event",
+   "first-input",
+   "largest-contentful-paint",
+   "mark",
+   "measure",
+   "navigation",
+   "paint",
+   "resource"
+  ],
+  "resource_timing_observer_mode": "type_resource_buffered",
+  "resource_timing_observer_error": null,
+  "observer_dropped_entries_count": "not_reported_by_callback",
+  "resource_timing_properties": {
+   "deliveryType": false,
+   "responseStatus": true,
+   "contentType": true,
+   "firstInterimResponseStart": true,
+   "finalResponseHeadersStart": true,
+   "transferSize": true,
+   "encodedBodySize": true,
+   "decodedBodySize": true,
+   "serverTiming": true
+  },
+  "fetch_wrapper": {
+   "installed": true,
+   "returns_exact_native_promise": true,
+   "returns_exact_native_response": true,
+   "attaches_observer_reactions": true,
+   "caveat": "attaching a rejection reaction can affect unhandledrejection reporting; fetch fulfillment/rejection, Promise identity, and Response identity are not replaced"
+  },
+  "response_body_observer": {
+   "clone_cap_bytes": 262144,
+   "requires_content_length": true,
+   "sse_clone_or_read": false,
+   "caveat": "a bounded Response.clone plus hashing can add CPU, allocation, tee buffering, and microtask work; per-record observer_overhead_ms is the script cost visible on this thread, not total browser cost"
+  },
+  "resource_timing_authority": "native Resource Timing owns network TTFB/download/source-byte fields; JavaScript fetch settle latency is never copied into them",
+  "request_id_authority": "crypto.randomUUID per wrapped fetch; a Server-Timing rid description matching req_admin_<UUIDv7> is recorded verbatim and compared by SHA-256 against observed response correlation headers; a unique same-ID candidate promotes the link, while a reused or unmatched ID stays a candidate and never proves a fresh server execution"
+ },
+ "capture": {
+  "complete": true,
+  "incomplete_reasons": [],
+  "overflow": {
+   "dropped_records": 0,
+   "first_dropped_sequence": null,
+   "last_dropped_sequence": null
+  },
+  "observer_dropped_entries": 0
+ },
+ "clocks": {
+  "time_origin_epoch_ms": 1789487987836,
+  "captured_epoch_ms": 1789488354926,
+  "captured_monotonic_ms": 367090
+ },
+ "records": [
+  {
+   "schema_version": 1,
+   "record_id": "a1814820-754c-4305-92de-45956677c3ab",
+   "sequence": 106,
+   "recorded_epoch_ms": 1789488198548,
+   "recorded_monotonic_ms": 210712,
+   "record_type": "resource_timing",
+   "source_entry_id": "a9c4291d-b7f9-49b0-ac46-042161b3b7a2",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5ce-f38f-7f20-bd55-2bba45012670",
+    "value_sha256": "4d473aa52ab83a7f4e68bc60be13be04c62b8421a5b81749a76ac355ea66543d",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "a72bff6dad853d05e2919a1fc27ca1eb81c1a94f284c283c591d19880bc6dc96",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 210703,
+     "raw_value": 210703,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 210703,
+     "raw_value": 210703,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 210706,
+     "raw_value": 210706,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 210709,
+     "raw_value": 210709,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 210709,
+     "raw_value": 210709,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 210709,
+     "raw_value": 210709,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488198539,
+    "response_end_epoch_ms": 1789488198545,
+    "ttfb_ms": {
+     "value": 3,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 316,
+      "raw_value": 316,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488198548,
+   "captured_monotonic_ms": 210712,
+   "observer_processing_ms": 1
+  },
+  {
+   "schema_version": 1,
+   "record_id": "093f08a3-eee6-4a6e-aa38-343f22467616",
+   "sequence": 107,
+   "recorded_epoch_ms": 1789488200970,
+   "recorded_monotonic_ms": 213134,
+   "record_type": "resource_timing",
+   "source_entry_id": "66f2946f-c0f8-44a0-96eb-3754f82e289a",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5ce-fd01-71f2-84f7-91e17e947fa9",
+    "value_sha256": "7957ad20a19ccf732d8738dd4dd151765d500160326fdd8b3b8cbf833ed2cace",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "d727e66d7e211a9a545206e65dcdee60ecc4c3aa84e5b07e96dba89cbe4f3d15",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 213122,
+     "raw_value": 213122,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 213122,
+     "raw_value": 213122,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 213126,
+     "raw_value": 213126,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 213128,
+     "raw_value": 213128,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 213128,
+     "raw_value": 213128,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 213128,
+     "raw_value": 213128,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488200958,
+    "response_end_epoch_ms": 1789488200964,
+    "ttfb_ms": {
+     "value": 2,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 366,
+      "raw_value": 366,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 66,
+      "raw_value": 66,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 72,
+      "raw_value": 72,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488200970,
+   "captured_monotonic_ms": 213134,
+   "observer_processing_ms": 4
+  },
+  {
+   "schema_version": 1,
+   "record_id": "22be5419-a98a-46ac-9e02-d233d5c91db2",
+   "sequence": 108,
+   "recorded_epoch_ms": 1789488216066,
+   "recorded_monotonic_ms": 228231,
+   "record_type": "resource_timing",
+   "source_entry_id": "1d494000-2818-4b41-a31c-f979fe3a735a",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5cf-37f9-76a1-941a-6f2570ae4e14",
+    "value_sha256": "d06e1da7f852b7544b9481fc4ae0ae9e66dcc1a035d99447a08ccb0efa6cdd4c",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "d727e66d7e211a9a545206e65dcdee60ecc4c3aa84e5b07e96dba89cbe4f3d15",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 228219,
+     "raw_value": 228219,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 228219,
+     "raw_value": 228219,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 228221,
+     "raw_value": 228221,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 228223,
+     "raw_value": 228223,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 228223,
+     "raw_value": 228223,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 228223,
+     "raw_value": 228223,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488216055,
+    "response_end_epoch_ms": 1789488216059,
+    "ttfb_ms": {
+     "value": 2,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 366,
+      "raw_value": 366,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 66,
+      "raw_value": 66,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 72,
+      "raw_value": 72,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488216066,
+   "captured_monotonic_ms": 228231,
+   "observer_processing_ms": 5
+  },
+  {
+   "schema_version": 1,
+   "record_id": "ca04431d-5e07-41b3-909e-4604b597829f",
+   "sequence": 109,
+   "recorded_epoch_ms": 1789488228575,
+   "recorded_monotonic_ms": 240739,
+   "record_type": "resource_timing",
+   "source_entry_id": "4681e036-c354-4d8c-8a17-f88c27d79d0e",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5cf-68d8-7921-bc75-d37f57780f0f",
+    "value_sha256": "2065733d5821a0167c80f0dbb45d4c8340bc6314e529dddf5208f191b0e779f5",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "a72bff6dad853d05e2919a1fc27ca1eb81c1a94f284c283c591d19880bc6dc96",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 240729,
+     "raw_value": 240729,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 240729,
+     "raw_value": 240729,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 240732,
+     "raw_value": 240732,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 240735,
+     "raw_value": 240735,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 240735,
+     "raw_value": 240735,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 240735,
+     "raw_value": 240735,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488228565,
+    "response_end_epoch_ms": 1789488228571,
+    "ttfb_ms": {
+     "value": 3,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 316,
+      "raw_value": 316,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488228575,
+   "captured_monotonic_ms": 240739,
+   "observer_processing_ms": 1
+  },
+  {
+   "schema_version": 1,
+   "record_id": "c57f2df8-1a67-48c8-aaaf-9a858665cbc1",
+   "sequence": 110,
+   "recorded_epoch_ms": 1789488231138,
+   "recorded_monotonic_ms": 243302,
+   "record_type": "resource_timing",
+   "source_entry_id": "f19cce1b-de20-479a-acfc-6d76dd0c8a51",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5cf-72d9-7060-8fb0-a40a2517f898",
+    "value_sha256": "d297af5a64588cc3e996a09220b752abaa7d061293f8b502c695dbb578bc1481",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "d727e66d7e211a9a545206e65dcdee60ecc4c3aa84e5b07e96dba89cbe4f3d15",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 243290,
+     "raw_value": 243290,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 243290,
+     "raw_value": 243290,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 243294,
+     "raw_value": 243294,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 243295,
+     "raw_value": 243295,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 243295,
+     "raw_value": 243295,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 243295,
+     "raw_value": 243295,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488231126,
+    "response_end_epoch_ms": 1789488231131,
+    "ttfb_ms": {
+     "value": 1,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 366,
+      "raw_value": 366,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 66,
+      "raw_value": 66,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 72,
+      "raw_value": 72,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488231138,
+   "captured_monotonic_ms": 243302,
+   "observer_processing_ms": 6
+  },
+  {
+   "schema_version": 1,
+   "record_id": "76da2eb6-f18e-434b-933b-d2b18f8bd00c",
+   "sequence": 111,
+   "recorded_epoch_ms": 1789488246258,
+   "recorded_monotonic_ms": 258422,
+   "record_type": "resource_timing",
+   "source_entry_id": "b01b73b6-8892-457e-894c-50c642357151",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5cf-adec-7ff2-bce8-5caf7a048ff3",
+    "value_sha256": "b88765d4814a835a8c17d6092b92787279a8987dcc5859f0358635ecbec48686",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "d727e66d7e211a9a545206e65dcdee60ecc4c3aa84e5b07e96dba89cbe4f3d15",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 258414,
+     "raw_value": 258414,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 258414,
+     "raw_value": 258414,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 258416,
+     "raw_value": 258416,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 258418,
+     "raw_value": 258418,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 258418,
+     "raw_value": 258418,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 258418,
+     "raw_value": 258418,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488246250,
+    "response_end_epoch_ms": 1789488246254,
+    "ttfb_ms": {
+     "value": 2,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 365,
+      "raw_value": 365,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 65,
+      "raw_value": 65,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 72,
+      "raw_value": 72,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488246258,
+   "captured_monotonic_ms": 258422,
+   "observer_processing_ms": 3
+  },
+  {
+   "schema_version": 1,
+   "record_id": "ae428f81-df09-40a0-92cd-c8682d8ba1ca",
+   "sequence": 112,
+   "recorded_epoch_ms": 1789488258700,
+   "recorded_monotonic_ms": 270864,
+   "record_type": "resource_timing",
+   "source_entry_id": "cfc670ad-bdb1-4de2-9590-c5964fe7362b",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5cf-de81-72b2-9872-3be0a77c8afd",
+    "value_sha256": "129fc94371031579a107aaf7e5666a7b4bcc7420071d94be6b120fd316379933",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "a72bff6dad853d05e2919a1fc27ca1eb81c1a94f284c283c591d19880bc6dc96",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 270850,
+     "raw_value": 270850,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 270850,
+     "raw_value": 270850,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 270853,
+     "raw_value": 270853,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 270859,
+     "raw_value": 270859,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 270859,
+     "raw_value": 270859,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 270859,
+     "raw_value": 270859,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488258686,
+    "response_end_epoch_ms": 1789488258695,
+    "ttfb_ms": {
+     "value": 6,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 316,
+      "raw_value": 316,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488258700,
+   "captured_monotonic_ms": 270864,
+   "observer_processing_ms": 1
+  },
+  {
+   "schema_version": 1,
+   "record_id": "e991c3ec-1dae-4403-a098-291fafc5621f",
+   "sequence": 113,
+   "recorded_epoch_ms": 1789488261397,
+   "recorded_monotonic_ms": 273561,
+   "record_type": "resource_timing",
+   "source_entry_id": "d3880d4c-b36c-452d-a986-dda63ebd9d0d",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5cf-e90c-7810-b29c-e6cc462714be",
+    "value_sha256": "e0c3190175207a80c629b1e3ea26169b692d3252092755e2c3c6284e365f4c4d",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "d727e66d7e211a9a545206e65dcdee60ecc4c3aa84e5b07e96dba89cbe4f3d15",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 273549,
+     "raw_value": 273549,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 273549,
+     "raw_value": 273549,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 273552,
+     "raw_value": 273552,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 273554,
+     "raw_value": 273554,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 273554,
+     "raw_value": 273554,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 273554,
+     "raw_value": 273554,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488261385,
+    "response_end_epoch_ms": 1789488261390,
+    "ttfb_ms": {
+     "value": 2,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 366,
+      "raw_value": 366,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 66,
+      "raw_value": 66,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 72,
+      "raw_value": 72,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488261397,
+   "captured_monotonic_ms": 273561,
+   "observer_processing_ms": 5
+  },
+  {
+   "schema_version": 1,
+   "record_id": "44a2a0d4-c44a-49b6-829f-ba9d00c5b7d3",
+   "sequence": 114,
+   "recorded_epoch_ms": 1789488276497,
+   "recorded_monotonic_ms": 288661,
+   "record_type": "resource_timing",
+   "source_entry_id": "573b4af2-a2f9-4282-8bfb-198810ea00c9",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5d0-2409-7000-ac3b-6d6c63c473bc",
+    "value_sha256": "6553f90bf937d1c4048954b320ebe80bc765ab4f12107092da9f7dcde7078117",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "d727e66d7e211a9a545206e65dcdee60ecc4c3aa84e5b07e96dba89cbe4f3d15",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 288651,
+     "raw_value": 288651,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 288651,
+     "raw_value": 288651,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 288654,
+     "raw_value": 288654,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 288656,
+     "raw_value": 288656,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 288656,
+     "raw_value": 288656,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 288656,
+     "raw_value": 288656,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488276487,
+    "response_end_epoch_ms": 1789488276492,
+    "ttfb_ms": {
+     "value": 2,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 366,
+      "raw_value": 366,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 66,
+      "raw_value": 66,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 72,
+      "raw_value": 72,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488276497,
+   "captured_monotonic_ms": 288661,
+   "observer_processing_ms": 3
+  },
+  {
+   "schema_version": 1,
+   "record_id": "e1654a46-1f39-40f3-b11f-a2cccb5d60f3",
+   "sequence": 115,
+   "recorded_epoch_ms": 1789488288828,
+   "recorded_monotonic_ms": 300992,
+   "record_type": "resource_timing",
+   "source_entry_id": "26349893-7c28-428c-8367-237eaa41d84e",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5d0-5435-7c02-b93a-db053b50d9fe",
+    "value_sha256": "87fb9305ab84cc049342e7740d095a15a8db70a40b5b6cd2ba5be30f4d4d07bd",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "a72bff6dad853d05e2919a1fc27ca1eb81c1a94f284c283c591d19880bc6dc96",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 300982,
+     "raw_value": 300982,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 300982,
+     "raw_value": 300982,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 300986,
+     "raw_value": 300986,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 300988,
+     "raw_value": 300988,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 300988,
+     "raw_value": 300988,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 300989,
+     "raw_value": 300989,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488288818,
+    "response_end_epoch_ms": 1789488288825,
+    "ttfb_ms": {
+     "value": 2,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 1,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 316,
+      "raw_value": 316,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488288828,
+   "captured_monotonic_ms": 300992,
+   "observer_processing_ms": 1
+  },
+  {
+   "schema_version": 1,
+   "record_id": "8b5de891-4924-4a84-ba6f-d829784a7fdf",
+   "sequence": 116,
+   "recorded_epoch_ms": 1789488291569,
+   "recorded_monotonic_ms": 303733,
+   "record_type": "resource_timing",
+   "source_entry_id": "3dd9ae46-4f19-49bb-adfc-3b5b05bbd0c2",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5d0-5ee9-7a52-818e-d6eef2cd1246",
+    "value_sha256": "cc2a58aa1faaf1ff4cb08e151b52747236d15b42331619c89d1c4b49160e2b4b",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "d727e66d7e211a9a545206e65dcdee60ecc4c3aa84e5b07e96dba89cbe4f3d15",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 303722,
+     "raw_value": 303722,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 303722,
+     "raw_value": 303722,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 303725,
+     "raw_value": 303725,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 303726,
+     "raw_value": 303726,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 303726,
+     "raw_value": 303726,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 303726,
+     "raw_value": 303726,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488291558,
+    "response_end_epoch_ms": 1789488291562,
+    "ttfb_ms": {
+     "value": 1,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 366,
+      "raw_value": 366,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 66,
+      "raw_value": 66,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 72,
+      "raw_value": 72,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488291569,
+   "captured_monotonic_ms": 303733,
+   "observer_processing_ms": 5
+  },
+  {
+   "schema_version": 1,
+   "record_id": "1048bacd-0d29-4874-9fed-8fbae972576c",
+   "sequence": 117,
+   "recorded_epoch_ms": 1789488306641,
+   "recorded_monotonic_ms": 318806,
+   "record_type": "resource_timing",
+   "source_entry_id": "1d8b76d3-9490-40bc-8b7a-c37f72641d8d",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5d0-99cd-7120-9682-97904c79c243",
+    "value_sha256": "069d8bbd6f943a6419feee4317c4afa59a38fbb7f364ecb4e6c2244e92931718",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "d727e66d7e211a9a545206e65dcdee60ecc4c3aa84e5b07e96dba89cbe4f3d15",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 318798,
+     "raw_value": 318798,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 318798,
+     "raw_value": 318798,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 318801,
+     "raw_value": 318801,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 318803,
+     "raw_value": 318803,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 318803,
+     "raw_value": 318803,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 318803,
+     "raw_value": 318803,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488306634,
+    "response_end_epoch_ms": 1789488306639,
+    "ttfb_ms": {
+     "value": 2,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 366,
+      "raw_value": 366,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 66,
+      "raw_value": 66,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 72,
+      "raw_value": 72,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488306641,
+   "captured_monotonic_ms": 318806,
+   "observer_processing_ms": 1
+  },
+  {
+   "schema_version": 1,
+   "record_id": "d1090650-31fe-4672-ae8c-1f7c0a45b794",
+   "sequence": 118,
+   "recorded_epoch_ms": 1789488318983,
+   "recorded_monotonic_ms": 331147,
+   "record_type": "resource_timing",
+   "source_entry_id": "d5141e64-d1f5-46a2-a69e-df892b927c08",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5d0-ca00-7620-8184-b574ff4c9346",
+    "value_sha256": "36985c50b23798eefcbc5e50a926c0b25e9408379ec866dd9757029cfb3d8d84",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "a72bff6dad853d05e2919a1fc27ca1eb81c1a94f284c283c591d19880bc6dc96",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 331137,
+     "raw_value": 331137,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 331137,
+     "raw_value": 331137,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 331140,
+     "raw_value": 331140,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 331144,
+     "raw_value": 331144,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 331144,
+     "raw_value": 331144,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 331144,
+     "raw_value": 331144,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488318973,
+    "response_end_epoch_ms": 1789488318980,
+    "ttfb_ms": {
+     "value": 4,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 316,
+      "raw_value": 316,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488318983,
+   "captured_monotonic_ms": 331147,
+   "observer_processing_ms": 1
+  },
+  {
+   "schema_version": 1,
+   "record_id": "31a2a1e3-85cc-4912-94f0-6f1a66bb4c99",
+   "sequence": 119,
+   "recorded_epoch_ms": 1789488321776,
+   "recorded_monotonic_ms": 333940,
+   "record_type": "resource_timing",
+   "source_entry_id": "dec7c98e-d211-4455-b3b4-3e7ae8a001b2",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5d0-d4e8-7583-a97c-d2c2a1ac7a14",
+    "value_sha256": "68476291e8621f7540d738b818b2eeb045c535047890a729ddac2a0ecc6bc38e",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "d727e66d7e211a9a545206e65dcdee60ecc4c3aa84e5b07e96dba89cbe4f3d15",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 333930,
+     "raw_value": 333930,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 333930,
+     "raw_value": 333930,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 333932,
+     "raw_value": 333932,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 333934,
+     "raw_value": 333934,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 333934,
+     "raw_value": 333934,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 333934,
+     "raw_value": 333934,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488321766,
+    "response_end_epoch_ms": 1789488321770,
+    "ttfb_ms": {
+     "value": 2,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 366,
+      "raw_value": 366,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 66,
+      "raw_value": 66,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 72,
+      "raw_value": 72,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488321776,
+   "captured_monotonic_ms": 333940,
+   "observer_processing_ms": 5
+  },
+  {
+   "schema_version": 1,
+   "record_id": "9d71e992-d714-4755-9ae0-109c62b698b8",
+   "sequence": 120,
+   "recorded_epoch_ms": 1789488336919,
+   "recorded_monotonic_ms": 349084,
+   "record_type": "resource_timing",
+   "source_entry_id": "b97bb858-a149-4f43-b0d6-fc31aa1f2855",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5d1-100f-79e1-ba4a-991e5f0cf363",
+    "value_sha256": "84bb33460cb7047c0a02a22caac479aaac2ddc964d8f9e8bf8c4968040851561",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "d727e66d7e211a9a545206e65dcdee60ecc4c3aa84e5b07e96dba89cbe4f3d15",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 349070,
+     "raw_value": 349070,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 349070,
+     "raw_value": 349070,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 349075,
+     "raw_value": 349075,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 349077,
+     "raw_value": 349077,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 349077,
+     "raw_value": 349077,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 349077,
+     "raw_value": 349077,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488336906,
+    "response_end_epoch_ms": 1789488336913,
+    "ttfb_ms": {
+     "value": 2,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 366,
+      "raw_value": 366,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 66,
+      "raw_value": 66,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 72,
+      "raw_value": 72,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488336919,
+   "captured_monotonic_ms": 349084,
+   "observer_processing_ms": 4
+  },
+  {
+   "schema_version": 1,
+   "record_id": "f69bcc6d-408e-4bfb-8de1-c9c32f3cb17b",
+   "sequence": 121,
+   "recorded_epoch_ms": 1789488349003,
+   "recorded_monotonic_ms": 361166,
+   "record_type": "resource_timing",
+   "source_entry_id": "8b431f40-3a5e-489f-b7c4-71c372d8ade8",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5d1-3f42-76e1-aaab-5ad7fc737759",
+    "value_sha256": "44646bf8d372488024d4fb75e1d3dc19b7998b58c91166c034e816d21662a482",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "a72bff6dad853d05e2919a1fc27ca1eb81c1a94f284c283c591d19880bc6dc96",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 361153,
+     "raw_value": 361153,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 361153,
+     "raw_value": 361153,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 361159,
+     "raw_value": 361159,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 361162,
+     "raw_value": 361162,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 361162,
+     "raw_value": 361162,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 361162,
+     "raw_value": 361162,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488348989,
+    "response_end_epoch_ms": 1789488348998,
+    "ttfb_ms": {
+     "value": 3,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 316,
+      "raw_value": 316,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 16,
+      "raw_value": 16,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488349003,
+   "captured_monotonic_ms": 361166,
+   "observer_processing_ms": 1
+  },
+  {
+   "schema_version": 1,
+   "record_id": "93e87f9f-17d0-4853-a555-26dd382ca85a",
+   "sequence": 122,
+   "recorded_epoch_ms": 1789488352080,
+   "recorded_monotonic_ms": 364244,
+   "record_type": "resource_timing",
+   "source_entry_id": "b93372ed-3214-484c-bc84-f062c71654ae",
+   "candidate_request_ids": [],
+   "correlation_state": "no_wrapped_fetch_candidate",
+   "correlation_reason": "no wrapped fetch shared the URL and time window; the entry is kept because a Server-Timing rid metric was present",
+   "server_request_id": {
+    "state": "observed",
+    "value": "req_admin_01a0a5d1-4b44-7352-aa81-1fb5768ed80e",
+    "value_sha256": "e6bf3a5c7815f14a0a0e414b22b83ca1d639ee5fb83ec1006742e60f62387f16",
+    "source": "PerformanceResourceTiming.serverTiming rid description",
+    "distinct_value_count": 1,
+    "verification": "no_wrapped_fetch_candidate",
+    "matched_header_name": null,
+    "reason": "no wrapped fetch shared the URL/time window; the ID is preserved as unlinked backend join evidence"
+   },
+   "initiator_type": "fetch",
+   "url_sha256": "d727e66d7e211a9a545206e65dcdee60ecc4c3aa84e5b07e96dba89cbe4f3d15",
+   "url_sha256_reason": null,
+   "same_origin": true,
+   "native": {
+    "time_origin_epoch_ms": 1789487987836,
+    "start_time_ms": {
+     "value": 364227,
+     "raw_value": 364227,
+     "reason": null
+    },
+    "fetch_start_ms": {
+     "value": 364227,
+     "raw_value": 364227,
+     "reason": null
+    },
+    "request_start_ms": {
+     "value": 364231,
+     "raw_value": 364231,
+     "reason": null
+    },
+    "first_interim_response_start_ms": {
+     "value": null,
+     "raw_value": 0,
+     "reason": "no_interim_response_or_property_unsupported"
+    },
+    "final_response_headers_start_ms": {
+     "value": 364235,
+     "raw_value": 364235,
+     "reason": null
+    },
+    "response_start_ms": {
+     "value": 364235,
+     "raw_value": 364235,
+     "reason": null
+    },
+    "response_end_ms": {
+     "value": 364235,
+     "raw_value": 364235,
+     "reason": null
+    },
+    "start_epoch_ms": 1789488352063,
+    "response_end_epoch_ms": 1789488352071,
+    "ttfb_ms": {
+     "value": 4,
+     "basis": "finalResponseHeadersStart-requestStart",
+     "reason": null
+    },
+    "download_ms": {
+     "value": 0,
+     "reason": null,
+     "basis": "responseEnd-responseStart"
+    },
+    "response_header_end_ms": {
+     "value": null,
+     "reason": "Resource Timing does not expose response header end"
+    },
+    "source_bytes": {
+     "transfer_size": {
+      "value": 366,
+      "raw_value": 366,
+      "reason": null
+     },
+     "encoded_body_size": {
+      "value": 66,
+      "raw_value": 66,
+      "reason": null
+     },
+     "decoded_body_size": {
+      "value": 72,
+      "raw_value": 72,
+      "reason": null
+     }
+    }
+   },
+   "native_status": {
+    "value": 200,
+    "reason": null
+   },
+   "cache": {
+    "state": "not_reported",
+    "basis": null,
+    "heuristic": null
+   },
+   "captured_epoch_ms": 1789488352080,
+   "captured_monotonic_ms": 364244,
+   "observer_processing_ms": 6
+  }
+ ],
+ "interpretation_limits": [
+  "Exact value equality does not prove copied or fabricated evidence.",
+  "The same request_id or source_entry_id reused across UI and direct observations is invalid; a URL/time candidate link is not a protocol correlation ID.",
+  "Missing native timestamps, ambiguous concurrent same-URL candidates, observer drops, and ring overflow make the affected evidence incomplete.",
+  "Resource Timing does not expose response header end, connection reuse identity, HTTP cache key, or in-flight request coalescing identity.",
+  "A zero Resource Timing field can mean cache, cancellation, privacy masking, an empty body, or unsupported data; ambiguous zeroes remain null with a reason.",
+  "UI render observation is supplied by the Main agent and is never converted into recorder PASS/FAIL.",
+  "A Server-Timing rid description carries the server-generated request ID (req_admin_<UUIDv7>), not a time value; the metric duration is not a latency measurement and is never read as one.",
+  "A matched server_request_id is a join key to backend evidence, not proof of a fresh server execution; a cached or reused ID stays ambiguous, and backend matching belongs to the outer QA stage."
+ ]
+}

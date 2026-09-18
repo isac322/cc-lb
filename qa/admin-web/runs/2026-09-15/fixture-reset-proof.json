@@ -1,0 +1,122 @@
+[
+  {
+    "engine": "sqlite",
+    "proof_exit": 0,
+    "same_entity_counts": true,
+    "same_fixture_hash": true,
+    "statuses": [
+      [
+        "health",
+        200
+      ],
+      [
+        "auth-session",
+        200
+      ],
+      [
+        "principals",
+        200
+      ],
+      [
+        "upstreams",
+        200
+      ],
+      [
+        "plugins",
+        200
+      ],
+      [
+        "config-draft",
+        200
+      ],
+      [
+        "config-history",
+        200
+      ],
+      [
+        "audit-all",
+        200
+      ],
+      [
+        "principal-primary",
+        200
+      ],
+      [
+        "principal-keys",
+        200
+      ],
+      [
+        "router-terminal",
+        200
+      ],
+      [
+        "plugin-references",
+        200
+      ],
+      [
+        "auth-401",
+        401
+      ]
+    ]
+  },
+  {
+    "engine": "postgres",
+    "proof_exit": 0,
+    "same_entity_counts": true,
+    "same_fixture_hash": true,
+    "statuses": [
+      [
+        "health",
+        200
+      ],
+      [
+        "auth-session",
+        200
+      ],
+      [
+        "principals",
+        200
+      ],
+      [
+        "upstreams",
+        200
+      ],
+      [
+        "plugins",
+        200
+      ],
+      [
+        "config-draft",
+        200
+      ],
+      [
+        "config-history",
+        200
+      ],
+      [
+        "audit-all",
+        200
+      ],
+      [
+        "principal-primary",
+        200
+      ],
+      [
+        "principal-keys",
+        200
+      ],
+      [
+        "router-terminal",
+        200
+      ],
+      [
+        "plugin-references",
+        200
+      ],
+      [
+        "auth-401",
+        401
+      ]
+    ]
+  }
+]

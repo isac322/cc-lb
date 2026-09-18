@@ -1,0 +1,81 @@
+{
+  "schema": "cc-lb-base-url-clear-verification/v1",
+  "candidate_sha256": "932d4865672405a6b2c32ed71e7c0bb44e94bd4d9fd23a6ffec59a5152f59ef8",
+  "source_base": "7c8b6168957bff5050d6482ae7d3c137ee7efe31",
+  "candidate_uncommitted": true,
+  "contract": {
+    "omitted": "preserve",
+    "null": "clear override",
+    "url": "set override"
+  },
+  "before_fix": "Expanded existing HTTP regression failed because the old URL remained instead of null.",
+  "after_fix": {
+    "focused_tests_run": 33,
+    "passed": 33,
+    "selected_out": 819,
+    "sqlite_conformance": "executed and passed",
+    "postgres_conformance": "executed and passed",
+    "proxy_scope": "Actual Lifecycle dispatch captured by RecordingDispatcher before and after real storage clear/rebuild; no external provider network call."
+  },
+  "browser": {
+    "steps": [
+      "stored loopback override",
+      "Edit Base URL to empty",
+      "Save",
+      "fresh independent GET returns null",
+      "page reload retains dash and default endpoint metadata"
+    ],
+    "storage_verified_null_at_revision": 2,
+    "main_screenshot_inspected": "browser-reload.png",
+    "credential_input": "remained blank/write-only",
+    "restoration": "Original loopback URL restored using revision-guarded API; revision/audit history advance normally."
+  },
+  "review": {
+    "reviewer": "ReviewApprovedAuditFix",
+    "blocking_findings": 0,
+    "optional_helper_deduplication": "Not implemented; kept existing private-module serde convention without introducing cross-module coupling."
+  },
+  "source_files": [
+    {
+      "path": "crates/cc-lb-storage-api/src/upstream.rs",
+      "sha256": "5f0e06f5af248e97b5b92e64b43ff1f64a32589f3b2988da0acc763af7845681"
+    },
+    {
+      "path": "crates/cc-lb-admin/src/v1/upstreams.rs",
+      "sha256": "02051ceddfe34c2eab0eaf21964b8b6b6047bdb42ffac590cc3297cec9b79405"
+    },
+    {
+      "path": "crates/cc-lb-storage-sqlite/src/adapter/upstreams.rs",
+      "sha256": "bb39ab94bd45a20721840c5ea3d908a2eb605514193c86852595bf8b40e03c22"
+    },
+    {
+      "path": "crates/cc-lb-storage-postgres/src/adapter/upstreams.rs",
+      "sha256": "52a069863d8b8b11d33f85f20faa2a1a325f6fc8055afe0f27d8982e9e8a9ebe"
+    },
+    {
+      "path": "crates/cc-lb-storage-conformance/src/upstream_store.rs",
+      "sha256": "e47cf433e0a217ce94f536201242605a3a42a9f8ddc68ab1224987db21306b3d"
+    },
+    {
+      "path": "crates/cc-lb-storage-conformance/src/scenarios/upstream_store.rs",
+      "sha256": "19f4a80650889cf6e19bf40fc1be0ee23143db49833b576c7c0cc28bfd9e0cbf"
+    },
+    {
+      "path": "crates/cc-lb-signer-anthropic-oauth/src/lib.rs",
+      "sha256": "314332dcbbe1006d94095064d8a7b618041b4eda23a70dee51a03f0b1c052842"
+    },
+    {
+      "path": "crates/cc-lb-admin/tests/v1_upstreams.rs",
+      "sha256": "ae087a3b6831a60a1f9e50e7a9bd80239a3ad369288890d197aa071371e86f0b"
+    },
+    {
+      "path": "crates/cc-lb-server/tests/dispatch_uses_resolved_upstream_base_url.rs",
+      "sha256": "d04111aecb22f1381578023cd1b524f6e3b9f471f6cc58df0ad61201f4274896"
+    }
+  ],
+  "original_worktree_restored": true,
+  "runtime_behavior_changed_outside_scope": false,
+  "production_changes": 0,
+  "pr_merge_held": true,
+  "full_runtime_qa_complete": false
+}

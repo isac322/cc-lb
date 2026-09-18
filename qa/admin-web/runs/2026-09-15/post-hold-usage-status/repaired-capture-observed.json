@@ -1,0 +1,20 @@
+{
+  "observed_at_utc": "2026-09-16T01:31:21.446Z",
+  "qa_usage_display": {
+    "name": "qa-usage-display",
+    "usage_text": "$2.00 · 3.0K tok",
+    "status_dot_class": "status-dot ok"
+  },
+  "qa_status_missing_credentials": {
+    "name": "qa-status-missing-credentials",
+    "status_dot_class": "status-dot neutral",
+    "button_title": null
+  },
+  "usage_entry_found": true,
+  "usage_server_request_id": "req_admin_01a0a7d6-f104-7bf0-9e53-a4c5e24b2bac",
+  "validations": {
+    "display_shows_3k": true,
+    "status_neutral": true,
+    "usage_rid_present": true
+  }
+}

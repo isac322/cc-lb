@@ -1,0 +1,20 @@
+{
+  "observed_at_utc": "2026-09-16T01:26:08.333Z",
+  "qa_usage_display": {
+    "name": "qa-usage-display",
+    "usage_text": "$2.00 · 3.0K tok",
+    "status_dot_class": "status-dot ok"
+  },
+  "qa_status_missing_credentials": {
+    "name": "qa-status-missing-credentials",
+    "status_dot_class": "status-dot neutral",
+    "button_title": null
+  },
+  "validations": {
+    "usage_text_matched": true,
+    "status_dot_neutral": true,
+    "danger_class_absent": true,
+    "button_title_clean": true,
+    "prohibited_string_found": false
+  }
+}

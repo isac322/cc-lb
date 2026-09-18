@@ -1,0 +1,46 @@
+{
+  "source_commit": "f3fa89bf81fecefbfd4dde399c2d771208e069ce",
+  "expected_ui_cells": 81,
+  "accepted_ui_cells": 0,
+  "ui_pass": 0,
+  "ui_fail": 0,
+  "ui_blocked": 81,
+  "accepted_paired_comparisons": 0,
+  "independent_direct": {
+    "measurement_scope": "unpaired direct API and SQLite transitions only",
+    "expected": 81,
+    "executed": 81,
+    "functional_pass": 81,
+    "functional_fail": 0,
+    "all_request_ids_joined_to_sql": true,
+    "sql_events_min": 51,
+    "sql_events_max": 51,
+    "request_duration_ms": {
+      "median": 34.62425,
+      "p95_interpolated": 38.56175,
+      "max": 40.152959
+    },
+    "ui_completion_credit": 0,
+    "paired_ui_direct_comparisons": 0,
+    "pure_db_execution_ms": null,
+    "pure_queue_wait_ms": null,
+    "state_control": {
+      "restored_before_every_request": "main storage.sqlite snapshot",
+      "auxiliary_scheduler_database": "persisted across independent direct cases; discovered during cleanup",
+      "whole_runtime_snapshot_equivalence": false,
+      "consequence": "Valid API/storage transition evidence and observed latencies, not a controlled paired UI/direct performance comparison."
+    }
+  },
+  "app_changes": false,
+  "production_mutations": false,
+  "pr793_head_unchanged": true,
+  "native_handoff": "Browser worker has no OMP eval proxy. After adapting to native MCP interactions with Main observation, the idle reaper removed the tab before mutation. No valid UI cell accepted.",
+  "raw_invalid_attempts_preserved": true,
+  "goal_complete": false,
+  "cleanup": {
+    "fixture_servers_stopped": true,
+    "owned_private_credentials_and_databases_removed": true,
+    "browser_tabs_remaining_observed": 0,
+    "raw_evidence_retained_privately": true
+  }
+}

@@ -1,0 +1,1343 @@
+{
+  "deployed_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+  "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+  "source_state": {
+    "kind": "approved_uncommitted_candidate",
+    "base_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+    "note": "Source hashes and references describe the approved uncommitted merge candidate worktree (HEAD a9da5c3c + master b07b25eebe7bbee7e882643c6776c82015d49689); source_commit identifies the PR-side base, not an updated production deployment."
+  },
+  "candidate": {
+    "status": "uncommitted_approved_candidate",
+    "source_base": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+    "candidate_uncommitted": true,
+    "scope": "Merge candidate (HEAD a9da5c3c + master b07b25ee): Audit latest + approved FIX01..05 + admin observability instrumentation + safety fixes (explicit clear_base_url upstream reset, admin_only audit filter before LIMIT, audit read-order index migrations renumbered PG 0120-0124 / SQLite 0088) + master Settings rework (editor/draft/validate/save/download file-backed contract; current/schema/diff/apply/reload routes removed; ConfigStore validation-report and metadata-only history; config history payload purge migrations PG 0119 / SQLite 0087)",
+    "production_applicability": false,
+    "note": "Approved local candidate only; not committed and not deployed to production. Entries marked candidate_uncommitted describe candidate-vs-deployed behavior and must not be read as production state. Binary verification is recorded separately per candidate under qa/admin-web/runs; source_files hashes define this source catalog."
+  },
+  "added_since_deploy": [
+    {
+      "type": "api",
+      "method": "GET",
+      "path": "/admin/v1/auth/session",
+      "handler": "auth_session",
+      "auth": "AdminAuth (any authenticated identity)",
+      "storage": "None (Memory/Context)",
+      "reference": "crates/cc-lb-admin/src/v1/router.rs:36",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "production_applicability": false,
+      "description": "Returns authenticated admin identity and mode (static_token or external)"
+    },
+    {
+      "type": "ui",
+      "source_id": "crates/cc-lb-admin/web/src/components/layout/AppShell.tsx#Topbar:admin_identity",
+      "page": "Global",
+      "component": "Topbar",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/layout/AppShell.tsx",
+        "symbol": "Topbar",
+        "line": 168
+      },
+      "name": "Admin Identity Badge",
+      "trigger_steps": [
+        "Mount any page in authenticated state"
+      ],
+      "preconditions": [
+        "Authenticated session with identity from /admin/v1/auth/session"
+      ],
+      "variants": [
+        "display with email/display_name/subject and kind"
+      ],
+      "scope": "once",
+      "iteration_source": "Single execution per session",
+      "risk_tier": "read",
+      "expected_ui": "Shows user identity label and kind in header",
+      "requests": [],
+      "polling": "none",
+      "client_only_reason": "Renders context from auth session",
+      "production_applicability": false
+    },
+    {
+      "type": "ui",
+      "source_id": "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#AuthRequiredGate:session_verification",
+      "page": "Global",
+      "component": "AuthRequiredGate",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx",
+        "symbol": "AuthRequiredGate",
+        "line": 45
+      },
+      "name": "Admin Session Verification",
+      "trigger_steps": [
+        "Mount app or receive auth-required event"
+      ],
+      "preconditions": [
+        "None"
+      ],
+      "variants": [
+        "loading",
+        "authenticated",
+        "required",
+        "external_required",
+        "error"
+      ],
+      "scope": "once",
+      "iteration_source": "Single execution",
+      "risk_tier": "read",
+      "expected_ui": "Shows checking spinner, token prompt, or external auth prompt depending on mode",
+      "requests": [
+        {
+          "method": "GET",
+          "endpoint": "/admin/v1/auth/session",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "getAuthSession",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/api.ts",
+            "symbol": "getAuthSession",
+            "line": 73
+          },
+          "side_effect_notes": "None"
+        }
+      ],
+      "polling": "none",
+      "client_only_reason": null,
+      "production_applicability": false
+    },
+    {
+      "type": "ui",
+      "source_id": "crates/cc-lb-admin/web/src/routes/audit.tsx#AuditPage:actor_metadata",
+      "page": "Audit",
+      "component": "AuditDetailDrawer",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/routes/audit.tsx",
+        "symbol": "AuditPage",
+        "line": 520
+      },
+      "name": "Audit Actor Metadata Rows",
+      "trigger_steps": [
+        "Click audit log row to open detail drawer"
+      ],
+      "preconditions": [
+        "Audit log item with actor metadata"
+      ],
+      "variants": [
+        "actor_authority, actor_subject, actor_kind, actor_email displayed or '-'"
+      ],
+      "scope": "item",
+      "iteration_source": "AuditEntry",
+      "risk_tier": "read",
+      "expected_ui": "Renders Actor authority, Actor subject, Actor kind, and Actor email rows",
+      "requests": [],
+      "polling": "none",
+      "client_only_reason": "Display parsed audit fields",
+      "production_applicability": false
+    },
+    {
+      "type": "ui",
+      "source_id": "crates/cc-lb-admin/web/src/components/ui/latency/LatencyCell.tsx#LatencyCell:responsibility_breakdown",
+      "page": "Overview / Logs",
+      "component": "LatencyCell",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/ui/latency/LatencyCell.tsx",
+        "symbol": "LatencyCell",
+        "line": 40
+      },
+      "name": "Latency by Responsibility Breakdown",
+      "trigger_steps": [
+        "Hover or inspect latency cell"
+      ],
+      "preconditions": [
+        "RequestEvent with responsibility timing metrics"
+      ],
+      "variants": [
+        "Downstream, cc-lb, Upstream net, Upstream wait, Unattributed, Renewal cycle"
+      ],
+      "scope": "item",
+      "iteration_source": "RequestEvent",
+      "risk_tier": "read",
+      "expected_ui": "Tooltip / popover showing categorized latency by responsibility",
+      "requests": [],
+      "polling": "none",
+      "client_only_reason": "Pure client-side timing breakdown visualization",
+      "production_applicability": false
+    },
+    {
+      "type": "storage_operation",
+      "trait_method": "AuditStore::query_recent_audit",
+      "operation_ids": [
+        "sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit",
+        "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
+      ],
+      "scope_type": "AuditQueryScope (All | Principal | Actor{authority,subject}) plus admin_only: bool",
+      "ordering": "Newest first: ORDER BY ts DESC, id DESC (sqlite) / ts DESC, seq DESC (postgres); newer insertions first on timestamp ties",
+      "reference": "crates/cc-lb-storage-api/src/traits.rs:47",
+      "implementations": [
+        {
+          "engine": "sqlite",
+          "source": {
+            "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+            "symbol": "SqliteStorage::query_recent_audit",
+            "line_start": 94,
+            "line_end": 146,
+            "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
+          }
+        },
+        {
+          "engine": "postgres",
+          "source": {
+            "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+            "symbol": "PostgresStorage::query_recent_audit",
+            "line_start": 194,
+            "line_end": 246,
+            "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
+          }
+        }
+      ],
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "Newest-first audit query with scope filtering applied before LIMIT; backs GET /admin/audit and GET /admin/v1/audit in the candidate. The new admin_only parameter (API default false; the audit page sends admin_only=true) appends the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT on both engines; both implementations now build the statement with sqlx QueryBuilder (Postgres binds until twice). Existing ascending AuditStore::query_audit and query_audit_by_actor definitions are preserved but are no longer mapped by the HTTP audit handler."
+    },
+    {
+      "type": "migration",
+      "name": "audit_log_v1 read-order indexes for query_recent_audit",
+      "sources": [
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0121_audit_log_principal_ts_seq_index.sql",
+          "symbol": "0121_audit_log_principal_ts_seq_index.sql",
+          "line_start": 1,
+          "line_end": 25,
+          "sha256": "7f3181b425f9de504eca701eb923e18babddad1ec0823aff17c693a064996d4f"
+        },
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0122_audit_log_actor_ts_seq_index.sql",
+          "symbol": "0122_audit_log_actor_ts_seq_index.sql",
+          "line_start": 1,
+          "line_end": 18,
+          "sha256": "c0037670d5987df525f0c14bfdd863b292fb468eb02a5542a21cc8feb15a44b8"
+        },
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_ts_seq_index.sql",
+          "symbol": "0123_audit_log_admin_ts_seq_index.sql",
+          "line_start": 1,
+          "line_end": 18,
+          "sha256": "e54009c1e87733a61e600a9e392c86bd98030a488d3a0abd585561d627f7427f"
+        },
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0124_audit_log_admin_principal_ts_seq_index.sql",
+          "symbol": "0124_audit_log_admin_principal_ts_seq_index.sql",
+          "line_start": 1,
+          "line_end": 16,
+          "sha256": "9e00717745dfa2a642635dd3d046400f6a541dd7f712999bfe53f24ea9520c64"
+        },
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0125_audit_log_admin_actor_ts_seq_index.sql",
+          "symbol": "0125_audit_log_admin_actor_ts_seq_index.sql",
+          "line_start": 1,
+          "line_end": 14,
+          "sha256": "01d8d566be3401fcdd46a971b6a087413b058eb6df4cebb9d325aa316ec5c4b2"
+        },
+        {
+          "file": "crates/cc-lb-storage-sqlite/migrations/0088_audit_log_read_order_indexes.sql",
+          "symbol": "0088_audit_log_read_order_indexes.sql",
+          "line_start": 1,
+          "line_end": 38,
+          "sha256": "3b8653f193766ff684abd20012a1d44aecd464bae35072017925102c8580d88f"
+        }
+      ],
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "Five new indexes per engine serve ORDER BY ts DESC, id/seq DESC inside each scope: scoped (principal, actor) plus partial admin_only indexes carrying the identical (admin_action IS NOT NULL OR kind IS NOT NULL) predicate; the Postgres actor index is partial on actor_authority IS NOT NULL. Postgres migrations are plain CREATE INDEX (one per file, lock_timeout 1s): each build holds a SHARE lock that blocks writes to audit_log_v1 for its duration, so a large live deployment MUST stay blocked until an operator pre-creates the indexes with CREATE INDEX CONCURRENTLY using identical definitions and verifies pg_index.indisvalid; no production DDL is authorized. SQLite migration 0088 creates all five indexes in one file. Both engines add real write amplification and WAL/index-build cost; this is not a zero-overhead change."
+    },
+    {
+      "type": "api",
+      "method": "GET",
+      "path": "/admin/v1/config/editor",
+      "handler": "get_config_editor",
+      "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
+      "storage": "ConfigStore::get_config_draft (+ conditional put_config_draft expiry purge); AuditStore::append_audit",
+      "reference": "crates/cc-lb-admin/src/routes.rs:49; crates/cc-lb-admin/src/settings.rs:203",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "New editor aggregate endpoint from master b07b25ee: returns schema, default_config, file_config, effective_config, draft, revision, last_validated_revision, last_validation, saved_at_unix_secs, file info (mode/fingerprint), override provenance, restart_required. storage.url redacted; Cache-Control: no-store. Supersedes removed GET /admin[/v1]/config/current and /config/schema."
+    },
+    {
+      "type": "api",
+      "method": "POST",
+      "path": "/admin/v1/config/save",
+      "handler": "save_config_file",
+      "auth": "require_admin_auth + authorize(AdminAction::Write)",
+      "storage": "ConfigStore::get_config_draft, put_config_draft (draft clear), append_config_history (metadata-only); AuditStore::append_audit",
+      "reference": "crates/cc-lb-admin/src/routes.rs:58; crates/cc-lb-admin/src/settings.rs:301",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "New file-save endpoint from master b07b25ee: writes the validated draft to the config file via atomic temp+rename with fingerprint check and self-lockout confirmation; clears the draft and records metadata-only history; restart_required: true (no runtime apply). Supersedes removed POST /admin[/v1]/config/apply."
+    },
+    {
+      "type": "api",
+      "method": "POST",
+      "path": "/admin/v1/config/draft/download",
+      "handler": "download_config_draft",
+      "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
+      "storage": "ConfigStore::get_config_draft; AuditStore::append_audit",
+      "reference": "crates/cc-lb-admin/src/routes.rs:59; crates/cc-lb-admin/src/settings.rs:391",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "New endpoint from master b07b25ee: returns the validated draft materialized to TOML as an attachment (application/toml, filename cc-lb.toml, no-store) after revision + validation checks; storage.url restored from the current file or storage_url_replacement."
+    },
+    {
+      "type": "migration",
+      "name": "config_history_v1 payload purge (metadata-only history)",
+      "sources": [
+        {
+          "file": "crates/cc-lb-storage-postgres/migrations/0119_purge_config_history_payload.sql",
+          "symbol": "0119_purge_config_history_payload.sql",
+          "line_start": 1,
+          "line_end": 11,
+          "sha256": "1b65ec4dd99310bc45f28fca5211ed8509f2b1ab9f991589bada22553329c8cf"
+        },
+        {
+          "file": "crates/cc-lb-storage-sqlite/migrations/0087_purge_config_history_payload.sql",
+          "symbol": "0087_purge_config_history_payload.sql",
+          "line_start": 1,
+          "line_end": 11,
+          "sha256": "be6ec8a51d4cdb45c2ea29a653f5c279de5382c8b98f9aadafc8a7a9ed4e1c90"
+        }
+      ],
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "Master b07b25ee migrations purge stored config payloads from config_history_v1 so history rows carry only revision + applied_at_unix_secs metadata; pairs with the HistoryEntry field removal (config_toml, summary) and the new file-backed save flow."
+    },
+    {
+      "type": "storage_operation",
+      "trait_method": "ConfigStore::set_config_validation",
+      "operation_ids": [
+        "sqlite:ConfigStore::set_config_validation:SqliteStorage::set_config_validation",
+        "postgres:ConfigStore::set_config_validation:PostgresStorage::set_config_validation"
+      ],
+      "scope_type": "replaces ConfigStore::set_last_validated_revision",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "Master b07b25ee rework: stores the full ConfigValidationReport JSON in ConfigDraftState.last_validation and sets last_validated_revision only when valid; called by POST /admin/v1/config/draft/validate."
+    },
+    {
+      "type": "storage_operation",
+      "trait_method": "ConfigStore::append_config_history",
+      "operation_ids": [
+        "sqlite:ConfigStore::append_config_history:SqliteStorage::append_config_history",
+        "postgres:ConfigStore::append_config_history:PostgresStorage::append_config_history"
+      ],
+      "scope_type": "signature changed: (revision, applied_at_unix_secs) metadata-only",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "description": "Master b07b25ee rework: drops config_toml and HistorySummary parameters; invoked by POST /admin/v1/config/save after the file write (best-effort)."
+    }
+  ],
+  "removed_since_deploy": [
+    {
+      "type": "route",
+      "path": "crates/cc-lb-admin/web/src/routes/credentials.tsx",
+      "reason": "Credentials page deprecated and removed in favor of upstream-specific credentials"
+    },
+    {
+      "type": "route",
+      "path": "crates/cc-lb-admin/web/src/routes/status.tsx",
+      "reason": "Dedicated /status page removed in favor of Settings and Metrics views"
+    },
+    {
+      "type": "api",
+      "endpoints": [
+        "GET /admin/status",
+        "GET /admin/killswitch",
+        "POST /admin/killswitch",
+        "DELETE /admin/killswitch",
+        "GET /admin/v1/killswitch",
+        "POST /admin/v1/killswitch",
+        "DELETE /admin/v1/killswitch",
+        "GET /admin/credentials",
+        "GET /admin/v1/credentials",
+        "GET /admin/oauth/status",
+        "GET /admin/v1/oauth/status",
+        "POST /admin/credentials/{principal_id}/{provider}/rotate",
+        "POST /admin/credentials/{principal_id}/{provider}/revoke"
+      ]
+    },
+    {
+      "type": "schema_field",
+      "endpoint": "GET /admin/v1/status",
+      "removed_fields": [
+        "principals",
+        "plugin_chain_summary",
+        "killswitch",
+        "last_reload_status",
+        "restart_required_changes"
+      ]
+    },
+    {
+      "type": "schema_field",
+      "endpoint": "GET /admin/config/history",
+      "removed_fields": [
+        "summary.upstreams",
+        "summary.principals",
+        "summary.plugin_count"
+      ]
+    },
+    {
+      "type": "ui_element",
+      "location": "crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx",
+      "elements": [
+        "/credentials nav item",
+        "/status nav item"
+      ]
+    },
+    {
+      "type": "ui_element",
+      "location": "crates/cc-lb-admin/web/src/components/CommandPalette.tsx",
+      "elements": [
+        "Go to Status navigation action"
+      ]
+    },
+    {
+      "type": "ui_element",
+      "location": "crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx",
+      "elements": [
+        "Global Killswitch badge",
+        "Plugin chain global usage summary"
+      ]
+    },
+    {
+      "type": "ui_element",
+      "location": "crates/cc-lb-admin/web/src/routes/settings.tsx",
+      "elements": [
+        "RestartRequiredMatrix: fully dynamic row",
+        "ConfigHistory: Upstreams, Principals, Plugins columns"
+      ]
+    },
+    {
+      "type": "api",
+      "endpoints": [
+        "GET /admin/config/current",
+        "GET /admin/v1/config/current",
+        "GET /admin/config/schema",
+        "GET /admin/v1/config/schema",
+        "GET /admin/config/diff",
+        "GET /admin/v1/config/diff",
+        "POST /admin/config/apply",
+        "POST /admin/v1/config/apply",
+        "POST /admin/config/reload",
+        "POST /admin/v1/config/reload",
+        "GET /admin/config/draft",
+        "PUT /admin/config/draft",
+        "POST /admin/config/draft/validate",
+        "GET /admin/config/history"
+      ],
+      "reason": "Master b07b25ee Settings rework: file-backed editor contract replaces in-memory current/apply/reload/diff; remaining config routes are v1-only (no non-v1 aliases). Replacements: GET /admin/v1/config/editor, POST /admin/v1/config/save, POST /admin/v1/config/draft/download.",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
+    },
+    {
+      "type": "storage_operation",
+      "trait_methods": [
+        "ConfigStore::get_config_history",
+        "ConfigStore::set_last_validated_revision"
+      ],
+      "reason": "Master b07b25ee: get_config_history removed with the /config/diff route; set_last_validated_revision replaced by set_config_validation storing the full validation report.",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
+    },
+    {
+      "type": "schema_field",
+      "endpoint": "GET /admin/v1/config/draft",
+      "removed_fields": [
+        "apply_supported (PR-era field removed with the CurrentConfig abstraction); last_validation_error replaced by last_validation report object"
+      ],
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
+    },
+    {
+      "type": "schema_field",
+      "endpoint": "GET /admin/v1/config/history",
+      "removed_fields": [
+        "config_toml",
+        "summary (HistorySummary removed; entries carry revision + saved_at_unix_secs only)"
+      ],
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true
+    }
+  ],
+  "changed_contracts": [
+    {
+      "target": "GET /admin/v1/status",
+      "deployed_behavior": "Returns full status object including principals, plugin_chain_summary, killswitch, last_reload_status, restart_required_changes.",
+      "latest_behavior": "Returns simplified status object containing only version, git_sha, rust_version, profile, target, uptime_secs, replica_id, generation, upstreams.",
+      "impact": "Clients expecting killswitch, principals, or restart_required_changes in /admin/v1/status receive undefined in latest."
+    },
+    {
+      "target": "GET /admin/audit and GET /admin/v1/audit",
+      "deployed_behavior": "Accepts query params: since, until, limit, principal_id. No actor filtering. No SensitiveRead authorization enforcement.",
+      "latest_behavior": "Accepts additional query params: actor_authority, actor_subject, admin_only. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. admin_only (default false) filters to entries with an admin action or kind before LIMIT. Enforces SensitiveRead authorization.",
+      "impact": "In deployed, querying by actor_authority or actor_subject is ignored/not supported. In latest, missing permissions return 403 Forbidden."
+    },
+    {
+      "target": "GET /admin/v1/events/detail/{event_id}",
+      "deployed_behavior": "Fetches event detail from storage without RBAC check or audit logging.",
+      "latest_behavior": "Requires SensitiveRead permission (returns 403 if unauthorized) and logs 'request_event_detail_read' audit event.",
+      "impact": "Requires authenticated identity with read permission in latest."
+    },
+    {
+      "target": "GET /admin/v1/export",
+      "deployed_behavior": "Exports config and chains without RBAC check or audit logging.",
+      "latest_behavior": "Requires SensitiveRead permission (403 on denial) and logs 'config_export' audit event (500 audit_write_failed if audit write fails).",
+      "impact": "Protected by RBAC in latest."
+    },
+    {
+      "target": "POST /admin/v1/principals/{id}/keys",
+      "deployed_behavior": "Accepts arbitrary extra JSON fields in request body; uses best-effort audit emission.",
+      "latest_behavior": "Enforces serde(deny_unknown_fields) on IssueKeyRequest; uses record_issue_audit_or_revoke (rolls back key creation if audit write fails).",
+      "impact": "Stricter payload validation and transactional audit guarantees in latest."
+    },
+    {
+      "target": "GET /admin/v1/principals/{id}/keys",
+      "deployed_behavior": "Lists keys for principal without SensitiveRead check or audit logging.",
+      "latest_behavior": "Requires SensitiveRead permission (403 if unauthorized) and logs 'principal_keys_list' audit event.",
+      "impact": "Protected by RBAC in latest."
+    },
+    {
+      "target": "POST /admin/v1/config/apply (removed) -> POST /admin/v1/config/save",
+      "deployed_behavior": "Logs audit record with hardcoded actor 'admin' and principal_id 'admin'.",
+      "latest_behavior": "Route removed by master b07b25ee. Replacement POST /admin/v1/config/save writes the validated draft to the config file (atomic replace, fingerprint + self-lockout checks), clears the draft, records metadata-only history, and logs 'config_save'/'config_save_failed' audit events with resolved actor metadata; restart_required: true.",
+      "impact": "Apply semantics replaced by file save + restart; audit records contain structured actor identity.",
+      "candidate_uncommitted": true
+    },
+    {
+      "target": "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx",
+      "deployed_behavior": "Synchronously checks localStorage for cclb_admin_token. If found, mounts children immediately. Form submit sets localStorage and unblocks without API validation.",
+      "latest_behavior": "Asynchronously calls GET /admin/v1/auth/session to validate token and identify actor. Shows loading spinner. Differentiates between static_token and external auth mode.",
+      "impact": "In deployed, the app will never make a network request on startup to verify the token, and does not support external auth redirect."
+    },
+    {
+      "target": "crates/cc-lb-admin/web/src/routes/settings.tsx (Admin Token card)",
+      "deployed_behavior": "Admin Token card is unconditionally rendered.",
+      "latest_behavior": "Admin Token card is conditionally rendered only when auth_mode === 'static_token'.",
+      "impact": "Under external auth in latest, Admin Token card is hidden."
+    },
+    {
+      "target": "crates/cc-lb-admin/web/src/routes/settings.tsx (Config History)",
+      "deployed_behavior": "Table has 6 columns: Revision, Applied, Upstreams, Principals, Plugins, TLS.",
+      "latest_behavior": "Table has 3 columns: Revision, Applied, TLS.",
+      "impact": "UI columns removed to match backend HistorySummary simplification."
+    },
+    {
+      "target": "GET /admin/audit and GET /admin/v1/audit (result ordering)",
+      "deployed_behavior": "Returns audit entries oldest first (ORDER BY id/seq ASC) via AuditStore::query_audit / query_audit_by_actor.",
+      "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor) and an admin_only flag; scope and admin_only filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler.",
+      "impact": "Entry order reverses vs deployed; clients paging by position see newest-first pages. Candidate only - not committed or deployed.",
+      "candidate_uncommitted": true
+    },
+    {
+      "target": "GET /admin/v1/upstreams and GET /admin/v1/upstreams/{id} (UpstreamResponse)",
+      "deployed_behavior": "UpstreamResponse has no base_url field.",
+      "latest_behavior": "Uncommitted candidate: UpstreamResponse adds base_url (Option<Url>, serialized as nullable string); frontend UpstreamSchema (web/src/lib/api.ts:784) requires the base_url key (nullable) and createUpstreamFromOauthDraft parses the response through UpstreamSchema.",
+      "impact": "Deployed responses lack base_url; candidate frontend schema validation fails against a backend that omits the key. Candidate only.",
+      "candidate_uncommitted": true
+    },
+    {
+      "target": "POST /admin/v1/principals/{id}/keys (label handling and error mapping)",
+      "deployed_behavior": "Omitted label becomes empty string; both stores run validate_identifier on the empty label and reject it; any KeyStoreError maps to 500.",
+      "latest_behavior": "Uncommitted candidate: empty label skips validate_identifier on both SqliteStorage and PostgresStorage (label optional); KeyStoreError::Storage(InvalidInput{field,reason}) maps to 400 {error:'invalid_input',field,reason}; other errors remain 500.",
+      "impact": "Key issuance without a label succeeds in candidate; client input errors surface as 400 invalid_input instead of 500. Candidate only.",
+      "candidate_uncommitted": true
+    },
+    {
+      "target": "crates/cc-lb-admin/web/src/components/upstreams/InlineNameEditor.tsx",
+      "deployed_behavior": "handleSave has no reentrancy guard; blur after Enter (or rapid Enter/blur) can issue a second PUT /admin/v1/upstreams/{id} with a stale spec_revision.",
+      "latest_behavior": "Uncommitted candidate: saveStartedRef latch allows a single submission per edit session; entering edit mode resets the latch; Escape sets the latch so the subsequent blur cannot save.",
+      "impact": "Duplicate rename submissions eliminated in candidate. Candidate only.",
+      "candidate_uncommitted": true
+    },
+    {
+      "target": "crates/cc-lb-admin/web/src/lib/queries.ts (principal mutations)",
+      "deployed_behavior": "enable/disable invalidates only ['principals']; allowed_models, default_limits and cache_keepalive PATCH invalidate ['principal',id]+['principals']; router-terminal PUT invalidates only ['router-terminal',id]. Router revision shown by useRouterTerminal can stay stale after non-router principal mutations.",
+      "latest_behavior": "Uncommitted candidate: all five mutations plus the router-terminal PUT funnel through invalidatePrincipalRecordQueries, invalidating ['principal',id], ['principals'] and ['router-terminal',id] together; qk.routerTerminal and qk.pluginReferences key factories added.",
+      "impact": "Router revision refreshes after every principal mutation in candidate. Candidate only.",
+      "candidate_uncommitted": true
+    },
+    {
+      "target": "crates/cc-lb-admin/web/src/components/plugins/PluginCatalog.tsx + PluginDeleteDialog.tsx + queries.ts (plugin delete lifecycle and GC)",
+      "deployed_behavior": "GC button 'Delete unused uploads' disabled when zero unused uploads; toast 'Deleted N unused uploads'; per-row delete disabled during sweep; dialog uses del.mutate with local onSuccess toast; usePluginReferences cached normally and invalidated on delete.",
+      "latest_behavior": "Uncommitted candidate: GC button 'Clean orphaned uploads' always enabled (gcInFlight latch and gcPending guard remain), toasts 'No orphaned upload blobs found' / 'Removed N orphaned upload blobs', progress label 'Cleaning orphaned uploads'; row delete no longer disabled during sweep; dialog awaits del.mutateAsync, relies on the shared MutationCache error toast, supports onDeleted callback; usePluginReferences gcTime:0, delete cancels the in-flight reference query and removes the inactive cache entry on success.",
+      "impact": "GC presentation clarifies that only unreferenced WASM blobs are removed (registered plugins kept even at Used By 0); delete lifecycle hardened against stale reference cache. Candidate only.",
+      "candidate_uncommitted": true
+    },
+    {
+      "type": "api_contract",
+      "name": "Explicit clear_base_url Base URL override reset",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "reference": "crates/cc-lb-admin/src/v1/upstreams.rs:138-160",
+      "description": "Approved on 2026-09-16: PUT/PATCH omission or explicit null preserves base_url, a URL sets it, and clear_base_url: true clears it; sending a non-null base_url together with clear_base_url returns 400 conflicting_base_url (a stale If-Match still wins with 409). The SettingsCard form captures the Base URL baseline when editing begins so a mid-edit props refetch cannot turn an untouched field into a clear, and treats a clear as unconfirmed (error toast, editor stays open) when the response base_url is not null. Both adapters preserve revision/credential semantics. Deployed baseline remains unchanged."
+    },
+    {
+      "type": "api_and_ui_capability",
+      "name": "File-backed Settings editor contract (master b07b25ee)",
+      "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
+      "candidate_uncommitted": true,
+      "production_applicability": false,
+      "reference": "crates/cc-lb-admin/src/settings.rs:203; crates/cc-lb-admin/src/routes.rs:49-63; crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx:732",
+      "description": "Supersedes the PR-era apply_supported capability: the CurrentConfig abstraction is removed; GET /admin/v1/config/editor exposes file mode/fingerprint, override provenance and restart_required; save writes the config file and requires restart. Non-v1 /admin/config/* aliases removed."
+    }
+  ],
+  "deployed_only_items": [
+    {
+      "source_id": "crates/cc-lb-admin/web/src/routes/credentials.tsx#CredentialsPage:mount",
+      "page": "Credentials",
+      "component": "CredentialsPage",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/routes/credentials.tsx",
+        "symbol": "CredentialsPage",
+        "line": 92
+      },
+      "name": "Load Credentials and OAuth Status",
+      "trigger_steps": [
+        "Navigate to /credentials"
+      ],
+      "preconditions": [
+        "Authenticated session"
+      ],
+      "variants": [
+        "loading",
+        "empty",
+        "populated with API keys and OAuth tokens"
+      ],
+      "scope": "once",
+      "iteration_source": "Single page mount",
+      "risk_tier": "read",
+      "expected_ui": "Renders API keys table, OAuth cards grid, and summary tiles (Total, Expiring Soon, Expired, Active)",
+      "requests": [
+        {
+          "method": "GET",
+          "endpoint": "/admin/credentials",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "useCredentials",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "useCredentials",
+            "line": 767
+          },
+          "side_effect_notes": "Read-only credential overview"
+        },
+        {
+          "method": "GET",
+          "endpoint": "/admin/oauth/status",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "useOAuthStatus",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "useOAuthStatus",
+            "line": 773
+          },
+          "side_effect_notes": "Read-only OAuth token overview"
+        },
+        {
+          "method": "GET",
+          "endpoint": "/admin/v1/principals",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "usePrincipalNameMap",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "usePrincipalNameMap",
+            "line": 744
+          },
+          "side_effect_notes": "Look up principal names for OAuth tokens"
+        }
+      ],
+      "polling": "none",
+      "client_only_reason": null,
+      "production_applicability": true
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/routes/credentials.tsx#CredentialsPage:rotate",
+      "page": "Credentials",
+      "component": "CredentialsPage",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/routes/credentials.tsx",
+        "symbol": "CredentialsPage",
+        "line": 102
+      },
+      "name": "Rotate Credential / Force Refresh OAuth Token",
+      "trigger_steps": [
+        "Click 'Rotate' or 'Force refresh' button on credential row/card",
+        "Confirm in modal"
+      ],
+      "preconditions": [
+        "Visible credential row or OAuth card"
+      ],
+      "variants": [
+        "success toast, error toast (backend returns 501 rotate_unsupported for OAuth)"
+      ],
+      "scope": "item",
+      "iteration_source": "Credential row or OAuth card",
+      "risk_tier": "write",
+      "expected_ui": "Modal confirmation dialog, then toast notification",
+      "requests": [
+        {
+          "method": "POST",
+          "endpoint": "/admin/credentials/{provider}/{cred_id}/rotate",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "postJson",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/routes/credentials.tsx",
+            "symbol": "CredentialsPage",
+            "line": 108
+          },
+          "side_effect_notes": "Attempts rotation (returns 501 for OAuth in v0.4.9)"
+        }
+      ],
+      "polling": "none",
+      "client_only_reason": null,
+      "production_applicability": true
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/routes/credentials.tsx#CredentialsPage:revoke",
+      "page": "Credentials",
+      "component": "CredentialsPage",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/routes/credentials.tsx",
+        "symbol": "CredentialsPage",
+        "line": 102
+      },
+      "name": "Revoke Credential",
+      "trigger_steps": [
+        "Click 'Revoke' button on credential row/card",
+        "Confirm in destructive modal"
+      ],
+      "preconditions": [
+        "Active credential or OAuth token"
+      ],
+      "variants": [
+        "success toast, error toast on failure"
+      ],
+      "scope": "item",
+      "iteration_source": "Credential row or OAuth card",
+      "risk_tier": "destructive",
+      "expected_ui": "Destructive confirm dialog, invalidates credentials query",
+      "requests": [
+        {
+          "method": "POST",
+          "endpoint": "/admin/credentials/{provider}/{cred_id}/revoke",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "postJson",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/routes/credentials.tsx",
+            "symbol": "CredentialsPage",
+            "line": 108
+          },
+          "side_effect_notes": "Deletes OAuth credentials from storage"
+        }
+      ],
+      "polling": "none",
+      "client_only_reason": null,
+      "production_applicability": true
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/routes/status.tsx#StatusPage:mount",
+      "page": "Status",
+      "component": "StatusPage",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/routes/status.tsx",
+        "symbol": "StatusPage",
+        "line": 78
+      },
+      "name": "Load System Status, Killswitch, and Observed Credentials",
+      "trigger_steps": [
+        "Navigate to /status"
+      ],
+      "preconditions": [
+        "Authenticated session"
+      ],
+      "variants": [
+        "loading",
+        "killswitch ACTIVE",
+        "killswitch OFF",
+        "with restart required changes",
+        "without restart required changes"
+      ],
+      "scope": "once",
+      "iteration_source": "Single page mount",
+      "risk_tier": "read",
+      "expected_ui": "Displays Restart-Required Changes list, System grid (Storage Backend, Plugin Chain Summary, Killswitch control), Credentials table, and OAuth Tokens grid",
+      "requests": [
+        {
+          "method": "GET",
+          "endpoint": "/admin/v1/status",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "useStatus",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "useStatus",
+            "line": 395
+          },
+          "side_effect_notes": "Polled every 15s"
+        },
+        {
+          "method": "GET",
+          "endpoint": "/admin/credentials",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "useCredentials",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "useCredentials",
+            "line": 767
+          },
+          "side_effect_notes": "Read-only"
+        },
+        {
+          "method": "GET",
+          "endpoint": "/admin/oauth/status",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "useOAuthStatus",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "useOAuthStatus",
+            "line": 773
+          },
+          "side_effect_notes": "Read-only"
+        },
+        {
+          "method": "GET",
+          "endpoint": "/admin/v1/principals",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "usePrincipalNameMap",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "usePrincipalNameMap",
+            "line": 744
+          },
+          "side_effect_notes": "Read-only"
+        }
+      ],
+      "polling": "POLLING_INTERVALS.STATUS_MS (15,000ms)",
+      "client_only_reason": null,
+      "production_applicability": true
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/routes/status.tsx#StatusPage:toggle_killswitch",
+      "page": "Status",
+      "component": "StatusPage",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/routes/status.tsx",
+        "symbol": "StatusPage",
+        "line": 217
+      },
+      "name": "Engage or Disengage Global Killswitch",
+      "trigger_steps": [
+        "Click 'Engage killswitch' button -> Confirm in dialog, OR Click 'Disengage'"
+      ],
+      "preconditions": [
+        "Authenticated session, StatusPage mounted"
+      ],
+      "variants": [
+        "engage (POST)",
+        "disengage (DELETE)"
+      ],
+      "scope": "once",
+      "iteration_source": "Button click",
+      "risk_tier": "destructive",
+      "expected_ui": "Changes badge from OFF to ACTIVE (or vice versa), disables/enables traffic, shows toast",
+      "requests": [
+        {
+          "method": "POST",
+          "endpoint": "/admin/killswitch",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "useKillswitch",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "useKillswitch",
+            "line": 1630
+          },
+          "side_effect_notes": "Engages emergency killswitch, stopping all proxy traffic"
+        },
+        {
+          "method": "DELETE",
+          "endpoint": "/admin/killswitch",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "useKillswitch",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "useKillswitch",
+            "line": 1630
+          },
+          "side_effect_notes": "Disengages emergency killswitch, resuming traffic"
+        }
+      ],
+      "polling": "none",
+      "client_only_reason": null,
+      "production_applicability": true
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx#Sidebar:link_credentials",
+      "page": "Global",
+      "component": "Sidebar",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx",
+        "symbol": "NAV",
+        "line": 22
+      },
+      "name": "Sidebar Navigation - Credentials",
+      "trigger_steps": [
+        "Click 'Credentials' link in sidebar"
+      ],
+      "preconditions": [
+        "Sidebar visible"
+      ],
+      "variants": [
+        "active link",
+        "inactive link"
+      ],
+      "scope": "once",
+      "iteration_source": "Navigation click",
+      "risk_tier": "read",
+      "expected_ui": "Navigates to /credentials route",
+      "requests": [],
+      "polling": "none",
+      "client_only_reason": "Router navigation link",
+      "production_applicability": true
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx#Sidebar:link_status",
+      "page": "Global",
+      "component": "Sidebar",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx",
+        "symbol": "NAV",
+        "line": 23
+      },
+      "name": "Sidebar Navigation - Status",
+      "trigger_steps": [
+        "Click 'Status' link in sidebar"
+      ],
+      "preconditions": [
+        "Sidebar visible"
+      ],
+      "variants": [
+        "active link",
+        "inactive link"
+      ],
+      "scope": "once",
+      "iteration_source": "Navigation click",
+      "risk_tier": "read",
+      "expected_ui": "Navigates to /status route",
+      "requests": [],
+      "polling": "none",
+      "client_only_reason": "Router navigation link",
+      "production_applicability": true
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:goto_status",
+      "page": "Global",
+      "component": "CommandPalette",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/CommandPalette.tsx",
+        "symbol": "CommandPalette",
+        "line": 105
+      },
+      "name": "Command Palette - Go to Status",
+      "trigger_steps": [
+        "Open command palette (Cmd+K)",
+        "Select 'Go to Status'"
+      ],
+      "preconditions": [
+        "Command palette open"
+      ],
+      "variants": [
+        "select item"
+      ],
+      "scope": "once",
+      "iteration_source": "Command selection",
+      "risk_tier": "read",
+      "expected_ui": "Navigates to /status and closes command palette",
+      "requests": [],
+      "polling": "none",
+      "client_only_reason": "Router navigation",
+      "production_applicability": true
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx#PluginDetailOperate:killswitch_indicator",
+      "page": "Plugins",
+      "component": "PluginDetailOperate",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx",
+        "symbol": "PluginDetailOperate",
+        "line": 140
+      },
+      "name": "Plugin Detail Global Killswitch Indicator",
+      "trigger_steps": [
+        "Select plugin to view detail in Operate tab"
+      ],
+      "preconditions": [
+        "Plugin selected"
+      ],
+      "variants": [
+        "Active badge (danger)",
+        "Inactive badge (ok)",
+        "Loading skeleton"
+      ],
+      "scope": "item",
+      "iteration_source": "Selected plugin",
+      "risk_tier": "read",
+      "expected_ui": "Shows 'Global Killswitch' status row with Active/Inactive badge",
+      "requests": [
+        {
+          "method": "GET",
+          "endpoint": "/admin/v1/status",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "useStatus",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "useStatus",
+            "line": 395
+          },
+          "side_effect_notes": "Read-only"
+        }
+      ],
+      "polling": "POLLING_INTERVALS.STATUS_MS (15,000ms)",
+      "client_only_reason": null,
+      "production_applicability": true
+    },
+    {
+      "source_id": "crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx#PluginDetailOperate:plugin_chain_summary",
+      "page": "Plugins",
+      "component": "PluginDetailOperate",
+      "source": {
+        "file": "crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx",
+        "symbol": "PluginDetailOperate",
+        "line": 154
+      },
+      "name": "Plugin Detail Global Chain Usage Summary",
+      "trigger_steps": [
+        "Select plugin to view detail in Operate tab"
+      ],
+      "preconditions": [
+        "Plugin selected"
+      ],
+      "variants": [
+        "loading skeleton",
+        "rendered text: '{N} entries across {M} principals'"
+      ],
+      "scope": "item",
+      "iteration_source": "Selected plugin",
+      "risk_tier": "read",
+      "expected_ui": "Displays total chain entries and number of principals with configured chain",
+      "requests": [
+        {
+          "method": "GET",
+          "endpoint": "/admin/v1/status",
+          "query_fields": [],
+          "body_fields": [],
+          "client_symbol": "useStatus",
+          "source": {
+            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
+            "symbol": "useStatus",
+            "line": 395
+          },
+          "side_effect_notes": "Read-only"
+        }
+      ],
+      "polling": "POLLING_INTERVALS.STATUS_MS (15,000ms)",
+      "client_only_reason": null,
+      "production_applicability": true
+    }
+  ],
+  "deployed_only_endpoints": [
+    {
+      "method": "GET",
+      "path": "/admin/status",
+      "handler": "crate::v1::status::status",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (via StatusResponse building)",
+        "SQLite (via StatusResponse building)"
+      ],
+      "reference": "crates/cc-lb-admin/src/routes.rs:110 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "Legacy status endpoint aliasing v1 status handler"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/killswitch",
+      "handler": "get_killswitch",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (storage.killswitch_enabled)",
+        "SQLite (storage.killswitch_enabled)"
+      ],
+      "reference": "crates/cc-lb-admin/src/routes.rs:111 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "Query whether global emergency killswitch is currently engaged"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/killswitch",
+      "handler": "set_killswitch",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (storage.set_killswitch_enabled(true))",
+        "SQLite (storage.set_killswitch_enabled(true))"
+      ],
+      "reference": "crates/cc-lb-admin/src/routes.rs:112 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "Engage global emergency killswitch; stops all proxy routing"
+    },
+    {
+      "method": "DELETE",
+      "path": "/admin/killswitch",
+      "handler": "clear_killswitch",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (storage.set_killswitch_enabled(false))",
+        "SQLite (storage.set_killswitch_enabled(false))"
+      ],
+      "reference": "crates/cc-lb-admin/src/routes.rs:113 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "Disengage global emergency killswitch; resumes proxy routing"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/killswitch",
+      "handler": "get_killswitch",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (storage.killswitch_enabled)",
+        "SQLite (storage.killswitch_enabled)"
+      ],
+      "reference": "crates/cc-lb-admin/src/routes.rs:116 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "v1 alias: Query whether global emergency killswitch is currently engaged"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/killswitch",
+      "handler": "set_killswitch",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (storage.set_killswitch_enabled(true))",
+        "SQLite (storage.set_killswitch_enabled(true))"
+      ],
+      "reference": "crates/cc-lb-admin/src/routes.rs:117 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "v1 alias: Engage global emergency killswitch"
+    },
+    {
+      "method": "DELETE",
+      "path": "/admin/v1/killswitch",
+      "handler": "clear_killswitch",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (storage.set_killswitch_enabled(false))",
+        "SQLite (storage.set_killswitch_enabled(false))"
+      ],
+      "reference": "crates/cc-lb-admin/src/routes.rs:118 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "v1 alias: Disengage global emergency killswitch"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/credentials",
+      "handler": "crate::credentials::list_credentials",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (PrincipalStore::list, get_oauth_ciphertext)",
+        "SQLite (PrincipalStore::list, get_oauth_ciphertext)"
+      ],
+      "reference": "crates/cc-lb-admin/src/credentials.rs:24 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "Lists observed credentials across principals"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/credentials",
+      "handler": "crate::credentials::list_credentials",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (PrincipalStore::list, get_oauth_ciphertext)",
+        "SQLite (PrincipalStore::list, get_oauth_ciphertext)"
+      ],
+      "reference": "crates/cc-lb-admin/src/routes.rs:163 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "v1 alias: Lists observed credentials across principals"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/oauth/status",
+      "handler": "crate::credentials::list_oauth_status",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (PrincipalStore::list, get_oauth_ciphertext)",
+        "SQLite (PrincipalStore::list, get_oauth_ciphertext)"
+      ],
+      "reference": "crates/cc-lb-admin/src/credentials.rs:25 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "Lists active OAuth flow status and tokens"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/oauth/status",
+      "handler": "crate::credentials::list_oauth_status",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (PrincipalStore::list, get_oauth_ciphertext)",
+        "SQLite (PrincipalStore::list, get_oauth_ciphertext)"
+      ],
+      "reference": "crates/cc-lb-admin/src/routes.rs:167 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "v1 alias: Lists active OAuth flow status and tokens"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/credentials/{principal_id}/{provider}/rotate",
+      "handler": "crate::credentials::rotate_credential",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "None (returns 501 rotate_unsupported)"
+      ],
+      "reference": "crates/cc-lb-admin/src/credentials.rs:27 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "Rotate credential endpoint; returned 501 rotate_unsupported directing to Upstreams page"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/credentials/{principal_id}/{provider}/revoke",
+      "handler": "crate::credentials::revoke_credential",
+      "auth": "AdminAuth (legacy token)",
+      "storage": [
+        "PostgreSQL (storage.delete_oauth)",
+        "SQLite (storage.delete_oauth)"
+      ],
+      "reference": "crates/cc-lb-admin/src/credentials.rs:31 (e56d029e)",
+      "source_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
+      "production_applicability": true,
+      "description": "Revokes an OAuth credential for a given principal and provider"
+    }
+  ],
+  "source_files": [
+    "crates/cc-lb-admin/Cargo.toml",
+    "crates/cc-lb-admin/src/audit.rs",
+    "crates/cc-lb-admin/src/auth.rs",
+    "crates/cc-lb-admin/src/auth/authorize.rs",
+    "crates/cc-lb-admin/src/auth/cloudflare_access.rs",
+    "crates/cc-lb-admin/src/auth/identity.rs",
+    "crates/cc-lb-admin/src/auth/jwks.rs",
+    "crates/cc-lb-admin/src/auth/mod.rs",
+    "crates/cc-lb-admin/src/auth/static_token.rs",
+    "crates/cc-lb-admin/src/cache_keepalive_view_activity_tests.rs",
+    "crates/cc-lb-admin/src/cache_keepalive_view_tests.rs",
+    "crates/cc-lb-admin/src/credentials.rs",
+    "crates/cc-lb-admin/src/events_detail_route.rs",
+    "crates/cc-lb-admin/src/lib.rs",
+    "crates/cc-lb-admin/src/management.rs",
+    "crates/cc-lb-admin/src/routes.rs",
+    "crates/cc-lb-admin/src/settings.rs",
+    "crates/cc-lb-admin/src/status.rs",
+    "crates/cc-lb-admin/src/v1/keys.rs",
+    "crates/cc-lb-admin/src/v1/oauth.rs",
+    "crates/cc-lb-admin/src/v1/plugins.rs",
+    "crates/cc-lb-admin/src/v1/plugins_wasm.rs",
+    "crates/cc-lb-admin/src/v1/principal_cache_keepalive.rs",
+    "crates/cc-lb-admin/src/v1/principal_cache_keepalive/query.rs",
+    "crates/cc-lb-admin/src/v1/principal_cache_keepalive/view.rs",
+    "crates/cc-lb-admin/src/v1/principals.rs",
+    "crates/cc-lb-admin/src/v1/router.rs",
+    "crates/cc-lb-admin/src/v1/status.rs",
+    "crates/cc-lb-admin/src/v1/upstreams.rs",
+    "crates/cc-lb-admin/web/src/components/AuthRequiredGate.test.tsx",
+    "crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx",
+    "crates/cc-lb-admin/web/src/components/CommandPalette.tsx",
+    "crates/cc-lb-admin/web/src/components/layout/AppShell.tsx",
+    "crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx",
+    "crates/cc-lb-admin/web/src/components/plugins/PluginCatalog.tsx",
+    "crates/cc-lb-admin/web/src/components/plugins/PluginDeleteDialog.tsx",
+    "crates/cc-lb-admin/web/src/components/plugins/PluginDetail.loading.test.tsx",
+    "crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx",
+    "crates/cc-lb-admin/web/src/components/settings-config/ConfigEditor.tsx",
+    "crates/cc-lb-admin/web/src/components/settings-config/index.ts",
+    "crates/cc-lb-admin/web/src/components/settings-config/schema.ts",
+    "crates/cc-lb-admin/web/src/components/ui/RequestEventsTable.test.tsx",
+    "crates/cc-lb-admin/web/src/components/ui/RequestEventsTable.tsx",
+    "crates/cc-lb-admin/web/src/components/ui/Sparkline.tsx",
+    "crates/cc-lb-admin/web/src/components/ui/latency/LatencyCell.test.tsx",
+    "crates/cc-lb-admin/web/src/components/ui/latency/LatencyCell.tsx",
+    "crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.test.tsx",
+    "crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx",
+    "crates/cc-lb-admin/web/src/components/ui/latency/computeStageGroups.test.ts",
+    "crates/cc-lb-admin/web/src/components/ui/latency/computeStageGroups.ts",
+    "crates/cc-lb-admin/web/src/components/upstreams/InlineNameEditor.tsx",
+    "crates/cc-lb-admin/web/src/lib/api.test.ts",
+    "crates/cc-lb-admin/web/src/lib/api.ts",
+    "crates/cc-lb-admin/web/src/lib/authSession.tsx",
+    "crates/cc-lb-admin/web/src/lib/configEditorModel.ts",
+    "crates/cc-lb-admin/web/src/lib/queries.ts",
+    "crates/cc-lb-admin/web/src/routeTree.gen.ts",
+    "crates/cc-lb-admin/web/src/routes/-audit-loading.test.tsx",
+    "crates/cc-lb-admin/web/src/routes/-plugins.test.tsx",
+    "crates/cc-lb-admin/web/src/routes/-settings-loading.test.tsx",
+    "crates/cc-lb-admin/web/src/routes/audit.tsx",
+    "crates/cc-lb-admin/web/src/routes/credentials.tsx",
+    "crates/cc-lb-admin/web/src/routes/principals.tsx",
+    "crates/cc-lb-admin/web/src/routes/settings.tsx",
+    "crates/cc-lb-admin/web/src/routes/status.tsx",
+    "crates/cc-lb-server/src/app.rs",
+    "crates/cc-lb-server/src/storage_factory.rs",
+    "crates/cc-lb-storage-api/src/audit.rs",
+    "crates/cc-lb-storage-api/src/storage_types_common.rs",
+    "crates/cc-lb-storage-api/src/traits.rs",
+    "crates/cc-lb-storage-postgres/migrations/0119_purge_config_history_payload.sql",
+    "crates/cc-lb-storage-postgres/migrations/0121_audit_log_principal_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0122_audit_log_actor_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0123_audit_log_admin_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0124_audit_log_admin_principal_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/migrations/0125_audit_log_admin_actor_ts_seq_index.sql",
+    "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
+    "crates/cc-lb-storage-postgres/src/adapter/config_store.rs",
+    "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
+    "crates/cc-lb-storage-sqlite/migrations/0087_purge_config_history_payload.sql",
+    "crates/cc-lb-storage-sqlite/migrations/0088_audit_log_read_order_indexes.sql",
+    "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
+    "crates/cc-lb-storage-sqlite/src/adapter/config_store.rs",
+    "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
+    "crates/cc-lb-storage-sqlite/src/lib.rs"
+  ],
+  "unread_files": [],
+  "gaps": []
+}

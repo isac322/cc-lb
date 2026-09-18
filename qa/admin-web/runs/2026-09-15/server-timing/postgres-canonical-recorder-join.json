@@ -1,0 +1,264 @@
+{
+  "rows": [
+    {
+      "source_entry_id": "d98d1a3d-d44a-47d6-aca4-8d06cf6ab003",
+      "rid": "req_admin_01a0a5d3-e74a-78d3-97f7-552eb46da419",
+      "backend_route": "/admin/dashboard/summary",
+      "backend_method": "GET",
+      "backend_status": 304,
+      "handler_ms": 4.973833000000001,
+      "sql_event_count": 1,
+      "sql_elapsed_secs": [
+        0.001264625
+      ],
+      "acquire_event_count": 1,
+      "acquire_total_secs": [
+        0.001552292
+      ]
+    },
+    {
+      "source_entry_id": "783413d9-0baa-43ee-b949-42f92a40b653",
+      "rid": "req_admin_01a0a5d3-e74c-73a3-86c1-0dc68a5649d9",
+      "backend_route": "/admin/usage",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 14.142708,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "8f9081ee-a179-427c-81ee-d33ee699454a",
+      "rid": "req_admin_01a0a5d3-fb26-7062-891d-b04274426d20",
+      "backend_route": "/admin/dashboard/summary",
+      "backend_method": "GET",
+      "backend_status": 304,
+      "handler_ms": 3.007208,
+      "sql_event_count": 1,
+      "sql_elapsed_secs": [
+        0.001103834
+      ],
+      "acquire_event_count": 1,
+      "acquire_total_secs": [
+        0.000900917
+      ]
+    },
+    {
+      "source_entry_id": "08a28e2d-dca0-418a-aa45-a68d920a70cd",
+      "rid": "req_admin_01a0a5d3-fb27-7020-bf34-95b2ab04ab8e",
+      "backend_route": "/admin/usage",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 16.745666999999997,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "d02d5cf2-4178-4cde-a922-fedd0f348786",
+      "rid": "req_admin_01a0a5d4-0ec7-7501-b455-4c74cf32d8fa",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.269959,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "891e1f46-cd65-482c-9a7b-efc95d8c7d16",
+      "rid": "req_admin_01a0a5d4-0ec8-7d41-a851-8e95aa902021",
+      "backend_route": "/admin/dashboard/summary",
+      "backend_method": "GET",
+      "backend_status": 304,
+      "handler_ms": 9.774708,
+      "sql_event_count": 1,
+      "sql_elapsed_secs": [
+        0.003264417
+      ],
+      "acquire_event_count": 1,
+      "acquire_total_secs": [
+        0.004841708
+      ]
+    },
+    {
+      "source_entry_id": "1c42e0e1-3a65-4946-bf84-c7807cde8926",
+      "rid": "req_admin_01a0a5d4-0ecf-7163-923f-044fc88f5cd6",
+      "backend_route": "/admin/usage",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 16.501917000000002,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "ff7d3ead-232f-43ed-b9d7-8e61473afda0",
+      "rid": "req_admin_01a0a5d4-1965-79e0-97ad-f51ac3f3535d",
+      "backend_route": "/{*file}",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 2.271333,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "ad06767f-46cb-4867-ab49-13477bdf2c63",
+      "rid": "req_admin_01a0a5d4-1969-7623-840e-668aa70dce4e",
+      "backend_route": "/{*file}",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.394458,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "949e0809-575d-4237-8273-fbe40ef290b2",
+      "rid": "req_admin_01a0a5d4-1969-7623-840e-666483915d4c",
+      "backend_route": "/{*file}",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.49037500000000006,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "ec3e95cc-c18f-4d68-98b5-4168e13084bf",
+      "rid": "req_admin_01a0a5d4-1969-7623-840e-66572db6414c",
+      "backend_route": "/{*file}",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.719542,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "65a2a34a-05bb-4d5a-ae4f-a75efb67bad7",
+      "rid": "req_admin_01a0a5d4-1969-7623-840e-6670e9b9c24e",
+      "backend_route": "/{*file}",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.488,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "8e0a4f4a-9cbf-408f-8a59-2fb7cc509606",
+      "rid": "req_admin_01a0a5d4-1969-7623-840e-66405637043c",
+      "backend_route": "/{*file}",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.7685,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "c909c0c2-7f67-47b5-a24d-ed922f5e60ce",
+      "rid": "req_admin_01a0a5d4-1f3e-7350-b4b7-0da272cdd476",
+      "backend_route": "/{*file}",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 1.290792,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "da2ffbdc-e39f-440c-b1a3-3f6ef5920d02",
+      "rid": "req_admin_01a0a5d4-2276-7b72-85bf-bc3e7fed4208",
+      "backend_route": "/admin/dashboard/summary",
+      "backend_method": "GET",
+      "backend_status": 304,
+      "handler_ms": 4.246709,
+      "sql_event_count": 1,
+      "sql_elapsed_secs": [
+        0.001845709
+      ],
+      "acquire_event_count": 1,
+      "acquire_total_secs": [
+        0.001307625
+      ]
+    },
+    {
+      "source_entry_id": "90561c86-4d87-42fb-84b9-d6fbe1eb7710",
+      "rid": "req_admin_01a0a5d4-2279-7ec3-a6bf-c55820222407",
+      "backend_route": "/admin/usage",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 8.333042,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    },
+    {
+      "source_entry_id": "5263fa11-c257-4fa1-aec3-58963570c2b2",
+      "rid": "req_admin_01a0a5d4-2353-7590-bdf9-4502b6703ddf",
+      "backend_route": "/admin/v1/plugins/registry",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 13.029584,
+      "sql_event_count": 3,
+      "sql_elapsed_secs": [
+        0.001228042,
+        0.001872291,
+        0.002743292
+      ],
+      "acquire_event_count": 3,
+      "acquire_total_secs": [
+        0.000903625,
+        0.00113725,
+        0.000784417
+      ]
+    },
+    {
+      "source_entry_id": "1f47c69d-d143-4c6b-8069-d5a541622fa4",
+      "rid": "req_admin_01a0a5d4-4892-7e70-bd9e-318f83a2a47b",
+      "backend_route": "/admin/v1/upstreams",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 5.247584,
+      "sql_event_count": 1,
+      "sql_elapsed_secs": [
+        0.002809458
+      ],
+      "acquire_event_count": 1,
+      "acquire_total_secs": [
+        0.000596625
+      ]
+    },
+    {
+      "source_entry_id": "5fa2a1cb-c56f-4623-8496-615ea4c75c0c",
+      "rid": "req_admin_01a0a5d4-49c6-7a23-937a-253e497b2dd2",
+      "backend_route": "/admin/health",
+      "backend_method": "GET",
+      "backend_status": 200,
+      "handler_ms": 0.304708,
+      "sql_event_count": 0,
+      "sql_elapsed_secs": [],
+      "acquire_event_count": 0,
+      "acquire_total_secs": []
+    }
+  ],
+  "resource_entries": 19,
+  "unique_server_ids": 19,
+  "source": "Complete private log captured before this observation",
+  "full_runtime_qa_complete": false
+}

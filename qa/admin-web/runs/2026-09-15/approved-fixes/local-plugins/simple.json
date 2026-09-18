@@ -1,0 +1,78 @@
+{
+  "mode": "simple",
+  "status": "PASS",
+  "actual": {
+    "delete_status": 204,
+    "dispatch": 1,
+    "pending": {
+      "cancel_disabled": true,
+      "dialog_retained": true
+    },
+    "url_plugin_absent": true,
+    "registry_absent": true,
+    "browser_deleted_refs_get_count": 0
+  },
+  "screen_sha256": "315e8e29058541bb6efcb99063be74eedc3abffdc44da984b1e1ae942045fcd0",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/auth/session",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/plugins/registry",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/health",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/upstreams",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/principals",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/plugins/wasm",
+      "query_names": [],
+      "status": 201
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/plugins/registry",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/plugins/registry/e91e45b2-4fb8-47b7-a155-4b5cf75e9efe/references",
+      "query_names": [],
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/admin/v1/plugins/registry/e91e45b2-4fb8-47b7-a155-4b5cf75e9efe",
+      "query_names": [],
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/plugins/registry",
+      "query_names": [],
+      "status": 200
+    }
+  ]
+}

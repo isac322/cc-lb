@@ -1,0 +1,53 @@
+{
+  "observed_at_utc": "2026-09-17T08:45:43.508840+00:00",
+  "goal_complete": false,
+  "current_public_origin_reachable": true,
+  "current_production_counts": {
+    "principals_count": 22,
+    "upstreams_count": 9,
+    "plugins_registry_count": 2
+  },
+  "current_image_revision": "5e8f74a01c74d7e3c160dc7f7c7129bb4eaa13f9",
+  "preserved_production_source_equivalent_for_audited_admin_server_storage_paths": true,
+  "still_unknown": [
+    "actual cursor/page depths",
+    "full entity x state x filter x poll execution matrix",
+    "production request-level SQL and acquire correlation",
+    "pure DB execution and pure queue wait"
+  ],
+  "obsolete_blocker_reasons": [
+    "Camofox native pointer unavailable",
+    "production principal/upstream/plugin list counts unavailable"
+  ],
+  "remaining_external_boundaries": [
+    "PR793 merge remains held until explicit final approval",
+    "production instrumentation deployment and logging require separate authorization",
+    "non-production OAuth success account is absent per user report"
+  ],
+  "next_runnable_batch": {
+    "environment": "new disposable SQLite fixture only",
+    "source_commit": "f3fa89bf81fecefbfd4dde399c2d771208e069ce",
+    "action_id": "UI-SRC-D74A22B571BC",
+    "atomic_request_id": "UI-PR-06",
+    "name": "Update Principal Default Limits",
+    "variants": [
+      "empty limits list",
+      "requests limit",
+      "input_tokens limit",
+      "output_tokens limit",
+      "total_tokens limit",
+      "cost_usd limit (cap_micros conversion)",
+      "concurrent limit",
+      "boundary cap=0 or window=1"
+    ],
+    "scope": "each_principal",
+    "entity_denominator": "must query the new fixture before expansion; no assumed cell count",
+    "paired_mutation_measurement": "restore identical snapshot before direct replay; never replay UI writes concurrently",
+    "runtime_changes": false
+  },
+  "limitations": [
+    "Principal/key scout proposal was corrected: its11IDs are not11cells and UI-PR-06 is DefaultLimitsCard, not generic reset.",
+    "Existing local smoke evidence does not fill the exhaustive ledger.",
+    "No deployment, merge, provider account selection, or production mutation was executed."
+  ]
+}
