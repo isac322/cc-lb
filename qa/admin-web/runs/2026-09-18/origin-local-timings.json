@@ -1,0 +1,105 @@
+{
+ "schema": "cc-lb-lab-local-timing/v1",
+ "binary": "target/debug/cc-lb built 2026-09-14 (commit 01f6e654 worktree)",
+ "profile": "debug",
+ "storage": "copy of live SQLite (14.9 MB)",
+ "listener": "127.0.0.1:19090",
+ "rows": [
+  {
+   "path": "/admin/health",
+   "status": "200",
+   "med_ms": 1.2,
+   "min_ms": 0.99,
+   "max_ms": 1.51,
+   "bytes": 71
+  },
+  {
+   "path": "/admin/v1/status",
+   "status": "200",
+   "med_ms": 1.32,
+   "min_ms": 1.2,
+   "max_ms": 1.56,
+   "bytes": 355
+  },
+  {
+   "path": "/admin/v1/subscription-quotas/aggregate?range=24h",
+   "status": "200",
+   "med_ms": 7.01,
+   "min_ms": 6.87,
+   "max_ms": 7.16,
+   "bytes": 2612
+  },
+  {
+   "path": "/admin/v1/subscription-quotas/pool-history?range=24h",
+   "status": "200",
+   "med_ms": 9.31,
+   "min_ms": 9.2,
+   "max_ms": 12.7,
+   "bytes": 141258
+  },
+  {
+   "path": "/admin/dashboard/summary?range=6h",
+   "status": "200",
+   "med_ms": 5.3,
+   "min_ms": 5.15,
+   "max_ms": 5.42,
+   "bytes": 178301
+  },
+  {
+   "path": "/admin/dashboard/summary?range=7d",
+   "status": "200",
+   "med_ms": 3.12,
+   "min_ms": 3.06,
+   "max_ms": 3.22,
+   "bytes": 83451
+  },
+  {
+   "path": "/admin/v1/events/recent?limit=50",
+   "status": "200",
+   "med_ms": 1.2,
+   "min_ms": 1.12,
+   "max_ms": 1.27,
+   "bytes": 51
+  },
+  {
+   "path": "/admin/v1/upstreams",
+   "status": "200",
+   "med_ms": 1.26,
+   "min_ms": 1.18,
+   "max_ms": 1.29,
+   "bytes": 299
+  },
+  {
+   "path": "/admin/v1/principals",
+   "status": "200",
+   "med_ms": 1.2,
+   "min_ms": 1.12,
+   "max_ms": 1.23,
+   "bytes": 17
+  },
+  {
+   "path": "/admin/v1/plugins/registry",
+   "status": "200",
+   "med_ms": 1.43,
+   "min_ms": 1.36,
+   "max_ms": 4.02,
+   "bytes": 1575
+  },
+  {
+   "path": "/admin/config/draft",
+   "status": "200",
+   "med_ms": 1.36,
+   "min_ms": 1.21,
+   "max_ms": 1.99,
+   "bytes": 113
+  },
+  {
+   "path": "/admin/v1/audit?limit=50",
+   "status": "200",
+   "med_ms": 2.23,
+   "min_ms": 2.14,
+   "max_ms": 2.6,
+   "bytes": 11601
+  }
+ ]
+}

@@ -1,0 +1,494 @@
+{
+ "schema": "cc-lb-write-path-fixture-timings/v1",
+ "environment": {
+  "target": "http://127.0.0.1:19090 isolated replica",
+  "binary": "target/debug/cc-lb built 2026-09-14 (same binary as production)",
+  "profile": "debug",
+  "storage": "copy of the live SQLite database (14.9 MB)",
+  "writes_applied_to": "the copy only; production untouched"
+ },
+ "coverage": {
+  "declared_write_endpoints": 41,
+  "measured": 41,
+  "repeats_per_endpoint": "1-3"
+ },
+ "rows": [
+  {
+   "method": "POST",
+   "path": "/admin/v1/upstreams/{id}/subscription-metadata/refresh",
+   "status": "200",
+   "med_ms": 1276.74,
+   "max_ms": 1276.74,
+   "bytes": 2392,
+   "error": null,
+   "note": "external: provider metadata fetch"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/plugins/wasm",
+   "status": "201",
+   "med_ms": 30.88,
+   "max_ms": 30.88,
+   "bytes": null,
+   "error": null,
+   "note": "real fixture module, 393 bytes"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/config/draft/download",
+   "status": "405",
+   "med_ms": 19.09,
+   "max_ms": 19.09,
+   "bytes": 0,
+   "error": ""
+  },
+  {
+   "method": "PUT",
+   "path": "/admin/v1/config/draft",
+   "status": "200",
+   "med_ms": 17.42,
+   "max_ms": 18.76,
+   "bytes": null,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/config/save",
+   "status": "405",
+   "med_ms": 17.34,
+   "max_ms": 17.34,
+   "bytes": 0,
+   "error": ""
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals",
+   "status": "201",
+   "med_ms": 10.79,
+   "max_ms": 10.79,
+   "bytes": 118,
+   "sample": null
+  },
+  {
+   "method": "DELETE",
+   "path": "/admin/v1/plugins/registry/{id}",
+   "status": "204",
+   "med_ms": 6.41,
+   "max_ms": 6.41,
+   "bytes": 0,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/upstreams",
+   "status": "201",
+   "med_ms": 5.88,
+   "max_ms": 5.88,
+   "bytes": 286,
+   "sample": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/1b518340-72e1-4add-9603-6d7b03643529/plugin-chain/reorder",
+   "status": "200",
+   "med_ms": 5.29,
+   "max_ms": 6.61,
+   "bytes": 14,
+   "sample": null
+  },
+  {
+   "method": "PATCH",
+   "path": "/admin/v1/plugins/registry/{id}",
+   "status": "200",
+   "med_ms": 5.29,
+   "max_ms": 5.55,
+   "bytes": 542,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/{id}/plugin-chain/reorder",
+   "status": "200",
+   "med_ms": 5.29,
+   "max_ms": 6.61,
+   "bytes": 14,
+   "sample": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/{id}/plugin-chain",
+   "status": "201",
+   "med_ms": 5.28,
+   "max_ms": 5.28,
+   "bytes": 285,
+   "sample": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/{id}/keys/01M2TP28YHFZNDFKC48KHQC2MJ/revoke",
+   "status": "200",
+   "med_ms": 5.24,
+   "max_ms": 5.24,
+   "bytes": 73,
+   "error": null
+  },
+  {
+   "method": "PUT",
+   "path": "/admin/v1/upstreams/{id}",
+   "status": "200",
+   "med_ms": 5.09,
+   "max_ms": 5.09,
+   "bytes": 293,
+   "error": null
+  },
+  {
+   "method": "PUT",
+   "path": "/admin/v1/plugin-chain-entries/{id}",
+   "status": "200",
+   "med_ms": 4.95,
+   "max_ms": 5.02,
+   "bytes": 294,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/{id}/keys",
+   "status": "201",
+   "med_ms": 4.89,
+   "max_ms": 5.26,
+   "bytes": 223,
+   "sample": null
+  },
+  {
+   "method": "PATCH",
+   "path": "/admin/v1/principals/{id}",
+   "status": "200",
+   "med_ms": 4.83,
+   "max_ms": 6.33,
+   "bytes": 181,
+   "error": null
+  },
+  {
+   "method": "PUT",
+   "path": "/admin/v1/principals/{id}/allowed_models",
+   "status": "200",
+   "med_ms": 4.8,
+   "max_ms": 5.14,
+   "bytes": 210,
+   "error": null
+  },
+  {
+   "method": "DELETE",
+   "path": "/admin/v1/plugin-chain-entries/{id}",
+   "status": "204",
+   "med_ms": 4.7,
+   "max_ms": 4.7,
+   "bytes": 0,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/1b518340-72e1-4add-9603-6d7b03643529/keys",
+   "status": "201",
+   "med_ms": 4.62,
+   "max_ms": 5.71,
+   "bytes": 223,
+   "sample": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/{id}/keys/{id}/revoke",
+   "status": "200",
+   "med_ms": 4.57,
+   "max_ms": 4.57,
+   "bytes": 73,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/1b518340-72e1-4add-9603-6d7b03643529/plugin-chain/rebalance?slot=router",
+   "status": "200",
+   "med_ms": 4.52,
+   "max_ms": 4.87,
+   "bytes": 14,
+   "sample": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/{id}/plugin-chain/rebalance",
+   "status": "200",
+   "med_ms": 4.52,
+   "max_ms": 4.87,
+   "bytes": 14,
+   "sample": null
+  },
+  {
+   "method": "PUT",
+   "path": "/admin/v1/principals/{id}",
+   "status": "200",
+   "med_ms": 4.48,
+   "max_ms": 4.5,
+   "bytes": 183,
+   "error": null
+  },
+  {
+   "method": "PATCH",
+   "path": "/admin/v1/upstreams/{id}",
+   "status": "200",
+   "med_ms": 4.43,
+   "max_ms": 4.45,
+   "bytes": 283,
+   "error": null
+  },
+  {
+   "method": "DELETE",
+   "path": "/admin/v1/upstreams/{id}",
+   "status": "204",
+   "med_ms": 4.41,
+   "max_ms": 4.41,
+   "bytes": 0,
+   "error": null
+  },
+  {
+   "method": "DELETE",
+   "path": "/admin/v1/upstreams/{id}/warmup-dialect-plugin",
+   "status": "200",
+   "med_ms": 4.35,
+   "max_ms": 4.35,
+   "bytes": 284,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/upstreams/{id}/enable",
+   "status": "200",
+   "med_ms": 4.29,
+   "max_ms": 4.4,
+   "bytes": 284,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/{id}/enable",
+   "status": "200",
+   "med_ms": 4.22,
+   "max_ms": 4.6,
+   "bytes": 181,
+   "error": null
+  },
+  {
+   "method": "DELETE",
+   "path": "/admin/v1/principals/{id}",
+   "status": "204",
+   "med_ms": 4.21,
+   "max_ms": 4.21,
+   "bytes": 0,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/{id}/disable",
+   "status": "200",
+   "med_ms": 4.11,
+   "max_ms": 4.54,
+   "bytes": 182,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/upstreams/{id}/disable",
+   "status": "200",
+   "med_ms": 4.11,
+   "max_ms": 4.2,
+   "bytes": 284,
+   "error": null
+  },
+  {
+   "method": "PUT",
+   "path": "/admin/v1/principals/{id}/router-terminal",
+   "status": "200",
+   "med_ms": 4.03,
+   "max_ms": 4.21,
+   "bytes": 39,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/upstreams/{id}/warmup/fire-now",
+   "status": "400",
+   "med_ms": 3.93,
+   "max_ms": 3.93,
+   "bytes": 27,
+   "error": "{\"error\":\"warmup_disabled\"}",
+   "note": "external: provider warmup request"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/1b518340-72e1-4add-9603-6d7b03643529/plugin-chain",
+   "status": "500",
+   "med_ms": 2.31,
+   "max_ms": 2.31,
+   "bytes": 25,
+   "sample": "{\"error\":\"storage_error\"}",
+   "note": "unknown wasm id: reachability and rejection latency"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/upstreams/{id}/oauth/start",
+   "status": "200",
+   "med_ms": 2.19,
+   "max_ms": 2.19,
+   "bytes": 657,
+   "error": null,
+   "note": "external: begins a provider OAuth handshake"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/config/draft/validate",
+   "status": "200",
+   "med_ms": 1.72,
+   "max_ms": 1.87,
+   "bytes": 52,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/principals/{id}/keys/{id}/enable",
+   "status": "200",
+   "med_ms": 1.66,
+   "max_ms": 1.66,
+   "bytes": 15,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/principals/{id}/keys/{id}/disable",
+   "status": "200",
+   "med_ms": 1.61,
+   "max_ms": 1.61,
+   "bytes": 15,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/oauth/draft/start",
+   "status": "200",
+   "med_ms": 1.59,
+   "max_ms": 1.59,
+   "bytes": 643,
+   "error": null,
+   "note": "external: provider OAuth handshake"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/principals/{id}/keys/{id}/revoke",
+   "status": "200",
+   "med_ms": 1.42,
+   "max_ms": 1.42,
+   "bytes": 15,
+   "error": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/upstreams/{id}/oauth/complete",
+   "status": "422",
+   "med_ms": 1.3,
+   "max_ms": 1.3,
+   "bytes": 169,
+   "error": "{\"error\":\"validation_failed\",\"field\":\"state_token\",\"message\":\"Failed to deserialize the JSON body into the target type: missing field `state",
+   "note": "external: exchanges a provider code; probed with an invalid code"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/1b518340-72e1-4add-9603-6d7b03643529/plugin-chain/rebalance",
+   "status": "400",
+   "med_ms": 1.25,
+   "max_ms": 1.26,
+   "bytes": 113,
+   "sample": "{\"error\":\"validation_failed\",\"field\":\"slot\",\"message\":\"Failed to deserialize query string: missing field `slot`\"}"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/oauth/draft/complete",
+   "status": "422",
+   "med_ms": 1.24,
+   "max_ms": 1.24,
+   "bytes": 169,
+   "error": "{\"error\":\"validation_failed\",\"field\":\"state_token\",\"message\":\"Failed to deserialize the JSON body into the target type: missing field `state",
+   "note": "external: completes a draft handshake; probed with an unknown draft"
+  },
+  {
+   "method": "PATCH",
+   "path": "/admin/v1/principals/1b518340-72e1-4add-9603-6d7b03643529",
+   "status": "428",
+   "med_ms": 1.23,
+   "max_ms": 1.57,
+   "bytes": 29,
+   "sample": "{\"error\":\"if_match_required\"}"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/plugins/wasm/gc",
+   "status": "200",
+   "med_ms": 1.22,
+   "max_ms": 1.23,
+   "bytes": 24,
+   "sample": null
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/router/preview",
+   "status": "200",
+   "med_ms": 1.15,
+   "max_ms": 1.39,
+   "bytes": 190,
+   "sample": null
+  },
+  {
+   "method": "PUT",
+   "path": "/admin/v1/principals/1b518340-72e1-4add-9603-6d7b03643529/allowed_models",
+   "status": "422",
+   "med_ms": 1.1,
+   "max_ms": 1.15,
+   "bytes": 185,
+   "sample": "{\"error\":\"validation_failed\",\"field\":null,\"message\":\"Failed to deserialize the JSON body into the target type: expected_revision: invalid type: null, expected u64 at line 1 column 122\"}"
+  },
+  {
+   "method": "PUT",
+   "path": "/admin/v1/principals/1b518340-72e1-4add-9603-6d7b03643529/router-terminal",
+   "status": "422",
+   "med_ms": 1.07,
+   "max_ms": 1.1,
+   "bytes": 164,
+   "sample": "{\"error\":\"validation_failed\",\"field\":\"strategy\",\"message\":\"Failed to deserialize the JSON body into the target type: missing field `strategy` at line 1 column 124\"}"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/upstreams/from-oauth-draft",
+   "status": "422",
+   "med_ms": 1.06,
+   "max_ms": 1.06,
+   "bytes": 169,
+   "error": "{\"error\":\"validation_failed\",\"field\":\"state_token\",\"message\":\"Failed to deserialize the JSON body into the target type: missing field `state",
+   "note": "external: materializes an upstream from a completed draft"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/1b518340-72e1-4add-9603-6d7b03643529/disable",
+   "status": "428",
+   "med_ms": 1.02,
+   "max_ms": 1.05,
+   "bytes": 29,
+   "sample": "{\"error\":\"if_match_required\"}"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/v1/principals/1b518340-72e1-4add-9603-6d7b03643529/enable",
+   "status": "428",
+   "med_ms": 1.01,
+   "max_ms": 1.06,
+   "bytes": 29,
+   "sample": "{\"error\":\"if_match_required\"}"
+  }
+ ]
+}
