@@ -92,6 +92,7 @@ test('audit loading reserves the resolved count width and keeps the nine-column 
   expect(screen.queryByLabelText('Status')).toBeNull();
   expect(queries.useAudit).toHaveBeenLastCalledWith({
     limit: '200',
+    admin_only: 'true',
     principal_id: undefined,
     since: undefined,
     until: undefined,
@@ -145,6 +146,7 @@ test('audit sends only supported principal and time filters and clears them toge
 
   expect(queries.useAudit).toHaveBeenLastCalledWith({
     limit: '200',
+    admin_only: 'true',
     principal_id: 'principal-1',
     since: '1718665200',
     until: '1718668800',
@@ -244,12 +246,13 @@ test('audit preserves duplicate request-id events across filter result transitio
   expectAuditRows(unfilteredRows.map((entry) => entry.admin_action));
 
   Object.assign(AuditRoute, {
-    useSearch: () => ({ principal_id: 'principal-1' }),
+    useSearch: () => ({ principal_id: 'example-principal-1' }),
   });
   rerender(<AuditComponent />);
   expect(queries.useAudit).toHaveBeenLastCalledWith({
     limit: '200',
-    principal_id: 'principal-1',
+    admin_only: 'true',
+    principal_id: 'example-principal-1',
     since: undefined,
     until: undefined,
   });
@@ -268,17 +271,18 @@ test('audit preserves duplicate request-id events across filter result transitio
 
   Object.assign(AuditRoute, {
     useSearch: () => ({
-      principal_id: 'principal-1',
-      since: 1_750_204_800,
-      until: 1_750_204_801,
+      principal_id: 'example-principal-1',
+      since: 100,
+      until: 200,
     }),
   });
   rerender(<AuditComponent />);
   expect(queries.useAudit).toHaveBeenLastCalledWith({
     limit: '200',
-    principal_id: 'principal-1',
-    since: '1750204800',
-    until: '1750204801',
+    admin_only: 'true',
+    principal_id: 'example-principal-1',
+    since: '100',
+    until: '200',
   });
   expectAuditRows(timeRows.map((entry) => entry.admin_action));
 
