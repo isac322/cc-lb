@@ -36,6 +36,7 @@ use crate::{
 
 const WASM_MAGIC: &[u8; 4] = b"\0asm";
 const MIN_WASM_BYTES: usize = 8;
+const UPLOAD_ROUTE: &str = "/admin/v1/plugins/wasm";
 const UPLOAD_WINDOW: Duration = Duration::from_secs(60);
 const UPLOAD_LIMIT: usize = 10;
 
@@ -84,10 +85,7 @@ pub fn router() -> Router<AdminState> {
         ServiceBuilder::new().layer(middleware::from_fn_with_state(limiter, upload_rate_limit));
 
     Router::new()
-        .route(
-            "/admin/v1/plugins/wasm",
-            post(upload_wasm).route_layer(upload_layers),
-        )
+        .route(UPLOAD_ROUTE, post(upload_wasm).route_layer(upload_layers))
         .route("/admin/v1/plugins/wasm/gc", post(gc_wasm))
         .layer(DefaultBodyLimit::max(
             (MAX_WASM_BLOB_BYTES as usize) + 4 * 1024 * 1024,
@@ -128,6 +126,40 @@ async fn upload_wasm(
     Extension(identity): Extension<AdminIdentity>,
     multipart: Multipart,
 ) -> Response {
+    if let Some(storage) = &state.storage {
+        // With storage configured, the shared audit log is the source of truth
+        // so replicas cannot exceed the cap in combination. Fetch the actor's
+        // window unbounded (i64::MAX keeps the limit bind in range) and count
+        // only this route's rows.
+        let now = cc_lb_clock::unix_secs(state.clock.now());
+        let since = now.saturating_sub(UPLOAD_WINDOW.as_secs());
+        match storage
+            .query_audit_by_actor(
+                &identity.authority,
+                &identity.subject,
+                since,
+                now,
+                i64::MAX as usize,
+            )
+            .await
+        {
+            Ok(entries) => {
+                let uploads = entries
+                    .iter()
+                    .filter(|entry| entry.route == UPLOAD_ROUTE)
+                    .count();
+                if uploads >= UPLOAD_LIMIT {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [(header::RETRY_AFTER, "60")],
+                        Json(json!({ "error": "rate_limited" })),
+                    )
+                        .into_response();
+                }
+            }
+            Err(error) => return storage_response(error),
+        }
+    }
     match upload_wasm_inner(&state, &identity, multipart).await {
         Ok((status, response)) => {
             let payload = AuditPayload::PluginRegistryUpload {
@@ -142,7 +174,7 @@ async fn upload_wasm(
                     identity: Some(&identity),
                     system_component: None,
                     action: &action,
-                    route: "/admin/v1/plugins/wasm",
+                    route: UPLOAD_ROUTE,
                     target_principal_id: None,
                     target_upstream: None,
                     api_key_id: None,
@@ -180,7 +212,7 @@ async fn upload_wasm(
                     identity: Some(&identity),
                     system_component: None,
                     action,
-                    route: "/admin/v1/plugins/wasm",
+                    route: UPLOAD_ROUTE,
                     target_principal_id: None,
                     target_upstream: None,
                     api_key_id: None,

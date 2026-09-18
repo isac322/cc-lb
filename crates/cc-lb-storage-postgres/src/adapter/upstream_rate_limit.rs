@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    RateLimitKind, StorageError, StorageResult, UpstreamRateLimitObservationRecord,
+    ChangeChannel, RateLimitKind, StorageError, StorageResult, UpstreamRateLimitObservationRecord,
     UpstreamRateLimitStateStore,
 };
 use sqlx::{Row, postgres::PgRow};
@@ -51,6 +51,17 @@ impl UpstreamRateLimitStateStore for PostgresStorage {
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
+
+        // The row is already committed; a failed NOTIFY only delays peer
+        // hydration, so log instead of reporting the write as failed.
+        if let Err(error) = sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(ChangeChannel::UpstreamRateLimit.postgres_channel())
+            .bind(observation.upstream_id.to_string())
+            .execute(&self.pool)
+            .await
+        {
+            tracing::warn!(%error, "upstream rate limit change notify failed");
+        }
 
         Ok(())
     }

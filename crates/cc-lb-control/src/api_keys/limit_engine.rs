@@ -11,14 +11,18 @@ use cc_lb_storage_api::types::{
     PrincipalLimitState, StoredApiKeyRecord,
 };
 use cc_lb_storage_api::{
-    ApiKeyUsage, ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey, ApiKeyUsageBucketQuery,
-    ApiKeyUsageFlush, ApiKeyUsageFlushResult, Storage, StorageError,
+    ApiKeyConcurrencyHold, ApiKeyConcurrencyHoldStore, ApiKeyUsage, ApiKeyUsageBucketDelta,
+    ApiKeyUsageBucketKey, ApiKeyUsageBucketQuery, ApiKeyUsageFlush, ApiKeyUsageFlushResult,
+    BackendKind, Storage, StorageError,
 };
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::api_keys::concurrent_guard::{KeyConcurrencyGuard, KeyConcurrencyManager};
+use crate::api_keys::concurrent_guard::{
+    DurableConcurrencyHold, KeyConcurrencyGuard, KeyConcurrencyManager,
+};
+
 use crate::api_keys::principal_view::{PrincipalStatus, PrincipalView};
 use crate::api_keys::types::{Limit, LimitKind};
 use cc_lb_clock::{ClockHandle, unix_secs};
@@ -38,6 +42,14 @@ const API_KEY_USAGE_COLD_ALLOWANCE_DIVISOR: i64 = 10;
 const API_KEY_USAGE_OUTAGE_CEILING_SECS: u64 = 300;
 const API_KEY_USAGE_RETENTION_MARGIN_SECS: u64 = 3_600;
 const API_KEY_USAGE_PENDING_MAX_ENTRIES: usize = 100_000;
+/// Maximum age of a cluster-wide concurrency hold before it is treated as a
+/// crash leftover (issue 807). Uses the writer lease window, floored at 90s
+/// so live requests are not evicted while their writer still holds a lease.
+const API_KEY_CONCURRENCY_HOLD_MAX_AGE_SECS: u64 = if API_KEY_USAGE_WRITER_LEASE_SECS > 90 {
+    API_KEY_USAGE_WRITER_LEASE_SECS
+} else {
+    90
+};
 const API_KEY_USAGE_PENDING_TARGET_ENTRIES: usize = 90_000;
 const API_KEY_USAGE_WRITER_INACTIVE_AFTER_SECS: u64 = 60;
 const API_KEY_USAGE_COMPACTION_BATCH_SIZE: usize = 1_000;
@@ -98,6 +110,7 @@ struct LimitEngineInner {
 
 struct DurableApiKeyUsage {
     storage: Arc<dyn Storage>,
+    backend_kind: BackendKind,
     writer_epoch: RwLock<Uuid>,
     pending: Mutex<HashMap<ApiKeyUsageBucketKey, ApiKeyUsage>>,
     in_flight: Mutex<Option<ApiKeyUsageFlush>>,
@@ -195,8 +208,16 @@ struct ReservationRecord {
     durable_bucket_widths: Vec<u64>,
     /// Held here to keep the concurrent-request slot occupied until refund
     /// or reconcile removes the record.
-    concurrent_guards: Vec<KeyConcurrencyGuard>,
+    concurrent_guards: Vec<ConcurrentSlot>,
     created_at: Instant,
+}
+
+/// A concurrent-request slot held by a [`ReservationRecord`]: either the
+/// local in-process counter or a cluster-wide Postgres hold row (issue 807).
+#[allow(dead_code)]
+enum ConcurrentSlot {
+    Local(KeyConcurrencyGuard),
+    Durable(DurableConcurrencyHold),
 }
 
 #[derive(Clone)]
@@ -334,8 +355,10 @@ impl LimitEngine {
                 now_sec.saturating_add(API_KEY_USAGE_WRITER_LEASE_SECS),
             )
             .await?;
+        let backend_kind = storage.backend_kind().await?;
         let state = Arc::new(DurableApiKeyUsage {
             storage,
+            backend_kind,
             writer_epoch: RwLock::new(writer_epoch),
             pending: Mutex::new(HashMap::new()),
             in_flight: Mutex::new(None),
@@ -370,6 +393,17 @@ impl LimitEngine {
                         }
                         if let Err(error) = refresh_remote_api_key_usage(&engine, &state, now_sec).await {
                             tracing::warn!(%error, "durable API-key usage refresh failed; freezing last remote snapshot");
+                        }
+                        if state.backend_kind == BackendKind::Postgres
+                            && let Err(error) = state
+                                .storage
+                                .delete_expired_api_key_concurrency_holds(
+                                    now_sec,
+                                    API_KEY_CONCURRENCY_HOLD_MAX_AGE_SECS,
+                                )
+                                .await
+                        {
+                            tracing::warn!(%error, "expired API-key concurrency hold sweep failed");
                         }
                     }
                 }
@@ -526,12 +560,36 @@ impl LimitEngine {
                     });
                 }
                 LimitKind::Concurrent => {
-                    let guard = self
-                        .inner
-                        .concurrent_mgr
-                        .try_acquire(&key_id, limit.cap_micros as u32)
-                        .map_err(|_| RejectReason::ConcurrentRateLimit)?;
-                    concurrent_guards.push(guard);
+                    let cap = limit.cap_micros as u32;
+                    let slot = match durable_usage.as_ref() {
+                        Some(state) if state.backend_kind == BackendKind::Postgres => {
+                            match self.try_durable_concurrent_hold(state, &key_id, cap, now_sec) {
+                                Ok(hold) => ConcurrentSlot::Durable(hold),
+                                Err(DurableHoldError::OverCap) => {
+                                    return Err(RejectReason::ConcurrentRateLimit);
+                                }
+                                Err(DurableHoldError::Unavailable) => {
+                                    // Storage unreachable or no multi-thread
+                                    // runtime: keep admitting on the local
+                                    // counter, matching the durable-usage
+                                    // fail-open policy.
+                                    ConcurrentSlot::Local(
+                                        self.inner
+                                            .concurrent_mgr
+                                            .try_acquire(&key_id, cap)
+                                            .map_err(|_| RejectReason::ConcurrentRateLimit)?,
+                                    )
+                                }
+                            }
+                        }
+                        _ => ConcurrentSlot::Local(
+                            self.inner
+                                .concurrent_mgr
+                                .try_acquire(&key_id, cap)
+                                .map_err(|_| RejectReason::ConcurrentRateLimit)?,
+                        ),
+                    };
+                    concurrent_guards.push(slot);
                 }
             }
         }
@@ -567,6 +625,44 @@ impl LimitEngine {
             id,
             forgotten: false,
         })
+    }
+
+    /// Acquire a cluster-wide concurrency slot on Postgres (issue 807).
+    ///
+    /// Inserts a hold row, counts live holds for the key, and deletes the row
+    /// again when the count exceeds `cap`. Runs the storage calls through
+    /// [`block_on_storage`] because `reserve` is synchronous.
+    fn try_durable_concurrent_hold(
+        &self,
+        state: &Arc<DurableApiKeyUsage>,
+        key_id: &str,
+        cap: u32,
+        now_sec: u64,
+    ) -> Result<DurableConcurrencyHold, DurableHoldError> {
+        let storage = Arc::clone(&state.storage);
+        let writer_epoch = *state.writer_epoch.read();
+        let hold_id = Uuid::now_v7();
+        let hold = ApiKeyConcurrencyHold {
+            hold_id,
+            key_id: key_id.to_owned(),
+            writer_epoch,
+            acquired_at_unix_secs: now_sec,
+        };
+        let key_id_owned = key_id.to_owned();
+        let Some(outcome) = block_on_storage({
+            let storage = Arc::clone(&storage);
+            async move { try_acquire_hold(storage.as_ref(), &hold, cap, now_sec).await }
+        }) else {
+            return Err(DurableHoldError::Unavailable);
+        };
+        match outcome {
+            Ok(true) => Ok(DurableConcurrencyHold::new(storage, hold_id, key_id_owned)),
+            Ok(false) => Err(DurableHoldError::OverCap),
+            Err(error) => {
+                tracing::warn!(%error, %key_id_owned, "durable API-key concurrency hold failed");
+                Err(DurableHoldError::Unavailable)
+            }
+        }
     }
 
     pub fn reconcile(
@@ -1028,6 +1124,60 @@ fn bound_pending_usage_to(
         retained = pending.len(),
         "durable API-key usage pending buffer reached capacity; dropped oldest deltas"
     );
+}
+
+/// Outcome of a cluster-wide concurrency hold attempt (issue 807).
+enum DurableHoldError {
+    /// Live hold count reached the cap; reject with `ConcurrentRateLimit`.
+    OverCap,
+    /// Storage failed or no multi-thread runtime was available; caller falls
+    /// back to the local counter.
+    Unavailable,
+}
+
+/// Runs a storage future from synchronous `reserve` code.
+///
+/// Returns `None` when there is no multi-thread Tokio runtime to borrow; the
+/// caller then falls back to the local concurrency counter.
+fn block_on_storage<F, T>(future: F) -> Option<T>
+where
+    F: Future<Output = T> + Send,
+    T: Send,
+{
+    let handle = tokio::runtime::Handle::try_current().ok()?;
+    if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+        return None;
+    }
+    Some(tokio::task::block_in_place(|| handle.block_on(future)))
+}
+
+/// Insert-then-count admission for `api_key_concurrency_holds_v1`.
+///
+/// Returns `Ok(true)` when the hold is admitted, `Ok(false)` when the live
+/// hold count exceeds `cap` (the inserted row is deleted again), or `Err` on
+/// storage failure. Holds older than `max_age` are excluded from the count as
+/// crash leftovers.
+async fn try_acquire_hold(
+    store: &(impl ApiKeyConcurrencyHoldStore + ?Sized),
+    hold: &ApiKeyConcurrencyHold,
+    cap: u32,
+    now_sec: u64,
+) -> Result<bool, StorageError> {
+    store.insert_api_key_concurrency_hold(hold).await?;
+    let count = store
+        .count_api_key_concurrency_holds(
+            &hold.key_id,
+            now_sec,
+            API_KEY_CONCURRENCY_HOLD_MAX_AGE_SECS,
+        )
+        .await?;
+    if count > u64::from(cap) {
+        if let Err(error) = store.delete_api_key_concurrency_hold(hold.hold_id).await {
+            tracing::warn!(%error, hold_id = %hold.hold_id, "failed to roll back over-cap concurrency hold");
+        }
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn durable_bucket_width(window_secs: u64) -> Option<u64> {
@@ -2071,5 +2221,161 @@ mod tests {
                 .sum::<i64>(),
             10,
         );
+    }
+
+    /// In-memory stand-in for `api_key_concurrency_holds_v1` implementing the
+    /// Postgres hold semantics (insert / delete / age-filtered count).
+    #[derive(Default)]
+    struct FakeConcurrencyHoldStore {
+        holds: Mutex<HashMap<Uuid, ApiKeyConcurrencyHold>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApiKeyConcurrencyHoldStore for FakeConcurrencyHoldStore {
+        async fn insert_api_key_concurrency_hold(
+            &self,
+            hold: &ApiKeyConcurrencyHold,
+        ) -> Result<(), StorageError> {
+            self.holds.lock().insert(hold.hold_id, hold.clone());
+            Ok(())
+        }
+
+        async fn delete_api_key_concurrency_hold(&self, hold_id: Uuid) -> Result<(), StorageError> {
+            self.holds.lock().remove(&hold_id);
+            Ok(())
+        }
+
+        async fn count_api_key_concurrency_holds(
+            &self,
+            key_id: &str,
+            now_unix_secs: u64,
+            max_age_secs: u64,
+        ) -> Result<u64, StorageError> {
+            let cutoff = now_unix_secs.saturating_sub(max_age_secs);
+            Ok(self
+                .holds
+                .lock()
+                .values()
+                .filter(|hold| hold.key_id == key_id && hold.acquired_at_unix_secs > cutoff)
+                .count() as u64)
+        }
+
+        async fn delete_expired_api_key_concurrency_holds(
+            &self,
+            now_unix_secs: u64,
+            max_age_secs: u64,
+        ) -> Result<u64, StorageError> {
+            let cutoff = now_unix_secs.saturating_sub(max_age_secs);
+            let mut holds = self.holds.lock();
+            let before = holds.len();
+            holds.retain(|_, hold| hold.acquired_at_unix_secs > cutoff);
+            Ok((before - holds.len()) as u64)
+        }
+    }
+
+    fn hold_for(key_id: &str, writer_epoch: Uuid, acquired_at: u64) -> ApiKeyConcurrencyHold {
+        ApiKeyConcurrencyHold {
+            hold_id: Uuid::now_v7(),
+            key_id: key_id.to_owned(),
+            writer_epoch,
+            acquired_at_unix_secs: acquired_at,
+        }
+    }
+
+    /// Two writer epochs against the same postgres-like store cannot both
+    /// hold a `Concurrent` cap of 1 (issue 807).
+    #[tokio::test]
+    async fn concurrent_holds_enforce_cap_across_writer_epochs() {
+        let store = FakeConcurrencyHoldStore::default();
+        let now_sec = 1_800_000_000_u64;
+        let writer_a = Uuid::now_v7();
+        let writer_b = Uuid::now_v7();
+
+        let hold_a = hold_for("key-a", writer_a, now_sec);
+        assert!(
+            try_acquire_hold(&store, &hold_a, 1, now_sec)
+                .await
+                .expect("first hold"),
+            "first writer should win the single slot",
+        );
+
+        let hold_b = hold_for("key-a", writer_b, now_sec);
+        assert!(
+            !try_acquire_hold(&store, &hold_b, 1, now_sec)
+                .await
+                .expect("second hold"),
+            "second writer must be rejected while the slot is held",
+        );
+        assert_eq!(
+            store.holds.lock().len(),
+            1,
+            "rejected hold must be rolled back",
+        );
+
+        // Crash leftover: a hold older than the writer-lease window no longer
+        // counts, so a new writer can take the slot.
+        let stale = now_sec + API_KEY_CONCURRENCY_HOLD_MAX_AGE_SECS + 1;
+        let hold_c = hold_for("key-a", writer_b, stale);
+        assert!(
+            try_acquire_hold(&store, &hold_c, 1, stale)
+                .await
+                .expect("stale hold"),
+            "expired crash leftover must not block admission",
+        );
+    }
+
+    /// SQLite keeps the local in-process counter: durable sync is active but
+    /// the `Concurrent` cap is still enforced by `KeyConcurrencyManager`.
+    #[tokio::test]
+    async fn sqlite_durable_sync_keeps_local_concurrent_cap() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_url = format!(
+            "sqlite://{}",
+            directory.path().join("concurrent.sqlite").display()
+        );
+        let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000));
+        let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
+            .await
+            .expect("open sqlite");
+        storage_impl
+            .initialize(BackendKind::Sqlite)
+            .await
+            .expect("migrate sqlite");
+        let storage: Arc<dyn Storage> = Arc::new(storage_impl);
+        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock);
+        let handle = engine
+            .start_durable_usage_sync(storage)
+            .await
+            .expect("start durable usage");
+
+        let view = PrincipalView::for_tests(
+            "principal-a",
+            true,
+            vec!["claude-3-opus".to_owned()],
+            vec![Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 1,
+            }],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            index_hash: [13u8; 32],
+            key_hash_b64: "sqlite-concurrent-key".to_owned(),
+            ..StoredApiKeyRecord::default()
+        };
+
+        let first = engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+            .expect("first reservation takes the local slot");
+        assert_eq!(
+            engine
+                .reserve(&view, &record, "principal-a", "claude-3-opus", 0, 0, None)
+                .err(),
+            Some(RejectReason::ConcurrentRateLimit),
+            "local cap must still reject the second reservation",
+        );
+        drop(first);
+        handle.shutdown().await;
     }
 }

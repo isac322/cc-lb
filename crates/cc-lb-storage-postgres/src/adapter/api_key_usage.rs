@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use cc_lb_clock::unix_secs;
 use cc_lb_storage_api::{
-    ApiKeyUsage, ApiKeyUsageBucket, ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey,
-    ApiKeyUsageBucketQuery, ApiKeyUsageBucketStore, ApiKeyUsageCompactionRun, ApiKeyUsageFlush,
-    ApiKeyUsageFlushResult, StorageError, StorageResult,
+    ApiKeyConcurrencyHold, ApiKeyConcurrencyHoldStore, ApiKeyUsage, ApiKeyUsageBucket,
+    ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey, ApiKeyUsageBucketQuery, ApiKeyUsageBucketStore,
+    ApiKeyUsageCompactionRun, ApiKeyUsageFlush, ApiKeyUsageFlushResult, StorageError,
+    StorageResult,
 };
 use sqlx::{Postgres, QueryBuilder, Row};
 use uuid::Uuid;
@@ -154,6 +155,72 @@ impl ApiKeyUsageBucketStore for PostgresStorage {
             folded_rows: stale.len() as u64,
             pruned_rows: pruned,
         })
+    }
+}
+
+#[async_trait]
+impl ApiKeyConcurrencyHoldStore for PostgresStorage {
+    async fn insert_api_key_concurrency_hold(
+        &self,
+        hold: &ApiKeyConcurrencyHold,
+    ) -> StorageResult<()> {
+        sqlx::query("INSERT INTO api_key_concurrency_holds_v1 (hold_id, key_id, writer_epoch, acquired_at_unix_secs) VALUES ($1, $2, $3, $4) ON CONFLICT(hold_id) DO NOTHING")
+            .bind(hold.hold_id)
+            .bind(&hold.key_id)
+            .bind(hold.writer_epoch)
+            .bind(u64_to_i64(hold.acquired_at_unix_secs, "API-key concurrency hold acquired_at")?)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    async fn delete_api_key_concurrency_hold(&self, hold_id: Uuid) -> StorageResult<()> {
+        sqlx::query("DELETE FROM api_key_concurrency_holds_v1 WHERE hold_id = $1")
+            .bind(hold_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    async fn count_api_key_concurrency_holds(
+        &self,
+        key_id: &str,
+        now_unix_secs: u64,
+        max_age_secs: u64,
+    ) -> StorageResult<u64> {
+        let cutoff = now_unix_secs.saturating_sub(max_age_secs);
+        let row = sqlx::query("SELECT COUNT(*)::BIGINT AS live FROM api_key_concurrency_holds_v1 WHERE key_id = $1 AND acquired_at_unix_secs > $2")
+            .bind(key_id)
+            .bind(u64_to_i64(cutoff, "API-key concurrency hold expiry cutoff")?)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+        i64_to_u64(
+            row.try_get::<i64, _>("live").map_err(map_sqlx_error)?,
+            "API-key concurrency hold count",
+        )
+    }
+
+    async fn delete_expired_api_key_concurrency_holds(
+        &self,
+        now_unix_secs: u64,
+        max_age_secs: u64,
+    ) -> StorageResult<u64> {
+        let cutoff = now_unix_secs.saturating_sub(max_age_secs);
+        let deleted = sqlx::query(
+            "DELETE FROM api_key_concurrency_holds_v1 WHERE acquired_at_unix_secs <= $1",
+        )
+        .bind(u64_to_i64(
+            cutoff,
+            "API-key concurrency hold expiry cutoff",
+        )?)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        Ok(deleted)
     }
 }
 

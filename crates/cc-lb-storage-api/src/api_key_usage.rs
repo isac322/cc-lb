@@ -55,3 +55,17 @@ pub struct ApiKeyUsageCompactionRun {
     pub folded_rows: u64,
     pub pruned_rows: u64,
 }
+
+/// A cluster-wide concurrent-request hold recorded by a usage writer.
+///
+/// Postgres-backed deployments insert one row per admitted request so the
+/// `Concurrent` limit is enforced across replicas. Holds whose
+/// `acquired_at_unix_secs` is older than the writer lease window are treated
+/// as crash leftovers and excluded from admission counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyConcurrencyHold {
+    pub hold_id: Uuid,
+    pub key_id: String,
+    pub writer_epoch: Uuid,
+    pub acquired_at_unix_secs: u64,
+}

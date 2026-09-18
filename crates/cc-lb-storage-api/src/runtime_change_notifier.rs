@@ -14,14 +14,20 @@ pub enum ChangeChannel {
     Principal,
     PluginRegistry,
     PluginChain,
+    UpstreamRateLimit,
+    SubscriptionQuota,
+    PromptCacheObservation,
 }
 
 impl ChangeChannel {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 7] = [
         Self::Upstream,
         Self::Principal,
         Self::PluginRegistry,
         Self::PluginChain,
+        Self::UpstreamRateLimit,
+        Self::SubscriptionQuota,
+        Self::PromptCacheObservation,
     ];
 
     pub fn postgres_channel(self) -> &'static str {
@@ -30,6 +36,9 @@ impl ChangeChannel {
             Self::Principal => "cclb_principal_changed",
             Self::PluginRegistry => "cclb_plugin_changed",
             Self::PluginChain => "cclb_plugin_chain_changed",
+            Self::UpstreamRateLimit => "cclb_upstream_rate_limit_changed",
+            Self::SubscriptionQuota => "cclb_subscription_quota_changed",
+            Self::PromptCacheObservation => "cclb_prompt_cache_observation_changed",
         }
     }
 
@@ -39,6 +48,9 @@ impl ChangeChannel {
             "cclb_principal_changed" => Some(Self::Principal),
             "cclb_plugin_changed" => Some(Self::PluginRegistry),
             "cclb_plugin_chain_changed" => Some(Self::PluginChain),
+            "cclb_upstream_rate_limit_changed" => Some(Self::UpstreamRateLimit),
+            "cclb_subscription_quota_changed" => Some(Self::SubscriptionQuota),
+            "cclb_prompt_cache_observation_changed" => Some(Self::PromptCacheObservation),
             _ => None,
         }
     }
