@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Cache Keepalive summary, list, and detail reads now use bounded storage queries and targeted detail lookup instead of materializing unrelated historical decisions, while preserving ordering, pricing, pagination, and selected-row error mappings.
 - Cache Keepalive 24-hour and 7-day cursors now retain the first page's time-window anchor, so pagination remains valid while the server clock advances.
 - PostgreSQL migrations no longer share version `0121` between the API-key concurrency-hold table and the audit principal read-order index, so a fresh database applies the full set instead of aborting on a duplicate `_sqlx_migrations` key.
+- PostgreSQL Settings drafts now accept updates at the current revision, including draft cleanup after file saves and invalid-draft expiry, while still rejecting stale revisions.
 
 ## [0.4.9] - 2026-09-11
 

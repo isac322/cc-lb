@@ -50,6 +50,16 @@ where
         let initial = ConfigStore::get_config_draft(storage.as_ref()).await?;
         assert_eq!(initial, ConfigDraftState::default());
 
+        let missing =
+            ConfigStore::put_config_draft(storage.as_ref(), ConfigDraftState::default(), 1)
+                .await
+                .expect_err("a missing draft cannot match a nonzero revision");
+        assert!(matches!(missing, StorageError::Conflict { .. }));
+        assert_eq!(
+            ConfigStore::get_config_draft(storage.as_ref()).await?,
+            ConfigDraftState::default()
+        );
+
         let revision = ConfigStore::put_config_draft(
             storage.as_ref(),
             ConfigDraftState {
