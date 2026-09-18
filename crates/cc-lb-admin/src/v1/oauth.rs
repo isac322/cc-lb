@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
@@ -23,8 +22,9 @@ use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
-    AuditActorFields, OrganizationMetadataRecord, Storage, StorageError, UpstreamCreate,
-    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord, validate_identifier,
+    AuditActorFields, OAuthPkceStore, OrganizationMetadataRecord, Storage, StorageError,
+    StoredOAuthPkceFlow, UpstreamCreate, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, validate_identifier,
 };
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
@@ -42,11 +42,8 @@ use crate::oauth_pkce::{
     HyperOAuthHttpClient, OAuthTokenError, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
 };
 
-type PkceFlows = Arc<Mutex<HashMap<String, InFlightPkce>>>;
-
-static PKCE_FLOWS: OnceLock<PkceFlows> = OnceLock::new();
-
 const PKCE_FLOW_TTL_SECS: u64 = 900;
+
 const METADATA_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_OAUTH_UPSTREAM_BASE_URL: &str = "https://api.anthropic.com";
 
@@ -148,7 +145,7 @@ struct UpstreamStatusResponse {
     last_warmup_at_unix_secs: Option<u64>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct InFlightPkce {
     handshake: PkceHandshakeState,
     created_at_unix_secs: u64,
@@ -156,7 +153,7 @@ struct InFlightPkce {
     target: PkceTarget,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 enum PkceTarget {
     ExistingUpstream {
         upstream_id: Uuid,
@@ -168,7 +165,7 @@ enum PkceTarget {
     },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct DraftCompletion {
     encrypted_tokens: EncryptedOAuthTokens,
     subscription_metadata_record: UpstreamSubscriptionMetadataRecord,
@@ -255,14 +252,10 @@ async fn start_oauth(
             expected_revision: upstream.revision,
         },
     };
-    match pkce_flows().lock() {
-        Ok(mut flows) => {
-            flows.retain(|_, flow| {
-                now.saturating_sub(flow.created_at_unix_secs) < PKCE_FLOW_TTL_SECS
-            });
-            flows.insert(state_token.clone(), in_flight);
-        }
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    if let Err(response) =
+        persist_pkce_flow(&state, storage.as_ref(), &state_token, &in_flight).await
+    {
+        return response;
     }
 
     let target_upstream = upstream.name.clone();
@@ -312,6 +305,9 @@ async fn start_oauth_draft(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
 ) -> Response {
+    let Some(storage) = state.storage.as_ref() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
+    };
     let claude_default;
     let oauth = match state.config.oauth.anthropic.as_ref() {
         Some(oauth) => oauth,
@@ -352,14 +348,10 @@ async fn start_oauth_draft(
         initiated_by: identity.audit_fields(),
         target: PkceTarget::PendingDraft { completed: None },
     };
-    match pkce_flows().lock() {
-        Ok(mut flows) => {
-            flows.retain(|_, flow| {
-                now.saturating_sub(flow.created_at_unix_secs) < PKCE_FLOW_TTL_SECS
-            });
-            flows.insert(state_token.clone(), in_flight);
-        }
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    if let Err(response) =
+        persist_pkce_flow(&state, storage.as_ref(), &state_token, &in_flight).await
+    {
+        return response;
     }
 
     if let Err(error) = record_admin_audit(
@@ -402,9 +394,12 @@ async fn complete_oauth_draft(
     Extension(identity): Extension<AdminIdentity>,
     Json(payload): Json<CompleteRequest>,
 ) -> Response {
-    let in_flight = match pkce_flows().lock() {
-        Ok(flows) => flows.get(&payload.state_token).cloned(),
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Some(storage) = state.storage.as_ref() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
+    };
+    let in_flight = match load_pkce_flow(&state, storage.as_ref(), &payload.state_token).await {
+        Ok(in_flight) => in_flight,
+        Err(response) => return response,
     };
     let Some(in_flight) = in_flight else {
         return invalid_state_response(
@@ -422,7 +417,7 @@ async fn complete_oauth_draft(
     }
     let initiated_by = in_flight.initiated_by.actor.clone();
 
-    let handshake = match in_flight.handshake.into_handshake() {
+    let handshake = match in_flight.handshake.clone().into_handshake() {
         Ok(handshake) => handshake,
         Err(_) => {
             return invalid_state_response(
@@ -460,9 +455,6 @@ async fn complete_oauth_draft(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
-    let Some(storage) = state.storage.as_ref() else {
-        return StatusCode::NOT_IMPLEMENTED.into_response();
-    };
     let version = storage
         .get_compatibility_kv(CLAUDE_CODE_STABLE_VERSION_KEY)
         .await
@@ -506,26 +498,22 @@ async fn complete_oauth_draft(
         fetched_at_unix_secs: cc_lb_clock::unix_secs(state.clock.now()),
     };
 
-    match pkce_flows().lock() {
-        Ok(mut flows) => match flows.get_mut(&payload.state_token) {
-            Some(InFlightPkce {
-                target: PkceTarget::PendingDraft { completed },
-                ..
-            }) if completed.is_none() => {
-                *completed = Some(Box::new(completion));
-            }
-            Some(InFlightPkce {
-                target: PkceTarget::PendingDraft { .. },
-                ..
-            }) => return invalid_state_response("OAuth draft has already been completed"),
-            Some(_) => return invalid_state_response("state token is for an existing upstream"),
-            None => {
-                return invalid_state_response(
-                    "state token expired or already used — restart the OAuth flow",
-                );
-            }
-        },
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let mut in_flight = in_flight;
+    match &mut in_flight.target {
+        PkceTarget::PendingDraft { completed } if completed.is_none() => {
+            *completed = Some(Box::new(completion));
+        }
+        PkceTarget::PendingDraft { .. } => {
+            return invalid_state_response("OAuth draft has already been completed");
+        }
+        PkceTarget::ExistingUpstream { .. } => {
+            return invalid_state_response("state token is for an existing upstream");
+        }
+    }
+    if let Err(response) =
+        persist_pkce_flow(&state, storage.as_ref(), &payload.state_token, &in_flight).await
+    {
+        return response;
     }
 
     if let Err(error) = record_admin_audit(
@@ -581,22 +569,21 @@ async fn create_upstream_from_oauth_draft(
         )
             .into_response();
     }
-    let draft = match pkce_flows().lock() {
-        Ok(flows) => flows
-            .get(&payload.state_token)
-            .and_then(|flow| match &flow.target {
-                PkceTarget::PendingDraft {
-                    completed: Some(completion),
-                } => Some((completion.clone(), flow.initiated_by.actor.clone())),
-                _ => None,
-            }),
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    let Some((completion, initiated_by)) = draft else {
-        return invalid_state_response("OAuth draft is missing or incomplete");
-    };
     let Some(storage) = state.storage.as_ref() else {
         return StatusCode::NOT_IMPLEMENTED.into_response();
+    };
+    let in_flight = match load_pkce_flow(&state, storage.as_ref(), &payload.state_token).await {
+        Ok(in_flight) => in_flight,
+        Err(response) => return response,
+    };
+    let draft = in_flight.and_then(|flow| match flow.target {
+        PkceTarget::PendingDraft {
+            completed: Some(completion),
+        } => Some((*completion, flow.initiated_by.actor)),
+        _ => None,
+    });
+    let Some((completion, initiated_by)) = draft else {
+        return invalid_state_response("OAuth draft is missing or incomplete");
     };
     let name = payload.name.clone();
     let base_url = match payload.base_url {
@@ -723,8 +710,8 @@ async fn create_upstream_from_oauth_draft(
         .await;
     }
 
-    if let Ok(mut flows) = pkce_flows().lock() {
-        flows.remove(&payload.state_token);
+    if let Err(response) = delete_pkce_flow(storage.as_ref(), &payload.state_token).await {
+        return response;
     }
 
     let target_upstream = updated.name.clone();
@@ -785,16 +772,17 @@ async fn complete_oauth(
         );
         return invalid_state_response("state token does not match this upstream");
     }
-    let in_flight = match pkce_flows().lock() {
-        Ok(flows) => flows.get(&payload.state_token).cloned(),
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Some(storage) = state.storage.as_ref() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
+    };
+    let in_flight = match load_pkce_flow(&state, storage.as_ref(), &payload.state_token).await {
+        Ok(in_flight) => in_flight,
+        Err(response) => return response,
     };
     let Some(in_flight) = in_flight else {
-        let size = pkce_flows().lock().map(|flows| flows.len()).unwrap_or(0);
         tracing::warn!(
             %upstream_id,
-            pkce_flows_size = size,
-            "oauth complete: state token not in pkce flow store (process restart or already consumed)"
+            "oauth complete: state token not in pkce flow store (expired or already consumed)"
         );
         return invalid_state_response(
             "state token expired or already used — restart the OAuth flow",
@@ -814,9 +802,6 @@ async fn complete_oauth(
         return invalid_state_response("state token does not match this upstream");
     }
 
-    let Some(storage) = state.storage.as_ref() else {
-        return StatusCode::NOT_IMPLEMENTED.into_response();
-    };
     let current = match UpstreamStore::get_by_id(storage.as_ref(), upstream_id).await {
         Ok(Some(upstream)) => upstream,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
@@ -859,8 +844,8 @@ async fn complete_oauth(
         }
     };
 
-    if let Ok(mut flows) = pkce_flows().lock() {
-        flows.remove(&payload.state_token);
+    if let Err(response) = delete_pkce_flow(storage.as_ref(), &payload.state_token).await {
+        return response;
     }
 
     let access_token_fingerprint = access_token_fingerprint(&credentials.access_token);
@@ -1030,8 +1015,55 @@ async fn get_oauth_status(
     }
 }
 
-fn pkce_flows() -> &'static PkceFlows {
-    PKCE_FLOWS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+async fn persist_pkce_flow(
+    state: &AdminState,
+    storage: &dyn Storage,
+    state_token: &str,
+    in_flight: &InFlightPkce,
+) -> Result<(), Response> {
+    let encrypted =
+        AeadEncryptedField::<InFlightPkce>::encrypt(&state.aead, in_flight, state_token.as_bytes())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    let flow = StoredOAuthPkceFlow {
+        state_token: state_token.to_owned(),
+        encrypted_payload: encrypted.ciphertext().to_vec(),
+        created_at_unix_secs: in_flight.created_at_unix_secs,
+        expires_at_unix_secs: in_flight
+            .created_at_unix_secs
+            .saturating_add(PKCE_FLOW_TTL_SECS),
+    };
+    storage
+        .put_pkce_flow(&flow)
+        .await
+        .map_err(|error| storage_error_response(&error))
+}
+
+async fn load_pkce_flow(
+    state: &AdminState,
+    storage: &dyn Storage,
+    state_token: &str,
+) -> Result<Option<InFlightPkce>, Response> {
+    let now = cc_lb_clock::unix_secs(state.clock.now());
+    let Some(flow) = storage
+        .get_pkce_flow(state_token, now)
+        .await
+        .map_err(|error| storage_error_response(&error))?
+    else {
+        return Ok(None);
+    };
+    let in_flight = AeadEncryptedField::<InFlightPkce>::from_ciphertext(flow.encrypted_payload)
+        .decrypt(&state.aead, state_token.as_bytes())
+        .map_err(|_| {
+            invalid_state_response("stored PKCE handshake is corrupted — restart the OAuth flow")
+        })?;
+    Ok(Some(in_flight))
+}
+
+async fn delete_pkce_flow(storage: &dyn Storage, state_token: &str) -> Result<(), Response> {
+    storage
+        .delete_pkce_flow(state_token)
+        .await
+        .map_err(|error| storage_error_response(&error))
 }
 
 fn encode_state(upstream_id: Uuid) -> Result<String, serde_json::Error> {
@@ -1174,9 +1206,11 @@ async fn rollback_oauth_draft_creation(
     detail: String,
 ) -> Response {
     let rollback_error = UpstreamStore::hard_delete(storage, upstream_id).await.err();
-    if let Ok(mut flows) = pkce_flows().lock() {
-        flows.remove(state_token);
-    }
+    let pkce_delete_error = storage.delete_pkce_flow(state_token).await.err();
+    let detail = match pkce_delete_error {
+        Some(error) => format!("{detail}; pkce flow cleanup failed: {error}"),
+        None => detail,
+    };
     let detail = match rollback_error {
         Some(error) => format!("{detail}; rollback delete failed: {error}"),
         None => detail,

@@ -7,6 +7,7 @@ pub mod cache_keepalive;
 pub mod cache_keepalive_sessions;
 pub mod error;
 pub mod limits;
+pub mod oauth_pkce;
 pub mod organization_metadata;
 pub mod plan_tiers;
 pub mod plugin_registry;
@@ -45,6 +46,7 @@ pub use cache_keepalive_sessions::*;
 
 pub use error::{PluginChainConflictReason, StorageError, StorageResult};
 pub use limits::*;
+pub use oauth_pkce::{OAuthPkceStore, StoredOAuthPkceFlow};
 pub use organization_metadata::*;
 pub use plan_tiers::*;
 pub use plugin_registry::*;
