@@ -1,0 +1,38 @@
+{
+ "schema": "cc-lb-audit-index-improvement/v1",
+ "method": "A fresh SQLite database built by applying all 84 current-master migrations in order, seeded with 200,000 audit rows across 12 principals, one in seven carrying an admin action. Each query is the shape the admin audit page issues. The A leg keeps the merged read-order indexes; the B leg drops exactly the five indexes that migration 0088 adds, on a fresh connection so the planner re-plans.",
+ "seeded_rows": 200000,
+ "principals": 12,
+ "repeats": 9,
+ "queries": {
+  "recent by principal": {
+   "with_indexes_ms": 0.161,
+   "without_indexes_ms": 7.998,
+   "speedup": 49.7,
+   "plan_with": "SEARCH audit_log_v1 USING INDEX idx_audit_log_principal_ts_id (princip",
+   "plan_without": "SEARCH audit_log_v1 USING INDEX idx_audit_log_principal_seq (principal_id=?) | USE TEMP B-TREE FOR ORDER BY"
+  },
+  "recent admin_only": {
+   "with_indexes_ms": 0.144,
+   "without_indexes_ms": 0.305,
+   "speedup": 2.1,
+   "plan_with": "SCAN audit_log_v1 USING INDEX idx_audit_log_admin_ts_id",
+   "plan_without": "SCAN audit_log_v1 USING INDEX idx_audit_log_ts"
+  },
+  "recent admin_only by principal": {
+   "with_indexes_ms": 0.108,
+   "without_indexes_ms": 7.877,
+   "speedup": 72.9,
+   "plan_with": "SEARCH audit_log_v1 USING INDEX idx_audit_log_admin_principal_ts_id (p",
+   "plan_without": "SEARCH audit_log_v1 USING INDEX idx_audit_log_principal_seq (principal_id=?) | USE TEMP B-TREE FOR ORDER BY"
+  },
+  "recent by actor": {
+   "with_indexes_ms": 0.076,
+   "without_indexes_ms": 21.994,
+   "speedup": 289.4,
+   "plan_with": "SEARCH audit_log_v1 USING COVERING INDEX idx_audit_log_actor_ts_id (ac",
+   "plan_without": "SEARCH audit_log_v1 USING INDEX idx_audit_log_actor_subject (actor_authority=? A | USE TEMP B-TREE FOR ORDER BY"
+  }
+ },
+ "migration": "crates/cc-lb-storage-sqlite/migrations/0088_audit_log_read_order_indexes.sql (merged as #796)"
+}

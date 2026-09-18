@@ -174,3 +174,23 @@ Artifact: `qa/admin-web/runs/2026-09-18/browser-origin-correlation.json`.
 Seeded-scale evidence for the audit and event read paths, including the effect of the
 read-order indexes, is preserved in `qa/admin-web/runs/2026-09-18/scale-experiment.json`
 (300,000 seeded rows, 42,807 in the 24-hour window).
+
+## Improvement measured: audit read-order indexes
+
+The audit indexes merged in #796 were measured as an A/B on a fresh database built from all 84
+current-master SQLite migrations and seeded with 200,000 audit rows. The B leg drops exactly the
+five indexes that migration `0088_audit_log_read_order_indexes.sql` adds.
+
+| Audit page query | Without | With | Gain |
+|---|---|---|---|
+| recent by principal | 8.00 ms | 0.16 ms | 50x |
+| recent, admin only | 0.31 ms | 0.14 ms | 2x |
+| recent, admin only, by principal | 7.88 ms | 0.11 ms | 74x |
+| recent by actor | 21.99 ms | 0.08 ms | 286x |
+
+Without the indexes every scoped query ends in `USE TEMP B-TREE FOR ORDER BY`; with them the
+planner serves the ordering directly, and the actor query becomes a covering index scan. The
+production database currently holds 14 audit rows, so this gain is latent there and grows with
+retention.
+
+Artifact: `qa/admin-web/runs/2026-09-18/audit-index-improvement.json`.
