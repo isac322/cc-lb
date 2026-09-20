@@ -4,12 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-20
+
+### Breaking changes
+
+- Runtime entities are now managed exclusively in the database through the Admin API and dashboard. Legacy bootstrap configuration and unauthenticated downstream mode have been removed, and unknown configuration fields now prevent startup.
+- Update configuration before restarting: move `[tls]` to `[listener.tls]`, `[api_keys.price_catalog]` to `[price_catalog]`, `api_keys.usage_retention_days` to top-level `request_event_retention_days`, and `aead.oauth_aead_key_env` to `aead.key_env`. Remove obsolete `[api_keys]`, `[downstream_auth]`, `[dns]`, `[egress]`, and `lifecycle_*` sections, including empty tables left after moving their settings. Removed nested options include `listener.unix_socket`, `body.per_route_overrides`, `timeouts.request_header_secs`, `timeouts.request_body_chunk_secs`, `timeouts.idle_secs`, `scheduler.retry_classes`, `scheduler.idempotency`, `scheduler.staleness`, `scheduler.pgbouncer_transaction_mode`, `observability.prometheus_endpoint`, `cluster.token_env_optional`, `storage.storage_path`, `runtime.wasmtime.plugin_failure_policy`, `price_catalog.refresh_interval`, and `prompt_cache_shadow.enabled`; the Wasmtime `on_demand` allocation strategy is also no longer accepted.
+- Admin access now requires an explicit provider in `[[admin.auth.providers]]` or `CC_LB_ADMIN_AUTH_PROVIDERS_JSON`. For an existing token, configure `kind = "static_token"`, an `id`, and `token_env = "CC_LB_ADMIN_TOKEN"` (or your existing variable). Remove the old `admin.token_env` and `admin.token` fields. Setting `CC_LB_ADMIN_TOKEN` alone no longer enables admin access.
+- Process settings are fixed at startup. Settings saves write the configuration file and require a restart; SIGHUP only reloads TLS certificates and keys. The former configuration apply/diff endpoints have been removed.
+- Database migrations permanently reduce stored configuration history to revision and application-time metadata, removing previous configuration payloads that could contain secrets. Preserve any configuration snapshots needed for recovery securely before upgrading.
+- Legacy credential APIs and the Credentials page have been removed. Use Upstreams for provider credentials and Principals for managed client keys. Database migrations drop the obsolete credential tables; back up the database and migrate any remaining legacy credentials before upgrading.
+- Obsolete admin status and killswitch endpoints have been removed. The retained `GET /admin/v1/status` response no longer includes `principals`, `plugin_chain_summary`, `killswitch`, `last_reload_status`, or `restart_required_changes`.
+
+### Added
+
+- Admin authentication supports provider-neutral identities with static-token and Cloudflare Access providers, with synchronous security auditing.
+- Request Logs expose latency attribution across downstream I/O, cc-lb processing, upstream networking, upstream wait, and unattributed time.
+
 ### Fixed
 
 - Cache Keepalive summary, list, and detail reads now use bounded storage queries and targeted detail lookup instead of materializing unrelated historical decisions, while preserving ordering, pricing, pagination, and selected-row error mappings.
 - Cache Keepalive 24-hour and 7-day cursors now retain the first page's time-window anchor, so pagination remains valid while the server clock advances.
 - PostgreSQL migrations no longer share version `0121` between the API-key concurrency-hold table and the audit principal read-order index, so a fresh database applies the full set instead of aborting on a duplicate `_sqlx_migrations` key.
 - PostgreSQL Settings drafts now accept updates at the current revision, including draft cleanup after file saves and invalid-draft expiry, while still rejecting stale revisions.
+- PostgreSQL replicas now share concurrent request holds, routing-cache invalidation, WASM upload limits, and OAuth PKCE handshakes.
+- Audit queries apply the admin-only filter before limiting results and use read-order indexes.
+- Admin APIs now accept empty managed-key labels, return invalid inputs as 400 Bad Request, allow clearing upstream base URL overrides, and include base URLs in OAuth draft responses.
+- Admin Web prevents duplicate inline-name saves, keeps plugin deletion available during upload garbage collection, handles cascade-deletion query cleanup and dialog back-navigation, and refreshes terminal routing strategy after principal changes.
 
 ## [0.4.9] - 2026-09-11
 
