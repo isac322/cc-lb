@@ -9,13 +9,16 @@ All notable changes to this project will be documented in this file.
 ### Breaking changes
 
 - Runtime entities are now managed exclusively in the database through the Admin API and dashboard. Legacy bootstrap configuration and unauthenticated downstream mode have been removed, and unknown configuration fields now prevent startup.
+- Update configuration before restarting: move `[tls]` to `[listener.tls]`, `[api_keys.price_catalog]` to `[price_catalog]`, `api_keys.usage_retention_days` to top-level `request_event_retention_days`, and `aead.oauth_aead_key_env` to `aead.key_env`. Remove obsolete `[dns]`, `[egress]`, and `lifecycle_*` sections. Removed nested options include `listener.unix_socket`, `body.per_route_overrides`, `timeouts.request_header_secs`, `timeouts.request_body_chunk_secs`, `timeouts.idle_secs`, `scheduler.retry_classes`, `scheduler.idempotency`, `scheduler.staleness`, `scheduler.pgbouncer_transaction_mode`, `observability.prometheus_endpoint`, `cluster.token_env_optional`, `storage.storage_path`, `runtime.wasmtime.plugin_failure_policy`, `price_catalog.refresh_interval`, and `prompt_cache_shadow.enabled`; the Wasmtime `on_demand` allocation strategy is also no longer accepted.
+- Admin access now requires an explicit provider in `[[admin.auth.providers]]` or `CC_LB_ADMIN_AUTH_PROVIDERS_JSON`. For an existing token, configure `kind = "static_token"`, an `id`, and `token_env = "CC_LB_ADMIN_TOKEN"` (or your existing variable). Remove the old `admin.token_env` and `admin.token` fields. Setting `CC_LB_ADMIN_TOKEN` alone no longer enables admin access.
 - Process settings are fixed at startup. Settings saves write the configuration file and require a restart; SIGHUP only reloads TLS certificates and keys. The former configuration apply/diff endpoints have been removed.
+- Database migrations permanently reduce stored configuration history to revision and application-time metadata, removing previous configuration payloads that could contain secrets. Preserve any configuration snapshots needed for recovery securely before upgrading.
 - Legacy credential APIs and the Credentials page have been removed. Use Upstreams for provider credentials and Principals for managed client keys. Database migrations drop the obsolete credential tables; back up the database and migrate any remaining legacy credentials before upgrading.
-- Obsolete admin status and killswitch endpoints have been removed.
+- Obsolete admin status and killswitch endpoints have been removed. The retained `GET /admin/v1/status` response no longer includes `principals`, `plugin_chain_summary`, `killswitch`, `last_reload_status`, or `restart_required_changes`.
 
 ### Added
 
-- Admin authentication supports provider-neutral identities with static-token and Cloudflare Access providers, with synchronous security auditing. Existing admin-token configuration remains supported through a deprecated compatibility provider.
+- Admin authentication supports provider-neutral identities with static-token and Cloudflare Access providers, with synchronous security auditing.
 - Request Logs expose latency attribution across downstream I/O, cc-lb processing, upstream networking, upstream wait, and unattributed time.
 
 ### Fixed
