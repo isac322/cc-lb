@@ -110,3 +110,10 @@ jobs:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # release-pr runs cargo-doc on every crate to decide the next
+          # versions. That pulls cc-lb-runtime-wasmtime, whose build.rs
+          # pre-builds wasm32 fixtures, and this job has no wasm32 target, so
+          # the fixture build fails with `can't find crate for core`. The
+          # fixtures do not shape the rustdoc surface that semver detection
+          # reads, so skip them here exactly as the preflight job does.
+          CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
