@@ -1,8 +1,8 @@
-# 프롬프트 캐시 공유 저장소 QA 매트릭스 (구현 전)
+# 프롬프트 캐시 공유 저장소 QA 매트릭스와 실행 결과
 
 관련 문서: [prompt-cache-shared-store-decisions.md](prompt-cache-shared-store-decisions.md), [prompt-cache-shared-store-plan.md](prompt-cache-shared-store-plan.md)
 
-이 문서는 PostgreSQL-first 공유 관측 저장소 재설계의 **구현 전 QA 목록**이다. 구현 완료 후 이 목록을 그대로 실행해 결과를 기록한다. 모든 행의 상태는 실행 전까지 `PENDING`이다.
+구현 전에 확정한 PostgreSQL-first 공유 관측 저장소 QA 목록과 실행 결과다. 합격 기준 없이 실측하도록 정한 항목은 `RECORDED`, 동작 검증 항목은 `PASS`로 기록한다. 실행 로그와 로컬 환경의 한계는 각 행의 증거에 남긴다.
 
 ## 1. 검증 대상 계약
 
@@ -412,12 +412,12 @@ scripts/coverage-gate.sh target/coverage.lcov
 
 #### QA-H6. 전체 회귀 스위트
 
-- **상태**: PENDING — 현재 head Linux CI 대기 중. 로컬 전체 스위트 2306 pass; 9건 실패 중 PG 의존 4건은 격리 PG 컨테이너 재검증 4/4 pass(근본 원인은 동일 컨테이너 공유), trybuild 1건 pass, 잔여는 사전 존재 네이티브 Mac PDK SIGSEGV + cargo-deny 로컬 미설치. PDK 크래시 증거는 `target/test-evidence/issue-825/pdk-crash.log`(macOS IPS EXC_BAD_ACCESS, copy_to_guest)이며 lldb 디버깅 로그는 타임아웃으로 증거가 아니다. 전체 워크스페이스 통과 주장 금지.
+- **상태**: PASS — `master`의 요청 로그 분류 변경(#826)을 보존해 rebase한 구현 커밋 `fc7130984aafe89a1f8569b3d6b99b807ef06dec`에서 Linux `ci`, `web`, `publish-check` 모두 통과했다. rebase 직후 로컬 통합 회귀도 77/77 통과했다. 최초 구현 커밋 `8ca710e7`의 세 워크플로도 통과했다. release 전용 artifact 검증 job은 PR 조건에 따라 SKIPPED이며 실행된 검증으로 세지 않는다. 로컬 macOS 전체 실행의 잔여 PDK SIGSEGV 4건과 cargo-deny 미설치 한계는 별도로 유지한다. Linux CI 통과를 macOS 전체 통과로 해석하지 않는다.
 - **Given**: 현재 PR head 커밋(머지 승인은 없으므로 머지된 HEAD가 아니다).
 - **When**: §5의 CI 명령 전체 실행(fmt, audit-redaction lint, clippy sqlite/postgres, deny, llvm-cov nextest, coverage gate, web build/lint/typecheck/vitest). 추가로 결정론적 케이스(QA-B6/B7/B8, QA-D1/D2 등 store·라우팅 수준)를 SQLite와 Postgres에서 각각 20회 이상 반복 실행해 불안정성을 점검한다. 실패한 CI job은 원인 수정 없이 재실행으로 통과시키지 않는다.
 - **Then**: 전부 통과. Postgres 의존 테스트는 `CI_POSTGRES_URL` 환경에서 실행한다. 반복 실행에서 간헐 실패가 나오면 flake로 넘기지 않고 FAIL로 기록한다.
 - **환경**: CI와 동일 조건.
-- **증거**: 로컬 스위트 실행 로그 + 격리 PG 재검증 결과(4/4). CI 실행 링크는 확정 후 기록.
+- **증거**: [CI: fmt·deny·양쪽 clippy·nextest/coverage·E2E](https://github.com/isac322/cc-lb/actions/runs/35529947107), [web](https://github.com/isac322/cc-lb/actions/runs/35529947161), [publish-check](https://github.com/isac322/cc-lb/actions/runs/35529947146). 로컬 증거는 `target/test-evidence/issue-825/`: SQLite/PostgreSQL 저장소 회귀 22개 × 20회, live proxy 8개 × 20회, 격리 PG 재검증 4/4, trybuild 통과 로그. PDK의 macOS IPS `EXC_BAD_ACCESS` 증거는 `pdk-crash.log`; 타임아웃된 lldb 실행은 성공 증거가 아니다.
 
 #### QA-H7. 어드민 라우팅 프리뷰 무회귀 (async 전환)
 
