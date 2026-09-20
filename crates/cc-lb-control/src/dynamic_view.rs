@@ -6,14 +6,16 @@ pub use cc_lb_domain::PlanInfo;
 use cc_lb_domain::RateLimitObservation;
 use cc_lb_observability::ObservabilityHook;
 use cc_lb_routing::RouterPlugin;
-use cc_lb_storage_api::{UpstreamRateLimitObservationRecord, UpstreamRecord};
+use cc_lb_storage_api::{
+    PromptCacheObservationStore, UpstreamRateLimitObservationRecord, UpstreamRecord,
+};
 use cc_lb_upstream::ApiKeyAwareSignerFactory;
 use parking_lot::RwLock;
 use uuid::Uuid;
 
 use crate::api_keys::principal_view::PrincipalView;
 use crate::traits::{
-    NoopSubscriptionQuotaCache, PromptCacheObservationCacheLike, PromptCacheObservationSinkLike,
+    NoopSubscriptionQuotaCache, PromptCacheObservationSinkLike, PromptCacheThreadUsageTrackerLike,
     SubscriptionQuotaCacheLike,
 };
 #[non_exhaustive]
@@ -26,8 +28,10 @@ pub struct DynamicView {
     pub upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
     pub subscription_quota_cache: Arc<dyn SubscriptionQuotaCacheLike>,
     pub subscription_quota_routing_max_staleness_secs: u64,
-    pub prompt_cache_observation_cache: Option<Arc<dyn PromptCacheObservationCacheLike>>,
+    pub prompt_cache_observation_store: Option<Arc<dyn PromptCacheObservationStore>>,
     pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    pub prompt_cache_grace_margin_secs: u64,
+    pub prompt_cache_thread_usage: Option<Arc<dyn PromptCacheThreadUsageTrackerLike>>,
     pub plan_info_by_upstream: HashMap<Uuid, PlanInfo>,
     pub generation: u64,
     upstream_records: Vec<UpstreamRecord>,
@@ -38,10 +42,16 @@ impl DynamicView {
         &self.upstream_records
     }
 
-    pub fn prompt_cache_observation_cache_opt(
+    pub fn prompt_cache_observation_store_opt(
         &self,
-    ) -> Option<&Arc<dyn PromptCacheObservationCacheLike>> {
-        self.prompt_cache_observation_cache.as_ref()
+    ) -> Option<&Arc<dyn PromptCacheObservationStore>> {
+        self.prompt_cache_observation_store.as_ref()
+    }
+
+    pub fn prompt_cache_thread_usage_opt(
+        &self,
+    ) -> Option<&Arc<dyn PromptCacheThreadUsageTrackerLike>> {
+        self.prompt_cache_thread_usage.as_ref()
     }
 
     pub fn prompt_cache_observation_sink_opt(
@@ -176,8 +186,10 @@ pub struct DynamicViewBuilder {
     upstream_rate_limit_cache: Option<Arc<RwLock<UpstreamRateLimitCache>>>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     subscription_quota_routing_max_staleness_secs: Option<u64>,
-    prompt_cache_observation_cache: Option<Arc<dyn PromptCacheObservationCacheLike>>,
+    prompt_cache_observation_store: Option<Arc<dyn PromptCacheObservationStore>>,
     prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    prompt_cache_grace_margin_secs: Option<u64>,
+    prompt_cache_thread_usage: Option<Arc<dyn PromptCacheThreadUsageTrackerLike>>,
     plan_info_by_upstream: HashMap<Uuid, PlanInfo>,
     upstream_records: Vec<UpstreamRecord>,
 }
@@ -194,8 +206,10 @@ impl DynamicViewBuilder {
             upstream_rate_limit_cache: None,
             subscription_quota_cache: None,
             subscription_quota_routing_max_staleness_secs: None,
-            prompt_cache_observation_cache: None,
+            prompt_cache_observation_store: None,
             prompt_cache_observation_sink: None,
+            prompt_cache_grace_margin_secs: None,
+            prompt_cache_thread_usage: None,
             plan_info_by_upstream: HashMap::new(),
             upstream_records: Vec::new(),
         }
@@ -214,8 +228,10 @@ impl DynamicViewBuilder {
             subscription_quota_routing_max_staleness_secs: Some(
                 view.subscription_quota_routing_max_staleness_secs,
             ),
-            prompt_cache_observation_cache: view.prompt_cache_observation_cache.clone(),
+            prompt_cache_observation_store: view.prompt_cache_observation_store.clone(),
             prompt_cache_observation_sink: view.prompt_cache_observation_sink.clone(),
+            prompt_cache_grace_margin_secs: Some(view.prompt_cache_grace_margin_secs),
+            prompt_cache_thread_usage: view.prompt_cache_thread_usage.clone(),
             plan_info_by_upstream: view.plan_info_by_upstream.clone(),
             upstream_records: view.upstreams_snapshot().to_vec(),
         }
@@ -267,11 +283,24 @@ impl DynamicViewBuilder {
         self
     }
 
-    pub fn prompt_cache_observation_cache(
+    pub fn prompt_cache_observation_store(
         mut self,
-        cache: Arc<dyn PromptCacheObservationCacheLike>,
+        store: Arc<dyn PromptCacheObservationStore>,
     ) -> Self {
-        self.prompt_cache_observation_cache = Some(cache);
+        self.prompt_cache_observation_store = Some(store);
+        self
+    }
+
+    pub fn prompt_cache_grace_margin_secs(mut self, grace_margin_secs: u64) -> Self {
+        self.prompt_cache_grace_margin_secs = Some(grace_margin_secs);
+        self
+    }
+
+    pub fn prompt_cache_thread_usage(
+        mut self,
+        tracker: Arc<dyn PromptCacheThreadUsageTrackerLike>,
+    ) -> Self {
+        self.prompt_cache_thread_usage = Some(tracker);
         self
     }
 
@@ -317,8 +346,10 @@ impl DynamicViewBuilder {
             subscription_quota_routing_max_staleness_secs: self
                 .subscription_quota_routing_max_staleness_secs
                 .unwrap_or(0),
-            prompt_cache_observation_cache: self.prompt_cache_observation_cache,
+            prompt_cache_observation_store: self.prompt_cache_observation_store,
             prompt_cache_observation_sink: self.prompt_cache_observation_sink,
+            prompt_cache_grace_margin_secs: self.prompt_cache_grace_margin_secs.unwrap_or(0),
+            prompt_cache_thread_usage: self.prompt_cache_thread_usage,
             plan_info_by_upstream: self.plan_info_by_upstream,
             generation: self.previous_generation.saturating_add(1),
             upstream_records: self.upstream_records,

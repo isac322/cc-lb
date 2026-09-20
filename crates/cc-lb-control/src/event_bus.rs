@@ -75,8 +75,6 @@ pub const DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_ROUTING_TIER_CAPACITY: usize = 4096;
-pub const DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY: usize = 4096;
-
 /// Errors surfaced by [`RequestEventBus`] implementations.
 #[derive(Debug, thiserror::Error)]
 pub enum BusError {
@@ -145,7 +143,6 @@ struct InMemoryBusInner {
     lifecycle_api_key_metrics_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_cache_hit_miss_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_routing_tier_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
-    lifecycle_prompt_cache_observation_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
 }
 
 impl InMemoryBus {
@@ -174,7 +171,6 @@ impl InMemoryBus {
                 lifecycle_api_key_metrics_tx: Mutex::new(None),
                 lifecycle_cache_hit_miss_tx: Mutex::new(None),
                 lifecycle_routing_tier_tx: Mutex::new(None),
-                lifecycle_prompt_cache_observation_tx: Mutex::new(None),
             }),
         }
     }
@@ -323,20 +319,6 @@ impl InMemoryBus {
         *guard = Some(tx);
         rx
     }
-
-    pub fn attach_lifecycle_prompt_cache_observation(
-        &self,
-        capacity: usize,
-    ) -> mpsc::Receiver<LifecycleEvent> {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        let mut guard = self
-            .inner
-            .lifecycle_prompt_cache_observation_tx
-            .lock()
-            .expect("event bus lifecycle prompt cache observation mutex poisoned");
-        *guard = Some(tx);
-        rx
-    }
 }
 
 impl Default for InMemoryBus {
@@ -474,14 +456,7 @@ impl RequestEventBus for InMemoryBus {
                 .expect("event bus lifecycle routing tier mutex poisoned");
             guard.clone()
         };
-        let prompt_cache_observation_tx = {
-            let guard = self
-                .inner
-                .lifecycle_prompt_cache_observation_tx
-                .lock()
-                .expect("event bus lifecycle prompt cache observation mutex poisoned");
-            guard.clone()
-        };
+
         if let Some(tx) = writer_tx {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
@@ -655,24 +630,6 @@ impl RequestEventBus for InMemoryBus {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     tracing::debug!("lifecycle routing tier subscriber mpsc closed");
-                }
-            }
-        }
-        if let LifecycleEvent::PromptCacheObservationsProduced { .. } = &event
-            && let Some(tx) = prompt_cache_observation_tx
-        {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_prompt_cache_observation_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle prompt cache observation subscriber mpsc full; dropping event (prompt cache observation may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle prompt cache observation subscriber mpsc closed");
                 }
             }
         }

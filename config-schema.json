@@ -92,9 +92,7 @@
     "prompt_cache_shadow": {
       "$ref": "#/$defs/PromptCacheShadowConfig",
       "default": {
-        "grace_margin_secs": 30,
-        "max_live_entries_per_partition": 50000,
-        "refresh_debounce_secs": 60
+        "grace_margin_secs": 30
       }
     },
     "request_event_retention_days": {
@@ -634,25 +632,13 @@
       "additionalProperties": false
     },
     "PromptCacheShadowConfig": {
-      "description": "Always-on prompt cache routing configuration.\n\nControls the prompt cache observation cache behavior. Observations from successful responses\nare decoded, upserted into the in-memory cache, and enqueued for persistent storage;\n`build_candidates` reads cache state per `(upstream, canonical model)` partition to compute\ncache scores.\n\nConfiguration keys and defaults:\n- `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed\n- `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence\n- `max_live_entries_per_partition` (default: 50000) - cache-negative admission ceiling for one\n  `(upstream, canonical model)` partition",
+      "description": "Always-on prompt cache routing configuration.\n\nControls prompt cache observation behavior. Observations decoded from successful\nresponses are persisted to the shared observation store, and `build_candidates`\nreads that store per `(upstream, canonical model)` partition to compute cache\nscores.\n\nConfiguration keys and defaults:\n- `grace_margin_secs` (default: 30) - margin subtracted from the observed TTL when\n  an observation's expiry is recorded, expiring entries slightly early to absorb\n  provider-side TTL jitter",
       "type": "object",
       "properties": {
         "grace_margin_secs": {
           "type": "integer",
           "format": "uint64",
           "default": 30,
-          "minimum": 0
-        },
-        "max_live_entries_per_partition": {
-          "type": "integer",
-          "format": "uint",
-          "default": 50000,
-          "minimum": 0
-        },
-        "refresh_debounce_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
           "minimum": 0
         }
       },

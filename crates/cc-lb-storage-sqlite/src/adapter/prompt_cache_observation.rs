@@ -3,7 +3,7 @@ use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::{
     PromptCacheObservationRecord, PromptCacheObservationStore, StorageError, StorageResult,
 };
-use sqlx::{QueryBuilder, Row, Sqlite};
+use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
@@ -18,6 +18,11 @@ const PURGE_MAX_BATCHES: usize = 1_024;
 #[async_trait]
 impl PromptCacheObservationStore for SqliteStorage {
     async fn upsert_observation(&self, record: &PromptCacheObservationRecord) -> StorageResult<()> {
+        // Monotonic winner update: the row is only overwritten when the incoming
+        // (expires_at, last_observed_at) pair is strictly newer, so a delayed or
+        // replayed write cannot regress a fresher observation. The WHERE guard
+        // keeps the update atomic — the winner's metadata is written whole, never
+        // spliced with the loser's fields.
         sqlx::query(
             "INSERT INTO prompt_cache_observations \
              (upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source) \
@@ -28,7 +33,10 @@ impl PromptCacheObservationStore for SqliteStorage {
              hash_schema_version = excluded.hash_schema_version, \
              prefix_content_block_index = excluded.prefix_content_block_index, \
              estimated_prefix_tokens = excluded.estimated_prefix_tokens, \
-             token_estimate_source = excluded.token_estimate_source",
+             token_estimate_source = excluded.token_estimate_source \
+             WHERE excluded.expires_at > prompt_cache_observations.expires_at \
+                OR (excluded.expires_at = prompt_cache_observations.expires_at \
+                    AND excluded.last_observed_at > prompt_cache_observations.last_observed_at)",
         )
         .bind(record.upstream_id.to_string())
         .bind(&record.canonical_model_id)
@@ -46,18 +54,32 @@ impl PromptCacheObservationStore for SqliteStorage {
         Ok(())
     }
 
-    async fn list_active_for_upstream(
+    async fn list_active_for_candidates(
         &self,
-        upstream_id: Uuid,
+        upstream_ids: &[Uuid],
+        canonical_model_id: &str,
+        v3_prefix_keys: &[String],
         not_expired_at_unix_secs: u64,
     ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
+        if upstream_ids.is_empty() || v3_prefix_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Bound JSON arrays keep the whole candidate set in two binds, so the
+        // lookup stays a single statement with one snapshot regardless of input
+        // size — no IN-list bind-limit chunking. json_each is the same JSON1
+        // path request_events uses for bound principal lists.
         let rows = sqlx::query(
             "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source \
              FROM prompt_cache_observations \
-             WHERE upstream_id = ? AND expires_at > ? \
-             ORDER BY v3_prefix_key, ttl_class",
+             WHERE upstream_id IN (SELECT CAST(value AS TEXT) FROM json_each(?1)) \
+               AND canonical_model_id = ?2 \
+               AND v3_prefix_key IN (SELECT value FROM json_each(?3)) \
+               AND expires_at > ?4 \
+             ORDER BY upstream_id, v3_prefix_key, ttl_class",
         )
-        .bind(upstream_id.to_string())
+        .bind(serde_json::to_string(upstream_ids)?)
+        .bind(canonical_model_id)
+        .bind(serde_json::to_string(v3_prefix_keys)?)
         .bind(u64_to_i64(
             not_expired_at_unix_secs,
             "prompt cache not_expired_at_unix_secs",
@@ -66,43 +88,6 @@ impl PromptCacheObservationStore for SqliteStorage {
         .await
         .map_err(map_sqlx_error)?;
 
-        rows.into_iter().map(row_to_record).collect()
-    }
-
-    async fn list_active_for_upstream_keys(
-        &self,
-        upstream_id: Uuid,
-        not_expired_at_unix_secs: u64,
-        v3_prefix_keys: &[String],
-    ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
-        if v3_prefix_keys.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut query_builder = QueryBuilder::<Sqlite>::new(
-            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source \
-             FROM prompt_cache_observations \
-             WHERE upstream_id = ",
-        );
-        query_builder
-            .push_bind(upstream_id.to_string())
-            .push(" AND expires_at > ")
-            .push_bind(u64_to_i64(
-                not_expired_at_unix_secs,
-                "prompt cache not_expired_at_unix_secs",
-            )?)
-            .push(" AND v3_prefix_key IN (");
-        for (index, key) in v3_prefix_keys.iter().enumerate() {
-            if index > 0 {
-                query_builder.push(", ");
-            }
-            query_builder.push_bind(key);
-        }
-        query_builder.push(") ORDER BY v3_prefix_key, ttl_class");
-        let rows = query_builder
-            .build()
-            .fetch_all(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
         rows.into_iter().map(row_to_record).collect()
     }
 

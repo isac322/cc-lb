@@ -17,8 +17,9 @@ use uuid::Uuid;
 
 struct PreviewPort;
 
+#[async_trait::async_trait]
 impl RoutePreviewPort for PreviewPort {
-    fn preview_route(
+    async fn preview_route(
         &self,
         _input: RoutePreviewInput,
     ) -> Result<RoutePreviewOutcome, RoutePreviewError> {

@@ -2,9 +2,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    AuthFailure, AuthInfo, LimitDecisionKind, ParseFailure, ParseInfo, PromptCacheObservationWire,
-    RouteFailure, RouteInfo, StreamError, StreamSuccess, TerminationReason, UsageSnapshot,
-    UsageSource,
+    AuthFailure, AuthInfo, LimitDecisionKind, ParseFailure, ParseInfo, RouteFailure, RouteInfo,
+    StreamError, StreamSuccess, TerminationReason, UsageSnapshot, UsageSource,
 };
 
 /// Application-generated unique identifier for a single request lifecycle.
@@ -217,17 +216,6 @@ pub enum LifecycleEvent {
         event_id: EventId,
         cache_state: cc_lb_request_log::RequestCacheState,
     },
-    /// Emitted by request producers after prompt-cache observations are decoded.
-    /// The prompt-cache observation subscriber owns cache writes, sink enqueue,
-    /// and drop metric side effects for these records.
-    PromptCacheObservationsProduced {
-        event_id: EventId,
-        upstream_id: Uuid,
-        canonical_model_id: String,
-        observations: Vec<PromptCacheObservationWire>,
-        dropped_below_threshold: u32,
-        dropped_aborted: u32,
-    },
 }
 
 impl LifecycleEvent {
@@ -248,8 +236,7 @@ impl LifecycleEvent {
             | Self::StreamCompleted { event_id, .. }
             | Self::RequestTerminated { event_id, .. }
             | Self::Priced { event_id, .. }
-            | Self::CacheObserved { event_id, .. }
-            | Self::PromptCacheObservationsProduced { event_id, .. } => event_id,
+            | Self::CacheObserved { event_id, .. } => event_id,
         }
     }
 
@@ -271,7 +258,6 @@ impl LifecycleEvent {
             Self::RequestTerminated { .. } => "request_terminated",
             Self::Priced { .. } => "priced",
             Self::CacheObserved { .. } => "cache_observed",
-            Self::PromptCacheObservationsProduced { .. } => "prompt_cache_observations_produced",
         }
     }
 }

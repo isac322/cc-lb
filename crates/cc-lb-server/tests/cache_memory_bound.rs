@@ -1,11 +1,7 @@
 use std::sync::Arc;
 
-use cc_lb_domain::TtlClass;
-use cc_lb_engine::clock::{ClockHandle, TestClock, unix_secs};
-use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
-use cc_lb_server::prompt_cache_observation_cache::{
-    PromptCacheObservationCache, PromptCacheObservationUpsert,
-};
+use cc_lb_engine::lifecycle::PromptCacheThreadUsage;
+use cc_lb_server::prompt_cache_thread_usage::PromptCacheThreadUsageTracker;
 use uuid::Uuid;
 
 #[global_allocator]
@@ -14,17 +10,16 @@ static A: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 const BASE_TS: u64 = 1_700_000_000;
 const MODEL: &str = "claude-sonnet-4-5-20250929";
 const UPSTREAM_COUNT: usize = 10;
-const OBSERVATIONS_PER_UPSTREAM: usize = 10_000;
-const OBSERVATION_COUNT: usize = UPSTREAM_COUNT * OBSERVATIONS_PER_UPSTREAM;
+const THREADS_PER_UPSTREAM: usize = 10_000;
 const DELTA_LIMIT_MIB: usize = 200;
 const BYTES_PER_MIB: usize = 1024 * 1024;
 
+/// The tracker caps thread-usage entries per upstream, so recording far more
+/// threads than the cap must stay within a small memory bound.
 #[tokio::test]
 #[ignore]
-async fn prompt_cache_100k_observations_under_200mib() {
-    let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
-    let now = unix_secs(clock.now());
-    let cache = PromptCacheObservationCache::new_with_debounce(clock, 30, 60);
+async fn thread_usage_tracker_stays_bounded_under_cap() {
+    let tracker = Arc::new(PromptCacheThreadUsageTracker::new(30));
     let upstreams: Vec<Uuid> = (0..UPSTREAM_COUNT)
         .map(|upstream_index| Uuid::from_u128((upstream_index + 1) as u128))
         .collect();
@@ -32,19 +27,19 @@ async fn prompt_cache_100k_observations_under_200mib() {
     let before_bytes = allocated_bytes();
 
     for (upstream_index, upstream_id) in upstreams.iter().copied().enumerate() {
-        for per_upstream_index in 0..OBSERVATIONS_PER_UPSTREAM {
-            let observation_index = upstream_index * OBSERVATIONS_PER_UPSTREAM + per_upstream_index;
-            cache.upsert_observation(PromptCacheObservationUpsert {
+        for per_upstream_index in 0..THREADS_PER_UPSTREAM {
+            let thread_index = upstream_index * THREADS_PER_UPSTREAM + per_upstream_index;
+            tracker.record_thread_usage(
                 upstream_id,
-                canonical_model: MODEL.to_owned(),
-                prefix_hash: format!("hash-{observation_index:09}"),
-                ttl_class: TtlClass::Ephemeral5m,
-                expires_at_unix_secs: now + 300,
-                last_observed_at_unix_secs: now,
-                prefix_content_block_index: 0,
-                estimated_prefix_tokens: 0,
-                token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
-            });
+                MODEL,
+                &format!("thread-{thread_index:09}"),
+                PromptCacheThreadUsage {
+                    cache_read_input_tokens: 1_024,
+                    cache_creation_input_tokens_5m: 0,
+                    cache_creation_input_tokens_1h: 0,
+                },
+                BASE_TS + thread_index as u64,
+            );
         }
     }
 
@@ -53,7 +48,7 @@ async fn prompt_cache_100k_observations_under_200mib() {
     let delta_mib = delta_bytes / BYTES_PER_MIB;
 
     eprintln!(
-        "cache_memory_bound: before_bytes={before_bytes} after_bytes={after_bytes} delta_mib={delta_mib} observation_count={OBSERVATION_COUNT}"
+        "cache_memory_bound: before_bytes={before_bytes} after_bytes={after_bytes} delta_mib={delta_mib}"
     );
 
     assert!(

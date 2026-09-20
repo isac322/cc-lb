@@ -479,33 +479,26 @@ impl Default for SubscriptionQuotaConfig {
 
 /// Always-on prompt cache routing configuration.
 ///
-/// Controls the prompt cache observation cache behavior. Observations from successful responses
-/// are decoded, upserted into the in-memory cache, and enqueued for persistent storage;
-/// `build_candidates` reads cache state per `(upstream, canonical model)` partition to compute
-/// cache scores.
+/// Controls prompt cache observation behavior. Observations decoded from successful
+/// responses are persisted to the shared observation store, and `build_candidates`
+/// reads that store per `(upstream, canonical model)` partition to compute cache
+/// scores.
 ///
 /// Configuration keys and defaults:
-/// - `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed
-/// - `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence
-/// - `max_live_entries_per_partition` (default: 50000) - cache-negative admission ceiling for one
-///   `(upstream, canonical model)` partition
+/// - `grace_margin_secs` (default: 30) - margin subtracted from the observed TTL when
+///   an observation's expiry is recorded, expiring entries slightly early to absorb
+///   provider-side TTL jitter
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PromptCacheShadowConfig {
     #[serde(default = "default_prompt_cache_shadow_grace_margin_secs")]
     pub grace_margin_secs: u64,
-    #[serde(default = "default_prompt_cache_shadow_refresh_debounce_secs")]
-    pub refresh_debounce_secs: u64,
-    #[serde(default = "default_prompt_cache_shadow_max_live_entries_per_partition")]
-    pub max_live_entries_per_partition: usize,
 }
 
 impl Default for PromptCacheShadowConfig {
     fn default() -> Self {
         Self {
             grace_margin_secs: 30,
-            refresh_debounce_secs: 60,
-            max_live_entries_per_partition: 50_000,
         }
     }
 }
@@ -1039,14 +1032,6 @@ fn default_prompt_cache_shadow_grace_margin_secs() -> u64 {
     PromptCacheShadowConfig::default().grace_margin_secs
 }
 
-fn default_prompt_cache_shadow_refresh_debounce_secs() -> u64 {
-    PromptCacheShadowConfig::default().refresh_debounce_secs
-}
-
-fn default_prompt_cache_shadow_max_live_entries_per_partition() -> usize {
-    PromptCacheShadowConfig::default().max_live_entries_per_partition
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1160,6 +1145,14 @@ cache_path = "/tmp/prices.json"
             (
                 "price_catalog.refresh_interval",
                 "[price_catalog]\nrefresh_interval = \"1h\"\n",
+            ),
+            (
+                "prompt_cache_shadow.refresh_debounce_secs",
+                "[prompt_cache_shadow]\nrefresh_debounce_secs = 60\n",
+            ),
+            (
+                "prompt_cache_shadow.max_live_entries_per_partition",
+                "[prompt_cache_shadow]\nmax_live_entries_per_partition = 50000\n",
             ),
             (
                 "prompt_cache_shadow.enabled",

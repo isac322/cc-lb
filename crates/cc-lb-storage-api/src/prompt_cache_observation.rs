@@ -23,6 +23,12 @@ pub struct PromptCacheObservationRecord {
 
 #[async_trait]
 pub trait PromptCacheObservationStore: Send + Sync + 'static {
+    /// Atomically records an observation. Writes are monotonic: the winner is
+    /// the record with the lexicographically greater `(expires_at,
+    /// last_observed_at)` pair, so a stale write can never regress a fresher
+    /// row. On a full tie the stored row is kept whole — winner metadata is
+    /// never spliced with loser fields — and replaying an identical record is a
+    /// no-op.
     async fn upsert_observation(
         &self,
         _record: &PromptCacheObservationRecord,
@@ -33,22 +39,28 @@ pub trait PromptCacheObservationStore: Send + Sync + 'static {
         })
     }
 
-    async fn list_active_for_upstream(
+    /// Batch lookup of active observations for one request's routing candidates:
+    /// every `upstream_id` × `v3_prefix_key` pair under one `canonical_model_id`
+    /// whose `expires_at` is still after `not_expired_at_unix_secs`.
+    ///
+    /// Results are deterministically ordered by `(upstream_id, v3_prefix_key,
+    /// ttl_class)` under each backend's own collation.
+    ///
+    /// Empty `upstream_ids` or `v3_prefix_keys` MUST return `Ok(vec![])` without
+    /// issuing a query. The default implementation reports `Unavailable` rather
+    /// than silently returning an empty snapshot, so an unimplemented backend
+    /// cannot masquerade as "no observations".
+    async fn list_active_for_candidates(
         &self,
-        _upstream_id: Uuid,
+        _upstream_ids: &[Uuid],
+        _canonical_model_id: &str,
+        _v3_prefix_keys: &[String],
         _not_expired_at_unix_secs: u64,
     ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_active_for_upstream_keys(
-        &self,
-        upstream_id: Uuid,
-        not_expired_at_unix_secs: u64,
-        _v3_prefix_keys: &[String],
-    ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
-        self.list_active_for_upstream(upstream_id, not_expired_at_unix_secs)
-            .await
+        Err(StorageError::Unavailable {
+            message: "PromptCacheObservationStore::list_active_for_candidates is not implemented"
+                .to_owned(),
+        })
     }
 
     async fn purge_expired_before(&self, _ts_unix_secs: u64) -> StorageResult<u64> {

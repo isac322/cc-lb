@@ -27,8 +27,9 @@ impl ServerRoutePreviewPort {
     }
 }
 
+#[async_trait]
 impl RoutePreviewPort for ServerRoutePreviewPort {
-    fn preview_route(
+    async fn preview_route(
         &self,
         input: RoutePreviewInput,
     ) -> Result<RoutePreviewOutcome, RoutePreviewError> {
@@ -40,6 +41,7 @@ impl RoutePreviewPort for ServerRoutePreviewPort {
                 headers: input.headers,
                 body_bytes: input.body_bytes,
             })
+            .await
             .map_err(map_preview_error)?;
         let winner = match (outcome.winner_upstream_id, outcome.winner_upstream_name) {
             (Some(upstream_id), Some(name)) => Some(RoutePreviewWinner { upstream_id, name }),
