@@ -26,6 +26,13 @@ pub struct RequestEventStreamFilters {
     pub upstream: Option<cc_lb_request_log::RequestEventUpstream>,
     pub upstream_id: Option<Uuid>,
     pub status_class: Option<StatusClass>,
+    /// Endpoint classification filter. `Some(kind)` matches rows whose
+    /// effective kind (renewal via `source_kind` precedence, else stored
+    /// `event_kind`, else `unclassified` for historical NULLs) equals `kind`.
+    /// When set, it bypasses the implicit `source_kind <> 'renewal'`
+    /// exclusion on list/histogram queries unless `source_kind` is also
+    /// explicitly supplied.
+    pub event_kind: Option<cc_lb_request_log::RequestEventKind>,
 }
 
 /// Case-insensitive ASCII prefix match for the request-log model filter.

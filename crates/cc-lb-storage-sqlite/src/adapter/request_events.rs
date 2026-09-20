@@ -3,7 +3,7 @@ use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
     RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
     RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket, RequestEventKeyUsageQuery,
-    RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
+    RequestEventKind, RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
     RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
     RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_pattern,
     model_filter_matches, normalize_usage_rollup_dimension,
@@ -135,22 +135,24 @@ impl RequestEventStore for SqliteStorage {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query_as::<_, (i64, Option<String>, Option<String>, String)>(
-            "SELECT id, source_kind, source_ref_id, payload FROM request_events_v1 \
+        let rows =
+            sqlx::query_as::<_, (i64, Option<String>, Option<String>, Option<String>, String)>(
+                "SELECT id, source_kind, source_ref_id, event_kind, payload FROM request_events_v1 \
              WHERE id > ? AND id <= ? \
              ORDER BY id ASC LIMIT ?",
-        )
-        .bind(u64_to_i64(after, "request event cursor after")?)
-        .bind(u64_to_i64(until, "request event cursor until")?)
-        .bind(usize_to_i64(limit.min(500), "request event cursor limit")?)
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
+            )
+            .bind(u64_to_i64(after, "request event cursor after")?)
+            .bind(u64_to_i64(until, "request event cursor until")?)
+            .bind(usize_to_i64(limit.min(500), "request event cursor limit")?)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|(id, source_kind, source_ref_id, payload)| {
+            .map(|(id, source_kind, source_ref_id, event_kind, payload)| {
                 let cursor = i64_to_u64(id, "request event cursor")?;
-                let event = request_event_from_storage(&payload, source_kind, source_ref_id)?;
+                let event =
+                    request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)?;
                 Ok((cursor, event))
             })
             .filter(|result| match result {
@@ -683,6 +685,42 @@ async fn request_event_principal_costs(
 /// Do not tighten this to the exact window.
 const HISTOGRAM_INDEX_HINT_SLACK_MS: u64 = 60_000;
 
+const HISTOGRAM_SQL_HEAD: &str = "SELECT MIN(MAX((list_ts_ms - ?1) / ?2, 0), ?3) AS bucket_index, \
+        COUNT(*) AS total_count, \
+        COUNT(CASE WHEN list_status >= 500 \
+            OR (list_status BETWEEN 200 AND 299 \
+                AND error_code = 'upstream_stream_error') \
+            THEN 1 END) AS error_count \
+ FROM request_events_v1 \
+ WHERE ts >= ?4 AND ts <= ?5 \
+   AND list_ts_ms >= ?15 AND list_ts_ms < ?16 \
+   AND (?6 IS NULL OR principal_id = ?6) \
+   AND (?7 IS NULL OR lower(model) LIKE ?7 ESCAPE '\\') \
+   AND (?8 IS NULL OR upstream_id = ?8) \
+   AND (?14 IS NULL OR thread_id = ?14) \
+   AND (?9 IS NULL OR list_upstream = ?9) \
+   AND (?10 IS NULL OR list_status BETWEEN ?10 AND ?11) \
+   AND ( \
+         ?12 = 1 \
+      OR (?13 IS NOT NULL AND source_kind = ?13) \
+      OR (?13 IS NULL AND ?17 IS NOT NULL) \
+      OR (?13 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) \
+   )";
+
+// Emitted only when `event_kind` is `Some`: a direct equality against the
+// effective kind so the query can seek
+// `request_events_v1_event_kind_list_order_idx` instead of scanning the whole
+// time window. The `?17 IS NULL OR ...` optional form cannot use that index,
+// so the clause is omitted entirely when no kind filter is set. `?17` stays
+// bound in both branches because the source_kind clause above still
+// references it.
+const HISTOGRAM_EVENT_KIND_FILTER: &str = " \
+   AND CASE WHEN source_kind = 'renewal' THEN 'renewal' \
+            ELSE COALESCE(event_kind, 'unclassified') END = ?17";
+
+const HISTOGRAM_SQL_TAIL: &str = " \
+ GROUP BY bucket_index";
+
 async fn request_event_histogram(
     storage: &SqliteStorage,
     query: &RequestEventHistogramQuery,
@@ -713,80 +751,76 @@ async fn request_event_histogram(
     let (source_kind_all, source_kind_exact) =
         request_event_list_sql::source_kind_filter(query.source_kind.as_deref());
 
-    let rows = sqlx::query_as::<_, (i64, i64, i64)>(
-        "SELECT MIN(MAX((list_ts_ms - ?1) / ?2, 0), ?3) AS bucket_index, \
-                COUNT(*) AS total_count, \
-                COUNT(CASE WHEN list_status >= 500 \
-                    OR (list_status BETWEEN 200 AND 299 \
-                        AND error_code = 'upstream_stream_error') \
-                    THEN 1 END) AS error_count \
-         FROM request_events_v1 \
-         WHERE ts >= ?4 AND ts <= ?5 \
-           AND list_ts_ms >= ?15 AND list_ts_ms < ?16 \
-           AND (?6 IS NULL OR principal_id = ?6) \
-           AND (?7 IS NULL OR lower(model) LIKE ?7 ESCAPE '\\') \
-           AND (?8 IS NULL OR upstream_id = ?8) \
-           AND (?14 IS NULL OR thread_id = ?14) \
-           AND (?9 IS NULL OR list_upstream = ?9) \
-           AND (?10 IS NULL OR list_status BETWEEN ?10 AND ?11) \
-           AND ( \
-                 ?12 = 1 \
-              OR (?13 IS NOT NULL AND source_kind = ?13) \
-              OR (?13 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) \
-           ) \
-         GROUP BY bucket_index",
-    )
-    .bind(u64_to_i64(
-        range_start_ms,
-        "request event histogram range start",
-    )?)
-    .bind(u64_to_i64(
-        query.bucket_ms,
-        "request event histogram bucket width",
-    )?)
-    .bind(u64_to_i64(
-        query.bucket_count.saturating_sub(1),
-        "request event histogram last bucket",
-    )?)
-    .bind(u64_to_i64(
-        query.since_unix_secs,
-        "request event histogram since",
-    )?)
-    .bind(u64_to_i64_upper(query.until_unix_secs))
-    .bind(query.filters.principal_id.as_deref())
-    .bind(
-        query
-            .filters
-            .model
-            .as_deref()
-            .map(model_filter_like_pattern),
-    )
-    .bind(query.filters.upstream_id.map(|id| id.to_string()))
-    .bind(
-        query
-            .filters
-            .upstream
-            .map(request_event_list_sql::upstream_as_str),
-    )
-    .bind(status_min)
-    .bind(status_max)
-    .bind(i64::from(source_kind_all))
-    .bind(source_kind_exact)
-    .bind(query.filters.thread_id.as_deref())
-    .bind(u64_to_i64(
-        range_start_ms.saturating_sub(HISTOGRAM_INDEX_HINT_SLACK_MS),
-        "request event histogram index hint lower bound",
-    )?)
-    .bind(u64_to_i64_upper(
-        query
-            .until_unix_secs
-            .saturating_add(1)
-            .saturating_mul(1_000)
-            .saturating_add(HISTOGRAM_INDEX_HINT_SLACK_MS),
-    ))
-    .fetch_all(storage.pool())
-    .await
-    .map_err(map_sqlx_error)?;
+    static SQL: std::sync::LazyLock<(String, String)> = std::sync::LazyLock::new(|| {
+        (
+            [HISTOGRAM_SQL_HEAD, HISTOGRAM_SQL_TAIL].concat(),
+            [
+                HISTOGRAM_SQL_HEAD,
+                HISTOGRAM_EVENT_KIND_FILTER,
+                HISTOGRAM_SQL_TAIL,
+            ]
+            .concat(),
+        )
+    });
+    let sql = if query.filters.event_kind.is_some() {
+        SQL.1.as_str()
+    } else {
+        SQL.0.as_str()
+    };
+
+    let rows = sqlx::query_as::<_, (i64, i64, i64)>(sql)
+        .bind(u64_to_i64(
+            range_start_ms,
+            "request event histogram range start",
+        )?)
+        .bind(u64_to_i64(
+            query.bucket_ms,
+            "request event histogram bucket width",
+        )?)
+        .bind(u64_to_i64(
+            query.bucket_count.saturating_sub(1),
+            "request event histogram last bucket",
+        )?)
+        .bind(u64_to_i64(
+            query.since_unix_secs,
+            "request event histogram since",
+        )?)
+        .bind(u64_to_i64_upper(query.until_unix_secs))
+        .bind(query.filters.principal_id.as_deref())
+        .bind(
+            query
+                .filters
+                .model
+                .as_deref()
+                .map(model_filter_like_pattern),
+        )
+        .bind(query.filters.upstream_id.map(|id| id.to_string()))
+        .bind(
+            query
+                .filters
+                .upstream
+                .map(request_event_list_sql::upstream_as_str),
+        )
+        .bind(status_min)
+        .bind(status_max)
+        .bind(i64::from(source_kind_all))
+        .bind(source_kind_exact)
+        .bind(query.filters.thread_id.as_deref())
+        .bind(u64_to_i64(
+            range_start_ms.saturating_sub(HISTOGRAM_INDEX_HINT_SLACK_MS),
+            "request event histogram index hint lower bound",
+        )?)
+        .bind(u64_to_i64_upper(
+            query
+                .until_unix_secs
+                .saturating_add(1)
+                .saturating_mul(1_000)
+                .saturating_add(HISTOGRAM_INDEX_HINT_SLACK_MS),
+        ))
+        .bind(query.filters.event_kind.map(|kind| kind.as_str()))
+        .fetch_all(storage.pool())
+        .await
+        .map_err(map_sqlx_error)?;
 
     for (bucket_index, total_count, error_count) in rows {
         let bucket_index = usize::try_from(bucket_index).map_err(|_| StorageError::Corrupted {
@@ -869,7 +903,8 @@ async fn insert_request_event_in_tx(
         "list_request_body_receive_ms, list_request_body_wait_ms, ",
         "list_request_body_process_ms, list_request_body_chunk_count, ",
         "list_response_body_wait_ms, list_response_body_process_ms, ",
-        "list_response_body_downstream_poll_gap_ms, list_retry_overhead_ms",
+        "list_response_body_downstream_poll_gap_ms, list_retry_overhead_ms, ",
+        "event_kind",
         ") VALUES (",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
@@ -880,7 +915,7 @@ async fn insert_request_event_in_tx(
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?",
+        "?, ?",
         ") ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING ",
         "RETURNING id",
     ))
@@ -1130,6 +1165,7 @@ async fn insert_request_event_in_tx(
     .bind(event.response_body_process_ms)
     .bind(event.response_body_downstream_poll_gap_ms)
     .bind(event.retry_overhead_ms)
+    .bind(event.event_kind.map(|kind| kind.as_str()))
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx_error)
@@ -1243,21 +1279,23 @@ async fn query_request_events(
     }
 
     let sql = format!(
-        "SELECT source_kind, source_ref_id, payload FROM request_events_v1 \
+        "SELECT source_kind, source_ref_id, event_kind, payload FROM request_events_v1 \
          WHERE ts >= ? AND ts <= ? \
          ORDER BY id {direction} LIMIT ?"
     );
-    let rows = sqlx::query_as::<_, (Option<String>, Option<String>, String)>(AssertSqlSafe(sql))
-        .bind(u64_to_i64(since, "request event since")?)
-        .bind(u64_to_i64_upper(until))
-        .bind(usize_to_i64(limit, "request event limit")?)
-        .fetch_all(storage.pool())
-        .await
-        .map_err(map_sqlx_error)?;
+    let rows = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, String)>(
+        AssertSqlSafe(sql),
+    )
+    .bind(u64_to_i64(since, "request event since")?)
+    .bind(u64_to_i64_upper(until))
+    .bind(usize_to_i64(limit, "request event limit")?)
+    .fetch_all(storage.pool())
+    .await
+    .map_err(map_sqlx_error)?;
 
     rows.into_iter()
-        .map(|(source_kind, source_ref_id, payload)| {
-            request_event_from_storage(&payload, source_kind, source_ref_id)
+        .map(|(source_kind, source_ref_id, event_kind, payload)| {
+            request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)
         })
         .collect()
 }
@@ -1266,6 +1304,7 @@ fn request_event_from_storage(
     payload: &str,
     source_kind: Option<String>,
     source_ref_id: Option<String>,
+    event_kind: Option<String>,
 ) -> StorageResult<RequestEvent> {
     let mut event = serde_json::from_str::<RequestEvent>(payload)?;
     if source_kind.is_some() {
@@ -1273,6 +1312,11 @@ fn request_event_from_storage(
     }
     if source_ref_id.is_some() {
         event.source_ref_id = source_ref_id;
+    }
+    if let Some(event_kind) = event_kind {
+        event.event_kind = Some(event_kind.parse().map_err(|_| StorageError::Corrupted {
+            message: format!("request event unknown event_kind value: {event_kind}"),
+        })?);
     }
     Ok(event)
 }
@@ -1319,6 +1363,11 @@ fn request_event_matches_filters(
     }
     if let Some(status_class) = filters.status_class
         && !status_class.matches(event.status)
+    {
+        return false;
+    }
+    if let Some(event_kind) = filters.event_kind
+        && RequestEventKind::effective(event.source_kind.as_deref(), event.event_kind) != event_kind
     {
         return false;
     }

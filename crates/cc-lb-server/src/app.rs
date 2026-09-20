@@ -2733,6 +2733,9 @@ async fn lifecycle_middleware(
             .unwrap_or("req_server_unknown")
             .to_owned();
         let context = cc_lb_engine::LifecycleContext::new(request_id, bus, &state.clock);
+        context.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(
+            request.uri().path(),
+        ));
         context.set_observability_hooks(&state.dynamic_view.load().global_observability_hooks);
         context
     });

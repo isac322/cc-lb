@@ -10,13 +10,14 @@ use crate::map_sqlx_error;
 use super::request_event_list_row::list_row_to_item;
 use super::request_events::{u64_to_i64, u64_to_i64_upper, usize_to_i64};
 
-const LIST_REQUEST_EVENTS_SQL: &str = "\
+const LIST_REQUEST_EVENTS_SQL_HEAD: &str = "\
 SELECT \
     ts, \
     list_ts_ms AS ts_ms, \
     request_id, \
     event_id, \
     source_kind, \
+    event_kind, \
     principal_id, \
     upstream_id, \
     upstream_name, \
@@ -99,8 +100,21 @@ WHERE ts >= ?1 AND ts <= ?2 \
   AND ( \
         ?12 = 1 \
      OR (?13 IS NOT NULL AND source_kind = ?13) \
+     OR (?13 IS NULL AND ?15 IS NOT NULL) \
      OR (?13 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) \
-  ) \
+  )";
+
+// Emitted only when `event_kind` is `Some`: a direct equality against the
+// effective kind so the query can seek
+// `request_events_v1_event_kind_list_order_idx`. The `?15 IS NULL OR ...`
+// optional form cannot use that index, so the clause is omitted entirely when
+// no kind filter is set. `?15` stays bound in both branches because the
+// source_kind clause above still references it.
+const LIST_REQUEST_EVENTS_EVENT_KIND_FILTER: &str = " \
+  AND CASE WHEN source_kind = 'renewal' THEN 'renewal' \
+           ELSE COALESCE(event_kind, 'unclassified') END = ?15 ";
+
+const LIST_REQUEST_EVENTS_SQL_TAIL: &str = "\
   AND ( \
         ?9 IS NULL \
      OR list_ts_ms < ?9 \
@@ -119,6 +133,7 @@ pub(super) struct ListRow {
     pub(super) request_id: String,
     pub(super) event_id: Option<String>,
     pub(super) source_kind: Option<String>,
+    pub(super) event_kind: Option<String>,
     pub(super) principal_id: Option<String>,
     pub(super) upstream_id: Option<String>,
     pub(super) upstream_name: Option<String>,
@@ -207,7 +222,24 @@ pub(super) async fn list_request_events(
         .map_or((None, None), |(min, max)| (Some(min), Some(max)));
     let (source_kind_all, source_kind_exact) = source_kind_filter(query.source_kind.as_deref());
 
-    let rows = sqlx::query_as::<_, ListRow>(LIST_REQUEST_EVENTS_SQL)
+    static SQL: std::sync::LazyLock<(String, String)> = std::sync::LazyLock::new(|| {
+        (
+            [LIST_REQUEST_EVENTS_SQL_HEAD, LIST_REQUEST_EVENTS_SQL_TAIL].concat(),
+            [
+                LIST_REQUEST_EVENTS_SQL_HEAD,
+                LIST_REQUEST_EVENTS_EVENT_KIND_FILTER,
+                LIST_REQUEST_EVENTS_SQL_TAIL,
+            ]
+            .concat(),
+        )
+    });
+    let sql = if query.filters.event_kind.is_some() {
+        SQL.1.as_str()
+    } else {
+        SQL.0.as_str()
+    };
+
+    let rows = sqlx::query_as::<_, ListRow>(sql)
         .bind(u64_to_i64(
             query.since_unix_secs,
             "request event list since",
@@ -236,6 +268,7 @@ pub(super) async fn list_request_events(
         .bind(i64::from(source_kind_all))
         .bind(source_kind_exact)
         .bind(query.filters.thread_id.as_deref())
+        .bind(query.filters.event_kind.map(|kind| kind.as_str()))
         .fetch_all(storage.pool())
         .await
         .map_err(map_sqlx_error)?;

@@ -25,6 +25,26 @@ describe('logsSearchSchema', () => {
     expect(parsed.time_range).toBeUndefined();
     expect(parsed.since_unix_secs).toBeUndefined();
     expect(parsed.until_unix_secs).toBeUndefined();
+    expect(parsed.event_kind).toBe('messages');
+  });
+
+  it('defaults the kind filter to messages and keeps explicit kinds', () => {
+    expect(logsSearchSchema.parse({}).event_kind).toBe('messages');
+    expect(logsSearchSchema.parse({ event_kind: 'renewal' }).event_kind).toBe(
+      'renewal',
+    );
+    expect(
+      logsSearchSchema.parse({ event_kind: 'unclassified' }).event_kind,
+    ).toBe('unclassified');
+  });
+
+  it('ignores legacy source_kind params and invalid kind values', () => {
+    const legacy = logsSearchSchema.parse({ source_kind: 'renewal' });
+    expect(legacy.event_kind).toBe('messages');
+    expect(legacy).not.toHaveProperty('source_kind');
+
+    const invalid = logsSearchSchema.parse({ event_kind: 'bogus' });
+    expect(invalid.event_kind).toBe('messages');
   });
 
   it('normalizes Unix bounds outside the JavaScript Date range', () => {
@@ -90,11 +110,13 @@ describe('buildHistoricalFilters', () => {
     expect(
       buildHistoricalFilters({
         session: 'session-1',
+        event_kind: 'messages',
         since_unix_secs: 100,
         until_unix_secs: 200,
       }),
     ).toEqual({
       thread_id: 'session-1',
+      event_kind: 'messages',
       since_unix_secs: '100',
       until_unix_secs: '200',
     });
@@ -104,14 +126,19 @@ describe('buildHistoricalFilters', () => {
     expect(
       buildHistoricalFilters({
         principal_id: 'principal-1',
+        event_kind: 'messages',
         since_unix_secs: 100,
       }),
-    ).toEqual({ principal_id: 'principal-1', since_unix_secs: '100' });
+    ).toEqual({
+      principal_id: 'principal-1',
+      event_kind: 'messages',
+      since_unix_secs: '100',
+    });
   });
 
   it('sends no time keys when the range is unbounded', () => {
-    const unbounded = buildHistoricalFilters({});
-    expect(unbounded).toEqual({});
+    const unbounded = buildHistoricalFilters({ event_kind: 'messages' });
+    expect(unbounded).toEqual({ event_kind: 'messages' });
     expect(unbounded).not.toHaveProperty('since_unix_secs');
     expect(unbounded).not.toHaveProperty('until_unix_secs');
   });
@@ -123,7 +150,7 @@ describe('buildHistoricalFilters', () => {
       session: 'session-1',
       model: 'claude-sonnet-4-5',
       status: '4xx' as const,
-      source_kind: 'renewal' as const,
+      event_kind: 'renewal' as const,
       time_range: 'custom' as const,
       since_unix_secs: 100,
       until_unix_secs: 200,
@@ -134,7 +161,7 @@ describe('buildHistoricalFilters', () => {
       thread_id: 'session-1',
       model: 'claude-sonnet-4-5',
       status_class: '4xx',
-      source_kind: 'renewal',
+      event_kind: 'renewal',
     };
     expect(buildHistoricalFilters(filters)).toEqual({
       ...live,

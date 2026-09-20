@@ -63,6 +63,7 @@ import {
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
+import { isMessagesRequestEvent } from '../lib/logRows';
 import {
   type ChainSlot,
   type LimitKind,
@@ -613,12 +614,15 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
   const recent = useRecentEvents({
     principal_id: principal.id,
     limit: '5',
+    event_kind: 'messages',
   });
   const events = useMemo(() => {
-    return (recent.data?.events ?? []).map((e) => ({
-      ...e,
-      _phase: 'final' as const,
-    }));
+    return (recent.data?.events ?? [])
+      .filter(isMessagesRequestEvent)
+      .map((e) => ({
+        ...e,
+        _phase: 'final' as const,
+      }));
   }, [recent.data]);
   const loading = recent.data === undefined && recent.isPending;
   return (

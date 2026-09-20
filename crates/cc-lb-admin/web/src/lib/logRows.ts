@@ -1,4 +1,9 @@
-import type { RequestEvent, RequestEventPartial } from './api';
+import {
+  type RequestEvent,
+  type RequestEventKind,
+  RequestEventKindSchema,
+  type RequestEventPartial,
+} from './api';
 import type { RequestEventWithPhase } from './RequestEventTypes';
 import type { LiveEventMap } from './upsertReducer';
 
@@ -10,7 +15,53 @@ export interface LogRowFilters {
   readonly session?: string;
   readonly model?: string;
   readonly status?: LogStatusClass;
-  readonly source_kind?: 'all' | 'renewal';
+  readonly event_kind?: RequestEventKind;
+}
+
+export type { RequestEventKind } from './api';
+
+/** All request event kinds in the order the logs UI presents them. */
+export const REQUEST_EVENT_KINDS: readonly RequestEventKind[] =
+  RequestEventKindSchema.options;
+
+export const REQUEST_EVENT_KIND_LABELS: Record<RequestEventKind, string> = {
+  messages: 'Messages',
+  count_tokens: 'Token count',
+  models: 'Models',
+  files: 'Files',
+  other: 'Other proxy requests',
+  renewal: 'Renewals',
+  unclassified: 'Unclassified',
+};
+
+const REQUEST_EVENT_KIND_SET: Record<string, true> = Object.fromEntries(
+  RequestEventKindSchema.options.map((kind) => [kind, true]),
+);
+
+/**
+ * Effective endpoint category for a row, mirroring
+ * `RequestEventKind::effective` on the backend: a `source_kind` of `renewal`
+ * always wins (historical rows predate the `event_kind` column), a recorded
+ * `event_kind` classifies directly, and anything else — missing or
+ * unrecognized — is `unclassified`.
+ */
+export function effectiveRequestEventKind(event: {
+  readonly source_kind?: string | null;
+  readonly event_kind?: string | null;
+}): RequestEventKind {
+  if (event.source_kind === 'renewal') return 'renewal';
+  const kind = event.event_kind;
+  return kind != null && REQUEST_EVENT_KIND_SET[kind] === true
+    ? (kind as RequestEventKind)
+    : 'unclassified';
+}
+
+/** Whether a row's effective endpoint category is `messages`. */
+export function isMessagesRequestEvent(event: {
+  readonly source_kind?: string | null;
+  readonly event_kind?: string | null;
+}): boolean {
+  return effectiveRequestEventKind(event) === 'messages';
 }
 
 type EventIdentity = {
@@ -99,10 +150,10 @@ export function filterLogRows(
     if (modelPrefix && !row.model?.toLowerCase().startsWith(modelPrefix)) {
       return false;
     }
-    if (filters.source_kind === 'renewal') {
-      return row.source_kind === 'renewal';
-    }
-    if (filters.source_kind !== 'all' && row.source_kind === 'renewal') {
+    if (
+      filters.event_kind !== undefined &&
+      effectiveRequestEventKind(row) !== filters.event_kind
+    ) {
       return false;
     }
     return true;

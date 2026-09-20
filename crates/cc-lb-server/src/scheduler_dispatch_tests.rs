@@ -860,6 +860,7 @@ fn saturate_lifecycle_bus(fixture: &Fixture) -> Vec<tokio::sync::mpsc::Receiver<
         stream: false,
         source_kind: None,
         source_ref_id: None,
+        event_kind: None,
     });
     receivers
 }

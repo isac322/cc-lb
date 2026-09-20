@@ -55,7 +55,11 @@ import {
   formatUsdAmount,
   sumTokens,
 } from '../lib/format';
-import { mergeLogRows, newestLiveEventIds } from '../lib/logRows';
+import {
+  isMessagesRequestEvent,
+  mergeLogRows,
+  newestLiveEventIds,
+} from '../lib/logRows';
 import {
   usePrincipalNameMap,
   useRecentEventsInfinite,
@@ -89,6 +93,10 @@ const RANGE_SECONDS: Record<Range, number> = {
   '7d': 604800,
 };
 const OVERVIEW_TABLE_COLUMNS = { cost: true, tokens: true } as const;
+// The overview previews real user requests only: renewals and non-messages
+// endpoints are excluded server-side, and merged rows are re-checked against
+// the same effective-kind rule so retained data cannot leak other categories.
+const OVERVIEW_EVENT_FILTERS = { event_kind: 'messages' } as const;
 
 const stepFor = (r: Range): 'hour' | 'minute' =>
   r === '7d' || r === '24h' ? 'hour' : 'minute';
@@ -1361,7 +1369,7 @@ function OverviewPage() {
     undefined,
     'totals',
   );
-  const events = useRecentEventsInfinite({});
+  const events = useRecentEventsInfinite(OVERVIEW_EVENT_FILTERS);
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
 
@@ -1382,7 +1390,7 @@ function OverviewPage() {
     (quotaAggregate.data === undefined && quotaAggregate.isPending) ||
     (quotaPoolHistory.data === undefined && quotaPoolHistory.isPending);
 
-  const live = useLiveEventStream({});
+  const live = useLiveEventStream(OVERVIEW_EVENT_FILTERS);
   const streamStatus = live.status;
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLTableRowElement>(null);
@@ -1407,7 +1415,7 @@ function OverviewPage() {
       mergeLogRows(
         live.eventsMap,
         events.data?.pages.flatMap((page) => page.events) ?? [],
-      ),
+      ).filter(isMessagesRequestEvent),
     [live.eventsMap, live.version, events.data],
   );
 

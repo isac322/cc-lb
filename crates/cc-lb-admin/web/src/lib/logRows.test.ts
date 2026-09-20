@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import type { RequestEvent, RequestEventPartial } from './api';
+import type {
+  RequestEvent,
+  RequestEventKind,
+  RequestEventPartial,
+} from './api';
 import {
+  effectiveRequestEventKind,
   filterLiveEventsByUnixSeconds,
+  filterLogRows,
   filterLogRowsByStatusClass,
+  isMessagesRequestEvent,
   mergeLogRows,
 } from './logRows';
 import type { LiveEventMap } from './upsertReducer';
@@ -211,5 +218,100 @@ describe('filterLogRowsByStatusClass', () => {
     const rows = mergeLogRows(new Map(), [makeFinal('final', 'request', 100)]);
 
     expect(filterLogRowsByStatusClass(rows)).toBe(rows);
+  });
+});
+
+describe('effectiveRequestEventKind', () => {
+  it('lets a renewal source_kind win over any recorded event_kind', () => {
+    expect(
+      effectiveRequestEventKind({
+        source_kind: 'renewal',
+        event_kind: 'messages',
+      }),
+    ).toBe('renewal');
+    expect(effectiveRequestEventKind({ source_kind: 'renewal' })).toBe(
+      'renewal',
+    );
+  });
+
+  it('classifies recorded event kinds directly', () => {
+    for (const kind of [
+      'messages',
+      'count_tokens',
+      'models',
+      'files',
+      'other',
+      'unclassified',
+    ] as const) {
+      expect(effectiveRequestEventKind({ event_kind: kind })).toBe(kind);
+    }
+  });
+
+  it('treats missing or unrecognized kinds as unclassified', () => {
+    expect(effectiveRequestEventKind({})).toBe('unclassified');
+    expect(effectiveRequestEventKind({ event_kind: null })).toBe(
+      'unclassified',
+    );
+    expect(effectiveRequestEventKind({ source_kind: 'proxy' })).toBe(
+      'unclassified',
+    );
+    expect(effectiveRequestEventKind({ event_kind: 'not-a-kind' })).toBe(
+      'unclassified',
+    );
+  });
+
+  it('reports only effective messages rows as messages events', () => {
+    expect(isMessagesRequestEvent({ event_kind: 'messages' })).toBe(true);
+    expect(
+      isMessagesRequestEvent({
+        source_kind: 'renewal',
+        event_kind: 'messages',
+      }),
+    ).toBe(false);
+    expect(isMessagesRequestEvent({})).toBe(false);
+  });
+});
+
+describe('filterLogRows event_kind', () => {
+  function kindRow(
+    requestId: string,
+    fields: { source_kind?: string; event_kind?: RequestEventKind },
+  ) {
+    return {
+      ...makeFinal(requestId, requestId, 100),
+      ...fields,
+      _phase: 'final' as const,
+    };
+  }
+
+  const rows = [
+    kindRow('messages', { event_kind: 'messages' }),
+    kindRow('count-tokens', { event_kind: 'count_tokens' }),
+    kindRow('models', { event_kind: 'models' }),
+    kindRow('files', { event_kind: 'files' }),
+    kindRow('other', { event_kind: 'other' }),
+    kindRow('renewal', { source_kind: 'renewal' }),
+    kindRow('renewal-shadowed', {
+      source_kind: 'renewal',
+      event_kind: 'messages',
+    }),
+    kindRow('historical-unknown', {}),
+  ];
+
+  it('partitions rows into the requested kind', () => {
+    const ids = (kind: Parameters<typeof filterLogRows>[1]['event_kind']) =>
+      filterLogRows(rows, { event_kind: kind }).map((row) => row.request_id);
+
+    expect(ids('messages')).toEqual(['messages']);
+    expect(ids('count_tokens')).toEqual(['count-tokens']);
+    expect(ids('models')).toEqual(['models']);
+    expect(ids('files')).toEqual(['files']);
+    expect(ids('other')).toEqual(['other']);
+    expect(ids('renewal')).toEqual(['renewal', 'renewal-shadowed']);
+    expect(ids('unclassified')).toEqual(['historical-unknown']);
+  });
+
+  it('applies no kind filtering when event_kind is unset', () => {
+    expect(filterLogRows(rows, {})).toHaveLength(rows.length);
   });
 });

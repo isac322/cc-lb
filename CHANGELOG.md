@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Request Log tables now default to `/v1/messages` requests. The Logs page filters by Messages, Token count, Models, Files, Other proxy requests, Renewals, or Unclassified; Overview and principal/upstream previews show Messages only. Row contents and the set of recorded requests are unchanged.
+- New request logs retain endpoint-category metadata for consistent history and live filtering. Existing logs without that metadata remain available under Unclassified on the Logs page; existing renewal logs remain under Renewals.
+
 ## [0.5.0] - 2026-09-20
 
 ### Breaking changes

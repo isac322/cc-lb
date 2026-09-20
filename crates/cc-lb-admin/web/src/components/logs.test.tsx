@@ -198,6 +198,7 @@ describe('LogsPage', () => {
       status: 429,
       duration_ms: 0,
       source_kind: 'renewal',
+      event_kind: 'renewal',
       _phase: 'final',
     } as RequestEventWithPhase;
     const rows = [
@@ -215,23 +216,28 @@ describe('LogsPage', () => {
       { ...target, request_id: 'wrong-session', thread_id: 'thread-other' },
       { ...target, request_id: 'wrong-model', model: 'other-model-target' },
       { ...target, request_id: 'wrong-status', status: 200 },
-      { ...target, request_id: 'wrong-source', source_kind: 'request' },
+      {
+        ...target,
+        request_id: 'wrong-kind',
+        source_kind: 'proxy',
+        event_kind: 'messages',
+      },
     ] as RequestEventWithPhase[];
 
     for (const [filters, excludedRequestId] of [
       [
-        { principal_id: 'principal-target', source_kind: 'all' },
+        { principal_id: 'principal-target', event_kind: 'renewal' },
         'wrong-principal',
       ],
       [
-        { upstream_id: 'upstream-target', source_kind: 'all' },
+        { upstream_id: 'upstream-target', event_kind: 'renewal' },
         'wrong-upstream',
       ],
-      [{ session: 'thread-target', source_kind: 'all' }, 'wrong-session'],
-      [{ model: 'model-target', source_kind: 'all' }, 'wrong-model'],
-      [{ model: 'MODEL-tar', source_kind: 'all' }, 'wrong-model'],
-      [{ status: '4xx', source_kind: 'all' }, 'wrong-status'],
-      [{ source_kind: 'renewal' }, 'wrong-source'],
+      [{ session: 'thread-target', event_kind: 'renewal' }, 'wrong-session'],
+      [{ model: 'model-target', event_kind: 'renewal' }, 'wrong-model'],
+      [{ model: 'MODEL-tar', event_kind: 'renewal' }, 'wrong-model'],
+      [{ status: '4xx', event_kind: 'renewal' }, 'wrong-status'],
+      [{ event_kind: 'renewal' }, 'wrong-kind'],
     ] as const) {
       const requestIds = filterLogRows(rows, filters).map(
         (row) => row.request_id,
@@ -247,7 +253,7 @@ describe('LogsPage', () => {
         session: 'thread-target',
         model: 'model-target',
         status: '4xx',
-        source_kind: 'renewal',
+        event_kind: 'renewal',
       }).map((row) => row.request_id),
     ).toEqual(['target']);
   });
@@ -255,7 +261,7 @@ describe('LogsPage', () => {
   it('renders Session select with an enforced w-64 and Clear button with h-9', async () => {
     const queryClient = new QueryClient();
 
-    vi.spyOn(Route, 'useSearch').mockReturnValue({ session: '123' });
+    vi.spyOn(Route, 'useSearch').mockReturnValue({ session: '123' } as never);
 
     const LogsPage = Route.options.component;
     if (LogsPage === undefined) {
@@ -282,7 +288,7 @@ describe('LogsPage', () => {
     vi.useFakeTimers();
     try {
       const queryClient = new QueryClient();
-      vi.spyOn(Route, 'useSearch').mockReturnValue({});
+      vi.spyOn(Route, 'useSearch').mockReturnValue({} as never);
 
       const LogsPage = Route.options.component;
       if (LogsPage === undefined) {
@@ -326,7 +332,9 @@ describe('LogsPage', () => {
   it('paginates rows correctly and clamps on filter change', async () => {
     const queryClient = new QueryClient();
     let currentSearch: Record<string, string> = {};
-    vi.spyOn(Route, 'useSearch').mockImplementation(() => currentSearch);
+    vi.spyOn(Route, 'useSearch').mockImplementation(
+      () => currentSearch as never,
+    );
 
     const LogsPage = Route.options.component;
     if (LogsPage === undefined) {
@@ -402,7 +410,7 @@ describe('LogsPage', () => {
 
   it('keeps historical pages stable while live rows continue arriving', async () => {
     const queryClient = new QueryClient();
-    vi.spyOn(Route, 'useSearch').mockReturnValue({});
+    vi.spyOn(Route, 'useSearch').mockReturnValue({} as never);
 
     const LogsPage = Route.options.component;
     if (LogsPage === undefined) {
@@ -441,7 +449,7 @@ describe('LogsPage', () => {
 
   it('moves an arriving live row onto the first page and the displaced historical tail onto the next page', async () => {
     const queryClient = new QueryClient();
-    vi.spyOn(Route, 'useSearch').mockReturnValue({});
+    vi.spyOn(Route, 'useSearch').mockReturnValue({} as never);
 
     const LogsPage = Route.options.component;
     if (LogsPage === undefined) {
@@ -492,7 +500,7 @@ describe('LogsPage', () => {
 
   it('exports all visible rows, not just the current page', async () => {
     const queryClient = new QueryClient();
-    vi.spyOn(Route, 'useSearch').mockReturnValue({});
+    vi.spyOn(Route, 'useSearch').mockReturnValue({} as never);
 
     const LogsPage = Route.options.component;
     if (LogsPage === undefined) {

@@ -49,6 +49,8 @@ const routeState = vi.hoisted(() => ({
     filters: Record<string, string | undefined>;
     pageParam: queries.RecentEventsPageParam;
   }>,
+  histogramCalls: [] as Array<Record<string, string | undefined>>,
+  liveCalls: [] as Array<Record<string, string | undefined>>,
   search: {} as Record<string, string | number | undefined>,
   suspendInitialForPrincipal: undefined as string | undefined,
   suspendedInitialPromise: new Promise<never>(() => {}),
@@ -86,7 +88,10 @@ vi.mock('../lib/queries', async () => {
         queryFn: async () => routeState.nextPage,
       }),
     ),
-    useEventsHistogram: () => routeState.histogram,
+    useEventsHistogram: (filters: Record<string, string | undefined>) => {
+      routeState.histogramCalls.push(filters);
+      return routeState.histogram;
+    },
     usePrincipalNameMap: () => new Map(),
     useRecentEventsPage: (
       filters: Record<string, string | undefined>,
@@ -111,7 +116,10 @@ vi.mock('../lib/queries', async () => {
 });
 
 vi.mock('../lib/useLiveEventStream', () => ({
-  useLiveEventStream: () => routeState.live,
+  useLiveEventStream: (filters: Record<string, string | undefined>) => {
+    routeState.liveCalls.push(filters);
+    return routeState.live;
+  },
 }));
 
 vi.mock('../components/ui/RequestEventsTable', () => ({
@@ -224,10 +232,14 @@ describe('logs polling surfaces', () => {
       version: 0,
     };
     routeState.recentCalls = [];
+    routeState.histogramCalls = [];
+    routeState.liveCalls = [];
     routeState.search = {};
     routeState.suspendInitialForPrincipal = undefined;
     routeState.suspendedInitialPromise = new Promise<never>(() => {});
-    vi.spyOn(Route, 'useSearch').mockImplementation(() => routeState.search);
+    vi.spyOn(Route, 'useSearch').mockImplementation(
+      () => routeState.search as never,
+    );
     routeState.recent = {
       data: page(),
       isPlaceholderData: false,
@@ -648,5 +660,56 @@ describe('logs polling surfaces', () => {
         Reflect.deleteProperty(URL, 'revokeObjectURL');
       }
     }
+  });
+
+  test('sends event_kind to recent, histogram, and live queries and partitions rows', async () => {
+    routeState.search = { event_kind: 'renewal' };
+    routeState.recent = {
+      data: pageFromEvents([
+        {
+          ts: 1_700_000_000,
+          request_id: 'renewal-request',
+          status: 200,
+          duration_ms: 25,
+          source_kind: 'renewal',
+        },
+        {
+          ts: 1_700_000_001,
+          request_id: 'messages-request',
+          status: 200,
+          duration_ms: 25,
+          event_kind: 'messages',
+        },
+      ]),
+      isPlaceholderData: false,
+      isPending: false,
+      refetch: vi.fn(),
+    };
+    routeState.histogram = {
+      data: { buckets: [], bucket_count: 0, bucket_ms: 60_000 },
+      isError: false,
+      isFetching: false,
+      isPending: false,
+    };
+
+    renderLogs();
+
+    await waitFor(() =>
+      expect(screen.getByText('renewal-request')).toBeDefined(),
+    );
+    expect(screen.queryByText('messages-request')).toBeNull();
+
+    for (const call of routeState.recentCalls) {
+      expect(call.filters.event_kind).toBe('renewal');
+    }
+    expect(routeState.recentCalls.length).toBeGreaterThan(0);
+    for (const filters of routeState.histogramCalls) {
+      expect(filters.event_kind).toBe('renewal');
+    }
+    expect(routeState.histogramCalls.length).toBeGreaterThan(0);
+    for (const filters of routeState.liveCalls) {
+      expect(filters.event_kind).toBe('renewal');
+    }
+    expect(routeState.liveCalls.length).toBeGreaterThan(0);
   });
 });

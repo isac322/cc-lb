@@ -223,6 +223,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             stream: true,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         },
         EventOp::Parse => LifecycleEvent::ParseCompleted {
             event_id,
@@ -308,6 +309,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: Some(profile.token_base() + 10),
+            event_kind: None,
         },
     }
 }

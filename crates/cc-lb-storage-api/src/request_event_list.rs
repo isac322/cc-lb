@@ -2,7 +2,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::storage_types_common::RequestEventStreamFilters;
-use cc_lb_request_log::RequestEventUpstream;
+use cc_lb_request_log::{RequestEventKind, RequestEventUpstream};
 
 /// Slim projection of a [`cc_lb_request_log::RequestEvent`] limited to the
 /// fields the admin request-event LIST view displays. Backends may populate
@@ -16,6 +16,9 @@ pub struct RequestEventListItem {
     pub request_id: String,
     pub event_id: Option<String>,
     pub source_kind: Option<String>,
+    /// Endpoint classification; `None` on rows persisted before the
+    /// `event_kind` column existed (historical `unclassified`).
+    pub event_kind: Option<RequestEventKind>,
     pub principal_id: Option<String>,
     pub upstream: Option<RequestEventUpstream>,
     pub upstream_id: Option<Uuid>,
@@ -115,9 +118,12 @@ pub struct RequestEventListQuery {
     pub limit: usize,
     pub filters: RequestEventStreamFilters,
     /// Source-kind filter for the list view:
-    /// - `None` excludes `renewal` rows (the default admin request-log view)
+    /// - `None` excludes `renewal` rows (the default admin request-log view),
+    ///   unless `filters.event_kind` is set — an explicit endpoint-kind filter
+    ///   bypasses only this implicit exclusion
     /// - `Some("all")` includes every source kind
     /// - `Some(kind)` returns only rows whose `source_kind` equals `kind`
+    ///   (conjunctive with `filters.event_kind` when both are supplied)
     pub source_kind: Option<String>,
 }
 
@@ -219,6 +225,7 @@ mod tests {
             request_id: String::new(),
             event_id: None,
             source_kind: None,
+            event_kind: None,
             principal_id: None,
             upstream: None,
             upstream_id: None,

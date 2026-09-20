@@ -153,6 +153,7 @@ async fn assemble_route(
         stream: false,
         source_kind: None,
         source_ref_id: None,
+        event_kind: None,
     })
     .await
     .unwrap();
@@ -163,23 +164,21 @@ async fn assemble_route(
     })
     .await
     .unwrap();
-    tx.send(LifecycleEvent::RequestTerminated {
-        event_id: eid(event_id),
-        reason: TerminationReason::Success,
-        client_status: 200,
-        duration_ms: 42,
-        first_body_chunk_ms: None,
-        internal_errors: Vec::new(),
-        limit_reconcile_ms: None,
-        observability_post_ms: None,
-        proxy_setup_ms: None,
-        request_body_read_ms: None,
-        request_body_bytes: None,
-        finalize_ms: None,
-        setup_timings: Default::default(),
-        io_timings: Default::default(),
-        upstream_body_ms: None,
-    })
+    tx.send(LifecycleEvent::RequestTerminated { event_id: eid(event_id),
+    reason: TerminationReason::Success,
+    client_status: 200,
+    duration_ms: 42,
+    first_body_chunk_ms: None,
+    internal_errors: Vec::new(),
+    limit_reconcile_ms: None,
+    observability_post_ms: None,
+    proxy_setup_ms: None,
+    request_body_read_ms: None,
+    request_body_bytes: None,
+    finalize_ms: None,
+    setup_timings: Default::default(),
+    io_timings: Default::default(),
+    upstream_body_ms: None, event_kind: None })
     .await
     .unwrap();
     drop(tx);

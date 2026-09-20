@@ -1,6 +1,6 @@
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventUpstream, StatusClass,
-    StorageResult, model_filter_like_pattern,
+    RequestEvent, RequestEventKind, RequestEventListItem, RequestEventListQuery,
+    RequestEventUpstream, StatusClass, StorageError, StorageResult, model_filter_like_pattern,
 };
 use sqlx::{FromRow, Postgres, QueryBuilder};
 
@@ -18,6 +18,7 @@ SELECT \
     r.list_ts_ms AS ts_ms, \
     r.event_id, \
     r.source_kind, \
+    r.event_kind, \
     r.principal_id, \
     r.upstream_id, \
     r.upstream_name, \
@@ -55,6 +56,7 @@ pub(super) struct ListRow {
     pub(super) ts_ms: Option<i64>,
     pub(super) event_id: Option<String>,
     pub(super) source_kind: Option<String>,
+    pub(super) event_kind: Option<String>,
     pub(super) principal_id: Option<String>,
     pub(super) upstream_id: Option<uuid::Uuid>,
     pub(super) upstream_name: Option<String>,
@@ -140,9 +142,20 @@ pub(super) async fn list_request_events(
             builder.push(" AND r.source_kind = ");
             builder.push_bind(source_kind);
         }
-        None => {
+        // An explicit event_kind filter bypasses only this implicit default
+        // renewal exclusion; an explicit source_kind stays conjunctive.
+        None if query.filters.event_kind.is_none() => {
             builder.push(" AND (r.source_kind IS NULL OR r.source_kind <> 'renewal')");
         }
+        None => {}
+    }
+
+    if let Some(event_kind) = query.filters.event_kind {
+        builder.push(
+            " AND CASE WHEN r.source_kind = 'renewal' THEN 'renewal' \
+             ELSE COALESCE(r.event_kind, 'unclassified') END = ",
+        );
+        builder.push_bind(event_kind.as_str());
     }
 
     if let Some(until_ts_ms) = query.until_ts_ms {
@@ -201,4 +214,10 @@ pub(super) fn status_class_range(class: StatusClass) -> (i32, i32) {
         StatusClass::FourXx => (400, 499),
         StatusClass::FiveXx => (500, 599),
     }
+}
+
+pub(super) fn parse_event_kind(value: &str) -> StorageResult<RequestEventKind> {
+    value.parse().map_err(|_| StorageError::Corrupted {
+        message: format!("request event unknown event_kind value: {value}"),
+    })
 }

@@ -7,9 +7,10 @@ use std::{
 use chrono::{DateTime, Utc};
 
 use anyhow::{Context, Result, ensure};
+
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventListQuery,
-    RequestEventStore, RequestEventStreamFilters, RequestEventUpstream,
+    BackendKind, MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventKind,
+    RequestEventListQuery, RequestEventStore, RequestEventStreamFilters, RequestEventUpstream,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -72,6 +73,29 @@ fn request_event_principal_cost_shapes_use_covering_indexes() {
             result
         })
         .expect("postgres principal-cost covering-index regression");
+}
+
+#[test]
+fn request_event_event_kind_filters_match_effective_kind() {
+    let Some(url) = postgres_url() else {
+        eprintln!(
+            "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
+        );
+        return;
+    };
+
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async move {
+            let fixture = Fixture::create(&url).await?;
+            let result = assert_event_kind_filters(&fixture.pool).await;
+            fixture
+                .drop_schema()
+                .await
+                .context("drop isolated event-kind schema")?;
+            result
+        })
+        .expect("postgres request-event event_kind regression");
 }
 
 const UUID_PRINCIPAL_COST_PLAN_SQL: &str =
@@ -278,6 +302,7 @@ async fn assert_materialized_schema(pool: &PgPool) -> Result<()> {
         ("list_event_key", "text", "NO", true),
         ("list_upstream", "text", "YES", false),
         ("list_status", "integer", "YES", false),
+        ("event_kind", "text", "YES", false),
     ];
     for (name, expected_type, expected_nullable, expects_default) in expected_columns {
         let Some((data_type, nullable, default)) = columns.get(name) else {
@@ -844,6 +869,246 @@ async fn assert_histogram_matches_list(storage: &PostgresStorage) -> Result<()> 
     ensure!(
         plan.iter().any(|line| line.contains("Index")),
         "histogram aggregate must be able to use a list_ts_ms index: {plan:?}"
+    );
+    Ok(())
+}
+
+/// Mirrors the SQLite event-kind regression: `source_kind = 'renewal'` wins
+/// over the materialized `event_kind`, historical NULL rows classify as
+/// `unclassified`, an explicit `event_kind` filter bypasses only the implicit
+/// renewal exclusion, and an explicit `source_kind` stays conjunctive. New
+/// writes materialize `event_kind`; rows written without one stay NULL and
+/// are never backfilled.
+async fn assert_event_kind_filters(pool: &PgPool) -> Result<()> {
+    let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize(BackendKind::Postgres).await?;
+
+    let base = FALLBACK_TS_SECS + 20_000;
+    let principal = "principal-pg-event-kind";
+    let rows: [(&str, Option<RequestEventKind>, Option<&str>); 5] = [
+        ("ek-messages", Some(RequestEventKind::Messages), None),
+        ("ek-count-tokens", Some(RequestEventKind::CountTokens), None),
+        ("ek-historical", None, None),
+        ("ek-renewal", None, Some("renewal")),
+        (
+            "ek-renewal-typed",
+            Some(RequestEventKind::Files),
+            Some("renewal"),
+        ),
+    ];
+    for (index, (request_id, event_kind, source_kind)) in rows.iter().enumerate() {
+        storage
+            .append_request_event(&RequestEvent {
+                ts: base + index as u64,
+                ts_ms: Some((base + index as u64) * 1_000 + 500),
+                request_id: (*request_id).to_owned(),
+                event_id: Some(format!("0193a7b8-1234-7e2f-9012-pgek{index:07}")),
+                principal_id: Some(principal.to_owned()),
+                model: Some("claude-sonnet-4-5".to_owned()),
+                status: 200,
+                duration_ms: 10,
+                event_kind: *event_kind,
+                source_kind: source_kind.map(str::to_owned),
+                ..Default::default()
+            })
+            .await?;
+    }
+
+    let materialized = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT event_id, event_kind FROM request_events_v1 \
+         WHERE principal_id = $1",
+    )
+    .bind(principal)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
+
+    // Borrow so the `async move` closures below capture a Copy reference and
+    // stay callable for every assertion.
+    let storage = &storage;
+    ensure!(
+        materialized.len() == 5,
+        "expected five materialized event rows: {materialized:?}"
+    );
+    for (index, (request_id, event_kind, _)) in rows.iter().enumerate() {
+        let event_id = format!("0193a7b8-1234-7e2f-9012-pgek{index:07}");
+        ensure!(
+            materialized.get(&event_id).map(Option::as_deref)
+                == Some(event_kind.map(RequestEventKind::as_str)),
+            "row {request_id} materialized event_kind {:?}, expected {event_kind:?}",
+            materialized.get(&event_id)
+        );
+    }
+
+    let list_ids = |event_kind: Option<RequestEventKind>, source_kind: Option<&str>| {
+        // Own the filter before the async block so the returned future does
+        // not borrow the per-call `&str` argument.
+        let source_kind = source_kind.map(str::to_owned);
+        async move {
+            let page = storage
+                .list_request_events(&RequestEventListQuery {
+                    since_unix_secs: base,
+                    until_unix_secs: base + 4,
+                    limit: 100,
+                    filters: RequestEventStreamFilters {
+                        principal_id: Some(principal.to_owned()),
+                        event_kind,
+                        ..Default::default()
+                    },
+                    source_kind,
+                    ..Default::default()
+                })
+                .await?;
+            let mut ids = page
+                .into_iter()
+                .map(|item| item.request_id)
+                .collect::<Vec<_>>();
+            ids.sort();
+            Ok::<_, anyhow::Error>(ids)
+        }
+    };
+
+    // No event_kind param: the pre-existing default exclusion still applies.
+    ensure!(
+        list_ids(None, None).await? == ["ek-count-tokens", "ek-historical", "ek-messages"],
+        "default list must keep excluding renewals"
+    );
+    ensure!(
+        list_ids(None, Some("all")).await?
+            == [
+                "ek-count-tokens",
+                "ek-historical",
+                "ek-messages",
+                "ek-renewal",
+                "ek-renewal-typed"
+            ],
+        "source_kind=all must keep returning every row"
+    );
+    ensure!(
+        list_ids(None, Some("renewal")).await? == ["ek-renewal", "ek-renewal-typed"],
+        "explicit source_kind=renewal must keep working"
+    );
+
+    // Explicit event_kind bypasses only the implicit exclusion and matches the
+    // effective kind: renewal source wins over a stored kind, NULL reads as
+    // unclassified.
+    ensure!(
+        list_ids(Some(RequestEventKind::Messages), None).await? == ["ek-messages"],
+        "event_kind=messages must match only the messages row"
+    );
+    ensure!(
+        list_ids(Some(RequestEventKind::Unclassified), None).await? == ["ek-historical"],
+        "event_kind=unclassified must match the historical NULL row"
+    );
+    ensure!(
+        list_ids(Some(RequestEventKind::Renewal), None).await?
+            == ["ek-renewal", "ek-renewal-typed"],
+        "event_kind=renewal must match renewal sources even with a stored kind"
+    );
+    ensure!(
+        list_ids(Some(RequestEventKind::Files), None)
+            .await?
+            .is_empty(),
+        "a stored files kind under a renewal source must not match files"
+    );
+    ensure!(
+        list_ids(Some(RequestEventKind::Messages), Some("all")).await? == ["ek-messages"],
+        "source_kind=all must stay conjunctive with event_kind"
+    );
+    ensure!(
+        list_ids(Some(RequestEventKind::Messages), Some("renewal"))
+            .await?
+            .is_empty(),
+        "explicit source_kind must stay conjunctive with event_kind"
+    );
+
+    // The histogram applies the same effective-kind predicate.
+    let histogram_total = |event_kind: Option<RequestEventKind>, source_kind: Option<&str>| {
+        let source_kind = source_kind.map(str::to_owned);
+        async move {
+            let buckets = storage
+                .request_event_histogram(&RequestEventHistogramQuery {
+                    since_unix_secs: base,
+                    until_unix_secs: base + 4,
+                    bucket_ms: 60_000,
+                    bucket_count: 1,
+                    filters: RequestEventStreamFilters {
+                        principal_id: Some(principal.to_owned()),
+                        event_kind,
+                        ..Default::default()
+                    },
+                    source_kind,
+                })
+                .await?;
+            Ok::<_, anyhow::Error>(buckets.iter().map(|bucket| bucket.total_count).sum::<u64>())
+        }
+    };
+    ensure!(
+        histogram_total(None, None).await? == 3,
+        "default histogram must keep excluding renewals"
+    );
+    ensure!(
+        histogram_total(Some(RequestEventKind::Renewal), None).await? == 2,
+        "histogram event_kind=renewal must match both renewal sources"
+    );
+    ensure!(
+        histogram_total(Some(RequestEventKind::Unclassified), None).await? == 1,
+        "histogram event_kind=unclassified must match the historical row"
+    );
+
+    // The delta/cursor path applies the same effective-kind filter.
+    let until_cursor = storage.current_request_event_cursor().await?;
+    let delta_ids = |event_kind: Option<RequestEventKind>| async move {
+        let events = storage
+            .query_request_events_between_cursors(
+                0,
+                until_cursor,
+                500,
+                &RequestEventStreamFilters {
+                    event_kind,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let mut ids = events
+            .into_iter()
+            .map(|(_, event)| event.request_id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        Ok::<_, anyhow::Error>(ids)
+    };
+    ensure!(
+        delta_ids(Some(RequestEventKind::Messages)).await? == ["ek-messages"],
+        "delta event_kind=messages must match only the messages row"
+    );
+    ensure!(
+        delta_ids(Some(RequestEventKind::Renewal)).await? == ["ek-renewal", "ek-renewal-typed"],
+        "delta event_kind=renewal must match both renewal sources"
+    );
+    ensure!(
+        delta_ids(Some(RequestEventKind::Unclassified)).await? == ["ek-historical"],
+        "delta event_kind=unclassified must match the historical row"
+    );
+
+    // Payload reads surface the raw kind: stored on new writes, absent on
+    // historical rows, never synthesized.
+    let events = storage.query_request_events(base, base + 4, 100).await?;
+    let kinds = events
+        .into_iter()
+        .map(|event| (event.request_id.clone(), event.event_kind))
+        .collect::<BTreeMap<_, _>>();
+    ensure!(
+        kinds.get("ek-messages") == Some(&Some(RequestEventKind::Messages)),
+        "payload read lost the stored event_kind: {kinds:?}"
+    );
+    ensure!(
+        kinds.get("ek-historical") == Some(&None),
+        "historical row gained a synthesized event_kind: {kinds:?}"
+    );
+    ensure!(
+        kinds.get("ek-renewal-typed") == Some(&Some(RequestEventKind::Files)),
+        "renewal source must not rewrite the stored event_kind: {kinds:?}"
     );
     Ok(())
 }

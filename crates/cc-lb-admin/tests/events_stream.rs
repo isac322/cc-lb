@@ -9,7 +9,7 @@ use axum::{
 };
 use cc_lb_config::Config;
 use cc_lb_control::{InMemoryBus, RequestEventBus};
-use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
+use cc_lb_request_log::{RequestEventKind, RequestEventPartial, RequestEventUpdate};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{TOKEN, app, authed_bytes, temp_storage, test_state};
 use http_body_util::BodyExt;
@@ -224,6 +224,129 @@ async fn events_stream_applies_combined_filters_to_partial_updates() {
         }
     }
     assert_eq!(message_request_ids(&text), ["target"]);
+}
+
+#[tokio::test]
+async fn events_stream_applies_event_kind_filter_to_partial_updates() {
+    let (_dir, storage) = temp_storage().await;
+    let bus = Arc::new(InMemoryBus::with_capacity(8));
+    let mut state = test_state(Config::default(), Some(storage));
+    state.event_bus = Some(bus.clone() as Arc<dyn RequestEventBus>);
+
+    let response =
+        stream_response_uri(state, "/admin/events/stream?event_kind=messages", Some("0")).await;
+    let mut body = response.into_body();
+    let mut text = String::new();
+    while !text.contains("event: cursor") {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("initial cursor frame timeout")
+            .expect("stream ended before initial cursor")
+            .expect("frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+
+    let matching = RequestEventPartial {
+        event_id: "event-target".to_owned(),
+        request_id: "target".to_owned(),
+        event_kind: Some(RequestEventKind::Messages),
+        ..Default::default()
+    };
+    let mut wrong_kind = matching.clone();
+    wrong_kind.event_id = "event-wrong-kind".to_owned();
+    wrong_kind.request_id = "wrong-kind".to_owned();
+    wrong_kind.event_kind = Some(RequestEventKind::Models);
+    let mut unclassified = matching.clone();
+    unclassified.event_id = "event-unclassified".to_owned();
+    unclassified.request_id = "unclassified".to_owned();
+    unclassified.event_kind = None;
+    bus.publish(RequestEventUpdate::Partial(wrong_kind));
+    bus.publish(RequestEventUpdate::Partial(unclassified));
+    bus.publish(RequestEventUpdate::Partial(matching));
+
+    while message_request_ids(&text).is_empty() {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("filtered message frame timeout")
+            .expect("stream ended before filtered message")
+            .expect("frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+    assert_eq!(message_request_ids(&text), ["target"]);
+}
+
+#[tokio::test]
+async fn events_stream_excludes_renewal_partials_by_default() {
+    let (_dir, storage) = temp_storage().await;
+    let bus = Arc::new(InMemoryBus::with_capacity(8));
+    let mut state = test_state(Config::default(), Some(storage));
+    state.event_bus = Some(bus.clone() as Arc<dyn RequestEventBus>);
+
+    let response = stream_response(state, Some("0")).await;
+    let mut body = response.into_body();
+    let mut text = String::new();
+    while !text.contains("event: cursor") {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("initial cursor frame timeout")
+            .expect("stream ended before initial cursor")
+            .expect("frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+
+    let renewal = RequestEventPartial {
+        event_id: "event-renewal".to_owned(),
+        request_id: "renewal".to_owned(),
+        source_kind: Some("renewal".to_owned()),
+        ..Default::default()
+    };
+    let normal = RequestEventPartial {
+        event_id: "event-normal".to_owned(),
+        request_id: "normal".to_owned(),
+        ..Default::default()
+    };
+    bus.publish(RequestEventUpdate::Partial(renewal));
+    bus.publish(RequestEventUpdate::Partial(normal));
+
+    while message_request_ids(&text).is_empty() {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("filtered message frame timeout")
+            .expect("stream ended before filtered message")
+            .expect("frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+    assert_eq!(message_request_ids(&text), ["normal"]);
+}
+
+#[tokio::test]
+async fn events_stream_backfill_applies_event_kind_filter() {
+    let (_dir, storage) = temp_storage().await;
+    let mut renewal = request_event(1);
+    renewal.request_id = "req-renewal".to_owned();
+    renewal.source_kind = Some("renewal".to_owned());
+    let mut messages = request_event(2);
+    messages.request_id = "req-messages".to_owned();
+    messages.event_kind = Some(RequestEventKind::Messages);
+    let unclassified = request_event(3);
+    for event in [&renewal, &messages, &unclassified] {
+        storage.append_request_event(event).await.unwrap();
+    }
+
+    let state = test_state(Config::default(), Some(storage));
+    let response =
+        stream_response_uri(state, "/admin/events/stream?event_kind=renewal", Some("0")).await;
+    let body = response.into_body();
+    let text = read_sse_frames(body, 3).await;
+    assert_eq!(message_request_ids(&text), ["req-renewal"]);
 }
 
 #[tokio::test]

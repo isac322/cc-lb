@@ -11,7 +11,7 @@ use cc_lb_lifecycle::{
 use cc_lb_observability::EngineMetricsHook;
 use cc_lb_request_log::{
     CostBreakdown as LifecycleCostBreakdown, RequestCacheBreakpoint, RequestCacheState,
-    RequestEventPartial, RequestEventUpdate, RequestEventUpstream,
+    RequestEventKind, RequestEventPartial, RequestEventUpdate, RequestEventUpstream,
 };
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
@@ -116,6 +116,7 @@ struct Partial {
     inserted_at: Option<Instant>,
     request_id: Option<String>,
     source_kind: Option<String>,
+    event_kind: Option<RequestEventKind>,
     source_ref_id: Option<String>,
     ts_ms: u64,
     last_partial_emit_ts: Option<Instant>,
@@ -257,6 +258,7 @@ impl Partial {
                 .unwrap_or_else(|| "req_unknown_shadow".to_owned()),
             source_kind: self.source_kind.clone(),
             source_ref_id: self.source_ref_id.clone(),
+            event_kind: self.event_kind,
             ts: ts_ms / 1_000,
             ts_ms,
             last_update_ms: now_ms,
@@ -791,6 +793,7 @@ async fn handle_event(
         first_body_chunk_ms,
         io_timings,
         internal_errors,
+        event_kind,
         ..
     } = &event
     {
@@ -814,6 +817,9 @@ async fn handle_event(
             partial.first_body_chunk_ms = *first_body_chunk_ms;
             partial.internal_errors = internal_errors.clone();
             partial.io_timings = *io_timings;
+            // Terminal-carried classification is the only metadata left when
+            // `RequestStarted` was dropped on the writer channel.
+            partial.event_kind = *event_kind;
             publish_partial(bus, &partial, PartialTrigger::RequestTerminated, now_ms);
             write_finalized_rows(
                 storage,
@@ -843,6 +849,10 @@ async fn handle_event(
             partial.first_body_chunk_ms = *first_body_chunk_ms;
         }
         partial.internal_errors = internal_errors.clone();
+        // Terminal kind is a fallback only: a classification already merged
+        // from `RequestStarted` (including renewal precedence) stays
+        // authoritative.
+        partial.event_kind = partial.event_kind.or(*event_kind);
         let expects_priced =
             partial.usage_seen && partial.model().is_some() && partial.cost.is_none();
         let expects_cache =
@@ -936,6 +946,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             stream,
             source_kind,
             source_ref_id,
+            event_kind,
             ..
         } => {
             partial.request_id = Some(request_id);
@@ -943,6 +954,12 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.stream = stream;
             partial.source_kind = source_kind;
             partial.source_ref_id = source_ref_id;
+            // `source_kind = "renewal"` is authoritative even when the
+            // producer also classified the replayed /v1/messages path.
+            partial.event_kind = Some(RequestEventKind::effective(
+                partial.source_kind.as_deref(),
+                event_kind,
+            ));
         }
         LifecycleEvent::ParseCompleted {
             result: Ok(info), ..
@@ -1192,6 +1209,7 @@ fn finalize_base(
         ts_ms: Some(ts_ms),
         request_id,
         source_kind: partial.source_kind.clone(),
+        event_kind: partial.event_kind,
         source_ref_id: partial.source_ref_id.clone(),
         principal_id,
         key_id,
@@ -1662,6 +1680,7 @@ mod tests {
                 setup_timings: Default::default(),
                 io_timings: Default::default(),
                 upstream_body_ms: None,
+                event_kind: None,
             },
         )
         .await;
@@ -1726,6 +1745,7 @@ mod tests {
                 upstream_body_ms: Some(41),
                 first_body_chunk_ms: Some(0),
                 internal_errors: Vec::new(),
+                event_kind: None,
             },
         )
         .await;
@@ -1752,6 +1772,7 @@ mod tests {
                 upstream_body_ms: None,
                 first_body_chunk_ms: None,
                 internal_errors: Vec::new(),
+                event_kind: None,
             },
         )
         .await;
@@ -1801,6 +1822,7 @@ mod tests {
             stream: false,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -1831,6 +1853,7 @@ mod tests {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -1867,6 +1890,7 @@ mod tests {
                 stream: false,
                 source_kind: Some("proxy".to_owned()),
                 source_ref_id: None,
+                event_kind: None,
             })
             .await
             .expect("send request started");
@@ -1895,6 +1919,7 @@ mod tests {
                 upstream_body_ms: None,
                 first_body_chunk_ms: None,
                 internal_errors: Vec::new(),
+                event_kind: None,
             })
             .await
             .expect("send termination");
@@ -1930,6 +1955,7 @@ mod tests {
             stream: false,
             source_kind: Some("proxy".to_owned()),
             source_ref_id: Some("ingress-123".to_owned()),
+            event_kind: None,
         })
         .await
         .expect("send request started");
@@ -1949,6 +1975,7 @@ mod tests {
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
+            event_kind: None,
         })
         .await
         .expect("send request terminated");
@@ -1959,6 +1986,268 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source_kind.as_deref(), Some("proxy"));
         assert_eq!(rows[0].source_ref_id.as_deref(), Some("ingress-123"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn event_kind_from_request_started_propagates_to_final_event() {
+        let (tx, rx) = mpsc::channel(4);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("event-kind");
+
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-event-kind".to_owned(),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+            source_kind: Some("proxy".to_owned()),
+            source_ref_id: None,
+            event_kind: Some(RequestEventKind::CountTokens),
+        })
+        .await
+        .expect("send request started");
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id,
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 12,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            event_kind: None,
+        })
+        .await
+        .expect("send request terminated");
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_kind, Some(RequestEventKind::CountTokens));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn event_kind_renewal_precedence_overrides_classified_path() {
+        let (tx, rx) = mpsc::channel(4);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("event-kind-renewal");
+
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-event-kind-renewal".to_owned(),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+            source_kind: Some("renewal".to_owned()),
+            source_ref_id: Some("session:9".to_owned()),
+            // A renewal replaying /v1/messages must not land as messages.
+            event_kind: Some(RequestEventKind::Messages),
+        })
+        .await
+        .expect("send request started");
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id,
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 3,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            event_kind: None,
+        })
+        .await
+        .expect("send request terminated");
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_kind, Some(RequestEventKind::Renewal));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminated_event_kind_classifies_orphan_shadow_row() {
+        // When `RequestStarted` is dropped on the writer channel, the
+        // terminal event's classification must still categorize the shadow
+        // row instead of leaving it unclassified.
+        let (tx, rx) = mpsc::channel(4);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id: eid("orphan-kind"),
+            reason: TerminationReason::Dropped,
+            client_status: 499,
+            duration_ms: 7,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            event_kind: Some(RequestEventKind::Messages),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_kind, Some(RequestEventKind::Messages));
+        assert_eq!(
+            rows[0].error_code.as_deref(),
+            Some("terminal_without_partial")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminated_without_event_kind_leaves_orphan_unclassified() {
+        // A terminal event from a producer that never classified the request
+        // must not invent a classification for the shadow row.
+        let (tx, rx) = mpsc::channel(4);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id: eid("orphan-no-kind"),
+            reason: TerminationReason::Dropped,
+            client_status: 499,
+            duration_ms: 7,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            event_kind: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_kind, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminated_event_kind_fills_partial_missing_started_kind() {
+        // A partial created by mid-lifecycle events (start event lost) picks
+        // up the terminal classification at finalization.
+        let (tx, rx) = mpsc::channel(4);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("partial-kind");
+
+        tx.send(LifecycleEvent::UsageObserved {
+            event_id: event_id.clone(),
+            usage: UsageSnapshot::default(),
+            source: UsageSource::NonStreamBody,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id,
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 3,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            event_kind: Some(RequestEventKind::Messages),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_kind, Some(RequestEventKind::Messages));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminated_event_kind_does_not_override_started_classification() {
+        // Renewal precedence: the classification merged from `RequestStarted`
+        // stays authoritative over whatever the terminal event carries.
+        let (tx, rx) = mpsc::channel(4);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("started-wins");
+
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-started-wins".to_owned(),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+            source_kind: Some("renewal".to_owned()),
+            source_ref_id: Some("session:7".to_owned()),
+            event_kind: Some(RequestEventKind::Renewal),
+        })
+        .await
+        .expect("send request started");
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id,
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 3,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            internal_errors: Vec::new(),
+            event_kind: Some(RequestEventKind::Messages),
+        })
+        .await
+        .expect("send request terminated");
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_kind, Some(RequestEventKind::Renewal));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1974,6 +2263,7 @@ mod tests {
             stream: true,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2002,6 +2292,7 @@ mod tests {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2031,6 +2322,7 @@ mod tests {
             stream: false,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2057,6 +2349,7 @@ mod tests {
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2086,6 +2379,7 @@ mod tests {
             stream: false,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2111,6 +2405,7 @@ mod tests {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2145,6 +2440,7 @@ mod tests {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2193,6 +2489,7 @@ mod tests {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: Some(4),
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2203,6 +2500,7 @@ mod tests {
             stream: false,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2250,6 +2548,7 @@ mod tests {
                 stream: false,
                 source_kind: Some("renewal".to_owned()),
                 source_ref_id: Some("orphan-session:1".to_owned()),
+                event_kind: None,
             },
         )
         .await;
@@ -2297,6 +2596,9 @@ mod tests {
         assert_eq!(rows[0].event_id.as_deref(), Some(event_id.as_str()));
         assert_eq!(rows[0].source_kind.as_deref(), Some("renewal"));
         assert_eq!(rows[0].source_ref_id.as_deref(), Some("orphan-session:1"));
+        // Renewal precedence: source_kind = "renewal" wins even though the
+        // producer did not classify the replayed /v1/messages path.
+        assert_eq!(rows[0].event_kind, Some(RequestEventKind::Renewal));
         assert_eq!(rows[0].status, 499);
         assert_eq!(
             rows[0].error_code.as_deref(),
@@ -2342,6 +2644,7 @@ mod tests {
             stream: false,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2361,6 +2664,7 @@ mod tests {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2412,6 +2716,7 @@ mod tests {
             stream: true,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2522,6 +2827,7 @@ mod tests {
                 request_id: format!("req-{event_id}"),
                 source_kind: None,
                 source_ref_id: None,
+                event_kind: None,
                 ts_ms: 1_730_000_000_000,
                 stream: false,
             })
@@ -2561,6 +2867,7 @@ mod tests {
                 setup_timings: Default::default(),
                 io_timings: Default::default(),
                 upstream_body_ms: None,
+                event_kind: None,
             })
             .await
             .unwrap();
@@ -2626,6 +2933,7 @@ mod tests {
             request_id: "req-classification-parity".to_owned(),
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
             ts_ms: 1_730_000_000_000,
             stream: false,
         })
@@ -2664,6 +2972,7 @@ mod tests {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2762,6 +3071,7 @@ mod tests {
             stream: true,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -2905,6 +3215,7 @@ mod tests {
                 retry_overhead_ms: None,
             },
             upstream_body_ms: Some(12),
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -3055,6 +3366,7 @@ mod tests {
             stream: false,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -3089,6 +3401,7 @@ mod tests {
             upstream_body_ms: None,
             first_body_chunk_ms: None,
             internal_errors: Vec::new(),
+            event_kind: None,
         })
         .await
         .unwrap();
@@ -3150,6 +3463,7 @@ mod tests {
             stream: false,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         });
         bus.publish_lifecycle(LifecycleEvent::RouteCompleted {
             event_id: event_id.clone(),
@@ -3207,6 +3521,7 @@ mod tests {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: None,
+            event_kind: None,
         });
 
         handle.shutdown().await;
