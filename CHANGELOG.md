@@ -4,12 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-20
+
+### Breaking changes
+
+- Runtime entities are now managed exclusively in the database through the Admin API and dashboard. Legacy bootstrap configuration and unauthenticated downstream mode have been removed, and unknown configuration fields now prevent startup.
+- Process settings are fixed at startup. Settings saves write the configuration file and require a restart; SIGHUP only reloads TLS certificates and keys. The former configuration apply/diff endpoints have been removed.
+- Legacy credential APIs and the Credentials page have been removed. Use Upstreams for provider credentials and Principals for managed client keys. Database migrations drop the obsolete credential tables; back up the database and migrate any remaining legacy credentials before upgrading.
+- Obsolete admin status and killswitch endpoints have been removed.
+
+### Added
+
+- Admin authentication supports provider-neutral identities with static-token and Cloudflare Access providers, with synchronous security auditing. Existing admin-token configuration remains supported through a deprecated compatibility provider.
+- Request Logs expose latency attribution across downstream I/O, cc-lb processing, upstream networking, upstream wait, and unattributed time.
+
 ### Fixed
 
 - Cache Keepalive summary, list, and detail reads now use bounded storage queries and targeted detail lookup instead of materializing unrelated historical decisions, while preserving ordering, pricing, pagination, and selected-row error mappings.
 - Cache Keepalive 24-hour and 7-day cursors now retain the first page's time-window anchor, so pagination remains valid while the server clock advances.
 - PostgreSQL migrations no longer share version `0121` between the API-key concurrency-hold table and the audit principal read-order index, so a fresh database applies the full set instead of aborting on a duplicate `_sqlx_migrations` key.
 - PostgreSQL Settings drafts now accept updates at the current revision, including draft cleanup after file saves and invalid-draft expiry, while still rejecting stale revisions.
+- PostgreSQL replicas now share concurrent request holds, routing-cache invalidation, WASM upload limits, and OAuth PKCE handshakes.
+- Audit queries apply the admin-only filter before limiting results and use read-order indexes.
+- Admin APIs now accept empty managed-key labels, return invalid inputs as 400 Bad Request, allow clearing upstream base URL overrides, and include base URLs in OAuth draft responses.
+- Admin Web prevents duplicate inline-name saves, keeps plugin deletion available during upload garbage collection, handles cascade-deletion query cleanup and dialog back-navigation, and refreshes terminal routing strategy after principal changes.
 
 ## [0.4.9] - 2026-09-11
 
