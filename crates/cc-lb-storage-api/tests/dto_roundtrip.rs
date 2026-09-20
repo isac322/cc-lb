@@ -14,9 +14,9 @@ use cc_lb_storage_api::{
     ConfigDraftState, HistoryEntry, IssuedKey, JudgeResponseFormat, KeyStatus, LlmJudgeConfig,
     OAuthCredentials, PrincipalCreate, PrincipalKind, PrincipalKindLite,
     PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RequestCacheBreakpoint,
-    RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventUpstream,
-    StorageError, StoredApiKeyRecord, UsageRollup, UsageRollupKey, UsageRollupResolution,
-    UsageRollupRun,
+    RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventKind,
+    RequestEventUpstream, StorageError, StoredApiKeyRecord, UsageRollup, UsageRollupKey,
+    UsageRollupResolution, UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -445,6 +445,7 @@ fn batch_b_wire_snapshots_are_stable() {
         request_id: "req_batch_b".to_owned(),
         source_kind: Some("renewal".to_owned()),
         source_ref_id: Some("session-hash:4".to_owned()),
+        event_kind: Some(RequestEventKind::Renewal),
         ts_ms: Some(1_700_000_000_123),
         principal_id: Some("principal_batch_b".to_owned()),
         key_id: Some("key_batch_b".to_owned()),
@@ -600,6 +601,7 @@ fn batch_b_wire_snapshots_are_stable() {
         "request_id": "req_batch_b",
         "source_kind": "renewal",
         "source_ref_id": "session-hash:4",
+        "event_kind": "renewal",
         "ts_ms": 1_700_000_000_123u64,
         "principal_id": "principal_batch_b",
         "key_id": "key_batch_b",

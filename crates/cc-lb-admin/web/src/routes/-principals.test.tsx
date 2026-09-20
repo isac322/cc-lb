@@ -322,6 +322,52 @@ test('recent requests delegates pending geometry to the structured table', () =>
   expect(container.textContent).not.toContain('—');
 });
 
+test('recent requests asks the backend for messages only and hides other categories', () => {
+  vi.mocked(queries.useRecentEvents).mockReturnValue({
+    data: {
+      events: [
+        {
+          duration_ms: 10,
+          event_kind: 'messages',
+          request_id: 'request-messages',
+          status: 200,
+          ts: 3,
+        },
+        {
+          duration_ms: 10,
+          event_kind: 'messages',
+          request_id: 'request-renewal',
+          source_kind: 'renewal',
+          status: 200,
+          ts: 2,
+        },
+        {
+          duration_ms: 10,
+          request_id: 'request-unclassified',
+          status: 200,
+          ts: 1,
+        },
+      ],
+    },
+    isLoading: false,
+    isPending: false,
+    isPlaceholderData: false,
+  } as never);
+
+  renderWithProviders(<RecentRequestsCard principal={principal} />);
+
+  expect(queries.useRecentEvents).toHaveBeenCalledWith({
+    principal_id: principal.id,
+    limit: '5',
+    event_kind: 'messages',
+  });
+  expect(screen.getByLabelText('View request request-messages')).toBeDefined();
+  expect(screen.queryByLabelText('View request request-renewal')).toBeNull();
+  expect(
+    screen.queryByLabelText('View request request-unclassified'),
+  ).toBeNull();
+});
+
 test('API key loading keeps the table header and per-column skeleton rows', () => {
   vi.mocked(queries.usePrincipalKeys).mockReturnValue({
     data: undefined,

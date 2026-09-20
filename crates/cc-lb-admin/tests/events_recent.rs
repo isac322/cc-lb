@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::Config;
+use cc_lb_request_log::RequestEventKind;
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{
     app, authed_bytes, authed_json, temp_storage, temp_storage_with_clock, test_state,
@@ -396,6 +397,89 @@ async fn events_recent_applies_each_filter_and_their_combination() {
         .filter_map(|event| event["request_id"].as_str())
         .collect::<Vec<_>>();
     assert_eq!(request_ids, ["target"]);
+}
+
+#[tokio::test]
+async fn events_recent_rejects_unknown_event_kind() {
+    let (_dir, storage) = temp_storage().await;
+    let admin_app = app(test_state(Config::default(), Some(storage)));
+
+    for query in ["event_kind=bogus", "event_kind=", "event_kind=MESSAGES"] {
+        let (status, _, body, _) = authed_json(
+            admin_app.clone(),
+            "GET",
+            &format!("/admin/events/recent?{query}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(body["error"], "invalid_event_kind", "{query}");
+    }
+}
+
+#[tokio::test]
+async fn events_recent_filters_by_event_kind() {
+    let clock = test_clock();
+    let (_dir, storage) = temp_storage_with_clock(clock.clone()).await;
+    let upstream_id = Uuid::from_u128(1);
+
+    let mut messages = request_event(clock.as_ref(), 0, "req-messages", upstream_id, "up");
+    messages.event_kind = Some(RequestEventKind::Messages);
+    let mut renewal = request_event(clock.as_ref(), 1, "req-renewal", upstream_id, "up");
+    renewal.source_kind = Some("renewal".to_owned());
+    let unclassified = request_event(clock.as_ref(), 2, "req-unclassified", upstream_id, "up");
+    for event in [&messages, &renewal, &unclassified] {
+        storage.append_request_event(event).await.unwrap();
+    }
+    let admin_app = app(test_state_with_clock(
+        Config::default(),
+        Some(storage),
+        clock,
+    ));
+
+    let request_ids = |body: &serde_json::Value| -> Vec<String> {
+        body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|event| event["request_id"].as_str().map(str::to_owned))
+            .collect()
+    };
+
+    for (query, expected) in [
+        ("event_kind=messages", vec!["req-messages"]),
+        ("event_kind=renewal", vec!["req-renewal"]),
+        ("event_kind=unclassified", vec!["req-unclassified"]),
+        ("event_kind=other", vec![]),
+        // An explicit event_kind bypasses only the implicit renewal
+        // exclusion; a supplied source_kind stays conjunctive.
+        ("event_kind=messages&source_kind=renewal", vec![]),
+        (
+            "event_kind=renewal&source_kind=renewal",
+            vec!["req-renewal"],
+        ),
+        // No event_kind preserves the legacy default: renewals excluded.
+        ("", vec!["req-unclassified", "req-messages"]),
+    ] {
+        let uri = if query.is_empty() {
+            "/admin/events/recent?limit=20".to_owned()
+        } else {
+            format!("/admin/events/recent?limit=20&{query}")
+        };
+        let (status, _, body, _) = authed_json(admin_app.clone(), "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{query}");
+        assert_eq!(request_ids(&body), expected, "{query}");
+    }
+
+    let (status, _, body, _) = authed_json(
+        admin_app,
+        "GET",
+        "/admin/events/recent?limit=20&event_kind=messages",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["events"][0]["event_kind"], "messages");
 }
 
 #[tokio::test]

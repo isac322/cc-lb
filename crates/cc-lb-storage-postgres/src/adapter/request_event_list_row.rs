@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use crate::adapter::i64_to_u64;
 
-use super::request_event_list_sql::ListRow;
+use super::request_event_list_sql::{ListRow, parse_event_kind};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -72,6 +72,11 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         request_id: payload.request_id.unwrap_or_default(),
         event_id: row.event_id,
         source_kind: row.source_kind,
+        event_kind: row
+            .event_kind
+            .as_deref()
+            .map(parse_event_kind)
+            .transpose()?,
         principal_id: row.principal_id,
         upstream: row.upstream.as_deref().map(parse_upstream).transpose()?,
         upstream_id: row.upstream_id,

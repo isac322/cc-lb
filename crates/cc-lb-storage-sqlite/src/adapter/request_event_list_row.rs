@@ -1,4 +1,6 @@
-use cc_lb_storage_api::{RequestEventListItem, RequestEventUpstream, StorageError, StorageResult};
+use cc_lb_storage_api::{
+    RequestEventKind, RequestEventListItem, RequestEventUpstream, StorageError, StorageResult,
+};
 use uuid::Uuid;
 
 use super::request_event_list_sql::ListRow;
@@ -14,6 +16,11 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         request_id: row.request_id,
         event_id: row.event_id,
         source_kind: row.source_kind,
+        event_kind: row
+            .event_kind
+            .as_deref()
+            .map(parse_event_kind)
+            .transpose()?,
         principal_id: row.principal_id,
         upstream: row.upstream.as_deref().map(parse_upstream).transpose()?,
         upstream_id: row
@@ -195,6 +202,12 @@ fn parse_upstream(value: &str) -> StorageResult<RequestEventUpstream> {
             message: format!("request event list unknown upstream value: {other}"),
         }),
     }
+}
+
+fn parse_event_kind(value: &str) -> StorageResult<RequestEventKind> {
+    value.parse().map_err(|_| StorageError::Corrupted {
+        message: format!("request event list unknown event_kind value: {value}"),
+    })
 }
 
 fn parse_uuid(value: &str, field: &str) -> StorageResult<Uuid> {

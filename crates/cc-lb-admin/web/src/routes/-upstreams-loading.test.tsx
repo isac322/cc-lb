@@ -319,6 +319,7 @@ function recentData(target: Upstream, model: string) {
         ts: NOW_UNIX_SECS - 30,
         ts_ms: (NOW_UNIX_SECS - 30) * 1_000,
         upstream: target.id,
+        event_kind: 'messages',
         model,
         status: 200,
         duration_ms: 100,

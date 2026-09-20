@@ -17,6 +17,7 @@ fn request_started_roundtrip() {
         stream: true,
         source_kind: Some("proxy".to_owned()),
         source_ref_id: Some("ingress-123".to_owned()),
+        event_kind: None,
     };
     let json = serde_json::to_string(&event).expect("serialize");
     let restored: LifecycleEvent = serde_json::from_str(&json).expect("deserialize");
@@ -85,6 +86,7 @@ fn request_terminated_preserves_nested_io_timings_and_defaults_legacy_payloads()
         first_body_chunk_ms: None,
         finalize_ms: None,
         internal_errors: Vec::new(),
+        event_kind: None,
     };
 
     let json = serde_json::to_value(&event).expect("serialize terminal setup timings");
@@ -154,6 +156,7 @@ fn kind_labels_cover_every_variant() {
             stream: false,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         }
         .kind(),
         LifecycleEvent::ParseCompleted {
@@ -251,6 +254,7 @@ fn kind_labels_cover_every_variant() {
             first_body_chunk_ms: None,
             finalize_ms: None,
             internal_errors: Vec::new(),
+            event_kind: None,
         }
         .kind(),
         LifecycleEvent::Priced {

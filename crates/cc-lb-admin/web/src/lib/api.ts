@@ -451,6 +451,23 @@ const requestIoTimingFields = {
   retry_overhead_ms: requestSetupTimingSchema,
 };
 
+/**
+ * Endpoint classification recorded per request event. Mirrors
+ * `cc_lb_request_log::RequestEventKind` on the backend; rows written before the
+ * column existed carry no value and classify as `unclassified`, while a
+ * `source_kind` of `renewal` still classifies as `renewal`.
+ */
+export const RequestEventKindSchema = z.enum([
+  'messages',
+  'count_tokens',
+  'models',
+  'files',
+  'other',
+  'renewal',
+  'unclassified',
+]);
+export type RequestEventKind = z.infer<typeof RequestEventKindSchema>;
+
 export const RequestEventPartialSchema = z.looseObject({
   event_id: z.string().min(1),
   request_id: z.string().min(1),
@@ -460,6 +477,7 @@ export const RequestEventPartialSchema = z.looseObject({
   elapsed_ms: z.number().nullable().optional(),
   stream: z.boolean().nullable().optional(),
   source_kind: z.string().nullable().optional(),
+  event_kind: RequestEventKindSchema.nullable().optional(),
   principal_id: z.string().nullable().optional(),
   principal_kind: z.string().nullable().optional(),
   key_id: z.string().nullable().optional(),
@@ -643,6 +661,7 @@ export interface RequestEvent {
   session_id_source?: string | null;
   model?: string;
   source_kind?: string;
+  event_kind?: RequestEventKind | null;
   status: number;
   upstream_error_type?: string;
   upstream_error_message?: string;

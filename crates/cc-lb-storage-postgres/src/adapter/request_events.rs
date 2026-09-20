@@ -3,7 +3,7 @@ use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
     RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
     RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket, RequestEventKeyUsageQuery,
-    RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
+    RequestEventKind, RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
     RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
     RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_pattern,
     model_filter_matches, normalize_usage_rollup_dimension,
@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, Postgres, QueryBuilder};
 use std::collections::BTreeMap;
 
-use super::request_event_list_sql::{self, status_class_range, upstream_as_str};
+use super::request_event_list_sql::{self, parse_event_kind, status_class_range, upstream_as_str};
 use crate::{
     adapter::{
         PostgresStorage, i64_to_u64, u64_to_i64, unix_secs_to_datetime,
@@ -83,8 +83,8 @@ impl RequestEventStore for PostgresStorage {
         };
         let until = unix_secs_to_datetime_upper(until, "request event until")?;
 
-        let rows = sqlx::query_as::<_, (Option<String>, Option<String>, Vec<u8>)>(
-            "SELECT source_kind, source_ref_id, payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq ASC LIMIT $3",
+        let rows = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Vec<u8>)>(
+            "SELECT source_kind, source_ref_id, event_kind, payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq ASC LIMIT $3",
         )
         .bind(since)
         .bind(until)
@@ -94,8 +94,8 @@ impl RequestEventStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|(source_kind, source_ref_id, payload)| {
-                request_event_from_storage(&payload, source_kind, source_ref_id)
+            .map(|(source_kind, source_ref_id, event_kind, payload)| {
+                request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)
             })
             .collect()
     }
@@ -114,8 +114,8 @@ impl RequestEventStore for PostgresStorage {
         };
         let until = unix_secs_to_datetime_upper(until, "request event until")?;
 
-        let rows = sqlx::query_as::<_, (Option<String>, Option<String>, Vec<u8>)>(
-            "SELECT source_kind, source_ref_id, payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq DESC LIMIT $3",
+        let rows = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Vec<u8>)>(
+            "SELECT source_kind, source_ref_id, event_kind, payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq DESC LIMIT $3",
         )
         .bind(since)
         .bind(until)
@@ -125,8 +125,8 @@ impl RequestEventStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|(source_kind, source_ref_id, payload)| {
-                request_event_from_storage(&payload, source_kind, source_ref_id)
+            .map(|(source_kind, source_ref_id, event_kind, payload)| {
+                request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)
             })
             .collect()
     }
@@ -196,11 +196,14 @@ impl RequestEventStore for PostgresStorage {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query_as::<_, (i64, Option<String>, Option<String>, Vec<u8>)>(
-            "SELECT seq, source_kind, source_ref_id, payload FROM request_events_v1 \
-             WHERE seq > $1 AND seq <= $2 \
-               AND COALESCE(tx_id, '0'::xid8) < pg_snapshot_xmin(pg_current_snapshot()) \
-             ORDER BY seq ASC LIMIT $3",
+        let rows = sqlx::query_as::<
+            _,
+            (i64, Option<String>, Option<String>, Option<String>, Vec<u8>),
+        >(
+            "SELECT seq, source_kind, source_ref_id, event_kind, payload FROM request_events_v1 \
+                 WHERE seq > $1 AND seq <= $2 \
+                   AND COALESCE(tx_id, '0'::xid8) < pg_snapshot_xmin(pg_current_snapshot()) \
+                 ORDER BY seq ASC LIMIT $3",
         )
         .bind(u64_to_i64(after, "request event cursor after")?)
         .bind(u64_to_i64(until, "request event cursor until")?)
@@ -213,9 +216,10 @@ impl RequestEventStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|(seq, source_kind, source_ref_id, payload)| {
+            .map(|(seq, source_kind, source_ref_id, event_kind, payload)| {
                 let cursor = i64_to_u64(seq, "request event cursor")?;
-                let event = request_event_from_storage(&payload, source_kind, source_ref_id)?;
+                let event =
+                    request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)?;
                 Ok((cursor, event))
             })
             .filter(|result| match result {
@@ -738,9 +742,20 @@ async fn request_event_histogram(
             builder.push(" AND r.source_kind = ");
             builder.push_bind(source_kind);
         }
-        None => {
+        // An explicit event_kind filter bypasses only this implicit default
+        // renewal exclusion; an explicit source_kind stays conjunctive.
+        None if query.filters.event_kind.is_none() => {
             builder.push(" AND (r.source_kind IS NULL OR r.source_kind <> 'renewal')");
         }
+        None => {}
+    }
+
+    if let Some(event_kind) = query.filters.event_kind {
+        builder.push(
+            " AND CASE WHEN r.source_kind = 'renewal' THEN 'renewal' \
+             ELSE COALESCE(r.event_kind, 'unclassified') END = ",
+        );
+        builder.push_bind(event_kind.as_str());
     }
 
     builder.push(" GROUP BY bucket_index");
@@ -771,6 +786,7 @@ fn request_event_from_storage(
     payload: &[u8],
     source_kind: Option<String>,
     source_ref_id: Option<String>,
+    event_kind: Option<String>,
 ) -> StorageResult<RequestEvent> {
     let mut event = serde_json::from_slice::<RequestEvent>(payload)?;
     if source_kind.is_some() {
@@ -778,6 +794,9 @@ fn request_event_from_storage(
     }
     if source_ref_id.is_some() {
         event.source_ref_id = source_ref_id;
+    }
+    if let Some(event_kind) = event_kind {
+        event.event_kind = Some(parse_event_kind(&event_kind)?);
     }
     Ok(event)
 }
@@ -808,8 +827,8 @@ async fn insert_request_event_in_tx(
                    list_ts_ms, list_event_key, list_upstream, list_status, \
                    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
                    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, \
-                   list_cost_components_materialized, payload, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, created_at) \
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,NOW()) \
+                   list_cost_components_materialized, payload, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, event_kind, created_at) \
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$70,NOW()) \
                ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
                RETURNING seq",
         )
@@ -989,6 +1008,7 @@ async fn insert_request_event_in_tx(
         .bind(event.parent_session_id.as_deref())
         .bind(event.client_app.as_deref())
         .bind(event.session_id_source.as_deref())
+        .bind(event.event_kind.map(|kind| kind.as_str()))
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)
@@ -1116,6 +1136,11 @@ fn request_event_matches_filters(
     }
     if let Some(status_class) = filters.status_class
         && !status_class.matches(event.status)
+    {
+        return false;
+    }
+    if let Some(event_kind) = filters.event_kind
+        && RequestEventKind::effective(event.source_kind.as_deref(), event.event_kind) != event_kind
     {
         return false;
     }

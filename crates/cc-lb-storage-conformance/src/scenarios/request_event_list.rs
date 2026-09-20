@@ -72,6 +72,7 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             model: Some("claude-sonnet-4-5".to_owned()),
             upstream: Some(RequestEventUpstream::AnthropicDirect),
             upstream_id: Some(upstream_id),
+            event_kind: None,
             status_class: Some(StatusClass::TwoXx),
         };
 
@@ -394,6 +395,7 @@ fn list_projection(event: &RequestEvent) -> RequestEventListItem {
         request_id: event.request_id.clone(),
         event_id: event.event_id.clone(),
         source_kind: event.source_kind.clone(),
+        event_kind: event.event_kind,
         principal_id: event.principal_id.clone(),
         upstream: event.upstream,
         upstream_id: event.upstream_id,

@@ -531,6 +531,7 @@ mod tests {
             stream: false,
             source_kind: source_kind.map(str::to_owned),
             source_ref_id: None,
+            event_kind: None,
         }
     }
 
@@ -594,6 +595,7 @@ mod tests {
             first_body_chunk_ms: None,
             finalize_ms: timing.finalize_ms,
             internal_errors: Vec::new(),
+            event_kind: None,
         }
     }
 

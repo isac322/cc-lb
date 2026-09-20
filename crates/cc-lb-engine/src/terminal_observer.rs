@@ -249,6 +249,7 @@ struct Inner {
 #[derive(Default)]
 struct TerminalState {
     request_id: String,
+    event_kind: Option<cc_lb_request_log::RequestEventKind>,
     status: u16,
     error_code: Option<&'static str>,
     internal_errors: Vec<InternalError>,
@@ -317,6 +318,13 @@ impl LifecycleContext {
     }
     pub(crate) fn set_request_span(&self, span: tracing::Span) {
         self.lock_state().request_span.get_or_insert(span);
+    }
+
+    /// Record the endpoint classification resolved from the ingress path at
+    /// the earliest request boundary. Emitted on `RequestStarted` so early
+    /// rejections (400/413/auth) are categorized before parsing runs.
+    pub fn set_event_kind(&self, event_kind: cc_lb_request_log::RequestEventKind) {
+        self.lock_state().event_kind = Some(event_kind);
     }
 
     pub(crate) fn set_attempt_timings(
@@ -460,7 +468,10 @@ impl LifecycleContext {
         let Some(bus) = self.inner.bus.as_ref() else {
             return;
         };
-        let request_id = self.lock_state().request_id.clone();
+        let (request_id, event_kind) = {
+            let state = self.lock_state();
+            (state.request_id.clone(), state.event_kind)
+        };
         bus.publish_lifecycle(LifecycleEvent::RequestStarted {
             event_id: self.inner.event_id.clone(),
             request_id,
@@ -468,6 +479,7 @@ impl LifecycleContext {
             stream,
             source_kind: Some("proxy".to_owned()),
             source_ref_id: None,
+            event_kind,
         });
     }
 
@@ -628,6 +640,7 @@ impl Inner {
                 first_body_chunk_ms: state.first_body_chunk_ms,
                 finalize_ms: state.finalize_ms,
                 internal_errors: state.internal_errors.clone(),
+                event_kind: state.event_kind,
             });
         }
         let terminal_hook_event =
@@ -838,6 +851,35 @@ mod tests {
         let (_id, reason, _status) =
             expect_terminated(rx.recv().await.expect("drop fallback delivered"));
         assert!(matches!(reason, TerminationReason::Dropped));
+    }
+
+    #[tokio::test]
+    async fn terminal_event_carries_recorded_event_kind_on_finish_and_drop() {
+        for finish_explicitly in [true, false] {
+            let bus = Arc::new(InMemoryBus::new());
+            let mut rx = subscribe(&bus);
+            let clock: ClockHandle = Arc::new(SystemClock);
+            {
+                let observer = LifecycleContext::new(
+                    "req-event-kind".to_owned(),
+                    bus.clone() as Arc<dyn RequestEventBus>,
+                    &clock,
+                );
+                observer.set_event_kind(cc_lb_request_log::RequestEventKind::Messages);
+                if finish_explicitly {
+                    observer.finish();
+                }
+            }
+
+            let event = rx.recv().await.expect("terminal event delivered");
+            let LifecycleEvent::RequestTerminated { event_kind, .. } = event else {
+                panic!("expected request termination");
+            };
+            assert_eq!(
+                event_kind,
+                Some(cc_lb_request_log::RequestEventKind::Messages)
+            );
+        }
     }
 
     #[tokio::test]
@@ -1172,6 +1214,51 @@ mod tests {
         assert_eq!(client_status, StatusCode::PAYLOAD_TOO_LARGE.as_u16());
         assert_eq!(request_body_read_ms, Some(3));
         assert_eq!(request_body_bytes, None);
+    }
+
+    #[tokio::test]
+    async fn early_rejections_carry_classified_event_kind_on_request_started() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_event_kind".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.set_event_kind(cc_lb_request_log::RequestEventKind::CountTokens);
+        observer.record_body_too_large_rejection(1_024);
+
+        let started = rx.recv().await.expect("request started delivered");
+        let LifecycleEvent::RequestStarted { event_kind, .. } = started else {
+            panic!("expected request started");
+        };
+        assert_eq!(
+            event_kind,
+            Some(cc_lb_request_log::RequestEventKind::CountTokens),
+            "413 rejection must carry the ingress classification"
+        );
+
+        let observer = LifecycleContext::new(
+            "req_event_kind_read".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.set_event_kind(cc_lb_request_log::RequestEventKind::Files);
+        observer.record_body_read_failure();
+
+        // Drain the first request's terminal event, then the second start.
+        let _ = rx.recv().await.expect("first terminal delivered");
+        let _ = rx.recv().await.expect("first parse failure delivered");
+        let started = rx.recv().await.expect("second request started delivered");
+        let LifecycleEvent::RequestStarted { event_kind, .. } = started else {
+            panic!("expected request started");
+        };
+        assert_eq!(
+            event_kind,
+            Some(cc_lb_request_log::RequestEventKind::Files),
+            "400 read failure must carry the ingress classification"
+        );
     }
 
     #[test]

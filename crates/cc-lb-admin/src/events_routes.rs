@@ -13,7 +13,7 @@ use axum::{
 };
 use cc_lb_control::BusReceiver;
 use cc_lb_control::record_dashboard_sse_lagged;
-use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
+use cc_lb_request_log::{RequestEventKind, RequestEventPartial, RequestEventUpdate};
 use cc_lb_storage_api::{RequestEvent, model_filter_matches};
 use serde_json::json;
 use tokio::{sync::broadcast::error::RecvError, time::Duration};
@@ -454,11 +454,17 @@ fn apply_filters_to_partial(partial: &RequestEventPartial, filters: &StreamFilte
     {
         return false;
     }
+    if let Some(event_kind) = filters.event_kind
+        && RequestEventKind::effective(partial.source_kind.as_deref(), partial.event_kind)
+            != event_kind
+    {
+        return false;
+    }
     if let Some(source_kind) = filters.source_kind.as_deref() {
         if source_kind != "all" && partial.source_kind.as_deref() != Some(source_kind) {
             return false;
         }
-    } else if partial.source_kind.as_deref() == Some("renewal") {
+    } else if filters.event_kind.is_none() && partial.source_kind.as_deref() == Some("renewal") {
         return false;
     }
     true

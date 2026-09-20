@@ -341,6 +341,7 @@ mod tests {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: None,
+            event_kind: None,
         }
     }
 

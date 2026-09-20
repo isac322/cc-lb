@@ -56,6 +56,7 @@ function recentEvent(requestId: string, principalId: string) {
     ts: 1_700_000_000,
     request_id: requestId,
     principal_id: principalId,
+    event_kind: 'messages',
     status: 200,
     duration_ms: 25,
   };
@@ -165,6 +166,7 @@ describe('principal recent-request polling', () => {
     expect(queries.useRecentEvents).toHaveBeenLastCalledWith({
       principal_id: otherPrincipal.id,
       limit: '5',
+      event_kind: 'messages',
     });
     expect(screen.queryByText('ada-request')).toBeNull();
     expect(screen.getByTestId('recent-requests-table').dataset.loading).toBe(
