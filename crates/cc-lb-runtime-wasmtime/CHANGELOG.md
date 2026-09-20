@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.4...cc-lb-runtime-wasmtime-v0.2.0) - 2026-09-20
+
+### Other
+
+- *(config)* make database entities the sole runtime source ([#789](https://github.com/isac322/cc-lb/pull/789))
+- reduce redundant build work ([#627](https://github.com/isac322/cc-lb/pull/627))
+
 ## [0.1.4](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.3...cc-lb-runtime-wasmtime-v0.1.4) - 2026-07-15
 
 ### Added
