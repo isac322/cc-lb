@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.2.4...cc-lb-plugin-conformance-v0.2.5) - 2026-09-20
+
+### Other
+
+- updated the following local packages: cc-lb-runtime-wasmtime
+
 ## [0.2.4](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.2.3...cc-lb-plugin-conformance-v0.2.4) - 2026-07-15
 
 ### Added
