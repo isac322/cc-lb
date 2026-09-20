@@ -6,8 +6,8 @@ pub use crate::storage_types_keys::*;
 pub use cc_lb_domain::PrincipalKindLite;
 pub use cc_lb_request_log::{
     FinalRequestEventUpdate, RequestCacheBreakpoint, RequestCacheBreakpointSource,
-    RequestCacheState, RequestEvent, RequestEventPartial, RequestEventPhase, RequestEventUpdate,
-    RequestEventUpstream,
+    RequestCacheState, RequestEvent, RequestEventKind, RequestEventPartial, RequestEventPhase,
+    RequestEventUpdate, RequestEventUpstream,
 };
 
 #[cfg(test)]

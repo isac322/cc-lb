@@ -2291,6 +2291,7 @@ impl Lifecycle {
         if let Some(o) = observer.as_ref() {
             o.set_observability_hooks(&view.global_observability_hooks);
             o.set_request_span(handle_span.clone());
+            o.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(&ctx.path));
             o.emit_request_started(body_view.stream());
         }
         store_setup_timings(observer.as_ref(), setup_timings);

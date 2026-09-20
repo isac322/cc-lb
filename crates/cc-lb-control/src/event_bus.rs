@@ -784,6 +784,7 @@ mod tests {
             stream: false,
             source_kind: None,
             source_ref_id: None,
+            event_kind: None,
         }
     }
 

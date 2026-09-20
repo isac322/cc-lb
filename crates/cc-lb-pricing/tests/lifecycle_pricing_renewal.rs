@@ -81,6 +81,7 @@ async fn renewal_is_priced_only_after_terminal_with_oauth_route_kind() {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: None,
+            event_kind: None,
         })
         .await
         .expect("send renewal terminal");
@@ -131,6 +132,7 @@ async fn send_renewal_pricing_inputs(tx: &mpsc::Sender<LifecycleEvent>, event_id
         stream: false,
         source_kind: Some("renewal".to_owned()),
         source_ref_id: Some(format!("session-{event_id}")),
+        event_kind: Some(cc_lb_request_log::RequestEventKind::Renewal),
     })
     .await
     .expect("send renewal start");

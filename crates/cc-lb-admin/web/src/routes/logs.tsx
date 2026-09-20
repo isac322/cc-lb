@@ -28,13 +28,19 @@ import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { SessionChip } from '../components/ui/SessionChip';
 import { TimeRangeBounds } from '../components/ui/TimeRangeBounds';
 import { TimeRangeStrip } from '../components/ui/TimeRangeStrip';
-import { eventTime, type RecentEventsPayload } from '../lib/api';
+import {
+  eventTime,
+  type RecentEventsPayload,
+  RequestEventKindSchema,
+} from '../lib/api';
 import {
   filterLiveEventsByUnixSeconds,
   filterLogRows,
   LOG_STATUS_CLASSES,
   mergeLogRows,
   newestLiveEventIds,
+  REQUEST_EVENT_KIND_LABELS,
+  REQUEST_EVENT_KINDS,
   selectLogRowsForPage,
 } from '../lib/logRows';
 import { LOGS_PAGE_SIZE } from '../lib/logsPagination';
@@ -74,7 +80,9 @@ export const logsSearchSchema = z
     session: z.string().optional(),
     model: z.string().optional(),
     status: z.enum(LOG_STATUS_CLASSES).optional(),
-    source_kind: z.enum(['all', 'renewal']).optional(),
+    // Old bookmarks may still carry `source_kind`; it is stripped as an unknown
+    // key and the kind filter falls back to its default.
+    event_kind: RequestEventKindSchema.catch('messages'),
     // Accepted only so bookmarked preset URLs do not fail validateSearch and
     // fall through to the route error boundary. Normalized away on load.
     time_range: z.string().optional(),
@@ -135,7 +143,7 @@ export function buildLiveFilters(filters: z.infer<typeof logsSearchSchema>) {
   if (filters.session) base.thread_id = filters.session;
   if (filters.model) base.model = filters.model;
   if (filters.status) base.status_class = filters.status;
-  if (filters.source_kind) base.source_kind = filters.source_kind;
+  if (filters.event_kind) base.event_kind = filters.event_kind;
   return base;
 }
 
@@ -168,6 +176,9 @@ function LogsPage() {
   const upstreams = useUpstreams();
 
   const { session: sessionFilter } = filters;
+  // validateSearch always supplies a kind, but tests that stub useSearch bypass
+  // it; a missing value behaves as the default.
+  const eventKindFilter = filters.event_kind ?? 'messages';
   const serverFilters = buildLiveFilters(filters);
   const historicalFilters = buildHistoricalFilters(filters);
   const nextPaginationIdentity = JSON.stringify([
@@ -176,7 +187,7 @@ function LogsPage() {
     filters.session,
     filters.model,
     filters.status,
-    filters.source_kind,
+    eventKindFilter,
     filters.since_unix_secs,
     filters.until_unix_secs,
   ]);
@@ -737,14 +748,16 @@ function LogsPage() {
     [],
   );
 
-  const sourceKindSelectOptions = useMemo<FilterOption[]>(
-    () => [
-      { value: 'all', label: <span className="font-mono">All events</span> },
-      {
-        value: 'renewal',
-        label: <span className="font-mono">Renewals only</span>,
-      },
-    ],
+  const eventKindSelectOptions = useMemo<FilterOption[]>(
+    () =>
+      // `messages` is the default state and is represented by the select's
+      // empty/"all" item, so the option list carries the other six kinds.
+      REQUEST_EVENT_KINDS.filter((kind) => kind !== 'messages').map((kind) => ({
+        value: kind,
+        label: (
+          <span className="font-mono">{REQUEST_EVENT_KIND_LABELS[kind]}</span>
+        ),
+      })),
     [],
   );
 
@@ -898,10 +911,10 @@ function LogsPage() {
             </Field>
             <Field label="Kind">
               <LogSelect
-                value={filters.source_kind ?? ''}
-                options={sourceKindSelectOptions}
-                onChange={(v) => setFilter('source_kind', v)}
-                allLabel="Exclude renewals"
+                value={eventKindFilter === 'messages' ? '' : eventKindFilter}
+                options={eventKindSelectOptions}
+                onChange={(v) => setFilter('event_kind', v || 'messages')}
+                allLabel="Messages"
                 widthClass="w-40"
               />
             </Field>
@@ -923,12 +936,12 @@ function LogsPage() {
             filters.session ||
             filters.model ||
             filters.status ||
-            filters.source_kind ||
+            eventKindFilter !== 'messages' ||
             filters.since_unix_secs ||
             filters.until_unix_secs ? (
               <Button
                 iconLeft={<X className="w-3 h-3" />}
-                onClick={() => navigate({ search: {} })}
+                onClick={() => navigate({ search: { event_kind: 'messages' } })}
               >
                 Clear
               </Button>

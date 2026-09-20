@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
-use crate::{RequestCacheBreakpoint, RequestCacheState, RequestEventUpstream, cache::is_zero};
+use crate::{
+    RequestCacheBreakpoint, RequestCacheState, RequestEventKind, RequestEventUpstream,
+    cache::is_zero,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RequestEvent {
@@ -14,6 +17,12 @@ pub struct RequestEvent {
     pub source_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref_id: Option<String>,
+    /// Endpoint classification captured at the earliest request boundary.
+    /// Absent on rows persisted before this field existed (historical
+    /// `unclassified`); `source_kind = "renewal"` stays authoritative via
+    /// [`RequestEventKind::effective`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_kind: Option<RequestEventKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts_ms: Option<u64>,
     pub principal_id: Option<String>,

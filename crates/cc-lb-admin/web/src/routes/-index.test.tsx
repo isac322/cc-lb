@@ -336,6 +336,7 @@ function finalLiveEvent(index: number): RequestEvent {
   return {
     duration_ms: 10,
     event_id: `live-${index}`,
+    event_kind: 'messages',
     model: `model-${index}`,
     request_id: `request-${index}`,
     status: 200,
@@ -1087,6 +1088,7 @@ describe('Overview loading geometry', () => {
             events: [
               {
                 duration_ms: 10,
+                event_kind: 'messages',
                 model: 'test-model',
                 request_id: 'request-1',
                 status: 200,
@@ -1108,6 +1110,91 @@ describe('Overview loading geometry', () => {
       loadingScrollBox?.className,
     );
     expect(screen.getByText('test-model')).toBeDefined();
+  });
+
+  it('requests only messages events and shows no other categories from mixed data', () => {
+    mockResolvedKpiQueries();
+    const eventsMap: LiveEventMap = new Map([
+      ['live-1', { phase: 'final', event: finalLiveEvent(1) }],
+      [
+        'live-2',
+        {
+          phase: 'final',
+          event: {
+            ...finalLiveEvent(2),
+            event_kind: 'messages',
+            source_kind: 'renewal',
+          },
+        },
+      ],
+      [
+        'live-3',
+        {
+          phase: 'final',
+          event: { ...finalLiveEvent(3), event_kind: 'count_tokens' },
+        },
+      ],
+      [
+        'live-4',
+        {
+          phase: 'final',
+          event: {
+            duration_ms: 10,
+            event_id: 'live-4',
+            model: 'model-4',
+            request_id: 'request-4',
+            status: 200,
+            ts: 4,
+          },
+        },
+      ],
+    ]);
+    mockLiveStream(eventsMap, 4);
+    vi.mocked(queries.useRecentEventsInfinite).mockReturnValue({
+      data: {
+        pages: [
+          {
+            events: [
+              {
+                duration_ms: 10,
+                event_kind: 'messages',
+                model: 'historical-model',
+                request_id: 'historical-1',
+                status: 200,
+                ts: 5,
+              },
+              {
+                duration_ms: 10,
+                event_kind: 'models',
+                model: 'historical-models',
+                request_id: 'historical-2',
+                status: 200,
+                ts: 4,
+              },
+            ],
+          },
+        ],
+      },
+      fetchNextPage: vi.fn(),
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      isLoading: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    expect(queries.useRecentEventsInfinite).toHaveBeenCalledWith({
+      event_kind: 'messages',
+    });
+    expect(liveEvents.useLiveEventStream).toHaveBeenCalledWith({
+      event_kind: 'messages',
+    });
+    expect(screen.getByLabelText('View request live-1')).toBeDefined();
+    expect(screen.getByLabelText('View request historical-1')).toBeDefined();
+    expect(screen.queryByLabelText('View request live-2')).toBeNull();
+    expect(screen.queryByLabelText('View request live-3')).toBeNull();
+    expect(screen.queryByLabelText('View request live-4')).toBeNull();
+    expect(screen.queryByLabelText('View request historical-2')).toBeNull();
   });
 
   it('keeps the pool chart memoized across live-only request updates', () => {

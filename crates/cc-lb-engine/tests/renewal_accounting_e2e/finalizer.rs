@@ -75,6 +75,7 @@ pub(crate) async fn persist_finalization(input: FinalizeInput<'_>) -> Completion
             stream: false,
             source_kind: Some("renewal".to_owned()),
             source_ref_id: Some(source_ref_id.to_owned()),
+            event_kind: Some(cc_lb_request_log::RequestEventKind::Renewal),
         });
     }
 

@@ -34,6 +34,7 @@ pub(super) fn publish_renewal_lifecycle(
         stream: false,
         source_kind: Some("renewal".to_owned()),
         source_ref_id: Some(input.source_ref_id.to_owned()),
+        event_kind: Some(cc_lb_request_log::RequestEventKind::Renewal),
     });
     event_bus.publish_lifecycle(LifecycleEvent::ParseCompleted {
         event_id: input.event_id.to_owned(),
@@ -145,6 +146,7 @@ pub(super) fn publish_renewal_lifecycle(
         first_body_chunk_ms: None,
         internal_errors: Vec::new(),
         io_timings: Default::default(),
+        event_kind: Some(cc_lb_request_log::RequestEventKind::Renewal),
     });
 }
 

@@ -205,6 +205,70 @@ async fn events_recent_excludes_renewal_by_default_and_includes_when_requested()
     assert_eq!(events[0]["request_id"], "req-renewal");
 }
 
+#[tokio::test]
+async fn events_delta_applies_event_kind_filter_consistently() {
+    let (_dir, storage) = temp_storage().await;
+    publish_source_kind_contracts(storage.as_ref()).await;
+    let state = test_state(Config::default(), Some(Arc::clone(&storage)));
+
+    let (status, _, renewal_resp, _) = authed_json(
+        app(state.clone()),
+        "GET",
+        "/admin/events/delta?since_cursor=0&event_kind=renewal",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = renewal_resp["events"].as_array().expect("events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["request_id"], "req-renewal");
+
+    let (status, _, unclassified_resp, _) = authed_json(
+        app(state.clone()),
+        "GET",
+        "/admin/events/delta?since_cursor=0&event_kind=unclassified",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = unclassified_resp["events"].as_array().expect("events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["request_id"], "req-normal");
+
+    // No event_kind preserves the legacy default: renewals excluded.
+    let (status, _, default_resp, _) = authed_json(
+        app(state),
+        "GET",
+        "/admin/events/delta?since_cursor=0",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = default_resp["events"].as_array().expect("events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["request_id"], "req-normal");
+}
+
+#[tokio::test]
+async fn events_endpoints_reject_unknown_event_kind_consistently() {
+    let (_dir, storage) = temp_storage().await;
+    let state = test_state(Config::default(), Some(Arc::clone(&storage)));
+
+    for uri in [
+        "/admin/events/recent?event_kind=bogus",
+        "/admin/events/delta?since_cursor=0&event_kind=bogus",
+        "/admin/events/stream?event_kind=bogus",
+        "/admin/v1/events/recent?event_kind=bogus",
+        "/admin/v1/events/histogram?since_unix_secs=1&until_unix_secs=2&bucket_ms=1000&event_kind=bogus",
+        "/admin/v1/events/delta?since_cursor=0&event_kind=bogus",
+        "/admin/v1/events/stream?event_kind=bogus",
+    ] {
+        let (status, _, body, _) = authed_json(app(state.clone()), "GET", uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(body["error"], "invalid_event_kind", "{uri}");
+    }
+}
+
 fn event_by_request_id<'a>(
     events: &'a [serde_json::Value],
     request_id: &str,

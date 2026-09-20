@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{RequestEvent, RequestEventUpstream};
+use crate::{RequestEvent, RequestEventKind, RequestEventUpstream};
 
 /// In-flight snapshot of an active request, emitted by the lifecycle event
 /// assembler while the request is still executing (before finalization).
@@ -27,6 +27,10 @@ pub struct RequestEventPartial {
     pub source_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref_id: Option<String>,
+    /// Endpoint classification captured at the earliest request boundary.
+    /// Mirrors [`RequestEvent::event_kind`]; absent means unclassified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_kind: Option<RequestEventKind>,
     pub ts: u64,
     pub ts_ms: u64,
     /// Millisecond timestamp of the most recent lifecycle event merged into

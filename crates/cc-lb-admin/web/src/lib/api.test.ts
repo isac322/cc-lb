@@ -148,6 +148,30 @@ describe('RequestEventPartialSchema', () => {
     expect(result.success).toBe(true);
   });
 
+  it('accepts a recorded event_kind and tolerates it missing', () => {
+    const withKind = RequestEventPartialSchema.safeParse({
+      ...baseFixture,
+      event_kind: 'count_tokens',
+    });
+    expect(withKind.success).toBe(true);
+    if (withKind.success) {
+      expect(withKind.data.event_kind).toBe('count_tokens');
+    }
+
+    const withoutKind = RequestEventPartialSchema.safeParse(baseFixture);
+    expect(withoutKind.success).toBe(true);
+    if (withoutKind.success) {
+      expect(withoutKind.data.event_kind).toBeUndefined();
+    }
+
+    expect(
+      RequestEventPartialSchema.safeParse({
+        ...baseFixture,
+        event_kind: 'not-a-kind',
+      }).success,
+    ).toBe(false);
+  });
+
   it('rejects partial object with thinking_budget_tokens as string', () => {
     const result = RequestEventPartialSchema.safeParse({
       ...baseFixture,

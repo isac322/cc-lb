@@ -75,6 +75,7 @@ import {
 import { getWindowColor } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
 import { fmtChartTooltipTs, sumTokens } from '../lib/format';
+import { isMessagesRequestEvent } from '../lib/logRows';
 import {
   type UpdateUpstreamWarmupSettingsRequest,
   type Upstream,
@@ -946,12 +947,15 @@ function DetailView({
   const recent = useRecentEvents({
     upstream_id: upstream.id,
     limit: '5',
+    event_kind: 'messages',
   });
   const recentForUpstream = useMemo(() => {
-    return (recent.data?.events ?? []).map((e) => ({
-      ...e,
-      _phase: 'final' as const,
-    }));
+    return (recent.data?.events ?? [])
+      .filter(isMessagesRequestEvent)
+      .map((e) => ({
+        ...e,
+        _phase: 'final' as const,
+      }));
   }, [recent.data]);
 
   const isOauth = upstream.kind === 'anthropic_oauth';

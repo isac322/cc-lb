@@ -80,6 +80,12 @@ pub enum LifecycleEvent {
         source_kind: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_ref_id: Option<String>,
+        /// Endpoint classification resolved at the earliest request boundary
+        /// (ingress path via `cc_lb_request_log::RequestEventKind::from_path`,
+        /// or `Renewal` for scheduler keepalive publishes). `None` means the
+        /// producer did not classify the request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_kind: Option<cc_lb_request_log::RequestEventKind>,
     },
     /// Body parsing and shape validation completed.
     ParseCompleted {
@@ -189,6 +195,12 @@ pub enum LifecycleEvent {
         finalize_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         internal_errors: Vec<cc_lb_domain::InternalError>,
+        /// Endpoint classification mirrored from `RequestStarted` so the
+        /// terminal event still categorizes the row when the start event is
+        /// lost on the writer channel. `None` means the producer did not
+        /// classify the request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_kind: Option<cc_lb_request_log::RequestEventKind>,
     },
     /// Emitted by the pricing subscriber after cost is computed from usage
     /// counts, model, and upstream kind. The assembler merges these micros

@@ -166,6 +166,7 @@ fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
         request_id: input.event_id.to_owned(),
         source_kind: Some("renewal".to_owned()),
         source_ref_id: Some(input.source_ref_id.to_owned()),
+        event_kind: Some(cc_lb_request_log::RequestEventKind::Renewal),
         principal_id: Some(input.record.principal_id.clone()),
         key_id: input.record.accounting_key_id.clone(),
         principal_kind: None,
