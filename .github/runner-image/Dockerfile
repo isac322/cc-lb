@@ -12,23 +12,23 @@
 # gnutar must stay installed: busybox tar rejects the -P flag that
 # actions/cache passes, so cache restore and save both fail on this image.
 
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:103eb3f4444c68ea2453bf3aad09d860eaa5a698effb3e656cd607f630f0e46d
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d
 LABEL org.opencontainers.image.source="https://github.com/isac322/cc-lb"
 
 ARG TARGETARCH
 ARG RUNNER_VERSION=2.337.0
-ARG RUNNER_CONTAINER_HOOKS_VERSION=0.7.0
-ARG DOCKER_VERSION=29.7.2
-ARG BUILDX_VERSION=0.36.1
-ARG SCCACHE_VERSION=0.17.0
-ARG GH_VERSION=2.100.0
-ARG PROMETHEUS_VERSION=3.13.2
+ARG RUNNER_CONTAINER_HOOKS_VERSION=0.8.1
+ARG DOCKER_VERSION=29.8.1
+ARG BUILDX_VERSION=0.37.1
+ARG SCCACHE_VERSION=0.18.0
+ARG GH_VERSION=2.101.0
+ARG PROMETHEUS_VERSION=3.14.0
 ARG HADOLINT_VERSION=2.15.1
 
 # linux-arm64 runner tarball SHA-256 from the v2.337.0 release notes.
 ARG RUNNER_SHA256_ARM64=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
-ARG GH_SHA256_ARM64=ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961
-ARG PROMETHEUS_SHA256_ARM64=7cecb17a6f41d59814e1a0581a1f81f79051ad5973d1ecf39e23a9f747d6572a
+ARG GH_SHA256_ARM64=b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
+ARG PROMETHEUS_SHA256_ARM64=077f3781ab7245dc04c9a3c9b78ba120fc8e41aa0dc97489b0af67247e50ba83
 ARG HADOLINT_SHA256_ARM64=f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d
 
 ENV RUNNER_MANUALLY_TRAP_SIG=1 \
@@ -59,7 +59,7 @@ RUN set -eux; \
       pkgconf \
       posix-libc-utils \
       postgresql-18-client \
-      python-3.13 \
+      python-3.14 \
       ripgrep \
       shadow \
       sudo \
@@ -68,7 +68,7 @@ RUN set -eux; \
       zlib \
       zstd; \
     if ! command -v python3 >/dev/null; then \
-      ln -sfn "$(command -v python3.13)" /usr/local/bin/python3; \
+      ln -sfn "$(command -v python3.14)" /usr/local/bin/python3; \
     fi; \
     clang --version; \
     gcc --version; \
@@ -121,7 +121,7 @@ RUN set -eux; \
         gh_sha256="${GH_SHA256_ARM64}"; \
         docker_arch=aarch64; \
         sccache_target="aarch64-unknown-linux-musl"; \
-        sccache_sha256="821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77"; \
+        sccache_sha256="2b3284d5da3b46a47dc4229e75bb7b88ac4aa99c8d754fb7d2f84997e5a4354a"; \
         prometheus_sha256="${PROMETHEUS_SHA256_ARM64}"; \
         hadolint_sha256="${HADOLINT_SHA256_ARM64}" \
         ;; \
