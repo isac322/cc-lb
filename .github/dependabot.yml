@@ -77,9 +77,11 @@ updates:
       - dependency-name: "apalis-sqlite"
         versions: ["1.0.0-rc.9"]
       # cc-lb-scheduler's ulid is type-coupled to apalis-sqlite/apalis-postgres
-      # 1.0.0-rc.8, which pin ulid ^1. Unblocks with the apalis family above.
+      # 1.0.0-rc.8, which pin ulid ^1, so every major past 1.x is blocked, not
+      # just the newest. Pinning only 3.0.0 made Dependabot fall back to 2.0.1
+      # (PR #842). Unblocks with the apalis family above.
       - dependency-name: "ulid"
-        versions: ["3.0.0"]
+        update-types: ["version-update:semver-major"]
       # The `scheduler-sqlx`/`sqlx` copies in cc-lb-admin, cc-lb-server and
       # cc-lb-scheduler are exact-pinned to 0.8.6 by apalis-sqlite/-postgres
       # 1.0.0-rc.8. The workspace `sqlx` is already on 0.9. Unblocks with the
@@ -105,11 +107,54 @@ updates:
       cargo-fuzz:
         patterns:
           - "*"
+    # /fuzz resolves the whole workspace graph through its cc-lb-* path
+    # dependencies, so it re-proposes the same blocked upgrades as the root
+    # entry above. It proposed reqwest 0.13 as PR #841. Keep both lists in sync.
     ignore:
       # bincode 3.0.0 is an xkcd-2347 joke release containing `compile_error!`;
       # 2.0.1 is the real latest stable. See deny.toml RUSTSEC-2025-0141.
       - dependency-name: "bincode"
         update-types: ["version-update:semver-major"]
+      # opentelemetry 0.33 needs tracing-opentelemetry 0.34; 0.33.0 (latest)
+      # still requires opentelemetry ^0.32.0. Drop these once it ships.
+      - dependency-name: "opentelemetry"
+        versions: ["0.33.0"]
+      - dependency-name: "opentelemetry-otlp"
+        versions: ["0.33.0"]
+      - dependency-name: "opentelemetry_sdk"
+        versions: ["0.33.0"]
+      # The apalis 1.0.0-rc family only moves in lockstep, and apalis-sqlite
+      # 1.0.0-rc.9 does not compile: persist.rs passes `&mut tx` where sqlx 0.9
+      # requires `&mut *tx`. apalis-sql 1.0.0-rc.9 also fails against
+      # apalis-core 1.0.0-rc.10 (removed `backend::poll_strategy`, `task_fn`).
+      # Drop these once a fixed apalis-sqlite release lands.
+      - dependency-name: "apalis"
+        versions: ["1.0.0-rc.10"]
+      - dependency-name: "apalis-core"
+        versions: ["1.0.0-rc.10"]
+      - dependency-name: "apalis-codec"
+        versions: ["0.1.0-rc.10"]
+      - dependency-name: "apalis-cron"
+        versions: ["1.0.0-rc.9"]
+      - dependency-name: "apalis-postgres"
+        versions: ["1.0.0-rc.9"]
+      - dependency-name: "apalis-sqlite"
+        versions: ["1.0.0-rc.9"]
+      # cc-lb-scheduler's ulid is type-coupled to apalis-sqlite/apalis-postgres
+      # 1.0.0-rc.8, which pin ulid ^1.
+      - dependency-name: "ulid"
+        update-types: ["version-update:semver-major"]
+      # The `scheduler-sqlx`/`sqlx` copies in cc-lb-admin, cc-lb-server and
+      # cc-lb-scheduler are exact-pinned to 0.8.6 by apalis-sqlite/-postgres
+      # 1.0.0-rc.8. The workspace `sqlx` is already on 0.9.
+      - dependency-name: "sqlx"
+        versions: ["0.9.x"]
+      # reqwest 0.13 dropped its ring provider feature: `rustls` forces the
+      # aws-lc-rs backend and `rustls-no-provider` panics unless a process
+      # default CryptoProvider is installed. Needs an explicit TLS-backend
+      # decision, not a version bump.
+      - dependency-name: "reqwest"
+        versions: ["0.13.x"]
 
   - package-ecosystem: "bun"
     directory: "/crates/cc-lb-admin/web"
