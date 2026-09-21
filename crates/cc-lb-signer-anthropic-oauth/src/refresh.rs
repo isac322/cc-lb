@@ -22,6 +22,7 @@ pub enum RefreshError {
     Json { reason: String },
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn exchange_pkce_code(
     http: &dyn OAuthHttpClient,
     token_url: &Url,
@@ -30,12 +31,14 @@ pub async fn exchange_pkce_code(
     code_verifier: &SecretString,
     redirect_uri: &Url,
     now_epoch_secs: u64,
+    expires_in: Option<u64>,
 ) -> Result<OAuthCredentials, RefreshError> {
     let body = pkce_token_body(
         client_id,
         code_verifier.expose_secret(),
         auth_code,
         redirect_uri,
+        expires_in,
     );
     let response = http
         .post_token(OAuthTokenRequest {
@@ -96,13 +99,17 @@ fn pkce_token_body(
     code_verifier: &str,
     auth_code: &str,
     redirect_uri: &Url,
+    expires_in: Option<u64>,
 ) -> SecretString {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "grant_type": "authorization_code",
         "code": auth_code,
         "code_verifier": code_verifier,
         "redirect_uri": redirect_uri.as_str(),
         "client_id": client_id,
     });
+    if let Some(expires_in) = expires_in {
+        payload["expires_in"] = serde_json::json!(expires_in);
+    }
     SecretString::new(payload.to_string().into_boxed_str())
 }

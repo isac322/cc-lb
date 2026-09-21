@@ -205,6 +205,7 @@ fn test_config(database_url: &str, upstream_addr: SocketAddr) -> TestResult<Conf
         token_url: Url::parse(&format!("http://{upstream_addr}/v1/oauth/token"))?,
         redirect_uri: Url::parse("http://127.0.0.1/admin/oauth/callback")?,
         scopes: Vec::new(),
+        long_lived_scopes: Vec::new(),
     });
     Ok(config)
 }

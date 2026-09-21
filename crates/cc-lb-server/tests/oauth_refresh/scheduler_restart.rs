@@ -116,6 +116,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
             now_secs(fixture.clock.as_ref()).saturating_sub(1),
             initial_tokens,
             Some(Url::parse(&fixture.fake_base).expect("fake url")),
+            false,
         )
         .await;
     let initial_generation =

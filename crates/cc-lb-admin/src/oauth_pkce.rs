@@ -20,6 +20,43 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum OAuthTokenMode {
+    /// 365-day access token, never refreshed. Default for new connections.
+    #[default]
+    #[serde(rename = "long_lived_365d")]
+    LongLived365d,
+    /// Classic 8-hour access token with background/lazy refresh.
+    #[serde(rename = "refreshing")]
+    Refreshing,
+}
+
+impl OAuthTokenMode {
+    pub(crate) fn never_refresh(self) -> bool {
+        matches!(self, Self::LongLived365d)
+    }
+
+    pub(crate) fn from_never_refresh(never_refresh: bool) -> Self {
+        if never_refresh {
+            Self::LongLived365d
+        } else {
+            Self::Refreshing
+        }
+    }
+}
+
+/// Why a long-lived request ended up as a refreshing credential.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum LongLivedFallbackReason {
+    /// Anthropic returned 400 invalid_request for the custom `expires_in`.
+    #[serde(rename = "rejected")]
+    Rejected,
+    /// Anthropic accepted the exchange but granted a materially shorter
+    /// lifetime than requested.
+    #[serde(rename = "clamped")]
+    Clamped,
+}
+
 #[derive(Clone)]
 pub(crate) struct PkceHandshake {
     pub(crate) authorize_url: Url,
@@ -28,6 +65,7 @@ pub(crate) struct PkceHandshake {
     scopes: Vec<String>,
     redirect_uri: Url,
     verifier: SecretString,
+    pub(crate) mode: OAuthTokenMode,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,6 +76,8 @@ pub(crate) struct PkceHandshakeState {
     scopes: Vec<String>,
     redirect_uri: Url,
     verifier: String,
+    #[serde(default)]
+    pub(crate) mode: OAuthTokenMode,
 }
 
 impl PkceHandshake {
@@ -49,6 +89,7 @@ impl PkceHandshake {
             scopes: self.scopes,
             redirect_uri: self.redirect_uri,
             verifier: self.verifier.expose_secret().to_owned(),
+            mode: self.mode,
         }
     }
 }
@@ -62,6 +103,7 @@ impl PkceHandshakeState {
             scopes: self.scopes,
             redirect_uri: self.redirect_uri,
             verifier: SecretString::new(self.verifier.into_boxed_str()),
+            mode: self.mode,
         })
     }
 }
@@ -76,6 +118,7 @@ impl fmt::Debug for PkceHandshake {
             .field("scopes", &self.scopes)
             .field("redirect_uri", &self.redirect_uri)
             .field("verifier", &"[REDACTED]")
+            .field("mode", &self.mode)
             .finish()
     }
 }
@@ -86,6 +129,7 @@ pub(crate) fn start_pkce_flow(
     token_endpoint: TokenUrl,
     scopes: Vec<String>,
     redirect_uri: Url,
+    mode: OAuthTokenMode,
 ) -> PkceHandshake {
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let authorize_url = authorize_url(
@@ -109,7 +153,23 @@ pub(crate) fn start_pkce_flow(
         scopes,
         redirect_uri,
         verifier: SecretString::new(verifier.into_secret().into_boxed_str()),
+        mode,
     }
+}
+
+pub(crate) struct PkceExchangeOutcome {
+    pub(crate) credentials: OAuthCredentials,
+    /// Mode actually negotiated. `Refreshing` when a long-lived request fell back.
+    pub(crate) mode: OAuthTokenMode,
+    /// `true` when long-lived was requested but the grant could not stay
+    /// long-lived; always mirrors `fallback_reason.is_some()`.
+    pub(crate) long_lived_fallback: bool,
+    /// Which fallback path produced a refreshing credential, if any.
+    pub(crate) fallback_reason: Option<LongLivedFallbackReason>,
+    /// Access-token lifetime the server actually granted, in seconds.
+    /// `None` for the plain refreshing path, which never asked for a
+    /// custom lifetime.
+    pub(crate) granted_expires_in_secs: Option<u64>,
 }
 
 pub(crate) async fn complete_pkce_flow(
@@ -118,8 +178,9 @@ pub(crate) async fn complete_pkce_flow(
     state_token: String,
     http: Arc<dyn OAuthHttpClient>,
     clock: &dyn Clock,
-) -> Result<OAuthCredentials, OAuthTokenError> {
-    exchange_pkce_code(
+) -> Result<PkceExchangeOutcome, OAuthTokenError> {
+    let now_epoch_secs = cc_lb_clock::unix_secs(clock.now());
+    let first = exchange_pkce_code(
         http.as_ref(),
         handshake.token_endpoint.url(),
         handshake.client_id.as_str(),
@@ -127,9 +188,111 @@ pub(crate) async fn complete_pkce_flow(
         &state_token,
         &handshake.verifier,
         &handshake.redirect_uri,
-        cc_lb_clock::unix_secs(clock.now()),
+        now_epoch_secs,
+        match handshake.mode {
+            OAuthTokenMode::Refreshing => None,
+            OAuthTokenMode::LongLived365d => {
+                Some(cc_lb_config::LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS)
+            }
+        },
     )
-    .await
+    .await;
+
+    match (handshake.mode, first) {
+        (OAuthTokenMode::Refreshing, result) => Ok(PkceExchangeOutcome {
+            credentials: result?,
+            mode: OAuthTokenMode::Refreshing,
+            long_lived_fallback: false,
+            fallback_reason: None,
+            granted_expires_in_secs: None,
+        }),
+        (OAuthTokenMode::LongLived365d, Ok(credentials)) => {
+            // The granted lifetime comes from the token response, never from
+            // the value we requested: Anthropic may silently clamp it.
+            let granted_secs = credentials.expires_at.saturating_sub(now_epoch_secs);
+            if long_lived_grant_is_usable(granted_secs) {
+                Ok(PkceExchangeOutcome {
+                    credentials,
+                    mode: OAuthTokenMode::LongLived365d,
+                    long_lived_fallback: false,
+                    fallback_reason: None,
+                    granted_expires_in_secs: Some(granted_secs),
+                })
+            } else {
+                // The server silently clamped below the point where
+                // never-refreshing is safe. Keep the issued tokens as-is —
+                // the refresh token is now the renewal path, so the
+                // credential must not be marked non-refreshable.
+                Ok(PkceExchangeOutcome {
+                    credentials,
+                    mode: OAuthTokenMode::Refreshing,
+                    long_lived_fallback: true,
+                    fallback_reason: Some(LongLivedFallbackReason::Clamped),
+                    granted_expires_in_secs: Some(granted_secs),
+                })
+            }
+        }
+        (OAuthTokenMode::LongLived365d, Err(error)) => {
+            if !is_long_lived_rejection(&error) {
+                return Err(error);
+            }
+            // Anthropic does not consume the authorization code on a failed
+            // exchange, so the same code can be re-exchanged without the
+            // custom `expires_in` as a classic refreshing credential.
+            let retry_now_epoch_secs = cc_lb_clock::unix_secs(clock.now());
+            let credentials = exchange_pkce_code(
+                http.as_ref(),
+                handshake.token_endpoint.url(),
+                handshake.client_id.as_str(),
+                &auth_code,
+                &state_token,
+                &handshake.verifier,
+                &handshake.redirect_uri,
+                retry_now_epoch_secs,
+                None,
+            )
+            .await?;
+            Ok(PkceExchangeOutcome {
+                granted_expires_in_secs: Some(
+                    credentials.expires_at.saturating_sub(retry_now_epoch_secs),
+                ),
+                credentials,
+                mode: OAuthTokenMode::Refreshing,
+                long_lived_fallback: true,
+                fallback_reason: Some(LongLivedFallbackReason::Rejected),
+            })
+        }
+    }
+}
+
+/// `true` when the granted access-token lifetime is long enough to justify
+/// never-refreshing mode. Anthropic anchors refresh tokens to a 30-day
+/// window, so a grant at or below [`cc_lb_config::LONG_LIVED_MIN_GRANT_SECS`]
+/// buys nothing over the refreshing flow while giving up renewal.
+fn long_lived_grant_is_usable(granted_secs: u64) -> bool {
+    granted_secs > cc_lb_config::LONG_LIVED_MIN_GRANT_SECS
+}
+
+/// `true` when Anthropic rejected the request purely because of the custom
+/// `expires_in`, meaning the same authorization code can be re-exchanged
+/// without it. Anthropic does not consume the code on a failed exchange.
+pub(crate) fn is_long_lived_rejection(error: &OAuthTokenError) -> bool {
+    let OAuthTokenError::TokenEndpoint {
+        status,
+        code,
+        description,
+    } = error
+    else {
+        return false;
+    };
+    if *status != StatusCode::BAD_REQUEST || code.as_deref() != Some("invalid_request") {
+        return false;
+    }
+    let Some(description) = description else {
+        return false;
+    };
+    let description = description.to_lowercase();
+    description.contains("expires_in") || description.contains("expiry")
 }
 
 fn authorize_url(
@@ -289,6 +452,7 @@ async fn exchange_pkce_code(
     code_verifier: &SecretString,
     redirect_uri: &Url,
     now_epoch_secs: u64,
+    expires_in: Option<u64>,
 ) -> Result<OAuthCredentials, OAuthTokenError> {
     let body = form_body(
         client_id,
@@ -296,6 +460,7 @@ async fn exchange_pkce_code(
         auth_code,
         state_token,
         redirect_uri,
+        expires_in,
     );
     let verifier_str = code_verifier.expose_secret();
     let verifier_challenge = {
@@ -358,6 +523,11 @@ fn parse_oauth_error_body(body: &[u8]) -> (Option<String>, Option<String>) {
     (parsed.error, description)
 }
 
+/// Parses the token endpoint body into credentials. `expires_at` is always
+/// derived from the `expires_in` the server actually returned (via
+/// [`refreshed_token_parts`], which computes `now + response.expires_in`);
+/// the lifetime cc-lb requested must never be substituted for it, because
+/// Anthropic may silently grant a shorter lifetime than asked for.
 fn parse_token_response(
     body: Bytes,
     now_epoch_secs: u64,
@@ -390,8 +560,9 @@ fn form_body(
     auth_code: &str,
     state_token: &str,
     redirect_uri: &Url,
+    expires_in: Option<u64>,
 ) -> SecretString {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "grant_type": "authorization_code",
         "code": auth_code,
         "redirect_uri": redirect_uri.as_str(),
@@ -399,5 +570,76 @@ fn form_body(
         "code_verifier": code_verifier,
         "state": state_token,
     });
+    if let Some(expires_in) = expires_in {
+        payload["expires_in"] = serde_json::json!(expires_in);
+    }
     SecretString::new(payload.to_string().into_boxed_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token_endpoint_error(
+        status: StatusCode,
+        code: Option<&str>,
+        description: Option<&str>,
+    ) -> OAuthTokenError {
+        OAuthTokenError::TokenEndpoint {
+            status,
+            code: code.map(str::to_owned),
+            description: description.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn long_lived_rejection_matches_expiry_invalid_request() {
+        for description in [
+            "Invalid expiry for scope",
+            "Custom expires_in not allowed for scope 'user:mcp_servers'",
+        ] {
+            let error = token_endpoint_error(
+                StatusCode::BAD_REQUEST,
+                Some("invalid_request"),
+                Some(description),
+            );
+            assert!(is_long_lived_rejection(&error), "{description}");
+        }
+    }
+
+    #[test]
+    fn long_lived_rejection_ignores_other_failures() {
+        for error in [
+            token_endpoint_error(
+                StatusCode::BAD_REQUEST,
+                Some("invalid_grant"),
+                Some("The authorization code has expired"),
+            ),
+            token_endpoint_error(
+                StatusCode::UNAUTHORIZED,
+                Some("invalid_request"),
+                Some("Invalid expiry for scope"),
+            ),
+            token_endpoint_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some("invalid_request"),
+                Some("Invalid expiry for scope"),
+            ),
+            token_endpoint_error(StatusCode::BAD_REQUEST, Some("invalid_request"), None),
+        ] {
+            assert!(!is_long_lived_rejection(&error), "{error}");
+        }
+    }
+
+    #[test]
+    fn long_lived_grant_boundary() {
+        assert!(!long_lived_grant_is_usable(
+            cc_lb_config::LONG_LIVED_MIN_GRANT_SECS
+        ));
+        assert!(long_lived_grant_is_usable(
+            cc_lb_config::LONG_LIVED_MIN_GRANT_SECS + 1
+        ));
+        // An 8-hour grant is far below the threshold and must demote.
+        assert!(!long_lived_grant_is_usable(8 * 60 * 60));
+    }
 }

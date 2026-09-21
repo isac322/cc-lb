@@ -495,7 +495,16 @@ impl LazyRefreshHandle for LazyRefresher {
                 reason: "oauth upstream not found".to_owned(),
             })?;
         let holder = lazy_refresh_holder(self.replica_id);
-        let expires_at_unix_secs = oauth_expires_at(&upstream, &self.aead)?;
+        let bundle = oauth_token_bundle(&upstream, &self.aead)?;
+        if bundle.never_refresh {
+            // Refreshing a 365-day token makes Anthropic revoke it and issue an
+            // 8-hour token instead; long-lived credentials must never be
+            // refreshed.
+            return Err(LazyRefreshError::Failed {
+                reason: RefreshError::NotRefreshable.to_string(),
+            });
+        }
+        let expires_at_unix_secs = bundle.expires_at_unix_secs;
         let claim = self
             .claim_guard
             .begin_refresh(
@@ -597,7 +606,13 @@ impl LazyRefreshHandle for LazyRefresher {
                 reason: "oauth upstream not found".to_owned(),
             })?;
         let holder = lazy_refresh_holder(self.replica_id);
-        let expires_at_unix_secs = oauth_expires_at(&upstream, &self.aead)?;
+        let bundle = oauth_token_bundle(&upstream, &self.aead)?;
+        if bundle.never_refresh {
+            // Long-lived credentials are never refreshed; there is nothing to
+            // enqueue.
+            return Ok(());
+        }
+        let expires_at_unix_secs = bundle.expires_at_unix_secs;
         let claim = self
             .claim_guard
             .begin_refresh(
@@ -642,6 +657,11 @@ pub enum RefreshError {
     Parse(cc_lb_oauth_protocol::TokenEndpointParseError),
     #[error("oauth refresh cancelled")]
     Cancelled,
+    /// Refreshing a long-lived (365-day) credential would make Anthropic revoke
+    /// it and issue an 8-hour token instead, so it must never reach the token
+    /// endpoint.
+    #[error("long-lived oauth credential must not be refreshed; reauthorization required")]
+    NotRefreshable,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -662,6 +682,12 @@ async fn refresh_flow(
         .ok_or(RefreshError::MissingCredentials)?
         .decrypt(aead, upstream.id.as_bytes())
         .map_err(|_| RefreshError::Decrypt)?;
+    if previous.never_refresh {
+        // Refreshing a 365-day token makes Anthropic revoke it and issue an
+        // 8-hour token instead; long-lived credentials must never reach the
+        // token endpoint.
+        return Err(RefreshError::NotRefreshable);
+    }
     let token = request_refresh(http, oauth_cfg, cancel, &previous.refresh_token).await;
     match token {
         Ok(response) => {
@@ -680,6 +706,7 @@ async fn refresh_flow(
                 expires_at_unix_secs: refreshed.expires_at_unix_secs,
                 refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
                 scopes: refreshed.scopes,
+                never_refresh: previous.never_refresh,
             };
             let fingerprint = access_token_fingerprint(&bundle.access_token);
             let expires_at = bundle.expires_at_unix_secs;
@@ -852,6 +879,7 @@ fn reason_for(error: &RefreshError) -> String {
         RefreshError::Decrypt => "decrypt".to_owned(),
         RefreshError::Encrypt => "encrypt".to_owned(),
         RefreshError::Storage(_) => "storage".to_owned(),
+        RefreshError::NotRefreshable => "not_refreshable".to_owned(),
     }
 }
 
@@ -873,10 +901,10 @@ fn lazy_metadata_hook_error(error: cc_lb_engine::MetadataHookEnqueueError) -> La
     }
 }
 
-fn oauth_expires_at(
+fn oauth_token_bundle(
     upstream: &UpstreamRecord,
     aead: &AeadService,
-) -> Result<u64, LazyRefreshError> {
+) -> Result<OAuthTokenBundle, LazyRefreshError> {
     let credentials =
         upstream
             .oauth_credentials
@@ -884,12 +912,11 @@ fn oauth_expires_at(
             .ok_or_else(|| LazyRefreshError::Failed {
                 reason: "missing oauth credentials".to_owned(),
             })?;
-    let bundle = credentials
+    credentials
         .decrypt(aead, upstream.id.as_bytes())
         .map_err(|_| LazyRefreshError::Failed {
             reason: "oauth decrypt failed".to_owned(),
-        })?;
-    Ok(bundle.expires_at_unix_secs)
+        })
 }
 
 fn lazy_refresh_holder(replica_id: Uuid) -> String {
@@ -977,6 +1004,50 @@ mod tests {
             .expect("scheduler-backed wait times out and falls back to in-proc refresh");
 
         assert_eq!(fixture.refresh_call_count(), 1);
+    }
+
+    /// `LazyRefresher::refresh_one` is the single chokepoint every lazy and
+    /// usage-poll refresh caller funnels through. The per-caller early returns
+    /// upstream of it are defence in depth; this guard is what makes a refresh
+    /// of a 365-day credential impossible for any present or future caller,
+    /// so it needs coverage of its own.
+    #[tokio::test]
+    async fn lazy_refresher_refuses_to_refresh_a_long_lived_credential() {
+        let fixture = LazyRefreshFixture::new(Duration::from_millis(0)).await;
+        let upstream_id = fixture.create_oauth_upstream_with_mode(true).await;
+        let claims = Arc::new(TestOAuthRefreshClaims::single_winner());
+        let refresher = fixture.lazy_refresher(
+            claims,
+            LazyRefreshContentionConfig::for_tests(
+                Duration::from_millis(20),
+                Duration::from_millis(5),
+            ),
+        );
+
+        let error = refresher
+            .refresh_one(upstream_id)
+            .await
+            .expect_err("a long-lived credential must never be refreshed");
+
+        assert!(
+            error.to_string().contains("reauthorization required"),
+            "operator-facing error must ask for reauthorization, got: {error}"
+        );
+        // The Anthropic token endpoint was never contacted: rotating the grant
+        // is what destroys the 365-day token.
+        assert_eq!(fixture.refresh_call_count(), 0);
+
+        let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+            .await
+            .expect("upstream readable")
+            .expect("upstream present");
+        let bundle = stored
+            .oauth_credentials
+            .expect("credentials present")
+            .decrypt(fixture.aead.as_ref(), upstream_id.as_bytes())
+            .expect("credentials decrypt");
+        assert_eq!(bundle.access_token, "sk-ant-oat01-old");
+        assert!(bundle.never_refresh);
     }
 
     #[tokio::test]
@@ -1103,6 +1174,7 @@ mod tests {
                 token_url,
                 redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect url"),
                 scopes: vec!["messages".to_owned()],
+                long_lived_scopes: Vec::new(),
             });
             let clock = Arc::new(TestClock::new_at_secs(1_700_000_000)) as ClockHandle;
             Self {
@@ -1121,6 +1193,10 @@ mod tests {
         }
 
         async fn create_oauth_upstream(&self) -> Uuid {
+            self.create_oauth_upstream_with_mode(false).await
+        }
+
+        async fn create_oauth_upstream_with_mode(&self, never_refresh: bool) -> Uuid {
             let record = self
                 .storage
                 .create(UpstreamCreate {
@@ -1142,6 +1218,7 @@ mod tests {
                     expires_at_unix_secs: 1,
                     refresh_token_expires_at_unix_secs: None,
                     scopes: vec!["messages".to_owned()],
+                    never_refresh,
                 },
                 record.id.as_bytes(),
             )
@@ -1413,6 +1490,7 @@ mod tests {
                         expires_at_unix_secs: 9_999_999_999,
                         refresh_token_expires_at_unix_secs: None,
                         scopes: vec!["messages".to_owned()],
+                        never_refresh: false,
                     },
                     self.upstream_id.as_bytes(),
                 )

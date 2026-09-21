@@ -91,7 +91,7 @@ describe('OAuth invalidation contract', () => {
       wrapper: makeWrapper(client),
     });
 
-    await result.current.mutateAsync(UPSTREAM_ID);
+    await result.current.mutateAsync({ id: UPSTREAM_ID });
 
     expect(invalidateSpy).not.toHaveBeenCalled();
   });

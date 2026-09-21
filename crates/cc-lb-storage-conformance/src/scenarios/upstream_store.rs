@@ -711,6 +711,7 @@ fn token_bundle(access_token: &str, refresh_token: &str) -> OAuthTokenBundle {
         expires_at_unix_secs: 1_900_000_000,
         refresh_token_expires_at_unix_secs: None,
         scopes: vec!["org:profile".to_owned()],
+        never_refresh: false,
     }
 }
 

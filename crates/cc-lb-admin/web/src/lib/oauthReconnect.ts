@@ -1,8 +1,11 @@
 // OAuth reconnect nudge classification + polling.
 // Single source of truth for deciding when an OAuth upstream needs the user to
-// re-run the connect flow. Consumed by the per-upstream detail notice and the
-// global summary; both share the same query keys as useUpstreamOAuthStatus so
-// the existing completion invalidation clears every surface at once.
+// re-run the connect flow. The deadline clock depends on the credential mode:
+// refreshing credentials are driven by the refresh token's expiry, while a
+// long-lived 365-day grant is driven by the access token itself since nothing
+// ever renews it. Consumed by the per-upstream detail notice and the global
+// summary; both share the same query keys as useUpstreamOAuthStatus so the
+// existing completion invalidation clears every surface at once.
 
 import {
   type UseQueryResult,
@@ -29,11 +32,16 @@ export interface OAuthReconnectNudge {
 
 const OAUTH_STATUS_POLL_MS = 30_000;
 
-// Refresh tokens live on a multi-week clock, so "soon" is days, not
-// minutes — warn while the refresh token is inside this window. Once it
-// lapses the connection can no longer renew itself, and the upstream must
-// be reauthorized.
+// Refreshing credentials live on the refresh token's multi-week clock, so
+// "soon" is days, not minutes — warn while the refresh token is inside this
+// window. Once it lapses the connection can no longer renew itself, and the
+// upstream must be reauthorized.
 export const REFRESH_EXPIRING_SOON_SECS = 3 * 24 * 60 * 60;
+
+// A long-lived 365-day grant has no refresh token to renew it, so the access
+// token's own expiry IS the login deadline. Two weeks gives an operator room
+// to schedule the yearly reauthorization without an outage.
+export const LONG_LIVED_EXPIRING_SOON_SECS = 14 * 24 * 60 * 60;
 
 // The refresh worker records failures in last_apply_error via reason_for():
 // "status_<code>" for token-endpoint rejections, plus network/parse/cancelled/
@@ -75,6 +83,37 @@ export function classifyOAuthReconnect(
       actionLabel: 'Connect',
       expiresAt: null,
     };
+  }
+
+  // A long-lived credential never refreshes: the refresh token is stored but
+  // unusable, and no renewal ever runs, so last_apply_error stays empty.
+  // Ignore the refresh token entirely and drive the nudge off the access
+  // token, which is the only real deadline.
+  if (status.mode === 'long_lived_365d') {
+    const accessExpiresAt = status.expires_at_unix_secs;
+    // An unknown deadline gets no invented countdown.
+    if (accessExpiresAt == null) return null;
+    if (accessExpiresAt <= nowSecs) {
+      return {
+        tone: 'danger',
+        label: 'Long-lived token expired',
+        description:
+          'The 365-day OAuth access token has expired. It cannot be refreshed, so reconnect the account to restore requests.',
+        actionLabel: 'Reconnect',
+        expiresAt: accessExpiresAt,
+      };
+    }
+    if (accessExpiresAt - nowSecs <= LONG_LIVED_EXPIRING_SOON_SECS) {
+      return {
+        tone: 'warn',
+        label: 'Long-lived token expiring soon',
+        description:
+          'The 365-day OAuth access token expires within 2 weeks and cannot be refreshed. Reconnect before the deadline to avoid interruption.',
+        actionLabel: 'Reconnect',
+        expiresAt: accessExpiresAt,
+      };
+    }
+    return null;
   }
 
   const refreshExpiresAt = status.refresh_token_expires_at_unix_secs;

@@ -1554,6 +1554,20 @@ async fn fresh_enough_access_token(
     bundle: OAuthTokenBundle,
 ) -> Result<String, UpstreamError> {
     let now = cc_lb_clock::unix_secs(state.clock.now());
+    if bundle.never_refresh {
+        // Long-lived (365-day) credentials must never be refreshed: Anthropic
+        // revokes the long-lived grant and returns a short-lived token, so the
+        // stored refresh token is retained but never used. An expired
+        // long-lived credential can only be recovered by reauthorizing.
+        return if bundle.expires_at_unix_secs > now {
+            Ok(bundle.access_token)
+        } else {
+            Err(UpstreamError::RefreshFailed {
+                detail: "long-lived oauth credential expired; reauthorization is required"
+                    .to_owned(),
+            })
+        };
+    }
     if bundle.expires_at_unix_secs > now.saturating_add(METADATA_REFRESH_LOOKAHEAD_SECS) {
         return Ok(bundle.access_token);
     }
@@ -2255,6 +2269,7 @@ mod tests {
             expires_at_unix_secs: u64::MAX / 2,
             refresh_token_expires_at_unix_secs: None,
             scopes: Vec::new(),
+            never_refresh: false,
         };
         let encrypted =
             AeadEncryptedField::<OAuthTokenBundle>::encrypt(aead, &bundle, created.id.as_bytes())

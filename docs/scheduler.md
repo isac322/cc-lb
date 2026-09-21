@@ -78,6 +78,12 @@ Rows expire when their last successful binding observation is at least the confi
 
 The recurring job removes expired rows through indexed, bounded batches. PostgreSQL skips locked candidates and rechecks expiry before deletion, so an in-flight renewal is not removed as stale. A shorter TTL applies to existing rows after restart; increasing it cannot restore rows already deleted. Disabling `scheduler.recurring_jobs.upstream_affinity_purge` stops physical cleanup, not the proxy's logical expiry check. SQLite can reuse freed pages without immediately shrinking its database file.
 
+### Long-lived OAuth credentials
+
+Upstreams connected with the `long_lived_365d` token mode are excluded from `OAuthRefreshJob` entirely. No bootstrap refresh task is seeded at connect time, and `OAuthRefreshWatchdogJob` neither seeds nor resurrects one for a long-lived upstream. If a stale refresh job is ever dispatched for such an upstream, the handler returns `Skip` without rescheduling and without enqueueing a `MetadataRefreshJob`.
+
+The exclusion applies only to credentials that are actually stored as long-lived. When Anthropic accepts a `long_lived_365d` exchange but grants a materially shorter lifetime than requested, cc-lb stores the credential as `refreshing` instead; such a clamped credential gets a bootstrap refresh task at connect time and is seeded and watched by `OAuthRefreshWatchdogJob` exactly like any other refreshing upstream.
+
 
 ## 3. DB Pool Isolation
 

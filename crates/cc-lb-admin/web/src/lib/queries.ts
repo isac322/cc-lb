@@ -39,6 +39,8 @@ import {
   getJson,
   type KeyListResponse,
   type LatestResponse,
+  type OAuthFallbackReason,
+  type OAuthTokenMode,
   type PoolHistoryResponse,
   type PrincipalLimitsResponse,
   patchJson,
@@ -1147,11 +1149,16 @@ export function useUpdateUpstreamWarmupSettings() {
 }
 export function useOAuthStart() {
   return useMutation({
-    mutationFn: (id: string) =>
+    mutationFn: ({ id, mode }: { id: string; mode?: OAuthTokenMode }) =>
       postJson<
-        { authorize_url: string; state_token: string; revision: number },
-        Record<string, never>
-      >(`/admin/v1/upstreams/${id}/oauth/start`, {}),
+        {
+          authorize_url: string;
+          state_token: string;
+          revision: number;
+          mode: OAuthTokenMode;
+        },
+        { mode?: OAuthTokenMode }
+      >(`/admin/v1/upstreams/${id}/oauth/start`, { mode }),
   });
 }
 export function useOAuthComplete() {
@@ -1171,6 +1178,10 @@ export function useOAuthComplete() {
           upstream_id: string;
           expires_at_unix_secs: number;
           access_token_fingerprint: string;
+          mode: OAuthTokenMode;
+          long_lived_fallback: boolean;
+          fallback_reason: OAuthFallbackReason | null;
+          granted_expires_in_secs: number | null;
         },
         { state_token: string; code: string }
       >(`/admin/v1/upstreams/${id}/oauth/complete`, { state_token, code }),
@@ -1665,7 +1676,7 @@ export function useSaveConfigFile() {
 
 export function useStartOauthDraft() {
   return useMutation({
-    mutationFn: () => startOauthDraft(),
+    mutationFn: (body?: { mode?: OAuthTokenMode }) => startOauthDraft(body),
     meta: { inlineError: true },
   });
 }

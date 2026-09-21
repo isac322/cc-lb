@@ -70,6 +70,7 @@ import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMini
 import {
   ApiError,
   type DraftCompleteResponse,
+  type OAuthTokenMode,
   type OrganizationMetadataInner,
   type QuotaSnapshot,
   type UpstreamOAuthStatusResponse,
@@ -80,6 +81,7 @@ import { fmtChartTooltipTs, sumTokens } from '../lib/format';
 import { isMessagesRequestEvent } from '../lib/logRows';
 import {
   classifyOAuthReconnect,
+  LONG_LIVED_EXPIRING_SOON_SECS,
   REFRESH_EXPIRING_SOON_SECS,
   useOAuthReconnectNudges,
 } from '../lib/oauthReconnect';
@@ -652,21 +654,85 @@ function refreshTokenExpiryTone(
   return 'ok';
 }
 
-// This badge describes the login lifecycle, not the access token: a lapsed
-// access token is routine and renews silently while a refresh token exists,
-// so it must never surface as "Expired" here.
+// This badge describes the login lifecycle, not the access token. For a
+// refreshing credential a lapsed access token is routine and renews silently
+// while a refresh token exists, so the refresh-token deadline drives the badge.
+// A long-lived credential never refreshes, so its own access-token expiry IS
+// the login deadline and the refresh token is ignored entirely.
 function oauthBadge(entry: UpstreamOAuthStatusResponse): OAuthBadge {
   if (entry.status === 'corrupted')
     return { tone: 'danger', label: 'Reconnect required' };
+  const now = Math.floor(Date.now() / 1000);
+  if (entry.mode === 'long_lived_365d') {
+    const exp = entry.expires_at_unix_secs;
+    if (exp == null) return { tone: 'neutral', label: 'Unknown' };
+    if (exp <= now) return { tone: 'danger', label: 'Login expired' };
+    if (exp - now < LONG_LIVED_EXPIRING_SOON_SECS)
+      return { tone: 'warn', label: 'Login expiring' };
+    return { tone: 'ok', label: 'Long-lived' };
+  }
   if (!entry.refresh_token_present)
     return { tone: 'warn', label: 'Refresh missing' };
   const refreshExp = entry.refresh_token_expires_at_unix_secs;
   if (refreshExp == null) return { tone: 'ok', label: 'Connected' };
-  const now = Math.floor(Date.now() / 1000);
   if (refreshExp <= now) return { tone: 'danger', label: 'Login expired' };
   if (refreshExp - now < REFRESH_EXPIRING_SOON_SECS)
     return { tone: 'warn', label: 'Login expiring' };
   return { tone: 'ok', label: 'Connected' };
+}
+
+// Shared by the create wizard and the reconnect modal: the mode must be
+// chosen before the authorize URL is generated, because the URL bakes in the
+// requested grant. A long-lived credential can never be refreshed, so the
+// trade-off is spelled out next to each option.
+function OAuthModeChoice({
+  value,
+  onChange,
+}: {
+  value: OAuthTokenMode;
+  onChange: (mode: OAuthTokenMode) => void;
+}) {
+  return (
+    <BaseRadioGroup
+      name="oauth-mode"
+      value={value}
+      onValueChange={(mode) => onChange(mode)}
+      className="space-y-2"
+      data-testid="oauth-mode-choice"
+    >
+      <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
+        <BaseRadio.Root
+          value="long_lived_365d"
+          className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle bg-bg transition-colors data-[checked]:border-[color:var(--color-accent)]"
+        >
+          <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
+        </BaseRadio.Root>
+        <div>
+          <div className="font-medium text-text">
+            365-day direct token (recommended)
+          </div>
+          <div className="text-xs text-text-faint mt-1">
+            Inference only. No monthly reauthorization. Cannot be refreshed.
+          </div>
+        </div>
+      </label>
+      <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
+        <BaseRadio.Root
+          value="refreshing"
+          className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle bg-bg transition-colors data-[checked]:border-[color:var(--color-accent)]"
+        >
+          <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
+        </BaseRadio.Root>
+        <div>
+          <div className="font-medium text-text">Standard refreshing token</div>
+          <div className="text-xs text-text-faint mt-1">
+            Full scope set including Remote Control and connectors. Reauthorize
+            about every 30 days.
+          </div>
+        </div>
+      </label>
+    </BaseRadioGroup>
+  );
 }
 
 const DETAIL_WINDOWS = [
@@ -835,6 +901,7 @@ function DetailView({
     state_token?: string;
     code?: string;
   }>({});
+  const [oauthMode, setOauthMode] = useState<OAuthTokenMode>('long_lived_365d');
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [range, setRange] = useState<'1h' | '6h' | '24h' | '7d'>('7d');
   const [isolatedWindow, setIsolatedWindow] = useState<string | null>(null);
@@ -843,19 +910,18 @@ function DetailView({
 
   // Single entry point for the OAuth authorize flow: the card button, the
   // reconnect notice, and the ?action=reconnect deep link all funnel here so
-  // every surface shares the same pending state and modal.
+  // every surface shares the same modal. The authorize URL bakes in the
+  // requested grant, so the modal opens on the mode choice first and only
+  // generates the URL once the operator has confirmed the mode. Reconnect
+  // doubles as the mode-conversion path, so seed it with the current mode.
+  const currentOAuthMode = upstreamOAuthQ.data?.has_credentials
+    ? upstreamOAuthQ.data.mode
+    : null;
   const startOAuthReconnect = useCallback(() => {
-    oauthStart.mutate(upstream.id, {
-      onSuccess: (res) => {
-        setOauthState({
-          authorize_url: res.authorize_url,
-          state_token: res.state_token,
-          code: '',
-        });
-        setOauthOpen(true);
-      },
-    });
-  }, [oauthStart, upstream.id]);
+    setOauthMode(currentOAuthMode ?? 'long_lived_365d');
+    setOauthState({});
+    setOauthOpen(true);
+  }, [currentOAuthMode]);
 
   // ?action=reconnect deep link: consume the param exactly once, then start
   // the existing flow. The ref survives StrictMode's double effect pass;
@@ -2004,15 +2070,10 @@ function DetailView({
                     <Button
                       size="sm"
                       className="self-center"
-                      loading={oauthStart.isPending}
                       iconLeft={<KeyRound className="h-3 w-3" />}
                       onClick={startOAuthReconnect}
                     >
-                      {oauthStart.isPending
-                        ? 'Starting...'
-                        : hasBoundToken
-                          ? 'Reconnect'
-                          : 'Connect'}
+                      {hasBoundToken ? 'Reconnect' : 'Connect'}
                     </Button>
                   )
                 }
@@ -2080,17 +2141,57 @@ function DetailView({
                       </div>
                       <div>
                         <div className="text-[11px] uppercase tracking-wider text-text-faint">
+                          Credential mode
+                        </div>
+                        <div
+                          data-testid="oauth-credential-mode"
+                          className="mt-0.5"
+                        >
+                          {principalEntry.mode === 'long_lived_365d' ? (
+                            <>
+                              <Badge tone="accent">365-day token</Badge>
+                              <div className="mt-1 text-xs text-text-faint">
+                                Never refreshed — reauthorize once a year
+                              </div>
+                            </>
+                          ) : principalEntry.mode === 'refreshing' ? (
+                            <>
+                              <Badge tone="neutral">Refreshing</Badge>
+                              <div className="mt-1 text-xs text-text-faint">
+                                Auto-refreshes; reauthorize about every 30 days
+                              </div>
+                            </>
+                          ) : (
+                            <span className="text-text-faint">Unknown</span>
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] uppercase tracking-wider text-text-faint">
                           Refresh token
                         </div>
                         <div className="mt-0.5">
-                          {principalEntry.refresh_token_present ? (
-                            'present'
+                          {principalEntry.can_refresh ? (
+                            principalEntry.refresh_token_present ? (
+                              'present'
+                            ) : (
+                              <span className="text-amber-400">missing</span>
+                            )
+                          ) : principalEntry.refresh_token_present ? (
+                            <span className="text-text-faint">
+                              stored, unused
+                            </span>
                           ) : (
-                            <span className="text-amber-400">missing</span>
+                            <span className="text-text-faint">not stored</span>
                           )}
                         </div>
-                        {principalEntry.refresh_token_expires_at_unix_secs !=
-                        null ? (
+                        {/* The refresh-token clock only matters when the
+                            credential can actually be refreshed; for a
+                            long-lived credential it would paint a false
+                            danger badge. */}
+                        {principalEntry.can_refresh &&
+                        principalEntry.refresh_token_expires_at_unix_secs !=
+                          null ? (
                           <div
                             data-testid="oauth-refresh-token-expiry"
                             className="mt-1 flex items-center gap-1.5 text-xs"
@@ -2235,11 +2336,11 @@ function DetailView({
         title="OAuth Authorization"
         description="Open the authorize URL, then paste the code below."
         size="lg"
-        preventDismiss={oauthComplete.isPending}
+        preventDismiss={oauthComplete.isPending || oauthStart.isPending}
         footer={
           <>
             <Button
-              disabled={oauthComplete.isPending}
+              disabled={oauthComplete.isPending || oauthStart.isPending}
               onClick={() => setOauthOpen(false)}
             >
               Cancel
@@ -2273,50 +2374,91 @@ function DetailView({
         }
       >
         <div className="space-y-3">
-          <p className="text-xs text-text-faint">
-            1. Open the authorization URL below. 2. Approve access. 3. Copy the
-            returned code and paste it here.
-          </p>
-          <Field label="Authorize URL">
-            <code className="block p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all select-all">
-              {oauthState.authorize_url ?? ''}
-            </code>
-            <div className="mt-2">
-              <Button
-                size="sm"
-                variant="primary"
-                disabled={!oauthState.authorize_url}
-                iconLeft={<ExternalLink className="w-3 h-3" />}
-                onClick={() => {
-                  if (oauthState.authorize_url) {
-                    window.open(
-                      oauthState.authorize_url,
-                      '_blank',
-                      'noopener,noreferrer',
-                    );
-                  }
-                }}
-              >
-                Open authorization URL
-              </Button>
-            </div>
-          </Field>
-          <Field label="State Token">
-            <code className="block p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all select-all">
-              {oauthState.state_token ?? ''}
-            </code>
-          </Field>
-          <Field label="Authorization Code" required>
-            <input
-              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS, 'font-mono')}
-              value={oauthState.code ?? ''}
-              onChange={(e) =>
-                setOauthState((s) => ({ ...s, code: e.target.value }))
-              }
-              placeholder="paste code…"
-              disabled={oauthComplete.isPending}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] uppercase tracking-wider text-text-faint">
+              Credential mode
+            </span>
+            <OAuthModeChoice
+              value={oauthMode}
+              onChange={(mode) => {
+                setOauthMode(mode);
+                // The mode is baked into the authorize URL, so a change
+                // discards any URL/code already generated.
+                setOauthState({});
+              }}
             />
-          </Field>
+          </div>
+          {!oauthState.authorize_url ? (
+            <Button
+              variant="primary"
+              loading={oauthStart.isPending}
+              onClick={() => {
+                oauthStart.mutate(
+                  { id: upstream.id, mode: oauthMode },
+                  {
+                    onSuccess: (res) => {
+                      setOauthState({
+                        authorize_url: res.authorize_url,
+                        state_token: res.state_token,
+                        code: '',
+                      });
+                    },
+                  },
+                );
+              }}
+            >
+              {oauthStart.isPending
+                ? 'Starting...'
+                : 'Generate authorization URL'}
+            </Button>
+          ) : (
+            <>
+              <p className="text-xs text-text-faint">
+                1. Open the authorization URL below. 2. Approve access. 3. Copy
+                the returned code and paste it here.
+              </p>
+              <Field label="Authorize URL">
+                <code className="block p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all select-all">
+                  {oauthState.authorize_url ?? ''}
+                </code>
+                <div className="mt-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={!oauthState.authorize_url}
+                    iconLeft={<ExternalLink className="w-3 h-3" />}
+                    onClick={() => {
+                      if (oauthState.authorize_url) {
+                        window.open(
+                          oauthState.authorize_url,
+                          '_blank',
+                          'noopener,noreferrer',
+                        );
+                      }
+                    }}
+                  >
+                    Open authorization URL
+                  </Button>
+                </div>
+              </Field>
+              <Field label="State Token">
+                <code className="block p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all select-all">
+                  {oauthState.state_token ?? ''}
+                </code>
+              </Field>
+              <Field label="Authorization Code" required>
+                <input
+                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS, 'font-mono')}
+                  value={oauthState.code ?? ''}
+                  onChange={(e) =>
+                    setOauthState((s) => ({ ...s, code: e.target.value }))
+                  }
+                  placeholder="paste code…"
+                  disabled={oauthComplete.isPending}
+                />
+              </Field>
+            </>
+          )}
         </div>
       </Modal>
 
@@ -2394,6 +2536,7 @@ function CreateUpstreamModal({
   );
   const [oauthName, setOauthName] = useState('');
   const [oauthError, setOauthError] = useState<string | null>(null);
+  const [oauthMode, setOauthMode] = useState<OAuthTokenMode>('long_lived_365d');
 
   const createPending = create.isPending;
   const startDraftPending = startDraft.isPending;
@@ -2424,6 +2567,7 @@ function CreateUpstreamModal({
       setDraftResult(null);
       setOauthName('');
       setOauthError(null);
+      setOauthMode('long_lived_365d');
       onPendingCreatedIdChange(null);
     }
   }, [open, onPendingCreatedIdChange]);
@@ -2460,15 +2604,18 @@ function CreateUpstreamModal({
 
   const handleAuthorizeClick = () => {
     setOauthError(null);
-    startDraft.mutate(undefined, {
-      onSuccess: (res: { authorize_url: string; state_token: string }) => {
-        setAuthState(res);
-        window.open(res.authorize_url, '_blank');
+    startDraft.mutate(
+      { mode: oauthMode },
+      {
+        onSuccess: (res: { authorize_url: string; state_token: string }) => {
+          setAuthState(res);
+          window.open(res.authorize_url, '_blank');
+        },
+        onError: (err: unknown) => {
+          setOauthError(err instanceof Error ? err.message : String(err));
+        },
       },
-      onError: (err: unknown) => {
-        setOauthError(err instanceof Error ? err.message : String(err));
-      },
-    });
+    );
   };
 
   const handleVerifyCode = () => {
@@ -2643,6 +2790,22 @@ function CreateUpstreamModal({
             complete the flow, then paste the code below.
           </p>
 
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] uppercase tracking-wider text-text-faint">
+              Credential mode
+            </span>
+            <OAuthModeChoice
+              value={oauthMode}
+              onChange={(mode) => {
+                setOauthMode(mode);
+                // The mode is baked into the authorize URL, so a change
+                // discards any URL/code already generated.
+                setAuthState(null);
+                setCode('');
+              }}
+            />
+          </div>
+
           <Button
             variant="primary"
             onClick={handleAuthorizeClick}
@@ -2723,6 +2886,42 @@ function CreateUpstreamModal({
 
       return (
         <div className="space-y-4">
+          {draftResult?.long_lived_fallback && (
+            <div
+              data-testid="oauth-long-lived-fallback-notice"
+              data-reason={draftResult.fallback_reason ?? 'unknown'}
+              className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1"
+            >
+              <div className="font-medium flex items-center gap-1.5">
+                <Info className="w-3.5 h-3.5" />
+                365-day token unavailable
+              </div>
+              {draftResult.fallback_reason === 'clamped' ? (
+                <p className="opacity-90">
+                  Anthropic accepted the 365-day request but granted a shorter
+                  lifetime, so the credential was kept refreshable instead of
+                  being locked to a token that could not renew itself.
+                  {draftResult.granted_expires_in_secs != null && (
+                    <>
+                      {' '}
+                      The granted token expires{' '}
+                      <RelativeOffsetTime
+                        offsetSeconds={draftResult.granted_expires_in_secs}
+                      />
+                      .
+                    </>
+                  )}
+                </p>
+              ) : (
+                <p className="opacity-90">
+                  Anthropic refused the 365-day request, so a standard
+                  refreshing credential was created instead. It auto-refreshes
+                  but needs reauthorization about every 30 days.
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="p-4 border border-subtle rounded-md bg-overlay-1 space-y-3">
             <h3 className="text-sm font-medium text-text">Account Preview</h3>
             <div className="grid grid-cols-2 gap-2 text-xs font-mono">

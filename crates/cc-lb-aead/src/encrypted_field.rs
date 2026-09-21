@@ -135,6 +135,11 @@ pub struct OAuthTokenBundle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token_expires_at_unix_secs: Option<u64>,
     pub scopes: Vec<String>,
+    /// `true` for long-lived (365-day) Anthropic credentials that must never be
+    /// refreshed. Rotating such a grant makes Anthropic revoke the 365-day
+    /// access token and hand back a short-lived one instead.
+    #[serde(default)]
+    pub never_refresh: bool,
 }
 
 /// Type alias for encrypted OAuth tokens.
@@ -157,6 +162,7 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec!["scope1".to_string(), "scope2".to_string()],
+            never_refresh: false,
         };
         let aad = b"upstream-id-001";
 
@@ -182,6 +188,7 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec![],
+            never_refresh: false,
         };
 
         let encrypted = AeadEncryptedField::encrypt(&aead, &bundle, b"upstream-001")
@@ -200,6 +207,7 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec![],
+            never_refresh: false,
         };
         let aad = b"upstream-001";
 
@@ -223,6 +231,7 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec!["scope1".to_string()],
+            never_refresh: false,
         };
         let aad = b"upstream-001";
 
@@ -255,6 +264,7 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec!["scope1".to_string()],
+            never_refresh: false,
         };
         let aad = b"upstream-001";
 
@@ -281,6 +291,7 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec![],
+            never_refresh: false,
         };
         let aad = b"upstream-001";
 
@@ -293,5 +304,55 @@ mod tests {
         assert!(!debug_output.contains("sk-refresh"));
         assert!(!debug_output.contains(&bundle.access_token));
         assert!(!debug_output.contains(&bundle.refresh_token));
+    }
+
+    /// Credentials written before the long-lived OAuth mode existed have no
+    /// `never_refresh` key in their encrypted JSON. `decrypt` maps any
+    /// deserialization error to `DecryptionFailed`, so a non-defaulted field
+    /// added to this struct would silently report every stored credential in
+    /// every existing deployment as corrupted. Pin the on-disk compatibility.
+    #[test]
+    fn legacy_ciphertext_without_never_refresh_decrypts_as_refreshing() {
+        let aead = test_service();
+        let aad = b"upstream-001";
+
+        // Byte-for-byte the plaintext shape cc-lb wrote before this field existed.
+        let legacy = br#"{"access_token":"sk-old-access","refresh_token":"sk-old-refresh","expires_at_unix_secs":1234567890,"scopes":["user:inference"]}"#;
+        let stored = AeadEncryptedField::<OAuthTokenBundle>::from_ciphertext(
+            aead.encrypt(legacy, aad).expect("encrypt legacy plaintext"),
+        );
+
+        let bundle = stored
+            .decrypt(&aead, aad)
+            .expect("legacy ciphertext decrypts");
+
+        assert_eq!(bundle.access_token, "sk-old-access");
+        assert_eq!(bundle.refresh_token, "sk-old-refresh");
+        assert_eq!(bundle.expires_at_unix_secs, 1234567890);
+        assert_eq!(bundle.scopes, vec!["user:inference".to_string()]);
+        assert!(
+            !bundle.never_refresh,
+            "an upgraded deployment must keep refreshing its existing credentials"
+        );
+    }
+
+    /// The other legacy shape: written after refresh-token expiry tracking landed
+    /// but before the long-lived mode.
+    #[test]
+    fn legacy_ciphertext_with_refresh_expiry_decrypts_as_refreshing() {
+        let aead = test_service();
+        let aad = b"upstream-001";
+
+        let legacy = br#"{"access_token":"a","refresh_token":"r","expires_at_unix_secs":1,"refresh_token_expires_at_unix_secs":99,"scopes":[]}"#;
+        let stored = AeadEncryptedField::<OAuthTokenBundle>::from_ciphertext(
+            aead.encrypt(legacy, aad).expect("encrypt legacy plaintext"),
+        );
+
+        let bundle = stored
+            .decrypt(&aead, aad)
+            .expect("legacy ciphertext decrypts");
+
+        assert_eq!(bundle.refresh_token_expires_at_unix_secs, Some(99));
+        assert!(!bundle.never_refresh);
     }
 }

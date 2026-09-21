@@ -4,11 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Anthropic OAuth upstreams can now be connected as a 365-day long-lived credential, which is the default for new connections. A long-lived credential is never refreshed: reauthorization is needed about once a year instead of about every 30 days, and its scopes are limited to profile and inference, so Remote Control and connectors are unavailable on it. The stored expiry always reflects the lifetime Anthropic actually returned, never the requested value. If Anthropic refuses the year-long expiry outright, or accepts the exchange but grants a materially shorter lifetime that does not outlive the refresh-token window, the connect flow keeps the credential refreshable instead of marking it long-lived, so the upstream cannot silently expire with no way to renew; the response reports which fallback occurred. The standard refreshing option remains selectable in both the create wizard and the Reconnect dialog, and re-running either flow converts an upstream between the two modes. Existing upstreams keep their current behaviour.
+
 ### Changed
 
 - Request Log tables now default to `/v1/messages` requests. The Logs page filters by Messages, Token count, Models, Files, Other proxy requests, Renewals, or Unclassified; Overview and principal/upstream previews show Messages only. Row contents and the set of recorded requests are unchanged.
 - New request logs retain endpoint-category metadata for consistent history and live filtering. Existing logs without that metadata remain available under Unclassified on the Logs page; existing renewal logs remain under Renewals.
-- Overview and Upstreams now surface OAuth reconnect guidance for known refresh-token expiry and failed renewal, with direct Connect/Reconnect actions. Warnings begin three days before a known deadline; routine access-token expiry does not trigger a warning while refresh remains available, and disabled upstreams are excluded from global attention counts.
+- Overview and Upstreams now surface OAuth reconnect guidance for known refresh-token expiry and failed renewal, with direct Connect/Reconnect actions. For a standard refreshing credential, warnings begin three days before a known deadline and routine access-token expiry does not trigger a warning while refresh remains available. A long-lived credential has no meaningful refresh deadline, so its guidance is driven by the access token instead and begins two weeks before it expires. Disabled upstreams are excluded from global attention counts.
+- Upstreams shows which credential mode an OAuth upstream uses. For a long-lived credential the stored refresh token is listed as retained but unused, and no refresh-token expiry warning is shown.
 
 ### Breaking changes
 

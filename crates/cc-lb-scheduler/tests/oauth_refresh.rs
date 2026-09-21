@@ -4,7 +4,8 @@ use std::time::Duration;
 use cc_lb_scheduler::error::{Result, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
-    OAuthRefreshConfig, OAuthRefreshJob, OAuthRefreshJobHandler, RefreshedOAuthTokens,
+    OAuthRefreshConfig, OAuthRefreshJob, OAuthRefreshJobHandler, RefreshOutcome,
+    RefreshedOAuthTokens,
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -32,10 +33,10 @@ mod jobs {
                     OAuthRefreshJob::new(upstream_id),
                     1_000,
                     |_| async {
-                        Ok(RefreshedOAuthTokens {
+                        Ok(RefreshOutcome::Refreshed(RefreshedOAuthTokens {
                             encrypted_tokens: encrypted_tokens(2),
                             expires_at_unix_secs: 2_000,
-                        })
+                        }))
                     },
                     capture_metadata(Arc::clone(&enqueued)),
                     move |id, expires_at| {
@@ -103,10 +104,10 @@ mod jobs {
                     OAuthRefreshJob::new(upstream_id),
                     1_000,
                     |_| async {
-                        Ok(RefreshedOAuthTokens {
+                        Ok(RefreshOutcome::Refreshed(RefreshedOAuthTokens {
                             encrypted_tokens: encrypted_tokens(2),
                             expires_at_unix_secs: 2_000,
-                        })
+                        }))
                     },
                     |_| async { Ok(()) },
                     |_, _| async { Ok(()) },
@@ -131,10 +132,10 @@ mod jobs {
                     OAuthRefreshJob::new(upstream_id),
                     1_000,
                     |_| async {
-                        Ok(RefreshedOAuthTokens {
+                        Ok(RefreshOutcome::Refreshed(RefreshedOAuthTokens {
                             encrypted_tokens: encrypted_tokens(2),
                             expires_at_unix_secs: 2_000,
-                        })
+                        }))
                     },
                     |_| async { Ok(()) },
                     |_, _| async { Ok(()) },
@@ -159,10 +160,10 @@ mod jobs {
                     OAuthRefreshJob::new(upstream_id),
                     1_000,
                     |_| async {
-                        Ok(RefreshedOAuthTokens {
+                        Ok(RefreshOutcome::Refreshed(RefreshedOAuthTokens {
                             encrypted_tokens: encrypted_tokens(2),
                             expires_at_unix_secs: 2_000,
-                        })
+                        }))
                     },
                     |_| async { Ok(()) },
                     |_, _| async { Ok(()) },
@@ -187,10 +188,10 @@ mod jobs {
                     OAuthRefreshJob::new(upstream_id),
                     1_000,
                     |_| async {
-                        Ok(RefreshedOAuthTokens {
+                        Ok(RefreshOutcome::Refreshed(RefreshedOAuthTokens {
                             encrypted_tokens: encrypted_tokens(2),
                             expires_at_unix_secs: 2_000,
-                        })
+                        }))
                     },
                     |_| async { Ok(()) },
                     |_, _| async { Ok(()) },
@@ -199,6 +200,35 @@ mod jobs {
 
             assert_eq!(outcome, JobOutcome::Skip);
             assert_eq!(upstreams.complete_calls(), 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn not_refreshable_outcome_skips_without_rescheduling() -> Result<()> {
+            let upstream_id = Uuid::new_v4();
+            let upstreams = FakeUpstreams::new(refreshable_record(upstream_id, 4), 5);
+            let handler = OAuthRefreshJobHandler::new(upstreams.clone(), Uuid::new_v4());
+            let enqueued = Arc::new(Mutex::new(None));
+            let scheduled = Arc::new(Mutex::new(None));
+            let scheduled_clone = Arc::clone(&scheduled);
+
+            let outcome = handler
+                .handle(
+                    OAuthRefreshJob::new(upstream_id),
+                    1_000,
+                    |_| async { Ok(RefreshOutcome::NotRefreshable) },
+                    capture_metadata(Arc::clone(&enqueued)),
+                    move |id, expires_at| {
+                        *scheduled_clone.lock().expect("scheduled lock") = Some((id, expires_at));
+                        async { Ok(()) }
+                    },
+                )
+                .await?;
+
+            assert_eq!(outcome, JobOutcome::Skip);
+            assert_eq!(upstreams.complete_calls(), 0);
+            assert_eq!(*enqueued.lock().expect("enqueued lock"), None);
+            assert_eq!(*scheduled.lock().expect("scheduled lock"), None);
             Ok(())
         }
     }
