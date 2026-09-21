@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - Request Log tables now default to `/v1/messages` requests. The Logs page filters by Messages, Token count, Models, Files, Other proxy requests, Renewals, or Unclassified; Overview and principal/upstream previews show Messages only. Row contents and the set of recorded requests are unchanged.
 - New request logs retain endpoint-category metadata for consistent history and live filtering. Existing logs without that metadata remain available under Unclassified on the Logs page; existing renewal logs remain under Renewals.
+- Overview and Upstreams now surface OAuth reconnect guidance for known refresh-token expiry and failed renewal, with direct Connect/Reconnect actions. Warnings begin three days before a known deadline; routine access-token expiry does not trigger a warning while refresh remains available, and disabled upstreams are excluded from global attention counts.
 
 ### Breaking changes
 

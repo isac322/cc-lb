@@ -14,7 +14,7 @@ import {
   RefreshCw,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -58,6 +58,7 @@ import {
   type ChartMarker,
 } from '../components/upstreams/buildQuotaChartData';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
+import { OAuthReconnectNotice } from '../components/upstreams/OAuthReconnectNotice';
 import { QuotaObservedAt } from '../components/upstreams/QuotaObservedAt';
 import {
   selectQuotaCardSnapshots,
@@ -71,11 +72,17 @@ import {
   type DraftCompleteResponse,
   type OrganizationMetadataInner,
   type QuotaSnapshot,
+  type UpstreamOAuthStatusResponse,
 } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
 import { fmtChartTooltipTs, sumTokens } from '../lib/format';
 import { isMessagesRequestEvent } from '../lib/logRows';
+import {
+  classifyOAuthReconnect,
+  REFRESH_EXPIRING_SOON_SECS,
+  useOAuthReconnectNudges,
+} from '../lib/oauthReconnect';
 import {
   type UpdateUpstreamWarmupSettingsRequest,
   type Upstream,
@@ -103,7 +110,7 @@ import {
 
 const upstreamSearchSchema = z.object({
   selectedId: z.string().optional(),
-  action: z.literal('new').optional(),
+  action: z.enum(['new', 'reconnect']).optional(),
 });
 
 // INPUT_CLASS carries no disabled styling, but a control locked by an in-flight
@@ -194,6 +201,11 @@ function UpstreamsPage() {
     [upstreams.data, pendingCreatedId],
   );
 
+  // Reconnect nudges derive from the same oauth/status queries the detail
+  // view reads; disabled upstreams stay in the map so their rows still carry
+  // the badge even though the global summary ignores them.
+  const { nudges: reconnectNudges } = useOAuthReconnectNudges(visibleUpstreams);
+
   const selected = visibleUpstreams.find((u) => u.id === selectedId) ?? null;
   const select = (id: string | undefined) =>
     navigate({ search: id ? { selectedId: id } : {} });
@@ -250,6 +262,7 @@ function UpstreamsPage() {
               const latest = quotaLatest.data?.upstreams.find(
                 (l) => l.upstream_id === u.id,
               );
+              const reconnectNudge = reconnectNudges.get(u.id);
               const runtimeStatus = statusByUpstreamId.get(u.id);
               const dotTone = !u.enabled
                 ? 'neutral'
@@ -288,8 +301,15 @@ function UpstreamsPage() {
                         {u.name}
                       </span>
                     </div>
-                    <div className="hidden @[240px]:flex items-center shrink-0">
-                      <Badge tone="mono">{u.kind}</Badge>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {reconnectNudge ? (
+                        <Badge tone={reconnectNudge.tone}>
+                          {reconnectNudge.label}
+                        </Badge>
+                      ) : null}
+                      <div className="hidden @[240px]:flex items-center">
+                        <Badge tone="mono">{u.kind}</Badge>
+                      </div>
                     </div>
                   </div>
                   {u.kind === 'anthropic_oauth' ? (
@@ -620,38 +640,32 @@ function UpstreamDetailLoadingShell() {
     </div>
   );
 }
-
-const OAUTH_EXPIRING_SOON_SECS = 600;
-// Refresh tokens live on a multi-week clock, so "soon" is days, not minutes.
-// Anthropic's absolute expiry is not extended by refreshing, and a lapsed
-// refresh token can only be recovered by reauthorizing the upstream.
-const OAUTH_REFRESH_EXPIRING_SOON_SECS = 7 * 24 * 60 * 60;
-
 type OAuthBadge = { tone: 'ok' | 'warn' | 'danger' | 'neutral'; label: string };
 
+// Refresh tokens live on a multi-week clock, so "soon" is measured in days.
 function refreshTokenExpiryTone(
   expiresAtUnixSecs: number,
 ): 'ok' | 'warn' | 'danger' {
   const now = Math.floor(Date.now() / 1000);
   if (expiresAtUnixSecs <= now) return 'danger';
-  if (expiresAtUnixSecs - now < OAUTH_REFRESH_EXPIRING_SOON_SECS) return 'warn';
+  if (expiresAtUnixSecs - now < REFRESH_EXPIRING_SOON_SECS) return 'warn';
   return 'ok';
 }
 
-function oauthBadge(entry: {
-  status: string;
-  expires_at_unix_secs: number | null;
-}): OAuthBadge {
+// This badge describes the login lifecycle, not the access token: a lapsed
+// access token is routine and renews silently while a refresh token exists,
+// so it must never surface as "Expired" here.
+function oauthBadge(entry: UpstreamOAuthStatusResponse): OAuthBadge {
   if (entry.status === 'corrupted')
-    return { tone: 'danger', label: 'Refresh failed' };
-  if (entry.status === 'missing')
-    return { tone: 'neutral', label: 'No credentials' };
-  const exp = entry.expires_at_unix_secs;
-  if (exp == null) return { tone: 'neutral', label: 'Unknown' };
+    return { tone: 'danger', label: 'Reconnect required' };
+  if (!entry.refresh_token_present)
+    return { tone: 'warn', label: 'Refresh missing' };
+  const refreshExp = entry.refresh_token_expires_at_unix_secs;
+  if (refreshExp == null) return { tone: 'ok', label: 'Connected' };
   const now = Math.floor(Date.now() / 1000);
-  if (exp <= now) return { tone: 'danger', label: 'Expired' };
-  if (exp - now < OAUTH_EXPIRING_SOON_SECS)
-    return { tone: 'warn', label: 'Expiring soon' };
+  if (refreshExp <= now) return { tone: 'danger', label: 'Login expired' };
+  if (refreshExp - now < REFRESH_EXPIRING_SOON_SECS)
+    return { tone: 'warn', label: 'Login expiring' };
   return { tone: 'ok', label: 'Connected' };
 }
 
@@ -796,6 +810,8 @@ function DetailView({
   upstream: Upstream;
   onBack: () => void;
 }) {
+  const { action } = Route.useSearch();
+  const navigate = useNavigate({ from: Route.fullPath });
   const toggle = useUpdateUpstreamWarmupSettings();
   const del = useDeleteUpstream();
   const oauthStart = useOAuthStart();
@@ -823,6 +839,50 @@ function DetailView({
   const [range, setRange] = useState<'1h' | '6h' | '24h' | '7d'>('7d');
   const [isolatedWindow, setIsolatedWindow] = useState<string | null>(null);
   const [showMoreMeta, setShowMoreMeta] = useState(false);
+  const isOauth = upstream.kind === 'anthropic_oauth';
+
+  // Single entry point for the OAuth authorize flow: the card button, the
+  // reconnect notice, and the ?action=reconnect deep link all funnel here so
+  // every surface shares the same pending state and modal.
+  const startOAuthReconnect = useCallback(() => {
+    oauthStart.mutate(upstream.id, {
+      onSuccess: (res) => {
+        setOauthState({
+          authorize_url: res.authorize_url,
+          state_token: res.state_token,
+          code: '',
+        });
+        setOauthOpen(true);
+      },
+    });
+  }, [oauthStart, upstream.id]);
+
+  // ?action=reconnect deep link: consume the param exactly once, then start
+  // the existing flow. The ref survives StrictMode's double effect pass;
+  // DetailView is keyed by upstream id, so a selection change remounts and
+  // re-arms it. Cancelling the modal never touches the nudge itself.
+  const handledReconnectAction = useRef(false);
+  useEffect(() => {
+    if (action !== 'reconnect') {
+      handledReconnectAction.current = false;
+      return;
+    }
+    if (handledReconnectAction.current) return;
+    handledReconnectAction.current = true;
+    navigate({
+      replace: true,
+      search: (previous) => ({ ...previous, action: undefined }),
+    });
+    if (!isOauth || oauthOpen || oauthStart.isPending) return;
+    startOAuthReconnect();
+  }, [
+    action,
+    isOauth,
+    oauthOpen,
+    oauthStart.isPending,
+    startOAuthReconnect,
+    navigate,
+  ]);
 
   // Keep a separate wall clock for snapshot freshness/countdowns. Series and
   // analysis requests use stable range keys and resolve their own absolute
@@ -958,7 +1018,6 @@ function DetailView({
       }));
   }, [recent.data]);
 
-  const isOauth = upstream.kind === 'anthropic_oauth';
   const metadataPending =
     isOauth &&
     subscriptionMetadataQ.data === undefined &&
@@ -991,6 +1050,13 @@ function DetailView({
   const oauthStatusBadge: OAuthBadge = principalEntry
     ? oauthBadge(principalEntry)
     : { tone: 'neutral', label: 'Not connected' };
+  const reconnectNudge = isOauth
+    ? classifyOAuthReconnect(
+        upstreamOAuthQ.data,
+        upstream.status.last_apply_error,
+        nowUnixSecs,
+      )
+    : null;
 
   // The toggle PATCH is not optimistic, so `upstream.enabled` still holds the
   // pre-request value while it is in flight; the requested value lives in the
@@ -1316,6 +1382,14 @@ function DetailView({
       {renderHeader()}
 
       <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-8 md:pb-12 space-y-6">
+        {reconnectNudge ? (
+          <OAuthReconnectNotice
+            nudge={reconnectNudge}
+            onReconnect={startOAuthReconnect}
+            pending={oauthStart.isPending}
+          />
+        ) : null}
+
         {isOauth &&
         (orgMeta?.claude_code_trial_ends_at ||
           orgMeta?.payment_auth_hosted_invoice_url ||
@@ -1932,18 +2006,7 @@ function DetailView({
                       className="self-center"
                       loading={oauthStart.isPending}
                       iconLeft={<KeyRound className="h-3 w-3" />}
-                      onClick={() => {
-                        oauthStart.mutate(upstream.id, {
-                          onSuccess: (res) => {
-                            setOauthState({
-                              authorize_url: res.authorize_url,
-                              state_token: res.state_token,
-                              code: '',
-                            });
-                            setOauthOpen(true);
-                          },
-                        });
-                      }}
+                      onClick={startOAuthReconnect}
                     >
                       {oauthStart.isPending
                         ? 'Starting...'
@@ -1995,10 +2058,10 @@ function DetailView({
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                       <div>
                         <div className="text-[11px] uppercase tracking-wider text-text-faint">
-                          Expires
+                          Access token
                         </div>
                         <div className="mt-0.5 font-mono">
-                          <Badge tone={oauthBadge(principalEntry).tone}>
+                          <Badge tone="neutral">
                             <RelativeTime
                               ts={
                                 principalEntry.expires_at_unix_secs
@@ -2010,6 +2073,9 @@ function DetailView({
                               }
                             />
                           </Badge>
+                        </div>
+                        <div className="mt-1 text-[10px] text-text-faint">
+                          Renews automatically while the refresh token is valid.
                         </div>
                       </div>
                       <div>
