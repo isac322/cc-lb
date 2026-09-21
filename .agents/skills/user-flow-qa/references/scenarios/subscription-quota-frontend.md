@@ -177,13 +177,13 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 | TC | Surface | Result | Evidence |
 |----|---------|--------|----------|
 | 1  | Detail Quota History range | **PASS** (gating) | post_{1h,6h,24h,7d}.png: x-spans 03:04–04:04 / 22:04–04:04 / 7/8–7/9 / 7/2–7/9 → 1h/6h/24h/7d, all distinct, no 16-day/6-23 stretch |
-| 2  | Detail snapshot cards | **PASS** | post_7d.png: 5H 59.0% / 7D 71.0% with meter + "live · Header · 16초 전", no NaN/broken cards |
+| 2  | Detail snapshot cards | **PASS** | post_7d.png: 5H 59.0% / 7D 71.0% with meter + "live · Header · 16초 전" ("16 seconds ago"), no NaN/broken cards |
 | 3  | Detail deficit/analysis | N/A | analysis/deficit code unchanged by fix; not force-reproduced (deficit renders only when detected) |
 | 4  | Detail empty/loading | N/A | code unchanged by fix; empty/skeleton paths not force-reproduced |
 | 5  | Overview pool quota | **PASS** (regression guard) | ov_post_{1h,7d}.png: 1h flat vs 7d dynamic, distinct spans, clean render; Overview code untouched |
 | 6  | Sidebar mini meters | **PASS** | /upstreams snapshot: per-window meters render (example-secondary-max 5h 59% / 7d 72%, etc.) |
 | 7  | ApiUsageCard | N/A | non-OAuth surface, separate usage endpoint, code unchanged by fix |
-| 8  | QuotaObservedAt | **PASS** | relative observed-at "16초 전" rendered in TC-2 card; unit-tested |
+| 8  | QuotaObservedAt | **PASS** | relative observed-at "16초 전" ("16 seconds ago") rendered in TC-2 card; unit-tested |
 | 9  | Fable 5 Quota Transition | **PASS** (automated Playwright route-mocked transition executed; isolated real-backend/manual mutation not executed) | TC-9 specs; Fable 5 model-scoped weekly quota transition case. Fresh responsive visual captures cover 1280/768/375. |
 | 10 | Range-scoped stale window visibility | documented, not executed | TC-10 specs; stale/out-of-range windows hidden from chart + model cards expire after 7d while 5h/7d always show |
 | 11 | Memory-Allocation Root Fixes Non-Regression (C1.4) | **PASS** | Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes` |
@@ -205,32 +205,31 @@ Verdict: **PASS**. Fix isolated to the detail Quota History `<XAxis allowDataOve
 - Fable routing preference: `crates/cc-lb-engine/src/builtin_filters/subscription_preference/tests.rs`.
 - Proxy path E2E: `crates/cc-lb-server/tests/claude_fable_5_proxy_path.rs`.
 
-## 5. TC-12 — 폴링 중 성공 데이터 유지와 응답 후 교체
+## 5. TC-12 — Retaining successful data during polling and replacing it on response
 
-### 환경과 데이터
+### Environment and data
 
-- 신규 SQLite와 별도 proxy/admin/metrics 포트를 사용하는 격리 인스턴스만 사용한다. 상세 구동 방법은 `principal-api-key-issuance.md`의 격리 환경 절차를 따른다. Vite의 `CC_LB_ADMIN_URL`은 이 인스턴스를 가리켜야 한다.
-- 실제 admin API로 OAuth upstream, API-key upstream, principal을 생성한다. 실제 공급자 자격 증명은 사용하지 않는다.
-- `subscription-quota-fullstack.md` §2의 SQL로 OAuth `5h`/`7d` checkpoint와 latest를 준비한다. `/latest`는 캐시를 읽으므로 초기 seed 후 격리 서버를 재시작하고, API가 `fresh` 상태를 반환하는지 확인한다.
-- `pool_subscription_quota_history_v1`에 두 시점 이상의 non-null utilization, `usage_rollups_v2`에 모델별 token/cost, `request_events_v1`에 해당 principal의 요청을 준비한다. 요청 seed는 payload뿐 아니라 `list_ts_ms`, `list_event_key`, `list_status`, `list_duration_ms`도 채워야 한다.
-- storage 조회, 실제 API 응답, 브라우저의 값과 시계열이 일치하는 상태를 baseline으로 기록한다. 호출 횟수나 HTTP 200만으로 성공을 판정하지 않는다.
+- Use only an isolated instance running a fresh SQLite database and separate proxy/admin/metrics ports. For detailed setup, follow the isolated-environment procedure in `principal-api-key-issuance.md`. Vite's `CC_LB_ADMIN_URL` must point at this instance.
+- Create the OAuth upstream, API-key upstream, and principal through the real admin API. Do not use real provider credentials.
+- Prepare the OAuth `5h`/`7d` checkpoints and latest rows using the SQL in `subscription-quota-fullstack.md` §2. Because `/latest` is served from cache, restart the isolated server after the initial seed and confirm the API returns `fresh` state.
+- Prepare at least two non-null utilization points in `pool_subscription_quota_history_v1`, per-model token/cost rows in `usage_rollups_v2`, and requests for that principal in `request_events_v1`. The request seed must populate not only the payload but also `list_ts_ms`, `list_event_key`, `list_status`, and `list_duration_ms`.
+- Record as the baseline a state in which the storage query, the real API response, and the browser's values and time series all agree. Do not judge success by call counts or HTTP 200 alone.
 
-### 상태 전이 절차
+### State-transition procedure
 
-1. 초기 렌더 완료 후 Playwright route gate를 설정한다. 첫 요청이나 StrictMode의 취소된 초기 요청을 baseline으로 삼지 않는다. 정상 응답은 `route.fetch()`로 실제 backend에서 가져오며, gate는 응답 보류 또는 HTTP 500 주입에만 사용한다.
-2. Overview pool-history와 upstream quota series의 다음 폴링 응답을 보류한다. SVG 노드, path, 축, 범례가 유지되고 skeleton으로 교체되지 않는지 확인한다. Logs live 모드에서는 histogram canvas와 기존 bucket 표현이 유지되며 dimming overlay가 없어야 한다.
-3. 보류 중 격리 DB에 새 quota checkpoint/pool snapshot 또는 요청 이벤트를 추가한다. gate 해제 후 실제 API의 변경 값과 브라우저 path/canvas/행의 변경을 확인한다. 기존 노드가 유지되면서 데이터가 교체되어야 한다.
-4. 연속 두 번 HTTP 500을 반환하여 기본 retry까지 소진한다. 성공 데이터는 남아 있어야 하며, 다음 200 응답 후 다시 갱신되어야 한다. backend의 pool snapshot writer가 새 값을 추가할 수 있으므로 복구 후 기대값은 과거 payload가 아니라 실제 복구 응답에서 구한다.
-5. Overview `1h → 7d`, API Usage `24h → 7d`를 보류한다. 같은 entity의 기존 차트는 남아 있어야 한다. Overview는 기존 표시 범위도 유지하고, 성공 응답 후 새 범위를 적용한다.
-6. upstream 또는 principal을 바꾸어 새 identity의 응답을 보류한다. 이전 entity의 차트나 요청 행이 새 이름 아래 나타나서는 안 된다. 데이터 없는 entity의 성공 응답은 정상 empty state여야 한다.
-7. Logs의 목록 검증은 live histogram 검증과 분리한다. live tail을 끈 뒤 `Refresh`로 실제 paginated 요청을 보류한다. 요청 matcher는 해당 Logs 페이지에서 관찰한 query를 사용한다. Overview의 `limit=200`과 Logs의 `limit=50`을 혼동하지 않는다.
-8. Logs model 필터를 일치하는 요청이 없는 값으로 바꾸고 recent/histogram 응답을 보류한다. 이전 필터의 행과 density가 없어야 하며, 빈 성공 응답 후 loading overlay가 사라져야 한다.
+1. After the initial render completes, install the Playwright route gate. Do not use the first request or StrictMode's cancelled initial request as the baseline. Fetch normal responses from the real backend via `route.fetch()`; use the gate only to hold a response or inject HTTP 500.
+2. Hold the next polling responses for the Overview pool history and the upstream quota series. Verify that the SVG nodes, paths, axes, and legend are retained and not replaced by a skeleton. In Logs live mode, the histogram canvas and the existing bucket rendering must be retained with no dimming overlay.
+3. While responses are held, add a new quota checkpoint/pool snapshot or request event to the isolated DB. After releasing the gate, verify the changed values from the real API against the changes in the browser's paths/canvas/rows. Existing nodes must be retained while their data is replaced.
+4. Return HTTP 500 twice in a row to exhaust the default retries. The successful data must remain, and it must refresh again after the next 200 response. Because the backend's pool snapshot writer may add new values, derive the post-recovery expectation from the actual recovery response, not from the old payload.
+5. Hold the responses for the Overview `1h → 7d` and API Usage `24h → 7d` range switches. The existing chart for the same entity must remain. Overview must also keep displaying the previous range and apply the new range only after the successful response.
+6. Switch the upstream or principal and hold the new identity's response. The previous entity's chart or request rows must not appear under the new name. A successful response for an entity with no data must render the normal empty state.
+7. Verify the Logs list separately from the live histogram. Turn off live tail, then hold the real paginated request issued by `Refresh`. Build the request matcher from the query observed on that Logs page. Do not confuse Overview's `limit=200` with Logs' `limit=50`.
+8. Change the Logs model filter to a value with no matching requests and hold the recent/histogram responses. No rows or density from the previous filter may remain, and the loading overlay must disappear after the empty successful response.
 
-### 판정과 회귀 테스트
+### Verdict and regression tests
 
-- **2026-09-07 PASS:** 격리 SQLite → 실제 admin API → 실제 브라우저로 Overview, OAuth Quota History, API Usage, principal Recent Requests, Logs histogram/목록의 지연·실패·복구·데이터 교체를 검증했다. 범위 및 entity/filter 전환도 통과했다.
-- Desktop 1440×1000에서 전이를 검증하고, upstream 화면은 mobile 390×844에서도 확인했다. 성공 응답 보류·오류 주입은 브라우저 gate를 사용했으며 정상 payload는 모의 응답으로 대체하지 않았다.
-- `src/lib/hooks/__tests__/polling-retention.test.ts`: 상대시간 폴링, 실패 후 유지/복구, 범위 및 upstream 경계.
-- `src/lib/hooks/__tests__/histogram-retention.test.ts`: 같은 필터의 poll/pan 유지, 필터 전환과 지연 응답 격리.
-- `src/routes/-index.test.tsx`, `-upstreams-loading.test.tsx`, `-principals-loading.test.tsx`, `-logs-polling.test.tsx`: 실제 소비자의 로딩·placeholder·성공 데이터 렌더링.
-- `src/lib/api.test.ts`: 외부 취소 신호와 30초 timeout의 동시 보장.
+- Execution evidence is intentionally omitted. Run the isolated SQLite → admin API → browser procedure and record only the required observable outcomes.
+- `src/lib/hooks/__tests__/polling-retention.test.ts`: relative-time polling, retain/recover after failure, range and upstream boundaries.
+- `src/lib/hooks/__tests__/histogram-retention.test.ts`: poll/pan retention under the same filter, filter switching, and delayed-response isolation.
+- `src/routes/-index.test.tsx`, `-upstreams-loading.test.tsx`, `-principals-loading.test.tsx`, `-logs-polling.test.tsx`: loading, placeholder, and successful-data rendering in the real consumers.
+- `src/lib/api.test.ts`: simultaneous guarantee of the external cancellation signal and the 30-second timeout.

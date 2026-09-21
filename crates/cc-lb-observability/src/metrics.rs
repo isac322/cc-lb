@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 30] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 31] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -92,6 +92,11 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 30] = [
         name: "cc_lb_cache_observation_write_failed_total",
         kind: MetricKind::Counter,
         description: "Total prompt-cache observation store writes that failed by store kind.",
+    },
+    MetricDefinition {
+        name: "cc_lb_cache_observation_read_failed_total",
+        kind: MetricKind::Counter,
+        description: "Total shared prompt-cache observation lookups that failed.",
     },
     MetricDefinition {
         name: "cc_lb_dropped_events_total",
@@ -247,6 +252,11 @@ pub(crate) fn register_prometheus14_metrics() {
         "Total prompt-cache observation store writes that failed by store kind."
     );
     metrics::describe_counter!(
+        "cc_lb_cache_observation_read_failed_total",
+        Unit::Count,
+        "Total shared prompt-cache observation lookups that failed."
+    );
+    metrics::describe_counter!(
         "cc_lb_dropped_events_total",
         Unit::Count,
         "Total events dropped from a bounded channel or queue by reason."
@@ -376,6 +386,7 @@ pub fn touch_prometheus14_metrics() {
         "store" => "sqlite"
     )
     .increment(1);
+    metrics::counter!("cc_lb_cache_observation_read_failed_total").increment(1);
     metrics::counter!("cc_lb_compiled_module_cache_hits_total").increment(1);
     metrics::counter!("cc_lb_compiled_module_cache_misses_total").increment(1);
     metrics::counter!("cc_lb_compiled_module_cache_evictions_total").increment(1);
@@ -463,6 +474,7 @@ pub(crate) fn touch_prometheus14_metric_handles() {
         "store" => "unknown"
     )
     .increment(0);
+    metrics::counter!("cc_lb_cache_observation_read_failed_total").increment(0);
     metrics::counter!(
         "cc_lb_dropped_events_total",
         "reason" => "unknown"

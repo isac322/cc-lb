@@ -1,19 +1,36 @@
 mod client_disconnect_support;
 use crate::common;
-
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_control::{BusReceiver, RequestEventBus};
+use cc_lb_domain::{Principal, TerminalStrategy, TtlClass, Upstream};
+use cc_lb_engine::api_keys::principal_view::{
+    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
+    RouterPipelineCache, ShapePluginCache,
+};
 use cc_lb_engine::{
     DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, LifecycleContext,
-    NoopSubscriptionQuotaCache,
+    PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike,
 };
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason, UsageSource};
+use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{
+    PromptCacheObservationRecord, PromptCacheObservationStore, RequestEventStore,
+    Storage as StorageTrait, StorageResult,
+};
+use cc_lb_upstream::{
+    DialectError, DialectShapeContext, ResponseTransformError, ShapedRequest, ShapedRequestBuilder,
+    SseEventTransformHook, TransformSseEventRequest, TransformSseEventResult, UpstreamDialect,
+};
+
 use http::header::CONTENT_ENCODING;
 use http::{HeaderMap, StatusCode};
 use http_body_util::BodyExt;
@@ -26,6 +43,8 @@ use client_disconnect_support::{
     upstream_frame_error_after,
 };
 use common::{RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState, messages_request};
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{Notify, mpsc};
 use url::Url;
 
 #[tokio::test]
@@ -127,7 +146,8 @@ async fn normal_stream_eof_remains_success() {
 async fn aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observation_event() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
-    let lifecycle = prompt_cache_lifecycle(
+    let sink = Arc::new(RecordingObservationSink::default());
+    let lifecycle = prompt_cache_lifecycle_with(
         sse_dispatch(
             StatusCode::OK,
             Body::from(Bytes::from_static(
@@ -136,6 +156,7 @@ async fn aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observa
             )),
         ),
         &test_bus,
+        Some(sink.clone() as Arc<dyn PromptCacheObservationSinkLike>),
     );
 
     let response = lifecycle
@@ -178,17 +199,6 @@ async fn aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observa
                     } => {
                         cache_usage_observed = usage.cache_creation_input_tokens == 12;
                     }
-                    LifecycleEvent::PromptCacheObservationsProduced {
-                        observations,
-                        dropped_below_threshold,
-                        dropped_aborted,
-                        ..
-                    } => panic!(
-                        "aborted below-threshold stream published an observation event: \
-                         observations={}, dropped_below_threshold={dropped_below_threshold}, \
-                         dropped_aborted={dropped_aborted}",
-                        observations.len(),
-                    ),
                     LifecycleEvent::RequestTerminated {
                         client_status,
                         reason,
@@ -220,13 +230,261 @@ async fn aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observa
         cache_usage_observed,
         "message_start cache creation usage was not observed",
     );
-    assert!(
-        std::iter::from_fn(|| lifecycle_rx.try_recv().ok()).all(|event| !matches!(
-            event,
-            LifecycleEvent::PromptCacheObservationsProduced { .. }
-        )),
-        "prompt-cache observation event was published after request termination",
+    assert!(sink.records().is_empty());
+}
+// QA-B1: the production stream loop enqueues the cache observation at
+// message_start — while the final upstream frames are still gated — and
+// publishes exactly once per request.
+#[tokio::test]
+async fn message_start_publishes_cache_observation_before_final_frames() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+    let sink = Arc::new(RecordingObservationSink::default());
+    let release = Arc::new(Notify::new());
+    let lifecycle = prompt_cache_lifecycle_with(
+        sse_dispatch(StatusCode::OK, gated_cache_sse_body(Arc::clone(&release))),
+        &test_bus,
+        Some(sink.clone() as Arc<dyn PromptCacheObservationSinkLike>),
     );
+
+    let mut body = lifecycle
+        .handle(cacheable_stream_request())
+        .await
+        .expect("lifecycle handles request")
+        .into_body();
+    let frame = body
+        .frame()
+        .await
+        .expect("first frame delivered")
+        .expect("first frame ok");
+    let frame = frame.into_data().expect("data frame");
+    let text = std::str::from_utf8(&frame).expect("first frame is utf8");
+    assert!(
+        text.contains("message_start"),
+        "first downstream frame must carry message_start: {text:?}",
+    );
+
+    // The final upstream frames are still gated: the observation was already
+    // enqueued at message_start, not deferred to stream completion.
+    let records = sink.records();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.upstream_id, uuid::Uuid::from_u128(1));
+    assert_eq!(record.canonical_model_id, "claude-sonnet-4-5-20250929");
+    assert_eq!(record.ttl_class, TtlClass::Ephemeral5m);
+    assert!(
+        record.estimated_prefix_tokens >= 1_024,
+        "published prefix must clear the model cache minimum: {record:?}",
+    );
+
+    release.notify_one();
+    let rest = body.collect().await.expect("body collects").to_bytes();
+    let rest = std::str::from_utf8(&rest).expect("stream tail is utf8");
+    assert!(
+        rest.contains("message_stop"),
+        "stream completes with message_stop: {rest:?}",
+    );
+    assert_eq!(
+        sink.records().len(),
+        1,
+        "message_stop must not publish a duplicate observation",
+    );
+
+    assert_success_terminal(&mut lifecycle_rx, StatusCode::OK.as_u16()).await;
+}
+
+// QA-B2: the compat transform path reaches the same early publish at
+// message_start.
+#[tokio::test]
+async fn transformed_sse_message_start_publishes_cache_observation_before_final_frames() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+    let sink = Arc::new(RecordingObservationSink::default());
+    let release = Arc::new(Notify::new());
+    let lifecycle = prompt_cache_transform_lifecycle(
+        sse_dispatch(StatusCode::OK, gated_cache_sse_body(Arc::clone(&release))),
+        &test_bus,
+        sink.clone(),
+    );
+
+    let mut body = lifecycle
+        .handle(cacheable_stream_request())
+        .await
+        .expect("lifecycle handles request")
+        .into_body();
+    let frame = body
+        .frame()
+        .await
+        .expect("first frame delivered")
+        .expect("first frame ok");
+    let frame = frame.into_data().expect("data frame");
+    let text = std::str::from_utf8(&frame).expect("first frame is utf8");
+    assert!(
+        text.contains("message_start"),
+        "first transformed frame must carry message_start: {text:?}",
+    );
+
+    let records = sink.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].canonical_model_id, "claude-sonnet-4-5-20250929");
+
+    release.notify_one();
+    let rest = body.collect().await.expect("body collects").to_bytes();
+    let rest = std::str::from_utf8(&rest).expect("stream tail is utf8");
+    assert!(
+        rest.contains("message_stop"),
+        "transformed stream completes with message_stop: {rest:?}",
+    );
+    assert_eq!(
+        sink.records().len(),
+        1,
+        "message_stop must not publish a duplicate observation",
+    );
+
+    assert_success_terminal(&mut lifecycle_rx, StatusCode::OK.as_u16()).await;
+}
+
+// QA-B3: a store write that is still blocked does not delay the first
+// downstream frame — the sink enqueue is non-blocking and the writer drains
+// to the store off the request path.
+#[tokio::test]
+async fn first_frame_arrives_while_observation_store_write_is_blocked() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+    let store = Arc::new(GatedObservationStore::default());
+    let (sink, writer) = channel_observation_sink(store.clone());
+    let lifecycle = prompt_cache_lifecycle_with(
+        sse_dispatch(StatusCode::OK, Body::from(cache_sse_body())),
+        &test_bus,
+        Some(sink.clone() as Arc<dyn PromptCacheObservationSinkLike>),
+    );
+
+    let mut body = lifecycle
+        .handle(cacheable_stream_request())
+        .await
+        .expect("lifecycle handles request")
+        .into_body();
+    let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("first frame is not delayed by the blocked store write")
+        .expect("first frame delivered")
+        .expect("first frame ok");
+    let frame = frame.into_data().expect("data frame");
+    let text = std::str::from_utf8(&frame).expect("first frame is utf8");
+    assert!(
+        text.contains("message_start"),
+        "first downstream frame must carry message_start: {text:?}",
+    );
+
+    // The write did start (the enqueue reached the writer) but is still gated.
+    tokio::time::timeout(Duration::from_secs(1), store.started.notified())
+        .await
+        .expect("observation write reached the store");
+    assert!(
+        store.records().is_empty(),
+        "gated store must not have committed yet",
+    );
+
+    store.release.notify_one();
+    let _ = body.collect().await.expect("body collects");
+    tokio::time::timeout(Duration::from_secs(1), store.committed.notified())
+        .await
+        .expect("observation commits once the store unblocks");
+    assert_eq!(sink.dropped_total(), 0);
+    drop(lifecycle);
+    drop(sink);
+    tokio::time::timeout(Duration::from_secs(1), writer)
+        .await
+        .expect("writer drains all accepted observations")
+        .expect("writer exits cleanly");
+    assert_eq!(store.records().len(), 1);
+
+    assert_success_terminal(&mut lifecycle_rx, StatusCode::OK.as_u16()).await;
+}
+
+// QA-B4: a downstream disconnect after message_start neither retracts nor
+// duplicates the accepted observation — it still commits exactly once.
+#[tokio::test]
+async fn disconnect_after_message_start_keeps_single_committed_observation() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+    let store = Arc::new(RecordingObservationStore::default());
+    let (sink, writer) = channel_observation_sink(store.clone());
+    let waiting = Arc::new(Notify::new());
+    let lifecycle = prompt_cache_lifecycle_with(
+        sse_dispatch(StatusCode::OK, gated_cache_sse_body(Arc::clone(&waiting))),
+        &test_bus,
+        Some(sink.clone() as Arc<dyn PromptCacheObservationSinkLike>),
+    );
+
+    let mut body = lifecycle
+        .handle(cacheable_stream_request())
+        .await
+        .expect("lifecycle handles request")
+        .into_body();
+    let _ = body
+        .frame()
+        .await
+        .expect("first frame delivered")
+        .expect("first frame ok");
+    drop(body);
+
+    assert_error_terminal(&mut lifecycle_rx, 499, "client_closed_request").await;
+    waiting.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), store.committed.notified())
+        .await
+        .expect("accepted observation still commits after disconnect");
+    assert_eq!(sink.dropped_total(), 0);
+    drop(lifecycle);
+    drop(sink);
+    tokio::time::timeout(Duration::from_secs(1), writer)
+        .await
+        .expect("writer drains after disconnect")
+        .expect("writer exits cleanly");
+    assert_eq!(store.records().len(), 1);
+}
+
+// QA-B4: a downstream disconnect before message_start publishes nothing.
+#[tokio::test]
+async fn disconnect_before_message_start_publishes_no_observation() {
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_rx = lifecycle_receiver(&test_bus);
+    let store = Arc::new(RecordingObservationStore::default());
+    let (sink, writer) = channel_observation_sink(store.clone());
+    let release = Arc::new(Notify::new());
+    let polled = Arc::new(Notify::new());
+    let upstream = {
+        let release = Arc::clone(&release);
+        let polled = Arc::clone(&polled);
+        Body::from_stream(async_stream::stream! {
+            polled.notify_one();
+            release.notified().await;
+            yield Ok::<Bytes, Infallible>(cache_message_start_frame());
+            yield Ok::<Bytes, Infallible>(cache_stream_tail_frame());
+        })
+    };
+    let lifecycle = prompt_cache_lifecycle_with(
+        sse_dispatch(StatusCode::OK, upstream),
+        &test_bus,
+        Some(sink.clone() as Arc<dyn PromptCacheObservationSinkLike>),
+    );
+    let mut body = lifecycle
+        .handle(cacheable_stream_request())
+        .await
+        .expect("lifecycle handles request")
+        .into_body();
+    let poll_task = tokio::spawn(async move { body.frame().await });
+    tokio::time::timeout(Duration::from_secs(1), polled.notified())
+        .await
+        .expect("relay awaits upstream");
+    poll_task.abort();
+    let _ = poll_task.await;
+
+    assert_error_terminal(&mut lifecycle_rx, 499, "client_closed_request").await;
+    assert_eq!(sink.enqueued_total(), 0);
+    assert!(store.records().is_empty());
+    writer.abort();
+    let _ = writer.await;
 }
 
 #[tokio::test]
@@ -641,12 +899,13 @@ async fn timeout_ordering(timeout_first: bool) {
     assert_error_terminal(&mut lifecycle_rx, 504, "tower_timeout").await;
 }
 
-fn prompt_cache_lifecycle(
+fn prompt_cache_lifecycle_with(
     dispatcher: Arc<dyn cc_lb_engine::UpstreamDispatch>,
     test_bus: &TestLifecycleBus,
+    sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
 ) -> Lifecycle {
     let authn = TestAuthn::new(TestState::default());
-    let view = DynamicViewBuilder::new(0)
+    let mut builder = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .global_router(Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
@@ -659,12 +918,14 @@ fn prompt_cache_lifecycle(
             kind: StorageUpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
             enabled: true,
-            api_key_ciphertext: Some(Vec::new()),
             revision: 1,
             ..UpstreamRecord::default()
         }])
-        .prompt_cache_observation_cache(Arc::new(NoopSubscriptionQuotaCache))
-        .build();
+        .prompt_cache_observation_store(Arc::new(NoopPromptCacheObservationStore));
+    if let Some(sink) = sink {
+        builder = builder.prompt_cache_observation_sink(sink);
+    }
+    let view = builder.build();
     Lifecycle::new_with_dynamic_view(
         authn.authn.clone(),
         Arc::new(DynamicViewHolder::new(view)),
@@ -679,4 +940,325 @@ fn stream_request() -> http::Request<Bytes> {
     messages_request(Bytes::from_static(
         br#"{"model":"claude-test","messages":[],"stream":true}"#,
     ))
+}
+#[derive(Default)]
+struct NoopPromptCacheObservationStore;
+
+#[async_trait]
+impl PromptCacheObservationStore for NoopPromptCacheObservationStore {
+    async fn list_active_for_candidates(
+        &self,
+        _upstream_ids: &[uuid::Uuid],
+        _canonical_model_id: &str,
+        _v3_prefix_keys: &[String],
+        _not_expired_at_unix_secs: u64,
+    ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+fn cacheable_stream_request() -> http::Request<Bytes> {
+    // One system block large enough to clear the Sonnet 4.5 cache minimum
+    // (1,024 tokens) on the serialized-prefix fast path.
+    let system_text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(300);
+    let body = format!(
+        r#"{{"model":"claude-sonnet-4-5","stream":true,"system":[{{"type":"text","text":"{system_text}","cache_control":{{"type":"ephemeral"}}}}],"messages":[{{"role":"user","content":"hi"}}]}}"#,
+    );
+    messages_request(Bytes::from(body))
+}
+
+fn cache_message_start_frame() -> Bytes {
+    Bytes::from_static(
+        b"event: message_start\n\
+          data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":4096,\"cache_creation_input_tokens\":4096,\"output_tokens\":0}}}\n\n",
+    )
+}
+
+fn cache_stream_tail_frame() -> Bytes {
+    Bytes::from_static(
+        b"event: content_block_delta\n\
+          data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n\
+          event: message_stop\n\
+          data: {\"type\":\"message_stop\"}\n\n",
+    )
+}
+
+fn cache_sse_body() -> Bytes {
+    let mut body = cache_message_start_frame().to_vec();
+    body.extend_from_slice(&cache_stream_tail_frame());
+    Bytes::from(body)
+}
+
+// Upstream body that emits message_start, then holds the remaining frames
+// until `release` fires — the seam that proves the observation is enqueued
+// before stream completion.
+fn gated_cache_sse_body(release: Arc<Notify>) -> Body {
+    Body::from_stream(async_stream::stream! {
+        yield Ok::<Bytes, Infallible>(cache_message_start_frame());
+        release.notified().await;
+        yield Ok::<Bytes, Infallible>(cache_stream_tail_frame());
+    })
+}
+
+#[derive(Default)]
+struct RecordingObservationSink {
+    records: Mutex<Vec<PromptCacheObservationRecord>>,
+}
+
+impl RecordingObservationSink {
+    fn records(&self) -> Vec<PromptCacheObservationRecord> {
+        self.records.lock().expect("records lock").clone()
+    }
+}
+
+impl PromptCacheObservationSinkLike for RecordingObservationSink {
+    fn enqueue(
+        &self,
+        record: PromptCacheObservationRecord,
+    ) -> Result<(), PromptCacheObservationEnqueueError> {
+        self.records.lock().expect("records lock").push(record);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingObservationStore {
+    records: Mutex<Vec<PromptCacheObservationRecord>>,
+    committed: Notify,
+}
+
+impl RecordingObservationStore {
+    fn records(&self) -> Vec<PromptCacheObservationRecord> {
+        self.records.lock().expect("records lock").clone()
+    }
+}
+
+#[async_trait]
+impl PromptCacheObservationStore for RecordingObservationStore {
+    async fn upsert_observation(&self, record: &PromptCacheObservationRecord) -> StorageResult<()> {
+        self.records
+            .lock()
+            .expect("records lock")
+            .push(record.clone());
+        self.committed.notify_one();
+        Ok(())
+    }
+
+    async fn list_active_for_candidates(
+        &self,
+        _upstream_ids: &[uuid::Uuid],
+        _canonical_model_id: &str,
+        _v3_prefix_keys: &[String],
+        _not_expired_at_unix_secs: u64,
+    ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Default)]
+struct GatedObservationStore {
+    records: Mutex<Vec<PromptCacheObservationRecord>>,
+    started: Notify,
+    release: Notify,
+    committed: Notify,
+}
+
+impl GatedObservationStore {
+    fn records(&self) -> Vec<PromptCacheObservationRecord> {
+        self.records.lock().expect("records lock").clone()
+    }
+}
+
+#[async_trait]
+impl PromptCacheObservationStore for GatedObservationStore {
+    async fn upsert_observation(&self, record: &PromptCacheObservationRecord) -> StorageResult<()> {
+        self.started.notify_one();
+        self.release.notified().await;
+        self.records
+            .lock()
+            .expect("records lock")
+            .push(record.clone());
+        self.committed.notify_one();
+        Ok(())
+    }
+
+    async fn list_active_for_candidates(
+        &self,
+        _upstream_ids: &[uuid::Uuid],
+        _canonical_model_id: &str,
+        _v3_prefix_keys: &[String],
+        _not_expired_at_unix_secs: u64,
+    ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+// Mirrors the production PromptCacheObservationSink contract — bounded
+// try_send enqueue plus a background writer draining to the store — because
+// the real sink lives in cc-lb-server, which engine integration tests cannot
+// depend on.
+struct ChannelObservationSink {
+    tx: mpsc::Sender<PromptCacheObservationRecord>,
+    enqueued: AtomicU64,
+    dropped: AtomicU64,
+}
+
+impl ChannelObservationSink {
+    fn enqueued_total(&self) -> u64 {
+        self.enqueued.load(Ordering::Relaxed)
+    }
+
+    fn dropped_total(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+impl PromptCacheObservationSinkLike for ChannelObservationSink {
+    fn enqueue(
+        &self,
+        record: PromptCacheObservationRecord,
+    ) -> Result<(), PromptCacheObservationEnqueueError> {
+        match self.tx.try_send(record) {
+            Ok(()) => {
+                self.enqueued.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                Err(PromptCacheObservationEnqueueError::ChannelFull)
+            }
+            Err(TrySendError::Closed(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                Err(PromptCacheObservationEnqueueError::ChannelClosed)
+            }
+        }
+    }
+}
+
+fn channel_observation_sink(
+    store: Arc<dyn PromptCacheObservationStore>,
+) -> (Arc<ChannelObservationSink>, tokio::task::JoinHandle<()>) {
+    let (tx, mut rx) = mpsc::channel(16);
+    let writer = tokio::spawn(async move {
+        while let Some(record) = rx.recv().await {
+            store
+                .upsert_observation(&record)
+                .await
+                .expect("test store write succeeds");
+        }
+    });
+    (
+        Arc::new(ChannelObservationSink {
+            tx,
+            enqueued: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+        }),
+        writer,
+    )
+}
+
+// Compat-path dialect: shapes like the test upstream and forwards every SSE
+// event unchanged so the transform hook path is exercised end to end.
+struct PassthroughTransformDialect;
+
+impl UpstreamDialect for PassthroughTransformDialect {
+    fn shape(
+        &self,
+        ctx: &DialectShapeContext,
+        _upstream: &Upstream,
+        _principal: &Principal,
+        builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
+        let mut url = Url::parse("http://upstream.local/").expect("test URL parses");
+        url.set_path(ctx.path.trim_start_matches('/'));
+        Ok(builder.shaped_request(
+            url,
+            ctx.method.clone(),
+            ctx.downstream_headers.clone(),
+            ctx.body_bytes.clone(),
+        ))
+    }
+
+    fn sse_event_transform_hook(&self) -> Option<&dyn SseEventTransformHook> {
+        Some(self)
+    }
+}
+
+impl SseEventTransformHook for PassthroughTransformDialect {
+    fn transform_sse_event(
+        &self,
+        _request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        Ok(TransformSseEventResult::Unchanged)
+    }
+}
+
+fn prompt_cache_transform_lifecycle(
+    dispatcher: Arc<dyn cc_lb_engine::UpstreamDispatch>,
+    test_bus: &TestLifecycleBus,
+    sink: Arc<RecordingObservationSink>,
+) -> Lifecycle {
+    let state = TestState::default();
+    let dialect = Arc::new(PassthroughTransformDialect);
+    let upstream_id = uuid::Uuid::from_u128(1);
+    let mut chains: HashMap<String, PrincipalRoutingArtifacts> = HashMap::new();
+    chains.insert(
+        "principal-test".to_owned(),
+        (
+            Some(Arc::new(RouterPipelineCache::empty(
+                TerminalStrategy::FirstPick,
+            ))),
+            ObservabilityHooksCache::Inherit,
+            DialectCache::Explicit(ShapePluginCache { dialect }),
+        ),
+    );
+    let principal = PrincipalRecord {
+        id: uuid::Uuid::from_u128(2),
+        name: "principal-test".to_owned(),
+        kind: StoragePrincipalKind::Machine,
+        allowed_models: vec!["*".to_owned()],
+        allowed_upstreams: vec![upstream_id],
+        default_limits: Vec::new(),
+        enabled: true,
+        last_apply_error: None,
+        last_apply_at_unix_secs: None,
+        deleted_at_unix_secs: None,
+        revision: 1,
+        created_at_unix_secs: 0,
+        updated_at_unix_secs: 0,
+        router_terminal_strategy: TerminalStrategy::FirstPick,
+        cache_keepalive: None,
+    };
+    let authn = TestAuthn::with_principal_view(
+        state,
+        Arc::new(PrincipalView::from_db(&[principal], chains)),
+    );
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .global_router(Arc::new(TestRouter {
+            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
+        }))
+        .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![UpstreamRecord {
+            id: upstream_id,
+            name: "test-upstream".to_owned(),
+            kind: StorageUpstreamKind::AnthropicApiKey,
+            base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
+            enabled: true,
+            api_key_ciphertext: Some(Vec::new()),
+            revision: 1,
+            ..UpstreamRecord::default()
+        }])
+        .prompt_cache_observation_store(Arc::new(NoopPromptCacheObservationStore))
+        .prompt_cache_observation_sink(sink)
+        .build();
+    Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_engine::SystemClock),
+    )
+    .with_event_bus(test_bus.bus_arc())
 }

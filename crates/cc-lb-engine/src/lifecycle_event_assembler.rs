@@ -493,8 +493,7 @@ fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
         | LifecycleEvent::ProviderErrorObserved { .. }
         | LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
         | LifecycleEvent::Priced { .. }
-        | LifecycleEvent::CacheObserved { .. }
-        | LifecycleEvent::PromptCacheObservationsProduced { .. } => None,
+        | LifecycleEvent::CacheObserved { .. } => None,
         _ => {
             tracing::warn!("lifecycle event assembler saw unknown lifecycle event variant");
             None

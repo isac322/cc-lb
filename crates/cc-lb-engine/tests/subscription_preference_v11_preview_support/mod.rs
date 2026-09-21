@@ -70,11 +70,11 @@ impl PreviewFixture {
         }
     }
 
-    pub fn preview(&self, request_id: &str) -> PreviewRouteOutcome {
-        self.preview_model(request_id, "claude-test")
+    pub async fn preview(&self, request_id: &str) -> PreviewRouteOutcome {
+        self.preview_model(request_id, "claude-test").await
     }
 
-    pub fn preview_model(&self, request_id: &str, model: &str) -> PreviewRouteOutcome {
+    pub async fn preview_model(&self, request_id: &str, model: &str) -> PreviewRouteOutcome {
         let body = format!(r#"{{"model":"{model}","messages":[]}}"#);
         self.lifecycle
             .preview_route(PreviewRouteInput {
@@ -83,6 +83,7 @@ impl PreviewFixture {
                 headers: HeaderMap::new(),
                 body_bytes: Bytes::from(body),
             })
+            .await
             .expect("preview succeeds")
     }
 

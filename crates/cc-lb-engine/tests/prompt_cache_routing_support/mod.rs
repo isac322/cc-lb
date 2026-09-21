@@ -1,15 +1,17 @@
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use cc_lb_domain::{
-    CacheScore, Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, TtlClass, WarmCacheEntry,
+    Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
+    WarmCacheEntry,
 };
-use cc_lb_engine::{
-    PromptCacheObservationCacheLike, PromptCacheObservationInput, SubscriptionQuotaCacheLike,
-};
-use cc_lb_storage_api::SubscriptionQuotaSample;
+use cc_lb_engine::{SubscriptionQuotaCacheLike, lifecycle::HASH_SCHEMA_VERSION};
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_storage_api::{
+    PromptCacheObservationRecord, PromptCacheObservationStore, StorageResult,
+    SubscriptionQuotaSample,
+};
 use uuid::Uuid;
 
 pub const TEST_MODEL: &str = "claude-sonnet-4-5-20250929";
@@ -117,49 +119,48 @@ impl TestPromptCacheObservationCache {
     }
 }
 
-impl PromptCacheObservationCacheLike for TestPromptCacheObservationCache {
-    fn snapshot_for_upstream(
+#[async_trait]
+impl PromptCacheObservationStore for TestPromptCacheObservationCache {
+    async fn list_active_for_candidates(
         &self,
-        upstream_id: Uuid,
-        _canonical_model: &str,
-        _request_breakpoint_hashes: &[(String, TtlClass)],
-        _now_unix_secs: u64,
-    ) -> Vec<WarmCacheEntry> {
-        self.warm_entries
-            .get(&upstream_id)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    fn upsert_observation(&self, _observation: PromptCacheObservationInput) {}
-
-    fn refresh_on_hit(
-        &self,
-        _upstream_id: Uuid,
-        _canonical_model: &str,
-        _prefix_hash: &str,
-        _ttl_class: TtlClass,
-        _now_unix_secs: u64,
-    ) -> bool {
-        false
-    }
-
-    fn thread_usage_score(
-        &self,
-        _upstream_id: Uuid,
-        _canonical_model: &str,
-        _thread_id: &str,
-        _now_unix_secs: u64,
-    ) -> Option<CacheScore> {
-        None
-    }
-
-    fn grace_margin_secs(&self) -> u64 {
-        30
-    }
-
-    fn clock_now_unix_secs(&self) -> u64 {
-        TEST_QUOTA_NOW_SECS
+        upstream_ids: &[Uuid],
+        canonical_model_id: &str,
+        v3_prefix_keys: &[String],
+        not_expired_at_unix_secs: u64,
+    ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
+        let mut records = upstream_ids
+            .iter()
+            .flat_map(|upstream_id| {
+                self.warm_entries
+                    .get(upstream_id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|entry| {
+                        entry.expires_at_unix_secs > not_expired_at_unix_secs
+                            && v3_prefix_keys.iter().any(|key| key == &entry.prefix_hash)
+                    })
+                    .map(|entry| PromptCacheObservationRecord {
+                        upstream_id: *upstream_id,
+                        canonical_model_id: canonical_model_id.to_owned(),
+                        v3_prefix_key: entry.prefix_hash.clone(),
+                        ttl_class: entry.ttl_class,
+                        expires_at_unix_secs: entry.expires_at_unix_secs,
+                        last_observed_at_unix_secs: entry.last_observed_at_unix_secs,
+                        hash_schema_version: HASH_SCHEMA_VERSION,
+                        prefix_content_block_index: entry.content_block_index,
+                        estimated_prefix_tokens: entry.estimated_prefix_tokens,
+                        token_estimate_source: entry.token_estimate_source.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        records.sort_by(|a, b| {
+            (a.upstream_id, &a.v3_prefix_key, ttl_rank(a.ttl_class)).cmp(&(
+                b.upstream_id,
+                &b.v3_prefix_key,
+                ttl_rank(b.ttl_class),
+            ))
+        });
+        Ok(records)
     }
 }
 
@@ -186,5 +187,12 @@ impl SubscriptionQuotaCacheLike for TestSubscriptionQuotaCache {
             .get(&upstream_id)
             .cloned()
             .unwrap_or_default()
+    }
+}
+
+fn ttl_rank(ttl: cc_lb_domain::TtlClass) -> u8 {
+    match ttl {
+        cc_lb_domain::TtlClass::Ephemeral5m => 0,
+        cc_lb_domain::TtlClass::Ephemeral1h => 1,
     }
 }

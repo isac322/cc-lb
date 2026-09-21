@@ -41,11 +41,7 @@ async fn full_proxy_write_then_non_breakpoint_lookback_hit_preserves_subscriptio
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let extra_config = r#"
-[prompt_cache_shadow]
-refresh_debounce_secs = 0
-"#;
-    let server = common::spawn_test_server_with_two_upstreams(extra_config, fake_config).await;
+    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
     assert!(server.sqlite_path.starts_with(server._config_dir.path()));
     let pool = support::open_sqlite_pool(&server).await;
     let upstream_rows = support::fetch_upstreams(&pool).await;
@@ -151,11 +147,7 @@ async fn top_level_cache_control_creates_a_breakpoint_and_holds_affinity() {
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let extra_config = r#"
-[prompt_cache_shadow]
-refresh_debounce_secs = 0
-"#;
-    let server = common::spawn_test_server_with_two_upstreams(extra_config, fake_config).await;
+    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
     let pool = support::open_sqlite_pool(&server).await;
 
     // No block-level `cache_control` anywhere: the only caching signal is the top-level field.
@@ -190,6 +182,13 @@ refresh_debounce_secs = 0
         first_event.cache_control_block_count,
         Some(1),
         "the synthesized automatic breakpoint must be counted exactly once"
+    );
+    // Request-event persistence and observation persistence have independent
+    // writers. Establish the committed-cache precondition before the next turn.
+    let (observations, _) = support::observation_stats(&pool, MODEL, Duration::from_secs(5)).await;
+    assert_eq!(
+        observations, 1,
+        "automatic breakpoint observation committed"
     );
 
     let second = common::http_post(
@@ -263,11 +262,7 @@ async fn assert_message_scoped_invalidator(marker: &str, apply: impl FnOnce(&mut
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let extra_config = r#"
-[prompt_cache_shadow]
-refresh_debounce_secs = 0
-"#;
-    let server = common::spawn_test_server_with_two_upstreams(extra_config, fake_config).await;
+    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
     let pool = support::open_sqlite_pool(&server).await;
 
     let base = scoped_invalidator_base(marker);
@@ -289,6 +284,31 @@ refresh_debounce_secs = 0
     .expect("send base request through cc-lb proxy");
     assert_eq!(first.status, 200);
     let first_event = support::wait_for_settled_event(&pool, MODEL, 0).await;
+    let first_message = first_event
+        .breakpoint_prefix_hash("message")
+        .expect("base request records a message breakpoint");
+    // A negative match assertion requires the original message prefix to be
+    // committed; otherwise a cold read would satisfy it vacuously.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut interval = tokio::time::interval(Duration::from_millis(20));
+        loop {
+            interval.tick().await;
+            let committed = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM prompt_cache_observations \
+                 WHERE canonical_model_id = ? AND v3_prefix_key = ?)",
+            )
+            .bind(MODEL)
+            .bind(&first_message)
+            .fetch_one(&pool)
+            .await
+            .expect("query message-prefix commit");
+            if committed {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("base message prefix commits before invalidation request");
 
     let second = common::http_post(
         server.proxy_addr,
@@ -314,9 +334,6 @@ refresh_debounce_secs = 0
         "{marker}: tools-tier prefix must stay byte-stable across this invalidator"
     );
 
-    let first_message = first_event
-        .breakpoint_prefix_hash("message")
-        .expect("base request records a message breakpoint");
     let second_message = second_event
         .breakpoint_prefix_hash("message")
         .expect("variant request records a message breakpoint");
@@ -378,11 +395,7 @@ async fn opus_4_7_records_a_warm_entry_for_a_prefix_between_2048_and_4096_tokens
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let extra_config = r#"
-[prompt_cache_shadow]
-refresh_debounce_secs = 0
-"#;
-    let server = common::spawn_test_server_with_two_upstreams(extra_config, fake_config).await;
+    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
     let pool = support::open_sqlite_pool(&server).await;
 
     let request = json!({
@@ -434,11 +447,7 @@ async fn requested_fast_speed_is_hash_neutral_on_a_model_that_ignores_it() {
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let extra_config = r#"
-[prompt_cache_shadow]
-refresh_debounce_secs = 0
-"#;
-    let server = common::spawn_test_server_with_two_upstreams(extra_config, fake_config).await;
+    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
     let pool = support::open_sqlite_pool(&server).await;
 
     let base = json!({
@@ -516,11 +525,7 @@ async fn a_replayed_thinking_block_changes_the_following_breakpoint_prefix() {
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let extra_config = r#"
-[prompt_cache_shadow]
-refresh_debounce_secs = 0
-"#;
-    let server = common::spawn_test_server_with_two_upstreams(extra_config, fake_config).await;
+    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
     let pool = support::open_sqlite_pool(&server).await;
 
     let base = json!({

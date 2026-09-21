@@ -8,11 +8,12 @@ use cc_lb_engine::DynamicViewHolder;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::notify_listener::{NotifyListener, NotifyListenerParams};
-use cc_lb_storage_api::BackendKind;
-use cc_lb_storage_api::upstream::UpstreamStatusUpdate;
+use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
-    ChangeChannel, ChangeEvent, RuntimeChangeNotifier, StorageError, StorageResult, UpstreamCreate,
-    UpstreamRecord, UpstreamStore, UpstreamUpdate,
+    BackendKind, ChangeChannel, ChangeEvent, RateLimitKind, RuntimeChangeNotifier, StorageError,
+    StorageResult, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate,
+    UpstreamRateLimitObservationRecord, UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
 use cc_lb_storage_sqlite::{SqliteStorage as Storage, open_sqlite};
 use metrics_exporter_prometheus::PrometheusHandle;
@@ -44,6 +45,13 @@ impl MockNotifier {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("notify listener did not subscribe");
+    }
+    fn send_for_upstream(&self, channel: ChangeChannel, upstream_id: Uuid) {
+        let _ = self.tx.send(ChangeEvent::new(
+            channel,
+            upstream_id.to_string(),
+            std::time::UNIX_EPOCH,
+        ));
     }
 }
 
@@ -211,6 +219,7 @@ struct Fixture {
     aead: Arc<AeadService>,
     runtime: Arc<WasmtimeRuntime>,
     holder: Arc<DynamicViewHolder>,
+    quota_cache: Arc<cc_lb_server::SubscriptionQuotaCache>,
 }
 
 async fn fixture() -> Fixture {
@@ -240,6 +249,7 @@ async fn fixture() -> Fixture {
     let oauth = Arc::new(AnthropicOAuthConfig::default());
     let aead = Arc::new(AeadService::from_master_key([24; 32]));
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let quota_cache = Arc::new(cc_lb_server::SubscriptionQuotaCache::new());
     let initial = build_dynamic_view(
         &stores,
         &oauth,
@@ -248,11 +258,12 @@ async fn fixture() -> Fixture {
         0,
         &runtime,
         dir.path(),
-        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        quota_cache.clone(),
+        30,
         None,
         None,
         1800,
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .await
     .expect("initial dynamic view builds");
@@ -264,6 +275,7 @@ async fn fixture() -> Fixture {
         oauth,
         aead,
         runtime,
+        quota_cache,
         holder,
     }
 }
@@ -284,8 +296,9 @@ async fn spawn_listener(
         aead: fixture.aead.clone(),
         data_dir: fixture._dir.path().to_path_buf(),
         lazy_refresher: None,
-        subscription_quota_cache: Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
-        prompt_cache_observation_cache: None,
+        subscription_quota_cache: fixture.quota_cache.clone(),
+        prompt_cache_thread_usage: None,
+        prompt_cache_grace_margin_secs: 30,
         prompt_cache_observation_sink: None,
         subscription_quota_routing_max_staleness_secs: 1800,
         clock: Arc::new(cc_lb_engine::SystemClock),
@@ -427,6 +440,143 @@ async fn rebuild_failure_does_not_swap_view() {
         labeled_counter_value(handle, "cclb_rebind_total", "outcome", "error"),
         before + 1.0
     );
+    cancel.cancel();
+    task.await.expect("listener exits");
+}
+#[tokio::test]
+async fn hydrate_notifications_refresh_peer_caches_without_view_rebuild() {
+    let fixture = fixture().await;
+    let start = fixture.holder.generation();
+
+    // Real SQLite rows: one upstream plus its rate-limit observation and a
+    // subscription quota sample.
+    let upstream = UpstreamStore::create(
+        &*fixture.storage,
+        UpstreamCreate {
+            name: "hydrate-upstream".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: None,
+            api_key_ciphertext: Some(vec![1, 2, 3]),
+            oauth_token_generation: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+        },
+    )
+    .await
+    .expect("upstream created");
+    fixture
+        .stores
+        .upstream_rate_limits
+        .put_observation(&UpstreamRateLimitObservationRecord {
+            upstream_id: upstream.id,
+            window: "1m".to_owned(),
+            kind: RateLimitKind::Requests,
+            limit: Some(1_000),
+            remaining: Some(750),
+            reset: Some("30s".to_owned()),
+            observed_at_unix_secs: 1_800_000_000,
+        })
+        .await
+        .expect("rate limit observation stored");
+    fixture
+        .stores
+        .upstream_subscription_quotas
+        .record_subscription_quota_sample(&SubscriptionQuotaSample {
+            upstream_id: upstream.id,
+            window: SubscriptionQuotaWindow::FiveHour,
+            source: SubscriptionQuotaSource::Header,
+            sample_kind: SubscriptionQuotaSampleKind::Sample,
+            observed_at_unix_millis: 1_800_000_000_000,
+            sample_id: Uuid::new_v4(),
+            utilization: Some(0.42),
+            status: Some(SubscriptionQuotaStatus::Allowed),
+            resets_at_unix_secs: Some(1_800_018_000),
+            surpassed_threshold: None,
+            representative_claim: None,
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            ingested_at_unix_millis: 1_800_000_000_000,
+        })
+        .await
+        .expect("quota sample stored");
+
+    let notifier = Arc::new(MockNotifier::new());
+    let cancel = CancellationToken::new();
+    let task = spawn_listener(
+        &fixture,
+        notifier.clone(),
+        cancel.clone(),
+        fixture.stores.clone(),
+    )
+    .await;
+
+    notifier.send_for_upstream(ChangeChannel::UpstreamRateLimit, upstream.id);
+    notifier.send_for_upstream(ChangeChannel::SubscriptionQuota, upstream.id);
+
+    // Wait for observable cache state, not an assumed scheduling delay.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let rate_limit_seen = {
+                let view = fixture.holder.load();
+                let cache = view.upstream_rate_limit_cache.read();
+                cache
+                    .snapshots
+                    .get(&upstream.id)
+                    .is_some_and(|snapshots| !snapshots.is_empty())
+            };
+            let quota_seen = fixture
+                .quota_cache
+                .snapshot_for_upstream(upstream.id, 1_800_000_001_000, 30)
+                .iter()
+                .any(|snapshot| snapshot.window == "5h" && snapshot.utilization == Some(0.42));
+            if rate_limit_seen && quota_seen {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both notifications hydrate peer caches");
+
+    {
+        let view = fixture.holder.load();
+        let cache = view.upstream_rate_limit_cache.read();
+        assert_eq!(
+            cache.snapshots.get(&upstream.id),
+            Some(&vec![cc_lb_domain::RateLimitObservation {
+                kind: RateLimitKind::Requests,
+                window: "1m".to_owned(),
+                limit: Some(1_000),
+                remaining: Some(750),
+                reset: Some("30s".to_owned()),
+            }])
+        );
+    }
+    let quota_snapshots =
+        fixture
+            .quota_cache
+            .snapshot_for_upstream(upstream.id, 1_800_000_001_000, 30);
+    let five_hour = quota_snapshots
+        .iter()
+        .find(|snapshot| snapshot.window == "5h")
+        .expect("5h quota snapshot");
+    assert_eq!(
+        five_hour.state,
+        cc_lb_domain::SubscriptionQuotaDataState::Fresh
+    );
+    assert_eq!(five_hour.utilization, Some(0.42));
+    assert_eq!(five_hour.status.as_deref(), Some("allowed"));
+
+    // Hydrate channels refresh peer caches only; the view generation is
+    // untouched because no rebuild ran.
+    assert_eq!(fixture.holder.generation(), start);
     cancel.cancel();
     task.await.expect("listener exits");
 }

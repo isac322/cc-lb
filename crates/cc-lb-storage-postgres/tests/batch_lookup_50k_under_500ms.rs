@@ -19,7 +19,10 @@ const EXPIRED_PER_UPSTREAM: usize = 9_000;
 const ACTIVE_PER_UPSTREAM: usize = RECORDS_PER_UPSTREAM - EXPIRED_PER_UPSTREAM;
 const TOTAL_RECORDS: u64 = (UPSTREAM_COUNT * RECORDS_PER_UPSTREAM) as u64;
 const NOW_UNIX_SECS: u64 = 1_700_000_000;
-const MAX_HYDRATE_ELAPSED: Duration = Duration::from_millis(500);
+// Heuristic budget carried over from the hydration workload this test replaced.
+// It guards gross regressions only: at 50k rows a sequential scan can still
+// pass, so this does not prove index usage — measure the plan separately.
+const MAX_LOOKUP_ELAPSED: Duration = Duration::from_millis(500);
 
 use cc_lb_storage_api::{BackendKind, MetaStore};
 
@@ -27,16 +30,18 @@ type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
 #[ignore = "requires CI_POSTGRES_URL; run with --release --ignored"]
-async fn hydrate_50k_rows_90percent_expired_under_500ms() -> TestResult {
+async fn batch_lookup_50k_rows_90percent_expired_under_500ms() -> TestResult {
     let Some(fixture) = Fixture::create().await? else {
         return Ok(());
     };
     let store = fixture.store();
     let upstream_ids = upstream_ids();
 
+    let mut all_keys = Vec::with_capacity(UPSTREAM_COUNT * RECORDS_PER_UPSTREAM);
     for (upstream_index, upstream_id) in upstream_ids.iter().copied().enumerate() {
         for record_index in 0..RECORDS_PER_UPSTREAM {
             let record = observation(upstream_index, upstream_id, record_index);
+            all_keys.push(record.v3_prefix_key.clone());
             PromptCacheObservationStore::upsert_observation(&store, &record).await?;
         }
     }
@@ -45,38 +50,25 @@ async fn hydrate_50k_rows_90percent_expired_under_500ms() -> TestResult {
         TOTAL_RECORDS
     );
 
-    let mut per_upstream_timings = Vec::with_capacity(UPSTREAM_COUNT);
-    for upstream_id in upstream_ids {
-        let started_at = Instant::now();
-        let records = PromptCacheObservationStore::list_active_for_upstream(
-            &store,
-            upstream_id,
-            NOW_UNIX_SECS,
-        )
-        .await?;
-        let elapsed = started_at.elapsed();
+    let started_at = Instant::now();
+    let records = PromptCacheObservationStore::list_active_for_candidates(
+        &store,
+        &upstream_ids,
+        "claude-sonnet-4-5-20250929",
+        &all_keys,
+        NOW_UNIX_SECS,
+    )
+    .await?;
+    let elapsed = started_at.elapsed();
 
-        assert_eq!(records.len(), ACTIVE_PER_UPSTREAM, "upstream {upstream_id}");
-        per_upstream_timings.push((upstream_id, elapsed));
-    }
-
-    let total_elapsed = per_upstream_timings
-        .iter()
-        .fold(Duration::ZERO, |sum, (_, elapsed)| sum + *elapsed);
-
-    eprintln!("total_elapsed_ms={:.3}", duration_ms(total_elapsed));
-    for (upstream_id, elapsed) in &per_upstream_timings {
-        eprintln!(
-            "upstream_id={upstream_id} elapsed_ms={:.3}",
-            duration_ms(*elapsed)
-        );
-    }
+    assert_eq!(records.len(), UPSTREAM_COUNT * ACTIVE_PER_UPSTREAM);
+    eprintln!("batch_lookup_elapsed_ms={:.3}", duration_ms(elapsed));
 
     fixture.drop_schema().await?;
 
     assert!(
-        total_elapsed < MAX_HYDRATE_ELAPSED,
-        "hydrate active rows took {total_elapsed:?}, expected < {MAX_HYDRATE_ELAPSED:?}"
+        elapsed < MAX_LOOKUP_ELAPSED,
+        "batch lookup of active rows took {elapsed:?}, expected < {MAX_LOOKUP_ELAPSED:?}"
     );
 
     Ok(())
@@ -94,7 +86,7 @@ impl Fixture {
             eprintln!("skipped: CI_POSTGRES_URL not set");
             return Ok(None);
         };
-        let schema = format!("test_hydrate_50k_{}", Uuid::new_v4().simple());
+        let schema = format!("test_batch_lookup_50k_{}", Uuid::new_v4().simple());
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(PgConnectOptions::from_str(&url)?)

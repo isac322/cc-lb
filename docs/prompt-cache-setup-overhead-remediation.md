@@ -1,75 +1,63 @@
-# Prompt-cache setup overhead 근본 개선 설계
+# Prompt-cache setup overhead fundamental remediation design
 
-- 상태: Implemented, locally verified, and CI passed
-- 작성일: 2026-09-07
-- 대상: `cc-lb-engine` proxy hot path와 admin-web latency timeline
-- 관련 ADR: ADR 0007, ADR 0008
+- Status: Implemented, locally verified, and CI passed
+- Written: 2026-09-07
+- Scope: `cc-lb-engine` proxy hot path and admin-web latency timeline
+- Related ADRs: ADR 0007, ADR 0008
 
-## 1. 목적
+## 1. Purpose
 
-운영 `isac-pi` 요청에서 확인된 초 단위 `proxy_setup_ms`를 제거한다. 최적화와 신규 Prometheus 계측 외에는 proxy의 관측 가능한 동작을 바꾸지 않는다.
+Remove excessive `proxy_setup_ms` from the proxy hot path. Change no observable proxy behavior other than the optimization and the new Prometheus instrumentation.
 
-다음 값은 변경 전후 완전히 같아야 한다.
+The following values must be completely identical before and after the change.
 
-- 모든 cache-control breakpoint의 위치, TTL, prefix hash, exact local token count
-- 20-content-block lookback 후보와 longest-prefix match
-- predicted cache read/creation tokens, cache value, routing winner
-- cache observation과 request event에 기록되는 값
-- downstream status/body/headers와 upstream으로 전송되는 request bytes
-- streaming, cancellation, timeout, retry 및 error mapping
+- Position, TTL, prefix hash, and exact local token count of every cache-control breakpoint
+- The 20-content-block lookback candidates and longest-prefix match
+- Predicted cache read/creation tokens, cache value, routing winner
+- Values recorded in cache observations and request events
+- Downstream status/body/headers and the request bytes sent upstream
+- Streaming, cancellation, timeout, retry, and error mapping
 
-Breakpoint 생략, token 근사, cache score degrade, observation 누락은 허용하지 않는다.
+Omitting breakpoints, approximating tokens, degrading the cache score, or dropping observations is not allowed.
 
-## 2. 운영에서 확인된 문제
+## 2. Repeated setup work
 
-2026-09-07 00:00–08:06 UTC의 `isac-pi` 요청 2,219건을 운영 PostgreSQL에서 집계했다.
+Repeated prompt-cache analysis can dominate setup work before upstream dispatch. Operational measurements and deployment details are omitted from this public design note; the implementation must preserve exact results while reducing repeated serialization and tokenization.
 
-- 평균 setup: 417.8ms
-- p50: 249ms
-- p95: 1,430ms
-- p99: 3,214ms
-- 최대: 10,459ms
-- 누적 breakpoint token work와 setup의 Pearson 상관: 0.8675
-- token work 300만 이상 구간의 setup p95: 7,178ms
+## 3. Current execution point
 
-최악 요청은 4.47MB, 182 messages, 4 breakpoints였다. Provider prompt는 366,323 tokens였지만 local estimator는 네 nested prefix를 각각 처음부터 계산해 총 5,704,721 token IDs를 처리했다. Request 수신부터 upstream dispatch까지 10.625초가 걸렸다.
+The proxy hot path executes in `Lifecycle::handle` in the following order.
 
-같은 사건 창의 Prometheus는 CPU throttling 0%, pod restart 0, cache observation drop 0, observation write failure 0을 기록했다. PostgreSQL도 ungranted lock 0, active query wait 0이었고 signer name lookup은 0.178ms였다. 병목은 DB나 observation writer가 아니라 dispatch 전에 실행되는 local prompt-cache 분석이었다.
+1. Parse the request body as JSON.
+2. Call `request_cache_metadata_from_value`.
+3. `analyze_v3_prompt_cache` flattens `tools → system → messages`.
+4. Build the structural BLAKE3 prefix chain and lookback candidates.
+5. Re-run `PrefixSerializer(blocks[..=index])` for each breakpoint.
+6. Run `o200k_base::encode_ordinary(...).len()` on each serialized prefix.
+7. After this work finishes, proceed to auth, routing, limit reservation, signer, and dispatch.
 
-## 3. 현재 실행 지점
+The structural hash chain is already linear over the whole request. The repeated cost is the cumulative JSON serialization and BPE tokenization performed per breakpoint.
 
-Proxy hot path는 `Lifecycle::handle`에서 다음 순서로 실행된다.
+## 4. Additional correctness constraint discovered
 
-1. Request body를 JSON으로 parse한다.
-2. `request_cache_metadata_from_value`를 호출한다.
-3. `analyze_v3_prompt_cache`가 `tools → system → messages`를 flatten한다.
-4. Structural BLAKE3 prefix chain과 lookback 후보를 만든다.
-5. 각 breakpoint마다 `PrefixSerializer(blocks[..=index])`를 다시 실행한다.
-6. 각 serialized prefix에 `o200k_base::encode_ordinary(...).len()`을 실행한다.
-7. 이 작업이 끝난 뒤 auth, routing, limit reservation, signer, dispatch로 진행한다.
+The structural prefix hash and the token-count identity are not the same key.
 
-Structural hash chain은 이미 전체 요청에 대해 선형이다. 반복 비용은 breakpoint마다 수행되는 cumulative JSON serialization과 BPE tokenization이다.
+- The structural block digest excludes `cache_control`.
+- The tokenization prefix bytes preserve `cache_control`.
 
-## 4. 추가로 확인된 정확성 제약
+Therefore, an implicit 5m marker and an explicit `ttl: "5m"` can share a structural hash while their serialized token prefixes differ. Token-count identity must follow those exact serialized bytes rather than structural equivalence.
 
-Structural prefix hash와 token-count identity는 같은 key가 아니다.
+Therefore the existing `prefix_hash` cannot be used as the token-count cache key.
 
-- Structural block digest는 `cache_control`을 제외한다.
-- Tokenization prefix bytes는 `cache_control`을 보존한다.
+## 5. Chosen solution structure
 
-따라서 implicit 5m marker와 explicit `ttl: "5m"`는 structural hash가 같아도 local token count가 다르다. 직접 재현한 값은 45와 50이었고, 운영 데이터에서도 하나의 structural hash가 둘 이상의 token count를 가진 사례가 4개 확인됐다.
+### 5.1 Keep the proxy-local structural hash
 
-그러므로 기존 `prefix_hash`를 token-count cache key로 사용할 수 없다.
+Do not change the existing schema-5 BLAKE3 chain. This key continues to be used for cache affinity, lookback matching, and persisted warm observations. The hash schema version is also unchanged.
 
-## 5. 선택한 해결 구조
+### 5.2 Separate exact token-prefix identity
 
-### 5.1 Proxy-local structural hash 유지
-
-기존 schema-5 BLAKE3 chain은 변경하지 않는다. 이 key는 cache affinity, lookback matching, persisted warm observation에 계속 사용한다. Hash schema version도 변경하지 않는다.
-
-### 5.2 Exact token-prefix identity 분리
-
-Token-count cache에는 실제 `PrefixSerializer` bytes의 BLAKE3 digest를 사용한다.
+For the token-count cache, use the BLAKE3 digest of the actual `PrefixSerializer` bytes.
 
 ```text
 TokenPrefixKey = BLAKE3(
@@ -79,69 +67,69 @@ TokenPrefixKey = BLAKE3(
 )
 ```
 
-`cache_control`, JSON escaping, source, model을 포함한 실제 tokenization bytes가 같고 downstream credential scope도 같을 때만 같은 key가 된다. Scope는 auth와 같은 우선순위로 `x-api-key`를 사용하고, 없을 때만 `Authorization` header를 one-way BLAKE3로 섞는다. 원문은 저장하거나 노출하지 않는다. Structural invalidator salt나 tokenization input에 없는 path/index metadata는 넣지 않는다.
+The key is the same only when the actual tokenization bytes — including `cache_control`, JSON escaping, source, and model — are identical and the downstream credential scope is also identical. The scope uses `x-api-key` with the same precedence as auth, and only when absent mixes in the `Authorization` header via one-way BLAKE3. The plaintext is never stored or exposed. Do not include the structural invalidator salt or path/index metadata that is not part of the tokenization input.
 
-### 5.3 Exact nested-prefix batch 준비
+### 5.3 Exact nested-prefix batch preparation
 
-Breakpoint마다 block tree를 다시 serialize하지 않는다.
+Do not re-serialize the block tree per breakpoint.
 
-1. `{"content_blocks":[` header를 한 번 기록한다.
-2. 각 prefix block을 한 번만 deterministic `serde_json`으로 serialize한다.
-3. 각 breakpoint block 끝의 byte offset을 기록한다.
-4. `],"model":...}` suffix를 결합하면 기존 `PrefixSerializer`와 byte-identical한 prefix가 된다.
-5. 각 offset에서 incremental BLAKE3 hasher를 clone해 exact `TokenPrefixKey`를 만든다.
+1. Write the `{"content_blocks":[` header once.
+2. Serialize each prefix block exactly once with deterministic `serde_json`.
+3. Record the byte offset at the end of each breakpoint block.
+4. Appending the `],"model":...}` suffix produces a prefix byte-identical to the existing `PrefixSerializer`.
+5. Clone the incremental BLAKE3 hasher at each offset to produce the exact `TokenPrefixKey`.
 
-기존 direct serializer와 byte-for-byte equality가 깨지면 최적화 경로를 사용하지 않고 기존 serializer로 fallback한다.
+If byte-for-byte equality with the existing direct serializer breaks, do not use the optimized path; fall back to the existing serializer.
 
 ### 5.4 Exact incremental token counting
 
-단순 block별 token count 합산은 BPE boundary 때문에 금지한다. 선택한 fast path는 `tiktoken-rs 0.12`의 ordinary encoder가 반환하는 마지막 불안정 regex piece를 보존한다.
+Simple per-block token count summation is forbidden because of BPE boundaries. The chosen fast path preserves the last unstable regex piece returned by the `tiktoken-rs 0.12` ordinary encoder.
 
-- 이전 breakpoint에서 확정된 stable token count는 재사용한다.
-- 새 block bytes와 이전 unstable tail만 tokenization한다.
-- 각 breakpoint의 standalone JSON suffix는 unstable tail에 붙여 exact count를 계산한다.
-- Incremental encoder 오류나 boundary invariant 불일치 입력은 기존 `encode_ordinary(full_prefix).len()`으로 fallback한다.
+- Reuse the stable token count finalized at the previous breakpoint.
+- Tokenize only the new block bytes and the previous unstable tail.
+- Append each breakpoint's standalone JSON suffix to the unstable tail to compute the exact count.
+- On incremental encoder errors or inputs that violate the boundary invariant, fall back to `encode_ordinary(full_prefix).len()`.
 
-모든 fast-path 결과는 frozen reference의 full-prefix count와 differential 비교한다. 오차 허용치는 0이다.
+Compare every fast-path result differentially against the frozen reference's full-prefix count. The error tolerance is 0.
 
 ### 5.5 Bounded exact count cache
 
-Process-local bounded cache를 둔다.
+Keep a process-local bounded cache.
 
 - key: `TokenPrefixKey`
 - value: exact `u64` local token count
-- 기본 capacity: 8,192 entries
-- capacity 초과 시 오래된 insertion부터 제거
-- eviction은 cache miss와 재계산만 만들며 결과에는 영향을 주지 않는다.
+- Default capacity: 8,192 entries
+- On capacity overflow, evict oldest insertions first
+- Eviction only causes a cache miss and recomputation; it does not affect results.
 
-모든 requested breakpoint count는 계속 반환한다. Cache hit은 계산 생략일 뿐 기능 생략이 아니다.
+Every requested breakpoint count is still returned. A cache hit skips computation, not functionality.
 
-Cache는 downstream credential scope별로 격리한다. 서로 다른 principal/key가 byte-identical prompt를 보내도 cache hit timing을 공유하지 않는다. None-auth mode는 단일 configured principal이므로 `unauthenticated` scope를 사용한다.
+The cache is isolated per downstream credential scope. Even when different principals/keys send byte-identical prompts, they do not share cache-hit timing. None-auth mode has a single configured principal, so it uses the `unauthenticated` scope.
 
 ### 5.6 Cancellation-safe single-flight
 
-동일 `TokenPrefixKey`의 concurrent miss는 한 번만 계산한다.
+Concurrent misses for the same `TokenPrefixKey` compute only once.
 
-- Blocking job은 request future와 독립적으로 완료된다.
-- Leader request가 취소돼도 waiter와 cache는 결과를 받는다.
-- Panic/failure 시 flight entry와 permit를 정리하고 waiter를 깨운다.
-- 실패 결과는 cache하지 않는다.
+- The blocking job completes independently of the request future.
+- Even if the leader request is cancelled, waiters and the cache receive the result.
+- On panic/failure, clean up the flight entry and permit and wake waiters.
+- Failed results are not cached.
 
 ### 5.7 Bounded blocking executor
 
-`Lifecycle::handle`의 prompt-cache 분석을 Tokio worker에서 직접 실행하지 않는다.
+Do not run `Lifecycle::handle`'s prompt-cache analysis directly on a Tokio worker.
 
-- `Arc<Value>`를 `spawn_blocking` job에 전달한다.
-- `tokio::sync::Semaphore`로 동시 CPU job 수를 제한한다.
-- 기본 concurrency는 `available_parallelism - 1`, 최솟값 1로 한다.
-- Queue에는 timeout이나 approximation을 두지 않는다. 대기는 async이고 기능은 그대로 유지한다.
-- Sync API인 `preview_route`와 `parse_request_cache_breakpoints`는 기존 exact sync analyzer를 유지한다.
+- Pass `Arc<Value>` to a `spawn_blocking` job.
+- Limit concurrent CPU jobs with `tokio::sync::Semaphore`.
+- Default concurrency is `available_parallelism - 1`, minimum 1.
+- The queue has no timeout or approximation. Waiting is async and functionality is preserved.
+- The sync APIs `preview_route` and `parse_request_cache_breakpoints` keep the existing exact sync analyzer.
 
-`Lifecycle::new`와 `new_with_dynamic_view`의 public signature는 변경하지 않는다. Executor와 cache는 내부 private field로 생성한다. 테스트만을 위한 production public API는 추가하지 않는다.
+Do not change the public signatures of `Lifecycle::new` and `new_with_dynamic_view`. The executor and cache are created as internal private fields. Do not add a production public API just for tests.
 
-### 5.8 Prometheus 계측
+### 5.8 Prometheus instrumentation
 
-내부 원인 분석은 request timeline이 아니라 Prometheus로 노출한다.
+Expose internal cause analysis via Prometheus, not the request timeline.
 
 - `cc_lb_prompt_cache_analysis_duration_seconds{stage="queue|total|tokenize"}`
 - `cc_lb_prompt_cache_token_count_cache_total{result="hit|miss|coalesced"}`
@@ -151,72 +139,72 @@ Cache는 downstream credential scope별로 격리한다. 서로 다른 principal
 - `cc_lb_prompt_cache_tokenizer_fallback_prefixes_total`
 - `cc_lb_prompt_cache_analysis_worker_failed_total`
 
-Label은 고정된 stage/result만 사용한다. Principal, request ID, prefix hash, model은 label로 추가하지 않는다.
+Labels use only the fixed stage/result. Do not add principal, request ID, prefix hash, or model as labels.
 
-### 5.9 Request Timeline 경계
+### 5.9 Request timeline boundary
 
-Request event의 `observability_post_ms` 필드와 DB/API compatibility는 유지한다. 다만 admin-web latency timeline과 latency cell에서는 이 post-response 관측 stage를 표시하지 않는다.
+Keep the request event's `observability_post_ms` field and DB/API compatibility. However, do not display this post-response observation stage in the admin-web latency timeline or latency cell.
 
-- `Setup overhead`는 dispatch를 실제로 지연한 시간이므로 유지한다.
-- `Observability post`는 timeline stage에서 제거한다.
-- 새 prompt-cache micro timings는 timeline에 추가하지 않는다.
-- Timeline total은 기존 `duration_ms`를 유지한다. 이 값은 post-response observation 실행 전에 확정되므로 별도 차감하지 않는다.
-- Observation pipeline 상태는 Prometheus에서만 본다.
+- Keep `Setup overhead` because it is time that actually delayed dispatch.
+- Remove `Observability post` from the timeline stages.
+- Do not add new prompt-cache micro timings to the timeline.
+- The timeline total keeps the existing `duration_ms`. This value is finalized before post-response observation runs, so no separate subtraction is needed.
+- Observation pipeline health is viewed only in Prometheus.
 
-## 6. 파일별 구현 계획
+## 6. Per-file implementation plan
 
 ### Engine
 
 - `crates/cc-lb-engine/src/prompt_cache_simulator.rs`
-  - structural analysis와 exact prefix batch preparation 분리
-  - frozen reference analyzer 유지
-  - optimized analyzer와 work statistics 추가
+  - Separate structural analysis from exact prefix batch preparation
+  - Keep the frozen reference analyzer
+  - Add the optimized analyzer and work statistics
 - `crates/cc-lb-engine/src/tokenizer.rs`
-  - exact nested-prefix incremental counter 추가
-  - reference path의 기존 thread-local call counter와 별도로 optimized work statistics 추가
+  - Add the exact nested-prefix incremental counter
+  - Add optimized work statistics separate from the reference path's existing thread-local call counter
 - `crates/cc-lb-engine/src/prompt_cache_simulator/optimized.rs`
-  - bounded executor, exact cache, single-flight, exact prefix batch 구현
+  - Implement the bounded executor, exact cache, single-flight, and exact prefix batch
 - `crates/cc-lb-engine/src/lifecycle.rs`
-  - request JSON을 `Arc<Value>`로 보관
-  - proxy hot path에서 async executor 사용
-  - sync preview/parser path 유지
+  - Hold the request JSON as `Arc<Value>`
+  - Use the async executor on the proxy hot path
+  - Keep the sync preview/parser path
 - `crates/cc-lb-engine/src/lib.rs`
-  - 내부 module만 등록하며 새 production public API는 내보내지 않음
+  - Register only internal modules; export no new production public API
 
 ### Observability
 
 - `crates/cc-lb-observability/src/init.rs`
-  - metric definitions, descriptions, registration, initial handles 추가
+  - Add metric definitions, descriptions, registration, and initial handles
 
 ### Admin web
 
 - `computeStageGroups.ts`
-  - timeline total은 기존 `duration_ms` 유지
-  - internal post는 `limit_reconcile_ms`만 계산
+  - Timeline total keeps the existing `duration_ms`
+  - Internal post computes only `limit_reconcile_ms`
 - `LatencyTimeline.tsx`
-  - `Observability post` stage 제거
-  - stage percentage와 unaccounted는 기존 `duration_ms` 기준 유지
+  - Remove the `Observability post` stage
+  - Stage percentages and unaccounted keep the existing `duration_ms` basis
 - `LatencyCell.tsx`
-  - Observability item 제거, headline/popover percentages는 기존 phase별 denominator 유지
+  - Remove the Observability item; headline/popover percentages keep the existing per-phase denominator
 
-## 7. 실패와 fallback
+## 7. Failures and fallbacks
 
-- Incremental boundary 검증 실패: 해당 request는 기존 full-prefix count path 사용
-- Incremental encoder 또는 boundary invariant 실패: 기존 full-prefix count path 사용
-- Blocking task join failure: 기존 dropped-events metric과 error trace를 남기고 sync analyzer로 정확히 fallback
-- Cache eviction: 정확한 재계산
-- Single-flight leader failure: entry 제거 후 waiter가 정확한 재계산
+- Incremental boundary verification failure: that request uses the existing full-prefix count path
+- Incremental encoder or boundary invariant failure: use the existing full-prefix count path
+- Blocking task join failure: leave the existing dropped-events metric and error trace, and fall back exactly to the sync analyzer
+- Cache eviction: exact recomputation
+- Single-flight leader failure: remove the entry, then waiters recompute exactly
 
-어떤 fallback도 approximation이나 breakpoint 누락을 허용하지 않는다.
+No fallback permits approximation or missing breakpoints.
 
-## 8. 완료 기준
+## 8. Completion criteria
 
-- Frozen reference와 optimized analyzer의 전체 `V3PromptCacheAnalysis` equality
-- 0/1/3/4/5 breakpoint, mixed TTL, lookback 19/20 경계 모두 동일
-- Proxy integration에서 selected upstream, request bytes, status/body, event/observation 동일
-- 4-breakpoint production-like fixture의 tokenized work가 cumulative 4-pass가 아니라 near-deepest-prefix 수준
-- Concurrent identical request에서 actual tokenization job 1회
-- 대형 분석 중 Tokio heartbeat가 지속
-- Prometheus endpoint에 새 metrics 노출
-- Admin-web에서 Observability post가 timeline에 나타나지 않음
-- 전체 CI 통과
+- Full `V3PromptCacheAnalysis` equality between the frozen reference and the optimized analyzer
+- Identical results across 0/1/3/4/5 breakpoints, mixed TTL, and lookback 19/20 boundaries
+- In proxy integration, identical selected upstream, request bytes, status/body, and event/observation
+- Tokenized work on the 4-breakpoint representative fixture at near-deepest-prefix level, not cumulative 4-pass
+- Exactly 1 actual tokenization job for concurrent identical requests
+- Tokio heartbeat persists during a large analysis
+- New metrics exposed on the Prometheus endpoint
+- Observability post does not appear in the admin-web timeline
+- Full CI pass

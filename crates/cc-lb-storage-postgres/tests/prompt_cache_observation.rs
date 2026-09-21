@@ -41,8 +41,14 @@ async fn postgres_prompt_cache_upsert_then_list_returns_active() -> TestResult<(
     record.last_observed_at_unix_secs = 150;
     PromptCacheObservationStore::upsert_observation(&store, &record).await?;
 
-    let active =
-        PromptCacheObservationStore::list_active_for_upstream(&store, upstream_id, 250).await?;
+    let active = PromptCacheObservationStore::list_active_for_candidates(
+        &store,
+        &[upstream_id],
+        "claude-sonnet-4-5-20250929",
+        &["sha256:active".to_owned()],
+        250,
+    )
+    .await?;
     assert_eq!(active, vec![record]);
 
     fixture.drop_schema().await?;
@@ -78,7 +84,14 @@ async fn postgres_prompt_cache_purge_removes_expired() -> TestResult<()> {
     let purged = PromptCacheObservationStore::purge_expired_before(&store, 200).await?;
     assert_eq!(purged, 1);
     assert_eq!(
-        PromptCacheObservationStore::list_active_for_upstream(&store, upstream_id, 200).await?,
+        PromptCacheObservationStore::list_active_for_candidates(
+            &store,
+            &[upstream_id],
+            "claude-sonnet-4-5-20250929",
+            &["sha256:expired".to_owned(), "sha256:active".to_owned()],
+            200,
+        )
+        .await?,
         vec![active]
     );
     assert_eq!(PromptCacheObservationStore::count(&store).await?, 1);
@@ -106,6 +119,83 @@ async fn postgres_prompt_cache_count_after_inserts() -> TestResult<()> {
     }
 
     assert_eq!(PromptCacheObservationStore::count(&store).await?, 3);
+
+    fixture.drop_schema().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+async fn postgres_prompt_cache_stale_upsert_does_not_regress() -> TestResult<()> {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let store = fixture.store();
+    let upstream_id = Uuid::new_v4();
+    let fresh = observation(upstream_id, "sha256:fresh", TtlClass::Ephemeral5m, 300, 200);
+    let mut stale = fresh.clone();
+    stale.expires_at_unix_secs = 250;
+    stale.last_observed_at_unix_secs = 150;
+    stale.estimated_prefix_tokens = 1;
+    stale.token_estimate_source = "stale_source".to_owned();
+
+    PromptCacheObservationStore::upsert_observation(&store, &fresh).await?;
+    PromptCacheObservationStore::upsert_observation(&store, &stale).await?;
+
+    let active = PromptCacheObservationStore::list_active_for_candidates(
+        &store,
+        &[upstream_id],
+        "claude-sonnet-4-5-20250929",
+        &["sha256:fresh".to_owned()],
+        200,
+    )
+    .await?;
+    assert_eq!(active, vec![fresh]);
+
+    fixture.drop_schema().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires CI_POSTGRES_URL; run with --ignored"]
+async fn postgres_prompt_cache_batch_lookup_isolates_candidates() -> TestResult<()> {
+    let Some(fixture) = Fixture::create().await? else {
+        return Ok(());
+    };
+    let store = fixture.store();
+    let upstream_a = Uuid::new_v4();
+    let upstream_b = Uuid::new_v4();
+    let wanted_a = observation(upstream_a, "sha256:a1", TtlClass::Ephemeral5m, 300, 200);
+    let wanted_b = observation(upstream_b, "sha256:b1", TtlClass::Ephemeral1h, 400, 200);
+    let other = observation(upstream_a, "sha256:other", TtlClass::Ephemeral5m, 300, 200);
+
+    for record in [&wanted_a, &wanted_b, &other] {
+        PromptCacheObservationStore::upsert_observation(&store, record).await?;
+    }
+
+    let mut expected = vec![wanted_a, wanted_b];
+    expected.sort_by(|a, b| {
+        (a.upstream_id, a.v3_prefix_key.as_str()).cmp(&(b.upstream_id, b.v3_prefix_key.as_str()))
+    });
+    let records = PromptCacheObservationStore::list_active_for_candidates(
+        &store,
+        &[upstream_a, upstream_b],
+        "claude-sonnet-4-5-20250929",
+        &["sha256:a1".to_owned(), "sha256:b1".to_owned()],
+        200,
+    )
+    .await?;
+    assert_eq!(records, expected);
+
+    let empty = PromptCacheObservationStore::list_active_for_candidates(
+        &store,
+        &[],
+        "claude-sonnet-4-5-20250929",
+        &["sha256:a1".to_owned()],
+        200,
+    )
+    .await?;
+    assert!(empty.is_empty());
 
     fixture.drop_schema().await?;
     Ok(())

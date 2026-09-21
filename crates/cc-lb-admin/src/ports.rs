@@ -38,8 +38,9 @@ pub enum RoutePreviewError {
     PipelineInstantiationError(String),
 }
 
+#[async_trait]
 pub trait RoutePreviewPort: Send + Sync {
-    fn preview_route(
+    async fn preview_route(
         &self,
         input: RoutePreviewInput,
     ) -> Result<RoutePreviewOutcome, RoutePreviewError>;

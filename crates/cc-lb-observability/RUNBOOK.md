@@ -60,15 +60,15 @@ sum(rate(cc_lb_cache_miss_total[5m])) > 10 * sum(rate(cc_lb_cache_hit_total[5m])
 
 - **Type**: Counter
 - **Labels**: `reason`
-- **Label Cardinality Bounds**: Very low, bounded by the 3 fixed reasons: `queue_full`, `below_threshold`, and `abort`.
+- **Label Cardinality Bounds**: Very low, bounded by `queue_full`, `channel_closed`, and `below_threshold`.
 
 ### Interpretation
 
 This metric tracks prompt-cache observations that were dropped before being written to the store.
 High values indicate that observations are being discarded.
 Spikes in `queue_full` indicate that the background writer queue is overwhelmed.
+`channel_closed` means the background writer is no longer accepting observations.
 When `below_threshold` rises, many requests do not meet the minimum token threshold for caching.
-Increases in `abort` indicate requests that ended before an observation could be recorded.
 
 ### Typical PromQL Query
 
@@ -83,6 +83,24 @@ This indicates that the background worker is bottlenecked.
 
 ```promql
 sum(rate(cc_lb_cache_observation_dropped_total{reason="queue_full"}[5m])) > 5
+```
+
+## Metric: cc_lb_cache_observation_read_failed_total
+
+- **Type**: Counter
+- **Labels**: None
+
+### Interpretation
+
+Counts failed shared-store lookups during routing. These failures leave cache
+affinity unknown; they do not mark the provider response as a cache miss or fail
+the client request. Inspect the `proxy.prompt_cache_observation_lookup` child
+span and database availability when this counter rises.
+
+### Typical PromQL Query
+
+```promql
+rate(cc_lb_cache_observation_read_failed_total[5m])
 ```
 
 ## Metric: cc_lb_cache_observation_write_failed_total

@@ -303,7 +303,6 @@ fn relay() -> SseRelay {
         upstream_kind: None,
         streaming_usage: Arc::new(Mutex::new(StreamingUsage::default())),
         prompt_cache_observation_context: None,
-        prompt_cache_observation_event_emitter: None,
     }
 }
 

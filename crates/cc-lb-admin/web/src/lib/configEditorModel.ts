@@ -302,7 +302,7 @@ export const CONFIG_EDITOR_SECTIONS = [
     id: 'prompt-cache-shadow',
     categoryId: 'routing',
     label: 'Prompt cache shadow',
-    description: 'Observation cache used for cache-aware routing.',
+    description: 'Shared observation store used for cache-aware routing.',
     paths: ['prompt_cache_shadow.*'],
     advancedPaths: [],
     danger: [],
@@ -1246,31 +1246,11 @@ const CONFIG_FIELD_GUIDANCE: readonly {
     pattern: 'prompt_cache_shadow.grace_margin_secs',
     guidance: {
       description:
-        'Extra lifetime granted to shadow-cache entries beyond their observed TTL.',
-      lower: 'Entries expire closer to their true TTL, freeing memory sooner.',
+        "Margin subtracted from the observed TTL when a cache observation's expiry is recorded.",
+      lower: 'Entries live closer to their true TTL, risking stale warm hits.',
       higher:
-        'Entries linger longer, absorbing TTL jitter at higher memory cost.',
-      impactDimensions: ['memory', 'latency'],
-    },
-  },
-  {
-    pattern: 'prompt_cache_shadow.max_live_entries_per_partition',
-    guidance: {
-      description: 'Maximum live shadow-cache entries kept per partition.',
-      lower: 'Bounds memory but evicts entries before they expire naturally.',
-      higher: 'Tracks more entries per partition at higher memory cost.',
-      impactDimensions: ['memory'],
-    },
-  },
-  {
-    pattern: 'prompt_cache_shadow.refresh_debounce_secs',
-    guidance: {
-      description: 'Minimum interval between shadow-cache refresh passes.',
-      lower:
-        'Refreshes more often, keeping state fresher at higher storage load.',
-      higher:
-        'Reduces refresh load but lets shadow state go staler between passes.',
-      impactDimensions: ['storage', 'latency'],
+        'Entries expire earlier, absorbing provider-side TTL jitter at the cost of fewer warm hits.',
+      impactDimensions: ['latency'],
     },
   },
   {

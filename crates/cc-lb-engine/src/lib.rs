@@ -57,7 +57,6 @@ pub mod lifecycle_event_assembler;
 pub mod lifecycle_event_logger;
 pub mod lifecycle_limit_reconcile_subscriber;
 pub mod lifecycle_limit_rejection_audit_subscriber;
-pub mod lifecycle_prompt_cache_observation_subscriber;
 #[cfg(not(loom))]
 pub mod lifecycle_rate_limit_header_subscriber;
 pub mod lifecycle_routing_tier_subscriber;
@@ -129,9 +128,8 @@ pub use cc_lb_control::dynamic_view::{
 };
 #[cfg(not(loom))]
 pub use cc_lb_control::{
-    NoopSubscriptionQuotaCache, PromptCacheObservationCacheLike,
-    PromptCacheObservationEnqueueError, PromptCacheObservationInput,
-    PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
+    NoopSubscriptionQuotaCache, PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike,
+    PromptCacheThreadUsageTrackerLike, SubscriptionQuotaCacheLike,
 };
 #[cfg(not(loom))]
 pub use cc_lb_domain::ReplicaIdentity;
@@ -167,9 +165,8 @@ pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
 #[cfg(not(loom))]
 pub use event_bus::{
     BusError, DEFAULT_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
-    DEFAULT_LIFECYCLE_PRICING_CAPACITY, DEFAULT_LIFECYCLE_PROMPT_CACHE_OBSERVATION_CAPACITY,
-    DEFAULT_LIFECYCLE_WRITER_CAPACITY, EventFanout, InMemoryBus, InMemoryFanout, new_in_memory_bus,
-    record_dashboard_sse_lagged,
+    DEFAULT_LIFECYCLE_PRICING_CAPACITY, DEFAULT_LIFECYCLE_WRITER_CAPACITY, EventFanout,
+    InMemoryBus, InMemoryFanout, new_in_memory_bus, record_dashboard_sse_lagged,
 };
 #[cfg(not(loom))]
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
@@ -196,9 +193,6 @@ pub use lifecycle_limit_reconcile_subscriber::{
 };
 pub use lifecycle_limit_rejection_audit_subscriber::{
     LimitRejectionAuditSubscriberHandle, spawn_lifecycle_limit_rejection_audit_subscriber,
-};
-pub use lifecycle_prompt_cache_observation_subscriber::{
-    PromptCacheObservationSubscriberHandle, spawn_lifecycle_prompt_cache_observation_subscriber,
 };
 #[cfg(not(loom))]
 pub use lifecycle_rate_limit_header_subscriber::{
@@ -227,9 +221,7 @@ pub use pg_notify_fanout::{
 #[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 #[cfg(not(loom))]
-pub use sse_relay::{
-    PromptCacheObservationEventEmitter, RelayError, SseBatchConfig, SseRelay, StreamingUsage,
-};
+pub use sse_relay::{RelayError, SseBatchConfig, SseRelay, StreamingUsage};
 #[cfg(not(loom))]
 pub use storage_tail_poller::StorageTailPoller;
 #[cfg(not(loom))]

@@ -40,7 +40,14 @@ where
         storage.upsert_observation(&expired).await?;
         storage.upsert_observation(&active).await?;
 
-        let records = storage.list_active_for_upstream(upstream_id, now).await?;
+        let records = storage
+            .list_active_for_candidates(
+                &[upstream_id],
+                &active.canonical_model_id,
+                &[active.v3_prefix_key.clone(), expired.v3_prefix_key.clone()],
+                now,
+            )
+            .await?;
         ensure!(records.len() == 1, "expected exactly one active record");
         ensure!(
             records[0].v3_prefix_key == active.v3_prefix_key,
@@ -88,7 +95,14 @@ where
         storage.upsert_observation(&record_5m).await?;
         storage.upsert_observation(&record_1h).await?;
 
-        let records = storage.list_active_for_upstream(upstream_id, now).await?;
+        let records = storage
+            .list_active_for_candidates(
+                &[upstream_id],
+                &record_5m.canonical_model_id,
+                &[prefix_hash.to_owned()],
+                now,
+            )
+            .await?;
         ensure!(
             records.len() == 2,
             "store should return both active TTL-class rows"
@@ -154,7 +168,18 @@ where
             "only the active row should remain"
         );
 
-        let records = storage.list_active_for_upstream(upstream_id, now).await?;
+        let records = storage
+            .list_active_for_candidates(
+                &[upstream_id],
+                &active.canonical_model_id,
+                &[
+                    active.v3_prefix_key.clone(),
+                    expired_one.v3_prefix_key.clone(),
+                    expired_two.v3_prefix_key.clone(),
+                ],
+                now,
+            )
+            .await?;
         ensure!(records.len() == 1, "active list should contain one row");
         ensure!(
             records[0].v3_prefix_key == active.v3_prefix_key,
@@ -204,7 +229,12 @@ where
 
         let reopened_store = backend.open(&fixture).await?;
         let records = reopened_store
-            .list_active_for_upstream(upstream_id, now)
+            .list_active_for_candidates(
+                &[upstream_id],
+                &active.canonical_model_id,
+                &[active.v3_prefix_key.clone(), expired.v3_prefix_key.clone()],
+                now,
+            )
             .await?;
         ensure!(
             records.len() == 1,
@@ -222,9 +252,10 @@ where
     teardown
 }
 
-/// Verify that list_active_for_upstream returns results deterministically sorted
-/// by prefix_hash, then ttl_class. This ensures consistent ordering across backends
-/// for conformance and operational stability.
+/// Verify that list_active_for_candidates returns results deterministically
+/// sorted by (upstream_id, v3_prefix_key, ttl_class) across upstreams. This
+/// ensures consistent ordering across backends for conformance and operational
+/// stability.
 pub async fn observation_list_is_sorted<B>(backend: Arc<B>, clock: ClockHandle) -> Result<()>
 where
     B: ConformanceBackend,
@@ -232,32 +263,43 @@ where
 {
     with_conformance_fixture(backend, |storage| async move {
         let now = unix_secs(clock.now());
-        let upstream_id = upstream_id(5);
+        // upstream_id(5) < upstream_id(6) under Uuid byte ordering, which both
+        // backends use for this column (PG uuid ordering is byte-wise; SQLite
+        // stores canonical lowercase text).
+        let upstream_a = upstream_id(5);
+        let upstream_b = upstream_id(6);
 
         let records_to_insert = vec![
             observation(
-                upstream_id,
-                "sha256:prefix-c",
-                TtlClass::Ephemeral1h,
-                now + 3_600,
-                now,
-            ),
-            observation(
-                upstream_id,
+                upstream_b,
                 "sha256:prefix-a",
                 TtlClass::Ephemeral5m,
                 now + 300,
                 now,
             ),
             observation(
-                upstream_id,
+                upstream_a,
+                "sha256:prefix-c",
+                TtlClass::Ephemeral1h,
+                now + 3_600,
+                now,
+            ),
+            observation(
+                upstream_a,
+                "sha256:prefix-a",
+                TtlClass::Ephemeral5m,
+                now + 300,
+                now,
+            ),
+            observation(
+                upstream_a,
                 "sha256:prefix-a",
                 TtlClass::Ephemeral1h,
                 now + 3_600,
                 now,
             ),
             observation(
-                upstream_id,
+                upstream_a,
                 "sha256:prefix-b",
                 TtlClass::Ephemeral5m,
                 now + 300,
@@ -269,26 +311,44 @@ where
             storage.upsert_observation(record).await?;
         }
 
-        let records = storage.list_active_for_upstream(upstream_id, now).await?;
-        ensure!(records.len() == 4, "should have 4 active records");
+        let keys: Vec<String> = records_to_insert
+            .iter()
+            .map(|record| record.v3_prefix_key.clone())
+            .collect();
+        let records = storage
+            .list_active_for_candidates(
+                &[upstream_a, upstream_b],
+                &records_to_insert[0].canonical_model_id,
+                &keys,
+                now,
+            )
+            .await?;
+        ensure!(records.len() == 5, "should have 5 active records");
 
-        let mut prev: Option<(String, i16)> = None;
-        for record in &records {
-            let ttl_value = match record.ttl_class {
-                TtlClass::Ephemeral5m => 0i16,
-                TtlClass::Ephemeral1h => 1i16,
-            };
-            let curr = (record.v3_prefix_key.clone(), ttl_value);
-            if let Some(p) = &prev {
-                ensure!(
-                    &curr >= p,
-                    "records should be sorted by (prefix_hash, ttl_class): expected {:?} >= {:?}",
-                    curr,
-                    p
-                );
-            }
-            prev = Some(curr);
-        }
+        let expected: Vec<(Uuid, &str, i16)> = vec![
+            (upstream_a, "sha256:prefix-a", 0),
+            (upstream_a, "sha256:prefix-a", 1),
+            (upstream_a, "sha256:prefix-b", 0),
+            (upstream_a, "sha256:prefix-c", 1),
+            (upstream_b, "sha256:prefix-a", 0),
+        ];
+        let actual: Vec<(Uuid, &str, i16)> = records
+            .iter()
+            .map(|record| {
+                (
+                    record.upstream_id,
+                    record.v3_prefix_key.as_str(),
+                    match record.ttl_class {
+                        TtlClass::Ephemeral5m => 0,
+                        TtlClass::Ephemeral1h => 1,
+                    },
+                )
+            })
+            .collect();
+        ensure!(
+            actual == expected,
+            "records should be sorted by (upstream_id, v3_prefix_key, ttl_class): {actual:?}"
+        );
         Ok(())
     })
     .await
@@ -330,29 +390,381 @@ where
         storage.upsert_observation(&sonnet).await?;
         storage.upsert_observation(&opus).await?;
 
-        let records = storage.list_active_for_upstream(upstream_id, now).await?;
+        let sonnet_records = storage
+            .list_active_for_candidates(
+                &[upstream_id],
+                &sonnet.canonical_model_id,
+                &[prefix_hash.to_owned()],
+                now,
+            )
+            .await?;
         ensure!(
-            records.len() == 2,
-            "same prefix under two models must persist as two rows, got {}",
-            records.len()
+            sonnet_records == vec![sonnet.clone()],
+            "querying the sonnet model must return only its row, got {sonnet_records:?}"
+        );
+        let opus_records = storage
+            .list_active_for_candidates(
+                &[upstream_id],
+                &opus.canonical_model_id,
+                &[prefix_hash.to_owned()],
+                now,
+            )
+            .await?;
+        ensure!(
+            opus_records == vec![opus.clone()],
+            "querying the opus model must return only its row, got {opus_records:?}"
         );
         ensure!(
-            records.iter().any(
-                |record| record.canonical_model_id == sonnet.canonical_model_id
-                    && record.expires_at_unix_secs == sonnet.expires_at_unix_secs
-            ),
-            "sonnet observation must survive with its own expiry"
-        );
-        ensure!(
-            records.iter().any(
-                |record| record.canonical_model_id == opus.canonical_model_id
-                    && record.expires_at_unix_secs == opus.expires_at_unix_secs
-            ),
-            "opus observation must survive with its own expiry"
+            storage.count().await? == 2,
+            "same prefix under two models must persist as two rows"
         );
         Ok(())
     })
     .await
+}
+
+/// A stale write must never regress a fresher row: upserting a record with an
+/// older (expires_at, last_observed_at) pair leaves the stored row untouched,
+/// including its metadata. This is the #825 regression guard at the store layer.
+pub async fn upsert_stale_write_does_not_regress<B>(
+    backend: Arc<B>,
+    clock: ClockHandle,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PromptCacheObservationStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let now = unix_secs(clock.now());
+        let upstream_id = upstream_id(7);
+        let prefix_hash = "sha256:t15-stale-guard";
+        let fresh = observation(
+            upstream_id,
+            prefix_hash,
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        let mut stale = observation(
+            upstream_id,
+            prefix_hash,
+            TtlClass::Ephemeral5m,
+            now + 60,
+            now - 240,
+        );
+        // Distinct metadata proves the stale write did not splice fields into
+        // the surviving row.
+        stale.estimated_prefix_tokens = 1;
+        stale.token_estimate_source = "stale_source".to_owned();
+        stale.prefix_content_block_index = 0;
+
+        storage.upsert_observation(&fresh).await?;
+        storage.upsert_observation(&stale).await?;
+
+        let records = storage
+            .list_active_for_candidates(
+                &[upstream_id],
+                &fresh.canonical_model_id,
+                &[prefix_hash.to_owned()],
+                now,
+            )
+            .await?;
+        ensure!(
+            records == vec![fresh],
+            "stale write must not regress the fresh row, got {records:?}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A newer write wins atomically: upserting a record with a newer (expires_at,
+/// last_observed_at) pair replaces the stored row wholesale, metadata included.
+pub async fn upsert_newer_write_overwrites<B>(backend: Arc<B>, clock: ClockHandle) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PromptCacheObservationStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let now = unix_secs(clock.now());
+        let upstream_id = upstream_id(8);
+        let prefix_hash = "sha256:t15-newer-wins";
+        let older = observation(
+            upstream_id,
+            prefix_hash,
+            TtlClass::Ephemeral5m,
+            now + 60,
+            now - 240,
+        );
+        let mut newer = observation(
+            upstream_id,
+            prefix_hash,
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        newer.estimated_prefix_tokens = 9_999;
+        newer.token_estimate_source = "newer_source".to_owned();
+
+        storage.upsert_observation(&older).await?;
+        storage.upsert_observation(&newer).await?;
+
+        let records = storage
+            .list_active_for_candidates(
+                &[upstream_id],
+                &newer.canonical_model_id,
+                &[prefix_hash.to_owned()],
+                now,
+            )
+            .await?;
+        ensure!(
+            records == vec![newer],
+            "newer write must replace the row wholesale, got {records:?}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// Tie-break ordering: equal expires_at is decided by last_observed_at, and a
+/// full tie keeps the already-stored row whole — the winner's metadata is never
+/// spliced with the loser's fields.
+pub async fn upsert_tiebreak_keeps_coherent_winner<B>(
+    backend: Arc<B>,
+    clock: ClockHandle,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PromptCacheObservationStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let now = unix_secs(clock.now());
+        let upstream_id = upstream_id(9);
+        let prefix_hash = "sha256:t15-tiebreak";
+
+        let older_observed = observation(
+            upstream_id,
+            prefix_hash,
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        // Same expires_at, newer last_observed_at: wins the tie-break.
+        let mut winner = observation(
+            upstream_id,
+            prefix_hash,
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now + 30,
+        );
+        winner.estimated_prefix_tokens = 2_000;
+        winner.token_estimate_source = "winner_source".to_owned();
+        // A full tie must retain the already-stored record, including metadata.
+        let mut tied = winner.clone();
+        tied.estimated_prefix_tokens = 3_000;
+        tied.token_estimate_source = "tied_source".to_owned();
+
+        storage.upsert_observation(&older_observed).await?;
+        storage.upsert_observation(&winner).await?;
+        storage.upsert_observation(&tied).await?;
+
+        let records = storage
+            .list_active_for_candidates(
+                &[upstream_id],
+                &winner.canonical_model_id,
+                &[prefix_hash.to_owned()],
+                now,
+            )
+            .await?;
+        ensure!(records.len() == 1, "expected exactly one stored row");
+        ensure!(
+            records.as_slice() == std::slice::from_ref(&winner),
+            "full-tie write must keep the already-stored record whole, got {records:?}"
+        );
+        // Check the tie before replaying: a last-writer-wins bug would otherwise
+        // be hidden by restoring the winner with this final write.
+        storage.upsert_observation(&winner).await?;
+        let replayed = storage
+            .list_active_for_candidates(
+                &[upstream_id],
+                &winner.canonical_model_id,
+                &[prefix_hash.to_owned()],
+                now,
+            )
+            .await?;
+        ensure!(
+            replayed == records,
+            "identical replay must preserve the row"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// Batch lookup returns exactly the requested (upstream, key) candidates for the
+/// requested model: other upstreams, unrequested keys, other models, and expired
+/// rows are all excluded. Empty input sets return empty without error.
+pub async fn list_active_for_candidates_isolates_candidates<B>(
+    backend: Arc<B>,
+    clock: ClockHandle,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PromptCacheObservationStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let now = unix_secs(clock.now());
+        let upstream_a = upstream_id(10);
+        let upstream_b = upstream_id(11);
+        let model = "claude-sonnet-4-5-20250929";
+
+        let wanted_a = observation_with_model(
+            upstream_a,
+            model,
+            "sha256:iso-a1",
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        let wanted_b = observation_with_model(
+            upstream_b,
+            model,
+            "sha256:iso-b1",
+            TtlClass::Ephemeral1h,
+            now + 3_600,
+            now,
+        );
+        let unrequested_key = observation_with_model(
+            upstream_a,
+            model,
+            "sha256:iso-other-key",
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        let other_model = observation_with_model(
+            upstream_a,
+            "claude-opus-4-1-20250805",
+            "sha256:iso-a1",
+            TtlClass::Ephemeral5m,
+            now + 300,
+            now,
+        );
+        let expired = observation_with_model(
+            upstream_b,
+            model,
+            "sha256:iso-b1",
+            TtlClass::Ephemeral5m,
+            now - 10,
+            now - 10,
+        );
+
+        for record in [
+            &wanted_a,
+            &wanted_b,
+            &unrequested_key,
+            &other_model,
+            &expired,
+        ] {
+            storage.upsert_observation(record).await?;
+        }
+
+        let records = storage
+            .list_active_for_candidates(
+                &[upstream_a, upstream_b],
+                model,
+                &["sha256:iso-a1".to_owned(), "sha256:iso-b1".to_owned()],
+                now,
+            )
+            .await?;
+        ensure!(
+            records == vec![wanted_a, wanted_b],
+            "batch lookup must return exactly the requested active candidates, got {records:?}"
+        );
+
+        // Empty input sets short-circuit to empty without issuing a query.
+        let empty = storage
+            .list_active_for_candidates(&[], model, &["sha256:iso-a1".to_owned()], now)
+            .await?;
+        ensure!(empty.is_empty(), "empty upstream set must return empty");
+        let empty = storage
+            .list_active_for_candidates(&[upstream_a], model, &[], now)
+            .await?;
+        ensure!(empty.is_empty(), "empty key set must return empty");
+        Ok(())
+    })
+    .await
+}
+
+/// Two independent storage handles racing writes to the same key must always
+/// converge on the freshest record, regardless of commit order. Covers the
+/// multi-replica interleave where a delayed writer would otherwise clobber a
+/// newer observation.
+pub async fn concurrent_upserts_keep_freshest<B>(backend: Arc<B>, clock: ClockHandle) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PromptCacheObservationStore,
+{
+    let fixture = backend.create_fixture().await?;
+    let result = async {
+        let now = unix_secs(clock.now());
+        let upstream_id = upstream_id(12);
+        let writer_a = Arc::new(backend.open(&fixture).await?);
+        let writer_b = Arc::new(backend.open(&fixture).await?);
+
+        const ROUNDS: usize = 8;
+        let mut keys = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let key = format!("sha256:t15-race-{round}");
+            keys.push(key.clone());
+            let fresh = observation(upstream_id, &key, TtlClass::Ephemeral5m, now + 300, now);
+            let stale = observation(
+                upstream_id,
+                &key,
+                TtlClass::Ephemeral5m,
+                now + 60,
+                now - 240,
+            );
+            let (a, b) = (Arc::clone(&writer_a), Arc::clone(&writer_b));
+            let (first, second) = if round % 2 == 0 {
+                ((a, stale), (b, fresh))
+            } else {
+                ((a, fresh), (b, stale))
+            };
+            let (first_handle, first_record) = first;
+            let (second_handle, second_record) = second;
+            let (first_result, second_result) = futures::join!(
+                async move { first_handle.upsert_observation(&first_record).await },
+                async move { second_handle.upsert_observation(&second_record).await },
+            );
+            first_result?;
+            second_result?;
+        }
+
+        let records = writer_a
+            .list_active_for_candidates(&[upstream_id], "claude-sonnet-4-5-20250929", &keys, now)
+            .await?;
+        ensure!(
+            records.len() == ROUNDS,
+            "expected one row per raced key, got {}",
+            records.len()
+        );
+        for record in &records {
+            ensure!(
+                record.expires_at_unix_secs == now + 300
+                    && record.last_observed_at_unix_secs == now,
+                "raced key {} must keep the freshest record, got expires_at={} last_observed_at={}",
+                record.v3_prefix_key,
+                record.expires_at_unix_secs,
+                record.last_observed_at_unix_secs
+            );
+        }
+        Ok(())
+    }
+    .await;
+    let teardown = backend.teardown(fixture).await;
+    result?;
+    teardown
 }
 
 fn observation(

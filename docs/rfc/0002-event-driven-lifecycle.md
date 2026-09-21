@@ -167,13 +167,7 @@ The costs of leaving all five in the handler:
   the tower timeout" without hoisting the observer into an outer layer — a
   band-aid that only fixes one termination path.
 
-### User constraints (verbatim, m0776–m0787)
-
-Direct quotes from the design conversation that gate this RFC:
-
-> "제어의 필수 기능이기 때문에 cc-lb 대시보드에서 사용자가 각 principal에
-> 설정한 규칙대로 limit이나 모델 선택을 할 수 있어야지. 그걸 왜 이벤트로
-> 바꿔?" (m0786)
+### Design constraints
 
 **HC-1**: Any decision that determines whether a request is served must
 remain synchronous on the response path. This includes authentication,
@@ -181,21 +175,14 @@ principal-scoped model allow-lists, `try_reserve` (429 admission),
 router selection, signer setup, and dispatch. **Only post-response accounting
 may move to events.**
 
-> "저비용 저지연이어야 한다고 말했는데, 그걸 지키는거야?" (m0784)
-
 **HC-2**: The event bus write must not add measurable latency. The current
 `RequestEventBus::publish` is a `try_send` over an mpsc — microseconds — and
 this budget must be preserved.
-
-> "각각을 따로 머지해서 각각 배포했을 때에도 정상 동작하는거야?" (m0784)
 
 **HC-3**: Every PR in the migration must be independently deployable and
 backwards compatible with the previous state of production. A partially
 migrated system must produce the same `request_events_v1` rows as a fully
 legacy or fully migrated one. No "big bang" cutover.
-
-> "이거 엄청나게 중요한 제품 기능이야. 이런 가시성이 없으면 proxy로써
-> 가치가 없어." (from m0189 originally, still holds)
 
 **HC-4**: The observation guarantee (§PR #222) may not regress at any step.
 Any bug in an event-driven subscriber must not cause a row to go missing.
@@ -719,13 +706,11 @@ non-response-critical. Adding future subscribers (metrics exporters, audit
 replay, third-party analytics) forces changing the handler each time.
 Also, tower timeout stays as `terminal_dropped`.
 
-### Alternative 2 — middleware hoist band-aid (§Section 1 of m0785)
+### Alternative 2 — middleware hoist band-aid
 
-**Rejected by user at m0776**: "그렇게 근본적인 수정을 할거면 애초에 proxy
-기능은 핵심 로직이니까 proxy 관련 함수 호출 트리는 정확히 필요한 것만
-두고..." — the band-aid solves only tower timeout classification and leaves
-the rest of the handler still doing telemetry. Effort spent on the band-aid
-would be discarded by this RFC anyway.
+**Rejected.** The band-aid solves only tower timeout classification and
+leaves the rest of the handler doing telemetry. Effort spent on the
+band-aid would be discarded by this RFC anyway.
 
 ### Alternative 3 — synchronous DB fallback on subscriber overflow
 
@@ -736,27 +721,24 @@ this RFC specifies.
 
 ### Alternative 4 — sequence numbers on every event
 
-**Rejected for v1.** Oracle in m0782 recommended `(event_id, seq)` tuple
-per event. Analysis in m0787 showed most events flow through the handler
-task sequentially; only terminal race is real, and it's already handled by
-the AtomicBool CAS. Sequence numbers can be added in a future RFC if a
-subscriber needs parallel processing.
+**Rejected for v1.** Most events flow through the handler task sequentially;
+the terminal emission race is already handled by the AtomicBool CAS.
+Sequence numbers can be added in a future RFC if a subscriber needs
+parallel processing.
 
 ### Alternative 5 — replay from persisted event log
 
 **Rejected as non-goal.** Persisting the raw event trail would enable
-process-crash recovery of in-flight requests. But durability guarantees
-against SIGKILL/OOM were already declared out-of-scope by the user's
-original spec (m0189: "서버가 복구할 수도 없이 프로세스가 강제 종료된게
-아니라면"). Adding an event log is a much larger project — separate RFC.
+process-crash recovery of in-flight requests. Durability guarantees against
+SIGKILL/OOM are outside this RFC's scope. Adding an event log requires a
+separate RFC.
 
 ## Prior art
 
 - **Linkerd2-proxy** — separates timeout metrics from route error metrics
   via a custom stream-wrapping middleware. Similar spirit to Phase 1 but
   focused on stream timeouts (which cc-lb doesn't have; we timeout the
-  entire request future). Documented in the librarian's bg_21c21929
-  research at m0767.
+  entire request future).
 - **Cloudflare Pingora** — tracks connection lifecycle via `Tracing::Drop`.
   Same pattern as cc-lb's current `TerminalObserver::Drop` — this RFC
   generalises the pattern to a full event stream, not just terminal state.

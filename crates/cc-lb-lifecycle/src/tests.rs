@@ -267,15 +267,6 @@ fn kind_labels_cover_every_variant() {
             cache_state: RequestCacheState::Unknown,
         }
         .kind(),
-        LifecycleEvent::PromptCacheObservationsProduced {
-            event_id: sample_event_id(),
-            upstream_id: Uuid::nil(),
-            canonical_model_id: "model".to_owned(),
-            observations: Vec::new(),
-            dropped_below_threshold: 0,
-            dropped_aborted: 0,
-        }
-        .kind(),
     ];
     assert_eq!(
         labels,
@@ -295,7 +286,6 @@ fn kind_labels_cover_every_variant() {
             "request_terminated",
             "priced",
             "cache_observed",
-            "prompt_cache_observations_produced",
         ],
     );
 }

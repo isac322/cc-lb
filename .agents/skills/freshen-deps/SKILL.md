@@ -1,6 +1,6 @@
 ---
 name: freshen-deps
-description: Project-wide dependency and tool version freshness sweep for the cc-lb repo. Use whenever the user asks to bump, refresh, upgrade, modernize, or "make everything latest" — across Rust toolchain, Cargo workspace deps, web (bun) deps, GitHub Actions, Docker base images, external CLI tools pinned in scripts, and any version reference embedded in CI or Docker. Slash invocation is `/freshen-deps`. Natural-language triggers include "bump everything", "update all dependencies", "make all deps latest", "전부 최신화", "버저닝 다 올려", "version bump 전수검사", any variation of "is there anything else outdated?", and follow-up pushback like "did you really get everything?" or "/freshen-deps". Even if the user only names one tool (e.g., "bump Rust"), use this skill — partial bumps usually expose adjacent stale pins that should also move. Do NOT use for adding new dependencies, removing dependencies, or migrating to a different package (those are separate refactors).
+description: Project-wide dependency and tool version freshness sweep for the cc-lb repo. Use whenever the user asks to bump, refresh, upgrade, modernize, or "make everything latest" — across Rust toolchain, Cargo workspace deps, web (bun) deps, GitHub Actions, Docker base images, external CLI tools pinned in scripts, and any version reference embedded in CI or Docker. Slash invocation is `/freshen-deps`. Natural-language triggers include "bump everything", "update all dependencies", "make all deps latest", "bring everything up to date", "bump all versions", "full version-bump sweep", any variation of "is there anything else outdated?", and follow-up pushback like "did you really get everything?" or "/freshen-deps". Even if the user only names one tool (e.g., "bump Rust"), use this skill — partial bumps usually expose adjacent stale pins that should also move. Do NOT use for adding new dependencies, removing dependencies, or migrating to a different package (those are separate refactors).
 ---
 
 # Freshen all versionable dependencies (cc-lb)
@@ -9,7 +9,7 @@ End-to-end sweep that drives every versioned external surface in this repo to it
 
 ## When to use this skill
 
-Activate on any request to "bump", "refresh", "upgrade everything", "최신화", or similar phrasing — including narrow framings ("bump Rust") because a real freshness pass always finds adjacent stale pins. Activate again on follow-up pushback ("really? all of them?") — that pushback is the user telling you the first sweep missed surfaces.
+Activate on any request to "bump", "refresh", "upgrade everything", "bring everything up to date", or similar phrasing — including narrow framings ("bump Rust") because a real freshness pass always finds adjacent stale pins. Activate again on follow-up pushback ("really? all of them?") — that pushback is the user telling you the first sweep missed surfaces.
 
 ## Core principle: methodology beats the checklist
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cc_lb_domain::{CacheScore, SubscriptionQuotaCandidateSnapshot, TtlClass, WarmCacheEntry};
+use cc_lb_domain::{CacheScore, SubscriptionQuotaCandidateSnapshot};
 use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::types::{ApiKeyMutation, PrincipalLimitState, StoredApiKeyRecord};
 use uuid::Uuid;
@@ -22,50 +22,11 @@ pub struct PromptCacheThreadUsage {
     pub cache_creation_input_tokens_1h: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PromptCacheObservationInput {
-    pub upstream_id: Uuid,
-    pub canonical_model: String,
-    pub prefix_hash: String,
-    pub ttl_class: TtlClass,
-    pub expires_at_unix_secs: u64,
-    pub observed_at_unix_secs: u64,
-    pub prefix_content_block_index: u32,
-    pub estimated_prefix_tokens: u64,
-    pub token_estimate_source: String,
-}
-
-pub trait SubscriptionQuotaCacheLike: Send + Sync {
-    fn upsert_observation(&self, record: &SubscriptionQuotaSample);
-
-    fn snapshot_for_upstream(
-        &self,
-        upstream_id: Uuid,
-        now_unix_millis: u64,
-        max_staleness_secs: u64,
-    ) -> Vec<SubscriptionQuotaCandidateSnapshot>;
-}
-
-pub trait PromptCacheObservationCacheLike: Send + Sync {
-    fn snapshot_for_upstream(
-        &self,
-        upstream_id: Uuid,
-        canonical_model: &str,
-        request_breakpoint_hashes: &[(String, TtlClass)],
-        now_unix_secs: u64,
-    ) -> Vec<WarmCacheEntry>;
-
-    fn upsert_observation(&self, observation: PromptCacheObservationInput);
-
-    fn refresh_on_hit(
-        &self,
-        upstream_id: Uuid,
-        canonical_model: &str,
-        prefix_hash: &str,
-        ttl_class: TtlClass,
-        now_unix_secs: u64,
-    ) -> bool;
-
+/// Diagnostic thread-usage tracker. This is a separate lineage from the
+/// shared prompt-cache observation store: it records per-thread provider
+/// cache usage for counterfactual diagnostics only and is never a warmth
+/// authority for routing.
+pub trait PromptCacheThreadUsageTrackerLike: Send + Sync {
     fn thread_usage_score(
         &self,
         _upstream_id: Uuid,
@@ -85,30 +46,17 @@ pub trait PromptCacheObservationCacheLike: Send + Sync {
         _now_unix_secs: u64,
     ) {
     }
+}
 
-    fn grace_margin_secs(&self) -> u64;
+pub trait SubscriptionQuotaCacheLike: Send + Sync {
+    fn upsert_observation(&self, record: &SubscriptionQuotaSample);
 
-    fn clock_now_unix_secs(&self) -> u64;
-
-    fn lookup_warm_entry(
+    fn snapshot_for_upstream(
         &self,
         upstream_id: Uuid,
-        canonical_model: &str,
-        prefix_hash: &str,
-        eligible_ttls: &[TtlClass],
-        now_unix_secs: u64,
-    ) -> Option<WarmCacheEntry> {
-        let requested: Vec<(String, TtlClass)> = eligible_ttls
-            .iter()
-            .map(|ttl| (prefix_hash.to_owned(), *ttl))
-            .collect();
-        self.snapshot_for_upstream(upstream_id, canonical_model, &requested, now_unix_secs)
-            .into_iter()
-            .filter(|entry| {
-                entry.prefix_hash == prefix_hash && eligible_ttls.contains(&entry.ttl_class)
-            })
-            .max_by_key(|entry| entry.expires_at_unix_secs)
-    }
+        now_unix_millis: u64,
+        max_staleness_secs: u64,
+    ) -> Vec<SubscriptionQuotaCandidateSnapshot>;
 }
 
 pub trait PromptCacheObservationSinkLike: Send + Sync {
@@ -137,39 +85,6 @@ impl SubscriptionQuotaCacheLike for NoopSubscriptionQuotaCache {
         _max_staleness_secs: u64,
     ) -> Vec<SubscriptionQuotaCandidateSnapshot> {
         Vec::new()
-    }
-}
-
-impl PromptCacheObservationCacheLike for NoopSubscriptionQuotaCache {
-    fn snapshot_for_upstream(
-        &self,
-        _upstream_id: Uuid,
-        _canonical_model: &str,
-        _request_breakpoint_hashes: &[(String, TtlClass)],
-        _now_unix_secs: u64,
-    ) -> Vec<WarmCacheEntry> {
-        Vec::new()
-    }
-
-    fn upsert_observation(&self, _observation: PromptCacheObservationInput) {}
-
-    fn refresh_on_hit(
-        &self,
-        _upstream_id: Uuid,
-        _canonical_model: &str,
-        _prefix_hash: &str,
-        _ttl_class: TtlClass,
-        _now_unix_secs: u64,
-    ) -> bool {
-        false
-    }
-
-    fn grace_margin_secs(&self) -> u64 {
-        30
-    }
-
-    fn clock_now_unix_secs(&self) -> u64 {
-        0
     }
 }
 

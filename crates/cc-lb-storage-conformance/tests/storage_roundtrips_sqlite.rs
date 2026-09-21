@@ -424,6 +424,26 @@ prompt_cache_observation_sqlite_test!(
     prompt_cache_observation_cross_model_same_prefix_keeps_both_rows_sqlite,
     cross_model_same_prefix_keeps_both_rows
 );
+prompt_cache_observation_sqlite_test!(
+    prompt_cache_observation_upsert_stale_write_does_not_regress_sqlite,
+    upsert_stale_write_does_not_regress
+);
+prompt_cache_observation_sqlite_test!(
+    prompt_cache_observation_upsert_newer_write_overwrites_sqlite,
+    upsert_newer_write_overwrites
+);
+prompt_cache_observation_sqlite_test!(
+    prompt_cache_observation_upsert_tiebreak_keeps_coherent_winner_sqlite,
+    upsert_tiebreak_keeps_coherent_winner
+);
+prompt_cache_observation_sqlite_test!(
+    prompt_cache_observation_list_active_for_candidates_isolates_candidates_sqlite,
+    list_active_for_candidates_isolates_candidates
+);
+prompt_cache_observation_sqlite_test!(
+    prompt_cache_observation_concurrent_upserts_keep_freshest_sqlite,
+    concurrent_upserts_keep_freshest
+);
 
 #[test]
 fn upstream_subscription_metadata_store_sqlite() {

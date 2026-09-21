@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_engine::DynamicViewHolder;
-use cc_lb_engine::PromptCacheObservationSinkLike;
 use cc_lb_engine::clock::ClockHandle;
+use cc_lb_engine::lifecycle::{PromptCacheObservationSinkLike, PromptCacheThreadUsageTrackerLike};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{ChangeChannel, ChangeEvent, RuntimeChangeNotifier};
 use tokio::sync::broadcast;
@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::dynamic_view_builder::{self, Stores};
-use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
+use crate::prompt_cache_thread_usage::PromptCacheThreadUsageTracker;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
 pub struct NotifyListener {
@@ -30,7 +30,8 @@ pub struct NotifyListener {
     data_dir: PathBuf,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
-    prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+    prompt_cache_thread_usage: Option<Arc<PromptCacheThreadUsageTracker>>,
+    prompt_cache_grace_margin_secs: u64,
     prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     subscription_quota_routing_max_staleness_secs: u64,
     clock: ClockHandle,
@@ -47,7 +48,8 @@ pub struct NotifyListenerParams {
     pub data_dir: PathBuf,
     pub lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     pub subscription_quota_cache: Arc<SubscriptionQuotaCache>,
-    pub prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+    pub prompt_cache_thread_usage: Option<Arc<PromptCacheThreadUsageTracker>>,
+    pub prompt_cache_grace_margin_secs: u64,
     pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub clock: ClockHandle,
@@ -66,7 +68,8 @@ impl NotifyListener {
             data_dir: params.data_dir,
             lazy_refresher: params.lazy_refresher,
             subscription_quota_cache: params.subscription_quota_cache,
-            prompt_cache_observation_cache: params.prompt_cache_observation_cache,
+            prompt_cache_thread_usage: params.prompt_cache_thread_usage,
+            prompt_cache_grace_margin_secs: params.prompt_cache_grace_margin_secs,
             prompt_cache_observation_sink: params.prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs: params
                 .subscription_quota_routing_max_staleness_secs,
@@ -145,7 +148,10 @@ impl NotifyListener {
             &self.runtime,
             &self.data_dir,
             self.subscription_quota_cache.clone(),
-            self.prompt_cache_observation_cache.clone(),
+            self.prompt_cache_grace_margin_secs,
+            self.prompt_cache_thread_usage
+                .clone()
+                .map(|tracker| tracker as Arc<dyn PromptCacheThreadUsageTrackerLike>),
             self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             self.clock.clone(),
@@ -255,20 +261,6 @@ impl NotifyListener {
                     tracing::warn!(%error, "subscription quota cache hydrate failed");
                 }
             }
-            ChangeChannel::PromptCacheObservation => {
-                let Some(cache) = &self.prompt_cache_observation_cache else {
-                    return;
-                };
-                if let Err(error) = cache
-                    .hydrate_from_store(
-                        self.stores.prompt_cache_observations.as_ref(),
-                        &upstream_ids,
-                    )
-                    .await
-                {
-                    tracing::warn!(%error, "prompt cache observation cache hydrate failed");
-                }
-            }
             _ => {}
         }
     }
@@ -369,8 +361,6 @@ fn drain_pending_events(
 fn is_hydrate_channel(channel: ChangeChannel) -> bool {
     matches!(
         channel,
-        ChangeChannel::UpstreamRateLimit
-            | ChangeChannel::SubscriptionQuota
-            | ChangeChannel::PromptCacheObservation
+        ChangeChannel::UpstreamRateLimit | ChangeChannel::SubscriptionQuota
     )
 }

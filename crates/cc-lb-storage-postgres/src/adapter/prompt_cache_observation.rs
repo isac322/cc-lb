@@ -1,8 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_domain::TtlClass;
 use cc_lb_storage_api::{
-    ChangeChannel, PromptCacheObservationRecord, PromptCacheObservationStore, StorageError,
-    StorageResult,
+    PromptCacheObservationRecord, PromptCacheObservationStore, StorageError, StorageResult,
 };
 use sqlx::{Row, postgres::PgRow};
 
@@ -21,8 +20,13 @@ const PURGE_MAX_BATCHES: usize = 1_024;
 #[async_trait]
 impl PromptCacheObservationStore for PostgresStorage {
     async fn upsert_observation(&self, record: &PromptCacheObservationRecord) -> StorageResult<()> {
+        // Monotonic winner update: the row is only overwritten when the incoming
+        // (expires_at, last_observed_at) pair is strictly newer, so a delayed or
+        // replayed write cannot regress a fresher observation. The WHERE guard
+        // keeps the update atomic — the winner's metadata is written whole, never
+        // spliced with the loser's fields.
         sqlx::query(
-            "INSERT INTO prompt_cache_observations (upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (upstream_id, canonical_model_id, v3_prefix_key, ttl_class) DO UPDATE SET expires_at = EXCLUDED.expires_at, last_observed_at = EXCLUDED.last_observed_at, hash_schema_version = EXCLUDED.hash_schema_version, prefix_content_block_index = EXCLUDED.prefix_content_block_index, estimated_prefix_tokens = EXCLUDED.estimated_prefix_tokens, token_estimate_source = EXCLUDED.token_estimate_source",
+            "INSERT INTO prompt_cache_observations (upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (upstream_id, canonical_model_id, v3_prefix_key, ttl_class) DO UPDATE SET expires_at = EXCLUDED.expires_at, last_observed_at = EXCLUDED.last_observed_at, hash_schema_version = EXCLUDED.hash_schema_version, prefix_content_block_index = EXCLUDED.prefix_content_block_index, estimated_prefix_tokens = EXCLUDED.estimated_prefix_tokens, token_estimate_source = EXCLUDED.token_estimate_source WHERE EXCLUDED.expires_at > prompt_cache_observations.expires_at OR (EXCLUDED.expires_at = prompt_cache_observations.expires_at AND EXCLUDED.last_observed_at > prompt_cache_observations.last_observed_at)",
         )
         .bind(record.upstream_id)
         .bind(&record.canonical_model_id)
@@ -46,58 +50,29 @@ impl PromptCacheObservationStore for PostgresStorage {
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
-
-        // The row is already committed; a failed NOTIFY only delays peer
-        // hydration, so log instead of reporting the write as failed.
-        if let Err(error) = sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(ChangeChannel::PromptCacheObservation.postgres_channel())
-            .bind(record.upstream_id.to_string())
-            .execute(&self.pool)
-            .await
-        {
-            tracing::warn!(%error, "prompt cache observation change notify failed");
-        }
         Ok(())
     }
 
-    async fn list_active_for_upstream(
+    async fn list_active_for_candidates(
         &self,
-        upstream_id: uuid::Uuid,
-        not_expired_at_unix_secs: u64,
-    ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
-        let rows = sqlx::query(
-            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source FROM prompt_cache_observations WHERE upstream_id = $1 AND expires_at > $2 ORDER BY v3_prefix_key, ttl_class",
-        )
-        .bind(upstream_id)
-        .bind(u64_to_i64(
-            not_expired_at_unix_secs,
-            "prompt cache not_expired_at_unix_secs",
-        )?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        rows.into_iter().map(row_to_record).collect()
-    }
-
-    async fn list_active_for_upstream_keys(
-        &self,
-        upstream_id: uuid::Uuid,
-        not_expired_at_unix_secs: u64,
+        upstream_ids: &[uuid::Uuid],
+        canonical_model_id: &str,
         v3_prefix_keys: &[String],
+        not_expired_at_unix_secs: u64,
     ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
-        if v3_prefix_keys.is_empty() {
+        if upstream_ids.is_empty() || v3_prefix_keys.is_empty() {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source FROM prompt_cache_observations WHERE upstream_id = $1 AND expires_at > $2 AND v3_prefix_key = ANY($3) ORDER BY v3_prefix_key, ttl_class",
+            "SELECT upstream_id, canonical_model_id, v3_prefix_key, ttl_class, expires_at, last_observed_at, hash_schema_version, prefix_content_block_index, estimated_prefix_tokens, token_estimate_source FROM prompt_cache_observations WHERE upstream_id = ANY($1) AND canonical_model_id = $2 AND v3_prefix_key = ANY($3) AND expires_at > $4 ORDER BY upstream_id, v3_prefix_key, ttl_class",
         )
-        .bind(upstream_id)
+        .bind(upstream_ids)
+        .bind(canonical_model_id)
+        .bind(v3_prefix_keys)
         .bind(u64_to_i64(
             not_expired_at_unix_secs,
             "prompt cache not_expired_at_unix_secs",
         )?)
-        .bind(v3_prefix_keys)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx_error)?;

@@ -40,29 +40,32 @@ fn built_candidate_cache_score_drives_subscription_preference_component_route() 
     let breakpoints = parse_request_cache_breakpoints(&HeaderMap::new(), &body);
     assert_eq!(breakpoints.len(), 1);
     let owner_prefix = breakpoints[0].lookback_prefixes[0].prefix_hash.clone();
-    let prompt_cache = TestPromptCacheObservationCache::new(HashMap::from([(
-        owner_id,
-        vec![WarmCacheEntry {
-            prefix_hash: owner_prefix.clone(),
-            expires_at_unix_secs: TEST_QUOTA_NOW_SECS + 300,
-            ttl_class: TtlClass::Ephemeral5m,
-            last_observed_at_unix_secs: TEST_QUOTA_NOW_SECS,
-            content_block_index: 0,
-            estimated_prefix_tokens: breakpoints[0].prefix_token_count,
-            token_estimate_source: "local_tiktoken_v1".to_owned(),
-            hash_schema_version: HASH_SCHEMA_VERSION,
-        }],
-    )]));
+    let warm_entries = HashMap::from([
+        (
+            owner_id,
+            vec![WarmCacheEntry {
+                prefix_hash: owner_prefix.clone(),
+                expires_at_unix_secs: TEST_QUOTA_NOW_SECS + 300,
+                ttl_class: TtlClass::Ephemeral5m,
+                last_observed_at_unix_secs: TEST_QUOTA_NOW_SECS,
+                content_block_index: 0,
+                estimated_prefix_tokens: breakpoints[0].prefix_token_count,
+                token_estimate_source: "serialized_prefix_bytes_v1".to_owned(),
+                hash_schema_version: HASH_SCHEMA_VERSION,
+            }],
+        ),
+        (quota_peer_id, Vec::new()),
+    ]);
+    let prompt_cache = TestPromptCacheObservationCache::new(warm_entries.clone());
     let view = test_view(prompt_cache, owner_id, quota_peer_id);
 
     let candidates = build_candidates(
         &view,
         "principal",
         RequestKind::AnthropicMessages,
-        TEST_MODEL,
         &breakpoints,
-        Some(thread_id),
-        &cc_lb_engine::SystemClock,
+        &warm_entries,
+        &cc_lb_engine::TestClock::new_at_secs(TEST_QUOTA_NOW_SECS),
     );
     let owner = candidate(&candidates, owner_id, "owner");
     let peer = candidate(&candidates, quota_peer_id, "quota peer");
@@ -155,29 +158,32 @@ fn moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
     );
     let turn_two_breakpoints = parse_request_cache_breakpoints(&HeaderMap::new(), &turn_two);
 
-    let prompt_cache = TestPromptCacheObservationCache::new(HashMap::from([(
-        owner_id,
-        vec![WarmCacheEntry {
-            prefix_hash: deep_prefix.clone(),
-            expires_at_unix_secs: TEST_QUOTA_NOW_SECS + 300,
-            ttl_class: TtlClass::Ephemeral5m,
-            last_observed_at_unix_secs: TEST_QUOTA_NOW_SECS,
-            content_block_index: 0,
-            estimated_prefix_tokens: turn_one_breakpoints[1].prefix_token_count,
-            token_estimate_source: "local_tiktoken_v1".to_owned(),
-            hash_schema_version: HASH_SCHEMA_VERSION,
-        }],
-    )]));
+    let warm_entries = HashMap::from([
+        (
+            owner_id,
+            vec![WarmCacheEntry {
+                prefix_hash: deep_prefix.clone(),
+                expires_at_unix_secs: TEST_QUOTA_NOW_SECS + 300,
+                ttl_class: TtlClass::Ephemeral5m,
+                last_observed_at_unix_secs: TEST_QUOTA_NOW_SECS,
+                content_block_index: 0,
+                estimated_prefix_tokens: turn_one_breakpoints[1].prefix_token_count,
+                token_estimate_source: "serialized_prefix_bytes_v1".to_owned(),
+                hash_schema_version: HASH_SCHEMA_VERSION,
+            }],
+        ),
+        (quota_peer_id, Vec::new()),
+    ]);
+    let prompt_cache = TestPromptCacheObservationCache::new(warm_entries.clone());
     let view = test_view(prompt_cache, owner_id, quota_peer_id);
 
     let candidates = build_candidates(
         &view,
         "principal",
         RequestKind::AnthropicMessages,
-        TEST_MODEL,
         &turn_two_breakpoints,
-        Some(thread_id),
-        &cc_lb_engine::SystemClock,
+        &warm_entries,
+        &cc_lb_engine::TestClock::new_at_secs(TEST_QUOTA_NOW_SECS),
     );
     let owner = candidate(&candidates, owner_id, "owner");
     let owner_score = owner.cache_score.as_ref().expect("owner cache score");
@@ -255,7 +261,7 @@ fn test_view(
             upstream_record(owner_id),
             upstream_record(quota_peer_id),
         ])
-        .prompt_cache_observation_cache(Arc::new(prompt_cache))
+        .prompt_cache_observation_store(Arc::new(prompt_cache))
         .subscription_quota_cache(Arc::new(quota_cache))
         .subscription_quota_routing_max_staleness_secs(60)
         .build()

@@ -1,94 +1,96 @@
 # Subscription quota range · analysis QA
 
-작성 시점: 구현 전
+Written: before implementation
 
-합의 주체: 6개 독립 조사 에이전트, 2개 비판 리뷰어, 1개 최종 판정 에이전트
+Consensus by: 6 independent investigation agents, 2 critical reviewers, 1 final judgment agent
 
-## 불변 계약
+## Invariant contract
 
-- 요청 범위 밖의 오래된 anchor는 current-state seed로만 사용한다.
-- Bucket 생성은 `floor(since / bucket_secs)`부터 `until`까지 수행한다.
-- 1시간/60초의 inclusive 계약은 window당 61개 dense carry-forward point다.
-- Anchor-only point도 `sample_count=0`, `observed=true`를 유지한다.
-- Left anchor의 정확한 timestamp, source, value는 보존한다.
-- Reset, gap, source merge, tie-breaking, downsampling 결과가 기존 요청 범위 의미를 유지한다.
-- PostgreSQL과 SQLite가 동일 결과를 반환한다.
-- `/analysis`는 요청한 upstream만 storage query에서 읽는다.
-- Frontend series freshness 30초와 analysis 120초 poll을 유지하고, 두 query key는 absolute clock 대신 stable range identity를 사용한다.
-- `/analysis`는 고정 60초 bucket 기준 20,000개를 초과하는 요청 범위를 storage 조회 전에 `bucket_range_too_large`로 거부한다.
+- Anchors older than the requested range are used only as the current-state seed.
+- Bucket generation runs from `floor(since / bucket_secs)` to `until`.
+- The 1-hour/60-second inclusive contract is 61 dense carry-forward points per window.
+- Anchor-only points also keep `sample_count=0`, `observed=true`.
+- Preserve the left anchor's exact timestamp, source, and value.
+- Reset, gap, source merge, tie-breaking, and downsampling results preserve the existing requested-range semantics.
+- PostgreSQL and SQLite return identical results.
+- `/analysis` reads only the requested upstreams from the storage query.
+- Keep the frontend series 30-second freshness and the analysis 120-second poll; both query keys use a stable range identity instead of the absolute clock.
+- `/analysis` rejects request ranges exceeding 20,000 fixed 60-second buckets with `bucket_range_too_large` before the storage query.
 
-## 저장소·도메인 QA
+## Storage · domain QA
 
-- [x] SQLite public series: anchor 1일/30일/180일에서 출력 point 수가 요청 범위에만 의존한다.
-- [x] PostgreSQL public series: 같은 입력이 SQLite와 동일한 point·timestamp·source·value를 반환한다.
-- [x] Admin slim series: anchor가 `since` 이전이어도 요청 범위 전체 61개 dense point를 반환한다.
-- [x] Provider-lots aggregate: anchor age와 무관하게 loop work가 요청 범위에 제한된다.
-- [x] Anchor가 없을 때 기존 empty/unknown 결과가 유지된다.
-- [x] Anchor가 `since`와 정확히 같을 때 중복 point가 생기지 않는다.
-- [x] Anchor가 `since` 직전일 때 첫 bucket이 올바른 carried state를 가진다.
-- [x] 범위 안 reset 이후 이전 값이 carry-forward되지 않는다.
-- [x] Source가 바뀌는 동일 timestamp tie가 기존 우선순위를 유지한다.
-- [x] Long gap과 missing observation semantics가 유지된다.
-- [x] Downsampling은 요청 범위 point만 대상으로 하며 첫점·마지막점과 기존 균등 인덱스 선택을 보존한다.
+- [x] SQLite public series: with anchors 1 day/30 days/180 days old, the output point count depends only on the requested range.
+- [x] PostgreSQL public series: the same input returns the same points/timestamps/sources/values as SQLite.
+- [x] Admin slim series: even when the anchor precedes `since`, returns all 61 dense points of the requested range.
+- [x] Provider-lots aggregate: regardless of anchor age, loop work is bounded by the requested range.
+- [x] When there is no anchor, the existing empty/unknown result is preserved.
+- [x] When the anchor exactly equals `since`, no duplicate point is produced.
+- [x] When the anchor is just before `since`, the first bucket has the correct carried state.
+- [x] After a reset inside the range, previous values are not carried forward.
+- [x] Same-timestamp ties with changing sources keep the existing precedence.
+- [x] Long-gap and missing-observation semantics are preserved.
+- [x] Downsampling targets only requested-range points and preserves the first point, last point, and existing uniform index selection.
 
 ## Analysis QA
 
-- [x] 새 storage API는 non-empty upstream ID 집합을 mandatory SQL predicate로 사용한다.
-- [x] PostgreSQL plan이 `(upstream_id, resolution, bucket_start)` 인덱스를 사용할 수 있는 shape다.
-- [x] SQLite 쿼리도 upstream filter와 시간 범위를 SQL에서 적용한다.
-- [x] 여러 upstream의 rollup을 upstream별 한 번만 partition한다.
-- [x] Window별 계산이 원본 row를 deep clone하지 않는다.
-- [x] Analysis 응답의 utilization, deficit, observation 수와 source가 기존 의미를 유지한다.
-- [x] Backend 상태를 변경한 뒤 다음 analysis refresh에서 값이 갱신된다.
-- [x] `/analysis`는 정확히 20,000개 bucket 범위를 허용하고 20,001개부터 HTTP 400을 반환한다.
-- [x] UI 지원 범위 1h/6h/24h/7d는 guardrail에 걸리지 않는다.
+- [x] The new storage API uses a non-empty upstream ID set as a mandatory SQL predicate.
+- [x] The PostgreSQL plan has a shape that can use the `(upstream_id, resolution, bucket_start)` index.
+- [x] The SQLite query also applies the upstream filter and time range in SQL.
+- [x] Rollups for multiple upstreams are partitioned once per upstream.
+- [x] Per-window computation does not deep-clone the original rows.
+- [x] Utilization, deficit, observation counts, and sources in the analysis response keep their existing meaning.
+- [x] After changing backend state, values refresh on the next analysis refresh.
+- [x] `/analysis` allows exactly a 20,000-bucket range and returns HTTP 400 from 20,001.
+- [x] The UI-supported ranges 1h/6h/24h/7d do not hit the guardrail.
 
-## API · 브라우저 QA
+## API · browser QA
 
-- [x] `/series`, `/analysis`, `/aggregate`의 status와 JSON schema가 유지된다.
-- [x] Upstream Detail의 Quota History 선, latest, deficit, loading/error/empty state가 정상이다.
-- [x] Mock API browser에서 1h/6h/24h/7d 버튼별 exact request range와 정상 chart render를 확인한다.
-- [x] SQLite/PostgreSQL storage·API transition과 browser-layer series 30초/analysis 120초 cadence가 각각 통과한다.
-- [x] Virtual clock에서 +60초에는 analysis 요청이 없고 +120초에는 최신 exact bounds로 refetch한다.
-- [x] Loading 중 기존 화면, empty 전환, analysis error 중 previous data, 성공 recovery가 정상 표시된다.
+- [x] `/series`, `/analysis`, `/aggregate` status and JSON schema are preserved.
+- [x] Upstream Detail's Quota History line, latest, deficit, and loading/error/empty states are correct.
+- [x] In the mock-API browser, verified the exact request range and correct chart render for each of the 1h/6h/24h/7d buttons.
+- [x] SQLite/PostgreSQL storage·API transitions and the browser-layer series 30-second/analysis 120-second cadence each pass.
+- [x] Under a virtual clock, there is no analysis request at +60 seconds, and at +120 seconds it refetches with the latest exact bounds.
+- [x] Existing screen during loading, empty transition, previous data during analysis error, and successful recovery all display correctly.
 
-## 성능 QA
+## Performance QA
 
-- [x] Work-count assertion으로 walked bucket 수가 anchor age가 아닌 요청 범위에 제한됨을 증명한다.
-- [x] SQLite scratch에서 anchor 1일/30일/180일 p50·p99 및 RSS before/after를 측정한다.
-- [x] PostgreSQL scratch에서 같은 데이터의 p50·p99와 buffers를 측정한다.
-- [x] `/analysis` filtered query의 rows와 buffers가 전체 rollup 수가 아닌 선택 upstream에 비례한다.
-- [x] 절대시간 임계값은 CI 영구 테스트로 고정하지 않고 측정 보고서에 기록한다.
+- [x] Prove with a work-count assertion that the walked bucket count is bounded by the requested range, not the anchor age.
+- [x] On SQLite scratch, measure p50/p99 and RSS before/after for anchors 1 day/30 days/180 days old.
+- [x] On PostgreSQL scratch, measure p50/p99 and buffers on the same data.
+- [x] The `/analysis` filtered query's rows and buffers are proportional to the selected upstreams, not the total rollup count.
+- [x] Do not pin absolute-time thresholds as permanent CI tests; record them in the measurement report.
 
-## 실행 결과
+## Execution results
 
-- Series 반환 작업량: 180일 anchor, 6 windows에서 `1,555,566` buckets → `366`.
+- Series return work: 180-day anchor, 6 windows: `1,555,566` buckets → `366`.
 - SQLite series p50/p99: `121.437/129.915ms` → `0.163/0.193ms`.
 - PostgreSQL series p50/p99: `133.119/139.993ms` → `0.474/0.692ms`.
 - SQLite provider-lots p50/p99: `3.647/3.856ms` → `0.091/0.109ms`.
 - PostgreSQL provider-lots p50/p99: `3.114/3.395ms` → `0.218/0.289ms`.
 - SQLite peak RSS: `560,758,784` bytes → `13,778,944` bytes.
-- PostgreSQL analysis scratch: 전체 upstream `100,000 rows / 29.103ms / 101,087 shared hits` →
-  선택 upstream `1,000 rows / 0.937ms / 2,006 shared hits`.
+- PostgreSQL analysis scratch: all upstreams `100,000 rows / 29.103ms / 101,087 shared hits` →
+  selected upstream `1,000 rows / 0.937ms / 2,006 shared hits`.
 - Storage conformance: SQLite `79/79`, PostgreSQL `64/64`.
-- Admin: unit `19/19`, focused integration `15/15`, 전체 `52 + 246` tests 통과.
-- Web: typecheck, Biome lint, Vitest `63 files / 573 tests` 통과.
-- Playwright: `upstream-quota-analysis-cadence.spec.ts` 6개 browser test 통과.
-  1h/6h/24h/7d exact range, delayed loading, empty 전환, analysis error 중 previous data,
-  성공 recovery, +60초 series-only refresh, +120초 최신 exact-bounds analysis refresh와
-  deficit/caveat DOM 변경을 검증했다. Browser는 mock API를 사용하며 실제 SQLite/PostgreSQL
-  storage·API state transition은 별도 Rust conformance/integration tests가 검증한다.
-- 독립 리뷰: range와 analysis 두 리뷰 모두 finding 0건.
-- GitHub Actions: rebased 기능 head `66be8150fc6c`에서 CI, Web, Publish-check 전부 통과.
-  Remote sccache backend 500은 uncached fallback으로, inherited wall-clock heartbeat
-  test race는 결정론적 rendezvous로 수정한 상태에서 검증했다.
+- Admin: unit `19/19`, focused integration `15/15`, all `52 + 246` tests passed.
+- Web: typecheck, Biome lint, Vitest `63 files / 573 tests` passed.
+- Playwright: `upstream-quota-analysis-cadence.spec.ts` 6 browser tests passed.
+  Verified 1h/6h/24h/7d exact ranges, delayed loading, empty transition, previous data
+  during analysis error, successful recovery, +60-second series-only refresh, +120-second
+  latest exact-bounds analysis refresh, and deficit/caveat DOM changes. The browser uses a
+  mock API; real SQLite/PostgreSQL storage·API state transitions are verified by separate
+  Rust conformance/integration tests.
+- Independent reviews: both the range and analysis reviews had 0 findings.
+- GitHub Actions: CI, Web, and Publish-check all passed on rebased feature head
+  `66be8150fc6c`. Verified with the remote sccache backend 500 handled by uncached
+  fallback and the inherited wall-clock heartbeat test race fixed by a deterministic
+  rendezvous.
 
-## 종료 게이트
+## Exit gate
 
-- [x] 관련 Rust unit/integration/conformance 테스트 통과
-- [x] SQLite QA 통과
-- [x] PostgreSQL QA 통과
-- [x] Web typecheck/test 통과
-- [x] Mock API 실제 브라우저 point/state transition과 양 backend storage/API transition을 계층별로 통과
-- [x] 독립 코드 리뷰 finding 0건
-- [x] GitHub CI 전체 통과
+- [x] Related Rust unit/integration/conformance tests pass
+- [x] SQLite QA pass
+- [x] PostgreSQL QA pass
+- [x] Web typecheck/test pass
+- [x] Mock-API real browser point/state transitions and both backends' storage/API transitions pass per layer
+- [x] Independent code review: 0 findings
+- [x] Full GitHub CI pass

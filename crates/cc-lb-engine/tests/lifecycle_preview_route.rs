@@ -28,6 +28,7 @@ async fn happy_path_returns_trace_with_stages_and_winner() {
 
     let outcome = lifecycle
         .preview_route(input(PRINCIPAL, None))
+        .await
         .expect("preview succeeds");
 
     assert_eq!(outcome.trace.stages.len(), 1);
@@ -51,6 +52,7 @@ async fn unknown_principal_returns_error() {
 
     let err = lifecycle
         .preview_route(input("nonexistent-principal", None))
+        .await
         .expect_err("must fail");
 
     match err {
@@ -65,9 +67,11 @@ async fn same_request_id_produces_deterministic_winner() {
 
     let first = lifecycle
         .preview_route(input(PRINCIPAL, Some("fixed-req-id")))
+        .await
         .expect("first preview succeeds");
     let second = lifecycle
         .preview_route(input(PRINCIPAL, Some("fixed-req-id")))
+        .await
         .expect("second preview succeeds");
 
     assert_eq!(first.winner_upstream_id, second.winner_upstream_id);
@@ -82,6 +86,7 @@ async fn pipeline_instantiation_error_returns_error() {
 
     let err = lifecycle
         .preview_route(input(PRINCIPAL, None))
+        .await
         .expect_err("must fail");
 
     match err {
@@ -101,6 +106,7 @@ async fn empty_candidate_pool_returns_null_winner() {
 
     let outcome = lifecycle
         .preview_route(input(PRINCIPAL, None))
+        .await
         .expect("preview succeeds");
 
     assert!(outcome.winner_upstream_id.is_none());
