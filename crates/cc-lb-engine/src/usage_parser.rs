@@ -59,6 +59,17 @@ pub(crate) struct UpstreamStreamError {
     pub(crate) error_message: Option<String>,
 }
 
+/// An upstream `stop_reason` that ends the response abnormally even though the
+/// HTTP status is 200 (`refusal`, `model_context_window_exceeded`). Normal
+/// reasons (`end_turn`, `max_tokens`, `stop_sequence`, `tool_use`,
+/// `pause_turn`, `compaction`) never produce this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AbnormalStop {
+    pub(crate) stop_reason: String,
+    pub(crate) category: Option<String>,
+    pub(crate) explanation: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BoundedErrorType(String);
 
@@ -426,6 +437,46 @@ pub(crate) fn detect_mid_stream_error(event: &ParsedSseEvent<'_>) -> Option<Upst
     })
 }
 
+/// Detect an abnormal `stop_reason` on a `message_delta` SSE event. Returns
+/// `Some` only for `refusal` and `model_context_window_exceeded`; every other
+/// stop reason and every other event type returns `None`.
+pub(crate) fn detect_abnormal_stop(event: &ParsedSseEvent<'_>) -> Option<AbnormalStop> {
+    let value = event.last_observed_value()?;
+    if value.get("type").and_then(Value::as_str) != Some("message_delta") {
+        return None;
+    }
+    let delta = value.get("delta")?;
+    abnormal_stop_from_fields(delta.get("stop_reason"), delta.get("stop_details"))
+}
+
+/// Detect an abnormal `stop_reason` on a buffered non-streaming Messages
+/// response body. Same rule as [`detect_abnormal_stop`], reading the top-level
+/// `stop_reason` / `stop_details` fields.
+pub(crate) fn detect_abnormal_stop_non_stream(value: &Value) -> Option<AbnormalStop> {
+    abnormal_stop_from_fields(value.get("stop_reason"), value.get("stop_details"))
+}
+
+fn abnormal_stop_from_fields(
+    stop_reason: Option<&Value>,
+    stop_details: Option<&Value>,
+) -> Option<AbnormalStop> {
+    let stop_reason = stop_reason.and_then(Value::as_str)?;
+    if !matches!(stop_reason, "refusal" | "model_context_window_exceeded") {
+        return None;
+    }
+    Some(AbnormalStop {
+        stop_reason: stop_reason.to_owned(),
+        category: stop_details
+            .and_then(|details| details.get("category"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        explanation: stop_details
+            .and_then(|details| details.get("explanation"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
 fn bounded_upstream_error(
     value: &Value,
 ) -> (Option<BoundedErrorType>, Option<BoundedErrorMessage>) {
@@ -732,6 +783,64 @@ mod tests {
     fn detect_mid_stream_error_ignores_normal_events() {
         let raw = raw_event(r#"{"type":"message_delta","usage":{"output_tokens":1}}"#);
         assert!(detect_raw_mid_stream_error(&raw).is_none());
+    }
+
+    #[test]
+    fn detect_abnormal_stop_extracts_refusal_details() {
+        let raw = raw_event(
+            r#"{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"declined","fallback_credit_token":null}},"usage":{"output_tokens":0}}"#,
+        );
+        let event = parse_sse_event(&raw);
+        let stop = detect_abnormal_stop(&event).expect("abnormal stop");
+        assert_eq!(stop.stop_reason, "refusal");
+        assert_eq!(stop.category.as_deref(), Some("cyber"));
+        assert_eq!(stop.explanation.as_deref(), Some("declined"));
+    }
+
+    #[test]
+    fn detect_abnormal_stop_extracts_context_window_exceeded() {
+        let raw = raw_event(
+            r#"{"type":"message_delta","delta":{"stop_reason":"model_context_window_exceeded"},"usage":{"output_tokens":0}}"#,
+        );
+        let event = parse_sse_event(&raw);
+        let stop = detect_abnormal_stop(&event).expect("abnormal stop");
+        assert_eq!(stop.stop_reason, "model_context_window_exceeded");
+        assert!(stop.category.is_none());
+        assert!(stop.explanation.is_none());
+    }
+
+    #[test]
+    fn detect_abnormal_stop_ignores_end_turn() {
+        let raw = raw_event(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#,
+        );
+        let event = parse_sse_event(&raw);
+        assert!(detect_abnormal_stop(&event).is_none());
+    }
+
+    #[test]
+    fn detect_abnormal_stop_ignores_missing_stop_reason() {
+        let raw = raw_event(r#"{"type":"message_delta","usage":{"output_tokens":1}}"#);
+        let event = parse_sse_event(&raw);
+        assert!(detect_abnormal_stop(&event).is_none());
+    }
+
+    #[test]
+    fn detect_abnormal_stop_non_stream_extracts_refusal_details() {
+        let value = serde_json::json!({
+            "type": "message",
+            "stop_reason": "refusal",
+            "stop_details": {
+                "type": "refusal",
+                "category": "reasoning_extraction",
+                "explanation": "declined",
+                "fallback_credit_token": null
+            }
+        });
+        let stop = detect_abnormal_stop_non_stream(&value).expect("abnormal stop");
+        assert_eq!(stop.stop_reason, "refusal");
+        assert_eq!(stop.category.as_deref(), Some("reasoning_extraction"));
+        assert_eq!(stop.explanation.as_deref(), Some("declined"));
     }
 
     #[test]

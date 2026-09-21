@@ -2300,7 +2300,18 @@ fn proxy_route_template(path: &str) -> Option<&'static str> {
 fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
     let request_ids = RequestIdState::default();
     let drain_controller = state.drain_controller.clone();
+    // request_id runs first so lifecycle_middleware can read the assigned id;
+    // lifecycle runs before the drain gate so drain rejections already carry a
+    // LifecycleContext in their extensions.
     let outer_sb = ServiceBuilder::new()
+        .layer(middleware::from_fn_with_state(
+            request_ids,
+            request_id_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            lifecycle_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             drain_controller,
             crate::drain::proxy_drain_middleware,
@@ -2310,27 +2321,17 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             cc_lb_observability::trace_layer(NoopObservabilityHook).make_span_with(
                 cc_lb_observability::ProxyMakeSpan::with_route_template(proxy_route_template),
             ),
-        )
-        .layer(middleware::from_fn_with_state(
-            request_ids,
-            request_id_middleware,
-        ));
+        );
 
-    let lifecycle_inner_sb = ServiceBuilder::new()
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            lifecycle_middleware,
-        ))
+    let inner_sb = ServiceBuilder::new()
         .layer(crate::chaos::ChaosLayer::from_env())
         .layer(HandleErrorLayer::new(timeout_error))
         .timeout(Duration::from_secs(timeout_secs.max(1)));
 
-    let non_lifecycle_inner_sb = ServiceBuilder::new()
-        .layer(crate::chaos::ChaosLayer::from_env())
-        .layer(HandleErrorLayer::new(timeout_error))
-        .timeout(Duration::from_secs(timeout_secs.max(1)));
-
-    let lifecycle_routes = Router::new()
+    // Every route on the proxy listener — including the router fallback and
+    // the method-not-allowed fallback below — runs under lifecycle_middleware
+    // so each accepted request produces exactly one request-log row.
+    let routes = Router::new()
         .route("/v1/messages", post(lifecycle_handler))
         .route("/v1/messages/count_tokens", post(lifecycle_handler))
         .route("/v1/models", get(lifecycle_handler))
@@ -2341,25 +2342,23 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             get(lifecycle_handler).delete(lifecycle_handler),
         )
         .route("/v1/files/{id}/content", get(lifecycle_handler))
+        .route("/api/oauth/usage", get(oauth_usage_handler))
         .route("/api/{*path}", any(lifecycle_handler))
         .route("/v1/{*path}", any(lifecycle_handler))
-        .with_state(state.clone())
-        .layer(lifecycle_inner_sb);
-
-    let non_lifecycle_routes = Router::new()
-        .route("/api/oauth/usage", get(oauth_usage_handler))
         .with_state(state)
-        .layer(non_lifecycle_inner_sb);
+        .layer(inner_sb);
 
     Router::new()
-        .merge(lifecycle_routes)
-        .merge(non_lifecycle_routes)
+        .merge(routes)
         .fallback(proxy_not_found)
         .method_not_allowed_fallback(proxy_method_not_allowed)
         .layer(outer_sb)
 }
 
-async fn proxy_not_found() -> Response<Body> {
+async fn proxy_not_found(request: Request<Body>) -> Response<Body> {
+    if let Some(observer) = request.extensions().get::<cc_lb_engine::LifecycleContext>() {
+        observer.record_route_not_found();
+    }
     anthropic_error_response(
         StatusCode::NOT_FOUND,
         "not_found",
@@ -2367,7 +2366,10 @@ async fn proxy_not_found() -> Response<Body> {
     )
 }
 
-async fn proxy_method_not_allowed() -> Response<Body> {
+async fn proxy_method_not_allowed(request: Request<Body>) -> Response<Body> {
+    if let Some(observer) = request.extensions().get::<cc_lb_engine::LifecycleContext>() {
+        observer.record_method_not_allowed();
+    }
     anthropic_error_response(
         StatusCode::METHOD_NOT_ALLOWED,
         "not_found",
@@ -2629,6 +2631,10 @@ async fn oauth_usage_handler(
     State(state): State<ProxyState>,
     request: Request<Body>,
 ) -> Response<Body> {
+    let observer = request
+        .extensions()
+        .get::<cc_lb_engine::LifecycleContext>()
+        .cloned();
     let authn = &state.builtin_authn;
     let dynamic_view = state.dynamic_view.load();
     if let Err(error) = authn
@@ -2636,13 +2642,16 @@ async fn oauth_usage_handler(
         .await
     {
         let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
+        if let Some(observer) = observer.as_ref() {
+            observer.record_local_response(status);
+        }
         return json_response(
             status,
             serde_json::json!({ "error": "authentication_error", "message": error.to_string() }),
         );
     }
 
-    match cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
+    let response = match cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
         state.storage.as_ref(),
         &state.dynamic_view,
         &*state.clock,
@@ -2657,7 +2666,11 @@ async fn oauth_usage_handler(
                 serde_json::json!({ "error": "usage_unavailable" }),
             )
         }
+    };
+    if let Some(observer) = observer.as_ref() {
+        observer.record_local_response(response.status());
     }
+    response
 }
 
 fn json_response(status: StatusCode, value: impl Serialize) -> Response<Body> {

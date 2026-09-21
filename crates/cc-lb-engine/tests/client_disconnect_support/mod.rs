@@ -229,6 +229,24 @@ pub fn canonical_error_frame() -> Bytes {
     )
 }
 
+/// A complete, well-formed Anthropic refusal stream: HTTP 200 with
+/// `stop_reason: "refusal"` and populated `stop_details`, and no content
+/// blocks. Captured from `api.anthropic.com`.
+pub fn refusal_sse_body() -> Body {
+    let stream = async_stream::stream! {
+        yield Ok::<Bytes, Infallible>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"id\":\"msg_refusal\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":80,\"output_tokens\":0}}}\n\n",
+        ));
+        yield Ok::<Bytes, Infallible>(Bytes::from_static(
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\",\"stop_sequence\":null,\"stop_details\":{\"type\":\"refusal\",\"category\":\"reasoning_extraction\",\"explanation\":\"This request was blocked as it seems to violate Anthropic's Terms of Service.\",\"fallback_credit_token\":null}},\"usage\":{\"input_tokens\":80,\"output_tokens\":0}}\n\n",
+        ));
+        yield Ok::<Bytes, Infallible>(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ));
+    };
+    Body::from_stream(stream)
+}
+
 pub fn transform_body() -> Body {
     let stream = async_stream::stream! {
         yield Ok::<Bytes, Infallible>(normal_sse_frame());

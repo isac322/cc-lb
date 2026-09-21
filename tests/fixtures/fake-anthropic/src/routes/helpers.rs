@@ -55,7 +55,9 @@ pub(crate) async fn mode_response(mode: FakeMode, retry_after: u64) -> Option<Re
         | FakeMode::TamperUnknownEvent
         | FakeMode::TruncateMidStream
         | FakeMode::SenpiTools
-        | FakeMode::OpenCodeTools => None,
+        | FakeMode::OpenCodeTools
+        | FakeMode::Refusal
+        | FakeMode::ContextWindowExceeded => None,
     }
 }
 

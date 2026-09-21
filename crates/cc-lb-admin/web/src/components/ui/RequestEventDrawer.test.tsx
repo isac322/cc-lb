@@ -86,7 +86,7 @@ describe('RequestEventDrawer', () => {
     expect(screen.queryByText('In progress')).toBeNull();
 
     // Terminal sections should appear
-    expect(screen.getByText('upstream_timeout')).toBeDefined();
+    expect(screen.getAllByText('upstream_timeout').length).toBeGreaterThan(0);
     expect(screen.getAllByText('150 ms').length).toBeGreaterThan(0);
   });
 
@@ -631,10 +631,12 @@ describe('RequestEventDrawer', () => {
     );
     expect(upstreamSpan.className).toContain('break-all');
 
-    const errorSpan = screen.getByText(
-      'very_long_error_code_that_should_wrap_properly',
-    );
-    expect(errorSpan.className).toContain('break-all');
+    // A 2xx row carrying an error_code now also renders the abnormal-outcome
+    // badge, so scope to the monospaced KvRow value this test is about.
+    const errorSpan = screen
+      .getAllByText('very_long_error_code_that_should_wrap_properly')
+      .find((el) => el.className.includes('font-mono'));
+    expect(errorSpan?.className).toContain('break-all');
 
     const requestIdSpan = screen.getByText(
       'req_long_id_that_should_wrap_properly_in_narrow_viewports',

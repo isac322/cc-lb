@@ -219,6 +219,9 @@ pub(crate) mod error_codes {
     pub(crate) const ROUTER_PIPELINE_UNAVAILABLE: &str = "router_pipeline_unavailable";
     pub(crate) const ROUTE_NO_UPSTREAM_AFTER_FILTER: &str = "route_no_upstream_after_filter";
     pub(crate) const ROUTE_NOT_CONFIGURED: &str = "route_not_configured";
+    pub(crate) const ROUTE_NOT_FOUND: &str = "route_not_found";
+    pub(crate) const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
+    pub(crate) const DRAIN_REJECTED: &str = "drain_rejected";
     pub(crate) const UPSTREAM_AFFINITY_UNAVAILABLE: &str = "upstream_affinity_unavailable";
     pub(crate) const LIMIT_REJECTED: &str = "limit_rejected";
     pub(crate) const SIGNER_FAILED: &str = "signer_failed";
@@ -226,6 +229,8 @@ pub(crate) mod error_codes {
     pub(crate) const UPSTREAM_4XX: &str = "upstream_4xx";
     pub(crate) const UPSTREAM_5XX: &str = "upstream_5xx";
     pub(crate) const UPSTREAM_STREAM_ERROR: &str = "upstream_stream_error";
+    pub(crate) const UPSTREAM_REFUSAL: &str = "upstream_refusal";
+    pub(crate) const UPSTREAM_CONTEXT_WINDOW_EXCEEDED: &str = "upstream_context_window_exceeded";
     pub(crate) const TOWER_TIMEOUT: &str = "tower_timeout";
     pub(crate) const TERMINAL_DROPPED: &str = "terminal_dropped";
     pub(crate) const CLIENT_CLOSED_REQUEST: &str = "client_closed_request";
@@ -456,6 +461,40 @@ impl LifecycleContext {
     pub fn record_body_read_failure(&self) {
         self.emit_request_started(false);
         self.set_terminal(StatusCode::BAD_REQUEST, error_codes::BODY_READ_FAILED);
+        self.finish();
+    }
+
+    /// Record a request that reached the proxy listener on a path with no
+    /// registered route, so unrouted traffic still lands in the request log.
+    pub fn record_route_not_found(&self) {
+        self.emit_request_started(false);
+        self.set_terminal(StatusCode::NOT_FOUND, error_codes::ROUTE_NOT_FOUND);
+        self.finish();
+    }
+
+    /// Record a request whose HTTP method is not permitted on an otherwise
+    /// registered proxy path.
+    pub fn record_method_not_allowed(&self) {
+        self.emit_request_started(false);
+        self.set_terminal(
+            StatusCode::METHOD_NOT_ALLOWED,
+            error_codes::METHOD_NOT_ALLOWED,
+        );
+        self.finish();
+    }
+
+    /// Record a request rejected because the instance is draining for shutdown.
+    pub fn record_drain_rejection(&self) {
+        self.emit_request_started(false);
+        self.set_terminal(StatusCode::SERVICE_UNAVAILABLE, error_codes::DRAIN_REJECTED);
+        self.finish();
+    }
+
+    /// Record a request answered locally by the server (no upstream dispatch),
+    /// finalizing with the actual response status and no error code.
+    pub fn record_local_response(&self, status: StatusCode) {
+        self.emit_request_started(false);
+        self.set_success_status(status);
         self.finish();
     }
 

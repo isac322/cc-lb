@@ -265,6 +265,22 @@ fn bounded_lossy_upstream_error_body(bytes: &[u8], truncated: bool) -> String {
     out
 }
 
+/// Render the request-log `upstream_error_message` for an abnormal upstream
+/// `stop_reason` (`refusal`, `model_context_window_exceeded`): `category=<..>;
+/// <explanation>` when `stop_details` is present, else the bare stop reason.
+/// Bounded with the same helper used for upstream error bodies.
+fn abnormal_stop_error_message(stop: &usage_parser::AbnormalStop) -> String {
+    let message = match (&stop.category, &stop.explanation) {
+        (Some(category), Some(explanation)) => {
+            format!("category={category}; {explanation}")
+        }
+        (Some(category), None) => format!("category={category}"),
+        (None, Some(explanation)) => explanation.clone(),
+        (None, None) => stop.stop_reason.clone(),
+    };
+    bounded_lossy_upstream_error_body(message.as_bytes(), false)
+}
+
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3522,6 +3538,9 @@ impl Lifecycle {
             .map_or_else(usage_parser::NonStreamObservation::default, |value| {
                 usage_parser::observe_non_stream_json_value(value)
             });
+        let abnormal_stop = response_body_json
+            .as_ref()
+            .and_then(usage_parser::detect_abnormal_stop_non_stream);
         let usage = observation.usage;
         let canonical_upstream_error = if status.is_client_error() || status.is_server_error() {
             observation.canonical_error
@@ -3755,6 +3774,19 @@ impl Lifecycle {
                 );
             } else if buffered_transform_error.is_some() {
                 o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+            } else if let Some(stop) = abnormal_stop.as_ref() {
+                o.emit_lifecycle(
+                    cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                        event_id: o.event_id().to_owned(),
+                        error_type: stop.stop_reason.clone(),
+                        error_message: abnormal_stop_error_message(stop),
+                    },
+                );
+                let code = match stop.stop_reason.as_str() {
+                    "refusal" => error_codes::UPSTREAM_REFUSAL,
+                    _ => error_codes::UPSTREAM_CONTEXT_WINDOW_EXCEEDED,
+                };
+                o.set_terminal(status, code);
             } else {
                 o.set_success_status(client_status);
             }
@@ -4166,6 +4198,7 @@ impl Lifecycle {
             let mut stream_upstream_error_frame_emitted = false;
             let mut downstream_sse_boundary = SseDownstreamBoundaryTracker::default();
             let mut stream_provider_error_seen = false;
+            let mut stream_abnormal_stop: Option<usage_parser::AbnormalStop> = None;
             let mut last_partial_at: Option<Instant> = None;
             let mut last_partial_output_tokens: u64 = 0;
             let mut upstream_error_body: Vec<u8> = Vec::new();
@@ -4408,6 +4441,21 @@ impl Lifecycle {
                                             );
                                         }
                                     }
+                                }
+                                if stream_abnormal_stop.is_none()
+                                    && let Some(stop) =
+                                        usage_parser::detect_abnormal_stop(&parsed_event)
+                                {
+                                    if let Some(o) = observer.as_ref() {
+                                        o.emit_lifecycle(
+                                            cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                                                event_id: o.event_id().to_owned(),
+                                                error_type: stop.stop_reason.clone(),
+                                                error_message: abnormal_stop_error_message(&stop),
+                                            },
+                                        );
+                                    }
+                                    stream_abnormal_stop = Some(stop);
                                 }
                                 sse_event_count = sse_event_count.saturating_add(1);
                                 let event_name = parsed_event.event_name();
@@ -5121,6 +5169,21 @@ impl Lifecycle {
                                     }
                                 }
                             }
+                            if stream_abnormal_stop.is_none()
+                                && let Some(stop) =
+                                    usage_parser::detect_abnormal_stop(&parsed_event)
+                            {
+                                if let Some(o) = observer.as_ref() {
+                                    o.emit_lifecycle(
+                                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                                            event_id: o.event_id().to_owned(),
+                                            error_type: stop.stop_reason.clone(),
+                                            error_message: abnormal_stop_error_message(&stop),
+                                        },
+                                    );
+                                }
+                                stream_abnormal_stop = Some(stop);
+                            }
                             sse_event_count = sse_event_count.saturating_add(1);
                             if success_sse_affinity_gate {
                                 let outgoing = if sse_transform_active {
@@ -5627,6 +5690,12 @@ impl Lifecycle {
                     o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
                 } else if stream_transform_error.is_some() && !upstream_error_status {
                     o.set_terminal(StatusCode::OK, error_codes::UPSTREAM_STREAM_ERROR);
+                } else if stream_abnormal_stop.is_some() && !upstream_error_status {
+                    let code = match stream_abnormal_stop.as_ref().map(|stop| stop.stop_reason.as_str()) {
+                        Some("refusal") => error_codes::UPSTREAM_REFUSAL,
+                        _ => error_codes::UPSTREAM_CONTEXT_WINDOW_EXCEEDED,
+                    };
+                    o.set_terminal(status, code);
                 } else if !upstream_error_status {
                     o.set_success_status(status);
                 }

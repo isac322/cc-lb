@@ -33,6 +33,12 @@ const FINALIZATION_GRACE: Duration = Duration::from_millis(200);
 /// waiting for the next tick.
 const FINALIZATION_TICK: Duration = Duration::from_millis(20);
 const PARTIAL_USAGE_THROTTLE: Duration = Duration::from_millis(250);
+/// Backoff between durable row-insert attempts. The insert is idempotent
+/// (`ON CONFLICT(event_id) DO NOTHING` in the storage adapter), so retrying a
+/// transient failure cannot duplicate the row. Total attempts =
+/// `STORAGE_WRITE_BACKOFF.len() + 1`.
+const STORAGE_WRITE_BACKOFF: [Duration; 2] =
+    [Duration::from_millis(50), Duration::from_millis(200)];
 #[derive(Default)]
 struct ParseIdentity {
     thread_id: Option<String>,
@@ -622,28 +628,42 @@ async fn write_finalized_rows(
     is_orphan: bool,
 ) {
     let row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
-    match storage.append_request_event(&row).await {
-        Ok(cursor) => {
-            if let Some(bus) = bus {
-                bus.publish(RequestEventUpdate::final_(row, cursor));
+    let mut attempts: u32 = 0;
+    let cursor = loop {
+        attempts += 1;
+        match storage.append_request_event(&row).await {
+            Ok(cursor) => break cursor,
+            Err(error) => {
+                if let Some(backoff) = STORAGE_WRITE_BACKOFF.get(attempts as usize - 1) {
+                    tracing::warn!(
+                        %error,
+                        lifecycle_event_id = %event_id,
+                        attempts,
+                        "lifecycle event assembler: row insert failed; retrying",
+                    );
+                    tokio::time::sleep(*backoff).await;
+                } else {
+                    tracing::error!(
+                        %error,
+                        lifecycle_event_id = %event_id,
+                        attempts,
+                        "lifecycle event assembler: failed to persist row after retries; request row lost",
+                    );
+                    metrics_hook.record_dropped_events_by("lifecycle_assembler_storage_error", 1);
+                    return;
+                }
             }
-            let outcome = if is_orphan {
-                "written_orphan"
-            } else {
-                "written"
-            };
-            metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome)
-                .increment(1);
         }
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                lifecycle_event_id = %event_id,
-                "lifecycle event assembler: failed to persist row",
-            );
-            metrics_hook.record_dropped_events_by("lifecycle_assembler_storage_error", 1);
-        }
+    };
+    if let Some(bus) = bus {
+        bus.publish(RequestEventUpdate::final_(row, cursor));
     }
+    let outcome = if is_orphan {
+        "written_orphan"
+    } else {
+        "written"
+    };
+    metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome).increment(1);
 }
 
 async fn flush_expired_terminations(
@@ -933,7 +953,7 @@ async fn handle_event(
     }
 
     if partials.len() > map_cap {
-        drop_oldest(partials);
+        evict_oldest(storage, bus, metrics, partials).await;
     }
 }
 
@@ -1392,7 +1412,16 @@ async fn flush_expired_orphans(
     }
 }
 
-fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
+/// Evict the oldest partial when the map exceeds `map_cap`. The evicted
+/// partial is still persisted as an orphan row (same shape as the orphan
+/// sweeper) so the accepted request keeps a request-log row instead of
+/// silently disappearing.
+async fn evict_oldest(
+    storage: &dyn RequestEventStore,
+    bus: Option<&dyn RequestEventBus>,
+    metrics: &dyn EngineMetricsHook,
+    partials: &mut HashMap<EventId, Partial>,
+) {
     let Some((oldest_key, _)) = partials
         .iter()
         .min_by_key(|(_, p)| p.inserted_at.unwrap_or_else(Instant::now))
@@ -1400,12 +1429,30 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     else {
         return;
     };
-    partials.remove(&oldest_key);
+    let Some(partial) = partials.remove(&oldest_key) else {
+        return;
+    };
     metrics::counter!(
         "cc_lb_lifecycle_assembler_rows_total",
         "outcome" => "cap_evicted"
     )
     .increment(1);
+    tracing::warn!(
+        lifecycle_event_id = %oldest_key,
+        "lifecycle event assembler: map capacity exceeded; persisting evicted partial as orphan row",
+    );
+    write_finalized_rows(
+        storage,
+        bus,
+        metrics,
+        &oldest_key,
+        &partial,
+        &TerminationReason::Dropped,
+        499,
+        0,
+        true,
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -1422,7 +1469,7 @@ mod tests {
     };
     use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
     use cc_lb_request_log::{CostBreakdown, HeaderSnapshot};
-    use cc_lb_storage_api::{RequestEvent, StorageResult};
+    use cc_lb_storage_api::{RequestEvent, StorageError, StorageResult};
     use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};
     use proptest::prelude::*;
     use std::collections::HashMap as StdHashMap;
@@ -1434,11 +1481,25 @@ mod tests {
     struct CapturingStore {
         rows: StdMutex<Vec<RequestEvent>>,
         cursor: AtomicU64,
+        /// Number of `append_request_event` calls that fail before
+        /// succeeding; exercises the retry path in `write_finalized_rows`.
+        fail_next: AtomicU64,
+        attempts: AtomicU64,
     }
 
     #[async_trait]
     impl RequestEventStore for CapturingStore {
         async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<u64> {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            if self
+                .fail_next
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(StorageError::Unavailable {
+                    message: "injected transient failure".to_owned(),
+                });
+            }
             self.rows.lock().unwrap().push(event.clone());
             Ok(self.cursor.fetch_add(1, Ordering::Relaxed) + 1)
         }
@@ -2598,6 +2659,102 @@ mod tests {
         // Renewal precedence: source_kind = "renewal" wins even though the
         // producer did not classify the replayed /v1/messages path.
         assert_eq!(rows[0].event_kind, Some(RequestEventKind::Renewal));
+        assert_eq!(rows[0].status, 499);
+        assert_eq!(
+            rows[0].error_code.as_deref(),
+            Some("terminal_without_partial")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn transient_storage_error_retries_and_persists_single_row() {
+        let store = CapturingStore::default();
+        store.fail_next.store(1, Ordering::Relaxed);
+        let metrics = noop_metrics();
+        let event_id = eid("retry-transient-storage-error");
+        let mut partial = Partial::new(Instant::now(), event_id.clone());
+        partial.request_id = Some("req-retry-transient-storage-error".to_owned());
+
+        write_finalized_rows(
+            &store,
+            None,
+            metrics.as_ref(),
+            &event_id,
+            &partial,
+            &TerminationReason::Success,
+            200,
+            12,
+            false,
+        )
+        .await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id.as_deref(), Some(event_id.as_str()));
+        drop(rows);
+        assert_eq!(store.attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn map_cap_eviction_persists_evicted_partial_as_orphan_row() {
+        let store = CapturingStore::default();
+        let metrics = noop_metrics();
+        let mut partials = HashMap::new();
+        let map_cap = 1;
+
+        let oldest_id = eid("cap-evicted-oldest");
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut partials,
+            map_cap,
+            LifecycleEvent::RequestStarted {
+                event_id: oldest_id.clone(),
+                request_id: "req-cap-evicted-oldest".to_owned(),
+                ts_ms: 1_730_000_000_000,
+                stream: false,
+                source_kind: None,
+                source_ref_id: None,
+                event_kind: None,
+            },
+        )
+        .await;
+        // Make eviction deterministic: `Instant` resolution can tie two
+        // back-to-back inserts, so age the oldest partial explicitly.
+        partials
+            .get_mut(&oldest_id)
+            .expect("oldest partial is present")
+            .inserted_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("monotonic clock has advanced past 1 second"),
+        );
+
+        let newest_id = eid("cap-evicted-newest");
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut partials,
+            map_cap,
+            LifecycleEvent::RequestStarted {
+                event_id: newest_id.clone(),
+                request_id: "req-cap-evicted-newest".to_owned(),
+                ts_ms: 1_730_000_000_001,
+                stream: false,
+                source_kind: None,
+                source_ref_id: None,
+                event_kind: None,
+            },
+        )
+        .await;
+
+        assert!(!partials.contains_key(&oldest_id));
+        assert!(partials.contains_key(&newest_id));
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id.as_deref(), Some(oldest_id.as_str()));
         assert_eq!(rows[0].status, 499);
         assert_eq!(
             rows[0].error_code.as_deref(),

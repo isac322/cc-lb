@@ -84,6 +84,22 @@ pub(crate) async fn messages(
     if wants_stream(&headers, &body_json) {
         return streaming_response(model, mode, state.config.slow_mode_bps, weather);
     }
+    if let Some((stop_reason, stop_details)) = crate::sse::abnormal_stop(mode) {
+        return json_response(
+            StatusCode::OK,
+            json!({
+                "id": "msg_fake_000000000000000000000000",
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "stop_reason": stop_reason,
+                "stop_sequence": null,
+                "stop_details": stop_details,
+                "usage": {"input_tokens": 100, "output_tokens": 0}
+            }),
+        );
+    }
 
     let response_body = json!({
         "id": "msg_fake_000000000000000000000000",

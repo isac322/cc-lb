@@ -109,11 +109,24 @@ describe('getRequestOutcome', () => {
       label: 'upstream_stream_error',
     });
   });
-  it('does not classify unrelated 2xx terminal metadata as an upstream error', () => {
+  it('returns semantic_error for a 2xx upstream refusal', () => {
+    expect(
+      getRequestOutcome(false, 200, 'upstream_refusal', 'refusal'),
+    ).toEqual({
+      type: 'semantic_error',
+      status: 200,
+      error_code: 'upstream_refusal',
+      upstream_error_type: 'refusal',
+      label: 'refusal',
+    });
+  });
+  it('returns semantic_error for any 2xx row carrying a terminal error code', () => {
     expect(getRequestOutcome(false, 200, 'terminal_without_partial')).toEqual({
-      type: 'completed',
+      type: 'semantic_error',
       status: 200,
       error_code: 'terminal_without_partial',
+      upstream_error_type: undefined,
+      label: 'terminal_without_partial',
     });
   });
   it('keeps an HTTP error numeric even when structured upstream details exist', () => {
