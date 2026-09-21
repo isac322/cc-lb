@@ -23,6 +23,7 @@ use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
+use mock_anthropic_oauth_server::{AppState as MockOAuthState, ExpiresInRejection, RejectionShape};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
@@ -38,11 +39,58 @@ struct Fixture {
     storage: Arc<Storage>,
     aead: Arc<AeadService>,
     clock: ClockHandle,
+    /// Mock OAuth server state; records the requests the flow issued.
+    oauth_state: MockOAuthState,
 }
 
 impl Fixture {
     async fn new() -> Self {
-        let oauth_addr = spawn_fake_anthropic().await;
+        Self::with_oauth_state(MockOAuthState::default()).await
+    }
+
+    async fn with_oauth_state(oauth_state: MockOAuthState) -> Self {
+        let (oauth_addr, oauth_state) = spawn_mock_anthropic(oauth_state).await;
+        Self::build(oauth_addr, oauth_state, None).await
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn new_with_scheduler() -> (Self, cc_lb_scheduler::admin::SchedulerAdminHandle) {
+        Self::with_oauth_state_and_scheduler(MockOAuthState::default()).await
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn with_oauth_state_and_scheduler(
+        oauth_state: MockOAuthState,
+    ) -> (Self, cc_lb_scheduler::admin::SchedulerAdminHandle) {
+        let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("scheduler sqlite opens");
+        apalis_sqlite::SqliteStorage::setup(&pool)
+            .await
+            .expect("apalis sqlite schema initializes");
+        cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
+            .await
+            .expect("scheduler migrations initialize");
+        let scheduler = cc_lb_scheduler::admin::SchedulerAdminHandle::new(
+            cc_lb_scheduler::worker::SchedulerBackend::Sqlite(
+                cc_lb_scheduler::worker::SqliteSchedulerBackend::new(
+                    pool,
+                    Arc::new(cc_lb_clock::SystemClock),
+                ),
+            ),
+        );
+        let (oauth_addr, oauth_state) = spawn_mock_anthropic(oauth_state).await;
+        let fixture = Self::build(oauth_addr, oauth_state, Some(scheduler.clone())).await;
+        (fixture, scheduler)
+    }
+
+    async fn build(
+        oauth_addr: SocketAddr,
+        oauth_state: MockOAuthState,
+        scheduler: Option<cc_lb_scheduler::admin::SchedulerAdminHandle>,
+    ) -> Self {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let test_clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
         let clock: ClockHandle = test_clock.clone();
@@ -70,7 +118,7 @@ impl Fixture {
             dynamic_view: admin_test_common::dynamic_view_holder(&config),
             dynamic_view_rebinder: None,
             config: Arc::new(config),
-            scheduler: None,
+            scheduler,
             admin_auth: crate::admin_test_common::static_token_auth("test-token"),
             start_time: std::time::Instant::now(),
             event_bus: None,
@@ -84,6 +132,7 @@ impl Fixture {
             storage,
             aead,
             clock,
+            oauth_state,
         }
     }
 
@@ -115,8 +164,11 @@ impl Fixture {
     }
 
     async fn start_draft(&self) -> (StatusCode, Value) {
-        self.post_json("/admin/v1/oauth/draft/start", json!({}))
-            .await
+        self.start_draft_with(json!({})).await
+    }
+
+    async fn start_draft_with(&self, body: Value) -> (StatusCode, Value) {
+        self.post_json("/admin/v1/oauth/draft/start", body).await
     }
 
     async fn complete_draft(&self, state_token: &str, code: &str) -> (StatusCode, Value) {
@@ -205,23 +257,49 @@ impl Fixture {
         upstream: &cc_lb_storage_api::UpstreamRecord,
     ) -> cc_lb_storage_api::UpstreamRecord {
         let expired_at = now_unix_secs(self.clock.as_ref()).saturating_sub(3600);
-        let bundle = OAuthTokenBundle {
-            access_token: "sk-ant-oat01-expired-seed".to_owned(),
-            refresh_token: "sk-ant-ort01-expired-seed".to_owned(),
-            expires_at_unix_secs: expired_at,
-            refresh_token_expires_at_unix_secs: None,
-            scopes: vec!["org:profile".to_owned()],
-        };
+        self.store_bundle(
+            upstream,
+            OAuthTokenBundle {
+                access_token: "sk-ant-oat01-expired-seed".to_owned(),
+                refresh_token: "sk-ant-ort01-expired-seed".to_owned(),
+                expires_at_unix_secs: expired_at,
+                refresh_token_expires_at_unix_secs: None,
+                scopes: vec!["org:profile".to_owned()],
+                never_refresh: false,
+            },
+        )
+        .await
+    }
+
+    async fn store_bundle(
+        &self,
+        upstream: &cc_lb_storage_api::UpstreamRecord,
+        bundle: OAuthTokenBundle,
+    ) -> cc_lb_storage_api::UpstreamRecord {
         let encrypted = AeadEncryptedField::<OAuthTokenBundle>::encrypt(
             self.aead.as_ref(),
             &bundle,
             upstream.id.as_bytes(),
         )
-        .expect("encrypt expired bundle");
+        .expect("encrypt bundle");
         self.storage
             .store_oauth_tokens(upstream.id, upstream.revision, encrypted)
             .await
-            .expect("seed expired tokens")
+            .expect("store oauth tokens")
+    }
+
+    async fn decrypt_bundle(&self, upstream_id: Uuid) -> OAuthTokenBundle {
+        let stored = self
+            .storage
+            .get_by_id(upstream_id)
+            .await
+            .expect("get upstream")
+            .expect("stored upstream");
+        stored
+            .oauth_credentials
+            .expect("oauth credentials")
+            .decrypt(&self.aead, upstream_id.as_bytes())
+            .expect("decrypt tokens")
     }
 
     async fn audit_entries(&self, needle: &str) -> Vec<AuditEntry> {
@@ -698,6 +776,334 @@ async fn oauth_status_flips_from_expired_to_active_after_reconnect() {
     );
 }
 
+/// Drives draft/start → draft/complete → upstreams/from-oauth-draft and returns
+/// the draft-complete body plus the upstream id of the created upstream.
+async fn run_draft_flow(fixture: &Fixture, start_body: Value) -> (Value, Uuid) {
+    let (status, start) = fixture.start_draft_with(start_body).await;
+    assert_eq!(status, StatusCode::OK);
+    let state_token = start["state_token"].as_str().expect("state token");
+    let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
+
+    let (status, complete) = fixture.complete_draft(state_token, &code).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let name = format!("oauth-draft-{}", Uuid::new_v4().simple());
+    let (status, created) = fixture.create_from_draft(state_token, &name).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let upstream_id = created["id"]
+        .as_str()
+        .expect("created upstream id")
+        .parse()
+        .expect("upstream id parses");
+    (complete, upstream_id)
+}
+
+#[tokio::test]
+async fn long_lived_is_default_and_stored_as_non_refreshable() {
+    let fixture = Fixture::new().await;
+
+    let (complete, upstream_id) = run_draft_flow(&fixture, json!({})).await;
+
+    assert_eq!(complete["mode"], "long_lived_365d");
+    assert_eq!(complete["long_lived_fallback"], false);
+    assert!(complete["fallback_reason"].is_null());
+    assert_eq!(
+        complete["granted_expires_in_secs"],
+        cc_lb_config::LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS
+    );
+    let bundle = fixture.decrypt_bundle(upstream_id).await;
+    assert!(bundle.never_refresh);
+    assert!(
+        !bundle.refresh_token.is_empty(),
+        "long-lived credentials still store the granted refresh token"
+    );
+    assert_eq!(
+        bundle.expires_at_unix_secs,
+        TEST_NOW_UNIX_SECS + cc_lb_config::LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS,
+    );
+}
+
+#[tokio::test]
+async fn refreshing_mode_stores_refreshable_bundle_with_mock_expiry() {
+    let fixture = Fixture::new().await;
+
+    let (complete, upstream_id) = run_draft_flow(&fixture, json!({ "mode": "refreshing" })).await;
+
+    assert_eq!(complete["mode"], "refreshing");
+    assert_eq!(complete["long_lived_fallback"], false);
+    assert!(complete["fallback_reason"].is_null());
+    assert!(complete["granted_expires_in_secs"].is_null());
+    let bundle = fixture.decrypt_bundle(upstream_id).await;
+    assert!(!bundle.never_refresh);
+    assert!(!bundle.refresh_token.is_empty());
+    // The mock grants its default 3600s lifetime when no expires_in is sent.
+    assert_eq!(bundle.expires_at_unix_secs, TEST_NOW_UNIX_SECS + 3600);
+}
+
+async fn run_rejected_long_lived_draft(
+    shape: RejectionShape,
+) -> (Value, OAuthTokenBundle, Vec<Option<u64>>) {
+    let oauth_state = MockOAuthState::default()
+        .with_expires_in_rejection(ExpiresInRejection::AnyExpiresIn, shape);
+    let fixture = Fixture::with_oauth_state(oauth_state).await;
+
+    let (complete, upstream_id) = run_draft_flow(&fixture, json!({})).await;
+    let bundle = fixture.decrypt_bundle(upstream_id).await;
+    let requested_expires_in = fixture.oauth_state.requested_expires_in();
+    (complete, bundle, requested_expires_in)
+}
+
+#[tokio::test]
+async fn long_lived_exchange_falls_back_on_invalid_expiry_for_scope() {
+    let (complete, bundle, requested_expires_in) =
+        run_rejected_long_lived_draft(RejectionShape::InvalidExpiryForScope).await;
+
+    assert_eq!(complete["mode"], "refreshing");
+    assert_eq!(complete["long_lived_fallback"], true);
+    assert_eq!(complete["fallback_reason"], "rejected");
+    assert_eq!(complete["granted_expires_in_secs"], 3600);
+    assert_eq!(
+        requested_expires_in.as_slice(),
+        &[
+            Some(cc_lb_config::LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS),
+            None
+        ],
+        "the rejected exchange must be retried without expires_in"
+    );
+    // The same authorization code was re-exchanged without expires_in: the mock
+    // only issues a token when the retry succeeds.
+    assert!(!bundle.never_refresh);
+    assert!(bundle.access_token.starts_with("sk-ant-oat01-"));
+    assert_eq!(bundle.expires_at_unix_secs, TEST_NOW_UNIX_SECS + 3600);
+}
+
+#[tokio::test]
+async fn long_lived_exchange_falls_back_on_custom_expires_in_not_allowed() {
+    let (complete, bundle, requested_expires_in) = run_rejected_long_lived_draft(
+        RejectionShape::CustomExpiresInNotAllowed("user:mcp_servers".to_owned()),
+    )
+    .await;
+
+    assert_eq!(complete["mode"], "refreshing");
+    assert_eq!(complete["long_lived_fallback"], true);
+    assert_eq!(complete["fallback_reason"], "rejected");
+    assert_eq!(complete["granted_expires_in_secs"], 3600);
+    assert_eq!(
+        requested_expires_in.as_slice(),
+        &[
+            Some(cc_lb_config::LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS),
+            None
+        ],
+        "the rejected exchange must be retried without expires_in"
+    );
+    assert!(!bundle.never_refresh);
+    assert!(bundle.access_token.starts_with("sk-ant-oat01-"));
+}
+
+#[tokio::test]
+async fn long_lived_grant_clamped_below_floor_demotes_to_refreshing() {
+    const CLAMPED_EXPIRES_IN: u64 = 28_800;
+    let fixture = Fixture::with_oauth_state(
+        MockOAuthState::default().with_expires_in_cap(CLAMPED_EXPIRES_IN),
+    )
+    .await;
+
+    let (complete, upstream_id) = run_draft_flow(&fixture, json!({})).await;
+
+    assert_eq!(complete["mode"], "refreshing");
+    assert_eq!(complete["long_lived_fallback"], true);
+    assert_eq!(complete["fallback_reason"], "clamped");
+    assert_eq!(complete["granted_expires_in_secs"], CLAMPED_EXPIRES_IN);
+    let bundle = fixture.decrypt_bundle(upstream_id).await;
+    assert!(!bundle.never_refresh);
+    assert!(
+        !bundle.refresh_token.is_empty(),
+        "a demoted credential must keep the refresh token as its renewal path"
+    );
+    assert_eq!(
+        bundle.expires_at_unix_secs,
+        TEST_NOW_UNIX_SECS + CLAMPED_EXPIRES_IN,
+        "stored expiry must reflect the granted expires_in, not the requested 365 days"
+    );
+    assert_eq!(
+        fixture.oauth_state.requested_expires_in().as_slice(),
+        &[Some(cc_lb_config::LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS)],
+        "the long-lived exchange must request the 365-day lifetime"
+    );
+}
+
+#[tokio::test]
+async fn long_lived_grant_at_floor_demotes_to_refreshing() {
+    let fixture = Fixture::with_oauth_state(
+        MockOAuthState::default().with_expires_in_cap(cc_lb_config::LONG_LIVED_MIN_GRANT_SECS),
+    )
+    .await;
+
+    let (complete, upstream_id) = run_draft_flow(&fixture, json!({})).await;
+
+    assert_eq!(complete["mode"], "refreshing");
+    assert_eq!(complete["long_lived_fallback"], true);
+    assert_eq!(complete["fallback_reason"], "clamped");
+    assert_eq!(
+        complete["granted_expires_in_secs"],
+        cc_lb_config::LONG_LIVED_MIN_GRANT_SECS
+    );
+    let bundle = fixture.decrypt_bundle(upstream_id).await;
+    assert!(!bundle.never_refresh);
+    assert!(!bundle.refresh_token.is_empty());
+    assert_eq!(
+        bundle.expires_at_unix_secs,
+        TEST_NOW_UNIX_SECS + cc_lb_config::LONG_LIVED_MIN_GRANT_SECS,
+        "a grant at the floor is too short to give up renewal"
+    );
+}
+
+#[tokio::test]
+async fn long_lived_grant_above_floor_stays_long_lived() {
+    const GRANTED_EXPIRES_IN: u64 = cc_lb_config::LONG_LIVED_MIN_GRANT_SECS + 1;
+    let fixture = Fixture::with_oauth_state(
+        MockOAuthState::default().with_expires_in_cap(GRANTED_EXPIRES_IN),
+    )
+    .await;
+
+    let (complete, upstream_id) = run_draft_flow(&fixture, json!({})).await;
+
+    assert_eq!(complete["mode"], "long_lived_365d");
+    assert_eq!(complete["long_lived_fallback"], false);
+    assert!(complete["fallback_reason"].is_null());
+    assert_eq!(complete["granted_expires_in_secs"], GRANTED_EXPIRES_IN);
+    let bundle = fixture.decrypt_bundle(upstream_id).await;
+    assert!(bundle.never_refresh);
+    assert_eq!(
+        bundle.expires_at_unix_secs,
+        TEST_NOW_UNIX_SECS + GRANTED_EXPIRES_IN,
+        "stored expiry must reflect the granted expires_in, not the requested 365 days"
+    );
+}
+
+#[tokio::test]
+async fn authorize_requests_mode_specific_scopes() {
+    let fixture = Fixture::new().await;
+
+    let (status, start) = fixture.start_draft().await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(start["mode"], "long_lived_365d");
+    authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
+
+    let (status, start) = fixture
+        .start_draft_with(json!({ "mode": "refreshing" }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(start["mode"], "refreshing");
+    authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
+
+    let scopes = fixture.oauth_state.requested_scopes();
+    assert_eq!(
+        scopes,
+        vec![
+            Some("user:profile user:inference".to_owned()),
+            Some("org:profile".to_owned()),
+        ],
+        "long-lived must request long_lived_scopes; refreshing must request oauth.scopes"
+    );
+}
+
+#[tokio::test]
+async fn oauth_status_reports_long_lived_mode_without_refresh() {
+    let fixture = Fixture::new().await;
+    let (_complete, upstream_id) = run_draft_flow(&fixture, json!({})).await;
+
+    let (status, body) = fixture.get_oauth_status(upstream_id).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["mode"], "long_lived_365d");
+    assert_eq!(body["can_refresh"], false);
+    assert_eq!(body["refresh_token_present"], true);
+    assert!(body["refresh_token_expires_at_unix_secs"].is_null());
+}
+
+#[tokio::test]
+async fn oauth_status_reports_refreshing_mode_and_refresh_token_expiry() {
+    let fixture = Fixture::new().await;
+    let upstream = fixture
+        .create_upstream("refreshing-status", UpstreamKind::AnthropicOauth)
+        .await;
+    let refresh_expires_at = now_unix_secs(fixture.clock.as_ref()) + 2_592_000;
+    fixture
+        .store_bundle(
+            &upstream,
+            OAuthTokenBundle {
+                access_token: "sk-ant-oat01-refreshing".to_owned(),
+                refresh_token: "sk-ant-ort01-refreshing".to_owned(),
+                expires_at_unix_secs: now_unix_secs(fixture.clock.as_ref()) + 3600,
+                refresh_token_expires_at_unix_secs: Some(refresh_expires_at),
+                scopes: vec!["org:profile".to_owned()],
+                never_refresh: false,
+            },
+        )
+        .await;
+
+    let (status, body) = fixture.get_oauth_status(upstream.id).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["mode"], "refreshing");
+    assert_eq!(body["can_refresh"], true);
+    assert_eq!(body["refresh_token_present"], true);
+    assert_eq!(
+        body["refresh_token_expires_at_unix_secs"],
+        refresh_expires_at
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn long_lived_upstream_seeds_no_oauth_refresh_task() {
+    let (fixture, scheduler) = Fixture::new_with_scheduler().await;
+
+    let (_complete, long_lived_id) = run_draft_flow(&fixture, json!({})).await;
+    let (_complete, refreshing_id) =
+        run_draft_flow(&fixture, json!({ "mode": "refreshing" })).await;
+
+    assert_eq!(
+        scheduler
+            .next_run_for_upstream(long_lived_id, "oauth_refresh")
+            .await
+            .expect("next run query succeeds"),
+        None,
+        "a long-lived credential must not seed an oauth refresh task"
+    );
+    assert_eq!(
+        scheduler
+            .next_run_for_upstream(refreshing_id, "oauth_refresh")
+            .await
+            .expect("next run query succeeds"),
+        Some(i64::try_from(TEST_NOW_UNIX_SECS).expect("test timestamp fits")),
+        "a refreshing credential must seed its bootstrap oauth refresh task"
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn clamped_upstream_seeds_oauth_refresh_task() {
+    let (fixture, scheduler) = Fixture::with_oauth_state_and_scheduler(
+        MockOAuthState::default().with_expires_in_cap(28_800),
+    )
+    .await;
+
+    let (complete, clamped_id) = run_draft_flow(&fixture, json!({})).await;
+
+    assert_eq!(complete["mode"], "refreshing");
+    assert_eq!(complete["fallback_reason"], "clamped");
+    assert_eq!(
+        scheduler
+            .next_run_for_upstream(clamped_id, "oauth_refresh")
+            .await
+            .expect("next run query succeeds"),
+        Some(i64::try_from(TEST_NOW_UNIX_SECS).expect("test timestamp fits")),
+        "a clamped credential is refreshing and must seed its bootstrap oauth refresh task"
+    );
+}
+
 fn test_config(oauth_addr: SocketAddr) -> Config {
     let mut config = Config::default();
     config.oauth.anthropic = Some(AnthropicOAuthConfig {
@@ -706,25 +1112,24 @@ fn test_config(oauth_addr: SocketAddr) -> Config {
         token_url: Url::parse(&format!("http://{oauth_addr}/oauth/token")).expect("token url"),
         redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect url"),
         scopes: vec!["org:profile".to_owned()],
+        long_lived_scopes: vec!["user:profile".to_owned(), "user:inference".to_owned()],
     });
     config
 }
 
-async fn spawn_fake_anthropic() -> SocketAddr {
+async fn spawn_mock_anthropic(state: MockOAuthState) -> (SocketAddr, MockOAuthState) {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind fixture");
     let addr = listener.local_addr().expect("local addr");
+    let app = mock_anthropic_oauth_server::app_with_state(state.clone());
     tokio::spawn(async move {
-        axum::serve(
-            listener,
-            fake_anthropic::app(fake_anthropic::AppConfig::default()),
-        )
-        .await
-        .expect("serve fake anthropic");
+        axum::serve(listener, app)
+            .await
+            .expect("serve mock anthropic oauth");
     });
-    addr
+    (addr, state)
 }
 
 async fn authorize_code(authorize_url: &str) -> String {

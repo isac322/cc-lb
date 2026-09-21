@@ -326,6 +326,17 @@
           "type": "string",
           "default": "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
         },
+        "long_lived_scopes": {
+          "description": "Scopes requested when connecting in long-lived (365-day) mode.",
+          "type": "array",
+          "default": [
+            "user:profile",
+            "user:inference"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
         "redirect_uri": {
           "type": "string",
           "format": "uri",

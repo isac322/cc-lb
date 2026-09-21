@@ -356,6 +356,7 @@ impl SignerFactory for AnthropicOAuthSignerFactory {
         Ok(Arc::new(PersistedAnthropicOAuthSigner {
             access_token: SecretString::new(tokens.access_token.into_boxed_str()),
             expires_at_unix_secs: tokens.expires_at_unix_secs,
+            never_refresh: tokens.never_refresh,
             store: self.store.clone(),
             aead: self.aead.clone(),
             clock: self.clock.clone(),
@@ -371,6 +372,7 @@ impl SignerFactory for AnthropicOAuthSignerFactory {
 struct PersistedAnthropicOAuthSigner {
     access_token: SecretString,
     expires_at_unix_secs: u64,
+    never_refresh: bool,
     store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
     clock: ClockHandle,
@@ -386,6 +388,7 @@ impl fmt::Debug for PersistedAnthropicOAuthSigner {
             .debug_struct("PersistedAnthropicOAuthSigner")
             .field("access_token", &"[REDACTED]")
             .field("expires_at_unix_secs", &self.expires_at_unix_secs)
+            .field("never_refresh", &self.never_refresh)
             .field("store", &"UpstreamStore")
             .field("aead", &"AeadService")
             .field("clock", &"Clock")
@@ -408,6 +411,16 @@ impl PersistedAnthropicOAuthSigner {
         let current = self.load_current_tokens().await?;
         if self.storage_has_newer_usable_token(&current) {
             return Ok(current);
+        }
+
+        if current.never_refresh {
+            // A long-lived credential was rejected by Anthropic. Rotating it here
+            // would destroy the 365-day grant and yield an 8-hour token at best,
+            // so surface a terminal error that asks the operator to reauthorize.
+            return Err(SignerError::ExpiredToken {
+                reason: "long-lived oauth access token rejected; reauthorization required"
+                    .to_owned(),
+            });
         }
 
         let refresh_handle =
@@ -455,6 +468,7 @@ impl PersistedAnthropicOAuthSigner {
         Self {
             access_token: SecretString::new(tokens.access_token.into_boxed_str()),
             expires_at_unix_secs: tokens.expires_at_unix_secs,
+            never_refresh: tokens.never_refresh,
             store: self.store.clone(),
             aead: self.aead.clone(),
             clock: self.clock.clone(),
@@ -466,6 +480,11 @@ impl PersistedAnthropicOAuthSigner {
     }
 
     fn maybe_trigger_soft_refresh(&self, now_unix_secs: u64) {
+        // Long-lived credentials must never schedule a background refresh:
+        // rotating one makes Anthropic revoke the 365-day grant.
+        if self.never_refresh {
+            return;
+        }
         if self
             .expires_at_unix_secs
             .saturating_sub(refresh::REFRESH_SOFT_BUFFER_SECS)
@@ -1324,6 +1343,7 @@ mod tests {
                 expires_at_unix_secs,
                 refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
+                never_refresh: false,
             },
             upstream_id.as_bytes(),
         )

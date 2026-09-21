@@ -260,7 +260,11 @@ function metadataData(target: Upstream, plan: string, accountEmail: string) {
   };
 }
 
-function oauthStatusData(target: Upstream, scope: string) {
+function oauthStatusData(
+  target: Upstream,
+  scope: string,
+  overrides: Record<string, unknown> = {},
+) {
   return {
     upstream_id: target.id,
     kind: target.kind,
@@ -269,7 +273,10 @@ function oauthStatusData(target: Upstream, scope: string) {
     expires_at_unix_secs: 2_000_000_000,
     refresh_token_present: true,
     refresh_token_expires_at_unix_secs: 2_100_000_000,
+    mode: 'refreshing',
+    can_refresh: true,
     scopes: [scope],
+    ...overrides,
   };
 }
 
@@ -638,6 +645,8 @@ describe('/upstreams cold-load geometry', () => {
         expires_at_unix_secs: 2_000_000_000,
         refresh_token_present: true,
         refresh_token_expires_at_unix_secs: 2_100_000_000,
+        mode: 'refreshing',
+        can_refresh: true,
         scopes: ['user:inference'],
       },
       isLoading: false,
@@ -1095,17 +1104,19 @@ describe('/upstreams mutation pending UX', () => {
     vi.spyOn(window, 'open').mockImplementation(() => null);
     const startDraft = vi.fn(
       (
-        _body: undefined,
+        _body: { mode?: string } | undefined,
         options?: {
           onSuccess?: (result: {
             authorize_url: string;
             state_token: string;
+            mode: string;
           }) => void;
         },
       ) => {
         options?.onSuccess?.({
           authorize_url: 'https://example.com/authorize',
           state_token: 'draft-state-token',
+          mode: 'long_lived_365d',
         });
       },
     );
@@ -1118,6 +1129,10 @@ describe('/upstreams mutation pending UX', () => {
             suggested_name: string;
             subscription_metadata: null;
             organization_metadata: null;
+            mode: string;
+            long_lived_fallback: boolean;
+            fallback_reason: 'rejected' | 'clamped' | null;
+            granted_expires_in_secs: number | null;
           }) => void;
         },
       ) => {
@@ -1126,6 +1141,10 @@ describe('/upstreams mutation pending UX', () => {
           suggested_name: 'OAuth Account',
           subscription_metadata: null,
           organization_metadata: null,
+          mode: 'long_lived_365d',
+          long_lived_fallback: false,
+          fallback_reason: null,
+          granted_expires_in_secs: null,
         });
       },
     );
@@ -1151,6 +1170,7 @@ describe('/upstreams mutation pending UX', () => {
 
     let dialog = screen.getByRole('dialog', { name: 'New upstream' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    expect(within(dialog).getByTestId('oauth-mode-choice')).toBeDefined();
     fireEvent.click(
       within(dialog).getByRole('button', {
         name: 'Authorize with Anthropic',
@@ -1167,6 +1187,10 @@ describe('/upstreams mutation pending UX', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
 
     expect(startDraft).toHaveBeenCalledTimes(1);
+    expect(startDraft).toHaveBeenCalledWith(
+      { mode: 'long_lived_365d' },
+      expect.anything(),
+    );
     expect(completeDraft).toHaveBeenCalledTimes(1);
     expect(createFromDraft).toHaveBeenCalledTimes(1);
     expect(createFromDraft).toHaveBeenCalledWith(
@@ -1261,6 +1285,9 @@ describe('/upstreams mutation pending UX', () => {
         status: 'missing',
         expires_at_unix_secs: null,
         refresh_token_present: false,
+        refresh_token_expires_at_unix_secs: null,
+        mode: null,
+        can_refresh: false,
         scopes: [],
       },
       isLoading: false,
@@ -1271,7 +1298,7 @@ describe('/upstreams mutation pending UX', () => {
     const complete = vi.fn();
     vi.mocked(queries.useOAuthStart).mockReturnValue({
       mutate: start,
-      isPending: true,
+      isPending: false,
       reset: vi.fn(),
     } as never);
     vi.mocked(queries.useOAuthComplete).mockReturnValue({
@@ -1281,34 +1308,6 @@ describe('/upstreams mutation pending UX', () => {
     } as never);
 
     const view = renderRoute();
-    const starting = screen.getByRole('button', { name: 'Starting...' });
-    expect(starting.hasAttribute('disabled')).toBe(true);
-    expect(starting.getAttribute('aria-busy')).toBe('true');
-    expect(starting.querySelector('svg.animate-spin')).not.toBeNull();
-
-    vi.mocked(queries.useOAuthStart).mockReturnValue({
-      mutate: vi.fn(
-        (
-          _id: string,
-          options?: {
-            onSuccess?: (result: {
-              authorize_url: string;
-              state_token: string;
-              revision: number;
-            }) => void;
-          },
-        ) => {
-          options?.onSuccess?.({
-            authorize_url: 'https://example.com/authorize',
-            state_token: 'oauth-state-token',
-            revision: 2,
-          });
-        },
-      ),
-      isPending: false,
-      reset: vi.fn(),
-    } as never);
-    view.rerender(routeElement());
 
     // The reconnect notice is the prominent entry point; the OAuth card keeps
     // its own Connect button, so scope the click to the notice's status role.
@@ -1320,9 +1319,69 @@ describe('/upstreams mutation pending UX', () => {
       within(reconnectNotice).getByRole('button', { name: 'Connect' }),
     );
 
+    // Connect only opens the modal on the mode choice; the start mutation
+    // fires from the Generate button, so its pending state lives there.
     let dialog = screen.getByRole('dialog', {
       name: 'OAuth Authorization',
     });
+    expect(within(dialog).getByTestId('oauth-mode-choice')).toBeDefined();
+    expect(start).not.toHaveBeenCalled();
+
+    vi.mocked(queries.useOAuthStart).mockReturnValue({
+      mutate: start,
+      isPending: true,
+      reset: vi.fn(),
+    } as never);
+    view.rerender(routeElement());
+
+    const starting = within(dialog).getByRole('button', {
+      name: 'Starting...',
+    });
+    expect(starting.hasAttribute('disabled')).toBe(true);
+    expect(starting.getAttribute('aria-busy')).toBe('true');
+    expect(starting.querySelector('svg.animate-spin')).not.toBeNull();
+    expect(start).not.toHaveBeenCalled();
+
+    const startResolved = vi.fn(
+      (
+        _vars: { id: string; mode?: string },
+        options?: {
+          onSuccess?: (result: {
+            authorize_url: string;
+            state_token: string;
+            revision: number;
+            mode: string;
+          }) => void;
+        },
+      ) => {
+        options?.onSuccess?.({
+          authorize_url: 'https://example.com/authorize',
+          state_token: 'oauth-state-token',
+          revision: 2,
+          mode: 'long_lived_365d',
+        });
+      },
+    );
+    vi.mocked(queries.useOAuthStart).mockReturnValue({
+      mutate: startResolved,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+    view.rerender(routeElement());
+    fireEvent.click(
+      within(dialog).getByRole('button', {
+        name: 'Generate authorization URL',
+      }),
+    );
+    expect(startResolved).toHaveBeenCalledTimes(1);
+    expect(startResolved).toHaveBeenCalledWith(
+      { id: upstream.id, mode: 'long_lived_365d' },
+      expect.anything(),
+    );
+    expect(
+      within(dialog).getByText('https://example.com/authorize'),
+    ).toBeDefined();
+
     fireEvent.change(within(dialog).getByPlaceholderText(/paste code/), {
       target: { value: 'oauth-code' },
     });
@@ -1436,6 +1495,8 @@ describe('/upstreams OAuth card', () => {
         expires_at_unix_secs: 2_000_000_000,
         refresh_token_present: true,
         refresh_token_expires_at_unix_secs: refreshTokenExpiresAt,
+        mode: 'refreshing',
+        can_refresh: true,
         scopes: ['user:inference'],
       },
       isLoading: false,
@@ -1511,5 +1572,260 @@ describe('/upstreams OAuth card', () => {
     view.rerender(routeElement());
 
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+describe('/upstreams long-lived OAuth credential', () => {
+  test('shows a stored-but-unused refresh token and no expiry for a long-lived credential', () => {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(
+        oauthStatusData(upstream, 'user:inference', {
+          mode: 'long_lived_365d',
+          can_refresh: false,
+          refresh_token_expires_at_unix_secs: null,
+        }),
+      ),
+    );
+
+    renderRoute();
+
+    expect(screen.queryByTestId('oauth-refresh-token-expiry')).toBeNull();
+    const refreshRow = screen.getByText('Refresh token')
+      .parentElement as HTMLElement;
+    expect(within(refreshRow).getByText('stored, unused')).toBeDefined();
+  });
+
+  test('keeps the healthy Long-lived badge when the stored refresh-token clock has lapsed', () => {
+    const now = Math.floor(Date.now() / 1000);
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(
+        oauthStatusData(upstream, 'user:inference', {
+          mode: 'long_lived_365d',
+          can_refresh: false,
+          expires_at_unix_secs: now + 330 * 24 * 60 * 60,
+          refresh_token_expires_at_unix_secs: now - 24 * 60 * 60,
+        }),
+      ),
+    );
+
+    renderRoute();
+
+    expect(screen.getByText('Long-lived')).toBeDefined();
+    expect(screen.queryByText('Login expired')).toBeNull();
+    expect(screen.queryByTestId('oauth-refresh-token-expiry')).toBeNull();
+  });
+
+  test('labels the credential mode for long-lived and refreshing credentials', () => {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(
+        oauthStatusData(upstream, 'user:inference', {
+          mode: 'long_lived_365d',
+          can_refresh: false,
+          refresh_token_expires_at_unix_secs: null,
+        }),
+      ),
+    );
+
+    renderRoute();
+    expect(
+      within(screen.getByTestId('oauth-credential-mode')).getByText(
+        '365-day token',
+      ),
+    ).toBeDefined();
+
+    cleanup();
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(oauthStatusData(upstream, 'user:inference')),
+    );
+
+    renderRoute();
+    expect(
+      within(screen.getByTestId('oauth-credential-mode')).getByText(
+        'Refreshing',
+      ),
+    ).toBeDefined();
+  });
+
+  test('shows the fallback notice only when the long-lived exchange fell back', () => {
+    vi.spyOn(window, 'open').mockImplementation(() => null);
+    let fallbackReason: 'rejected' | 'clamped' | null = null;
+    let grantedExpiresInSecs: number | null = null;
+    const startDraft = vi.fn(
+      (
+        _body: { mode?: string } | undefined,
+        options?: {
+          onSuccess?: (result: {
+            authorize_url: string;
+            state_token: string;
+            mode: string;
+          }) => void;
+        },
+      ) => {
+        options?.onSuccess?.({
+          authorize_url: 'https://example.com/authorize',
+          state_token: 'draft-state-token',
+          mode: 'long_lived_365d',
+        });
+      },
+    );
+    const completeDraft = vi.fn(
+      (
+        _body: unknown,
+        options?: {
+          onSuccess?: (result: {
+            state_token: string;
+            suggested_name: string;
+            subscription_metadata: null;
+            organization_metadata: null;
+            mode: string;
+            long_lived_fallback: boolean;
+            fallback_reason: 'rejected' | 'clamped' | null;
+            granted_expires_in_secs: number | null;
+          }) => void;
+        },
+      ) => {
+        options?.onSuccess?.({
+          state_token: 'draft-state-token',
+          suggested_name: 'OAuth Account',
+          subscription_metadata: null,
+          organization_metadata: null,
+          mode: fallbackReason ? 'refreshing' : 'long_lived_365d',
+          long_lived_fallback: fallbackReason !== null,
+          fallback_reason: fallbackReason,
+          granted_expires_in_secs: grantedExpiresInSecs,
+        });
+      },
+    );
+    vi.mocked(queries.useStartOauthDraft).mockReturnValue({
+      mutate: startDraft,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+    vi.mocked(queries.useCompleteOauthDraft).mockReturnValue({
+      mutate: completeDraft,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+
+    const completeHandshake = () => {
+      fireEvent.click(screen.getByRole('button', { name: 'New' }));
+      const dialog = screen.getByRole('dialog', { name: 'New upstream' });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+      fireEvent.click(
+        within(dialog).getByRole('button', {
+          name: 'Authorize with Anthropic',
+        }),
+      );
+      fireEvent.change(within(dialog).getByPlaceholderText('paste code...'), {
+        target: { value: 'oauth-code' },
+      });
+      fireEvent.click(
+        within(dialog).getByRole('button', {
+          name: 'Verify and fetch account',
+        }),
+      );
+      return dialog;
+    };
+
+    renderRoute();
+    let dialog = completeHandshake();
+    expect(within(dialog).getByText('Account Preview')).toBeDefined();
+    expect(
+      within(dialog).queryByTestId('oauth-long-lived-fallback-notice'),
+    ).toBeNull();
+
+    cleanup();
+    fallbackReason = 'rejected';
+    renderRoute();
+    dialog = completeHandshake();
+    expect(within(dialog).getByText('Account Preview')).toBeDefined();
+    let notice = within(dialog).getByTestId('oauth-long-lived-fallback-notice');
+    expect(notice.getAttribute('data-reason')).toBe('rejected');
+
+    cleanup();
+    fallbackReason = 'clamped';
+    grantedExpiresInSecs = 28_800;
+    renderRoute();
+    dialog = completeHandshake();
+    expect(within(dialog).getByText('Account Preview')).toBeDefined();
+    notice = within(dialog).getByTestId('oauth-long-lived-fallback-notice');
+    expect(notice.getAttribute('data-reason')).toBe('clamped');
+    // The granted lifetime (28800s = 8 hours) is surfaced to the operator.
+    expect(notice.textContent).toContain('expires in 8 hours');
+  });
+
+  test('requests a refreshing credential when the standard mode is chosen', () => {
+    const startDraft = vi.fn();
+    vi.mocked(queries.useStartOauthDraft).mockReturnValue({
+      mutate: startDraft,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+
+    renderRoute();
+    fireEvent.click(screen.getByRole('button', { name: 'New' }));
+    const dialog = screen.getByRole('dialog', { name: 'New upstream' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+
+    const modeChoice = within(dialog).getByTestId('oauth-mode-choice');
+    fireEvent.click(
+      within(modeChoice).getByRole('radio', {
+        name: /Standard refreshing token/,
+      }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Authorize with Anthropic' }),
+    );
+
+    expect(startDraft).toHaveBeenCalledTimes(1);
+    expect(startDraft).toHaveBeenCalledWith(
+      { mode: 'refreshing' },
+      expect.anything(),
+    );
+  });
+
+  test('nudges reconnect on the access-token clock and ignores the stored refresh token', () => {
+    const now = Math.floor(Date.now() / 1000);
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(
+        oauthStatusData(upstream, 'user:inference', {
+          mode: 'long_lived_365d',
+          can_refresh: false,
+          expires_at_unix_secs: now + 10 * 24 * 60 * 60,
+          refresh_token_expires_at_unix_secs: null,
+        }),
+      ),
+    );
+
+    renderRoute();
+
+    // Inside the 14-day window the access-token deadline drives the nudge.
+    const notice = screen.getByRole('status');
+    expect(
+      within(notice).getByText('Long-lived token expiring soon'),
+    ).toBeDefined();
+    expect(
+      within(notice).getByRole('button', { name: 'Reconnect' }),
+    ).toBeDefined();
+    expect(screen.getByText('Login expiring')).toBeDefined();
+
+    cleanup();
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(
+        oauthStatusData(upstream, 'user:inference', {
+          mode: 'long_lived_365d',
+          can_refresh: false,
+          expires_at_unix_secs: now + 330 * 24 * 60 * 60,
+          refresh_token_expires_at_unix_secs: now - 24 * 60 * 60,
+        }),
+      ),
+    );
+
+    renderRoute();
+
+    // A lapsed refresh-token clock must not nudge a credential that never
+    // uses it.
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.getByText('Long-lived')).toBeDefined();
   });
 });

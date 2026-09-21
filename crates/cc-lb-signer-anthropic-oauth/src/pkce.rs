@@ -111,6 +111,7 @@ pub async fn complete_pkce_flow(
         &handshake.verifier,
         &handshake.redirect_uri,
         unix_secs(clock.now()),
+        None,
     )
     .await
 }
