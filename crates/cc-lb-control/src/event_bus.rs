@@ -58,6 +58,15 @@ pub trait RequestEventBus: Send + Sync + 'static {
     fn publish_lifecycle(&self, event: LifecycleEvent);
 
     fn subscribe_lifecycle(&self) -> LifecycleBusReceiver;
+
+    /// Detached overflow tasks currently parked on a full
+    /// lifecycle-assembler channel. The assembler polls this during its
+    /// shutdown drain so parked row-bearing events are delivered before the
+    /// receiver is dropped. Buses without an assembler overflow path return
+    /// 0; bus wrappers should delegate to their inner bus.
+    fn assembler_overflow_in_flight(&self) -> usize {
+        0
+    }
 }
 
 /// Default capacity for the broadcast channel powering admin SSE subscribers.
@@ -427,6 +436,15 @@ impl InMemoryBus {
                 .fetch_sub(1, Ordering::Relaxed);
         });
     }
+
+    /// Detached overflow tasks currently parked on a full assembler channel.
+    /// Read by the assembler's shutdown drain; see
+    /// [`RequestEventBus::assembler_overflow_in_flight`].
+    pub fn assembler_overflow_in_flight(&self) -> usize {
+        self.inner
+            .assembler_overflow_in_flight
+            .load(Ordering::Relaxed)
+    }
 }
 
 impl Default for InMemoryBus {
@@ -707,6 +725,10 @@ impl RequestEventBus for InMemoryBus {
 
     fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
         LifecycleBusReceiver::InMemory(self.inner.lifecycle_broadcast_tx.subscribe())
+    }
+
+    fn assembler_overflow_in_flight(&self) -> usize {
+        InMemoryBus::assembler_overflow_in_flight(self)
     }
 }
 

@@ -92,8 +92,11 @@ const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
 const PRICE_CATALOG_LOCAL_INSTALL_INTERVAL: Duration = Duration::from_secs(60);
 const WASMTIME_POOL_METRICS_INTERVAL: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Copy)]
-struct TowerTimeoutMarker;
+/// Response extension carrying the terminal classification for a response
+/// produced outside the lifecycle handler. `lifecycle_middleware` reads it
+/// and finalizes the request's `LifecycleContext`; unmarked responses are
+/// left to the context's `Drop` backstop.
+type TerminalClassification = cc_lb_engine::TerminalClassification;
 
 #[derive(Clone, Copy)]
 struct RequestBodyCaps {
@@ -2301,8 +2304,8 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
     let request_ids = RequestIdState::default();
     let drain_controller = state.drain_controller.clone();
     // request_id runs first so lifecycle_middleware can read the assigned id;
-    // lifecycle runs before the drain gate so drain rejections already carry a
-    // LifecycleContext in their extensions.
+    // lifecycle runs before the drain gate so drain rejections can hand their
+    // terminal classification back through the response extensions.
     let outer_sb = ServiceBuilder::new()
         .layer(middleware::from_fn_with_state(
             request_ids,
@@ -2355,26 +2358,28 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
         .layer(outer_sb)
 }
 
-async fn proxy_not_found(request: Request<Body>) -> Response<Body> {
-    if let Some(observer) = request.extensions().get::<cc_lb_engine::LifecycleContext>() {
-        observer.record_route_not_found();
-    }
-    anthropic_error_response(
+async fn proxy_not_found(_request: Request<Body>) -> Response<Body> {
+    let mut response = anthropic_error_response(
         StatusCode::NOT_FOUND,
         "not_found",
         "requested proxy path was not found",
-    )
+    );
+    response
+        .extensions_mut()
+        .insert(TerminalClassification::ROUTE_NOT_FOUND);
+    response
 }
 
-async fn proxy_method_not_allowed(request: Request<Body>) -> Response<Body> {
-    if let Some(observer) = request.extensions().get::<cc_lb_engine::LifecycleContext>() {
-        observer.record_method_not_allowed();
-    }
-    anthropic_error_response(
+async fn proxy_method_not_allowed(_request: Request<Body>) -> Response<Body> {
+    let mut response = anthropic_error_response(
         StatusCode::METHOD_NOT_ALLOWED,
         "not_found",
         "method is not allowed for this proxy path",
-    )
+    );
+    response
+        .extensions_mut()
+        .insert(TerminalClassification::METHOD_NOT_ALLOWED);
+    response
 }
 
 async fn healthz(State(state): State<ProxyState>) -> Json<HealthBody> {
@@ -2469,7 +2474,9 @@ async fn timeout_error(error: tower::BoxError) -> Response<Body> {
     let mut response = Response::new(Body::from("request timed out"));
     *response.status_mut() = status;
     if is_elapsed {
-        response.extensions_mut().insert(TowerTimeoutMarker);
+        response
+            .extensions_mut()
+            .insert(TerminalClassification::TOWER_TIMEOUT);
     }
     response
 }
@@ -2516,7 +2523,7 @@ async fn lifecycle_handler(
             drop(body_read_span);
             if let Some(observer) = observer.as_ref() {
                 observer.set_request_body_timing(body_read_ms, None);
-                observer.record_body_too_large_rejection(cap as u64);
+                observer.terminate_body_too_large(cap as u64);
             }
             return body_too_large_response();
         }
@@ -2525,7 +2532,8 @@ async fn lifecycle_handler(
             drop(body_read_span);
             if let Some(observer) = observer.as_ref() {
                 observer.set_request_body_timing(body_read_ms, None);
-                observer.record_body_read_failure();
+                let terminal = TerminalClassification::BODY_READ_FAILED;
+                observer.terminate(terminal.status, terminal.error_code);
             }
             let mut response = Response::new(Body::from(format!("body read failed: {source}")));
             *response.status_mut() = StatusCode::BAD_REQUEST;
@@ -2631,10 +2639,6 @@ async fn oauth_usage_handler(
     State(state): State<ProxyState>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let observer = request
-        .extensions()
-        .get::<cc_lb_engine::LifecycleContext>()
-        .cloned();
     let authn = &state.builtin_authn;
     let dynamic_view = state.dynamic_view.load();
     if let Err(error) = authn
@@ -2642,16 +2646,17 @@ async fn oauth_usage_handler(
         .await
     {
         let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
-        if let Some(observer) = observer.as_ref() {
-            observer.record_local_response(status);
-        }
-        return json_response(
+        let mut response = json_response(
             status,
             serde_json::json!({ "error": "authentication_error", "message": error.to_string() }),
         );
+        response
+            .extensions_mut()
+            .insert(TerminalClassification::local(status));
+        return response;
     }
 
-    let response = match cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
+    let mut response = match cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
         state.storage.as_ref(),
         &state.dynamic_view,
         &*state.clock,
@@ -2667,9 +2672,10 @@ async fn oauth_usage_handler(
             )
         }
     };
-    if let Some(observer) = observer.as_ref() {
-        observer.record_local_response(response.status());
-    }
+    let status = response.status();
+    response
+        .extensions_mut()
+        .insert(TerminalClassification::local(status));
     response
 }
 
@@ -2744,10 +2750,15 @@ async fn lifecycle_middleware(
         request.extensions_mut().insert(c.clone());
     }
     let response = next.run(request).await;
-    if response.extensions().get::<TowerTimeoutMarker>().is_some()
+    // Only a response carrying an explicit terminal classification is
+    // finalized here. A streaming proxy response returns headers long before
+    // its body finishes, so terminating unconditionally would finalize every
+    // stream at header time; unmarked responses fall through to the context's
+    // Drop backstop instead.
+    if let Some(marker) = response.extensions().get::<TerminalClassification>()
         && let Some(c) = ctx.as_ref()
     {
-        c.terminate_tower_timeout();
+        c.terminate(marker.status, marker.error_code);
     }
     response
 }

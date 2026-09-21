@@ -55,6 +55,7 @@ impl FakeMode {
             "tamper-unknown-event" => Self::TamperUnknownEvent,
             "truncate-mid-stream" => Self::TruncateMidStream,
             "opencode-tools" => Self::OpenCodeTools,
+            "senpi-tools" => Self::SenpiTools,
             "refusal" => Self::Refusal,
             "context-window-exceeded" => Self::ContextWindowExceeded,
             _ => Self::Ok,

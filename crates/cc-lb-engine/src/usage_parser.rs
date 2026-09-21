@@ -451,8 +451,13 @@ pub(crate) fn detect_abnormal_stop(event: &ParsedSseEvent<'_>) -> Option<Abnorma
 
 /// Detect an abnormal `stop_reason` on a buffered non-streaming Messages
 /// response body. Same rule as [`detect_abnormal_stop`], reading the top-level
-/// `stop_reason` / `stop_details` fields.
+/// `stop_reason` / `stop_details` fields. Only a Messages-shaped body
+/// (`type == "message"`) qualifies: the non-streaming path also serves
+/// passthrough routes whose bodies may carry an unrelated `stop_reason`.
 pub(crate) fn detect_abnormal_stop_non_stream(value: &Value) -> Option<AbnormalStop> {
+    if value.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
     abnormal_stop_from_fields(value.get("stop_reason"), value.get("stop_details"))
 }
 
@@ -841,6 +846,30 @@ mod tests {
         assert_eq!(stop.stop_reason, "refusal");
         assert_eq!(stop.category.as_deref(), Some("reasoning_extraction"));
         assert_eq!(stop.explanation.as_deref(), Some("declined"));
+    }
+
+    #[test]
+    fn detect_abnormal_stop_non_stream_ignores_non_message_bodies() {
+        // Passthrough routes (count_tokens, models, catch-alls) can carry a
+        // top-level `stop_reason` that is not a Messages stop reason.
+        let value = serde_json::json!({
+            "stop_reason": "refusal",
+            "stop_details": {"category": "cyber", "explanation": "declined"}
+        });
+        assert!(detect_abnormal_stop_non_stream(&value).is_none());
+
+        let value = serde_json::json!({
+            "type": "error",
+            "stop_reason": "refusal"
+        });
+        assert!(detect_abnormal_stop_non_stream(&value).is_none());
+
+        let value = serde_json::json!({
+            "type": "message",
+            "stop_reason": "refusal"
+        });
+        let stop = detect_abnormal_stop_non_stream(&value).expect("abnormal stop");
+        assert_eq!(stop.stop_reason, "refusal");
     }
 
     #[test]

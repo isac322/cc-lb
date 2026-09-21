@@ -3786,7 +3786,7 @@ impl Lifecycle {
                     "refusal" => error_codes::UPSTREAM_REFUSAL,
                     _ => error_codes::UPSTREAM_CONTEXT_WINDOW_EXCEEDED,
                 };
-                o.set_terminal(status, code);
+                o.set_terminal(client_status, code);
             } else {
                 o.set_success_status(client_status);
             }
@@ -4446,15 +4446,9 @@ impl Lifecycle {
                                     && let Some(stop) =
                                         usage_parser::detect_abnormal_stop(&parsed_event)
                                 {
-                                    if let Some(o) = observer.as_ref() {
-                                        o.emit_lifecycle(
-                                            cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
-                                                event_id: o.event_id().to_owned(),
-                                                error_type: stop.stop_reason.clone(),
-                                                error_message: abnormal_stop_error_message(&stop),
-                                            },
-                                        );
-                                    }
+                                    // Latch only: the upstream-error observation is emitted
+                                    // at finalization, where it is known whether a later
+                                    // provider/proxy error wins the terminal classification.
                                     stream_abnormal_stop = Some(stop);
                                 }
                                 sse_event_count = sse_event_count.saturating_add(1);
@@ -5173,15 +5167,9 @@ impl Lifecycle {
                                 && let Some(stop) =
                                     usage_parser::detect_abnormal_stop(&parsed_event)
                             {
-                                if let Some(o) = observer.as_ref() {
-                                    o.emit_lifecycle(
-                                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
-                                            event_id: o.event_id().to_owned(),
-                                            error_type: stop.stop_reason.clone(),
-                                            error_message: abnormal_stop_error_message(&stop),
-                                        },
-                                    );
-                                }
+                                // Latch only: the upstream-error observation is emitted
+                                // at finalization, where it is known whether a later
+                                // provider/proxy error wins the terminal classification.
                                 stream_abnormal_stop = Some(stop);
                             }
                             sse_event_count = sse_event_count.saturating_add(1);
@@ -5690,9 +5678,19 @@ impl Lifecycle {
                     o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
                 } else if stream_transform_error.is_some() && !upstream_error_status {
                     o.set_terminal(StatusCode::OK, error_codes::UPSTREAM_STREAM_ERROR);
-                } else if stream_abnormal_stop.is_some() && !upstream_error_status {
-                    let code = match stream_abnormal_stop.as_ref().map(|stop| stop.stop_reason.as_str()) {
-                        Some("refusal") => error_codes::UPSTREAM_REFUSAL,
+                } else if let Some(stop) = stream_abnormal_stop.as_ref()
+                    && !upstream_error_status
+                    && !stream_provider_error_seen
+                {
+                    o.emit_lifecycle(
+                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                            event_id: o.event_id().to_owned(),
+                            error_type: stop.stop_reason.clone(),
+                            error_message: abnormal_stop_error_message(stop),
+                        },
+                    );
+                    let code = match stop.stop_reason.as_str() {
+                        "refusal" => error_codes::UPSTREAM_REFUSAL,
                         _ => error_codes::UPSTREAM_CONTEXT_WINDOW_EXCEEDED,
                     };
                     o.set_terminal(status, code);

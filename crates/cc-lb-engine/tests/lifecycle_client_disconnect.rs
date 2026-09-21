@@ -940,12 +940,13 @@ async fn timeout_ordering(timeout_first: bool) {
         .expect("lifecycle handles request")
         .into_body();
 
+    let timeout = cc_lb_engine::TerminalClassification::TOWER_TIMEOUT;
     if timeout_first {
-        observer.terminate_tower_timeout();
+        observer.terminate(timeout.status, timeout.error_code);
         drop(body);
     } else {
         drop(body);
-        observer.terminate_tower_timeout();
+        observer.terminate(timeout.status, timeout.error_code);
     }
     drop(observer);
 
