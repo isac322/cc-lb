@@ -182,7 +182,12 @@ if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "$
   # A filesystem socket is isolated by each container's mount namespace, keeping
   # its sccache server bound to the matching Rust sysroot and installed target.
   export SCCACHE_SERVER_UDS=/tmp/sccache.sock
-  export SCCACHE_LOG=warn SCCACHE_ERROR_LOG=/tmp/sccache-error.log
+  # sccache increments the per-language "Cache errors" counter in
+  # server.rs (CompileResult::Error), and that site logs at debug only, so
+  # SCCACHE_LOG=warn could never explain a non-zero count. Raise just that
+  # module; opendal and everything else stay at warn. See #565.
+  export SCCACHE_LOG="warn,sccache::server=debug"
+  export SCCACHE_ERROR_LOG=/tmp/sccache-error.log
   sccache --start-server
   test -S "${SCCACHE_SERVER_UDS}"
   set -x
@@ -230,13 +235,17 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
   unset RUSTC_WRAPPER
   if [ -s "${SCCACHE_ERROR_LOG}" ]; then
     # opendal logs every cold-cache probe as "read failed NotFound", which is an
-    # ordinary miss rather than an error. Those lines outnumber everything else,
-    # so a blind tail shows only misses; report their count and dump the rest.
+    # ordinary miss rather than an error, and it dominates the file. Every
+    # filter below is wrapped so that "no match" (grep exit 1) cannot abort the
+    # build under `set -e` with pipefail.
     log_lines="$(wc -l < "${SCCACHE_ERROR_LOG}")"
     notfound_lines="$(grep -c 'NotFound' "${SCCACHE_ERROR_LOG}" || true)"
-    echo "sccache error log (${target}): ${log_lines} lines, ${notfound_lines} benign NotFound cache probes" >&2
-    echo "--- sccache error log (${target}, NotFound probes filtered, last 200) ---" >&2
-    grep -v 'NotFound' "${SCCACHE_ERROR_LOG}" | tail -n 200 >&2
+    echo "sccache error log (${target}): ${log_lines} lines, ${notfound_lines:-0} NotFound cache probes" >&2
+    echo "--- cache-error entries (${target}) ---" >&2
+    { grep -F 'compile result: cache error' "${SCCACHE_ERROR_LOG}" || true; } >&2
+    echo "--- other non-probe entries (${target}, last 100) ---" >&2
+    { grep -v 'NotFound' "${SCCACHE_ERROR_LOG}" \
+      | grep -vF 'compile result:' | tail -n 100 || true; } >&2
     echo "--- end sccache error log (${target}) ---" >&2
   else
     echo "sccache error log is empty for ${target}" >&2
