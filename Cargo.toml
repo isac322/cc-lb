@@ -52,7 +52,7 @@ wasmtime  = "48"
 rkyv      = { version = "0.8", default-features = false }
 bytecheck = { version = "0.8", default-features = false }
 blake3    = { version = "1", default-features = false }
-wasmparser = "0.258"
+wasmparser = "0.259"
 
 anyhow = "1"
 arc-swap = "1"
@@ -74,7 +74,7 @@ flate2 = "1"
 brotli = "9"
 zstd = "0.14"
 globset = "0.4"
-h2 = "0.4.16"
+h2 = "0.4.19"
 hickory-resolver = "0.26"
 hex = "0.4"
 hyper = "1.11.1"
@@ -95,6 +95,11 @@ opentelemetry_sdk = { version = "0.32", features = ["trace"] }
 proptest = "1"
 rand = "0.10"
 regex = "1"
+# Held at 0.12: reqwest 0.13 dropped its ring provider feature. `rustls` now
+# forces the aws-lc-rs backend (a second crypto stack, plus a C/asm build
+# dependency in the musl cross build) and `rustls-no-provider` panics at
+# Client construction unless a process-default CryptoProvider is installed
+# first. Both are architecture decisions, not a version bump. See PR body.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 ring = "0.17"
 rust-embed = { version = "8", features = ["deterministic-timestamps"] }
@@ -112,7 +117,7 @@ tempfile = "3"
 thiserror = "2"
 tokio = "1"
 tokio-util = "0.7"
-toml = "1.1.5"
+toml = "1.1.6"
 tower = "0.5"
 tower-service = "0.3"
 tower-http = "0.7"
