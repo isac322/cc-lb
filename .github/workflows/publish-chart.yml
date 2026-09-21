@@ -64,9 +64,9 @@ jobs:
             exit 1
           fi
 
-      - uses: azure/setup-helm@v5.0.1
+      - uses: azure/setup-helm@v5
         with:
-          version: v4.2.4
+          version: v4.3.0
 
       - name: Log in to ghcr.io
         env:

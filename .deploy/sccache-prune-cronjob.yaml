@@ -21,7 +21,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: prune
-              image: python:3.12-slim
+              image: python:3.14-slim
               env:
                 - name: SCCACHE_ENDPOINT
                   value: http://garage.arc-systems.svc.cluster.local:3900

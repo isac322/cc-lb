@@ -124,9 +124,9 @@ jobs:
 
       - uses: ./.github/actions/setup-actionlint
 
-      - uses: azure/setup-helm@v5.0.1
+      - uses: azure/setup-helm@v5
         with:
-          version: v4.2.4
+          version: v4.3.0
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -158,7 +158,7 @@ jobs:
 
 
       - name: Install and dry-run release-plz server release
-        uses: MarcoIeni/release-plz-action@v0.5.136
+        uses: MarcoIeni/release-plz-action@v0.5.139
         with:
           command: release
           config: release-plz-server.toml
@@ -296,7 +296,11 @@ jobs:
           set -euo pipefail
           ver=0.20.2
           archive="cargo-deny-${ver}-aarch64-unknown-linux-musl.tar.gz"
+          # GitHub's release CDN intermittently answers 504. A bare --fail
+          # turns that into a red gate that looks like a dependency failure,
+          # and AGENTS.md forbids re-running the job to paper over it.
           curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 \
             "https://github.com/EmbarkStudios/cargo-deny/releases/download/${ver}/${archive}" \
             --output "/tmp/${archive}"
           echo "995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d  /tmp/${archive}" | sha256sum --check
