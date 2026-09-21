@@ -100,7 +100,7 @@ regex = "1"
 # dependency in the musl cross build) and `rustls-no-provider` panics at
 # Client construction unless a process-default CryptoProvider is installed
 # first. Both are architecture decisions, not a version bump. See PR body.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls"] }
 ring = "0.17"
 rust-embed = { version = "8", features = ["deterministic-timestamps"] }
 secrecy = "0.10"
