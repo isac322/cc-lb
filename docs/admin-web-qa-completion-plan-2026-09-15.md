@@ -1,518 +1,518 @@
-# Admin Web 전수 QA 잔여 작업 완료 계획
+# Admin Web Exhaustive QA Remaining-Work Completion Plan
 
-- 작성일: 2026-09-15
-- 상태: 진행 중. 전수 완료·운영 개선 완료를 주장하지 않는다.
-- 작업 브랜치: `qa/admin-web-exhaustive-completion`
-- 구현 기준선: `ef70b347790c46fa9956435a820a51b60c547d04` (Keepalive 성능 개선 PR #791 머지)
-- 작업 트리: `/data/tmp/cc-lb-admin-web-qa-completion`
-- 원본 보존 위치: `/data/data/orca/workspaces/cc-lb/analyze-and-fix-perf`
-- 원래 운영 대상: `https://cc-lb.runbear.io`, Kubernetes context `runbear-operation`
-- 실제 운영 배포 commit/image, DB, 측정 시간창은 재확인하여 실행 manifest에 별도로 고정한다.
-- 이 문서의 모든 TODO를 끝낼 때까지 goal을 유지한다. 예산 한도를 설정하지 않는다.
+- Written: 2026-09-15
+- Status: in progress. Does not claim exhaustive completion or production improvement completion.
+- Work branch: `qa/admin-web-exhaustive-completion`
+- Implementation baseline: `ef70b347790c46fa9956435a820a51b60c547d04` (Keepalive performance improvement PR #791 merged)
+- Work tree: `/data/tmp/cc-lb-admin-web-qa-completion`
+- Original preserved at: `/data/data/orca/workspaces/cc-lb/analyze-and-fix-perf`
+- Original production target: `https://cc-lb.runbear.io`, Kubernetes context `runbear-operation`
+- The actual production deployment commit/image, DB, and measurement time window will be re-verified and pinned separately in the execution manifest.
+- The goal stays in place until every TODO in this document is done. No budget limit is set.
 
-## 1. 사용자 요청과 누락 감사
+## 1. User request and gap audit
 
-최초 요청은 모든 웹 조회·조작을 UI → API → handler → query로 추적한 QA 목록, 실제 운영 브라우저 실행, 네트워크·브라우저·서버·DB 병목 구분, 재사용 스킬 두 개와 QA 목록의 Git 관리였다. 후속으로 전체 스킬 경로의 `.opencode/skills` → `.agents/skills` 이전도 요청되었다.
+The original request was: a QA list tracing every web view and manipulation UI → API → handler → query, real production browser execution, separation of network/browser/server/DB bottlenecks, and Git management of two reusable skills plus the QA list. A follow-up also requested migrating the entire skill path from `.opencode/skills` to `.agents/skills`.
 
-앞선 작업은 Keepalive 개선 코드와 로컬 검증·PR/CI는 수행했지만, 다음 일곱 항목을 완료하지 않았다.
+The earlier work delivered the Keepalive improvement code, local verification, and PR/CI, but left the following seven items incomplete.
 
-| 누락 ID | 남은 의무 | 감사 시점의 근거 | 완료에 필요한 결과 |
+| Gap ID | Remaining obligation | Evidence at audit time | Result required for completion |
 |---|---|---|---|
-| GAP-01 | 두 스킬·인벤토리·생성기·유효 실행 결과 Git 관리 | 원본에서 미추적. #791 머지 트리에 전체 인벤토리와 두 스킬 없음 | 리뷰·CI를 거친 커밋/PR 및 승인된 머지로 공유 저장소에 반영 |
-| GAP-02 | 기존 스킬 전체 경로 이전 반영 | 로컬 이동만 수행. 머지 트리 `.agents/skills` 0개, `.opencode/skills` 36개 파일 | 최신 기준선의 모든 기존 파일을 보존한 이전, 참조 및 발견 검증 |
-| GAP-03 | 누락 없는 전체 QA 목록 증명 | 기존 226행은 생성 행 수이며 `pending_full_reconciliation` | 독립 소스 분모, 정방향/역방향 누락 집합 0, 안정 ID 및 실행 단계 |
-| GAP-04 | 전체 운영 브라우저 실행 | 주요 화면의 일부 측정과 Keepalive 집중 측정만 존재 | 모든 정의된 대상·변형·페이지·poll cell의 실행 결과와 증거 |
-| GAP-05 | 운영 Keepalive 증거 보완과 잘못된 보고 정정 | 과거 pagination 20-page cap, 일부 detail timing 독립성 미입증, 기존 보고서 전수 완료 문구 잔존 | 독립 원시 timestamp, 실제 terminal cursor, 보고서 정정 및 새 측정 |
-| GAP-06 | 요청별 모든 계층 상관 측정 | 최종 로컬 API 기록 양 DB 각각 389행의 SQL/pool 필드 null, 별도 plan은 존재 | 브라우저/서버/SQL/pool 증거 연결, 미제공 항목의 실제 계측 또는 구체적 승인·차단 처리 |
-| GAP-07 | 통제된 cold/warm 비교 | 첫 요청/후속 요청을 구분했지만 OS/DB cold cache를 통제하지 않음 | 격리 환경의 검증 가능한 cache 상태, 동일 조건의 반복 비교 |
+| GAP-01 | Git management of the two skills, inventory, generator, and valid execution results | Untracked in the original. The #791 merge tree lacks the full inventory and the two skills | Reflected in the shared repository via a reviewed, CI-checked commit/PR and an approved merge |
+| GAP-02 | Full-path migration of existing skills applied | Only moved locally. Merge tree has 0 files in `.agents/skills`, 36 files in `.opencode/skills` | Migration preserving every existing file at the latest baseline, with references and discovery verified |
+| GAP-03 | Proof of a complete QA list with no omissions | The existing 226 rows are generated row counts and `pending_full_reconciliation` | Independent source denominators, forward/reverse missing sets of 0, stable IDs, and execution stages |
+| GAP-04 | Full production browser execution | Only partial measurements of major screens and Keepalive-focused measurement exist | Execution results and evidence for every defined target, variant, page, and poll cell |
+| GAP-05 | Supplemented production Keepalive evidence and correction of wrong reporting | Past 20-page pagination cap, unproven independence of some detail timings, leftover exhaustive-completion wording in the old report | Independent raw timestamps, real terminal cursors, report correction, and new measurement |
+| GAP-06 | Per-request all-layer correlated measurement | The final local API records have null SQL/pool fields on both DBs, 389 rows each; a separate plan exists | Browser/server/SQL/pool evidence linkage; real instrumentation or explicit approval/blocking for items not provided |
+| GAP-07 | Controlled cold/warm comparison | First vs. subsequent requests were distinguished, but OS/DB cold cache was not controlled | Verifiable cache states in an isolated environment, repeated comparisons under identical conditions |
 
-분석·제안 `docs/keepalive-performance-proposal.md`는 사용자의 미커밋 보존 지시를 유지한다. 그 지시를 스킬·QA 산출물 제외로 확대하지 않는다. 과거 로컬 57개 QA·92개 브라우저 PASS는 운영 전수 실행을 대체하지 않는다.
+The analysis/proposal `docs/keepalive-performance-proposal.md` keeps the user's uncommitted-preservation instruction. That instruction is not extended to exclude the skill/QA artifacts. The past 57 local QA and 92 browser PASSes do not substitute for exhaustive production execution.
 
-## 2. 권한과 안전 경계
+## 2. Authority and safety boundaries
 
-1. 승인된 작업은 문서·프로젝트 소유 스킬·QA 도구·목록·격리 fixture·실행 증거 작성, 조사와 측정, 관련 Git/PR 준비다.
-2. **머지는 PR마다 별도 승인받는다.** 승인 요청에는 저장소, PR 번호·제목, 해결하는 일, 주요 파일/동작 변경, 남은 위험, 검증 결과, base/head SHA, merge 방식과 branch 삭제 여부를 설명한다. 승인 전 머지·auto-merge·merge queue를 설정하지 않는다. #791의 과거 승인은 다른 PR에 적용하지 않는다.
-3. 새 애플리케이션 runtime 코드·공개 API·제품 동작 변경이 필요하면, 정확한 파일/심볼·변경 동작·필요성·대안을 제시하고 승인받기 전에는 수정하지 않는다. 계측 부족을 메우기 위한 runtime instrumentation도 같은 원칙을 따른다.
-4. 운영은 승인된 읽기 측정만 수행한다. 삭제·revocation·설정 변경·외부 호출을 유발하는 동작은 격리 fixture에서 검증한다. 운영의 가역 쓰기도 구체적 대상과 복구 방법을 제시하고 승인받는다.
-5. HTTP GET이라도 실제 부작용·갱신·외부 과금 가능성을 소스로 확인한다. method만으로 안전하다고 분류하지 않는다.
-6. 운영 DB cache flush, 운영 PostgreSQL 재시작, 전역 통계 reset, 운영 대량 부하, 실제 자격증명 복제 및 비밀값을 포함한 dump를 금지한다.
-7. 운영 읽기 요청은 낮은 동시성으로 실행하며 부하·오류·대기 상황에 따라 일시 중단한다. 중단은 BLOCKED로 기록하고 완료로 처리하지 않는다.
-8. 운영 데이터가 계속 변하면 관측 시간창과 분모 변경을 기록한다. 불안정한 전체 집합을 고정된 fixture로 검증한 결과와 운영 결과를 합쳐 위장하지 않는다.
-9. 기존 원본 작업 트리는 보존한다. 최신 기준선의 기존 스킬을 이전하고 원본 신규 두 스킬 및 QA 자산만 선별 반영한다. 오래된 앱 diff·migration 번호·미커밋 분석을 통째로 복사하지 않는다.
-10. 원시 request ID·시각·증거는 보존하되 token, cookie, 개인정보, 요청 payload 비밀값은 기록하지 않는다. Git에는 검증된 비식별 증거와 재현 절차만 반영한다.
+1. Approved work is: writing documents, project-owned skills, QA tooling, lists, isolated fixtures, and execution evidence; investigation and measurement; and related Git/PR preparation.
+2. **Each merge requires separate approval.** The approval request explains the repository, PR number/title, what it resolves, key file/behavior changes, remaining risks, verification results, base/head SHAs, merge method, and whether the branch is deleted. Do not set merge, auto-merge, or merge queue before approval. The past approval for #791 does not apply to other PRs.
+3. If new application runtime code, public API, or product behavior changes are needed, present the exact files/symbols, the behavior change, the necessity, and alternatives, and do not modify before approval. Runtime instrumentation added to fill observability gaps follows the same rule.
+4. Production gets only approved read measurement. Actions that cause deletion, revocation, configuration change, or external calls are verified in isolated fixtures. Even reversible production writes require presenting the specific target and recovery method and obtaining approval.
+5. Even for HTTP GET, verify real side effects, updates, and possible external billing from the source. Do not classify as safe by method alone.
+6. Prohibited: production DB cache flush, production PostgreSQL restart, global stats reset, heavy production load, copying real credentials, and dumps containing secret values.
+7. Production read requests run at low concurrency and pause under load, errors, or queueing. A pause is recorded as BLOCKED, not completion.
+8. If production data keeps changing, record the observation window and denominator changes. Do not disguise results by merging an unstable full set verified against a fixed fixture with production results.
+9. Preserve the existing original work tree. Migrate the existing skills at the latest baseline and selectively apply only the original's two new skills and QA assets. Do not wholesale-copy stale app diffs, migration numbers, or uncommitted analysis.
+10. Preserve raw request IDs, timestamps, and evidence, but do not record tokens, cookies, personal data, or secret request-payload values. Commit only verified de-identified evidence and reproduction procedures to Git.
 
-## 3. 산출물과 단일 소유권
+## 3. Artifacts and single ownership
 
-- 이 계획 문서: Main 소유. 요청·TODO·승인·상태·최종 증거의 진행 기록.
-- `.agents/skills/web-qa-inventory-extractor/SKILL.md`: 정적 UI/API/SQL 전수 추출과 독립 역대조 절차. 실행 스킬과 역할을 중복하지 않는다.
-- `.agents/skills/web-performance-qa/SKILL.md`: 검증된 목록의 브라우저 실행·계측·위험 격리·증거 연결 절차.
-- `scripts/generate-qa-inventory.mjs`: 기존 생성기를 재사용한다. 단순히 하드코딩된 이전 목록을 출력한 것으로 현재 소스 조사 성공을 주장하지 않는다.
-- `qa/admin-web/api-query-inventory.yaml` 및 `.md`: 같은 안정 ID, 같은 원자 요청, 실행 방법과 source evidence.
-- `qa/admin-web/runs/`: run별 manifest, 소스 분모/실행 행렬, PASS/FAIL/BLOCKED ledger, 비식별 원시 증거 및 결과 보고. 기존 원시 기록을 새 기록으로 덮어쓰지 않는다.
-- 기존 `.agents/skills/user-flow-qa` 시나리오와 `web/e2e`, `web/qa` 실행 자산을 우선 재사용한다. 불필요한 별도 테스트 프레임워크를 만들지 않는다.
-- 소스 조사자는 소스와 의도만 기록한다. 브라우저 결과·계측값·PASS를 만들어내지 않는다. 브라우저 실행자는 실제 수행한 cell만 기록한다. Main이 두 증거를 연결한다.
+- This plan document: owned by Main. Running record of requests, TODOs, approvals, status, and final evidence.
+- `.agents/skills/web-qa-inventory-extractor/SKILL.md`: exhaustive static UI/API/SQL extraction and independent reverse-reconciliation procedure. Does not duplicate the execution skill's role.
+- `.agents/skills/web-performance-qa/SKILL.md`: browser execution, instrumentation, risk isolation, and evidence-linkage procedure for the verified list.
+- `scripts/generate-qa-inventory.mjs`: reuse the existing generator. It merely prints a previously hardcoded list; do not claim current-source investigation success from it.
+- `qa/admin-web/api-query-inventory.yaml` and `.md`: same stable IDs, same atomic requests, execution methods, and source evidence.
+- `qa/admin-web/runs/`: per-run manifest, source denominator/execution matrix, PASS/FAIL/BLOCKED ledger, de-identified raw evidence, and result reports. Do not overwrite existing raw records with new ones.
+- Prefer reusing the existing `.agents/skills/user-flow-qa` scenarios and the `web/e2e`, `web/qa` execution assets. Do not build an unnecessary separate test framework.
+- The source investigator records only source and intent. They do not fabricate browser results, measurements, or PASSes. The browser executor records only cells actually executed. Main links the two bodies of evidence.
 
-## 4. 행렬과 증거 계약
+## 4. Matrix and evidence contract
 
-### 4.1 정적 목록
+### 4.1 Static list
 
-각 UI action은 안정 ID, 화면/컴포넌트, 현재 source 파일·심볼·위치, 선행조건, 정확한 클릭/입력/스크롤 단계, 상태/필터 변형, 기대 화면, 관련 원자 요청 ID를 갖는다. 원자 요청은 method/path/query/body/관련 header, client callsite, handler, authorization, storage trait와 SQLite/PostgreSQL query 또는 명시적 no-query/cache 근거를 갖는다. UI 도달 불가와 client-only는 사유를 기록한다.
+Each UI action has a stable ID, screen/component, current source file/symbol/location, preconditions, exact click/input/scroll steps, state/filter variants, expected screen, and related atomic request IDs. Each atomic request has method/path/query/body/relevant headers, client callsite, handler, authorization, storage trait, and the SQLite/PostgreSQL query or an explicit no-query/cache justification. UI-unreachable and client-only entries record the reason.
 
-동적 경로는 실제 wire contract로 검증한다. 여러 method/endpoint를 `A & B` 한 행에 합치지 않는다. 임의 page size, selector가 겹치는 All 버튼, 존재하지 않는 modal, 이전 버전 endpoint를 쓰지 않는다.
+Dynamic paths are verified against the real wire contract. Do not merge multiple methods/endpoints into one row as `A & B`. Do not use arbitrary page sizes, All buttons whose selectors overlap, nonexistent modals, or endpoints from older versions.
 
-### 4.2 실행 범위
+### 4.2 Execution scope
 
-- 엔티티별 항목은 실제 API로 Principal/Upstream/Plugin/대상 행의 분모를 확인한다.
-- 각 적용 가능한 상태·필터·페이지·poll cycle을 실제 실행 키로 펼친다. 적용되지 않는 차원은 사유와 cardinality 1을 기록한다.
-- 계속 추가되는 운영 이력은 측정 anchor와 cursor 범위로 한정하고 변화량을 기록한다. 무제한 미래 데이터까지 끝났다고 주장하지 않는다.
-- pagination 종료는 원본 wire `next_cursor == null`과 마지막 응답 증거로만 확인한다. page 수 hard cap을 terminal로 바꾸지 않는다.
-- 쓰기/삭제·오류/빈 상태는 목적에 맞는 격리 fixture에서 상태전이 전후를 검증한다. 운영과 격리 실행의 환경 표시는 별도다.
+- For per-entity items, verify the denominator of Principal/Upstream/Plugin/target rows via the real API.
+- Expand every applicable state/filter/page/poll cycle into real execution keys. For dimensions that do not apply, record the reason and cardinality 1.
+- Bound continuously growing production history by a measurement anchor and cursor range, and record the amount of change. Do not claim completion through unlimited future data.
+- Confirm pagination termination only by the wire `next_cursor == null` and the last response's evidence. Do not turn a hard page cap into terminal.
+- Verify write/delete, error, and empty states before and after the state transition in a fit-for-purpose isolated fixture. Environment labeling for production vs. isolated runs is separate.
 
-### 4.3 요청별 원시 기록
+### 4.3 Per-request raw records
 
-각 record에 `run_id`, `execution_key`, `environment`, `source_commit`, `deployed_image`, UTC 및 monotonic 시작/종료 시각, method/비식별 URL/입력 hash, status, response 크기와 의미 hash를 기록한다. UI action과 direct request는 서로 다른 request ID와 시각을 갖는다. 쓰기 요청을 단순히 두 번 재생하지 말고 격리 fixture의 동일 시작 상태를 복원한 독립 실행으로 비교한다.
+Each record carries `run_id`, `execution_key`, `environment`, `source_commit`, `deployed_image`, UTC and monotonic start/end times, method/de-identified URL/input hash, status, and response size plus a semantic hash. A UI action and a direct request have different request IDs and times. Do not simply replay a write request twice; compare against an independent run that restores the same starting state in the isolated fixture.
 
-브라우저 click/request/TTFB/download/state/render 시점을 보존한다. server handler 및 SQL·pool wait는 같은 correlation으로 연결한다. cache-served/no-DB 경로는 실제 관측 또는 소스 근거로 `not_applicable`과 이유를 남긴다. 측정되지 않은 값은 0 또는 다른 계층의 값으로 채우지 않는다. null은 완료가 아니라 구체적 미계측/차단 사유와 연결한다.
+Preserve browser click/request/TTFB/download/state/render timings. Link server handler and SQL/pool waits with the same correlation. For cache-served/no-DB paths, record `not_applicable` with the reason, based on real observation or source evidence. Do not fill unmeasured values with 0 or another layer's value. A null is not completion; link it to a specific unmeasured/blocked reason.
 
-### 4.4 완료 판정
+### 4.4 Completion verdict
 
-- 정적 완료: source→inventory와 inventory→source의 미매핑 집합 각각 0, 중복 ID 0, 잘못된 path/method/source 0.
-- 실행 완료: 실제 기대 cell 집합과 고유 ledger key 집합이 exact하게 같다.
-- 수식: `expected cells = unique keys = PASS + FAIL + BLOCKED`.
-- 최종 PASS: FAIL 0, BLOCKED 0, 필수 증거 누락 0, 위험 동작의 복구 확인.
-- 단순 행 수 일치, 대표 entity, screenshot만 존재, API 200, 단위 테스트 통과는 전수 완료가 아니다.
-- 승인·접근·필수 계측이 막히면 TODO를 완료하지 않는다. 차단 원인과 해소에 필요한 구체적 승인을 사용자에게 요청한다.
+- Static completion: source→inventory and inventory→source unmapped sets each 0, duplicate IDs 0, wrong path/method/source 0.
+- Execution completion: the actual expected-cell set and the unique ledger-key set are exactly equal.
+- Formula: `expected cells = unique keys = PASS + FAIL + BLOCKED`.
+- Final PASS: FAIL 0, BLOCKED 0, missing required evidence 0, recovery confirmed for risky actions.
+- Matching row counts, a representative entity, screenshots alone, API 200, or passing unit tests are not exhaustive completion.
+- If approval, access, or required instrumentation is blocked, do not complete the TODO. Ask the user for the specific approval needed to unblock it.
 
-## 5. 상세 TODO와 완료 조건
+## 5. Detailed TODOs and completion conditions
 
-체크박스는 실행 증거가 있을 때만 갱신한다. TODO 도구와 아래 86개 항목의 이름을 동일하게 유지한다. 발견된 추가 의무는 원래 항목을 지우지 않고 새 ID로 추가한다.
+Update a checkbox only when execution evidence exists. Keep the names identical between the TODO tool and the 86 items below. Newly discovered obligations are added with new IDs without deleting the original items.
 
-### 문서와 기준선
+### Documents and baseline
 
-- [x] PLAN-01 남은 작업 문서와 완료 조건 작성
-  - GAP-01~07, 원문 권한 경계, 모든 TODO, 단일 소유자와 증거 계약을 이 문서에 기록하고 목록 일치를 검증한다.
-- [x] PLAN-02 원본 보존과 최신 기준 작업트리 준비
-  - #791이 포함된 기준선과 별도 브랜치를 고정한다. 원본 분석/스킬/QA 자료를 보존하고 승인된 자산만 선별 이관한다.
-- [x] PLAN-03 운영 배포 인증 관측 접근 기준선 확정
-  - 실제 image/commit, Pod/DB backend, 접근 계정/권한, WARP, metrics/logs/traces/DB read-only 경로를 확인한다. 비밀값 없이 manifest를 만든다.
+- [x] PLAN-01 Write the remaining-work document and completion conditions
+  - Record GAP-01~07, the original authority boundaries, all TODOs, single ownership, and the evidence contract in this document, and verify list consistency.
+- [x] PLAN-02 Preserve the original and prepare a latest-baseline worktree
+  - Pin a separate branch on the baseline containing #791. Preserve the original analysis/skills/QA material and selectively transfer only approved assets.
+- [x] PLAN-03 Establish the production deployment authenticated-observation baseline
+  - Confirm the actual image/commit, Pod/DB backend, access account/permissions, WARP, and metrics/logs/traces/DB read-only paths. Build the manifest without secret values.
 
-### 스킬과 자산
+### Skills and assets
 
-- [x] ASSET-01 최신 기존 스킬 전체 경로 이전
-  - 최신 `.opencode/skills`의 모든 파일을 내용 보존하여 이전한다. 신규 두 스킬 추가와 구분하고 관련 참조를 갱신한다.
-- [x] ASSET-02 두 QA 스킬 역할과 실행 계약 정리
-  - 전수 추출/역대조와 실제 실행/계측의 책임을 분리한다. 위험 구분, 변동 분모, 독립 timing, cold-cache 의미와 false-PASS 금지를 명확히 한다.
-- [x] ASSET-03 인벤토리 생성기와 산출물 Git 관리 준비
-  - 기존 생성기·안정 ID를 이어받고 current-source 검증 데이터를 반영한다. YAML/Markdown 생성 재현성과 일치를 확인한다.
-- [x] ASSET-04 기존 운영 보고서의 과장 판정 정정
-  - 기존 원시 기록은 보존하고 20-page cap/detail timing 증거 한계를 명시한다. 기존 `runtime-reconciled`/`10/10` 주장을 철회하며 새 run과 연결한다.
-- [x] ASSET-05 새 경로 스킬 발견과 재실행 검증
-  - 새 세션/정상 discovery에서 `.agents/skills`를 찾고 각 스킬의 문서화된 명령/경로를 실행할 수 있음을 확인한다. 현재 세션의 stale `skill://` 매핑은 새 경로를 찾았다고 거짓 판정하지 않는다.
+- [x] ASSET-01 Full-path migration of the latest existing skills
+  - Migrate every file of the latest `.opencode/skills` with content preserved. Keep this separate from adding the two new skills, and update related references.
+- [x] ASSET-02 Define the two QA skills' roles and execution contract
+  - Separate exhaustive extraction/reverse reconciliation from real execution/instrumentation. Clarify risk classification, variable denominators, independent timing, cold-cache meaning, and the ban on false PASSes.
+- [x] ASSET-03 Prepare Git management for the inventory generator and artifacts
+  - Inherit the existing generator and stable IDs, and reflect current-source verification data. Confirm YAML/Markdown generation reproducibility and consistency.
+- [x] ASSET-04 Correct exaggeration verdicts in the existing production report
+  - Preserve the existing raw records and state the 20-page cap / detail-timing evidence limits. Retract the earlier `runtime-reconciled`/`10/10` claims and link to the new run.
+- [x] ASSET-05 Verify skill discovery and re-execution at the new path
+  - Confirm that a fresh session/normal discovery finds `.agents/skills` and can run each skill's documented commands/paths. Do not falsely judge that the current session's stale `skill://` mapping found the new path.
 
-### 소스 전수 목록
+### Exhaustive source list
 
-- [x] INV-01 Overview 공통 인증 탐색 동작 전수 대조
-  - KPI/차트/시간창/사용량/Principal drill-down, auth gate, command palette, navigation, mount/poll/refresh 요청을 모두 추적한다.
-- [x] INV-02 Upstreams Warmup 동작과 요청 전수 대조
-  - 목록/상세/설정/enable-disable/metadata·quota/refresh/warmup/인증/키 등 현재 존재하는 모든 조건부 UI와 요청을 추적한다.
-- [x] INV-03 Principals Router Keepalive 동작 전수 대조
-  - 생성/편집/키/권한/limit/route 설정과 Keepalive 카드·sheet·필터·상세·poll·cursor 동작을 추적한다.
-- [x] INV-04 Logs SSE 필터 상세 동작 전수 대조
-  - live/history, session/group, 모든 필터·시간창·페이지, SSE lifecycle, row/detail/payload 전개 요청을 추적한다.
-- [x] INV-05 Plugins 업로드 참조 삭제 동작 전수 대조
-  - 목록/상세/upload/replace/apply/reference/GC/delete와 현재 UI의 조건부 경로를 추적한다.
-- [x] INV-06 Settings Audit 동작과 요청 전수 대조
-  - config draft/schema/validation/apply/history와 Audit 검색/시간창/필터/페이지/상세를 현재 source 기준으로 추적한다.
-- [x] INV-07 Admin API 역추적과 양 저장소 SQL 매핑
-  - 모든 등록 method/path를 UI 요청과 역대조한다. handler→trait→실제 SQL/메모리/cache를 추적하고 runtime 부작용도 분류한다.
-- [x] INV-08 소스 인벤토리 양방향 누락 집합 검증
-  - 서로 독립적인 source 분모와 inventory를 집합 대조한다. 미매핑·중복·깨진 참조가 0임을 기계적으로 확인한다.
+- [x] INV-01 Exhaustive reconciliation of Overview common auth/navigation behavior
+  - Trace all of KPI/charts/time window/usage/Principal drill-down, auth gate, command palette, navigation, and mount/poll/refresh requests.
+- [x] INV-02 Exhaustive reconciliation of Upstreams Warmup behavior and requests
+  - Trace every currently existing conditional UI and request: list/detail/settings/enable-disable/metadata·quota/refresh/warmup/auth/keys.
+- [x] INV-03 Exhaustive reconciliation of Principals Router Keepalive behavior
+  - Trace create/edit/keys/permissions/limit/route settings and the Keepalive card/sheet/filter/detail/poll/cursor behavior.
+- [x] INV-04 Exhaustive reconciliation of Logs SSE filter/detail behavior
+  - Trace live/history, session/group, all filters/time windows/pages, the SSE lifecycle, and row/detail/payload expansion requests.
+- [x] INV-05 Exhaustive reconciliation of Plugins upload/reference/delete behavior
+  - Trace list/detail/upload/replace/apply/reference/GC/delete and the conditional paths in the current UI.
+- [x] INV-06 Exhaustive reconciliation of Settings Audit behavior and requests
+  - Trace config draft/schema/validation/apply/history and Audit search/time window/filter/page/detail against the current source.
+- [x] INV-07 Admin API reverse tracing and both-stores SQL mapping
+  - Reverse-reconcile every registered method/path against UI requests. Trace handler→trait→real SQL/memory/cache and classify runtime side effects too.
+- [x] INV-08 Bidirectional missing-set verification of the source inventory
+  - Set-compare mutually independent source denominators against the inventory. Mechanically confirm 0 unmapped/duplicate/broken references.
 
-- [x] INV-09 운영 전용 Credentials Status 소스와 차이 대조
-  - 실제 운영 `e56d029e`와 기준선 `ef70b347` 사이의 UI/API 차이를 별도 기록한다. 운영에 남아 있는 Credentials/Status 화면, 이전 인증·config·API 계약을 누락하지 않고 최신 전용 기능의 운영 적용 불가 상태를 명시한다.
-### 계측 준비
+- [x] INV-09 Reconcile production-only Credentials Status source and differences
+  - Separately record the UI/API differences between the actual production `e56d029e` and baseline `ef70b347`. Do not omit the Credentials/Status screens remaining in production or the older auth/config/API contract, and state that the newest-only features cannot be applied to production.
+### Instrumentation preparation
 
-- [ ] MEASURE-01 운영 엔티티 분모와 실행 행렬 고정
-  - 실제 목록과 cursor page traversal, 조회 anchor, 상태/필터/poll 조합을 기록한다. 변동 데이터 규칙과 운영 부하 중단 조건을 설정한다.
-- [ ] MEASURE-02 안전한 쓰기 삭제 격리 fixture 준비
-  - 실제 app + SQLite 기본 환경 및 필요한 PostgreSQL 환경을 구성한다. 외부 서비스는 안전한 시험 연결을 사용하고 실제 자격증명을 복제하지 않는다. 정상/빈/오류/권한 상태 및 복구 경로를 준비한다.
-  - 2026-09-16 사용자가 실제 OAuth 성공 검증용 비운영 테스트 계정이 현재 없다고 확인했다. 해당 성공·메타데이터 조회 경로는 외부 전제조건 차단으로 유지한다. 운영 토큰 복제, 임의 계정 선택, 가짜 성공 응답으로 대체하지 않으며 계정 부재를 다른 격리 검증의 실패로 합산하지 않는다.
-- [x] MEASURE-03 요청별 서버 SQL pool 계측 방법 확정
-  - 기존 관측 기능으로 요청별 SQL 횟수/시간/pool 대기를 얻을 수 있는지 확인한다. 부족하면 필요한 정확한 instrumentation 범위를 승인 요청한다. 별도 EXPLAIN만으로 실제 요청 시간을 채우지 않는다.
-- [x] MEASURE-04 브라우저 독립 원시 기록 수집기 검증
-  - 실제 클릭과 network capture를 연결하고 원시 시각·response hash·render 결과를 수집한다. direct fetch 복사값 및 누락값을 성공으로 판정하지 않는 음성 검증을 수행한다.
+- [ ] MEASURE-01 Pin production entity denominators and the execution matrix
+  - Record the real lists and cursor page traversal, query anchors, and state/filter/poll combinations. Set variable-data rules and production-load stop conditions.
+- [ ] MEASURE-02 Prepare safe write/delete isolation fixtures
+  - Configure the real app + default SQLite environment and, where needed, a PostgreSQL environment. Use safe test connections for external services; do not copy real credentials. Prepare normal/empty/error/permission states and recovery paths.
+  - On 2026-09-16 the user confirmed there is currently no non-production test account for real OAuth success verification. Those success/metadata-fetch paths remain blocked by an external precondition. Do not substitute production token copying, arbitrary account selection, or fake success responses, and do not add the missing account into other isolated verifications' failures.
+- [x] MEASURE-03 Confirm the per-request server SQL/pool instrumentation method
+  - Check whether existing observability can yield per-request SQL count/time/pool wait. If insufficient, request approval for the exact instrumentation scope needed. Do not fill real request times from a separate EXPLAIN alone.
+- [x] MEASURE-04 Verify the browser independent raw-record collector
+  - Link real clicks to network capture and collect raw timestamps, response hashes, and render results. Run negative verification that does not judge copied direct-fetch values or missing values as success.
 
-- [x] MEASURE-05 Admin 요청에 한정한 SQL 로그 필터 검증
-  - 격리 SQLite·PostgreSQL에서 `info,[admin.request]=debug`를 시험했다. 각 3개 Admin 조회의 SQL·acquire 이벤트를 유지하면서 Admin span 밖 SQL DEBUG는 0건이었다. 같은 소규모 broad-filter 대조에서는 각각 99·144건이었다. 일반 INFO와 Proxy 401 제어 결과는 유지했다.
-  - 이 설정은 Admin span 내부의 모든 DEBUG를 허용하므로 SQL-only 필터나 모든 endpoint의 비밀 안전성 검증이 아니다. 운영 설정·앱 코드·provider 계정은 변경하지 않았으며 로그량·성능 수치를 운영 전체로 외삽하지 않는다.
+- [x] MEASURE-05 Verify a SQL log filter scoped to Admin requests
+  - Tested `info,[admin.request]=debug` on isolated SQLite and PostgreSQL. It kept the SQL/acquire events of each of 3 Admin queries while SQL DEBUG outside the Admin span was 0. A comparable small broad-filter control produced 99 and 144 events respectively. The general INFO and Proxy 401 control results were preserved.
+  - This setting allows all DEBUG inside the Admin span, so it is not a SQL-only filter or a secret-safety verification for every endpoint. No production settings, app code, or provider accounts were changed, and the log-volume/performance figures are not extrapolated to all of production.
 
-### 전수 실측
+### Exhaustive measurement
 
-- [ ] RUN-01 Overview 공통 인증 탐색 브라우저 실측
-  - INV-01의 모든 적용 가능한 cell을 실행하고 환경·원자 요청·UI 증거를 기록한다.
-- [ ] RUN-02 Upstreams Warmup 브라우저 전수 실측
-  - 모든 대상 Upstream과 variant를 실행한다. 부작용 있는 동작은 격리 환경에서 검증한다.
-- [ ] RUN-03 Principals Router 브라우저 전수 실측
-  - 모든 대상 Principal의 일반 관리/라우팅 UI와 관련 상태전이를 실행한다. 키 발급/폐기는 격리 fixture만 사용한다.
-- [ ] RUN-04 Keepalive 계정 필터 상세 폴링 전수 실측
-  - 모든 active Principal, 3 horizons×7 filters, 카드/설정 sheet/list/detail, 동시 세 poll stream 각각 최소 두 cycle을 검증한다.
-- [ ] RUN-05 Keepalive 모든 cursor 실제 terminal 검증
-  - 적용 가능한 각 조합을 실제 null cursor까지 순회한다. hard cap, 중간 오류, 변동 분모는 별도 차단 사유이며 terminal로 기록하지 않는다.
-- [ ] RUN-06 Logs SSE 필터 상세 브라우저 전수 실측
-  - 로그와 SSE의 모든 정의된 변형을 실행하고 시간창·cursor·필터·렌더 상태의 일치를 확인한다.
-- [ ] RUN-07 Plugins 업로드 참조 삭제 브라우저 실측
-  - 운영 read cell과 격리 lifecycle mutation cell을 구분해 실행하고 참조/삭제 상태전이를 검증한다.
-- [ ] RUN-08 Settings Audit 브라우저 전수 실측
-  - 운영 조회 및 격리 설정 적용/이력/감사 상태전이를 검증한다.
-- [ ] RUN-09 쓰기 삭제 상태전이와 복구 결과 검증
-  - 모든 mutation cell이 storage→API→UI 변화와 복구를 증명하는지 대조한다. 실행하지 못한 동작을 목록에서 제외하지 않는다.
-- [ ] RUN-10 모든 원자 요청의 서버 DB 상관 분석
-  - 각 실행을 실제 handler·SQL·pool 관측과 연결한다. 화면/전송/서버/DB 병목 및 미관측 원인을 개별 cell에 기록한다.
+- [ ] RUN-01 Overview common auth/navigation browser measurement
+  - Execute every applicable cell from INV-01 and record environment, atomic requests, and UI evidence.
+- [ ] RUN-02 Upstreams Warmup exhaustive browser measurement
+  - Execute every target Upstream and variant. Verify side-effecting actions in the isolated environment.
+- [ ] RUN-03 Principals Router exhaustive browser measurement
+  - Execute the general management/routing UI and related state transitions for every target Principal. Use only isolated fixtures for key issuance/revocation.
+- [ ] RUN-04 Keepalive account/filter/detail polling exhaustive measurement
+  - Verify all active Principals, 3 horizons × 7 filters, card/settings sheet/list/detail, and at least two cycles of each of the three concurrent poll streams.
+- [ ] RUN-05 Keepalive real terminal verification of every cursor
+  - Traverse each applicable combination to a real null cursor. Hard caps, mid-run errors, and variable denominators are separate blockers, not recorded as terminal.
+- [ ] RUN-06 Logs SSE filter/detail exhaustive browser measurement
+  - Execute every defined variant of logs and SSE and confirm consistency of time window/cursor/filter/render state.
+- [ ] RUN-07 Plugins upload/reference/delete browser measurement
+  - Run production read cells and isolated lifecycle-mutation cells separately, and verify reference/delete state transitions.
+- [ ] RUN-08 Settings Audit exhaustive browser measurement
+  - Verify production reads and isolated settings apply/history/audit state transitions.
+- [ ] RUN-09 Verify write/delete state transitions and recovery results
+  - Check that every mutation cell proves the storage→API→UI change and recovery. Do not drop unexecuted actions from the list.
+- [ ] RUN-10 Server/DB correlation analysis for every atomic request
+  - Link each execution to real handler/SQL/pool observations. Record screen/transport/server/DB bottlenecks and unobserved causes per cell.
 
-- [ ] RUN-11 운영 전용 Credentials Status 브라우저 실측
-  - INV-09에서 확인한 운영 전용 화면과 동작도 동일한 실제 브라우저·원시 증거 기준으로 실행한다. 최신 코드에서 제거되었다는 이유로 운영 분모에서 빼지 않는다.
-### 캐시 비교
+- [ ] RUN-11 Production-only Credentials Status browser measurement
+  - Execute the production-only screens and behaviors identified in INV-09 under the same real-browser/raw-evidence standard. Do not drop them from the production denominator because the latest code removed them.
+### Cache comparison
 
-- [x] CACHE-01 격리 cold warm 캐시 통제 절차 검증
-  - 운영이 아닌 격리 환경에서 app cache, DB buffer, OS page cache의 통제 범위를 명시하고 cache 상태를 관측으로 입증한다. 첫 요청을 cold라고 이름만 바꾸지 않는다.
-- [x] CACHE-02 통제된 캐시 조건별 성능 비교 기록
-  - 같은 build/engine/dataset/동시성에서 cold와 warm 조건을 각각 반복 측정한다. API/SQL/pool/response/브라우저 지표를 분리하고 제한을 명시한다.
+- [x] CACHE-01 Verify the isolated cold/warm cache control procedure
+  - In an isolated (non-production) environment, specify the control scope of app cache, DB buffer, and OS page cache, and prove cache state by observation. Do not merely rename the first request "cold".
+- [x] CACHE-02 Record performance comparison per controlled cache condition
+  - Measure cold and warm conditions repeatedly under the same build/engine/dataset/concurrency. Separate API/SQL/pool/response/browser metrics and state the limits.
 
-### 검증과 전달
+### Verification and delivery
 
-- [ ] VERIFY-01 기능 누락 실패 증거 결함 수정 재검증
-  - QA 자산의 실제 결함은 수정하고 재실행한다. 앱 결함은 범위를 제시해 승인받은 후 수정한다. 실패를 삭제·재명명·완화하여 통과시키지 않는다.
-- [ ] VERIFY-02 원시 증거 보안과 실행 행렬 완전성 검증
-  - 기대 key와 actual key를 exact 대조하고 missing/duplicate/secret/필수 null을 검사한다. 독립 검토자가 분모와 PASS 주장을 반증 시도한다.
-- [ ] VERIFY-03 최종 성능 병목 결과와 문서 동기화
-  - 화면/계정/variant별 결과, 오류와 개선점, SQL 상관 근거, cache 상태, 남은 한계를 작성한다. 스킬/목록/계획/실행 보고의 상태가 모순되지 않게 한다.
-- [x] VERIFY-04 전체 변경 독립 리뷰와 저장소 게이트 검증
-  - 스킬 이전·QA 도구·데이터·문서 전체 diff를 독립 리뷰한다. 변경 범위에 맞는 formatter/lint/typecheck/tests와 실제 실행을 최종 한 번 수행한다.
-- [x] VERIFY-05 문서 스킬 인벤토리 증거 커밋 PR 생성
-  - 명시된 자산과 검증된 비식별 증거만 커밋한다. 분석 제안·비밀값·무관한 원본 앱 변경을 제외하고 PR에 포함/제외 범위를 설명한다.
-- [x] VERIFY-06 현재 PR head CI 통과와 리뷰 완료
-  - 현재 head의 CI/필수 리뷰를 확인한다. 실패는 무수정 rerun하지 않고 원인을 수정해 검증한다.
-- [x] VERIFY-07 PR별 변경 설명 후 사용자 머지 승인 요청
-  - PR마다 §2의 최종 내용·검증·head/base·방식·위험을 설명하고 사용자 승인을 기록한다. 대기 중에는 가능한 독립 작업을 진행한다.
-- [ ] VERIFY-08 승인된 PR만 머지하고 산출물 반영 확인
-  - 승인된 동일 head/대상/옵션으로만 머지한다. 변경되면 다시 설명하고 승인받는다. 공유 저장소의 파일/스킬 경로/보고서 반영을 확인한 뒤 goal 완료를 판정한다.
+- [ ] VERIFY-01 Re-verify after fixing defects in missing/failed evidence
+  - Fix real defects in the QA assets and re-run. For app defects, present the scope and fix only after approval. Do not pass failures by deleting, renaming, or weakening them.
+- [ ] VERIFY-02 Verify raw-evidence security and execution-matrix completeness
+  - Exactly compare expected keys vs. actual keys and check missing/duplicate/secret/required-null fields. An independent reviewer attempts to disprove the denominators and PASS claims.
+- [ ] VERIFY-03 Sync final performance-bottleneck results with documents
+  - Write per-screen/account/variant results, errors and improvements, SQL-correlation evidence, cache states, and remaining limits. Keep skill/list/plan/execution-report statuses consistent.
+- [x] VERIFY-04 Independent review of the whole change and repository-gate verification
+  - Independently review the full diff of skill migration, QA tooling, data, and documents. Run the formatter/lint/typecheck/tests matching the change scope and a real execution once at the end.
+- [x] VERIFY-05 Commit documents/skills/inventory/evidence and create the PR
+  - Commit only the stated assets and verified de-identified evidence. Exclude analysis proposals, secrets, and unrelated original app changes, and explain the PR's include/exclude scope.
+- [x] VERIFY-06 Current PR head CI pass and review completion
+  - Confirm CI/required reviews on the current head. Do not rerun failures unmodified; fix the cause and verify.
+- [x] VERIFY-07 Explain each PR's changes and request user merge approval
+  - For each PR, explain §2's final contents, verification, head/base, method, and risks, and record the user's approval. Proceed with possible independent work while waiting.
+- [ ] VERIFY-08 Merge only approved PRs and confirm artifact reflection
+  - Merge only with the approved identical head/target/options. If anything changes, explain again and get approval. Judge goal completion after confirming file/skill-path/report reflection in the shared repository.
 
-- [x] VERIFY-09 YAML 직렬화 결함 수정 및 파서 검증
-  - 빈 문자열 등 특수 mapping key를 안전하게 직렬화한다. 생성 YAML을 표준 파서로 읽고 원본 key/value가 보존되는지 검증한다. 생성물 바이트 일치와 문법·의미 유효성을 별도로 확인한다.
+- [x] VERIFY-09 Fix the YAML serialization defect and verify with a parser
+  - Safely serialize special mapping keys such as empty strings. Parse the generated YAML with a standard parser and verify the original key/values are preserved. Check generated-artifact byte equality and syntactic/semantic validity separately.
 
-### Audit 오류 수정 — 사용자 추가 승인
+### Audit error fix — additional user approval
 
-- [x] AUDIT-01 승인된 최신 Audit 조회 계약과 영향 범위 고정
-  - 실제 263행 fixture에서 오래된 200개를 먼저 제한해 최신 config_export가 API/UI에서 누락되는 결함을 수정한다. 기존 AuditStore의 append-order 조회는 보존한다. 새 최근 조회는 ts 내림차순과 삽입 ID/seq 내림차순 tie-break 후 LIMIT을 적용하며 All/Principal/Actor 범위를 지원한다. HTTP 필터 검증·since/after/until·limit 상한과 감사 기록 부작용은 유지한다.
-- [x] AUDIT-02 기존 순서를 보존하는 양 DB 최신 조회 구현
-  - storage-api에 별도 query_recent_audit와 borrowed AuditQueryScope를 추가하고 SQLite/PostgreSQL에서 실제 제한 조회한다. 기존 query_audit/query_audit_by_actor와 conformance append 순서는 바꾸지 않는다. 모든 trait 구현·관련 mock도 갱신한다. 불필요한 새 migration·실시간 설정 변경·상시 계측은 포함하지 않는다.
-- [x] AUDIT-03 Audit 화면 연결과 최신 기록 회귀 검증
-  - Admin Audit 두 alias를 새 조회에 연결하고 최신 200개 초과, 같은 ts의 결정적 순서, 지연 삽입된 과거 ts, Principal/Actor 필터, 빈/0limit/역전시간창, 새 export 발생 후 UI 갱신을 검증한다. 원래 오래된 순 저장소 조회의 기존 테스트는 유지한다. 실제 브라우저 pre-fix FAIL 증거와 post-fix 검증을 분리한다.
-- [x] AUDIT-04 수정된 Audit 계약과 QA 목록 및 증거 갱신
-  - 코드 변경 뒤 source catalog/hash/SQL/실행 명세와 결과를 갱신한다. 이전 ef70 실행 증거와 새 candidate의 소스·binary를 혼동하지 않는다. 수정 PR/머지는 기존 개별 승인 절차를 따른다.
+- [x] AUDIT-01 Pin the approved latest Audit query contract and impact scope
+  - Fix the defect where, in a real 263-row fixture, limiting to the oldest 200 first made the newest config_export missing from the API/UI. Preserve the existing AuditStore append-order query. The new recent query applies LIMIT after ts descending plus insertion ID/seq descending tie-break, and supports All/Principal/Actor scopes. HTTP filter validation, since/after/until, the limit cap, and audit-record side effects are preserved.
+- [x] AUDIT-02 Implement order-preserving latest-record queries on both DBs
+  - Add a separate query_recent_audit and a borrowed AuditQueryScope to storage-api, with real limited queries on SQLite/PostgreSQL. Do not change the existing query_audit/query_audit_by_actor or the conformance append order. Update all trait implementations and related mocks. Do not include unnecessary new migrations, live config changes, or always-on instrumentation.
+- [x] AUDIT-03 Wire the Audit screen and regression-verify latest records
+  - Connect both Admin Audit aliases to the new query and verify: over-200 newest records, deterministic order for equal ts, late-inserted old ts, Principal/Actor filters, empty/0-limit/reversed time windows, and UI refresh after a new export. Keep the existing tests for the original oldest-order store query. Keep the real-browser pre-fix FAIL evidence and post-fix verification separate.
+- [x] AUDIT-04 Update the fixed Audit contract, QA list, and evidence
+  - After the code change, update the source catalog/hash/SQL/execution spec and results. Do not confuse the earlier ef70 execution evidence with the new candidate's source/binary. The fix PR/merge follows the existing per-item approval procedure.
 
-### 추가 승인 오류 수정
+### Additional approved error fixes
 
-- [x] FIX-01 Upstream 이름 변경 중복 제출 수정 검증
-  - InlineNameEditor의 Enter/blur 중복 제출을 실제 한 요청으로 수렴시킨다. 정상 blur 저장과 Escape 취소는 유지하며 API 성공 뒤 stale revision 409가 덮어쓰지 않도록 실제 브라우저로 검증한다.
-- [x] FIX-02 저장된 Base URL 응답 누락 수정 검증
-  - Upstreams/OAuth 조회·변경 응답과 프런트 schema에 저장된 base_url을 일관되게 반환한다. secret 원문이나 저장되지 않은 api_key_env 출처를 복원·노출하지 않는다. 저장→새 조회→페이지 새로고침 상태전이를 검증한다.
-- [x] FIX-03 선택적 API 키 라벨 계약 수정 검증
-  - 선택적 라벨의 omitted/empty 값을 양 DB 발급 경로에서 허용하고 실제 잘못된 입력을 400으로 매핑한다. 키 생성·해시·인증 알고리즘과 중복발급 방지는 보존한다. 발급·조회·proxy 사용·폐기의 실제 경로 및 음성 입력을 검증한다.
-- [x] FIX-04 Principal 변경 후 Router revision 동기화 검증
-  - spec_revision을 바꾸는 관련 mutation 후 Router의 실제 서버 revision/전략 값을 갱신하고 갱신 중 stale 저장을 막는다. 진짜 동시 수정에 대한 409 보호는 유지한다.
-- [x] FIX-05 Plugins 삭제 완료 흐름과 GC 안내 수정 검증
-  - 삭제된 대상의 참조 refetch/Not Found 오류가 성공을 덮지 않게 캐시·현재 선택 화면을 정리한다. GC는 고아 blob만 정리한다는 실제 동작에 맞춰 안내·활성 조건을 수정하며 등록된 플러그인을 추가 삭제하지 않는다.
+- [x] FIX-01 Verify the fix for duplicate submission on Upstream rename
+  - Converge InlineNameEditor's Enter/blur duplicate submission into a real single request. Keep normal blur save and Escape cancel, and verify with a real browser that a stale-revision 409 does not overwrite after API success.
+- [x] FIX-02 Verify the fix for the missing saved Base URL in responses
+  - Consistently return the stored base_url in Upstreams/OAuth read/change responses and the frontend schema. Do not restore or expose secret plaintext or the origin of an unsaved api_key_env. Verify the save→fresh read→page-refresh state transition.
+- [x] FIX-03 Verify the fix for the optional API-key label contract
+  - Accept omitted/empty values for the optional label on both DB issuance paths and map real invalid input to 400. Preserve key generation/hashing/auth algorithm and duplicate-issuance prevention. Verify the real issue/read/proxy-use/revoke paths and negative inputs.
+- [x] FIX-04 Verify Router revision sync after Principal change
+  - After related mutations that change spec_revision, refresh the Router's real server revision/strategy values and block stale saves during the refresh. Keep 409 protection for genuine concurrent edits.
+- [x] FIX-05 Verify the Plugins delete-completion flow and GC guidance fix
+  - Clean the cache and current selection screen so refetch/Not Found errors for a deleted target do not mask success. Adjust the guidance/active conditions to match the real behavior — GC cleans only orphan blobs — without additionally deleting registered plugins.
 
-### 승인된 격리 계측
+### Approved isolated instrumentation
 
-- [x] OBS-01 Admin 전용 요청 식별과 span 구현
-  - `app.rs::admin_router`와 private middleware에 서버 생성 bounded ID, `x-request-id`, 정제된 request span과 응답 생성까지의 handler 시간을 연결한다. Proxy 처리·인증·본문·SSE 동작은 바꾸지 않는다.
-- [x] OBS-02 양 저장소 acquire 전체시간 관측 활성화
-  - SQLite `open_sqlite`와 PostgreSQL `open_postgres_pool`에서 SQLx 일반 acquire 로그를 DEBUG로 활성화할 수 있게 한다. pool 크기·timeout·SQL 결과는 유지하며 기존 전이 의존성 `log`를 직접 선언한다.
-- [x] OBS-03 격리 요청 SQL acquire 상관 검증
-  - 두 DB의 실제 Admin 요청에서 응답 ID와 동일 span의 SQL·acquire 이벤트를 연결한다. 식별자 충돌·클라이언트 ID 반사·handler/stream 시간 혼동을 방지한다.
-- [x] OBS-04 계측 비밀 비노출과 오버헤드 검증
-  - 격리 로그에 credential·cookie·본문·원시 URL을 노출하지 않는지 확인하고, 기존 후보와 계측 후보를 같은 조건에서 비교한다. Proxy 제어 요청도 비교한다. 운영 설정 변경·배포는 별도 승인 전에는 하지 않는다.
+- [x] OBS-01 Admin-only request identification and span implementation
+  - In `app.rs::admin_router` and private middleware, link a server-generated bounded ID, `x-request-id`, a sanitized request span, and the handler time through response generation. Do not change Proxy handling, auth, body, or SSE behavior.
+- [x] OBS-02 Enable full-acquire-time observation on both stores
+  - In SQLite `open_sqlite` and PostgreSQL `open_postgres_pool`, make it possible to enable SQLx general acquire logs at DEBUG. Keep pool size/timeout/SQL results unchanged and declare the existing transitive dependency `log` directly.
+- [x] OBS-03 Verify isolated request SQL/acquire correlation
+  - On both DBs' real Admin requests, link the response ID to SQL/acquire events in the same span. Prevent identifier collisions, client-ID reflection, and handler/stream-time confusion.
+- [x] OBS-04 Verify instrumentation secret non-exposure and overhead
+  - Confirm isolated logs do not expose credentials/cookies/bodies/raw URLs, and compare the existing candidate and the instrumented candidate under the same conditions. Also compare Proxy control requests. Do not change production settings or deploy before separate approval.
 
-- [x] OBS-05 Server-Timing UI 요청 식별 연결 구현
-  - 추가 승인된 `Server-Timing`의 `rid.description`에 기존 서버 ID만 전달한다. 시간·본문·인증정보를 추가 노출하지 않는다. 수집기는 캐시 ID 재사용·뒤늦은 모호성·상충하는 ID를 보수적으로 처리한다.
-- [x] OBS-06 실제 브라우저 SQL 상관 연결 검증
-  - 각 DB에서 실제 UI가 보낸 요청을 Resource Timing ID로 서버 head/SQL/acquire 로그에 연결한다. 독립 fetch로 UI 요청을 대체하지 않고, 빠진 로그·본문·순수 wait를 다른 값으로 채우지 않는다.
+- [x] OBS-05 Implement Server-Timing UI request identification linkage
+  - In the additionally approved `Server-Timing`, pass only the existing server ID in `rid.description`. Do not newly expose time, body, or auth information. The collector conservatively handles cache-ID reuse, late ambiguity, and conflicting IDs.
+- [x] OBS-06 Verify real-browser SQL correlation linkage
+  - On each DB, link requests actually sent by the UI to server head/SQL/acquire logs via Resource Timing IDs. Do not substitute independent fetches for UI requests, and do not fill missing logs/bodies/pure waits with other values.
 
-### 차단 항목 재평가
+### Blocked-item reassessment
 
-- [x] REASSESS-01 운영 관측 행과 소스 ID 오프라인 대조
-  - 이미 보존한 Plugins·Upstreams native 관측을 실제 source ID와 대조한다. 별도 관측 이름을 정식 ID로 연결할 근거가 없는 행은 미해결로 남기며 새 운영 요청은 보내지 않는다.
-- [x] REASSESS-02 외부 승인 없이 가능한 잔여 검증 분리
-  - 남은 항목을 외부 승인·credential 필요, 운영 계측 적용 필요, 기존 자료로 가능한 대조, 승인된 격리 환경에서 가능한 검증으로 나눈다. 머지 보류를 다른 작업의 취소로 확대하지 않는다.
+- [x] REASSESS-01 Offline reconciliation of production observation rows against source IDs
+  - Reconcile the already-preserved Plugins/Upstreams native observations against real source IDs. Leave rows with no basis to link a separate observation name to a canonical ID unresolved, and send no new production requests.
+- [x] REASSESS-02 Separate remaining verification possible without external approval
+  - Divide remaining items into: needs external approval/credentials, needs production instrumentation applied, reconcilable with existing material, and verifiable in the approved isolated environment. Do not expand a merge hold into cancellation of other work.
 
-- [x] REASSESS-03 PostgreSQL 브라우저 관측 창 종료 증거 검증
-  - 기존 raw snapshot의 `end=null`과 `ui_oracle=null`은 유지하고, 승인된 로컬 PostgreSQL 환경에서 유효한 `endAction` 호출 뒤 종료된 window와 실제 UI·RID·SQL 증거를 새 파일로 보존한다. 운영 요청이나 코드 변경은 하지 않는다.
-  - 새 raw window의 종료 시각과 서버 요청 3건 연결을 확인했다. 다만 기대·관측 해시를 같은 HTML에서 만든 한계가 있어 독립 UI oracle PASS로는 인정하지 않는다.
-- [x] REASSESS-04 독립 UI 오라클과 원본 화면 증거 검증
-  - 클릭 전에 최소 기대 상태를 고정하고, 실제 DOM에서 별도로 추출한 상태와 비교한다. 스크린샷 원본 bytes와 두 상태 객체를 먼저 보존한 뒤 해시를 계산한다. 동일 관측을 양쪽에 복사한 해시 비교는 통과 근거로 사용하지 않는다.
-  - 클릭 전에 고정한 `/plugins` 경로와 `Plugins` 제목을 실제 DOM에서 별도 추출한 상태와 비교했다. 원본 PNG를 보존하고 Main이 화면과 해시를 확인했다. 종료된 관측 창의 registry GET을 실제 PostgreSQL query/acquire 이벤트 3개씩에 연결했다. 이 한 페이지 탐색 검증은 운영 전수 QA 완료를 뜻하지 않는다.
+- [x] REASSESS-03 Verify PostgreSQL browser-observation window-close evidence
+  - Keep the existing raw snapshot's `end=null` and `ui_oracle=null`, and preserve, in a new file, a window closed after a valid `endAction` call plus real UI/RID/SQL evidence in the approved local PostgreSQL environment. No production requests or code changes.
+  - Confirmed the new raw window's close time and its linkage to 3 server requests. However, because the expected and observed hashes were built from the same HTML, it is not accepted as an independent UI-oracle PASS.
+- [x] REASSESS-04 Verify the independent UI oracle and original screen evidence
+  - Pin the minimum expected state before the click and compare it against state extracted separately from the real DOM. Preserve the screenshot's original bytes and both state objects before computing hashes. Do not use a hash comparison that copied the same observation to both sides as pass evidence.
+  - Compared the `/plugins` path and `Plugins` title pinned before the click against state extracted separately from the real DOM. The original PNG was preserved and Main verified the screen and hashes. Linked the closed observation window's registry GETs to 3 real PostgreSQL query/acquire events each. This one-page navigation verification does not mean exhaustive production QA is complete.
 
-### 격리 잔여 시나리오
+### Isolated remaining scenarios
 
-- [x] LOCAL-01 Upstream 사용량 표시의 실데이터 경로 검증
-  - 미관측된 cost/token 표시가 어떤 실제 집계·DTO·UI 필드에 연결되는지 확인한다. 외부 호출 없는 격리 fixture 생성 경로가 확인될 때만 실제 상태 전이를 검증한다.
-  - 새 SQLite fixture의 실제 rollup 저장소와 Admin API, 브라우저에서 `$1.25 · 2.0K tok` → `$2.00 · 3.0K tok` 자연 poll 전이를 확인했다. 수정한 캡처에서 실제 `/admin/usage` UI 요청 3건을 각각 SQL·acquire 이벤트에 연결했다. request ingestion 경로를 검증한 것은 아니다.
-- [x] LOCAL-02 Upstream 오류 상태 표시의 생성 경로 검증
-  - 상태 표시의 실제 생성 경로와 UI 계약을 확인한다. 연결되지 않는 URL만 설정해서 오류 상태라고 가정하지 않고, 존재하지 않는 UI 변형도 통과·실패로 만들지 않는다.
-  - 실제 생성 경로는 연결 실패가 아닌 OAuth credential 검증 오류였다. 새 격리 upstream의 `error`·danger 도트·오류 title을 확인하고 실제 disable API 이후 저장소·status API·브라우저가 `disabled`·neutral·title 없음으로 바뀌는 것을 확인했다. native tooltip 픽셀 표시는 검증하지 않았다.
+- [x] LOCAL-01 Verify the real-data path of the Upstream usage display
+  - Confirm which real aggregation/DTO/UI field the unobserved cost/token display connects to. Verify the real state transition only when an isolated fixture generation path without external calls is confirmed.
+  - Confirmed, in a new SQLite fixture's real rollup store, Admin API, and browser, the natural poll transition `$1.25 · 2.0K tok` → `$2.00 · 3.0K tok`. In the fixed capture, linked 3 real `/admin/usage` UI requests to SQL/acquire events each. The request-ingestion path was not verified.
+- [x] LOCAL-02 Verify the generation path of the Upstream error-status display
+  - Confirm the real generation path and UI contract of the status display. Do not assume an error state just by setting an unreachable URL, and do not manufacture pass/fail for a UI variant that does not exist.
+  - The real generation path was an OAuth credential validation error, not a connection failure. Confirmed the new isolated upstream's `error`/danger dot/error title, and after a real disable API call, confirmed the store/status API/browser changed to `disabled`/neutral/no title. Native tooltip pixel display was not verified.
 
-### 승인된 Base URL 초기화
+### Approved Base URL clearing
 
-- [x] BASEURL-01 명시적 null 초기화 계약과 호출부 범위 확정
-  - 2026-09-16 사용자가 `명시적 null로 제거 승인`을 선택했다. update에서 생략은 유지, null은 override 제거, URL은 설정이다. create/response의 nullable 표현과 key/OAuth/warmup 필드 계약은 유지한다.
-- [x] BASEURL-02 API와 양 저장소의 삼상태 갱신 구현
-  - `UpstreamUpdate.base_url`의 외부 Option은 변경 여부, 내부 Option은 nullable 값을 뜻한다. 기존 Serde 삼상태 관례와 양 DB의 명시적 presence 조건을 사용하고 모든 실제 caller/mock을 이관한다. 새 migration·의존성·runtime test hook은 추가하지 않는다.
-- [x] BASEURL-03 생략 설정 초기화 및 충돌 회귀 검증
-  - 기존 HTTP 회귀에 생략·명시적 null·복원·stale revision을 추가했고 수정 전 실제 실패를 보존했다. 양 DB conformance와 해당 회귀를 수정 후 검증하며 키·토큰의 비노출과 충돌 보호를 유지한다.
-- [x] BASEURL-04 실제 UI 저장 재조회와 프록시 목적지 검증
-  - 실제 SettingsCard에서 비우기→저장→새 GET→새로고침 뒤 기본값 상태를 확인한다. 실제 proxy 경로는 기존 RecordingDispatcher seam에서 custom override와 제거 후 기본 목적지를 비교한다. 유료/외부 Anthropic 요청은 보내지 않는다.
-  - 수정 전 HTTP 회귀가 기존 URL 반환으로 실패했고, 수정 후 SQLite·PostgreSQL conformance와 signer·실제 Lifecycle dispatch 회귀를 포함한 33/33 검사가 통과했다. 실제 UI 비우기·저장·독립 GET·새로고침 후 DB NULL과 기본 endpoint 표시를 확인하고 원래 loopback override를 복원했다. 외부 provider 요청은 하지 않았다.
+- [x] BASEURL-01 Pin the explicit-null clearing contract and callsite scope
+  - On 2026-09-16 the user chose `approve removal via explicit null`. In update, omission stays unchanged, null removes the override, and a URL sets it. Keep the nullable representation in create/response and the key/OAuth/warmup field contracts.
+- [x] BASEURL-02 Implement tri-state update in the API and both stores
+  - `UpstreamUpdate.base_url`'s outer Option means whether to change; the inner Option is the nullable value. Use the existing Serde tri-state convention and explicit presence conditions on both DBs, and migrate every real caller/mock. Add no new migration, dependency, or runtime test hook.
+- [x] BASEURL-03 Regression-verify omission/set/clear and conflicts
+  - Added omission, explicit null, restore, and stale revision to the existing HTTP regression, and preserved the real pre-fix failure. Verify both-DB conformance and that regression after the fix, keeping key/token non-exposure and conflict protection.
+- [x] BASEURL-04 Verify real UI save/re-read and proxy destination
+  - In the real SettingsCard, confirm clear→save→fresh GET→refresh leaves the default state. For the real proxy path, compare a custom override and the default destination after removal at the existing RecordingDispatcher seam. Send no paid/external Anthropic requests.
+  - The pre-fix HTTP regression failed by returning the old URL; after the fix, 33/33 checks passed including SQLite/PostgreSQL conformance and signer/real Lifecycle dispatch regressions. Confirmed real UI clear/save/independent GET/refresh, then DB NULL and the default endpoint display, and restored the original loopback override. No external provider requests were made.
 
-- [x] BASEURL-05 초기화 수정 후 카탈로그 문서 최종 검증
-  - formatter, 영향 Rust target의 all-features Clippy, source inventory check와 표준 YAML 파싱을 확인했다. 두 DB의 실제 SQL 및 bind 정보와 UI·API 삼상태 계약을 함께 갱신했다.
-- [x] BASEURL-06 Base URL 수정 커밋과 PR CI 검증
-  - 추가 승인 수정과 격리 증거를 별도 커밋으로 기존 draft PR에 반영하고 새 head의 CI를 확인한다. 이전 head의 통과를 새 head에 적용하지 않으며 머지 보류는 유지한다.
-  - 후속 커밋 `80e1180f0bedd2054450fb68e57444e035c59ef2`를 draft PR #793에 반영했다. 해당 head의 Rust·Web·publish-check 및 상태 검사 11개 성공, release-artifact 조건부 제외 1개를 확인했다. 사용자 머지 보류는 유지하며 ready 전환·머지·배포는 하지 않았다.
+- [x] BASEURL-05 Final catalog/document verification after the clearing fix
+  - Confirmed the formatter, all-features Clippy on affected Rust targets, the source inventory check, and standard YAML parsing. Updated both DBs' real SQL and bind info together with the UI/API tri-state contract.
+- [x] BASEURL-06 Commit the Base URL fix and verify PR CI
+  - Apply the additionally approved fix and isolated evidence as a separate commit to the existing draft PR and check CI on the new head. Do not apply the previous head's pass to the new head; the merge hold stays.
+  - Applied follow-up commit `80e1180f0bedd2054450fb68e57444e035c59ef2` to draft PR #793. Confirmed 11 successful checks on that head — Rust, Web, publish-check, and status checks — plus 1 conditionally excluded release-artifact check. The user merge hold stays; no ready transition, merge, or deployment was done.
 
-### 승인된 Settings 지원 표시
+### Approved Settings support display
 
-- [x] SETTINGS-01 설정 제공자 capability와 소비자 범위 확정
-  - 2026-09-16 사용자가 지원 여부 표시 수정을 승인했다. 실제 Apply 구현이 있는 InMemoryCurrentConfig와 TestReloader만 지원을 선언하고, ConfigWatcher·Config·기본 제공자는 미지원이다.
-- [x] SETTINGS-02 API 지원 여부와 Apply 비활성화 구현
-  - CurrentConfig의 명시적 capability를 draft 응답의 필수 `apply_supported`로 전달한다. UI는 값이 정확히 true일 때만 기존 검증·revision 조건과 함께 Apply를 허용하고, false·미확인에는 비활성화 이유를 표시한다.
-- [x] SETTINGS-03 지원 미지원 및 상태 전이 회귀 검증
-  - 수정 전 미지원인데 Apply가 활성화되는 실패를 재현했다. 미지원 제공자의 저장·검증 유지와 직접 Apply 501, 지원 제공자의 기존 200, UI의 false→true→unknown 전이를 검증한다.
-- [x] SETTINGS-04 실제 브라우저 안내와 요청 차단 검증
-  - 실제 파일 기반 서버에서 유효한 draft의 Save·Validate 후에도 Apply가 비활성화되고 안내가 보이며 Apply 요청이 발생하지 않는지 확인한다. 사전 기대 상태·독립 DOM·원본 PNG·서버 로그를 보존한다.
-  - 실제 파일 제공자에서 Save 1건·Validate 1건 성공 후에도 Apply가 비활성화됐고 서버 로그의 Apply 요청은 0건이었다. 최종 문구·Apply 전용 접근성 설명·Validate 설명 분리와 변경 컨트롤이 보이는 원본 PNG를 확인했다.
-- [x] SETTINGS-05 설정 capability 문서 인벤토리 및 PR 검증
-  - API·UI 계약과 정확한 source 참조를 갱신하고 영향 게이트 및 독립 리뷰를 수행한다. 새 head CI를 확인하되 기존 머지 보류를 해제하거나 운영에 적용하지 않는다.
-  - 커밋 `91cd5219bd9047d1339ff40e9aec11142867a36e`를 draft PR #793에 반영했다. 해당 head의 Rust·Web·publish-check 및 상태 검사 11개 성공, release-artifact 조건부 제외 1개를 확인했다. 기존 지원 모드의 응답 revision·요청 CAS·이력 생성 제한은 별도 미검증 사항으로 남겼으며 머지·운영 반영은 하지 않았다.
+- [x] SETTINGS-01 Pin the settings-provider capability and consumer scope
+  - On 2026-09-16 the user approved the support-indication fix. Only InMemoryCurrentConfig and TestReloader, which have real Apply implementations, declare support; ConfigWatcher, Config, and the default provider do not.
+- [x] SETTINGS-02 Implement API support flag and Apply disablement
+  - Pass CurrentConfig's explicit capability as the required `apply_supported` in the draft response. The UI allows Apply only when the value is exactly true, together with the existing validation/revision conditions, and shows a disable reason for false/unconfirmed.
+- [x] SETTINGS-03 Regression-verify supported/unsupported and state transitions
+  - Reproduced the pre-fix failure where Apply was enabled despite no support. Verify save/validate preservation and direct-Apply 501 on unsupported providers, the existing 200 on supported providers, and the UI's false→true→unknown transitions.
+- [x] SETTINGS-04 Verify real-browser guidance and request blocking
+  - On a real file-based server, confirm that after Save/Validate of a valid draft, Apply stays disabled, guidance is shown, and no Apply request is sent. Preserve the prior expected state, independent DOM, original PNG, and server logs.
+  - On the real file provider, after 1 successful Save and 1 successful Validate, Apply stayed disabled and server logs showed 0 Apply requests. Confirmed the final wording, the Apply-only accessibility description, the separated Validate description, and the original PNG showing the changed controls.
+- [x] SETTINGS-05 Settings-capability document inventory and PR verification
+  - Update the API/UI contract and exact source references, and run the affected gates and independent review. Check new-head CI without lifting the existing merge hold or applying to production.
+  - Applied commit `91cd5219bd9047d1339ff40e9aec11142867a36e` to draft PR #793. Confirmed 11 successful checks on that head — Rust, Web, publish-check, and status checks — plus 1 conditionally excluded release-artifact check. The existing support mode's response revision, request CAS, and history-generation limits were left as separately unverified items; no merge or production application was done.
 
-### 애플리케이션 안전성 재검증
+### Application safety re-verification
 
-- [x] SAFETY-01 앱 변경을 목적별로 분류하고 영향 범위 확정
-  - head `19b05570`의 소스 파일 27개 중 2개는 cfg(test) 내부 변경이고 25개는 런타임 변경이다. QA 도구와 의도한 기능 수정·관측 변경을 구분했다.
-- [x] SAFETY-02 독립 리뷰로 의도하지 않은 동작 변경 점검
-  - 계측·백엔드/저장소·프런트엔드를 독립 검토했다. 근거가 부족했던 Plugins 이중 삭제 추정은 알림/탐색 순서를 대조한 뒤 철회했다.
-- [x] SAFETY-03 누락된 동작 비교를 실행하고 안전성 근거 보고
-  - 현재 head 빌드로 Rust 104개·웹 53개 검사, SQLite/PG HTTP 22쌍(44요청), 성공한 합성 키 등록의 로그 비노출 검사를 수행했다. Audit 빈 화면과 구버전에서 열린 Base URL 폼의 변경 없는 저장에 의한 DB NULL을 실제 브라우저로 재현했다. Audit 범위별 추가 정렬/스캔을 두 DB의 실행 계획으로 확인했다. 운영 영향 없음.
-- [x] SAFETY-04 수정 승인 후 앱 회귀 세 항목 재검증
-  - 2026-09-16 사용자가 아래 세 수정 범위를 명시적으로 승인했다. 기존 CI/리뷰 완료 체크는 당시 검사 이력이며 새로 발견된 안전성 결함의 해결을 뜻하지 않는다.
+- [x] SAFETY-01 Classify app changes by purpose and pin the impact scope
+  - Of the 27 source files in head `19b05570`, 2 are cfg(test)-internal changes and 25 are runtime changes. Distinguished QA tooling from intended feature fixes/observation changes.
+- [x] SAFETY-02 Check for unintended behavior changes via independent review
+  - Independently reviewed instrumentation, backend/storage, and frontend. The under-evidenced Plugins double-delete conjecture was retracted after comparing notification/navigation order.
+- [x] SAFETY-03 Run the missing behavior comparisons and report safety evidence
+  - With the current-head build, ran 104 Rust and 53 web checks, 22 SQLite/PG HTTP pairs (44 requests), and a log non-exposure check for a successful synthetic key registration. Reproduced in a real browser the DB NULL caused by an unchanged save from a Base URL form opened on the old version, and the Audit empty screen. Confirmed per-scope Audit extra sorts/scans via both DBs' execution plans. No production impact.
+- [x] SAFETY-04 Re-verify three app regression items after fix approval
+  - On 2026-09-16 the user explicitly approved the three fix scopes below. The earlier CI/review-complete checks are inspection history from that time and do not mean the newly found safety defects were resolved.
 
-### 승인된 앱 안전성 수정
+### Approved app-safety fixes
 
-- [x] SAFETYFIX-01 Base URL 명시적 초기화 계약과 폼 수정
-  - HTTP의 생략·null은 유지, URL은 설정, `clear_base_url: true`만 초기화로 구분한다. URL과 초기화가 동시에 전달되면 변경 전에 거절한다. 기존 BASEURL-01~06의 null 초기화는 과거 검증 이력으로 보존하고 현재 계약은 이 항목으로 대체한다. 자격증명 의미와 revision 보호를 유지한다.
-- [x] SAFETYFIX-02 Audit 관리자 필터를 조회 제한 전에 적용
-  - API 기본값은 전체 기록을 유지하고 UI는 `admin_only=true`를 명시한다. 양 DB에서 관리자 대상 조건을 LIMIT 전에 적용하며 principal/actor/time 범위와 최신 순서를 유지한다.
-- [x] SAFETYFIX-03 Audit 정렬 인덱스와 쓰기 비용 검증
-  - 새 SQLite/PG 마이그레이션으로 실제 필터·정렬을 지원한다. 기존 마이그레이션을 고치거나 운영 DB에 실행하지 않는다. 조회 계획과 추가 쓰기 비용을 격리 데이터로 검증한다.
-  - 최종 인덱스는 두 DB 각각 5개이며 actor 정렬 인덱스는 `actor_authority IS NOT NULL` 부분 인덱스다. 6개 조회 형태의 A/B/A 결과가 같았고 SQLite 임시 정렬 제거와 PostgreSQL generic actor plan의 부분 인덱스 사용을 확인했다. 10만 합성 행의 실제 앱 migration runner에서 직접 생성 및 별도 concurrent 사전 생성 경로 모두 성공하고 행 수·정의·valid/ready 상태가 보존됐다.
-  - 쓰기 비용은 0이 아니다. 합성 데이터의 SQLite 2천 autocommit 삽입은 평균 기준 대비 비관리자 약 33%, 관리자 약 126% 증가했다. 실제 writer처럼 token 0을 저장한 PostgreSQL 1만 행 INSERT의 DB 실행 시간은 약 73%·151%, WAL은 약 27%·116% 증가했다. PG 값은 commit/client/pool 시간을 제외한 실행·WAL 수치이며 운영 지연·처리량으로 외삽하지 않는다. token NULL을 넣었던 초기 SQL 전용 fixture 비용은 최종 비용 근거로 사용하지 않는다.
-- [x] SAFETYFIX-04 공용 API 타입과 모든 소비자 통합
-  - 새 초기화 필드와 Audit 조회 옵션의 타입·호출부·mock·카탈로그를 함께 이관한다. 과거 실행 증거는 현재 계약으로 덮어쓰지 않는다.
-- [x] SAFETYFIX-05 기존 실패 재현과 양 DB 회귀 검증
-  - 구버전에서 열린 폼을 유지한 배포 전환 후 무편집 저장, 현재 UI의 명시적 초기화, 429 기록 뒤의 관리자 작업 조회, 양 DB 결과/정렬/쓰기 비용, 권한·CAS·자격증명 보존을 확인한다.
-  - 최종 바이너리 `f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8`에서 old UI→new backend 무편집 저장은 URL/revision을 그대로 유지했고, current UI의 의도적 초기화는 DB NULL을 저장했다. new UI→old backend에서 무시된 초기화(PUT 200 한 건)는 오류·편집 유지로 표시되며 성공을 가장하지 않았다. Audit의 숨겨졌던 관리자 작업은 실제 UI에 표시됐다.
-  - Rust 112개·Web 706개·타입 검사·빌드·영향 target Clippy 및 formatter를 확인했다. 실제 PG HTTP에서도 보존/명시적 초기화/400 충돌/409 CAS/복원 및 두 Audit 모드를 확인했다. 표준 YAML 파싱과 inventory 생성·check는 433행으로 통과했다. 원시 증거의 한계와 초기 PG fixture 오류(token NULL)를 별도 기록했다.
-- [x] SAFETYFIX-06 독립 리뷰와 안전성 보고 및 PR 갱신
-  - 세 결함의 수정과 재검증을 독립 리뷰한다. 필요한 저장소 게이트와 새 head CI를 확인하되 머지·운영 배포·운영 DB 변경은 하지 않는다.
-  - 앱 수정 커밋 `e993e2393b6a3b5774afd0f85a9a881fdb2f0955`를 draft PR #793에 반영했다. 해당 commit의 CI·Web·publish-check 및 상태 검사 11개 성공, release-artifact 조건부 제외 1개를 확인했다. `application-safety/ci-source-commit.json`에 exact-head 근거를 고정했다. 이후 문서 갱신의 CI는 그 head에서 별도로 확인하며, 머지와 운영 반영은 계속 보류한다.
+- [x] SAFETYFIX-01 Base URL explicit-clear contract and form fix
+  - Keep HTTP omission/null as-is; a URL sets; only `clear_base_url: true` is distinguished as clearing. If a URL and clearing are delivered together, reject before changing. The earlier BASEURL-01~06 null clearing is preserved as past verification history; the current contract is superseded by this item. Keep credential semantics and revision protection.
+- [x] SAFETYFIX-02 Apply the Audit admin filter before the query limit
+  - The API default keeps all records and the UI specifies `admin_only=true`. On both DBs, apply the admin-target condition before LIMIT, preserving principal/actor/time ranges and newest-first order.
+- [x] SAFETYFIX-03 Verify Audit sort indexes and write cost
+  - Support the real filter/sort with new SQLite/PG migrations. Do not fix existing migrations or run them on the production DB. Verify query plans and added write cost with isolated data.
+  - The final indexes are 5 per DB, and the actor sort index is a partial index on `actor_authority IS NOT NULL`. A/B/A results for the 6 query shapes were identical; confirmed removal of SQLite's temp sort and use of the partial index by PostgreSQL's generic actor plan. With 100k synthetic rows, both direct creation in the real app migration runner and a separate concurrent pre-creation path succeeded, preserving row counts, definitions, and valid/ready states.
+  - Write cost is not zero. For synthetic data, 2,000 SQLite autocommit inserts increased by about 33% (non-admin) and about 126% (admin) versus the average baseline. For a PostgreSQL 10k-row INSERT storing token 0 like the real writer, DB execution time rose about 73%·151% and WAL about 27%·116%. The PG figures are execution/WAL numbers excluding commit/client/pool time; do not extrapolate to production latency/throughput. The earlier SQL-only fixture cost that inserted token NULL is not used as the final cost evidence.
+- [x] SAFETYFIX-04 Migrate the shared API types and all consumers together
+  - Migrate the new clear field and the Audit query options' types, callsites, mocks, and catalog together. Do not overwrite past execution evidence with the current contract.
+- [x] SAFETYFIX-05 Reproduce the existing failures and regression-verify on both DBs
+  - Verify: unchanged save from a form kept open across a deployment transition from the old version; intentional clearing in the current UI; admin-action queries after a 429 record; both DBs' results/sort/write cost; and permission/CAS/credential preservation.
+  - On final binary `f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8`, an unchanged save from old UI→new backend kept URL/revision unchanged, and the current UI's intentional clear stored DB NULL. An ignored clear on new UI→old backend (one PUT 200) displayed as error/edit-preserved and did not fake success. The previously hidden admin actions in Audit were shown in the real UI.
+  - Confirmed 112 Rust and 706 Web checks, typecheck, build, affected-target Clippy, and the formatter. On real PG HTTP, also confirmed preservation/explicit clear/400 conflict/409 CAS/restore and both Audit modes. Standard YAML parsing and inventory generate/check passed at 433 rows. The raw-evidence limits and the initial PG fixture error (token NULL) were recorded separately.
+- [x] SAFETYFIX-06 Independent review, safety report, and PR update
+  - Independently review the fixes and re-verification of the three defects. Check the necessary repository gates and new-head CI, but do not merge, deploy to production, or change the production DB.
+  - Applied app-fix commit `e993e2393b6a3b5774afd0f85a9a881fdb2f0955` to draft PR #793. Confirmed 11 successful checks on that commit — CI, Web, publish-check, and status checks — plus 1 conditionally excluded release-artifact check. Pinned the exact-head evidence in `application-safety/ci-source-commit.json`. CI for later document updates is checked separately on that head; merge and production application remain on hold.
 
-## 6. 진행 및 증거 기록
+## 6. Progress and evidence log
 
-| 시점 | 항목 | 실제 수행/증거 | 남은 조건 |
+| Time | Item | Actual work/evidence | Remaining condition |
 |---|---|---|---|
-| 2026-09-15 시작 | 전체 | 누락 감사 후 사용자로부터 남은 작업 문서화·지속 실행 지시 수신. 예산 제한 없는 goal 생성. 별도 최신 기준 작업트리 생성. | 아래 TODO 증거 기반 실행 |
-| 2026-09-15 | PLAN-01, PLAN-02 | 문서 TODO 40개와 고유 이름 40개 확인. `ef70b347` 기준 별도 worktree 생성. 기존 QA 자산 5개만 선별 복사하고 원본 보존. 예산 필드 없이 active goal 생성 확인. | 운영 기준선 및 후속 검증 진행 중 |
-| 2026-09-15 | ASSET-01, ASSET-02 | 최신 기준선 스킬 36개 원본과 이동 후 byte 비교 불일치 0, 기존 경로 제거 확인. path+SHA manifest `e7e0bb343a8e1d874926bd3937c5c67e9e7f884c69d99d6c8f3b05364a1bffb0`. 신규 두 스킬의 정적 추출/실행 책임 분리. | Git 반영·최종 게이트는 별도 TODO 유지 |
-| 2026-09-15 | ASSET-04, ASSET-05 진행 | 과거 보고서 전수 완료 주장 철회 및 별도 review JSON 작성, 원시 JSON byte 동일 보존. 새 `omp --cwd=... --skills=... --no-session -p` 세션이 두 `skill://` URI를 `.agents/skills` 실제 경로로 읽음. 단독 `omp read`의 empty registry 실패와 구분. | 새 운영 run 연결 및 생성기 재실행 검증 남음 |
-| 2026-09-15 | PLAN-03, INV-09, RUN-11 진행 | 운영 v0.4.9 `e56d029e`/PG16 migration114와 기준선 `ef70b347`/migration118 차이 확인. Admin/Web 변경57파일과 운영 전용 화면을 위한 TODO2개 추가. | 운영·최신 소스 행렬을 별도 검증 |
-| 2026-09-15 | PLAN-03 완료 | Camofox 실제 UI와 GET에서 Principal22/Upstream9/Plugin2 확인. 보호된 조회 접근 성공. legacy 배포의 auth/session404를 최신 identity 권한 증거로 오인하지 않음. `production-preflight.json` 및 독립 K8s/Thanos/Tempo 조사에 버전·DB·관측 한계 기록. | 요청별 SQL/pool 수집과 전수 실행은 별도 TODO |
-| 2026-09-15 | MEASURE-03 범위 결정 | 새 상시 앱 계측 승인 요청에 사용자가 목적을 질문했으며 승인은 주어지지 않았다. 기존 관측으로 전수 QA를 먼저 진행하고 실제 특정 요청의 증거 부족을 확인한 뒤 최소 보완 방법을 판단한다. | runtime 변경 없음. 누락 계측은 null과 원인을 기록 |
-| 2026-09-15 | CACHE-01 부분 검증 | 네트워크 없는 일회용 Linux 컨테이너의 소유64MiB파일에서 mincore16384pages→파일별evict0→inspect0→warm16384를 실제 관측. 전역cache flush와 운영 변경 없음. | 실제 DB buffer/app cache 조건과 성능 비교는 아직 미검증 |
-| 2026-09-15 | ASSET-03~05 완료 | generator/--check 모두433행(205UI/149request/115API) 생성·일치 검증. 별도 scratch의 new file·기존 source 변경·MD불일치가 각각 실패하고 복구 후 성공함을 실험. native skill discovery와 과거 보고서 철회·새 IN_PROGRESS run 교차참조 완료. | 실제 실행/최종 독립 검토/커밋은 별도 TODO 유지 |
-| 2026-09-15 | MEASURE-02 진행 | SQLite·PG16 실제앱 각각 prepare→populated snapshot→reset→restart→proof 수행. fixture hash/엔티티수 보존,각12개200+의도401확인,plugin참조2 확인. OAuth시작URL을loopback으로제한. | 실제browser mutation전수와 외부OAuth성공 조건은 미완료 |
-| 2026-09-15 | INV-01~06, INV-09 완료 | 영역별 독립 소스 조사와 통합 교정으로 UI205action/149원자요청·93sourcefile을 고정하고현재hash/route/요청매핑검사통과. 운영과다른57파일 대조및운영전용10UI/13API명세를deployed-delta에보존. 기존가짜modal/경로는교정. | API/SQL 의미 독립 검토와 최종 양방향 판정은 INV-07/08에서 별도 진행 |
-| 2026-09-15 | MEASURE-04 완료 | recorder1.0.5 실제 Chromium click/독립GET/원래Promise·Response identity/동일URL병렬/503/abort/SSEno-clone/privacy/overflow/미완료fetch drain후settlement 보존 검증. 최신raw SHA `d491f9de898a4dddadc1da8d034edd92f3e9fbe701c499e352c73907d9aa28be`. | Camofox native410장애와ResourceTiming candidate/서버correlation부재는별도한계이며운영전수PASS를뜻하지않음 |
-| 2026-09-15 | INV-07, INV-08 완료 | 115API 등록↔목록·149UI요청 매핑 미해결0. read70개를4개독립범위(10/21/19/20)로검토해발견한20개 의미오류를교정하고각검토자가해소확인. slim-checkpoint/usage-interval 누락SQL과upstream전체scan오매핑수정. 최종168고유operation·양DB SQL 근거를검증하고generator/--check다시통과. | source-semantic-review.json 참조. 실제운영실행/계측의완료는별도이며전체diff최종리뷰도남음 |
-| 2026-09-15 | CACHE-01, CACHE-02 완료 | 현재ef70앱+격리PG16,같은합성100k-decision데이터·concurrency1에서summary/list/detail각 cold-A8/warm30/cold-B8 총138요청. 48cold회모두소유relation341파일/37684pageevict후mincore0,요청직전targetOS/PGbuffer0 실증. 각endpoint46회200·canonicalhash단일값 직접검증. | `runs/2026-09-15/cache-experiment` 참조. PostgreSQL target-relation cache만의통제실험;순수poolwait미관측,protocolrequest-ID추적/하드웨어cold/운영전체개선/SQLiteAPI cache비교주장없음 |
-| 2026-09-15 | CACHE-01/02 재현 증거 보완 대기 | 위 실측·48회 조건·138응답 자체는 확인했지만 실행자가 당시 helper 원본/hash를 보존하지 않았음을 후속확인. 현재helper는실험후안전성수정으로달라졌으므로현재hash를당시코드로기록하지않는다. 원래도구작성·수정기록에서당시버전을정확복구중이며체크박스를완료에서보류로정정한다. | 실측값변조·추정복구없음. 재현스크립트와당시helper provenance확보후완료판정 |
-| 2026-09-15 | CACHE-01/02 재현 증거 보완 완료 | 후속두수정의기록을역적용해965행/36278byte의당시helper를복구했고기존tool snapshot D210과일치. 복구SHA `6b96b33f848db01c0a293325480cb480fb0635295c27a17330a3d85f2ebcaf7b`,재현스크립트·protocol과함께보존. | reproducibility.json에사후복구이며실험당시fullSHA를기록한것이아님을명시. 실측값/원시조건증거변경없음 |
-| 2026-09-15 | AUDIT-01~03 완료 | 새최근조회의양DB·HTTP회귀32개PASS,실제후보UI15/15 PASS·36network기록. 최신200개/동일ts/late-old삽입/필터/newexport조회상태전이확인. ef70baseline과후보binary·patchSHA를분리보존. | approvedcandidate evidence는 `local-settings/audit-candidate`; SettingsApply501은변경없음 |
-| 2026-09-15 | 전체검증 환경 결함 처리 | 영향crate1512개실행중1511PASS/1trybuild링커실패/9skip. trybuild가RUSTFLAGS를제거해사용자Cargo설정의ld64.lld가AppleSDK를해석못한것을확인. 글로벌설정변경없이scratch CARGO_HOME의nativeclang과기존캐시/bin링크를사용해해당실제typestate test 재실행1/1 PASS. | 테스트삭제/약화/무수정retry아님. 최종다섯수정통합후전체gate다시검증할예정 |
-| 2026-09-15 | 운영 실행 차단 기록 | 부분분모와74개공통관측·484개Keepalive direct 기록을보존. 짧은client deadline은serverfailure가아닌censored lower bound로교정. heavycard한번실제DOM UI요청은200/8442ms로관측하고poll후이동·탭종료. | 전체UIlist조합·cursor미완료. Camofox native410/isolated-world관측한계·운영부하안전중단을완료로세지않음 |
-| 2026-09-15 | FIX-01~05 검증 | 후보 binary SHA `f564dcf57a4c2b914b2c690b8dee4e1c68f4fa472ae680bbe599d250dcd28f65`: Upstreams 필수 6/6, Principals 10/10, Plugins 단순 삭제·cascade 삭제·실제 orphan GC 세 흐름 PASS. 원래 환경변수명 복원은 승인 범위 밖의 기존 write-only 계약으로 분리한다. | 격리 후보 검증이며 운영 반영이나 운영 전수 PASS를 뜻하지 않는다. |
-| 2026-09-15 | 후보 증거 보존 | 원시 JSON/JSONL·provenance·후속 회귀 로그 17개를 `qa/admin-web/runs/2026-09-15/approved-fixes/index.json`의 경로와 SHA로 보존했다. | 자격증명·브라우저 프로필·검토하지 않은 스크린샷은 제외했다. 기존 baseline FAIL은 후보 PASS로 덮어쓰지 않는다. |
-| 2026-09-15 | 응답 회귀 테스트 수정 | 최초 전체 게이트 1,519/1,520 PASS 뒤 승인된 `base_url` 추가를 거부하던 assertion을 수정했다. 같은 테스트와 warmup 이력 4개 필드 비노출 검증을 보존했고, focused 9/9 및 수정된 전체 게이트 1,520/1,520 PASS(exit 0)를 확인했다. | 제외된 9개는 실행된 것으로 세지 않는다. 이 결과는 이후 추가된 계측 구현 전 후보의 회귀 증거이며 운영 전수 측정 PASS가 아니다. |
-| 2026-09-15 | 독립 리뷰 | Audit·FIX-01~05·응답 테스트 수정은 correct 판정. `after`는 하한 배타 필터이며 전진 cursor를 보장하지 않는다. legacy 빈 label 문자열과 v1 null 표현은 각각 보존한다. | 조건부 Audit 정렬의 인덱스 비용과 현재 도달 경로가 확인되지 않은 DB check 오류 메시지 위험은 미측정 사항으로 남긴다. migration·추가 API 변경 없음. |
-| 2026-09-15 | YAML 직렬화 결함 | `wire_semantics`의 빈 문자열 키가 인용되지 않는 결함을 확인했다. 기존 `--check`의 바이트 일치만으로 파싱 성공을 주장할 수 없다. | 카탈로그·generator 수정 후 표준 파싱 검증 필요. 운영 엔티티·cursor 분모, native pointer, 요청별 SQL/pool 증거, 비운영 OAuth 성공 자격증명도 미완료다. |
-| 2026-09-15 | 격리 계측 검증 | `instrumentation/index.json`에 19개 파일 보존. 후보 `132e831a…`: 두 DB 12개 실제 요청의 ID·SQL·acquire 연결, 민감한 body/cookie/header/query 표식 비노출 2건, A/B/A 300개 GET, Proxy 401·request-id 제어 12건, 관련 library tests 191/191 PASS. | 빈 목록의 loopback 왕복 비교이며 순수 CPU 비용이나 운영 성능을 뜻하지 않는다. 순수 DB 실행·pool wait는 미측정이다. |
-| 2026-09-15 | 브라우저 연결 확장 | strict-CSP mock에서 Server-Timing ID를 Camofox 격리 영역에서 읽고 서버 ID 두 개와 일치시켰다. 사용자 추가 승인으로 기존 ID만 담는 헤더를 구현했다. 새 후보 `db564601…`에서 두 DB UI 요청 14개의 ID를 관찰했다. | 이전 PG 서버의 제한된 Hub tail로 전체 로그를 회수하지 못했으므로 그 7개 요청을 SQL 연결 완료로 세지 않는다. 전체 로그를 private 파일에 보존하도록 수집 경로를 고친 뒤 새 관측을 진행한다. |
-| 2026-09-15 | 수집기 과장 방지 | 수집기 1.0.7에서 뒤늦은 동일 ID 후보·상충 ID·약한 기존 연결이 잘못 유지되는 세 경우를 재현하고 수정 후 같은 재현을 통과했다. | 실제 브라우저 검증과 캐시 ID 재사용 처리는 별도 확인한다. native click 한 호출이 두 요청을 낸 도구 현상도 기록하며 UI action과 HTTP request를 1:1로 가정하지 않는다. |
-| 2026-09-15 | Canonical 수집기 연결 검증 | 수정된 수집기 1.0.7에서 보존한 SQLite 17개, PostgreSQL 19개 Resource Timing ID를 관측 전부터 저장한 private 서버 로그에 모두 연결했다. 각 DB에서 6개 SQL-bearing entry를 확인했다. `qa/admin-web/runs/2026-09-15/server-timing/index.json`에 성공·실패·제한 증거를 분리 보존했다. | SQLite는 sequence 106 이후의 별도 window이며 앞선 103개 drain 복구가 아니다. PG raw snapshot의 action window는 열려 있어 전체 UI oracle 완료가 아니다. 순수 DB/queue 시간과 전체 운영 행렬은 계속 미완료다. |
-| 2026-09-15 | 최종 코드 게이트 | Rust format, Web lint/typecheck, 72 files·699 Web tests, 현재 inventory check, recorder syntax 모두 PASS. Server/SQLite library tests는 Server-Timing 추가 후에도 191/191 PASS. | 테스트/도구 통과가 운영 전체 실행이나 머지 승인을 뜻하지 않는다. |
-| 2026-09-15 | PR #793 생성 및 CI | `qa/admin-web-exhaustive-completion`의 `7c8b6168957bff5050d6482ae7d3c137ee7efe31`을 푸시하고 `master` 대상 draft PR을 생성했다. Rust·Web·publish-check 모두 성공했고 상태 검사 포함 11개 성공, release-artifact 조건부 검사 1개 제외를 확인했다. | 이 결과는 해당 head에 한정한다. 이후 로컬 QA 기록은 별도 변경이며 자동으로 같은 CI 증거를 적용하지 않는다. |
-| 2026-09-15 | 머지 보류 | 저장소·PR·base/head·squash/admin 방식·브랜치 유지·미완료 범위를 제시한 뒤 사용자가 `머지 보류`를 선택했다. | Draft 해제·머지·자동 머지·브랜치 삭제·운영 배포는 실행하지 않는다. 별도 승인 없는 나머지 QA 작업은 가능한 범위만 수행한다. |
-| 2026-09-16 | 격리 사용량·오류 상태 전이 | `post-hold-usage-status/index.json`의 22개 파일에 초기·전이 원시 DOM/PNG/API/SQL seed 및 UI 요청 상관 증거를 보존했다. 기존 미관측 `UPSTREAM-004`, `UPSTREAM-006`에 대한 새 로컬 기능 증거이며 과거 행은 덮어쓰지 않았다. | `/admin/v1` 전용 RT 필터가 `/admin/usage`를 빠뜨린 수집 결함을 수정해 새 관측으로 검증했다. 운영 요청·앱 코드·PR 변경은 없고 해당 fixture 포트·브라우저 탭은 종료했다. |
+| 2026-09-15 start | All | After the gap audit, received the user's instruction to document the remaining work and keep executing. Created a goal with no budget limit. Created a separate latest-baseline worktree. | Evidence-based execution of the TODOs below |
+| 2026-09-15 | PLAN-01, PLAN-02 | Confirmed 40 document TODOs and 40 unique names. Created a separate worktree on `ef70b347`. Selectively copied only the 5 existing QA assets and preserved the original. Confirmed an active goal with no budget field. | Production baseline and follow-up verification in progress |
+| 2026-09-15 | ASSET-01, ASSET-02 | Byte comparison of the 36 latest-baseline skill files before/after the move: 0 mismatches; old path removal confirmed. path+SHA manifest `e7e0bb343a8e1d874926bd3937c5c67e9e7f884c69d99d6c8f3b05364a1bffb0`. Separated the two new skills' static-extraction/execution responsibilities. | Git reflection and final gates remain separate TODOs |
+| 2026-09-15 | ASSET-04, ASSET-05 in progress | Retracted the old report's exhaustive-completion claims and wrote a separate review JSON; raw JSON bytes preserved identically. A new `omp --cwd=... --skills=... --no-session -p` session resolved both `skill://` URIs to real `.agents/skills` paths. Distinguished from the standalone `omp read` empty-registry failure. | New production run linkage and generator re-run verification remain |
+| 2026-09-15 | PLAN-03, INV-09, RUN-11 in progress | Confirmed differences between production v0.4.9 `e56d029e`/PG16 migration114 and baseline `ef70b347`/migration118. Added 2 TODOs for the 57 Admin/Web changed files and the production-only screens. | Verify the production vs. latest-source matrix separately |
+| 2026-09-15 | PLAN-03 complete | Confirmed Principal 22/Upstream 9/Plugin 2 via the real Camofox UI and GETs. Protected read access succeeded. Did not mistake the legacy deployment's auth/session 404 for latest-identity permission evidence. Recorded version/DB/observation limits in `production-preflight.json` and the independent K8s/Thanos/Tempo investigation. | Per-request SQL/pool collection and exhaustive execution are separate TODOs |
+| 2026-09-15 | MEASURE-03 scope decided | The user asked about the purpose of the new always-on app instrumentation approval request, and approval was not given. Proceed with exhaustive QA using existing observability first, then judge the minimal supplementation after confirming evidence gaps for specific real requests. | No runtime change. Record missing instrumentation as null with the cause |
+| 2026-09-15 | CACHE-01 partial verification | In a networkless disposable Linux container, actually observed on an owned 64MiB file: mincore 16384 pages → per-file evict 0 → inspect 0 → warm 16384. No global cache flush or production change. | Real DB-buffer/app-cache conditions and the performance comparison not yet verified |
+| 2026-09-15 | ASSET-03~05 complete | Both generator and --check produced and matched 433 rows (205 UI/149 request/115 API). Experimentally confirmed that a new file, an existing-source change, and an MD mismatch in a separate scratch each fail and succeed after recovery. Native skill discovery and old-report retraction/new IN_PROGRESS-run cross-referencing complete. | Real execution/final independent review/commits remain separate TODOs |
+| 2026-09-15 | MEASURE-02 in progress | On real apps with SQLite and PG16 respectively: prepare → populated snapshot → reset → restart → proof. Fixture hash/entity counts preserved; 12×200 + intended 401 confirmed each; 2 plugin references confirmed. OAuth start URL restricted to loopback. | Real-browser mutation exhaustiveness and the external-OAuth success condition remain incomplete |
+| 2026-09-15 | INV-01~06, INV-09 complete | Pinned 205 UI actions/149 atomic requests/93 source files via per-area independent source investigation plus integrated correction; current hash/route/request-mapping checks pass. Preserved the 57-file diff vs. production and the production-only 10 UI/13 API spec in deployed-delta. Corrected the earlier fake modal/paths. | Independent API/SQL semantic review and final bidirectional verdict proceed separately in INV-07/08 |
+| 2026-09-15 | MEASURE-04 complete | Verified recorder 1.0.5 on real Chromium: click/independent GET/original Promise·Response identity/same-URL parallel/503/abort/SSE no-clone/privacy/overflow/unfinished-fetch drain-then-settlement preservation. Latest raw SHA `d491f9de898a4dddadc1da8d034edd92f3e9fbe701c499e352c73907d9aa28be`. | The Camofox native410 failure and missing ResourceTiming candidate/server correlation are separate limits and do not mean exhaustive production PASS |
+| 2026-09-15 | INV-07, INV-08 complete | 115 API registrations↔list and 149 UI-request mappings: 0 unresolved. Reviewed 70 reads across 4 independent scopes (10/21/19/20), corrected the 20 semantic errors found, and each reviewer confirmed resolution. Fixed the missing slim-checkpoint/usage-interval SQL and the upstream full-scan mis-mapping. Verified the final 168 unique operations and both-DB SQL evidence; generator/--check passed again. | See source-semantic-review.json. Real production execution/instrumentation completion is separate; the final full-diff review also remains |
+| 2026-09-15 | CACHE-01, CACHE-02 complete | Current ef70 app + isolated PG16, same synthetic 100k-decision data, concurrency 1: summary/list/detail each cold-A8/warm30/cold-B8, 138 requests total. All 48 cold runs evicted the owned relation's 341 files/37684 pages to mincore 0, and target OS/PG buffer 0 was proven right before each request. Each endpoint: 46×200 and a single canonical hash value, directly verified. | See `runs/2026-09-15/cache-experiment`. A controlled experiment on PostgreSQL target-relation cache only; no claims about pure pool wait (unobserved), protocol request-ID tracing, hardware cold, whole-production improvement, or SQLite API cache comparison |
+| 2026-09-15 | CACHE-01/02 reproduction-evidence supplementation pending | The measurements, 48-run conditions, and 138 responses themselves were confirmed, but a follow-up found the executor had not preserved the helper source/hash at the time. The current helper differs due to a post-experiment safety fix, so the current hash is not recorded as the code of that time. Recovering the exact version from the original tool-authoring/modification records; correcting the checkbox from complete to pending. | No measurement tampering or estimated recovery. Completion verdict after securing the reproduction script and the period helper's provenance |
+| 2026-09-15 | CACHE-01/02 reproduction-evidence supplementation complete | Reverse-applied the records of the two follow-up fixes to recover the period helper (965 lines/36278 bytes); it matches existing tool snapshot D210. Recovery SHA `6b96b33f848db01c0a293325480cb480fb0635295c27a17330a3d85f2ebcaf7b`, preserved with the reproduction script and protocol. | reproducibility.json states this is post-hoc recovery, not a full SHA recorded at experiment time. No change to measurements/raw-condition evidence |
+| 2026-09-15 | AUDIT-01~03 complete | The new recent query's both-DB/HTTP regressions: 32 PASS; real candidate UI 15/15 PASS with 36 network records. Confirmed newest-200/same-ts/late-old-insert/filter/new-export query state transitions. Preserved the ef70 baseline and candidate binary/patch SHAs separately. | Approved-candidate evidence is `local-settings/audit-candidate`; Settings Apply 501 unchanged |
+| 2026-09-15 | Full-verification environment defect handled | Of 1512 affected-crate runs: 1511 PASS / 1 trybuild linker failure / 9 skipped. Confirmed trybuild strips RUSTFLAGS so the user Cargo config's ld64.lld could not parse the Apple SDK. Without changing global config, re-ran that real typestate test 1/1 PASS using a scratch CARGO_HOME with native clang and the existing cache/bin links. | Not a test deletion/weakening/unmodified retry. Will re-verify the full gate after integrating the final five fixes |
+| 2026-09-15 | Production-execution blockage recorded | Preserved partial denominators, 74 common observations, and 484 Keepalive direct records. Corrected the short client deadline to a censored lower bound, not a server failure. Observed one heavy-card real DOM UI request at 200/8442ms, then moved on after the poll and closed the tab. | Full UI list combinations/cursors incomplete. Camofox native410/isolated-world observation limits and the production-load safety stop are not counted as complete |
+| 2026-09-15 | FIX-01~05 verification | Candidate binary SHA `f564dcf57a4c2b914b2c690b8dee4e1c68f4fa472ae680bbe599d250dcd28f65`: Upstreams required 6/6, Principals 10/10, Plugins simple-delete/cascade-delete/real orphan-GC three flows PASS. Restoring the original env-var name is separated as a pre-existing write-only contract outside the approval scope. | Isolated-candidate verification; does not mean production application or exhaustive production PASS. |
+| 2026-09-15 | Candidate evidence preserved | Preserved 17 raw JSON/JSONL, provenance, and follow-up regression logs by path and SHA in `qa/admin-web/runs/2026-09-15/approved-fixes/index.json`. | Excluded credentials, browser profiles, and unreviewed screenshots. Earlier baseline FAILs are not overwritten by candidate PASSes. |
+| 2026-09-15 | Response regression test fix | After the first full gate passed 1,519/1,520, fixed the assertion that rejected the approved `base_url` addition. Kept the same test and the 4 warmup-history-field non-exposure checks; confirmed focused 9/9 and the fixed full gate 1,520/1,520 PASS (exit 0). | The 9 excluded tests are not counted as run. This result is regression evidence for the pre-instrumentation candidate, not exhaustive production measurement PASS. |
+| 2026-09-15 | Independent review | Audit, FIX-01~05, and the response-test fix judged correct. `after` is a lower-bound-exclusive filter and does not guarantee a forward cursor. The legacy empty label string and the v1 null representation are each preserved. | The index cost of the conditional Audit sort and the risk of a DB check error message whose current reachability is unconfirmed are left unmeasured. No migration or additional API changes. |
+| 2026-09-15 | YAML serialization defect | Confirmed a defect where empty-string keys in `wire_semantics` are emitted unquoted. Byte equality from the existing `--check` alone cannot claim parse success. | After catalog/generator fixes, standard-parse verification is needed. Production entity/cursor denominators, native pointer, per-request SQL/pool evidence, and non-production OAuth success credentials are also incomplete. |
+| 2026-09-15 | Isolated instrumentation verification | 19 files preserved in `instrumentation/index.json`. Candidate `132e831a…`: linked ID·SQL·acquire for 12 real requests on both DBs, 2 sensitive body/cookie/header/query-marker non-exposure checks, A/B/A 300 GETs, 12 Proxy 401/request-id controls, related library tests 191/191 PASS. | A loopback round-trip comparison on an empty list; does not mean pure CPU cost or production performance. Pure DB execution and pool wait are unmeasured. |
+| 2026-09-15 | Browser linkage extension | In a strict-CSP mock, read the Server-Timing ID inside the Camofox isolated world and matched it to the two server IDs. With the user's additional approval, implemented the header carrying only the existing ID. Observed IDs for 14 UI requests on both DBs on new candidate `db564601…`. | Because the earlier PG server's limited Hub tail could not recover the full logs, those 7 requests are not counted as SQL-linked. Fixed the collection path to preserve full logs in a private file, then proceeded with new observation. |
+| 2026-09-15 | Collector exaggeration prevention | On collector 1.0.7, reproduced three cases where a late identical-ID candidate, a conflicting ID, or a weak existing link was wrongly retained; after the fix, the same reproductions pass. | Real-browser verification and cache-ID-reuse handling are checked separately. Also recorded the tool phenomenon where one native click call produced two requests; do not assume UI action and HTTP request are 1:1. |
+| 2026-09-15 | Canonical collector linkage verification | On fixed collector 1.0.7, linked all preserved Resource Timing IDs — 17 SQLite, 19 PostgreSQL — to private server logs stored before observation. Confirmed 6 SQL-bearing entries per DB. Preserved success/failure/limit evidence separately in `qa/admin-web/runs/2026-09-15/server-timing/index.json`. | SQLite is a separate window after sequence 106, not a recovery of the earlier 103-entry drain. The PG raw snapshot's action window is open, so full UI-oracle completion is not claimed. Pure DB/queue time and the full production matrix remain incomplete. |
+| 2026-09-15 | Final code gate | Rust format, Web lint/typecheck, 72 files·699 Web tests, current inventory check, recorder syntax — all PASS. Server/SQLite library tests still 191/191 PASS after the Server-Timing addition. | Passing tests/tools does not mean full production execution or merge approval. |
+| 2026-09-15 | PR #793 created and CI | Pushed `7c8b6168957bff5050d6482ae7d3c137ee7efe31` on `qa/admin-web-exhaustive-completion` and created a draft PR targeting `master`. Rust, Web, and publish-check all succeeded; confirmed 11 successful checks including status checks, plus 1 conditionally excluded release-artifact check. | This result is limited to that head. Later local QA records are separate changes and do not automatically inherit the same CI evidence. |
+| 2026-09-15 | Merge hold | After presenting repository/PR/base·head/squash·admin method/branch retention/unfinished scope, the user chose `hold merge`. | No draft release, merge, auto-merge, branch deletion, or production deployment. Remaining QA work proceeds only within what is possible without separate approval. |
+| 2026-09-16 | Isolated usage/error state transitions | Preserved initial/transition raw DOM/PNG/API/SQL seed and UI-request correlation evidence in the 22 files of `post-hold-usage-status/index.json`. New local-feature evidence for the previously unobserved `UPSTREAM-004`, `UPSTREAM-006`; the old rows were not overwritten. | Fixed a collection defect where the `/admin/v1`-only RT filter dropped `/admin/usage`, and verified with new observation. No production requests, app-code, or PR changes; the fixture port and browser tab were closed. |
 
-## 7. 승인 및 차단 기록
+## 7. Approval and blockage log
 
-| 대상 | 요청할 구체적 변경/작업 | 승인 상태 | 실행 상태 |
+| Target | Specific change/work requested | Approval status | Execution status |
 |---|---|---|---|
-| PR #793 머지 | head `7c8b6168957bff5050d6482ae7d3c137ee7efe31`, base `master`, squash/admin, 브랜치 삭제 없음으로 최종 요청 | 사용자 `머지 보류` 선택 | Draft 유지. 머지·ready 전환·auto-merge·queue·브랜치 삭제 금지. 새 명시적 승인 필요 |
-| 격리 Admin 요청 계측 | Admin 전용 ID/span, 양 DB acquire 로그, 필요한 직접 의존성 선언 및 격리 검증 | 사용자 `격리 계측 구현 승인` 선택 | 명시한 세 runtime 파일과 지원 metadata만 변경. Proxy 처리·운영 설정·배포는 제외 |
-| 운영 쓰기 또는 운영 설정 변경 | 필요 시 대상·부작용·복구 방법별 요청 | 미승인 | 변경 없음 |
-| 최신 Audit 기록 누락 수정 | Admin Audit용 최근 제한 조회 추가, 기존 append-order 계약 유지, 양 DB/handler/회귀 검증 | 사용자 ask에서 `Audit 오류 수정 승인` 선택 | 위 AUDIT-01~04 범위만 구현 가능. 머지·운영 반영 미승인 |
-| Settings Apply 지원 표시 | provider capability를 draft API에 노출하고 UI에서 명시적 true만 Apply 허용; 미지원·로딩·오류·unknown 안내 구분 | 2026-09-16 사용자 `지원 여부 표시 수정 승인` 선택 | API/700 Web·23 backend 회귀와 실제 file-provider UI 검증 완료. 기존 apply/reload 실행·startup-fixed 정책은 변경하지 않음 |
-| 추가 다섯 앱 오류 수정 | FIX-01~05: 중복 이름 저장/Base URL/선택 라벨/Router revision/Plugins 삭제·GC 표시 | 사용자 다중 선택으로 다섯 항목 모두 승인 | 해당 UI/API/양 DB/회귀 범위만 수정. 별도 계측·Settings Apply·배포·머지 미승인 |
-| Server-Timing ID 전달 | `app.rs`에서 기존 x-request-id와 동일한 ID만 rid.description으로 전달하고 QA 수집기에 연결 | 사용자 `격리 환경 추가 승인` 선택 | 새 시간값·본문·credential 노출 없음. 운영 설정·배포는 별도 승인 |
-| Base URL 명시적 null 제거 | Upstream update의 생략/명시적 null/URL을 삼상태로 구분하고 양 DB·기존 호출부·UI·프록시 목적지 검증 | 2026-09-16 사용자 `명시적 null로 제거 승인` 선택 | 격리 구현·검증 완료. 키·토큰 null 계약과 운영 데이터·머지 보류는 유지 |
-| 앱 안전성 세 항목 수정 | 명시적 `clear_base_url`, LIMIT 전 `admin_only`, Audit 필터·정렬 인덱스와 읽기/쓰기 검증 | 2026-09-16 사용자 `세 문제 수정 승인` 선택 | 이 범위의 앱/API/새 migration 및 격리 검증만 승인. 기존 null 초기화 HTTP 계약을 대체. 머지·운영 배포·운영 DB 실행은 미승인 |
-| 대용량 운영 PG 인덱스 준비 | 운영 배포 전 동일한 5개 인덱스를 별도 승인된 온라인 작업으로 생성하고 정의·valid/ready 확인 | 미승인 | 직접 startup 생성은 쓰기를 막을 수 있으므로 사전 준비와 승인 전 배포 차단. 격리 리허설만 수행 |
-| 최종 PR의 master 통합 | PR #793에 master `b07b25ee`를 통합하고 새 Settings 파일 저장 계약·기존 독립 수정 보존, 미출시 인덱스 migration만 재번호 부여 | 2026-09-17 사용자 `최종 PR 수정 승인` 선택 | 별도 작업트리에서 검증 후 같은 draft PR에 commit/push. 호환성 임시 릴리스·운영 DDL·머지·배포는 제외 |
-| PostgreSQL 초안 revision 저장 | `ConfigStore::put_config_draft`의 생성/조건부 갱신 분리 및 기존 revision 회귀 시나리오를 양 DB harness에 등록 | 2026-09-17 사용자 `수정하고 검증 계속` 선택 | 동일 DB에서 수정 전 HTTP 500, 수정 후 revision 7→8 HTTP 200 및 stale revision 409 확인. 공개 API·schema 변경 없음 |
+| PR #793 merge | Final request with head `7c8b6168957bff5050d6482ae7d3c137ee7efe31`, base `master`, squash/admin, no branch deletion | User chose `hold merge` | Draft kept. No merge/ready transition/auto-merge/queue/branch deletion. New explicit approval required |
+| Isolated Admin-request instrumentation | Admin-only ID/span, both-DB acquire logs, necessary direct-dependency declaration, and isolated verification | User chose `approve isolated instrumentation implementation` | Only the three stated runtime files and supporting metadata changed. Proxy handling, production settings, and deployment excluded |
+| Production writes or production config change | Per-target request with side effects and recovery method when needed | Not approved | No change |
+| Latest Audit record omission fix | Add a recent-limited query for Admin Audit, keep the existing append-order contract, verify both DBs/handler/regressions | User chose `approve Audit error fix` in ask | Only the AUDIT-01~04 scope above may be implemented. Merge/production application not approved |
+| Settings Apply support display | Expose provider capability in the draft API and allow Apply in the UI only on explicit true; distinguish unsupported/loading/error/unknown guidance | User chose `approve support-indication fix` on 2026-09-16 | API/700 Web·23 backend regressions and real file-provider UI verification complete. Existing apply/reload execution and startup-fixed policy unchanged |
+| Five additional app error fixes | FIX-01~05: duplicate name save/Base URL/optional label/Router revision/Plugins delete·GC display | All five approved via user multi-select | Only the stated UI/API/both-DB/regression scopes modified. Separate instrumentation, Settings Apply, deployment, merge not approved |
+| Server-Timing ID delivery | In `app.rs`, pass only the same ID as the existing x-request-id via rid.description and link it to the QA collector | User chose `approve additional isolated environment` | No new time/body/credential exposure. Production settings/deployment need separate approval |
+| Base URL explicit-null removal | Distinguish omission/explicit null/URL as tri-state in Upstream update; verify both DBs, existing callsites, UI, and proxy destination | User chose `approve removal via explicit null` on 2026-09-16 | Isolated implementation/verification complete. Key/token null contract and production data/merge hold preserved |
+| Three app-safety fixes | Explicit `clear_base_url`, `admin_only` before LIMIT, Audit filter/sort indexes with read/write verification | User chose `approve fixing the three issues` on 2026-09-16 | Only this scope's app/API/new migrations and isolated verification approved. Supersedes the earlier null-clearing HTTP contract. Merge/production deployment/production DB execution not approved |
+| Large production PG index preparation | Before production deployment, create the same 5 indexes as a separately approved online operation and verify definitions·valid/ready | Not approved | Direct startup creation can block writes, so pre-creation and pre-approval block deployment. Only isolated rehearsal performed |
+| Final PR master integration | Integrate master `b07b25ee` into PR #793, keep the new Settings file-save contract and the existing independent fixes, renumber only the unreleased index migrations | User chose `approve final PR fix` on 2026-09-17 | Verified in a separate worktree, then committed/pushed to the same draft PR. Compatibility interim release, production DDL, merge, and deployment excluded |
+| PostgreSQL draft revision save | Split create/conditional update in `ConfigStore::put_config_draft` and register the existing-revision regression scenario on both DB harnesses | User chose `fix and keep verifying` on 2026-09-17 | On the same DB: pre-fix HTTP 500; post-fix revision 7→8 HTTP 200 and stale-revision 409 confirmed. No public API/schema change |
 
-문서의 TODO가 모두 체크되고, 실제 증거의 필수 항목이 모두 충족되고, 승인 필요한 작업까지 완료되기 전에는 goal을 완료 처리하지 않는다.
+The goal is not marked complete until every TODO in this document is checked, every required evidence item is satisfied, and the work needing approval is finished.
 
-### 7.1 요청 상관 계측: 확인된 원인과 승인 경계
+### 7.1 Request-correlation instrumentation: confirmed causes and approval boundary
 
-읽기 전용 조사 후 사용자가 격리 계측 구현을 명시 승인했다. 승인된 앱 변경은 `cc-lb-server/src/app.rs`의 Admin 전용 middleware, `cc-lb-server/src/storage_factory.rs::open_postgres_pool`, `cc-lb-storage-sqlite/src/lib.rs::open_sqlite`이다. 필요한 기존 `log` 직접 의존성 선언과 검증을 포함하되 버전 인상은 하지 않는다. 운영 로그 설정 변경·배포, Proxy 처리 변경은 승인 범위 밖이다.
+After the read-only investigation, the user explicitly approved isolated instrumentation implementation. The approved app changes are the Admin-only middleware in `cc-lb-server/src/app.rs`, `cc-lb-server/src/storage_factory.rs::open_postgres_pool`, and `cc-lb-storage-sqlite/src/lib.rs::open_sqlite`. They include the necessary direct declaration of the existing `log` dependency and verification, but no version bump. Production log-config changes/deployment and Proxy-handling changes are outside the approval scope.
 
-- `crates/cc-lb-server/src/app.rs::admin_router`와 `crates/cc-lb-admin/src/routes.rs::build_router`에는 Admin 요청용 식별 span과 응답 correlation header가 없다. Proxy의 기존 `request_id_middleware`는 별도 경로이므로 수정 대상으로 삼지 않는다.
-- 최소 HTTP 제안은 Admin 경로에만 서버 생성 bounded ID와 `x-request-id` 응답 헤더, 정제된 method·route template·status·handler duration을 연결하는 것이다. 비신뢰 클라이언트 ID를 무조건 반사하거나 헤더·본문·쿠키·원시 URL을 기록하지 않는다.
-- SQLite는 `crates/cc-lb-storage-sqlite/src/lib.rs::open_sqlite`, PostgreSQL은 `crates/cc-lb-server/src/storage_factory.rs::open_postgres_pool`에서 pool을 구성한다. 일반 acquire 로그는 SQLx 기본값이 off이므로 로그 필터만 바꿔서는 활성화되지 않는다.
-- 저장소 SQLx 0.9.0의 query 로그는 현재 span을 사용한다. SQLite worker도 명령과 함께 span을 받아 진입한다. 다만 `QueryLogger.elapsed`에는 행 스트리밍·소비·백프레셔 시간이 포함될 수 있으므로 순수 DB 실행 시간으로 기록하지 않는다.
-- SQLx의 `acquired_after_secs`는 세마포어 대기 외에 ping·연결 생성·인증·hook·재시도 등을 포함하는 **acquire 전체 시간**이다. 순수 `pool_wait_ms`를 분리하는 기본 hook은 확인되지 않았다. acquire 값을 pool wait에 복사하지 않는다.
-- 위 HTTP span과 pool 옵션은 격리 구현·검증만 승인되었다. 실제 운영 로그 필터와 배포는 별도 사용자 승인 전에는 실행하지 않는다. 격리 요청에서 상관 ID·driver 시간·acquire 시간·비밀 비노출을 먼저 증명해야 하며, 순수 DB 실행과 pool wait가 여전히 없으면 해당 필드는 계속 차단 상태다.
-- 계측 CPU·메모리·로그량 비용은 아직 측정하지 않았다. 무시할 수 있는 비용이라고 가정하거나 전체 요청의 귀속이 이미 증명됐다고 보고하지 않는다.
+- `crates/cc-lb-server/src/app.rs::admin_router` and `crates/cc-lb-admin/src/routes.rs::build_router` have no Admin-request identification span or response correlation header. The Proxy's existing `request_id_middleware` is a separate path and is not a modification target.
+- The minimal HTTP proposal attaches, only to Admin paths, a server-generated bounded ID, an `x-request-id` response header, and sanitized method·route template·status·handler duration. It does not unconditionally reflect untrusted client IDs or log headers/bodies/cookies/raw URLs.
+- SQLite builds its pool in `crates/cc-lb-storage-sqlite/src/lib.rs::open_sqlite`; PostgreSQL in `crates/cc-lb-server/src/storage_factory.rs::open_postgres_pool`. General acquire logs are off by default in SQLx, so changing only the log filter does not enable them.
+- The stores' SQLx 0.9.0 query logs use the current span. The SQLite worker also receives the span with the command. However, `QueryLogger.elapsed` can include row-streaming, consumption, and backpressure time, so it is not recorded as pure DB execution time.
+- SQLx's `acquired_after_secs` is the **full acquire time**, including ping, connection creation, auth, hooks, and retries beyond semaphore wait. No built-in hook isolating pure `pool_wait_ms` was found. Do not copy the acquire value into pool wait.
+- The HTTP span and pool options above are approved for isolated implementation/verification only. Real production log filters and deployment are not executed before separate user approval. Correlation IDs, driver time, acquire time, and secret non-exposure must first be proven on isolated requests; if pure DB execution and pool wait are still absent, those fields stay blocked.
+- Instrumentation CPU/memory/log-volume cost has not been measured yet. Do not assume the cost is negligible or report that attribution of the whole request is already proven.
 
-### 7.2 Audit 인덱스의 운영 배포 조건
+### 7.2 Production deployment conditions for the Audit indexes
 
-PostgreSQL의 plain `CREATE INDEX`는 생성하는 동안 해당 테이블의 쓰기를 막는다. 새 migration의 `lock_timeout = '1s'`는 잠금 획득 대기만 제한하며 생성 중 잠금 보유 시간을 제한하지 않는다. statement timeout도 성공이나 무중단을 보장하지 않는다.
+PostgreSQL's plain `CREATE INDEX` blocks writes to the table while it builds. The new migration's `lock_timeout = '1s'` limits only the wait to acquire the lock, not the lock-hold time during creation. A statement timeout does not guarantee success or zero downtime either.
 
-따라서 대용량 운영 `audit_log_v1`에서는 새 앱 배포보다 먼저, 별도로 승인받은 작업에서 새 migration과 동일한 인덱스 이름·키 순서·조건으로 `CREATE INDEX CONCURRENTLY`를 한 문장씩 transaction 밖에서 실행해야 한다. 앱 migration 경로 안에서 concurrent 생성을 실행하거나 timeout을 해제하지 않는다. 생성 후 대상 테이블, 전체 정의, `indisvalid`, `indisready`를 확인한다. 이름만 같은 잘못된/invalid 인덱스는 `IF NOT EXISTS`만으로 검증되지 않는다.
+Therefore, on a large production `audit_log_v1`, before deploying the new app, a separately approved operation must run `CREATE INDEX CONCURRENTLY` one statement at a time outside a transaction, with the same index names, key order, and conditions as the new migration. Do not run concurrent creation inside the app migration path or disable the timeout. After creation, verify the target table, full definitions, `indisvalid`, and `indisready`. A wrong/invalid index with only the same name is not verified by `IF NOT EXISTS` alone.
 
-올바른 사전 생성이 확인되면 앱의 새 migration은 인덱스 생성을 건너뛴다. 이 경로도 짧은 잠금과 migration 기록 작업까지 없어진다는 뜻은 아니다. 격리 10만 행 리허설은 운영 무중단 증명이나 운영 DDL 승인으로 간주하지 않는다. SQLite 검증은 별도 writer가 없는 격리 startup에서 수행했으며 인덱스 생성이 다른 writer에 영향을 주지 않는다고 주장하지 않는다.
+Once correct pre-creation is confirmed, the app's new migration skips index creation. This path does not mean the short locks and migration bookkeeping disappear either. The isolated 100k-row rehearsal is not proof of zero-downtime production deployment or approval for production DDL. SQLite verification ran at isolated startup with no other writer; it does not claim index creation leaves other writers unaffected.
 
-### 7.3 최종 통합과 단일 유지보수 전환의 경계
+### 7.3 Boundary of the final integration and the single-maintenance transition
 
-- 최종 후보는 PR #793의 `a9da5c3c`와 master `b07b25ee`를 통합한다. 앞서 실험한 임시 키 발급 중지·migration 상한·호환성 중간 릴리스는 이 후보에 포함하지 않는다.
-- Settings는 master의 editor → draft → validate → atomic file save / TOML download 계약을 유지한다. 저장은 실행 중 설정을 바꾸지 않는다. 새 설정의 활성화에는 프로세스 재시작이 필요하다. 기존 Apply 지원 필드·current/schema/diff/apply/reload 경로는 현재 계약에서 제거한다. 과거 실행 증거는 그대로 보존한다.
-- 이미 master에 있는 PostgreSQL `0119`와 SQLite `0087` history 정리 migration은 byte 단위로 보존한다. 이 PR의 미출시 Audit 인덱스만 PostgreSQL `0120`–`0124`, SQLite `0088`로 옮긴다. 과거 migration의 checksum은 변경하지 않는다.
-- History 정리는 조회 가능한 JSON을 revision·시각 메타데이터로 줄이는 작업이다. WAL, 과거 백업, 재사용 전 저장 페이지까지 비밀을 물리적으로 지웠다는 뜻이 아니다. 별도 유지보수·credential 회전은 이번 통합에서 실행하지 않는다.
-- 격리 PostgreSQL 18에서 실제 구버전 binary로 schema 114와 키를 만든 뒤 종료하고 최종 후보를 시작했다. schema 124, 기존 migration checksum 보존, 같은 키의 전환 전후 프록시 HTTP 200을 확인했다. 작은 합성 DB의 결과이며 운영 DB의 migration 시간이나 실제 배포 성공 증거가 아니다.
-- 운영 전환은 별도 승인 대상이다. 확인 당시 활성 앱·primary는 `runbear-local`, `runbear-operation` 앱 replica는 0이고 DB는 standby였다. 실행 시점에 대상·백업·구버전 종료를 다시 확인해야 한다. 이 문서는 scale·DDL·릴리스·ArgoCD sync를 승인하지 않는다.
+- The final candidate integrates PR #793's `a9da5c3c` with master `b07b25ee`. The earlier-experimented temporary key-issuance stop, migration cap, and compatibility interim release are not included in this candidate.
+- Settings keeps master's editor → draft → validate → atomic file save / TOML download contract. Saving does not change the running configuration. Activating new settings requires a process restart. The existing Apply support field and the current/schema/diff/apply/reload paths are removed from the current contract. Past execution evidence is preserved as-is.
+- The PostgreSQL `0119` and SQLite `0087` history-cleanup migrations already on master are preserved byte-for-byte. Only this PR's unreleased Audit indexes move to PostgreSQL `0120`–`0124` and SQLite `0088`. Past migrations' checksums are unchanged.
+- History cleanup reduces queryable JSON to revision/timestamp metadata. It does not mean secrets were physically erased from the WAL, old backups, or pre-reuse storage pages. Separate maintenance/credential rotation is not performed in this integration.
+- On isolated PostgreSQL 18, built schema 114 and keys with the real old-version binary, stopped it, and started the final candidate. Confirmed schema 124, preserved existing migration checksums, and pre/post-transition proxy HTTP 200 for the same key. This is a small synthetic DB result, not evidence of production DB migration time or real deployment success.
+- Production transition is a separate approval item. At check time, the active app/primary was `runbear-local`, the `runbear-operation` app had 0 replicas, and the DB was standby. Re-confirm the target, backup, and old-version shutdown at execution time. This document does not approve scale, DDL, release, or ArgoCD sync.
 
-### 7.4 PostgreSQL 초안 revision 결함과 회귀 증거
+### 7.4 PostgreSQL draft revision defect and regression evidence
 
-- 기존 SQL의 `INSERT ... SELECT ... WHERE expected_revision = 0`은 기존 행을 갱신할 때도 입력 행을 제거했다. 올바른 revision으로 두 번째 초안을 저장해도 storage conflict가 발생했고 API는 500을 반환했다. 이 SQL은 통합 전 master에도 동일했다.
-- 최초 생성은 revision 0에 한정한 upsert, 이후 저장은 현재 revision이 일치하는 행의 조건부 UPDATE로 분리했다. 존재하지 않는 초안의 nonzero revision과 실제 stale revision은 계속 거부한다.
-- 기존 `config_draft_optimistic_revision` 시나리오가 harness에 등록되지 않아 이 경로를 실행하지 못했다. PostgreSQL·SQLite에 해당 시나리오만 등록하고, 없는 행을 nonzero revision으로 만들 수 없다는 경계를 추가했다.
-- 실제 등록된 회귀는 수정 전 SQLite PASS / PostgreSQL FAIL, 수정 후 양쪽 PASS였다. 동일한 업그레이드 DB에서도 기존 revision 7 저장의 500이 수정 후 200·revision 8로 바뀌고, 다시 보낸 revision 7은 409로 거부되었다. 파일 저장 후 초안 정리·만료 초안 정리·브라우저 상태 전이는 별도로 검증 기록에 남긴다.
+- The existing SQL's `INSERT ... SELECT ... WHERE expected_revision = 0` removed the input row even when updating an existing row. Saving a second draft with the correct revision still produced a storage conflict, and the API returned 500. This SQL was identical on pre-integration master.
+- Split it into an upsert limited to revision 0 for first creation and a conditional UPDATE on a row matching the current revision for later saves. Nonexistent drafts with nonzero revision and genuinely stale revisions are still rejected.
+- The existing `config_draft_optimistic_revision` scenario was not registered in the harness, so this path never ran. Registered only that scenario on PostgreSQL/SQLite and added the boundary that a nonexistent row cannot be created with a nonzero revision.
+- The actual registered regression was pre-fix SQLite PASS / PostgreSQL FAIL, post-fix both PASS. On the same upgraded DB, the existing revision-7 save's 500 became 200·revision 8 after the fix, and a re-sent revision 7 was rejected with 409. Post-file-save draft cleanup, expired-draft cleanup, and browser state transitions are left in the separate verification record.
 
-### 7.5 최종 통합 후보 검증
+### 7.5 Final integration candidate verification
 
-- 증거는 `qa/admin-web/runs/2026-09-17/final-cutover-integration/index.json`에 파일별 SHA와 함께 보존했다. 테스트 binary는 두 통합 부모와 실제 source diff SHA로 식별한다. 최종 commit 이후의 CI와 혼동하지 않는다.
-- 현재 소스 인벤토리 426행, UI action 209개, 원자 요청 148개, API endpoint 104개를 생성·대조하고 YAML 파싱을 확인했다. 과거 운영 기록은 변경하지 않았으며 전체 운영 실행 상태는 `runtime_pending`이다.
-- Web typecheck/build와 73파일·775테스트, Biome 182파일, Rust format·전체 테스트 컴파일·all-features/SQLite-only Clippy를 통과했다.
-- 수정 후 macOS 전체 workspace는 2,365개 중 2,361개 PASS, 기존 native PDK SIGSEGV 4개 FAIL, 14개 제외였다. 같은 최종 소스의 Linux PDK 4개는 모두 PASS다. macOS 전체 검사를 green으로 보고하지 않는다.
-- 실제 구버전 binary에서 만든 PostgreSQL 114→124 및 SQLite 81→88 업그레이드, 기존 checksum 보존, history 메타데이터 축소를 확인했다. 양 DB의 반복 초안 저장·검증·다운로드·atomic file save·저장 후 정리·만료 정리·재시작 전후 설정 전이를 실제 HTTP로 검증했다.
-- Native Settings 저장/다운로드/재시작 배너, Base URL 삭제/원복, Audit 관리자 행 렌더링, Router 전략/revision 왕복, Plugins built-in 화면을 확인했다. 최초 Settings 원복 보고는 검증된 draft까지만 반영된 상태였다. 독립 API 점검에서 이를 발견해 파일 덮어쓰기 확인까지 완료했고, 최종 revision 12·draft null·file/effective info를 확인했다. 이 과정도 증거에 보존했다.
-- 검증용 서비스·PostgreSQL 컨테이너·자격증명/config/DB 파일·임시 binary를 정리했다. 기존 공유 DB와 운영 환경은 변경하지 않았다. Native Audit 관측은 해당 fixture의 관리자 행 렌더링에 한정되며 운영 전수 또는 모든 필터 조합의 증거가 아니다.
-- 같은 draft PR에 반영한 새 head의 CI는 별도로 확인한다. 머지·릴리스·운영 반영은 계속 보류한다.
+- Evidence is preserved with per-file SHAs in `qa/admin-web/runs/2026-09-17/final-cutover-integration/index.json`. Test binaries are identified by the two integration parents and the real source-diff SHA. Do not confuse this with CI after the final commit.
+- Generated and reconciled the current source inventory: 426 rows, 209 UI actions, 148 atomic requests, 104 API endpoints; YAML parsing confirmed. Past production records were not changed; overall production execution status is `runtime_pending`.
+- Passed Web typecheck/build and 73 files·775 tests, Biome 182 files, Rust format, full test compilation, and all-features/SQLite-only Clippy.
+- Post-fix full macOS workspace: 2,361 of 2,365 PASS, 4 pre-existing native PDK SIGSEGV FAILs, 14 excluded. The same final source's 4 Linux PDK tests all PASS. The full macOS run is not reported as green.
+- Confirmed real old-version-binary upgrades PostgreSQL 114→124 and SQLite 81→88, preserved existing checksums, and history metadata reduction. Verified repeated draft save/validate/download/atomic file save/post-save cleanup/expiry cleanup/restart setting transitions on both DBs over real HTTP.
+- Confirmed native Settings save/download/restart banner, Base URL delete/restore, Audit admin-row rendering, Router strategy/revision round-trip, and the Plugins built-in screen. The first Settings restore report reflected only the verified draft; an independent API check caught this, file-overwrite verification was completed, and final revision 12·draft null·file/effective info were confirmed. This process is also preserved in the evidence.
+- Cleaned up verification services, the PostgreSQL container, credentials/config/DB files, and temporary binaries. The existing shared DB and production environment were not changed. Native Audit observation is limited to that fixture's admin-row rendering and is not evidence of exhaustive production coverage or every filter combination.
+- CI on the new head pushed to the same draft PR is checked separately. Merge, release, and production application remain on hold.
 
-### 7.6 운영 접근과 남은 승인 경계 재확인
+### 7.6 Production access and remaining approval boundaries re-confirmed
 
-- 2026-09-17 08:35–08:38 UTC에 원래 공개 주소의 인증된 브라우저에서 health 200과 Principal 22개(활성 22), Upstream 9개(활성 9), Plugin 2개의 목록을 다시 관측했다. 조회는 목록별 한 번씩 순차 실행했으며 무거운 페이지·반복 폴링·운영 mutation은 실행하지 않았다.
-- 같은 점검에서 `runbear-operation` 앱은 replica/endpoint 0, `runbear-local` 앱은 ready replica/endpoint 2였다. 후자의 immutable image digest에 있는 모든 플랫폼 revision은 `5e8f74a01c74d7e3c160dc7f7c7129bb4eaa13f9`였다. 공개 health 자체의 Git SHA는 `unknown`이므로 이 조회를 특정 Pod에 직접 연결했다고 주장하지 않는다.
-- 보존된 운영 source commit `e56d029e`와 `5e8f74a0` 사이의 Admin·server/src·storage-api·양 storage adapter 경로에는 source diff가 없었다. 목록 분모 확인은 전체 cursor/page/filter/poll 행렬 고정이나 운영 전수 계측을 대체하지 않는다.
-- Camofox native pointer와 목록 접근을 현재도 사용할 수 없다는 과거 차단 사유는 더 이상 유효하지 않다. 새 관측이 없는 나머지 cell의 상태는 그대로 남긴다.
-- PR #793의 `f3fa89bf`는 정확한 head CI 확인을 마쳤지만 머지 승인 답변은 아직 없다. Draft 해제·머지·릴리스·배포·운영 DDL은 실행하지 않는다. 새 QA 자료는 `qa/admin-web-limits-matrix` 브랜치에 분리해 승인 질문에 제시한 head를 바꾸지 않는다.
-- 비운영 OAuth 성공 계정 부재와 운영 계측 활성화 승인은 여전히 별도 전제조건이다. 격리 상태전이 검증에는 이 차단을 확대 적용하지 않는다.
+- On 2026-09-17 08:35–08:38 UTC, re-observed health 200 and the lists — 22 Principals (22 active), 9 Upstreams (9 active), 2 Plugins — from an authenticated browser at the original public address. Reads ran once per list, sequentially; no heavy pages, repeated polling, or production mutations were executed.
+- In the same check, the `runbear-operation` app had 0 replicas/endpoints and the `runbear-local` app had 2 ready replicas/endpoints. Every platform revision in the latter's immutable image digest was `5e8f74a01c74d7e3c160dc7f7c7129bb4eaa13f9`. The public health's own Git SHA is `unknown`, so this lookup is not claimed to be tied directly to a specific Pod.
+- Between the preserved production source commit `e56d029e` and `5e8f74a0`, there is no source diff in the Admin, server/src, storage-api, or either storage adapter paths. List-denominator confirmation does not replace pinning the full cursor/page/filter/poll matrix or exhaustive production instrumentation.
+- The old blocker that Camofox native pointer and list access were unusable is no longer valid. The state of remaining cells without new observations is left unchanged.
+- PR #793's `f3fa89bf` finished exact-head CI verification, but there is still no merge-approval answer. No draft release, merge, release, deployment, or production DDL is executed. New QA material is split onto the `qa/admin-web-limits-matrix` branch so the head presented in the approval question does not change.
+- The missing non-production OAuth success account and approval to enable production instrumentation remain separate preconditions. This blockage is not extended to isolated state-transition verification.
 
-### 7.7 격리 Default Limits 실행 행렬
+### 7.7 Isolated Default Limits execution matrix
 
-- 대상은 current-source `UI-SRC-D74A22B571BC` / 원자 요청 `UI-PR-06` 하나다. 새 SQLite fixture의 실제 Principal 목록 3개를 기준으로 source variant 8그룹을 9개 구체 상태로 펼치고 각각 3회 반복한다. UI 81개 cell과 같은 snapshot에서 재생하는 direct PATCH 81개가 분모다. 다른 Principal 기능이나 운영 전체의 완료 수로 합산하지 않는다.
-- 구체 상태는 빈 목록, requests/input_tokens/output_tokens/total_tokens/cost_usd/concurrent, cap=0, window=1이다. concurrent의 window는 실제 UI가 입력할 수 있는 60초를 사용한다. 모든 초기 상태를 Requests/2m/17로 맞춰 빈 목록을 포함한 모든 cell에서 실제 상태변화를 관측한다.
-- 각 UI cell과 직접 요청 사이에는 해당 소유 서버를 정지하고 같은 SQLite snapshot을 복원한다. 복원 직후 DB SHA와 대상 revision을 확인한다. 쓰기 요청을 동일한 미복구 상태에 동시에 재생하지 않는다.
-- Native click, 실제 DOM 값·화면, Resource Timing, 서버 request ID, SQLite 저장 결과와 SQL 로그를 개별 cell에 연결한다. 예상 UI 값은 실행 전 고정하며 실제 관측값에 복사하지 않는다. SQLx lifetime/acquire total을 순수 DB 실행·queue wait로 바꾸거나 없는 값을 0으로 채우지 않는다.
-- [x] 격리 엔티티와 제한 변형 실행 행렬 고정
-- [ ] 모든 행렬 셀의 브라우저 상태전이 계측
-- [ ] 동일 초기 상태의 직접 요청과 SQL 연결
-- [x] 행렬 누락과 증거 보안을 검증하고 정리 — 이번 부분 실행의 81개 BLOCKED key 보존·비밀 검사·소유 자원 정리이며 UI 완료가 아님
-- [x] 브라우저와 별도로 직접 요청 행렬 검증
-- [x] 격리 fixture 전체 상태 snapshot 복구 보완
+- The target is a single current-source `UI-SRC-D74A22B571BC` / atomic request `UI-PR-06`. Based on the new SQLite fixture's real 3-Principal list, the 8 source variant groups are expanded into 9 concrete states, each repeated 3 times. The denominator is 81 UI cells plus 81 direct PATCHes replayed from the same snapshots. It is not added into completion counts for other Principal features or all of production.
+- The concrete states are: empty list, requests/input_tokens/output_tokens/total_tokens/cost_usd/concurrent, cap=0, window=1. The concurrent window uses the 60 seconds the real UI can enter. Every initial state is set to Requests/2m/17 so a real state change is observed in every cell, including the empty list.
+- Between each UI cell and its direct request, the owning server is stopped and the same SQLite snapshot is restored. Right after restore, the DB SHA and target revision are confirmed. Write requests are not replayed concurrently against the same unrestored state.
+- Per cell, link the native click, real DOM values/screen, Resource Timing, server request ID, SQLite stored result, and SQL logs. Expected UI values are pinned before execution and not copied from actual observations. Do not convert SQLx lifetime/acquire totals into pure DB execution/queue wait or fill missing values with 0.
+- [x] Pin the isolated entity and limit-variant execution matrix
+- [ ] Instrument browser state transitions for every matrix cell
+- [ ] Link direct requests from the same initial state to SQL
+- [x] Verify matrix completeness and evidence security, then clean up — this preserves the 81 BLOCKED keys of this partial run, checks secrets, and cleans owned resources; it is not UI completion
+- [x] Verify the direct-request matrix separately from the browser
+- [x] Supplement the isolated fixture full-state snapshot restore
 
-#### 현재 관측과 무효 처리
+#### Current observations and invalidation handling
 
-- 독립 direct 요청 81개는 모두 HTTP 200, 대상 SQLite 값 일치, revision 1 증가를 확인했다. 각 request ID에 SQL 이벤트 51개를 연결했다. 이 fixture의 관측 지연은 중앙값 34.624ms, p95 38.562ms, 최대 40.153ms였다. 운영 성능이나 UI/direct 차이로 외삽하지 않는다.
-- 최초 브라우저 시도는 인증 미완료였고, 다음 두 시도는 오래된 element ref 및 반복 Save 때문에 각각 한 번의 측정 창에 PATCH 3개·2개를 발생시켰다. 단일 동작의 초기상태 비교 조건을 위반하므로 모두 거부했다. 앱의 중복 제출 결함으로 판정한 것이 아니다.
-- Native MCP만 사용하는 역할 분리 후 baseline과 수집기는 정상 준비됐지만, 동작 전에 Camofox의 300초 idle reaper가 탭을 회수했다. 해당 창에는 PATCH가 없었다. 이후에는 비변경 DOM 관측으로 handoff 중 탭 상태를 확인하되, daemon 설정을 무단 변경하지 않는다.
-- cleanup에서 `storage.scheduler.sqlite`와 `data/replica_id` 등 보조 상태가 main DB snapshot 밖에 남는 것을 발견했다. 기존 81개 direct 결과는 대상 API/저장 상태전이의 증거로 유지하지만, 전체 runtime 초기상태가 동일한 통제 비교라고 주장하지 않는다. 이 누락은 아래 Fixture v2에서 보완했다.
-- 유효한 UI cell 및 paired 비교는 아직 0개다. 기대 UI key 81개를 모두 BLOCKED로 보존했으며, 독립 direct PASS를 UI 완료 수로 옮기지 않았다. 원시 실패와 측정값은 `qa/admin-web/runs/2026-09-17/principal-limits-partial/`에 범위를 구분해 기록한다.
+- All 81 independent direct requests confirmed HTTP 200, matching target SQLite values, and revision +1. 51 SQL events were linked to each request ID. Observed latency on this fixture: median 34.624ms, p95 38.562ms, max 40.153ms. Not extrapolated to production performance or UI/direct differences.
+- The first browser attempt had incomplete authentication; the next two attempts produced 3 and 2 PATCHes respectively in a single measurement window due to a stale element ref and repeated Save. All were rejected for violating the single-action initial-state comparison condition. This was not judged an app duplicate-submission defect.
+- After role separation using only native MCP, the baseline and collector became ready, but Camofox's 300-second idle reaper reclaimed the tab before any action. That window had no PATCH. Since then, tab state is checked during handoff via non-mutating DOM observation, without unauthorized daemon-config changes.
+- During cleanup, auxiliary state such as `storage.scheduler.sqlite` and `data/replica_id` was found remaining outside the main DB snapshot. The existing 81 direct results are kept as evidence of the target API/storage state transition, but are not claimed as a controlled comparison with identical full-runtime initial state. This gap is addressed in Fixture v2 below.
+- Valid UI cells and paired comparisons are still 0. All 81 expected UI keys are preserved as BLOCKED, and independent direct PASSes were not moved into the UI completion count. Raw failures and measurements are recorded with scope separation in `qa/admin-web/runs/2026-09-17/principal-limits-partial/`.
 
-#### Fixture v2 복구 경계
+#### Fixture v2 recovery boundary
 
-- QA helper만 수정했다. 앱 코드·PR #793 head·운영 설정은 바꾸지 않았다. 생성 config의 `runtime.data_dir`를 fixture root의 절대 `data` 경로로 고정했다.
-- 정지한 fixture의 main DB와 scheduler SQLite DB를 SQLite backup API로 보존하고, runtime identity/plugin state의 파일·디렉터리 목록과 해시를 함께 기록한다. 보조 DB와 runtime 디렉터리의 부재도 명시적으로 저장한다.
-- reset은 모든 source hash·경로·TOML 계약을 확인한 뒤 적용한다. 외부 경로·symlink·경로 중복을 거부하며, filesystem 적용 실패는 원래 파일로 복구한다. 복구 자체가 실패하면 recovery 디렉터리를 삭제하지 않는다.
-- 실제 앱을 다른 cwd에서 실행해 두 DB와 runtime identity가 소유 root 안에 생성됨을 확인했다. 두 DB/identity/file 복원, 추가 파일 제거, 재시작 후 기존 Principal 3개 조회, absent-state 복원, 변조 전 타깃 불변, 외부 경로·양쪽 symlink·legacy 형식 거부, 단일/이중 filesystem 실패 후 복구·recovery 보존을 검증했다.
-- 기존 불완전 fixture/snapshot은 version 2로 위장 갱신하지 않고 재생성 필요 오류로 거부한다. 과거 자료는 보존한다.
-- 검증은 SQLite 두 저장소와 공통 filesystem 경계를 대상으로 했다. PostgreSQL의 기존 dump/restore 실행 경로를 이 run에서 재검증한 것으로 세지 않으며, PostgreSQL과 filesystem 사이의 crash-atomic transaction을 주장하지 않는다. 근거: `qa/admin-web/runs/2026-09-17/fixture-snapshot-boundary/verification.json`.
-- v2로 새 fixture를 생성하고 main/scheduler DB와 runtime 파일을 함께 복원한 상태의 fingerprint를 확인한 뒤 81개 기대 UI cell을 다시 고정했다. 그러나 브라우저 worker가 반복 READY 전달에도 실행하지 않아 중단·취소했고, 동일 worker 등록은 복구되지 않았다. 새 run의 UI/paired 실행도 0개이며, 이를 제품 오류나 UI 통과로 분류하지 않는다.
-- 준비된 v2 행렬은 `qa/admin-web/runs/2026-09-17/principal-limits-v2-preparation/preparation.json`에 BLOCKED로 보존했다. 소유 서버·자격증명·DB는 정리했다. 재개에는 동작하는 브라우저 workflow를 확보한 후 새 fixture를 만들고 동일한 전체-state 계약으로 실행해야 한다.
+- Only the QA helper was modified. App code, the PR #793 head, and production settings were not changed. The generated config's `runtime.data_dir` is pinned to the fixture root's absolute `data` path.
+- The stopped fixture's main DB and scheduler SQLite DB are preserved via the SQLite backup API, and file/directory lists plus hashes of runtime identity/plugin state are recorded together. The absence of auxiliary DBs and runtime directories is also stored explicitly.
+- Reset is applied only after verifying every source hash, path, and TOML contract. External paths, symlinks, and path duplicates are rejected; a filesystem apply failure restores the original files. If the recovery itself fails, the recovery directory is not deleted.
+- Confirmed by running the real app from a different cwd that both DBs and runtime identity are created inside the owned root. Verified: both-DB/identity/file restore, extra-file removal, querying the existing 3 Principals after restart, absent-state restore, target immutability before tampering, rejection of external paths/both-direction symlinks/legacy format, and recovery plus recovery-directory preservation after single/double filesystem failures.
+- Existing incomplete fixtures/snapshots are rejected with a regeneration-required error rather than disguised as version 2. Past material is preserved.
+- Verification covered the two SQLite stores and the common filesystem boundary. The existing PostgreSQL dump/restore execution path is not counted as re-verified in this run, and no crash-atomic transaction between PostgreSQL and the filesystem is claimed. Evidence: `qa/admin-web/runs/2026-09-17/fixture-snapshot-boundary/verification.json`.
+- After creating a new v2 fixture and confirming the fingerprint of the state where main/scheduler DBs and runtime files are restored together, the 81 expected UI cells were re-pinned. However, the browser worker did not execute despite repeated READY delivery, so it was stopped/cancelled, and the same worker registration was not recovered. The new run's UI/paired executions are also 0; this is not classified as a product error or a UI pass.
+- The prepared v2 matrix is preserved as BLOCKED in `qa/admin-web/runs/2026-09-17/principal-limits-v2-preparation/preparation.json`. Owned servers, credentials, and DBs were cleaned up. Resuming requires securing a working browser workflow, then creating a new fixture and running under the same full-state contract.
 
-#### Native click 복구 후 재현
+#### Reproduction after native-click recovery
 
-- 중단된 kernel 제어기를 복구하고 새 격리 fixture를 만들었다. 바이너리 SHA `afbc0a74fcfde73f374768b8465eb8b3876b74923831d91f07cc58d28b2b60bc`를 기존 실행 근거와 대조했다. main/scheduler DB 해시와 runtime 파일 목록을 복원 직후 확인하고 81개 셀의 새 Principal ID를 고정했다.
-- 브라우저 worker는 새 탭 생성·인증·DOM 확인을 수행했다. 그러나 첫 셀에서 빈 limits로 바뀌지 않고 기존 Requests/2m/17이 다시 저장됐다. 단일 PATCH와 revision 증가만으로 성공 처리하지 않았으며, direct 재생도 실행하지 않았다.
-- 원인을 stale ref로 단정할 수 없다. 별도 복원 후 유일한 Edit 버튼의 semantic XPath로 native click을 한 번 호출했는데, 독립 passive observer가 trusted Edit 클릭과 134ms 뒤 trusted Save 클릭을 모두 관측했다. worker의 명시적 Remove/Save 호출은 없었다. 앱 결함 여부는 미확정이며 앱 코드는 수정하지 않았다.
-- 앱을 제외한 단순 HTML counter에서도 별도 1회 native click을 시도했다. `native mouse move timed out after 24928ms`로 실패했고, 후속 조회는 `404 Tab not found`였다. 이 실험은 중복 클릭의 독립 재현 성공이 아니라 별도 native 입력 장애 증거다.
-- 근거: `qa/admin-web/runs/2026-09-17/native-click-recovery/`. 유효 UI 0/81, paired 비교 0을 유지한다. 두 소유 서버를 정지했고 진단 탭은 남아 있지 않다. native 입력의 단일 동작 계약을 확보하기 전까지 운영 쓰기나 행렬 확대를 하지 않는다.
+- Recovered the interrupted kernel controller and created a new isolated fixture. Binary SHA `afbc0a74fcfde73f374768b8465eb8b3876b74923831d91f07cc58d28b2b60bc` was reconciled against existing execution evidence. Main/scheduler DB hashes and the runtime file list were confirmed right after restore, and the 81 cells' new Principal IDs were pinned.
+- The browser worker performed new-tab creation, authentication, and DOM checks. However, on the first cell, the limits did not change to empty; the existing Requests/2m/17 was saved again. It was not treated as success based on a single PATCH and revision increment alone, and the direct replay was not executed.
+- The cause cannot be pinned to a stale ref. After a separate restore, a single native click was invoked via the semantic XPath of the only Edit button, and an independent passive observer saw both a trusted Edit click and, 134ms later, a trusted Save click. The worker made no explicit Remove/Save call. Whether this is an app defect is undetermined; app code was not modified.
+- A separate single native click was also attempted on a simple HTML counter without the app. It failed with `native mouse move timed out after 24928ms`, and the follow-up query returned `404 Tab not found`. This experiment is not a successful independent reproduction of the duplicate click; it is evidence of a separate native-input failure.
+- Evidence: `qa/admin-web/runs/2026-09-17/native-click-recovery/`. Valid UI stays 0/81, paired comparisons 0. Both owned servers were stopped and no diagnostic tab remains. Until the single-action contract of native input is secured, no production writes or matrix expansion.
 
-#### Native click 설치본 원인 조사와 승인 경계
+#### Native-click installed-copy cause investigation and approval boundary
 
-- 설치된 Camofox 1.16.0의 `server.js:3905–3922`는 `locator.click({ timeout: 3000 })`가 timeout을 반환하면 첫 시도의 입력 전달 여부를 확인하지 않고 `dispatchMouseSequence`를 호출한다. 사건 요청 `08dc7809`의 서비스 로그에서 이 fallback 경고와 후속 mouse sequence, HTTP 200을 확인했다. 단일 호출에서 두 trusted 클릭이 관측된 증거와 함께 unsafe replay 경로를 확인했다.
-- 최초 locator timeout의 원인과 정확한 dispatch 완료 시점은 아직 모른다. navigation 대기가 원인이라고 단정하여 `noWaitAfter`를 추가하거나 QA 페이지에서 두 번째 클릭을 막아 결과를 통과시키지 않는다. 별도 counter의 mouse-move timeout 원인도 확정하지 않았다.
-- 수정 제안은 canonical `/etc/nix-darwin/pkgs/camofox-browser/package.nix`에 패치를 등록하여 모호한 timeout 뒤 자동 재클릭을 제거하는 것이다. `/nix/store` 설치본 직접 수정, cc-lb 앱 변경, timeout 연장, synthetic click 우회는 하지 않는다. 실제 적용에는 Camofox 패키지 빌드·서비스 교체/재시작 범위의 별도 승인이 필요하다.
-- 조사 근거 `native-click-recovery/root-cause.json`과 `native-service-log-extract.json`을 보존했다. 시스템 변경과 수정 후 검증은 아직 실행하지 않았다.
-- 사용자가 Camofox 수정·적용 승인 질문에서 **보류**를 선택했다. 패치 작성·시스템 설정 변경·서비스 교체·재시작은 진행하지 않는다. 일반적인 계속 지시를 이 보류의 해제나 시스템 변경 승인으로 해석하지 않는다. 관련 UI 행렬은 BLOCKED로 유지하며, 사용자가 보류를 명시적으로 해제하기 전에는 같은 승인을 반복 요청하지 않는다.
+- In the installed Camofox 1.16.0, `server.js:3905–3922` calls `dispatchMouseSequence` when `locator.click({ timeout: 3000 })` returns a timeout, without checking whether the first attempt's input was delivered. In the service log for event request `08dc7809`, confirmed this fallback warning, the subsequent mouse sequence, and HTTP 200. Together with the evidence of two trusted clicks observed from a single call, the unsafe replay path was confirmed.
+- The cause of the first locator timeout and the exact dispatch-completion point are still unknown. Do not assert navigation wait as the cause, add `noWaitAfter`, or block the second click on the QA page to force a pass. The cause of the separate counter's mouse-move timeout is also unconfirmed.
+- The proposed fix registers a patch in the canonical `/etc/nix-darwin/pkgs/camofox-browser/package.nix` to remove the auto-reclick after an ambiguous timeout. No direct `/nix/store` installed-copy edits, no cc-lb app changes, no timeout extension, no synthetic-click bypass. Actual application needs separate approval covering the Camofox package build and service replacement/restart.
+- Investigation evidence `native-click-recovery/root-cause.json` and `native-service-log-extract.json` is preserved. System changes and post-fix verification have not been executed yet.
+- On the Camofox fix/apply approval question, the user chose **hold**. No patch authoring, system-config change, service replacement, or restart proceeds. A generic "continue" instruction is not interpreted as lifting this hold or approving system changes. The related UI matrix stays BLOCKED, and the same approval is not repeatedly requested until the user explicitly lifts the hold.
 
-### 7.8 사용자 추가 지시: 원인 재검증, 버그별 PR 분리, QA 단일 PR
+### 7.8 Additional user instruction: re-verify causes, split per-bug PRs, single QA PR
 
-이 절은 기존 목표와 미완료 항목을 대체하지 않고 추가한다. 운영 전수 실측, 소스·실행 행렬의 누락 검증, 요청별 상관 분석과 격리 cold/warm 비교 등 기존 완료 조건을 모두 유지한다.
+This section adds to, and does not replace, the existing goal and unfinished items. All existing completion conditions remain: exhaustive production measurement, missing-set verification of the source/execution matrix, per-request correlation analysis, and the isolated cold/warm comparison.
 
-- 사용자가 Camofox 버그 여부를 다시 확인하고, 실제 버그라면 패치해서라도 나머지 검증을 수행하라고 지시했다. §7.7의 Camofox 수정 보류는 이 범위에 한해 해제된다. 확인된 원인에 대한 canonical 패치·빌드·Camofox 서비스만 교체/재시작·수정 전후 검증을 허용한다. 무관한 시스템 변경, 운영 데이터 변경, PR 머지·운영 배포는 포함하지 않는다.
-- 단일 요청의 중복 클릭, 최초 locator timeout, 별도 mouse-move timeout 및 탭 소멸을 서로 다른 주장으로 판정한다. 기존 로그는 unsafe replay 경로의 근거지만 모든 timeout의 원인이 밝혀졌다는 뜻은 아니다.
-- 실제 설치본·해당 release·현재 upstream을 구분한다. ref/CSS/XPath native 클릭, 저수준 mouse, 키보드 활성화, DOM synthetic 등 실제 지원되는 경로를 조사하고 독립 이벤트 횟수·대상·실제 저장 상태로 비교한다. 지원되지 않는 방법은 실행한 것처럼 기록하지 않는다. synthetic 비교군의 성공을 native UI 검증으로 인정하지 않는다.
-- 확정된 cc-lb 버그는 root cause별 PR 하나로 분리한다. 같은 원인의 후속 안전성 보완은 해당 PR에 묶고, 별개 원인은 분리한다. 각 PR은 원인·최소 수정·직접 회귀 증거를 포함한다.
-- QA 스킬·목록·생성기·fixture·수집기·Admin 계측·보고·증거는 하나의 QA PR로 모은다. PR #793과 `qa/admin-web-limits-matrix`의 모든 변경을 분류하고, 이미 master에 반영된 변경을 새 PR로 중복하지 않는다.
-- 기존 브랜치와 사용자 변경은 보존한다. 분리 PR의 base/head와 필수 의존성을 명시하고 실제 diff와 검증을 대조한다. 기존 PR의 종결·머지·운영 배포는 자동으로 수행하지 않는다.
+- The user instructed: re-check whether it is a Camofox bug, and if it is a real bug, patch it and complete the remaining verification. The §7.7 Camofox-fix hold is lifted only for this scope. Permitted: canonical patch, build, Camofox-service-only replacement/restart, and pre/post-fix verification for the confirmed cause. Unrelated system changes, production data changes, PR merges, and production deployment are not included.
+- Judge the single-request duplicate click, the first locator timeout, and the separate mouse-move timeout plus tab disappearance as distinct claims. The existing logs are evidence of the unsafe replay path but do not mean every timeout's cause is known.
+- Distinguish the actual installed copy, its release, and current upstream. Investigate actually supported paths — ref/CSS/XPath native click, low-level mouse, keyboard activation, DOM synthetic — and compare by independent event counts, targets, and real saved state. Do not record unsupported methods as executed. Do not accept the synthetic comparison group's success as native UI verification.
+- Confirmed cc-lb bugs are split into one PR per root cause. Follow-up safety hardening of the same cause is bundled into that PR; separate causes are split. Each PR includes the cause, minimal fix, and direct regression evidence.
+- QA skills, list, generator, fixtures, collector, Admin instrumentation, reports, and evidence are collected into one QA PR. Classify every change in PR #793 and `qa/admin-web-limits-matrix`; do not duplicate changes already on master into the new PR.
+- Existing branches and user changes are preserved. State each split PR's base/head and required dependencies, and reconcile the actual diff against verification. Do not automatically close, merge, or deploy existing PRs.
 
-추가 완료 조건:
+Additional completion conditions:
 
-- [x] 각 클릭 장애의 판정, 재현 환경, 근거 등급 및 남은 불확실성 기록
-- [x] 지원되는 클릭 방식별 독립 입력·상태 증거 비교
-- [x] 확정 Camofox 결함의 동일 조건 수정 전 실패/수정 후 성공 및 정상 경로 검증
-- [x] 확정 cc-lb 버그 각각의 PR과 누락 없는 변경 소유권 표
-- [ ] 모든 QA 관련 개선을 포함하는 단일 PR과 실행 근거
-- [ ] 복구된 브라우저에서 기존 미완료 행렬 실행 및 원래 전체 완료 조건 충족
+- [x] Record each click failure's verdict, reproduction environment, evidence grade, and remaining uncertainty
+- [x] Compare independent input/state evidence per supported click method
+- [x] For the confirmed Camofox defect, verify identical-condition pre-fix failure/post-fix success and the normal path
+- [x] A table of each confirmed cc-lb bug's PR and complete change ownership
+- [ ] A single PR containing every QA-related improvement, with execution evidence
+- [ ] Run the previously incomplete matrix on the recovered browser and satisfy the original full completion conditions
 
-### 7.9 Camofox 수정 검증과 버그 PR 분리 결과
+### 7.9 Camofox fix verification and per-bug PR split results
 
-- Canonical Camofox 패치는 timeout 뒤의 재디스패치를 차단하고, 기존 30초 handler 예산 안에서 클릭과 후속 처리가 시간을 나누도록 변경했다. 관련 패키지만 빌드하고 Camofox 런타임을 교체했으며 무관한 시스템 설정은 적용하지 않았다.
-- 독립 counter/버튼 교체 probe에서 CSS/ref 각 3회씩 총 12회 모두 native 호출 1회당 trusted action 1회를 관측했다. 수정 전 counter CSS/ref 각 3회는 호출당 action 2회였다. 실제 추출 함수 smoke 13조건은 수정 후 통과했고 같은 harness는 수정 전 중복 클릭 조건에서 실패했다.
-- 추가 6조건은 다운로드 2회 각각 dispatch/download 1회, 40초 navigation 보류 2회 각각 약 25.5초 bounded timeout과 dispatch 1회, disabled 버튼 2회 각각 bounded timeout과 dispatch 0회를 확인했다. 다운로드 도구 총 지연 약 38–39초의 원인은 분리하지 않았으며, 이를 앱 성능 측정으로 간주하지 않는다.
-- 원시 관측에서 독립 집계한 결과와 패치 식별자는 `qa/admin-web/runs/2026-09-17-native-click-recovery/budget-validated/verification.json`에 보존한다. 모든 timeout 원인의 해소나 upstream 릴리스 반영을 주장하지 않는다.
-- 버그별 Draft PR은 #794 Base URL 응답, #795 Base URL 초기화, #796 Audit 조회, #797 키 label, #798 draft revision, #799 Router revision, #800 plugin 삭제, #801 plugin GC 안내, #802 이름 변경 중복 제출이다. 각 PR은 직전 버그 브랜치를 base로 하는 stack이며 정확한 head/base는 같은 디렉터리 `pr-split-ledger.json`에 기록한다.
-- 최종 누적 소스에서 frontend typecheck/lint/build, 73파일·775테스트, Rust format, 실제 PostgreSQL·SQLite를 포함한 선택 회귀 54/54를 통과했다. 선택에서 제외된 907개 테스트는 실행 통과로 계산하지 않는다. 각 중간 PR head의 독립 CI와 누적 소스 검증을 구분한다.
-- 격리 Default Limits 81셀은 동일 binary fingerprint와 full-state snapshot으로 새 실행 디렉터리를 준비했다. 이전 무효 UI 증거는 보존하며 새 브라우저 실행과 paired 검증이 끝나기 전에는 완료로 표시하지 않는다. 운영 계측 적용·실제 OAuth 계정·머지·배포 승인 경계는 그대로다.
+- The canonical Camofox patch blocks re-dispatch after a timeout and changes click/follow-up handling to share time within the existing 30-second handler budget. Only the related package was built and the Camofox runtime replaced; no unrelated system settings were applied.
+- On an independent counter/button-swap probe, all 12 runs — 3 each for CSS/ref — observed 1 trusted action per native call. Pre-fix counter CSS/ref, 3 each, produced 2 actions per call. The real extraction function's 13-condition smoke passed after the fix; the same harness failed on the duplicate-click condition before the fix.
+- Six additional conditions confirmed: 2 downloads each with 1 dispatch/download, 2 forty-second navigation holds each with an ~25.5s bounded timeout and 1 dispatch, and 2 disabled-button cases each with a bounded timeout and 0 dispatches. The cause of the download tool's ~38–39s total latency was not isolated and is not treated as app-performance measurement.
+- Results independently aggregated from raw observations and the patch identifier are preserved in `qa/admin-web/runs/2026-09-17-native-click-recovery/budget-validated/verification.json`. No claim that all timeout causes are resolved or that an upstream release incorporates the fix.
+- Per-bug Draft PRs: #794 Base URL response, #795 Base URL clearing, #796 Audit query, #797 key label, #798 draft revision, #799 Router revision, #800 plugin delete, #801 plugin GC guidance, #802 rename duplicate submission. Each PR is a stack based on the previous bug branch; exact head/base are recorded in `pr-split-ledger.json` in the same directory.
+- On the final accumulated source: frontend typecheck/lint/build, 73 files·775 tests, Rust format, and 54/54 selected regressions including real PostgreSQL/SQLite passed. The 907 tests excluded from the selection are not counted as executed passes. Each intermediate PR head's independent CI is distinguished from accumulated-source verification.
+- For the isolated Default Limits 81 cells, a new execution directory was prepared with the same binary fingerprint and full-state snapshot. The earlier invalid UI evidence is preserved, and nothing is marked complete until the new browser execution and paired verification finish. The approval boundaries for production instrumentation application, a real OAuth account, merge, and deployment are unchanged.

@@ -1,76 +1,76 @@
-# 프롬프트 캐시 공유 저장소 QA 매트릭스와 실행 결과
+# Prompt-Cache Shared Store QA Matrix and Execution Results
 
-관련 문서: [prompt-cache-shared-store-decisions.md](prompt-cache-shared-store-decisions.md), [prompt-cache-shared-store-plan.md](prompt-cache-shared-store-plan.md)
+Related documents: [prompt-cache-shared-store-decisions.md](prompt-cache-shared-store-decisions.md), [prompt-cache-shared-store-plan.md](prompt-cache-shared-store-plan.md)
 
-구현 전에 확정한 PostgreSQL-first 공유 관측 저장소 QA 목록과 실행 결과다. 합격 기준 없이 실측하도록 정한 항목은 `RECORDED`, 동작 검증 항목은 `PASS`로 기록한다. 실행 로그와 로컬 환경의 한계는 각 행의 증거에 남긴다.
+This is the QA list and execution results for the PostgreSQL-first shared observation store, finalized before implementation. Items designated to be measured without pass criteria are recorded as `RECORDED`; behavior-verification items are recorded as `PASS`. Execution logs and local-environment limitations are noted in each row's evidence.
 
-## 1. 검증 대상 계약
+## 1. Contract under verification
 
-구현이 만족해야 하는 관측 가능 계약은 다음과 같다. 우선순위는 **응답 전달/가용성 > 캐시 적중 > 지연**이다.
+The observable contract the implementation must satisfy is as follows. The priority is **response delivery/availability > cache hits > latency**.
 
-- 관측을 확보하는 즉시 비동기 저장을 시작한다. 응답 스트리밍과 완료는 DB 커밋과 무관하게 진행된다 — 첫 프레임 전 대기도, 완료 경계 배리어도 없다(P1-A 확정).
-- 라우팅은 매 요청마다 공유 저장소에서 후보 키만 일괄 조회한다. pod별 장기 보관 캐시, 관측용 NOTIFY, hydration 경로는 라우팅에서 제거된다.
-- 보장의 시작점은 **저장 커밋 성공**이다. 비동기 쓰기 시작은 다음 turn에서의 가시성을 보장하지 않는다.
-- 동일 키에 역순으로 도착한 쓰기는 유효 만료를 후퇴시키지 않는다. 만료를 늘리는 쪽이 이길 때 그 관측의 메타데이터가 일관되게 유지된다.
-- DB 읽기 실패는 cold cache(관측 없음 확정)와 다르다. 캐시 상태를 알 수 없는 상태로 취급하고, 캐시 친화도 없이 중립 점수로 라우팅을 계속한다(P2-A 확정). 오류는 OTel로 보고한다.
-- provider 내부 캐시의 실제 적중은 보장 대상이 아니다. 검증 대상은 cc-lb가 기록하고 읽는 관측 상태다.
-- 쓰기 발행은 단일 유한 비블로킹 sink에 `try_send`로 시도한다. 큐 포화나 저장 실패 시 OTel 메트릭/스팬으로 보고하고 요청을 계속 진행한다. 용량 예약, 사전 확인, 요청 거절, 재시도, outbox, 신규 인프라를 두지 않는다(P3 확정). 응답 전달이 캐시 적중보다 우선한다.
+- Async storage starts the moment an observation is acquired. Response streaming and completion proceed independently of the DB commit — no wait before the first frame and no completion-boundary barrier (P1-A confirmed).
+- On every request, routing batch-queries only the candidate keys from the shared store. Per-pod long-lived caches, observation NOTIFY, and hydration paths are removed from routing.
+- The guarantee's starting point is **successful store commit**. Starting an async write does not guarantee visibility on the next turn.
+- Writes arriving out of order for the same key must not regress the valid expiry. When the expiry-extending side wins, that observation's metadata stays consistent.
+- A DB read failure differs from cold cache (confirmed no observation). It is treated as an unknown cache state, and routing continues with a neutral score without cache affinity (P2-A confirmed). The error is reported via OTel.
+- Actual hits in the provider's internal cache are not guaranteed. What is verified is the observation state cc-lb records and reads.
+- Write publish is attempted via `try_send` on a single bounded non-blocking sink. On queue saturation or store failure, report via OTel metrics/spans and continue the request. No capacity reservation, pre-check, request rejection, retry, outbox, or new infrastructure (P3 confirmed). Response delivery takes precedence over cache hits.
 
-- 관측 테이블을 직접 읽는 어드민 화면은 없다. 단, 어드민 라우팅 프리뷰는 엔진의 라우팅 스코어러를 통해 관측을 **간접 소비**하므로 QA-H7로 검증한다.
+- No admin screen reads the observation table directly. However, the admin routing preview **indirectly consumes** observations through the engine's routing scorer, so it is verified by QA-H7.
 
-## 2. 상태 규칙
+## 2. Status rules
 
-| 상태 | 의미 |
+| Status | Meaning |
 |---|---|
-| `PENDING` | 미실행. 구현 후 실행해 결과를 기록한다. |
-| `PASS` | 실행 완료, 모든 Then 단언 충족. 증거 열에 실행 산출물 경로를 기록한다. |
-| `FAIL` | 실행 완료, 하나 이상의 Then 단언 불충족. 증거 열에 실패 출력을 기록한다. |
-| `BLOCKED` | 실행 불가. §9의 미확인 전제조건과 연결해 사유를 기록한다. 관측되지 않은 blocker를 사전에 단정하지 않는다. |
-| `RECORDED` | 실행됐으나 PASS/FAIL 판정 대상이 아닌 기록 행(기준선 재현, 측정·관측 기록). 재실행 없이 산출물을 인용한다. |
+| `PENDING` | Not run. Run after implementation and record the result. |
+| `PASS` | Execution complete; all Then assertions satisfied. Record the run artifact path in the evidence column. |
+| `FAIL` | Execution complete; one or more Then assertions unmet. Record the failure output in the evidence column. |
+| `BLOCKED` | Cannot run. Record the reason linked to an unverified precondition in §9. Do not pre-declare blockers that were not observed. |
+| `RECORDED` | Executed but not a PASS/FAIL judgment row (baseline reproduction, measurement/observation record). Cite the artifact without re-running. |
 
-실행 증거는 `target/test-evidence/issue-825/` 아래에 상대 경로로 보관한다.
+Execution evidence is stored under `target/test-evidence/issue-825/` as relative paths.
 
-## 3. 확정된 정책
+## 3. Confirmed policies
 
-사용자가 다음과 같이 최종 결정했다(2026-09-20). 이전의 OPEN 분기는 폐기한다. Main의 우선순위 감사(피어 리뷰)를 거쳐 설계는 확정 상태다. QA 게이트는 부분 실행됐으며 각 행의 상태는 §7에 기록한다 — 미실행 행이 남아 있으므로 전체 "무회귀"는 주장하지 않는다.
+The user finalized the following policies on 2026-09-20, replacing the earlier OPEN alternatives. Main and the peer reviewers confirmed the design against those priorities. Execution results are recorded in §7: behavioral scenarios are `PASS`, while baseline reproduction and measurement-only scenarios are `RECORDED`. These results establish the documented contracts within the tested environments, not an unrestricted claim of no regressions. See §4, §5, and QA-H6 for provider, reproducibility, and macOS limitations.
 
-| ID | 쟁점 | 확정 동작 |
+| ID | Issue | Confirmed behavior |
 |---|---|---|
-| **P1** | 완료 경계 | **A. 완전 비동기**: 응답 완료는 DB 커밋과 독립적이다. 스트리밍·비스트리밍 모두 쓰기가 블록/실패 중이어도 정상 완료된다. 다음 turn 가시성은 커밋 완료 여부에 달린다. |
-| **P2** | 라우팅 시점 공유 DB 읽기 실패 | **A. fail-open**: 읽기 실패는 cold가 아닌 Unknown으로 처리하고, 캐시 친화도 가중치 없는 중립 점수로 라우팅을 계속한다. 오류는 OTel로 보고한다. |
-| **P3** | 쓰기 발행 포화/실패 | **직접 시도 + 실패 보고**: 용량 예약·사전 확인·요청 거절 없이 단일 유한 비블로킹 sink에 `try_send`한다. 실패 시 OTel 메트릭/스팬으로 보고하고 요청을 계속한다. 재시도·outbox·신규 인프라 없음. |
+| **P1** | Completion boundary | **A. Fully async**: response completion is independent of the DB commit. Both streaming and non-streaming complete normally even while a write is blocked/failing. Next-turn visibility depends on whether the commit completed. |
+| **P2** | Shared-DB read failure at routing time | **A. fail-open**: a read failure is treated as Unknown, not cold, and routing continues with a neutral score without cache-affinity weight. The error is reported via OTel. |
+| **P3** | Write publish saturation/failure | **Direct attempt + failure reporting**: `try_send` to a single bounded non-blocking sink with no capacity reservation, pre-check, or request rejection. On failure, report via OTel metrics/spans and continue the request. No retry, outbox, or new infrastructure. |
 
-## 4. 공통 환경
+## 4. Common environment
 
-- **격리**: 모든 실행은 로컬 격리 자원만 사용한다. SQLite는 테스트별 임시 디렉터리, PostgreSQL은 테스트 전용 데이터베이스/스키마, 포트는 임의 할당 또는 multi-replica 스크립트의 고정 localhost 포트(8888, 8889, 8001, 8002, 8003, 8004, 18888)를 사용한다. 프로덕션 데이터·자격증명·엔드포인트에 쓰지 않는다.
-- **자격증명**: 테스트용 더미 키만 사용한다(예: multi-replica 스크립트의 고정 더미 토큰). 실제 provider 키, OAuth 자격, 프로덕션 DB URL을 어떤 산출물에도 기록하지 않는다. 증거 로그는 자격증명을 마스킹한 상태로 저장한다.
-- **fake provider 경계**: `tests/fixtures/fake-anthropic`은 계약 충실 mock이다. 이 하네스의 PASS는 cc-lb의 관측·저장·조회 동작을 증명하지만, 실제 유료 provider의 내부 캐시 적중을 증명하지 않는다. provider 실측 검증은 별도 승인이 필요한 범위 밖 작업이다.
-- **결정론**: 레이스를 가리는 `sleep` 단언을 쓰지 않는다. 동기화는 테스트 범위 배리어(채널, `tokio::sync::Barrier`, 게이트된 mock store, fake provider의 프레임 제어 헤더)로 한다. 프로덕션 공개 API에 테스트 전용 flush를 추가하지 않는다.
-- **시간 제어**: 컴포넌트 테스트는 `cc_lb_clock::TestClock`(`advance_secs`/`advance`)으로 시간을 진행한다. `TestClock`은 in-process 하네스에서만 유효하며, `common::spawn_test_server_*`가 띄우는 별도 프로세스 서버에는 적용되지 않는다. 프로세스 수준 테스트는 DB 행의 절대 시각을 직접 비교한다.
-- **측정 단언**: p50/p95/p99 같은 지연 수치는 측정하고 기록한다. 사전에 임의의 임계값(예: 50ms)을 PASS 조건으로 두지 않는다. 0ms 지연, 100% 보장 같은 단언은 금지한다.
+- **Isolation**: every run uses only local isolated resources. SQLite uses a per-test temporary directory; PostgreSQL uses a test-only database/schema; ports are randomly assigned or the multi-replica script's fixed localhost ports (8888, 8889, 8001, 8002, 8003, 8004, 18888). Never write to production data, credentials, or endpoints.
+- **Credentials**: only dummy test keys are used (e.g. the fixed dummy tokens in the multi-replica script). No real provider keys, OAuth credentials, or production DB URLs are recorded in any artifact. Evidence logs are stored with credentials masked.
+- **Fake-provider boundary**: `tests/fixtures/fake-anthropic` is a contract-faithful mock. A PASS on this harness proves cc-lb's observe/store/query behavior, but does not prove internal cache hits of a real paid provider. Live-provider verification is out-of-scope work requiring separate approval.
+- **Determinism**: no `sleep` assertions that hide races. Synchronization uses test-scoped barriers (channels, `tokio::sync::Barrier`, gated mock stores, the fake provider's frame-control headers). No test-only flush is added to the production public API.
+- **Time control**: component tests advance time with `cc_lb_clock::TestClock` (`advance_secs`/`advance`). `TestClock` is valid only in the in-process harness and does not apply to the separate-process servers spawned by `common::spawn_test_server_*`. Process-level tests compare absolute timestamps on DB rows directly.
+- **Measurement assertions**: latency figures such as p50/p95/p99 are measured and recorded. No arbitrary preset threshold (e.g. 50ms) is a PASS condition. Assertions like 0ms latency or 100% guarantees are forbidden.
 
-## 5. 실행 명령
+## 5. Execution commands
 
-테스트 타깃 이름은 `Cargo.toml`의 `[[test]]` 등록 기준이다. `cc-lb-server`, `cc-lb-admin`, `cc-lb-storage-postgres`, `tests-multi-replica` 모두 통합 테스트 타깃 이름은 `integration`이며 `tests/all.rs`에 모듈로 등록된다.
+Test target names follow the `[[test]]` registration in `Cargo.toml`. For `cc-lb-server`, `cc-lb-admin`, `cc-lb-storage-postgres`, and `tests-multi-replica`, the integration test target name is `integration`, registered as modules in `tests/all.rs`.
 
 ```bash
-# cc-lb-server 통합 테스트 (SQLite 기본). prompt_cache_live_qa 모듈만 필터하는 예시.
+# cc-lb-server integration tests (SQLite default). Example filtering only the prompt_cache_live_qa module.
 CC_LB_ADMIN_SKIP_SPA=1 CC_LB_SKIP_WASM_FIXTURE_BUILD=1 \
   cargo test -p cc-lb-server --test integration prompt_cache_live_qa -- --nocapture
 
-# cc-lb-admin 통합 테스트 (RequestEvent/rollup 등 관리 API 계약)
+# cc-lb-admin integration tests (admin API contracts such as RequestEvent/rollup)
 CC_LB_ADMIN_SKIP_SPA=1 CC_LB_SKIP_WASM_FIXTURE_BUILD=1 \
   cargo test -p cc-lb-admin --test integration
 
-# PostgreSQL 스토리지 어댑터 라이브 테스트 (postgres feature + CI_POSTGRES_URL 필요)
+# PostgreSQL storage adapter live tests (postgres feature + CI_POSTGRES_URL required)
 CI_POSTGRES_URL="postgres://cc_lb:cc_lb@127.0.0.1:5432/cc_lb" \
   cargo test -p cc-lb-storage-postgres --features postgres --test integration -- --test-threads=1
 
-# 2-replica + 공유 PostgreSQL 18 E2E (Docker 필요, DOCKER_HOST=tcp://localhost:2375)
+# 2-replica + shared PostgreSQL 18 E2E (Docker required, DOCKER_HOST=tcp://localhost:2375)
 CC_LB_MULTI_REPLICA_E2E=1 \
 CC_LB_MULTI_REPLICA_POSTGRES_URL="postgres://cc_lb:cc_lb@127.0.0.1:5432/cc_lb" \
   bash tests/multi-replica/multi-replica-postgres.sh
-# 또는 cargo 래퍼:
+# or the cargo wrapper:
 CC_LB_MULTI_REPLICA_E2E=1 CC_LB_MULTI_REPLICA_POSTGRES_URL="postgres://..." \
   cargo test -p tests-multi-replica --test integration
 
@@ -83,7 +83,7 @@ bun run --shell=bun typecheck
 bunx --bun vitest run --passWithNoTests --maxWorkers=1 --no-file-parallelism
 ```
 
-CI 요구사항(`.github/workflows/ci.yml`, `web.yml` 기준):
+CI requirements (per `.github/workflows/ci.yml`, `web.yml`):
 
 ```bash
 cargo fmt --check
@@ -99,371 +99,382 @@ cargo llvm-cov report --lcov --output-path target/coverage.lcov \
 scripts/coverage-gate.sh target/coverage.lcov
 ```
 
-## 6. 단언 규칙
+**Reproducibility note.** The committed `tests/multi-replica/multi-replica-postgres.sh` / `tests-multi-replica` suite exercises generic OAuth, dynamic-view synchronization, and failover — it does **not** exercise prompt-cache breakpoints or peer-cache routing. The issue-825-specific runs (two-process shared PostgreSQL, live DB-fault injection, OTLP span capture, shutdown-drain gates) were driven by disposable scripts under `/tmp/cc-lb-825-qa`, and the evidence under `target/test-evidence/issue-825/` is local and git-ignored — it is not available from a fresh clone. The committed Rust regression tests are reproducible; do not claim the whole live QA reruns with one command from a fresh clone.
 
-- 메트릭이나 로그의 **부재**만으로 동작을 단언하지 않는다. 부재 단언은 항상 관측 가능한 동작 단언(라우팅 결과, DB 행, 응답 본문)과 함께 둔다.
-- SQL 소스 텍스트를 단언하지 않는다. 쿼리 동작은 결과와 `EXPLAIN` 출력으로 검증한다.
-- 후보 키 개수의 고정 상한을 가정하지 않는다. 일괄 조회 검증은 요청에서 도출된 실제 후보 집합 기준으로 한다.
-- `sleep`으로 경쟁 조건을 가리지 않는다. 대기가 필요하면 유한 데드라인이 있는 조건 폴링(기존 `support.rs`의 `wait_for_*` 패턴) 또는 명시적 배리어를 쓴다.
-- fake provider의 `x-fake-ttft-ms`, `x-fake-inter-token-ms`, `x-fake-delta-count`, `x-fake-mode` 헤더는 지연을 만드는 수단이지 **결정론적 배리어가 아니다**. "provider 완료를 보류한 채 DB를 단언"하는 시나리오는 테스트 범위의 명시적 게이트(fixture의 스트림 보류 훅 + 저장소 커밋 확인 신호)로 동기화한다. x-fake 지연 헤더는 보조적 스모크에만 사용한다. 이를 위해 프로덕션 공개 API를 추가하지 않는다.
+**PostgreSQL verification caveat.** The conformance Postgres runner (`tests/storage_roundtrips_postgres.rs:630-659`) early-returns and Rust reports `ok` when neither `CI_POSTGRES_URL` nor `PG_URL` is set — do not count that as PostgreSQL verification. `CI_POSTGRES_URL` must point at a dedicated test database. To run the both-backend regression explicitly:
 
-## 7. QA 매트릭스
-
-### A. 기준선 재현
-
-#### QA-A1. #825 기준선 재현 (hydration이 로컬 갱신 만료를 후퇴)
-
-- **상태**: RECORDED
-- **Given**: HEAD `917a1003893d87a307f297863a662b6f273e2904`의 실제 SQLite 저장소와 캐시. 동일 관측을 받은 캐시 두 개 중 하나에만 DB 재로딩을 적용.
-- **When**: T+0 최초 기록(만료 T+270) → T+40 hit으로 수명 갱신(만료 T+310) → T+60 오래된 DB 기록 재로딩 → T+280 조회.
-- **Then**: 재로딩한 캐시는 만료가 T+270으로 후퇴하고 T+280 조회에서 없음으로 판정. 대조군은 T+310 유지. 새 기록→옛 기록 순서의 DB 쓰기도 만료 310→270으로 후퇴.
-- **환경**: 격리 로컬 SQLite, 네이티브 실행.
-- **증거**: `/tmp/cc-lb-825-repro-native.log`, `/tmp/cc-lb-825-controls.log`.
-- **비고**: PostgreSQL에서의 동일 결함은 아직 실행으로 증명되지 않았다. 신구조에는 hydration 경로가 없으므로 이 시나리오의 사후 대응은 §8 매핑과 QA-B7/B8, QA-C1로 옮겨진다.
-
-### B. 쓰기 경로
-
-#### QA-B1. fast-path SSE `message_start` 조기 발행
-
-- **상태**: PASS
-- **Given**: 스트리밍 요청. fake provider가 `message_start`에 cache usage를 싣는다. 스트림 보류는 테스트 범위의 명시적 게이트(fixture가 `message_start` 송출 후 최종 프레임을 테스트 신호까지 보류하는 훅)로 고정한다 — `x-fake-*` 지연 헤더는 결정론적 배리어가 아니므로 보조 스모크에만 쓴다.
-- **When**: 서버가 `message_start`의 usage를 수신했음을 테스트 배리어로 확인한 뒤(클라이언트 프레임 수신과 무관), 최종 프레임을 계속 보류한 상태에서 저장소를 조회하고 커밋을 확인한다. 이후 게이트를 해제한다.
-- **Then**: 스트림이 완료되기 전에 해당 `(upstream_id, canonical_model_id, v3_prefix_key, ttl_class)` 관측 행이 커밋되어 있다. `message_stop`까지 발행을 미루는 기존 동작이면 이 단언은 실패한다.
-- **환경**: `cargo test -p cc-lb-server --test integration` 범위의 live QA 하네스, 격리 SQLite.
-- **증거**: `target/test-evidence/issue-825/lifecycle_client_disconnect.log` (23 pass — production Lifecycle fast-path 조기 발행, 게이트된 store로 최종 프레임 보류 중 커밋 확인), `target/test-evidence/issue-825/observation_failure_isolation.log` (9 pass — 실제 서버 sink 경유 SQLite 커밋을 최종 게이트 프레임 전에 확인).
-
-#### QA-B2. compat SSE 경로 `message_start` 조기 발행
-
-- **상태**: PASS
-- **Given**: SSE 이벤트 변환 훅이 있는 dialect(compat 경로)를 통과하는 스트리밍 응답. `relay_response`의 `sse_event_transform_hook` 분기.
-- **When**: QA-B1과 동일 — usage 수신 배리어 확인 후 최종 프레임 보류 상태에서 저장소 조회·커밋 확인.
-- **Then**: 변환 경로에서도 동일하게 조기 발행된다. 변환 여부와 무관하게 관측 발행 시점이 같다.
-- **환경**: compat dialect를 표현하는 테스트 fixture 필요. 해당 fixture가 없으면 §9에 기록하고 BLOCKED가 아니라 fixture 추가 후 실행.
-- **증거**: `target/test-evidence/issue-825/lifecycle_client_disconnect.log` (compat 경로 조기 발행 포함 23 pass), `target/test-evidence/issue-825/observation_failure_isolation.log` (실제 서버 sink compat 커밋 확인).
-
-#### QA-B3. DB 쓰기 블록 중 첫 프레임 전달
-
-- **상태**: PASS
-- **Given**: 쓰기를 게이트로 보류하는 테스트 전용 store(기존 `BlockingStore` 패턴을 `future::pending` 대신 제어 가능한 게이트로 확장). 스트리밍 요청.
-- **When**: 관측 쓰기가 게이트에서 블록된 상태로 유지.
-- **Then**: 첫 SSE 프레임(`message_start` 또는 첫 delta)이 DB 커밋 없이 클라이언트에 전달된다. "첫 delta 전에 DB 커밋 완료"를 요구하지 않는다. 게이트 해제 후 쓰기가 완료된다.
-- **환경**: in-process 하네스(게이트된 store 주입 가능 지점 필요).
-- **증거**: `target/test-evidence/issue-825/lifecycle_client_disconnect.log` — 게이트된 store 블록 중 첫 프레임 전달 확인. 프레임 수신과 커밋의 순서 기록.
-
-#### QA-B4. abort 전후 발행과 중복 발행 부재
-
-- **상태**: PASS
-- **Given**: 스트리밍 요청 두 건. (a) 서버가 `message_start`의 usage를 수신했음을 테스트 배리어로 확인한 뒤(클라이언트가 프레임을 받았는지와 무관) 클라이언트 연결을 강제 종료. (b) `message_start` 도달 전 클라이언트 연결 종료. 발행 횟수는 테스트 전용 관찰 store 래퍼로 계수한다.
-- **When**: 각 케이스 후 저장소 조회와 발행 카운터 확인.
-- **Then**: (a) 이미 관측된 `message_start` 기반 행은 커밋되어 보존. (b) 관측 전 abort는 발행 없음. DB 행 수(upsert 키 기준 1행)만으로는 중복 발행을 증명할 수 없으므로, 관찰 래퍼가 기록한 수용 발행 배치 수가 정확히 1임을 단언한다 — `message_stop`이나 abort 시점에 두 번째 발행이 없어야 한다. 이것은 **로컬 단일 발행** 계약이다. 분산 exactly-once/at-least-once 보장을 요구하지 않는다.
-- **환경**: live QA 하네스, 클라이언트 소켓 강제 close.
-- **증거**: `target/test-evidence/issue-825/lifecycle_client_disconnect.log` — before/after abort 케이스 포함 23 pass. 케이스별 DB 행 수와 발행 카운터.
-
-#### QA-B5. 비스트리밍(buffered) 발행
-
-- **상태**: PASS
-- **Given**: `stream` 미지정/`false` 요청. `MessageScript`의 `ScriptedMessageResponse`로 usage를 포함한 buffered 응답.
-- **When**: 응답 수신 후 저장소 조회, 이어서 동일 prefix의 두 번째 요청.
-- **Then**: 응답 완료 후 관측 행이 존재하고, 두 번째 요청의 라우팅이 그 관측을 반영한다. P1-A 확정에 따라 응답 완료는 커밋을 내포하지 않으므로, 두 번째 요청 전에 커밋 완료를 테스트 배리어로 확인한다.
-- **증거**: `target/test-evidence/issue-825/runtime/RESULTS.tsv` — 실제 2프로세스 PG 환경에서 buffered 발행 확인.
-
-#### QA-B6. 신규 키 쓰기
-
-- **상태**: PASS
-- **Given**: 저장소에 없는 새 `(upstream, model, prefix, ttl)` 키의 관측.
-- **When**: upsert 실행.
-- **Then**: 행이 삽입되고 모든 필드(`expires_at`, `last_observed_at`, `hash_schema_version`, `prefix_content_block_index`, `estimated_prefix_tokens`, `token_estimate_source`)가 기록값과 일치한다.
-- **환경**: store 수준 계약 테스트. SQLite와 Postgres 양쪽.
-- **증거**: `target/test-evidence/issue-825/storage-stress-{1..20}.log` — SQLite+PG 22개 store 테스트 × 20회 = 440 pass.
-
-#### QA-B7. 역순 쓰기 — 오래된 관측이 늦게 도착
-
-- **상태**: PASS
-- **Given**: 동일 키. 먼저 만료 T+310의 쓰기를 커밋.
-- **When**: 이후 만료 T+270의 오래된 관측 쓰기를 커밋. 반대 방향(옛값 커밋 후 새값 커밋으로 정상 갱신)도 함께 실행한다.
-- **Then**: 역순 — `expires_at`은 T+310을 유지하고, 승자(T+310 관측)의 메타데이터가 일관되게 남는다. "만료만 max로 유지하고 메타데이터는 오래된 값으로 덮어쓰기"는 불합격이다. 정순 — 새 쓰기가 옛 행을 정상 갱신한다. T+280 시점 조회에서 키가 유효하다.
-- **환경**: store 수준 계약 테스트. SQLite와 Postgres 양쪽. 기준선 QA-A1에서 SQLite는 이 순서로 후퇴했으므로 회귀 방지 행이다.
-- **증거**: `target/test-evidence/issue-825/storage-stress-{1..20}.log` — 역순/정순 모노토닉 병합 440 pass.
-
-#### QA-B8. 동시 쓰기 — 두 pod/두 클라이언트의 겹친 갱신
-
-- **상태**: PASS
-- **Given**: 동일 키에 서로 다른 만료를 가진 두 쓰기를 별도 연결에서 동시에 발행. 추가로 동일 만료·다른 메타데이터(동률) 케이스를 준비한다.
-- **When**: 두 커밋 완료 후 조회. 동률 케이스도 양쪽 도착 순서로 각각 실행.
-- **Then**: 최종 `expires_at`은 둘 중 큰 값이고, 메타데이터는 그 승자 관측의 것과 일관된다. 어느 순서로 커밋돼도 결과가 같다. 동률(같은 `expires_at`)은 `last_observed_at`이 큰 쪽이 승자이며 그 메타데이터가 일관되게 남는다 — 임의의 오래된 메타데이터 덮어쓰기는 불합격이다. 완전히 동일한 관측의 재발행(identity replay)은 멱등이다.
-- **환경**: Postgres는 별도 연결 2개로 실행. SQLite는 동일 파일에 대한 순차·동시 쓰기 모두.
-- **증거**: `target/test-evidence/issue-825/storage-stress-{1..20}.log` — 동시 쓰기·동률(coherent tie)·멱등 재발행 포함 440 pass.
-
-#### QA-B9. 발행 포화 시 관측 유실 보고와 요청 계속 (P3 확정)
-
-- **상태**: PASS
-- **Given**: 비블로킹 sink의 유한 큐를 고의로 채운 상태.
-- **When**: 새 관측을 포함한 요청 디스패치.
-- **Then**: 요청은 거절되지 않고 정상 처리된다. `try_send` 실패는 OTel 메트릭/스팬으로 관측 가능하게 기록된다. 용량 예약, 사전 확인, 요청 거절이 없음을 단언한다. 드롭된 관측은 DB에 나타나지 않는다 — 이 유실은 허용 동작이며 보고만 요구된다.
-- **환경**: 큐를 채우는 테스트 훅 필요(§9).
-- **증거**: `target/test-evidence/issue-825/observation_failure_isolation.log` — queue-full/closed × stream/buffered 모두 HTTP 200 + 실제 카운터/WARN 확인. 단, 큐 계열 케이스는 OTLP export 대상이 아니어서 in-process 카운터/WARN이 증거다(QA-F4 참조).
-### C. 읽기 경로
-
-#### QA-C1. 두 프로세스 read-after-commit (NOTIFY/rebind 없이)
-
-- **상태**: PASS
-- **Given**: 공유 PostgreSQL에 붙은 cc-lb 프로세스 A와 B. A로 Turn 1 요청을 보내 관측 커밋을 확인.
-- **When**: B로 동일 prefix의 Turn 2 요청 전송. B의 로컬 상태는 비어 있다.
-- **Then**: B는 공유 DB 조회만으로 A가 기록한 upstream으로 라우팅한다 — 단, 이 기대는 **통제된 동등 조건**(후보들이 health/quota/rate-limit 등 다른 제약에서 동등하게 eligible)에서만 성립한다. warm 관측이 health/quota/rate-limit 제약을 override하는 것은 불합격이다. 관측용 NOTIFY 수신이나 view rebind 없이 성립해야 한다 — 관측 채널(`cclb_prompt_cache_observation_changed`) 제거 후에도 이 시나리오가 통과하는 것이 핵심이다.
-- **환경**: `tests/multi-replica/multi-replica-postgres.sh` 확장 또는 동등한 2프로세스 하네스. Docker Postgres 18.
-- **증거**: `target/test-evidence/issue-825/runtime/RESULTS.tsv` — 실제 2프로세스 PG에서 C1 4/4 pass. B의 `request_events_v1` `upstream_id`와 fake provider 수신 기록.
-#### QA-C2. 즉시 다음 turn (P1-A 확정)
-
-- **상태**: RECORDED — `target/test-evidence/issue-825/runtime/RESULTS.tsv` QA-C2: turn2_upstream 기록, commit_seen_at=1789919627 turn2_done=1789919627.
-- **Given**: Turn 1 응답 완료 직후, 폴링이나 인위적 대기 없이 Turn 2 전송.
-- **When**: 응답 완료와 동시에 다음 요청.
-- **Then**: P1-A이므로 Turn 2가 Turn 1 관측을 반영하는 것은 보장이 아니다. 이 행은 동작을 기록한다: 커밋이 완료됐다면 반영, 미완료면 미반영 — 둘 다 허용 동작이다. Turn 1 커밋 시각과 Turn 2 라우팅 결과를 함께 기록해 미커밋 구간의 크기를 관측한다.
-- **증거**: Turn 2 라우팅 결과와 Turn 1 커밋 시각.
-
-#### QA-C3. 요청 스냅샷 일관성
-
-- **상태**: PASS
-- **Given**: 라우팅 계산 중인 요청. 조회 시점과 선택 시점 사이에 (a) 새 관측 커밋, (b) 기존 행 만료 경과를 각각 주입.
-- **When**: 조회 결과를 해당 요청의 선택에 적용.
-- **Then**: 한 요청의 라우팅은 그 요청의 조회 결과만 사용하는 일회성 데이터다 — 별도 스냅샷 프레임워크가 아니라 요청 범위 조회 결과다. (a) 조회 후 커밋된 행은 이번 요청에 반영되지 않는다(다음 요청에서 반영). (b) **선택 시점에 만료를 재평가한다** — 조회와 선택 사이에 만료가 경과한 행은 이번 결정에서 제외된다. 요청 간 관측을 재사용하는 warmth 캐시가 없음을 확인한다.
-- **환경**: in-process 하네스. `TestClock`으로 만료 경과를 결정론적으로 만든다.
-- **증거**: `target/test-evidence/issue-825/lifecycle-regressions.log` (59 pass, 1 existing ignored — 스냅샷 일관성 케이스 포함).
-
-#### QA-C4. 빈 후보 키 집합 — 조회 생략
-
-- **상태**: PASS
-- **Given**: 캐시 breakpoint가 없는 요청(후보 키 집합이 비어 있음).
-- **When**: 라우팅 실행.
-- **Then**: 관측 저장소에 읽기 쿼리를 발행하지 않는다. 라우팅은 정상 완료된다. 단언은 쿼리 카운팅 래퍼 store로 한다(로그 부재 단언 금지).
-- **환경**: in-process 하네스, 카운팅 store 래퍼.
-- **증거**: `target/test-evidence/issue-825/lifecycle-regressions.log` — 빈 키 조회 생략 케이스 포함 59 pass.
-
-#### QA-C5. 정확 키 한정 조회
-
-- **상태**: PASS
-- **Given**: 요청의 후보 `(upstream × model × prefix × ttl)` 키 집합과 무관한 다수의 타 upstream/모델 행이 저장소에 존재.
-- **When**: 라우팅 조회 실행.
-- **Then**: 조회는 요청에서 도출된 후보의 upstream·model·prefix와 요청이 허용하는 TTL class로 한정된다. 바인딩 없는 무한정 조회(전체 테이블 반환)는 불합격이다. 반환 행은 후보 집합의 부분집합이다. 플래너가 작은 테이블에서 seq scan을 선택하는 것 자체는 실패 사유가 아니다 — 금지 대상은 후보 한정이 없는 쿼리다.
-- **환경**: store 수준 + 라우팅 수준. Postgres에서는 `EXPLAIN`으로 인덱스 사용을 확인한다.
-- **증거**: `target/test-evidence/issue-825/lifecycle-regressions.log` — 후보 한정 조회 케이스 포함 59 pass. `EXPLAIN` 출력은 `target/test-evidence/issue-825/runtime/measure-lookup/`의 pg-explain/sqlite-plan 참조.
-
-#### QA-C6. 쿼리 플랜과 지연 측정
-
-- **상태**: RECORDED — 측정 완료(임계값 평가가 아닌 기록 행).
-- **Given**: 대표적인 카디널리티의 관측 테이블(후보 키 수와 테이블 행 수를 실제 워크로드에 근거해 정한다 — 고정 상한 가정 금지).
-- **When**: 라우팅 조회를 반복 실행해 p50/p95/p99를 측정하고 `EXPLAIN (ANALYZE, BUFFERS)`를 채취.
-- **Then**: 측정값과 플랜을 기록한다. PASS/FAIL 임계값은 사전에 정하지 않는다 — 캐시 전용의 임의 지연 상한을 두지 않고, 조회 지연과 캐시 적중 이득을 함께 기록해 평가한다. 측정 결과가 새 인덱스/스키마 필요성의 유일한 근거다 — 측정 전에 스키마 변경을 전제하지 않는다.
-- **환경**: Postgres 라이브. SQLite에서도 동일 측정을 병행해 비교 기록.
-- **증거**: `target/test-evidence/issue-825/runtime/measure-lookup/summary.txt` + pg-explain/sqlite-plan — 200회 반복, live + synthetic 50k 행. pg-live p50=0.040ms p95=0.047ms p99=0.069ms, pg-synth p50=0.167ms p95=0.178ms p99=0.185ms, sqlite-live p50=0.008ms p99=0.012ms, sqlite-synth p50=0.073ms p99=0.090ms. 한계: end-to-end/네트워크/프로덕션 카디널리티 측정이 아니므로 그 범위의 결론은 내지 않는다.
-
-
-#### QA-D1. 만료 경계 정확성
-
-- **상태**: PASS
-- **Given**: `expires_at = T`인 행.
-- **When**: `now = T-1`, `now = T`, `now = T+1`에서 각각 조회.
-- **Then**: `expires_at > now` 계약 기준으로 `T-1`에서는 반환, `T`와 `T+1`에서는 미반환. 이 경계는 고정 계약이며 구현 결과에 맞춰 조정하지 않는다. grace는 쓰기 시점에 한 번만 차감된다(`lifecycle.rs`의 `prompt_cache_observation_expires_at`) — 조회·재저장 경로에서 grace를 다시 빼는 이중 차감은 불합격이다. 커밋이 지연돼도 저장된 절대 `expires_at`은 관측 시점 기준으로 유지되며, 저장 시점부터 TTL을 다시 세지 않는다.
-- **환경**: store 수준, `TestClock` 또는 고정 시각 바인딩.
-- **증거**: `target/test-evidence/issue-825/storage-stress-{1..20}.log` — 만료 경계·이중 grace 부재·지연 커밋 TTL 비재설정 포함 440 pass.
-
-
-#### QA-D2. 키 구성요소 격리
-
-- **상태**: PASS
-- **Given**: upstream, canonical model, prefix, TTL class, hash schema version 중 정확히 하나씩만 다른 행들을 시딩.
-- **When**: 특정 `(upstream, model, prefix, ttl)` 조합으로 조회·라우팅.
-- **Then**: 각 차원이 독립적으로 격리된다. 다른 upstream/모델/prefix/TTL의 warm 행이 이번 요청의 점수에 섞이지 않는다. `hash_schema_version`이 `HASH_SCHEMA_VERSION`과 다른 행은 warmth에서 제외된다.
-- **환경**: store 수준 + 라우팅 수준.
-- **증거**: `target/test-evidence/issue-825/lifecycle-regressions.log` — schema+TTL 격리 케이스 포함 59 pass. `target/test-evidence/issue-825/storage-stress-{1..20}.log` — store 수준 격리 440 pass.
-
-#### QA-D3. pod/DB 재시작과 TTL 비연장
-
-- **상태**: PASS
-- **Given**: 관측 행 커밋 후 (a) cc-lb pod 재시작, (b) Postgres 컨테이너 stop/start.
-- **When**: 재시작 완료 후 만료 전 시점에 조회·라우팅.
-- **Then**: 커밋된 관측은 재시작 후에도 유효하다. 만료는 절대 시각 기준이며 재시작으로 연장되지 않는다 — 재시작 소요 시간만큼 남은 수명이 줄어든 상태로 읽힌다. 만료가 지난 행은 부활하지 않는다.
-- **환경**: multi-replica 하네스 또는 단일 프로세스 + Docker Postgres 재시작.
-- **증거**: `target/test-evidence/issue-825/runtime/RESULTS.tsv` — pod 재시작 + Postgres 컨테이너 재시작 후 TTL 비연장 확인.
-
-### E. 회귀 — 제거 대상
-
-#### QA-E1. 60초 debounce 제거 — 즉시 재저장
-
-- **상태**: PASS
-- **Given**: 관측이 커밋된 키. 컴포넌트 수준에서 `TestClock`을 `advance_secs(40)`으로 40초 진행(60초 debounce 윈도우 미만).
-- **When**: 동일 키의 두 번째 관측(hit 갱신) 발생.
-- **Then**: 60초를 기다리지 않고 새 쓰기가 발행·커밋된다. 같은 초 안의 `>` 비교 같은 wall-clock 트릭이 아니라, TestClock 진행으로 debounce 윈도우 내임을 보장한 채 쓰기 발생을 단언한다.
-- **환경**: in-process 컴포넌트 테스트(`TestClock` 주입 가능 지점). 프로세스 수준에서는 DB 행의 `last_observed_at` 비교로 대체.
-- **증거**: `target/test-evidence/issue-825/runtime/RESULTS.tsv` — debounce 제거 후 즉시 재저장(rewrite) 확인.
-
-#### QA-E2. 관측 전용 hydration/NOTIFY 제거 — quota/rate-limit 무영향
-
-- **상태**: PASS
-- **Given**: 신구조가 배포된 프로세스.
-- **When**: (a) 관측 쓰기 후 피어 pod의 동작 확인. (b) quota/rate-limit 변경 이벤트 발생.
-- **Then**: (a) 라우팅은 QA-C1처럼 직접 조회로 동작하고, 관측 hydration 경로(`hydrate_from_store`의 PromptCacheObservation 분기, `cclb_prompt_cache_observation_changed` 채널)는 존재하지 않는다. (b) `UpstreamRateLimit`, `SubscriptionQuota` 등 다른 채널의 hydration/rebind는 기존과 동일하게 동작한다 — 제거 범위는 관측 전용 경로뿐이다.
-- **환경**: multi-replica 또는 notify_listener 수준 테스트.
-- **증거**: (a) `target/test-evidence/issue-825/runtime/RESULTS.tsv` C1 — 관측 채널 없이 직접 조회 라우팅. (b) `target/test-evidence/issue-825/notify_listener.log` — 5/5 pass, quota/rate-limit hydration이 view rebuild 없이 동작함을 포함.
-
-#### QA-E3. 사망 설정 제거 (clean cutover)
-
-- **상태**: PASS
-- **Given**: `refresh_debounce_secs` 등 제거 대상 설정이 포함된 기존 형식의 설정 파일.
-- **When**: 설정 로드/검증 실행, 어드민 설정 화면 렌더링.
-- **Then**: 제거된 필드는 스키마·파서·어드민 UI(`configEditorModel.ts`의 `prompt_cache_shadow.refresh_debounce_secs` 항목)에 없다. no-op 호환 shim이나 경고 후 무시 옵션을 두지 않는다. 제거된 키를 포함한 구 설정 파일은 `deny_unknown_fields` 계약에 따라 로드가 거절된다.
-- **환경**: `cargo test -p cc-lb-server --test integration`(validate 계열) + `bunx --bun vitest run` + 브라우저 QA(QA-H4).
-- **증거**: `/tmp/cc-lb-825-removed_nested_fields_and_aliases_are_rejected.log` — 제거된 중첩 필드/별칭을 포함한 구 설정이 `deny_unknown_fields`로 거절됨. `target/test-evidence/issue-825/browser/desktop_prompt_cache_shadow_*.png` — UI에 제거 필드 없음.
-
-### F. 장애·포화 — 캐시 서브시스템 오류가 요청을 실패시키지 않음을 증명
-
-#### QA-F1. 라우팅 시점 DB 읽기 실패 (P2-A 확정)
-
-- **상태**: PASS
-- **Given**: 라우팅 조회 시점에 DB 연결 실패/타임아웃을 주입할 수 있는 store 또는 네트워크 차단.
-- **When**: 읽기 실패 상태에서 요청 전송.
-- **Then**: 요청은 실패하지 않는다. 캐시 친화도 가중치 없는 중립 점수로 라우팅을 계속하고, 읽기 실패는 cold cache(관측 없음 확정)로 기록하지 않는다. 오류는 OTel로 보고된다. "실패를 cold로 해석"하거나 요청을 거절하는 동작은 불합격이다.
-- **환경**: 실패 주입 가능한 store 래퍼 또는 `db_unreachable_503.rs`의 컨테이너 제어 패턴.
-- **증거**: `target/test-evidence/issue-825/lifecycle-regressions.log` — read-failure 시 Unknown↔cold 구분 케이스 포함 59 pass. 실제 HTTP 수준은 `target/test-evidence/issue-825/runtime/fault-response-{false,true}.txt` + `fault-exported-spans.log` + `fault-span-summary.json` — 테이블 rename으로 읽기 실패 주입 후 HTTP 200, OTLP lookup Error 자식 스팬 + 성공 200 루트 확인.
-
-#### QA-F2. 쓰기 실패 처리 (P1-A 확정)
-
-- **상태**: PASS
-- **Given**: `upsert`가 항상 실패하는 store(기존 `FailingStore` 패턴).
-- **When**: 관측 발생 후 응답 완료까지 진행.
-- **Then**: 쓰기 실패는 OTel 메트릭/스팬으로 관측 가능하게 기록되고, 스트리밍·비스트리밍 응답 모두 정상 완료된다(기존 `observation_failure_isolation` 계약 유지). 실패한 관측은 커밋되지 않았으므로 다음 조회에 나타나지 않는다 — 보장 시작점은 커밋 성공이다. 재시도나 outbox가 없음을 확인한다.
-- **환경**: in-process 하네스.
-- **증거**: `target/test-evidence/issue-825/observation_failure_isolation.log` — write-fail × stream/buffered HTTP 200 + 실제 카운터/WARN. `target/test-evidence/issue-825/runtime/fault-response-{false,true}.txt` — 쓰기 실패 주입 하 HTTP 200 + OTLP 오류 자식 스팬.
-
-#### QA-F3. 포화 시 동작 (P3 확정)
-
-- **상태**: PASS
-- **Given**: 비블로킹 sink의 유한 큐를 고갈시킨 상태에서 대량 관측 발생.
-- **When**: 포화 상태에서 추가 관측.
-- **Then**: QA-B9와 동일 기준. 요청은 거절되지 않고 정상 완료되며, `try_send` 실패는 OTel로 보고된다. 조용한 드롭(보고 없는 유실)은 불합격이다.
-- **환경**: QA-B9와 동일.
-- **증거**: `target/test-evidence/issue-825/observation_failure_isolation.log` — queue-full/closed × stream/buffered HTTP 200 + 카운터/WARN. 큐 계열은 OTLP export 대상이 아니며 in-process 카운터/WARN이 증거.
-
-#### QA-F4. 캐시 장애 매트릭스 — 스트림/비스트림 응답 성공과 OTel 보고
-
-- **상태**: PASS
-- **Given**: 캐시 서브시스템의 각 장애를 개별 주입: (a) 라우팅 읽기 실패, (b) 발행 큐 포화, (c) 큐 닫힘, (d) store 쓰기 실패. 각 장애를 스트리밍과 비스트리밍 요청에 각각 적용.
-- **When**: 장애 상태에서 요청을 완료까지 진행.
-- **Then**: 모든 조합에서 응답이 정상 완료된다 — 캐시 오류로 요청이 실패하거나 거절되지 않는다. 각 장애는 OTel 자식 operation 오류/카운터로 보고되고, 성공한 HTTP 루트 스팬이 오류로 잘못 표시되지 않는다. provider hit/miss 카운터는 캐시 관측 장애와 무관하게 실제 provider 응답 기준으로 유지된다. 읽기 실패 시 라우팅은 중립 점수로 정상 제약(health/quota/rate-limit)을 그대로 적용한다.
-- **환경**: 실패 주입 store 래퍼 + 큐 제어 훅 + OTel/메트릭 캡처.
-- **증거**: `target/test-evidence/issue-825/runtime/fault-response-{false,true}.txt` + `fault-metrics-before/after` + `fault-exported-spans.log` + `fault-span-summary.json` — 테이블 rename 읽기/쓰기 실패 하 실제 HTTP 200, 매칭 OTLP lookup Error 자식 스팬, 성공 200 루트. 큐 계열 케이스는 OTLP 미export — `target/test-evidence/issue-825/observation_failure_isolation.log`의 in-process 카운터/WARN이 증거.
-
-### G. 수명주기
-
-#### QA-G1. 종료 드레인 vs 강제 종료
-
-- **상태**: PASS
-- **Given**: 발행됐지만 아직 커밋되지 않은 관측이 있는 상태. DB는 정상 응답한다.
-- **When**: (a) SIGTERM(graceful drain), (b) SIGKILL, (c) drain 중 DB 장애 또는 종료 데드라인 초과.
-- **Then**: (a) 정상 DB에서 큐에 남은 쓰기가 기존 종료 상한(500ms) 안에 커밋 완료된 뒤 프로세스가 종료된다 — "완료를 시도했다"는 것만으로는 불합격이며, 종료 후 DB 조회로 커밋을 확인한다. 동기화는 제어 가능한 테스트 게이트로 하고 wall-clock sleep으로 drain을 가정하지 않는다. (b) SIGKILL은 미커밋 관측 유실을 허용한다. (c) DB 장애/데드라인 초과 시에는 유실이 허용되며 그 한계를 문서에 명시한다. "종료 시 모든 데이터 보존" 같은 단언은 하지 않는다.
-- **환경**: 프로세스 수준 테스트. 기존 `drain_*` 테스트 패턴 참조.
-- **증거**: `target/test-evidence/issue-825/runtime/RESULTS.tsv` + `runtime/g1/` — PG SHARE lock으로 INSERT 블록을 `pg_stat_activity`로 확인한 뒤: SIGTERM+lock 해제 시 큐 쓰기 커밋(7→9), SIGKILL+lock 유지 시 유실(1→1), SIGTERM+데드라인 만료 후 해제 시 유실(1→1).
-
-### H. 무회귀
-
-#### QA-H1. thread lineage 진단 불변
-
-- **상태**: PASS
-- **Given**: thread usage/lineage 진단을 발생시키는 요청 시나리오(기존 `record_thread_usage_from_response` 경로).
-- **When**: 변경 전후 동일 시나리오 실행.
-- **Then**: thread lineage 관련 진단 출력과 `request_events_v1`의 관련 필드가 변경 전과 동일한 의미를 유지한다.
-- **환경**: live QA 하네스.
-- **증거**: `target/test-evidence/issue-825/observation_failure_isolation.log` — 10/10 pass. 실제 Lifecycle buffered+streamed → 실제 Tracker 진단 경로(observer bus fixture) 검증: 생성 수 1600→400으로 기존 동등성 유지, 다른 thread 누수 없음, DB 실패 시 track 유실 없음.
-
-#### QA-H2. RequestEvent/rollup 전이 무회귀
-
-- **상태**: PASS
-- **Given**: 관측 구조 변경 전후의 동일 요청 시퀀스.
-- **When**: `request_events_v1`의 cache 분석 필드(`matched_v3_cache_key`, `lookback_distance`, `predicted_*`, `token_estimate_source` 등)와 usage rollup 조회.
-- **Then**: 요청 로그와 rollup의 스키마·의미가 전이 전후로 유지된다. 관측 저장 구조 변경이 이 소비자의 데이터 공급원을 바꾸지 않는다.
-- **환경**: `cargo test -p cc-lb-admin --test integration` + live QA 하네스의 `wait_for_lookback_event` 계열 단언.
-- **증거**: 기존 계약 패리티 기준(바이트 동일 raw DB 덤프 주장 아님). `target/test-evidence/issue-825/qa825-baseline-rollup.json` — 기준선 conformance 3/3 pass, 현재와 동일한 3개 테스트를 SQLite+PG 양쪽에서 실행. `target/test-evidence/issue-825/usage-rollup.log` — 현재 head 3/3 pass. 기준선+현재 live QA의 `request_events_v1` 캐시 필드 단언(`matched_v3_cache_key`, `lookback_distance`, `predicted_*`, `token_estimate_source`)이 양쪽에서 동일하게 유지됨. `runtime/events-{before,after}.json`, `usage-{before,after}.json` 참조.
-
-#### QA-H3. 기존 prompt_cache_live_qa 시나리오 통과
-
-- **상태**: PASS
-- **Given**: 기존 `prompt_cache_live_qa` 모듈 전체(lookback hit, breakpoint 격리, TTL 분기 등).
-- **When**: 모듈 전체 실행.
-- **Then**: 신구조에서도 기존 시나리오가 통과한다. debounce 제거로 `refresh_debounce_secs = 0` 설정이 무의미해지면 설정을 정리한 뒤 동일 의도로 통과해야 한다.
-- **환경**: `cargo test -p cc-lb-server --test integration prompt_cache_live_qa`.
-- **증거**: `target/test-evidence/issue-825/qa825-live-stress.json` — 최신 소스 기준 live QA 8케이스 × 20회 = 160 pass(4 test threads, 77.1s). `target/test-evidence/issue-825/qa825-baseline-live.json` — 기준선 917a1003 격리 스크래치 live QA 8/8 pass. 참고: 실행 중 두 가지 테스트 전제조건을 수정 — (1) 구 대기 함수가 독립 observation writer를 기다리지 않던 레이스(turn 2 전 정확히 1개 커밋 행 대기로 수정), (2) negative invalidation 3케이스가 cold 상태에서 공허하게 통과할 수 있던 문제(두 번째 요청 전 정확한 message prefix 커밋 배리어 추가, 기존 단언 유지). 최종 fmt + clippy sqlite/postgres도 통과(`qa825-static-gates.json`).
-
-#### QA-H4. 어드민 설정 화면 브라우저 QA
-
-- **상태**: PASS
-- **Given**: 제거된 설정 필드를 포함한 어드민 설정 화면.
-- **When**: 브라우저에서 설정 화면을 열고 `prompt_cache_shadow` 섹션 확인, 설정 저장/로드 왕복.
-- **Then**: 소비자 관점에서 제거된 필드가 UI에 보이지 않고, 유효한 설정의 저장/로드 왕복이 오류 없이 동작한다. 브라우저 QA 범위는 실제로 제거된 설정 UI 변경뿐이며 새 대시보드 검증을 포함하지 않는다. 단언은 UI의 소비자 가시 동작과 설정 왕복에 두고, `configEditorModel.test.ts`의 섹션 목록 같은 구현 세부를 고정하지 않는다.
-- **환경**: `bun run --shell=bun build` 산출물 + 브라우저(frontend QA 절차), vitest.
-- **증거**: `target/test-evidence/issue-825/browser/desktop_prompt_cache_shadow_*.png` — 브라우저에서 제거 필드 부재와 설정 왕복 확인.
-
-#### QA-H5. 텔레메트리·요청 로그 유지
-
-- **상태**: PASS
-- **Given**: 관측 발생 요청.
-- **When**: 메트릭 엔드포인트와 요청 로그 조회.
-- **Then**: 쓰기 실패·발행 등 유효한 관측 메트릭과 요청 로그 필드가 유지되거나 신구조에 맞게 이관된다. 로컬 캐시 전용으로 의미가 사라진 메트릭은 제거할 수 있되, 제거한 항목과 사유를 문서에 기록한다. 제거되는 것은 debounce·hydration·관측 NOTIFY 경로뿐이다.
-- **환경**: live QA 하네스 + `/metrics` 스크레이프.
-- **증거**: 메트릭 인벤토리 비교(HEAD 대비 diff + 런타임 스크레이프). 유지: `cc_lb_cache_observation_dropped_total`, `cc_lb_cache_observation_write_failed_total`, `cc_lb_cache_hit_total`, `cc_lb_cache_miss_total`, `cc_lb_lifecycle_cache_hit_miss_events_total` — `target/test-evidence/issue-825/runtime/observation-metrics.txt`, `metrics-{A,B}-{before,after}.txt`, `fault-metrics-{before,after}.txt`(write_failed{store=\"postgres\"}=2, miss 카운터 실측). 추가: `cc_lb_cache_observation_read_failed_total`(신규 공유 조회 실패 경로, P2-A). 변경: `dropped`의 reason 라벨 — `abort` 제거(발행 지점이 `message_start`로 옮겨져 관측 전 abort 드롭 경로가 소멸, subscriber 삭제와 함께 제거), `channel_closed` 추가(큐 닫힘 드롭을 queue_full과 구분). 제거 사유는 `crates/cc-lb-observability/RUNBOOK.md` diff에 기록됨. 그 외 관측 메트릭 이름의 삭제 없음 — 삭제된 `prompt_cache_observation_cache.rs`는 메트릭을 내지 않았다.
-
-#### QA-H6. 전체 회귀 스위트
-
-- **상태**: PASS — `master`의 요청 로그 분류 변경(#826)을 보존해 rebase한 구현 커밋 `fc7130984aafe89a1f8569b3d6b99b807ef06dec`에서 Linux `ci`, `web`, `publish-check` 모두 통과했다. rebase 직후 로컬 통합 회귀도 77/77 통과했다. 최초 구현 커밋 `8ca710e7`의 세 워크플로도 통과했다. release 전용 artifact 검증 job은 PR 조건에 따라 SKIPPED이며 실행된 검증으로 세지 않는다. 로컬 macOS 전체 실행의 잔여 PDK SIGSEGV 4건과 cargo-deny 미설치 한계는 별도로 유지한다. Linux CI 통과를 macOS 전체 통과로 해석하지 않는다.
-- **Given**: 현재 PR head 커밋(머지 승인은 없으므로 머지된 HEAD가 아니다).
-- **When**: §5의 CI 명령 전체 실행(fmt, audit-redaction lint, clippy sqlite/postgres, deny, llvm-cov nextest, coverage gate, web build/lint/typecheck/vitest). 추가로 결정론적 케이스(QA-B6/B7/B8, QA-D1/D2 등 store·라우팅 수준)를 SQLite와 Postgres에서 각각 20회 이상 반복 실행해 불안정성을 점검한다. 실패한 CI job은 원인 수정 없이 재실행으로 통과시키지 않는다.
-- **Then**: 전부 통과. Postgres 의존 테스트는 `CI_POSTGRES_URL` 환경에서 실행한다. 반복 실행에서 간헐 실패가 나오면 flake로 넘기지 않고 FAIL로 기록한다.
-- **환경**: CI와 동일 조건.
-- **증거**: [CI: fmt·deny·양쪽 clippy·nextest/coverage·E2E](https://github.com/isac322/cc-lb/actions/runs/35529947107), [web](https://github.com/isac322/cc-lb/actions/runs/35529947161), [publish-check](https://github.com/isac322/cc-lb/actions/runs/35529947146). 로컬 증거는 `target/test-evidence/issue-825/`: SQLite/PostgreSQL 저장소 회귀 22개 × 20회, live proxy 8개 × 20회, 격리 PG 재검증 4/4, trybuild 통과 로그. PDK의 macOS IPS `EXC_BAD_ACCESS` 증거는 `pdk-crash.log`; 타임아웃된 lldb 실행은 성공 증거가 아니다.
-
-#### QA-H7. 어드민 라우팅 프리뷰 무회귀 (async 전환)
-
-- **상태**: PASS
-- **Given**: `Lifecycle::preview_route`가 공유 저장소 조회를 위해 async로 전환되고, admin `RoutePreviewPort`/핸들러/서버 어댑터 호출자가 함께 이관된 상태. 커밋된 warm 관측, cold(관측 없음), 만료된 관측, 읽기 실패의 네 가지 저장소 상태를 각각 준비.
-- **When**: 각 상태에서 어드민 라우팅 프리뷰 API 호출.
-- **Then**: 프리뷰는 기존과 동일한 스코어링 의미와 현행 라우팅 제약(health/quota/rate-limit)을 반영한다 — warm 관측은 프리뷰 점수에 반영되고, cold/만료는 미반영, 읽기 실패는 fail-open 중립 점수 + OTel 오류 보고이며 프리뷰가 503으로 실패하지 않는다. 프리뷰 호출은 upstream을 실제로 호출하지 않는다. async 전환이 프리뷰의 캐시 점수 기능을 조용히 제거하면 불합격이다.
-- **환경**: `cargo test -p cc-lb-admin --test integration` + 실패 주입 store.
-- **증거**: `target/test-evidence/issue-825/runtime/preview-h7-{warm,cold,expired,unknown}.json` + `preview-{warm,known-cold,recovered,read-failure,inspect}.json` — warm은 warm upstream 승자와 `matched_v3_cache_key` 반영, cold/만료는 미반영, 읽기 실패는 fail-open 중립 + OTel 오류. 프리뷰는 upstream을 호출하지 않는다.
-
-## 8. #825 불변식의 신구조 매핑
-
-원래 #825의 관측 불변식은 "로컬에서 갱신된 만료가 오래된 DB 재로딩으로 후퇴하지 않는다"였다. 신구조에는 hydration과 pod별 장기 캐시가 없으므로, 불변식은 다음처럼 옮겨진다.
-
-| 기존 불변식 (hydration 구조) | 신구조 대응 불변식 | 검증 행 |
-|---|---|---|
-| 오래된 DB 재로딩이 로컬 갱신 만료를 후퇴시키지 않음 | 동일 키에 역순 도착한 쓰기가 커밋된 만료를 후퇴시키지 않음 | QA-B7, QA-B8 |
-| T+280 조회에서 warm으로 판정 | 만료 전 조회에서 커밋된 관측이 반환되고 라우팅에 반영 | QA-D1, QA-C1 |
-| 새 원격 기록 반영 정상 | 다른 프로세스가 커밋한 관측을 NOTIFY 없이 조회로 반영 | QA-C1 |
-| 실제 만료 정상 | 절대 만료 시각 기준, 재시작으로 연장되지 않음 | QA-D1, QA-D3 |
-| upstream/model/prefix/TTL 격리 | 동일 | QA-D2 |
-
-## 9. 미확인 전제조건
-
-실행 전에 확인이 필요한 항목. 관측되지 않은 blocker를 단정하지 않으며, 확인 결과에 따라 행을 조정한다.
-
-| # | 전제 | 확인 방법 | 영향 행 |
-|---|---|---|---|
-| U1 | compat SSE 경로(`sse_event_transform_hook` 존재 dialect)를 표현하는 테스트 fixture 존재 여부 | fixture/테스트 코드 조사 | QA-B2 |
-| U2 | 쓰기를 결정론적으로 보류/해제할 수 있는 게이트된 store 주입 지점 | 구현 중 sink/store 경계 확인 | QA-B3, QA-B9, QA-F3 |
-| U3 | 비블로킹 sink 큐를 테스트에서 고갈시키는 훅의 형태 | 구현 중 sink 경계 확인 | QA-B9, QA-F3 |
-| U4 | `TestClock`이 프로세스 수준 서버에 주입 불가 — 컴포넌트 테스트 위치 결정 | 구현 중 확인 | QA-E1, QA-C3 |
-| U5 | 대표 카디널리티(후보 키 수, 테이블 행 수)의 실측 근거 | 프로덕션 메트릭/로그 조사 또는 합리적 추정치 합의 | QA-C6 |
-| U6 | Postgres에서의 #825 동형 결함(역순 upsert 후퇴) 사전 재현 여부 | QA-B7을 변경 전 Postgres 어댑터에 먼저 실행 | QA-B7 기준선 |
-
-## 10. 증거 기록 양식
-
-각 행 실행 후 증거 열에 다음을 기록한다.
-
-```text
-실행일시(UTC):
-실행자/환경: (로컬|CI, OS, Postgres 버전)
-명령: (§5의 정확한 명령)
-결과: PASS|FAIL|BLOCKED
-산출물: (로그/덤프/스크린샷 경로)
-비고: (관측된 예외, 계약 해석 메모)
+```bash
+: "${CI_POSTGRES_URL:?Set a dedicated PostgreSQL test URL}"
+cargo test -p cc-lb-storage-conformance --no-default-features --features sqlite,postgres --test integration prompt_cache_observation_ -- --nocapture
 ```
 
-증거는 자격증명을 마스킹한 상태로 `target/test-evidence/` 아래 테스트별 디렉터리에 둔다.
+The `cc-lb-storage-postgres` `prompt_cache_observation` adapter tests are marked `#[ignore]`; if running those explicitly, pass `-- --ignored` — do not blanket-run all tests with `--ignored`.
+
+## 6. Assertion rules
+
+- Do not assert behavior solely from the **absence** of a metric or log. An absence assertion is always paired with an observable behavior assertion (routing result, DB row, response body).
+- Do not assert on SQL source text. Query behavior is verified via results and `EXPLAIN` output.
+- Do not assume a fixed upper bound on the candidate-key count. Batch-lookup verification is based on the actual candidate set derived from the request.
+- Do not hide races with `sleep`. When waiting is needed, use condition polling with a bounded deadline (the existing `wait_for_*` pattern in `support.rs`) or an explicit barrier.
+- The fake provider's `x-fake-ttft-ms`, `x-fake-inter-token-ms`, `x-fake-delta-count`, and `x-fake-mode` headers are means of creating latency, **not deterministic barriers**. A scenario that "asserts the DB while holding provider completion" synchronizes via a test-scoped explicit gate (the fixture's stream-hold hook + a store-commit confirmation signal). The x-fake latency headers are only for auxiliary smoke. No production public API is added for this.
+
+## 7. QA matrix
+
+### A. Baseline reproduction
+
+#### QA-A1. #825 baseline reproduction (hydration regresses a locally refreshed expiry)
+
+- **Status**: RECORDED
+- **Given**: the real SQLite store and cache at HEAD `917a1003893d87a307f297863a662b6f273e2904`. Of two caches that received the same observation, only one gets a DB reload applied.
+- **When**: T+0 first record (expiry T+270) → T+40 lifetime refresh by a hit (expiry T+310) → T+60 stale DB record reload → T+280 lookup.
+- **Then**: the reloaded cache's expiry regresses to T+270 and the T+280 lookup judges it absent. The control stays at T+310. A DB write in new-record → old-record order also regresses expiry 310→270.
+- **Environment**: isolated local SQLite, native execution.
+- **Evidence**: `/tmp/cc-lb-825-repro-native.log`, `/tmp/cc-lb-825-controls.log`.
+- **Note**: the same defect on PostgreSQL has not yet been proven by execution. Since the new structure has no hydration path, this scenario's post-change coverage moves to the §8 mapping and QA-B7/B8, QA-C1.
+
+### B. Write path
+
+#### QA-B1. Fast-path SSE `message_start` early publish
+
+- **Status**: PASS
+- **Given**: a streaming request. The fake provider carries cache usage on `message_start`. Stream hold is fixed by a test-scoped explicit gate (a fixture hook that holds the final frame after sending `message_start` until a test signal) — the `x-fake-*` latency headers are not deterministic barriers and are used only for auxiliary smoke.
+- **When**: after confirming via a test barrier that the server received the `message_start` usage (regardless of client frame receipt), query the store and confirm the commit while the final frame is still held. Then release the gate.
+- **Then**: the `(upstream_id, canonical_model_id, v3_prefix_key, ttl_class)` observation row is committed before the stream completes. The old behavior of deferring publish until `message_stop` would fail this assertion.
+- **Environment**: live QA harness in the `cargo test -p cc-lb-server --test integration` scope, isolated SQLite.
+- **Evidence**: `target/test-evidence/issue-825/lifecycle_client_disconnect.log` (23 pass — production Lifecycle fast-path early publish, commit confirmed while the gated store holds the final frame), `target/test-evidence/issue-825/observation_failure_isolation.log` (9 pass — SQLite commit via the real server sink confirmed before the final gate frame).
+
+#### QA-B2. Compat SSE path `message_start` early publish
+
+- **Status**: PASS
+- **Given**: a streaming response passing through a dialect with an SSE event transform hook (compat path). The `sse_event_transform_hook` branch of `relay_response`.
+- **When**: same as QA-B1 — after the usage-receive barrier, query the store and confirm the commit while the final frame is held.
+- **Then**: the transform path also publishes early, identically. The publish point is the same regardless of whether a transform is applied.
+- **Environment**: requires a test fixture expressing a compat dialect. If no such fixture exists, record it in §9 and run after adding the fixture — not BLOCKED.
+- **Evidence**: `target/test-evidence/issue-825/lifecycle_client_disconnect.log` (23 pass including compat-path early publish), `target/test-evidence/issue-825/observation_failure_isolation.log` (real server sink compat commit confirmed).
+
+#### QA-B3. First frame delivered while the DB write is blocked
+
+- **Status**: PASS
+- **Given**: a test-only store that holds writes on a gate (extending the existing `BlockingStore` pattern with a controllable gate instead of `future::pending`). A streaming request.
+- **When**: the observation write stays blocked at the gate.
+- **Then**: the first SSE frame (`message_start` or the first delta) is delivered to the client without a DB commit. "DB commit complete before the first delta" is not required. The write completes after the gate is released.
+- **Environment**: in-process harness (needs a point where the gated store can be injected).
+- **Evidence**: `target/test-evidence/issue-825/lifecycle_client_disconnect.log` — first frame delivered while the gated store is blocked. Ordering of frame receipt vs commit recorded.
+
+#### QA-B4. Publish around abort and absence of duplicate publish
+
+- **Status**: PASS
+- **Given**: two streaming requests. (a) After confirming via a test barrier that the server received the `message_start` usage (regardless of whether the client received the frame), forcibly close the client connection. (b) Close the client connection before `message_start` arrives. Publish count is measured with a test-only observing store wrapper.
+- **When**: after each case, query the store and check the publish counter.
+- **Then**: (a) the row based on the already-observed `message_start` is committed and preserved. (b) an abort before observation produces no publish. Since the DB row count (1 row per upsert key) alone cannot prove the absence of duplicate publishes, assert that the observing wrapper recorded exactly 1 accepted publish batch — there must be no second publish at `message_stop` or at abort. This is a **local single-publish** contract. No distributed exactly-once/at-least-once guarantee is required.
+- **Environment**: live QA harness, forced client socket close.
+- **Evidence**: `target/test-evidence/issue-825/lifecycle_client_disconnect.log` — 23 pass including before/after abort cases. Per-case DB row counts and publish counters.
+
+#### QA-B5. Non-streaming (buffered) publish
+
+- **Status**: PASS
+- **Given**: a request with `stream` unset/`false`. A buffered response including usage via `MessageScript`'s `ScriptedMessageResponse`.
+- **When**: after receiving the response, query the store, then send a second request with the same prefix.
+- **Then**: the observation row exists after the response completes, and the second request's routing reflects that observation. Per P1-A, response completion does not imply a commit, so commit completion is confirmed via a test barrier before the second request.
+- **Evidence**: `target/test-evidence/issue-825/runtime/RESULTS.tsv` — buffered publish confirmed in a real 2-process PG environment.
+
+#### QA-B6. New-key write
+
+- **Status**: PASS
+- **Given**: an observation for a new `(upstream, model, prefix, ttl)` key absent from the store.
+- **When**: run the upsert.
+- **Then**: the row is inserted and every field (`expires_at`, `last_observed_at`, `hash_schema_version`, `prefix_content_block_index`, `estimated_prefix_tokens`, `token_estimate_source`) matches the recorded values.
+- **Environment**: store-level contract test. Both SQLite and Postgres.
+- **Evidence**: `target/test-evidence/issue-825/storage-stress-{1..20}.log` — SQLite+PG 22 store tests × 20 runs = 440 pass.
+
+#### QA-B7. Out-of-order write — a stale observation arrives late
+
+- **Status**: PASS
+- **Given**: the same key. First commit a write with expiry T+310.
+- **When**: then commit a stale observation write with expiry T+270. Also run the opposite direction (old value committed, then new value committed as a normal refresh).
+- **Then**: out-of-order — `expires_at` stays at T+310 and the winner's (T+310 observation's) metadata remains consistent. "Keep only expiry at max and overwrite metadata with the stale values" is a fail. In-order — the new write refreshes the old row normally. A lookup at T+280 finds the key valid.
+- **Environment**: store-level contract test. Both SQLite and Postgres. In baseline QA-A1, SQLite regressed under this ordering, so this is a regression-prevention row.
+- **Evidence**: `target/test-evidence/issue-825/storage-stress-{1..20}.log` — 440 pass for out-of-order/in-order monotonic merge.
+
+#### QA-B8. Concurrent writes — overlapping updates from two pods/two clients
+
+- **Status**: PASS
+- **Given**: two writes with different expiries for the same key, issued concurrently from separate connections. Additionally prepare a same-expiry, different-metadata (tie) case.
+- **When**: query after both commits complete. The tie case is also run in both arrival orders.
+- **Then**: the final `expires_at` is the larger of the two, and the metadata is consistent with that winner observation. The result is the same regardless of commit order. For a tie (same `expires_at`), the larger `last_observed_at` wins and its metadata remains consistent — overwriting with arbitrary stale metadata is a fail. Re-publishing a fully identical observation (identity replay) is idempotent.
+- **Environment**: Postgres runs with 2 separate connections. SQLite runs both sequential and concurrent writes on the same file.
+- **Evidence**: `target/test-evidence/issue-825/storage-stress-{1..20}.log` — 440 pass including concurrent writes, ties (coherent tie), and idempotent replay.
+
+#### QA-B9. Observation loss reporting and request continuation on publish saturation (P3 confirmed)
+
+- **Status**: PASS
+- **Given**: the non-blocking sink's bounded queue deliberately filled.
+- **When**: dispatch a request carrying a new observation.
+- **Then**: the request is not rejected and completes normally. The `try_send` failure is observably recorded via OTel metrics/spans. Assert there is no capacity reservation, pre-check, or request rejection. The dropped observation does not appear in the DB — this loss is allowed behavior and only reporting is required.
+- **Environment**: requires a test hook that fills the queue (§9).
+- **Evidence**: `target/test-evidence/issue-825/observation_failure_isolation.log` — queue-full/closed × stream/buffered all HTTP 200 + real counter/WARN confirmed. However, the queue cases are not OTLP-exported, so the in-process counter/WARN is the evidence (see QA-F4).
+
+### C. Read path
+
+#### QA-C1. Two-process read-after-commit (no NOTIFY/rebind)
+
+- **Status**: PASS
+- **Given**: cc-lb processes A and B attached to a shared PostgreSQL. Send a Turn 1 request to A and confirm the observation commit.
+- **When**: send a Turn 2 request with the same prefix to B. B's local state is empty.
+- **Then**: B routes to the upstream A recorded, using only the shared-DB lookup — however, this expectation holds only under **controlled equal conditions** (candidates equally eligible under other constraints such as health/quota/rate-limit). A warm observation overriding health/quota/rate-limit constraints is a fail. It must hold without observation NOTIFY receipt or view rebind — the key point is that this scenario passes even after the observation channel (`cclb_prompt_cache_observation_changed`) is removed.
+- **Environment**: `tests/multi-replica/multi-replica-postgres.sh` extended, or an equivalent 2-process harness. Docker Postgres 18.
+- **Evidence**: `target/test-evidence/issue-825/runtime/RESULTS.tsv` — C1 4/4 pass on real 2-process PG. B's `request_events_v1` `upstream_id` and the fake provider's receipt record.
+
+#### QA-C2. Immediate next turn (P1-A confirmed)
+
+- **Status**: RECORDED — `target/test-evidence/issue-825/runtime/RESULTS.tsv` QA-C2: turn2_upstream recorded, commit_seen_at=1789919627 turn2_done=1789919627.
+- **Given**: immediately after the Turn 1 response completes, send Turn 2 with no polling or artificial wait.
+- **When**: the next request at the same moment the response completes.
+- **Then**: per P1-A, Turn 2 reflecting the Turn 1 observation is not a guarantee. This row records behavior: reflected if the commit completed, not reflected if not — both are allowed. Record the Turn 1 commit time and the Turn 2 routing result together to observe the size of the uncommitted window.
+- **Evidence**: Turn 2 routing result and Turn 1 commit time.
+
+#### QA-C3. Request snapshot consistency
+
+- **Status**: PASS
+- **Given**: a request mid-routing computation. Between lookup time and selection time, inject (a) a new observation commit and (b) expiry elapsing on an existing row, respectively.
+- **When**: apply the lookup result to that request's selection.
+- **Then**: a request's routing uses only that request's lookup result — one-shot data, not a separate snapshot framework but a request-scoped lookup result. (a) A row committed after the lookup is not reflected in this request (it is reflected in the next request). (b) **Expiry is re-evaluated at selection time** — a row whose expiry elapsed between lookup and selection is excluded from this decision. Confirm there is no warmth cache reusing observations across requests.
+- **Environment**: in-process harness. `TestClock` makes expiry elapse deterministically.
+- **Evidence**: `target/test-evidence/issue-825/lifecycle-regressions.log` (59 pass, 1 existing ignored — includes the snapshot-consistency case).
+
+#### QA-C4. Empty candidate key set — lookup skipped
+
+- **Status**: PASS
+- **Given**: a request with no cache breakpoint (empty candidate key set).
+- **When**: run routing.
+- **Then**: no read query is issued to the observation store. Routing completes normally. The assertion uses a query-counting wrapper store (no log-absence assertions).
+- **Environment**: in-process harness, counting store wrapper.
+- **Evidence**: `target/test-evidence/issue-825/lifecycle-regressions.log` — 59 pass including the empty-key lookup-skip case.
+
+#### QA-C5. Lookup bounded to exact candidate keys
+
+- **Status**: PASS
+- **Given**: many rows for other upstreams/models unrelated to the request's candidate `(upstream × model × prefix × ttl)` key set exist in the store.
+- **When**: run the routing lookup.
+- **Then**: the lookup is bounded to the request-derived candidates' upstream·model·prefix and the TTL classes the request allows. An unbounded lookup with no bindings (returning the whole table) is a fail. Returned rows are a subset of the candidate set. The planner choosing a seq scan on a small table is not itself a failure — the forbidden target is a query with no candidate bounding.
+- **Environment**: store level + routing level. On Postgres, confirm index usage with `EXPLAIN`.
+- **Evidence**: `target/test-evidence/issue-825/lifecycle-regressions.log` — 59 pass including the candidate-bounded lookup case. For `EXPLAIN` output see pg-explain/sqlite-plan under `target/test-evidence/issue-825/runtime/measure-lookup/`.
+
+#### QA-C6. Query plan and latency measurement
+
+- **Status**: RECORDED — measurement complete (a record row, not a threshold evaluation).
+- **Given**: an observation table of representative cardinality (candidate-key count and table row count grounded in the real workload — no fixed upper-bound assumption).
+- **When**: run the routing lookup repeatedly to measure p50/p95/p99 and capture `EXPLAIN (ANALYZE, BUFFERS)`.
+- **Then**: record the measurements and the plan. No PASS/FAIL threshold is set in advance — no arbitrary cache-specific latency ceiling; record lookup latency and cache-hit gains together for evaluation. The measurement result is the sole basis for needing a new index/schema — do not presuppose a schema change before measuring.
+- **Environment**: Postgres live. The same measurement is run in parallel on SQLite for comparison.
+- **Evidence**: `target/test-evidence/issue-825/runtime/measure-lookup/summary.txt` + pg-explain/sqlite-plan — 200 iterations, live + synthetic 50k rows. pg-live p50=0.040ms p95=0.047ms p99=0.069ms, pg-synth p50=0.167ms p95=0.178ms p99=0.185ms, sqlite-live p50=0.008ms p99=0.012ms, sqlite-synth p50=0.073ms p99=0.090ms. Limitation: this is not an end-to-end/network/production-cardinality measurement, so no conclusion is drawn for that scope.
+
+#### QA-D1. Expiry boundary correctness
+
+- **Status**: PASS
+- **Given**: a row with `expires_at = T`.
+- **When**: query at `now = T-1`, `now = T`, `now = T+1` respectively.
+- **Then**: per the `expires_at > now` contract, returned at `T-1`, not returned at `T` and `T+1`. This boundary is a fixed contract and is not adjusted to match implementation results. Grace is deducted only once at write time (`prompt_cache_observation_expires_at` in `lifecycle.rs`) — deducting grace again on the lookup/re-store path is a fail. Even if the commit is delayed, the stored absolute `expires_at` stays relative to observation time; the TTL is not counted again from store time.
+- **Environment**: store level, `TestClock` or fixed-time binding.
+- **Evidence**: `target/test-evidence/issue-825/storage-stress-{1..20}.log` — 440 pass including expiry boundary, no double grace, and no TTL reset on delayed commit.
+
+#### QA-D2. Key-component isolation
+
+- **Status**: PASS
+- **Given**: seed rows each differing in exactly one of upstream, canonical model, prefix, TTL class, or hash schema version.
+- **When**: query and route with a specific `(upstream, model, prefix, ttl)` combination.
+- **Then**: each dimension is isolated independently. Warm rows of other upstreams/models/prefixes/TTLs do not leak into this request's score. Rows whose `hash_schema_version` differs from `HASH_SCHEMA_VERSION` are excluded from warmth.
+- **Environment**: store level + routing level.
+- **Evidence**: `target/test-evidence/issue-825/lifecycle-regressions.log` — 59 pass including the schema+TTL isolation case. `target/test-evidence/issue-825/storage-stress-{1..20}.log` — 440 pass for store-level isolation.
+
+#### QA-D3. Pod/DB restart and TTL non-extension
+
+- **Status**: PASS
+- **Given**: after committing an observation row, (a) restart the cc-lb pod, (b) stop/start the Postgres container.
+- **When**: after the restart completes, query and route at a point before expiry.
+- **Then**: the committed observation remains valid after restart. Expiry is based on an absolute timestamp and is not extended by a restart — it is read with its remaining lifetime reduced by the restart duration. Rows past expiry do not resurrect.
+- **Environment**: multi-replica harness or single process + Docker Postgres restart.
+- **Evidence**: `target/test-evidence/issue-825/runtime/RESULTS.tsv` — TTL non-extension confirmed after pod restart + Postgres container restart.
+
+### E. Regression — removal targets
+
+#### QA-E1. 60-second debounce removal — immediate re-store
+
+- **Status**: PASS
+- **Given**: a key with a committed observation. At component level, advance `TestClock` by `advance_secs(40)` (below the 60-second debounce window).
+- **When**: a second observation (hit refresh) occurs for the same key.
+- **Then**: a new write is published and committed without waiting 60 seconds. Assert the write occurs while guaranteed to be inside the debounce window via TestClock advancement — not a wall-clock trick like a `>` comparison within the same second.
+- **Environment**: in-process component test (a point where `TestClock` can be injected). At process level, substitute a comparison of the DB row's `last_observed_at`.
+- **Evidence**: `target/test-evidence/issue-825/runtime/RESULTS.tsv` — immediate re-store (rewrite) after debounce removal confirmed.
+
+#### QA-E2. Observation-only hydration/NOTIFY removal — quota/rate-limit unaffected
+
+- **Status**: PASS
+- **Given**: a process running the new structure.
+- **When**: (a) after an observation write, check a peer pod's behavior. (b) raise a quota/rate-limit change event.
+- **Then**: (a) routing works via direct lookup as in QA-C1, and the observation hydration path (the `PromptCacheObservation` branch of `hydrate_from_store`, the `cclb_prompt_cache_observation_changed` channel) does not exist. (b) hydration/rebind of other channels such as `UpstreamRateLimit` and `SubscriptionQuota` works as before — the removal scope is only the observation-specific path.
+- **Environment**: multi-replica or notify_listener-level test.
+- **Evidence**: (a) `target/test-evidence/issue-825/runtime/RESULTS.tsv` C1 — direct-lookup routing without the observation channel. (b) `target/test-evidence/issue-825/notify_listener.log` — 5/5 pass, including quota/rate-limit hydration working without a view rebuild.
+
+#### QA-E3. Dead config removal (clean cutover)
+
+- **Status**: PASS
+- **Given**: an old-format config file containing removal-target settings such as `refresh_debounce_secs`.
+- **When**: run config load/validation; render the admin settings screen.
+- **Then**: the removed fields are absent from the schema, parser, and admin UI (the `prompt_cache_shadow.refresh_debounce_secs` entry in `configEditorModel.ts`). No no-op compatibility shim or warn-and-ignore option. An old config file containing removed keys is rejected on load per the `deny_unknown_fields` contract.
+- **Environment**: `cargo test -p cc-lb-server --test integration` (validate family) + `bunx --bun vitest run` + browser QA (QA-H4).
+- **Evidence**: `/tmp/cc-lb-825-removed_nested_fields_and_aliases_are_rejected.log` — old config with removed nested fields/aliases rejected by `deny_unknown_fields`. `target/test-evidence/issue-825/browser/desktop_prompt_cache_shadow_*.png` — removed fields absent from the UI.
+
+### F. Failure/saturation — prove cache subsystem errors do not fail requests
+
+#### QA-F1. DB read failure at routing time (P2-A confirmed)
+
+- **Status**: PASS
+- **Given**: a store or network block that can inject a DB connection failure/timeout at routing-lookup time.
+- **When**: send a request while reads are failing.
+- **Then**: the request does not fail. Routing continues with a neutral score without cache-affinity weight, and the read failure is not recorded as cold cache (confirmed no observation). The error is reported via OTel. "Interpreting failure as cold" or rejecting the request is a fail.
+- **Environment**: a failure-injectable store wrapper or the container-control pattern of `db_unreachable_503.rs`.
+- **Evidence**: `target/test-evidence/issue-825/lifecycle-regressions.log` — 59 pass including the read-failure Unknown↔cold distinction case. At real HTTP level: `target/test-evidence/issue-825/runtime/fault-response-{false,true}.txt` + `fault-exported-spans.log` + `fault-span-summary.json` — after injecting a read failure via table rename, HTTP 200, OTLP lookup Error child span + successful 200 root confirmed.
+
+#### QA-F2. Write failure handling (P1-A confirmed)
+
+- **Status**: PASS
+- **Given**: a store whose `upsert` always fails (existing `FailingStore` pattern).
+- **When**: proceed through response completion after an observation occurs.
+- **Then**: the write failure is observably recorded via OTel metrics/spans, and both streaming and non-streaming responses complete normally (existing `observation_failure_isolation` contract preserved). The failed observation is not committed and does not appear in subsequent lookups — the guarantee's starting point is commit success. Confirm there is no retry or outbox.
+- **Environment**: in-process harness.
+- **Evidence**: `target/test-evidence/issue-825/observation_failure_isolation.log` — write-fail × stream/buffered HTTP 200 + real counter/WARN. `target/test-evidence/issue-825/runtime/fault-response-{false,true}.txt` — HTTP 200 + OTLP error child span under injected write failure.
+
+#### QA-F3. Behavior under saturation (P3 confirmed)
+
+- **Status**: PASS
+- **Given**: a burst of observations while the non-blocking sink's bounded queue is exhausted.
+- **When**: additional observations under saturation.
+- **Then**: same criteria as QA-B9. Requests are not rejected and complete normally, and `try_send` failures are reported via OTel. A silent drop (unreported loss) is a fail.
+- **Environment**: same as QA-B9.
+- **Evidence**: `target/test-evidence/issue-825/observation_failure_isolation.log` — queue-full/closed × stream/buffered HTTP 200 + counter/WARN. The queue cases are not OTLP-exported; the in-process counter/WARN is the evidence.
+
+#### QA-F4. Cache failure matrix — stream/non-stream response success and OTel reporting
+
+- **Status**: PASS
+- **Given**: inject each cache-subsystem failure individually: (a) routing read failure, (b) publish queue saturation, (c) queue closed, (d) store write failure. Apply each failure to both streaming and non-streaming requests.
+- **When**: run requests to completion under each failure.
+- **Then**: responses complete normally in every combination — no request fails or is rejected because of a cache error. Each failure is reported as an OTel child operation error/counter, and the successful HTTP root span is not wrongly marked as an error. Provider hit/miss counters stay based on actual provider responses, independent of cache-observation failures. On read failure, routing applies the normal constraints (health/quota/rate-limit) unchanged with a neutral score.
+- **Environment**: failure-injection store wrapper + queue-control hook + OTel/metrics capture.
+- **Evidence**: `target/test-evidence/issue-825/runtime/fault-response-{false,true}.txt` + `fault-metrics-before/after` + `fault-exported-spans.log` + `fault-span-summary.json` — real HTTP 200 under table-rename read/write failure, matching OTLP lookup Error child span, successful 200 root. Queue cases are not OTLP-exported — the in-process counter/WARN in `target/test-evidence/issue-825/observation_failure_isolation.log` is the evidence.
+
+### G. Lifecycle
+
+#### QA-G1. Shutdown drain vs force-kill
+
+- **Status**: PASS
+- **Given**: a state with observations published but not yet committed. The DB responds normally.
+- **When**: (a) SIGTERM (graceful drain), (b) SIGKILL, (c) DB failure or shutdown-deadline exceeded during drain.
+- **Then**: (a) with a healthy DB, queued writes finish committing within the existing shutdown bound (500ms) before the process exits — "tried to complete" alone is a fail; the commit is confirmed by a DB query after exit. Synchronization uses a controllable test gate; drain is not assumed via wall-clock sleep. (b) SIGKILL may lose uncommitted observations. (c) on DB failure/deadline exceeded, loss is allowed and that limit is documented. No assertion like "all data preserved on shutdown".
+- **Environment**: process-level test. See the existing `drain_*` test pattern.
+- **Evidence**: `target/test-evidence/issue-825/runtime/RESULTS.tsv` + `runtime/g1/` — after confirming an INSERT block via a PG SHARE lock with `pg_stat_activity`: SIGTERM + lock release → queued writes committed (7→9); SIGKILL + lock held → loss (1→1); SIGTERM + released after deadline expiry → loss (1→1).
+
+### H. No-regression
+
+#### QA-H1. Thread lineage diagnostics unchanged
+
+- **Status**: PASS
+- **Given**: a request scenario that produces thread usage/lineage diagnostics (the existing `record_thread_usage_from_response` path).
+- **When**: run the same scenario before and after the change.
+- **Then**: thread-lineage diagnostic output and the related `request_events_v1` fields keep the same meaning as before the change.
+- **Environment**: live QA harness.
+- **Evidence**: `target/test-evidence/issue-825/observation_failure_isolation.log` — 10/10 pass. Real Lifecycle buffered+streamed → real Tracker diagnostic path (observer bus fixture) verified: creation count 1600→400 with existing equivalence preserved, no other thread leaks, no track loss on DB failure.
+
+#### QA-H2. RequestEvent/rollup no-regression across the transition
+
+- **Status**: PASS
+- **Given**: the same request sequence before and after the observation-structure change.
+- **When**: query the `request_events_v1` cache-analysis fields (`matched_v3_cache_key`, `lookback_distance`, `predicted_*`, `token_estimate_source`, etc.) and the usage rollup.
+- **Then**: the request log and rollup keep their schema and meaning across the transition. The observation-storage change does not change this consumer's data source.
+- **Environment**: `cargo test -p cc-lb-admin --test integration` + the live QA harness's `wait_for_lookback_event` family assertions.
+- **Evidence**: existing contract parity as the baseline (not a byte-identical raw DB dump claim). `target/test-evidence/issue-825/qa825-baseline-rollup.json` — baseline conformance 3/3 pass, the same 3 tests run on both SQLite+PG as current. `target/test-evidence/issue-825/usage-rollup.log` — current head 3/3 pass. The `request_events_v1` cache-field assertions (`matched_v3_cache_key`, `lookback_distance`, `predicted_*`, `token_estimate_source`) of baseline+current live QA hold identically on both. See `runtime/events-{before,after}.json`, `usage-{before,after}.json`.
+
+#### QA-H3. Existing prompt_cache_live_qa scenarios pass
+
+- **Status**: PASS
+- **Given**: the entire existing `prompt_cache_live_qa` module (lookback hit, breakpoint isolation, TTL branching, etc.).
+- **When**: run the whole module.
+- **Then**: the existing scenarios pass under the new structure. If `refresh_debounce_secs = 0` becomes meaningless after debounce removal, the config is cleaned up and the tests must still pass with the same intent.
+- **Environment**: `cargo test -p cc-lb-server --test integration prompt_cache_live_qa`.
+- **Evidence**: `target/test-evidence/issue-825/qa825-live-stress.json` — live QA 8 cases × 20 runs = 160 pass on latest source (4 test threads, 77.1s). `target/test-evidence/issue-825/qa825-baseline-live.json` — baseline 917a1003 isolated-scratch live QA 8/8 pass. Note: two test preconditions were fixed during the run — (1) a race where the old wait function did not wait for the independent observation writer (fixed to wait for exactly 1 committed row before turn 2), (2) an issue where the 3 negative-invalidation cases could pass vacuously from a cold state (added an exact message-prefix commit barrier before the second request; existing assertions kept). Final fmt + clippy sqlite/postgres also passed (`qa825-static-gates.json`).
+
+#### QA-H4. Admin settings screen browser QA
+
+- **Status**: PASS
+- **Given**: the admin settings screen including the removed config fields.
+- **When**: open the settings screen in a browser, check the `prompt_cache_shadow` section, and round-trip a config save/load.
+- **Then**: from the consumer's view, the removed fields are not visible in the UI, and save/load round-trip of valid config works without error. The browser QA scope is only the actually removed settings UI change and does not include new dashboard verification. Assertions are on consumer-visible UI behavior and the config round-trip, not on implementation details such as the section list in `configEditorModel.test.ts`.
+- **Environment**: `bun run --shell=bun build` output + browser (frontend QA procedure), vitest.
+- **Evidence**: `target/test-evidence/issue-825/browser/desktop_prompt_cache_shadow_*.png` — removed-field absence and config round-trip confirmed in the browser.
+
+#### QA-H5. Telemetry and request-log retention
+
+- **Status**: PASS
+- **Given**: a request that produces an observation.
+- **When**: query the metrics endpoint and the request log.
+- **Then**: valid observation metrics and request-log fields — write failure, publish, etc. — are preserved or migrated to fit the new structure. Metrics that lost meaning as local-cache-only may be removed, but the removed items and reasons are recorded in docs. Only the debounce, hydration, and observation-NOTIFY paths are removed.
+- **Environment**: live QA harness + `/metrics` scrape.
+- **Evidence**: metric inventory comparison (diff vs HEAD + runtime scrape). Kept: `cc_lb_cache_observation_dropped_total`, `cc_lb_cache_observation_write_failed_total`, `cc_lb_cache_hit_total`, `cc_lb_cache_miss_total`, `cc_lb_lifecycle_cache_hit_miss_events_total` — `target/test-evidence/issue-825/runtime/observation-metrics.txt`, `metrics-{A,B}-{before,after}.txt`, `fault-metrics-{before,after}.txt` (write_failed{store="postgres"}=2, miss counter measured). Added: `cc_lb_cache_observation_read_failed_total` (new shared-lookup failure path, P2-A). Changed: `dropped`'s reason label — `abort` removed (the publish point moved to `message_start`, eliminating the pre-observation abort drop path; removed together with the subscriber deletion), `channel_closed` added (distinguishes queue-closed drops from queue_full). Removal reasons are recorded in the `crates/cc-lb-observability/RUNBOOK.md` diff. No other observation metric names were deleted — the deleted `prompt_cache_observation_cache.rs` emitted no metrics.
+
+#### QA-H6. Full regression suite
+
+- **Status**: PASS — on the implementation commit `fc7130984aafe89a1f8569b3d6b99b807ef06dec`, rebased preserving `master`'s request-log classification change (#826), Linux `ci`, `web`, and `publish-check` all passed. The local integration regression right after the rebase also passed 77/77. The three workflows also passed on the original implementation commit `8ca710e7`. The release-only artifact verification job is SKIPPED per PR conditions and is not counted as executed verification. The remaining 4 PDK SIGSEGVs and the missing cargo-deny limitation of the local macOS full run are kept separately. A Linux CI pass is not interpreted as a full macOS pass.
+- **Given**: the current PR head commit (not a merged HEAD, since there is no merge approval).
+- **When**: run all §5 CI commands (fmt, audit-redaction lint, clippy sqlite/postgres, deny, llvm-cov nextest, coverage gate, web build/lint/typecheck/vitest). Additionally, run the deterministic cases (QA-B6/B7/B8, QA-D1/D2 and other store/routing-level cases) 20+ times each on SQLite and Postgres to check for instability. A failed CI job is not passed by re-running without fixing the cause.
+- **Then**: all pass. Postgres-dependent tests run under `CI_POSTGRES_URL`. An intermittent failure in repeated runs is recorded as FAIL, not dismissed as a flake.
+- **Environment**: same conditions as CI.
+- **Evidence**: [CI: fmt·deny·both clippy·nextest/coverage·E2E](https://github.com/isac322/cc-lb/actions/runs/35529947107), [web](https://github.com/isac322/cc-lb/actions/runs/35529947161), [publish-check](https://github.com/isac322/cc-lb/actions/runs/35529947146). Local evidence under `target/test-evidence/issue-825/`: SQLite/PostgreSQL store regression 22 tests × 20 runs, live proxy 8 × 20 runs, isolated-PG re-verification 4/4, trybuild pass logs. The PDK macOS IPS `EXC_BAD_ACCESS` evidence is `pdk-crash.log`; the timed-out lldb run is not success evidence.
+
+#### QA-H7. Admin routing preview no-regression (async transition)
+
+- **Status**: PASS
+- **Given**: `Lifecycle::preview_route` transitioned to async for the shared-store lookup, with the admin `RoutePreviewPort`/handler/server-adapter callers migrated together. Prepare four store states: committed warm observation, cold (no observation), expired observation, and read failure.
+- **When**: call the admin routing preview API in each state.
+- **Then**: the preview reflects the same scoring semantics as before and the current routing constraints (health/quota/rate-limit) — a warm observation is reflected in the preview score, cold/expired are not reflected, and a read failure is fail-open neutral score + OTel error report with the preview not failing with 503. The preview call does not actually call upstreams. If the async transition silently removes the preview's cache-score feature, that is a fail.
+- **Environment**: `cargo test -p cc-lb-admin --test integration` + failure-injection store.
+- **Evidence**: `target/test-evidence/issue-825/runtime/preview-h7-{warm,cold,expired,unknown}.json` + `preview-{warm,known-cold,recovered,read-failure,inspect}.json` — warm reflects the warm upstream winner and `matched_v3_cache_key`, cold/expired are not reflected, read failure is fail-open neutral + OTel error. The preview does not call upstreams.
+
+## 8. Mapping the #825 invariant to the new structure
+
+The original #825 observation invariant was "a locally refreshed expiry must not regress due to a stale DB reload". Since the new structure has no hydration and no per-pod long-lived cache, the invariant maps as follows.
+
+| Old invariant (hydration structure) | New-structure counterpart invariant | Verification rows |
+|---|---|---|
+| A stale DB reload does not regress a locally refreshed expiry | An out-of-order write for the same key does not regress the committed expiry | QA-B7, QA-B8 |
+| Judged warm at the T+280 lookup | A committed observation is returned and reflected in routing at a pre-expiry lookup | QA-D1, QA-C1 |
+| New remote records reflected normally | Observations committed by another process are reflected via lookup without NOTIFY | QA-C1 |
+| Real expiry works normally | Absolute expiry timestamp basis; not extended by restart | QA-D1, QA-D3 |
+| upstream/model/prefix/TTL isolation | Same | QA-D2 |
+
+## 9. Unverified preconditions
+
+Items that need confirmation before execution. Do not declare unobserved blockers; adjust rows based on confirmation results.
+
+| # | Precondition | How to confirm | Affected rows |
+|---|---|---|---|
+| U1 | Whether a test fixture expressing the compat SSE path (dialect with `sse_event_transform_hook`) exists | Inspect fixture/test code | QA-B2 |
+| U2 | An injection point for a gated store that can deterministically hold/release writes | Confirm the sink/store boundary during implementation | QA-B3, QA-B9, QA-F3 |
+| U3 | The shape of a hook that exhausts the non-blocking sink queue in tests | Confirm the sink boundary during implementation | QA-B9, QA-F3 |
+| U4 | `TestClock` cannot be injected into a process-level server — decide the component-test location | Confirm during implementation | QA-E1, QA-C3 |
+| U5 | Measured basis for representative cardinality (candidate-key count, table row count) | Investigate production metrics/logs or agree on a reasonable estimate | QA-C6 |
+| U6 | Whether the #825-shaped defect on Postgres (out-of-order upsert regression) is reproduced beforehand | Run QA-B7 against the pre-change Postgres adapter first | QA-B7 baseline |
+
+## 10. Evidence record format
+
+After running each row, record the following in the evidence column.
+
+```text
+Run at (UTC):
+Runner/environment: (local|CI, OS, Postgres version)
+Command: (the exact command from §5)
+Result: PASS|FAIL|BLOCKED
+Artifacts: (log/dump/screenshot paths)
+Notes: (observed exceptions, contract-interpretation memos)
+```
+
+Evidence is stored under `target/test-evidence/` in per-test directories with credentials masked.

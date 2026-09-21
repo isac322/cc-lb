@@ -182,7 +182,7 @@ Limits:
 
 Use this skill for prompts like:
 
-- "proxy 테스트했어? 실제 요청 처리되는지 확인해."
+- "Did you test the proxy? Verify that real requests are actually being processed."
 - "I changed header sanitization in the gateway; prove X-Secret is stripped and auth still reaches the signer."
 - "This path rewrite should send `/api/messages` to `/v1/messages`; verify it without doing unnecessary paid calls."
 - "Remote users hit 10.222.0.6, so don't test only localhost."
@@ -191,7 +191,7 @@ Use this skill for prompts like:
 
 Do not use it for:
 
-- "dashboard 버튼 눌러봐" unless the dashboard changes proxy request behavior.
+- "Try pressing the dashboard button" unless the dashboard changes proxy request behavior.
 - "OAuth code exchange fails" unless the next claim is about proxy requests after OAuth succeeds.
-- "systemd status 확인해" unless service health is only a prerequisite to proxy-path verification.
+- "Check systemd status" unless service health is only a prerequisite to proxy-path verification.
 - "rename an internal Rust variable" unless it changes routing/signing/header behavior.

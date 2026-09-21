@@ -1,40 +1,40 @@
 # Admin Web Runtime Progress — updated 2026-09-16; baseline 2026-09-15
 
-> **현재 상태: INCOMPLETE.** 완료 보고가 아니라 동결한 source/evidence를 현재 실행·미실행·차단·실패 집합에 연결한 진행 ledger다. `runtime_complete=false`, `overall_pass=false`다.
+> **Current status: INCOMPLETE.** This is not a completion report but a progress ledger linking the frozen source/evidence to the current executed, unexecuted, blocked, and failed sets. `runtime_complete=false`, `overall_pass=false`.
 
-이 문서의 기존 정규화 행·분류 계수·135개 미해결 항목은 **과거 관측 snapshot**이다. 이후의 제한된 해결 증거는 아래 `후속 승인·검증 overlay`와 JSON의 `post_hold_resolution_overlay`에 별도로 기록한다. 과거 행을 새 결과로 덮어쓰거나 운영 실행률로 환산하지 않는다.
+The existing normalized rows, classification coefficients, and 135 unresolved items in this document are a **past observation snapshot**. Later limited-resolution evidence is recorded separately in the `Follow-up approval/verification overlay` below and in `post_hold_resolution_overlay` in the JSON. Past rows are not overwritten with new results or converted into production execution rates.
 
-## 판정 요약
+## Verdict summary
 
 - Current baseline: `ef70b347`
 - Production deployed: `e56d029ea8641827d420c582c5f41a72ab9e2182`
-- Audit candidate: `ef70b34+uncommitted-audit-patch-…` — 승인된 latest-200 범위의 별도 overlay이며 baseline FAIL을 삭제하지 않는다.
-- Approved fix candidate: `ef70b347` + uncommitted patch `7ef93773…` (binary `f564dcf5…`) — 별도 `approved_fix_overlay`이며 baseline 분모·셀을 바꾸지 않는다.
-- 과거 input freeze는 707개 입력을 고정했다(browser profile·credential·cache 제외; 당시 누락 0·JSON/JSONL parse error 0). 이는 현재 run 디렉터리의 총 파일 수가 아니다. 후속 증거 6개는 overlay의 경로·SHA-256으로 별도 고정한다.
-- Canonical inventory는 approved uncommitted candidate 기준으로 재생성되었다(standard parser Ruby/Psych 통과, `approved-source-catalog-check.json`). 현재 분모는 433 rows / 170 storage operations / 422 production matrix rows이며, 아래 정규화 cell 수치는 historical 값을 그대로 보존한다.
-- 필수 SQL/pool correlation, native keepalive pointer, production UI matrix가 미완료이므로 overall PASS를 주장하지 않는다.
+- Audit candidate: `ef70b34+uncommitted-audit-patch-…` — a separate overlay for the approved latest-200 scope; it does not delete the baseline FAIL.
+- Approved fix candidate: `ef70b347` + uncommitted patch `7ef93773…` (binary `f564dcf5…`) — a separate `approved_fix_overlay`; it does not change the baseline denominator or cells.
+- The earlier input freeze fixed 707 inputs (browser profile, credential, and cache excluded; 0 missing and 0 JSON/JSONL parse errors at the time). This is not the total file count of the current run directory. The 6 follow-up evidence items are fixed separately by path and SHA-256 in the overlay.
+- The canonical inventory was regenerated against the approved uncommitted candidate (standard parser Ruby/Psych passed, `approved-source-catalog-check.json`). The current denominators are 433 rows / 170 storage operations / 422 production matrix rows; the normalized cell figures below preserve their historical values.
+- Because required SQL/pool correlation, the native keepalive pointer, and the production UI matrix are incomplete, no overall PASS is claimed.
 
-## 수치 기준: source와 실행을 분리
+## Counting basis: source versus execution
 
-| 기준 | 수치 | 의미 |
+| Basis | Count | Meaning |
 |---|---:|---|
-| Current source action | 205 | `ui.json.items` 원시 배열 길이 |
-| Historical base variant | 582 | 원래 snapshot의 variant label 수. 현재 source는 595개 label이며 어느 쪽도 runtime cell 수가 아님 |
-| UI request occurrence | 149 | action별 `requests` 원시 합계 |
+| Current source action | 205 | Raw array length of `ui.json.items` |
+| Historical base variant | 582 | Variant label count in the original snapshot. The current source has 595 labels; neither is a runtime cell count |
+| UI request occurrence | 149 | Raw sum of per-action `requests` |
 | API endpoint row | 115 | api-read 70 + api-write 45 |
 | Canonical inventory row | 433 | ui_action 215 + network_request 162 + backend_endpoint 56 |
 | Production matrix row | 422 | ui_action 208 + network_request 158 + backend_endpoint 56 |
-| 모든 입력 JSONL row | 1,650 | candidate subset/network 중복 파일 포함 |
-| Primary action/runtime row | 1,563 | 주 ledger 7개 원시 합계 |
+| All input JSONL rows | 1,650 | Includes candidate subset/network duplicate files |
+| Primary action/runtime row | 1,563 | Raw sum of the 7 main ledgers |
 | Normalized physical cell | 1,511 | UI 1,009 + direct API 499 + supplemental 3 |
-| Keepalive direct row | 484 | UI 실행 0; 별도 heavy-card UI artifact 1 |
-| Approved-candidate flow | 19 | upstreams 6 required PASS + principals 10 PASS + plugins 3 PASS (overlay, baseline cell 아님; isolated functional check 수이며 browser interaction 수가 아님) |
+| Keepalive direct row | 484 | UI executions 0; 1 separate heavy-card UI artifact |
+| Approved-candidate flow | 19 | upstreams 6 required PASS + principals 10 PASS + plugins 3 PASS (overlay, not baseline cells; a count of isolated functional checks, not browser interactions) |
 
-433 source row, 205 source action, 422 production row, 484 keepalive direct row를 UI 실행 수로 세지 않았다.
+The 433 source rows, 205 source actions, 422 production rows, and 484 keepalive direct rows were not counted as UI executions.
 
-## 필수 분류 계수
+## Required classification coefficients
 
-| 분류 | 수 |
+| Classification | Count |
 |---|---:|
 | notexecuted | 267 |
 | safetyblocked | 258 |
@@ -48,27 +48,27 @@
 | behaviorverified | 1,099 |
 | artifactoraclepass within declared cell oracle | 826 |
 
-`behaviorverified`는 관측한 동작 oracle 통과다. `artifactoraclepass`는 **원시 artifact가 선언한 기능 검증 통과**이며 UI/direct/SQL/pool 전 계층 측정 PASS가 아니다.
+`behaviorverified` is an observed behavior-oracle pass. `artifactoraclepass` is a **functional verification pass declared by the raw artifact**, not a PASS measured across all UI/direct/SQL/pool layers.
 
 ## Full measurement gate
 
-| 상태 | cell 수 |
+| Status | Cells |
 |---|---:|
 | not_evaluated | 1,006 |
 | blocked | 505 |
 
-UI interaction + direct API + SQL + pool 측정 게이트다. SQL/pool correlation 증거가 없는 cell은 `blocked`, 그 외 측정 증거가 없는 cell은 `not_evaluated`다. 측정값을 0으로 채우지 않았고 PASS로 계수한 cell은 없다. Server-timing 증거는 canonical RID join을 측정했지만 pure DB 실행·pure pool queue wait는 여전히 미측정이다.
+This is the UI interaction + direct API + SQL + pool measurement gate. Cells without SQL/pool correlation evidence are `blocked`; cells without other measurement evidence are `not_evaluated`. No measurement was filled with 0, and no cell was counted as PASS. Server-timing evidence measured the canonical RID join, but pure DB execution and pure pool queue wait remain unmeasured.
 
-## Runtime enum 분모
+## Runtime enum denominators
 
-| Enum | Production Camofox/Firefox | Local Playwright/Chromium | 판정 |
+| Enum | Production Camofox/Firefox | Local Playwright/Chromium | Verdict |
 |---|---:|---:|---|
-| Locale (auto 포함) | 147 | 126 | Chromium 미지원 21개 source 후보는 product FAIL이 아니다. Local 128 cell은 옵션 126 + 분모/필터 관측 2다. |
-| Timezone (auto 포함) | 446 | 419 | runtime별 actual supported enum이 다르다. Local 420 cell은 옵션 419 + 분모 관측 1이다. |
+| Locale (including auto) | 147 | 126 | The 21 source candidates unsupported by Chromium are not product FAILs. The local 128 cells are 126 options + 2 denominator/filter observations. |
+| Timezone (including auto) | 446 | 419 | The actual supported enums differ per runtime. The local 420 cells are 419 options + 1 denominator observation. |
 
-## Current source 영역별 진행
+## Current source progress by area
 
-| 영역 | source | reviewed | UI executed | direct API | partial | not executed | artifact-oracle-pass |
+| Area | source | reviewed | UI executed | direct API | partial | not executed | artifact-oracle-pass |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Audit | 13 | 13 | 12 | 0 | 1 | 1 | 11 |
 | Global | 20 | 8 | 3 | 0 | 0 | 17 | 3 |
@@ -80,9 +80,9 @@ UI interaction + direct API + SQL + pool 측정 게이트다. SQL/pool correlati
 | Shared Request Tables | 1 | 1 | 0 | 0 | 0 | 1 | 0 |
 | Upstreams | 43 | 43 | 34 | 0 | 22 | 9 | 12 |
 
-## Production matrix 영역별 진행
+## Production matrix progress by area
 
-| 영역 | source | reviewed | UI executed | direct API | partial | not executed | artifact-oracle-pass |
+| Area | source | reviewed | UI executed | direct API | partial | not executed | artifact-oracle-pass |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Audit | 12 | 12 | 0 | 0 | 0 | 12 | 0 |
 | Credentials | 3 | 3 | 1 | 0 | 1 | 2 | 0 |
@@ -95,22 +95,22 @@ UI interaction + direct API + SQL + pool 측정 게이트다. SQL/pool correlati
 | Status | 2 | 2 | 1 | 0 | 1 | 1 | 0 |
 | Upstreams | 43 | 0 | 0 | 0 | 0 | 43 | 0 |
 
-Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개는 direct API 증거다.
+Production UI executed counts only the UI stage. The 230 keepalive direct GET successes are direct API evidence.
 
-## Audit baseline과 후보판 분리
+## Separating the Audit baseline and candidate
 
-- Baseline `local-settings/actions.jsonl` FAIL row 595, 599, 651을 보존했다.
-- 후보판 `actions-all.jsonl` 15 PASS는 direct API 8, UI 7이다.
-- 후보판은 latest-200, same-timestamp 순서, delayed-old 배제/시간필터, export refresh/reload 가시성 해결 증거다.
-- 후보판 source version이 baseline과 다르므로 baseline FAIL을 PASS로 덮지 않는다.
+- Baseline `local-settings/actions.jsonl` FAIL rows 595, 599, 651 are preserved.
+- The candidate `actions-all.jsonl` 15 PASSes are 8 direct API + 7 UI.
+- The candidate is evidence resolving latest-200, same-timestamp ordering, delayed-old exclusion/time filter, and export refresh/reload visibility.
+- Because the candidate source version differs from the baseline, baseline FAILs are not overwritten with PASS.
 
-## Approved fix overlay (baseline 보존)
+## Approved fix overlay (baseline preserved)
 
-- Candidate: `ef70b347` + uncommitted patch `7ef93773…`, binary `f564dcf5…`. Main이 reviewed JSON/JSONL 15개 + provenance + focused regression을 `qa/admin-web/runs/2026-09-15/approved-fixes/`에 byte-identical 복사했다(해시 대조 완료). profiles/credentials/unreviewed PNG는 미복사.
-- Flow: upstreams required 6/6 PASS, principals 10/10 PASS, plugins 3/3 PASS (+gc-storage proof). 이 수치는 isolated functional check이며 full runtime/measurement PASS가 아니다. principals 10개 중 direct API-only 1, proxy-only 1을 포함한다.
-- Baseline FAIL은 삭제하지 않고 `approved_fix_overlay.resolved_findings`로 해결 증거를 분리 연결한다.
+- Candidate: `ef70b347` + uncommitted patch `7ef93773…`, binary `f564dcf5…`. Main copied the 15 reviewed JSON/JSONL files + provenance + focused regression byte-identically to `qa/admin-web/runs/2026-09-15/approved-fixes/` (hash comparison complete). profiles/credentials/unreviewed PNGs were not copied.
+- Flow: upstreams required 6/6 PASS, principals 10/10 PASS, plugins 3/3 PASS (+gc-storage proof). These figures are isolated functional checks, not full runtime/measurement PASS. The 10 principals include 1 direct API-only and 1 proxy-only.
+- Baseline FAILs are not deleted; resolution evidence is linked separately via `approved_fix_overlay.resolved_findings`.
 
-| Baseline task | Source | 해결 candidate flow |
+| Baseline task | Source | Resolving candidate flow |
 |---|---|---|
 | UPSTREAM-023 | `components/upstreams/InlineNameEditor.tsx#InlineNameEditor:save` | rename_enter_exactly_one_put_no_followup_409, rename_blur_exactly_one_put, rename_escape_no_request, rename_real_stale_409_preserved |
 | UPSTREAM-029 | `components/upstreams/SettingsCard.tsx#SettingsCard:save` | settings_baseurl_put_get_reload_persists |
@@ -119,24 +119,24 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 | PLUGIN-1 | `PluginCatalog.tsx#PluginCatalog:run_gc` | gc.json, gc-storage.json |
 | PLUGIN-5 | `PluginDeleteDialog.tsx#PluginDeleteDialog:confirm_delete` | simple.json, cascade.json |
 
-- `UPSTREAM-030` (env var key): candidate exploratory FAIL은 `SUPPORTED_LIMITATION/NOT_IN_APPROVED_FIX`다 — env 이름은 write 시 암호화 key material로 해소되고 GET이 반환하지 않아 reload provenance 재구성 불가. secret은 blank/write-only 유지. extra FAIL이 아니며 baseline product_fail도 유지.
-- `settings_null_default_get_reload` exploratory FAIL은 required PASS와 다른 leg로, product FAIL로 계수하지 않고 triage 대상으로 기록.
-- 새 coverage(baseline FAIL 해결 아님): principals blank-label list/proxy/revoke, terminal refetch lock 2종, concurrent 409 preserved.
-- Regression: 이전 full test 1519/1520 fail → warmup test 수정 → focused detail-contract 9/9 PASS → whole backend gate **1520/1520 PASS** (13 slow, 9 skipped, exit 0; `cc-lb-admin-web-qa-evidence/approved-fixes-full-backend-gate.txt`). backend test gate만 완료이며 full runtime QA gate는 계속 미완료다. native RECOVERED_LOCAL 및 production Plugins 증거는 진행 중이다.
+- `UPSTREAM-030` (env var key): the candidate exploratory FAIL is `SUPPORTED_LIMITATION/NOT_IN_APPROVED_FIX` — the env name resolves to encryption key material at write time and GET does not return it, so reload provenance cannot be reconstructed. The secret remains blank/write-only. It is not an extra FAIL, and the baseline product_fail is also preserved.
+- The `settings_null_default_get_reload` exploratory FAIL is a different leg from the required PASS; it is recorded as a triage target, not counted as a product FAIL.
+- New coverage (not baseline FAIL resolution): principals blank-label list/proxy/revoke, 2 terminal refetch locks, concurrent 409 preserved.
+- Regression: previous full test 1519/1520 fail → warmup test fix → focused detail-contract 9/9 PASS → whole backend gate **1520/1520 PASS** (13 slow, 9 skipped, exit 0; `cc-lb-admin-web-qa-evidence/approved-fixes-full-backend-gate.txt`). Only the backend test gate is complete; the full runtime QA gate remains incomplete. Native RECOVERED_LOCAL and production Plugins evidence are in progress.
 
-## Keepalive 진행과 한계
+## Keepalive progress and limitations
 
-- 484 physical row = list 462 + summary 22.
-- list: direct success 209, client abort 5, safety-stop 미실행 248.
-- summary: two-cycle direct success 21, client abort 1.
-- direct 성공 230과 abort 6은 UI 실행이 아니다.
-- heavy-card DOM UI artifact 1개는 최초 8,442ms HTTP 200과 자동 poll 8회를 관측했다.
-- 2s/3s/10s client deadline은 right-censored lower bound이며 HTTP server FAIL이 아니다.
-- 당시 native pointer는 Camofox 410으로 막혔다. 이후 다른 제한된 관측에서 native 기능은 복구됐지만 Keepalive의 전체 native UI·cursor 행렬과 운영 SQL/pool 상관 증거는 아직 확보하지 못했다.
+- 484 physical rows = 462 list + 22 summary.
+- list: 209 direct successes, 5 client aborts, 248 not executed due to safety-stop.
+- summary: 21 two-cycle direct successes, 1 client abort.
+- The 230 direct successes and 6 aborts are not UI executions.
+- The 1 heavy-card DOM UI artifact observed an initial 8,442ms HTTP 200 and 8 automatic polls.
+- The 2s/3s/10s client deadlines are right-censored lower bounds, not HTTP server FAILs.
+- The native pointer was blocked by Camofox 410 at the time. Native capability has since recovered in other limited observations, but the full native UI/cursor matrix for Keepalive and production SQL/pool correlation evidence have not yet been obtained.
 
-## 미완료 작업 목록
+## Unfinished work list
 
-과거 snapshot의 **135개 task**를 보존한다. 아래 분류는 현재 남은 작업 수를 다시 계산한 결과가 아니다. `→ approved-fix`와 후속 overlay는 해당 환경·변형에 대한 새 증거만 연결하며 운영 전체 완료를 뜻하지 않는다.
+The **135 tasks** from the past snapshot are preserved. The classification below is not a recount of currently remaining work. `→ approved-fix` and the follow-up overlay only link new evidence for that environment/variant and do not mean full production completion.
 
 ### blocked (65)
 
@@ -208,11 +208,11 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 
 ### measurementblocked (1)
 
-- **KEEPALIVE-RIGHT-CENSORED** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:summary_poll`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_horizon`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_status_filter`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:mount_and_poll` 외 1개; Five list requests and one summary request hit client-imposed deadlines. They are right-censored lower bounds, not HTTP server failures.; evidence: `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`, `cc-lb-admin-web-qa-evidence/production-heavy-principal-card.json`
+- **KEEPALIVE-RIGHT-CENSORED** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:summary_poll`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_horizon`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_status_filter`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:mount_and_poll` plus 1 more; Five list requests and one summary request hit client-imposed deadlines. They are right-censored lower bounds, not HTTP server failures.; evidence: `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`, `cc-lb-admin-web-qa-evidence/production-heavy-principal-card.json`
 
 ### nativepointerblocked (1)
 
-- **KEEPALIVE-NATIVE-POINTER** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:summary_poll`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_horizon`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_status_filter`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:mount_and_poll` 외 1개; Camofox native pointer interaction returned 410. One DOM-dispatched heavy-card UI artifact verified behavior but does not replace native-pointer coverage.; evidence: `cc-lb-admin-web-qa-evidence/production-heavy-principal-card.json`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime-summary.json`
+- **KEEPALIVE-NATIVE-POINTER** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:summary_poll`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_horizon`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_status_filter`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:mount_and_poll` plus 1 more; Camofox native pointer interaction returned 410. One DOM-dispatched heavy-card UI artifact verified behavior but does not replace native-pointer coverage.; evidence: `cc-lb-admin-web-qa-evidence/production-heavy-principal-card.json`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime-summary.json`
 
 ### notexecuted (37)
 
@@ -237,22 +237,22 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 - **KEEPALIVE-UI-LIST-MATRIX** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_horizon`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_status_filter`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:mount_and_poll`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:paginate`; The 462 list cells are direct GET denominator observations, not UI executions; all 462 UI list interactions remain unexecuted.; evidence: `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime-summary.json`
 - **KEEPALIVE-UI-SUMMARY-MATRIX** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:summary_poll`; Twenty-two summary principal cells were measured by direct reads. Exactly one separate DOM-dispatched UI artifact exists, leaving 21 summary UI cells unexecuted.; evidence: `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`, `cc-lb-admin-web-qa-evidence/production-heavy-principal-card.json`
 - **CURRENT-NOT-EXECUTED-AUDIT** — `crates/cc-lb-admin/web/src/routes/audit.tsx#AuditPage:actor_metadata`; No executed current-baseline runtime cell exists for 1 Audit source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
-- **CURRENT-NOT-EXECUTED-GLOBAL** — `crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#AuthRequiredGate:external_auth_retry`, `crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#handleSubmit:validation_empty`, `crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:close`, `crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:keyboard_open` 외 13개; No executed current-baseline runtime cell exists for 17 Global source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
-- **CURRENT-NOT-EXECUTED-LOGS** — `components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:dismiss`, `components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:retry`, `components/ui/LogsPagination.tsx#LogsPagination:next_page`, `components/ui/LogsPagination.tsx#LogsPagination:prev_page` 외 27개; No executed current-baseline runtime cell exists for 31 Logs source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
-- **CURRENT-NOT-EXECUTED-OVERVIEW** — `crates/cc-lb-admin/web/src/components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:dismiss`, `crates/cc-lb-admin/web/src/components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:retry`, `crates/cc-lb-admin/web/src/components/ui/RequestEventDrawer.tsx#RequestDetail:close`, `crates/cc-lb-admin/web/src/components/ui/RequestEventDrawer.tsx#RequestDetail:copy_id` 외 17개; No executed current-baseline runtime cell exists for 21 Overview source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
-- **CURRENT-NOT-EXECUTED-PRINCIPALS** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:summary_poll`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:toggle_enabled`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_horizon`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_status_filter` 외 5개; No executed current-baseline runtime cell exists for 9 Principals source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
+- **CURRENT-NOT-EXECUTED-GLOBAL** — `crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#AuthRequiredGate:external_auth_retry`, `crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#handleSubmit:validation_empty`, `crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:close`, `crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:keyboard_open` plus 13 more; No executed current-baseline runtime cell exists for 17 Global source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
+- **CURRENT-NOT-EXECUTED-LOGS** — `components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:dismiss`, `components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:retry`, `components/ui/LogsPagination.tsx#LogsPagination:next_page`, `components/ui/LogsPagination.tsx#LogsPagination:prev_page` plus 27 more; No executed current-baseline runtime cell exists for 31 Logs source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
+- **CURRENT-NOT-EXECUTED-OVERVIEW** — `crates/cc-lb-admin/web/src/components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:dismiss`, `crates/cc-lb-admin/web/src/components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:retry`, `crates/cc-lb-admin/web/src/components/ui/RequestEventDrawer.tsx#RequestDetail:close`, `crates/cc-lb-admin/web/src/components/ui/RequestEventDrawer.tsx#RequestDetail:copy_id` plus 17 more; No executed current-baseline runtime cell exists for 21 Overview source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
+- **CURRENT-NOT-EXECUTED-PRINCIPALS** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:summary_poll`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:toggle_enabled`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_horizon`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_status_filter` plus 5 more; No executed current-baseline runtime cell exists for 9 Principals source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
 - **CURRENT-NOT-EXECUTED-SHARED-REQUEST-TABLES** — `crates/cc-lb-admin/web/src/components/ui/latency/LatencyCell.tsx#LatencyCell:responsibility_breakdown`; No executed current-baseline runtime cell exists for 1 Shared Request Tables source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
-- **CURRENT-NOT-EXECUTED-UPSTREAMS** — `components/upstreams/warmup/WarmupHistoryDrawer.tsx#AttemptDetail:close`, `components/upstreams/warmup/parts/WarmupConfigModal.tsx#WarmupConfigModal:copy`, `routes/upstreams.tsx#CreateUpstreamModal:submitOauthConfirm`, `routes/upstreams.tsx#DetailView:isolateSeries` 외 5개; No executed current-baseline runtime cell exists for 9 Upstreams source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
-- **PRODUCTION-UI-NOT-EXECUTED-AUDIT** — `audit.tsx#AuditPage:clear_filters`, `audit.tsx#AuditPage:click_row`, `audit.tsx#AuditPage:close_detail_modal`, `audit.tsx#AuditPage:empty_state_clear` 외 8개; No UI execution exists for 12 production-matrix Audit action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
+- **CURRENT-NOT-EXECUTED-UPSTREAMS** — `components/upstreams/warmup/WarmupHistoryDrawer.tsx#AttemptDetail:close`, `components/upstreams/warmup/parts/WarmupConfigModal.tsx#WarmupConfigModal:copy`, `routes/upstreams.tsx#CreateUpstreamModal:submitOauthConfirm`, `routes/upstreams.tsx#DetailView:isolateSeries` plus 5 more; No executed current-baseline runtime cell exists for 9 Upstreams source action(s). Denominator/source review alone is not execution.; evidence: `cc-lb-admin-web-qa-evidence/runtime-denominators.json`, `cc-lb-admin-web-qa-completion/qa/admin-web/source-contracts/ui.json`
+- **PRODUCTION-UI-NOT-EXECUTED-AUDIT** — `audit.tsx#AuditPage:clear_filters`, `audit.tsx#AuditPage:click_row`, `audit.tsx#AuditPage:close_detail_modal`, `audit.tsx#AuditPage:empty_state_clear` plus 8 more; No UI execution exists for 12 production-matrix Audit action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
 - **PRODUCTION-UI-NOT-EXECUTED-CREDENTIALS** — `crates/cc-lb-admin/web/src/routes/credentials.tsx#CredentialsPage:revoke`, `crates/cc-lb-admin/web/src/routes/credentials.tsx#CredentialsPage:rotate`; No UI execution exists for 2 production-matrix Credentials action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
-- **PRODUCTION-UI-NOT-EXECUTED-GLOBAL** — `crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#handleSubmit:validation_empty`, `crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:goto_status`, `crates/cc-lb-admin/web/src/components/layout/AppShell.tsx#Topbar:open_mobile_menu`, `crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx#Sidebar:link_credentials` 외 1개; No UI execution exists for 5 production-matrix Global action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
-- **PRODUCTION-UI-NOT-EXECUTED-LOGS** — `components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:dismiss`, `components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:retry`, `components/ui/LogsPagination.tsx#LogsPagination:next_page`, `components/ui/LogsPagination.tsx#LogsPagination:prev_page` 외 27개; No UI execution exists for 31 production-matrix Logs action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
-- **PRODUCTION-UI-NOT-EXECUTED-OVERVIEW** — `crates/cc-lb-admin/web/src/components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:dismiss`, `crates/cc-lb-admin/web/src/components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:retry`, `crates/cc-lb-admin/web/src/components/ui/RequestEventDrawer.tsx#RequestDetail:copy_id`, `crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts#connect:delta_backfill` 외 3개; No UI execution exists for 7 production-matrix Overview action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
-- **PRODUCTION-UI-NOT-EXECUTED-PLUGINS** — `PluginCatalog.tsx#PluginCatalog:copy_sha256`, `PluginCatalog.tsx#PluginCatalog:inspect_click`, `PluginCatalog.tsx#PluginCatalog:open_delete_dialog`, `PluginCatalog.tsx#PluginCatalog:run_gc` 외 18개; No UI execution exists for 22 production-matrix Plugins action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
-- **PRODUCTION-UI-NOT-EXECUTED-PRINCIPALS** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:toggle_enabled`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_horizon`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_status_filter`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:mount_and_poll` 외 35개; No UI execution exists for 39 production-matrix Principals action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
-- **PRODUCTION-UI-NOT-EXECUTED-SETTINGS** — `settings.tsx#ConfigDraftSection:apply_draft`, `settings.tsx#ConfigDraftSection:reload_daemon`, `settings.tsx#ConfigDraftSection:retry_editor`, `settings.tsx#ConfigDraftSection:save_draft` 외 2개; No UI execution exists for 6 production-matrix Settings action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
+- **PRODUCTION-UI-NOT-EXECUTED-GLOBAL** — `crates/cc-lb-admin/web/src/components/AuthRequiredGate.tsx#handleSubmit:validation_empty`, `crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:goto_status`, `crates/cc-lb-admin/web/src/components/layout/AppShell.tsx#Topbar:open_mobile_menu`, `crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx#Sidebar:link_credentials` plus 1 more; No UI execution exists for 5 production-matrix Global action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
+- **PRODUCTION-UI-NOT-EXECUTED-LOGS** — `components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:dismiss`, `components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:retry`, `components/ui/LogsPagination.tsx#LogsPagination:next_page`, `components/ui/LogsPagination.tsx#LogsPagination:prev_page` plus 27 more; No UI execution exists for 31 production-matrix Logs action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
+- **PRODUCTION-UI-NOT-EXECUTED-OVERVIEW** — `crates/cc-lb-admin/web/src/components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:dismiss`, `crates/cc-lb-admin/web/src/components/LiveTailFailureBanner.tsx#LiveTailFailureBanner:retry`, `crates/cc-lb-admin/web/src/components/ui/RequestEventDrawer.tsx#RequestDetail:copy_id`, `crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts#connect:delta_backfill` plus 3 more; No UI execution exists for 7 production-matrix Overview action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
+- **PRODUCTION-UI-NOT-EXECUTED-PLUGINS** — `PluginCatalog.tsx#PluginCatalog:copy_sha256`, `PluginCatalog.tsx#PluginCatalog:inspect_click`, `PluginCatalog.tsx#PluginCatalog:open_delete_dialog`, `PluginCatalog.tsx#PluginCatalog:run_gc` plus 18 more; No UI execution exists for 22 production-matrix Plugins action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
+- **PRODUCTION-UI-NOT-EXECUTED-PRINCIPALS** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:toggle_enabled`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_horizon`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_status_filter`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:mount_and_poll` plus 35 more; No UI execution exists for 39 production-matrix Principals action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
+- **PRODUCTION-UI-NOT-EXECUTED-SETTINGS** — `settings.tsx#ConfigDraftSection:apply_draft`, `settings.tsx#ConfigDraftSection:reload_daemon`, `settings.tsx#ConfigDraftSection:retry_editor`, `settings.tsx#ConfigDraftSection:save_draft` plus 2 more; No UI execution exists for 6 production-matrix Settings action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
 - **PRODUCTION-UI-NOT-EXECUTED-STATUS** — `crates/cc-lb-admin/web/src/routes/status.tsx#StatusPage:toggle_killswitch`; No UI execution exists for 1 production-matrix Status action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
-- **PRODUCTION-UI-NOT-EXECUTED-UPSTREAMS** — `components/upstreams/ApiUsageCard.tsx#ApiUsageCard:metricToggle`, `components/upstreams/ApiUsageCard.tsx#ApiUsageCard:rangeToggle`, `components/upstreams/InlineNameEditor.tsx#InlineNameEditor:save`, `components/upstreams/SettingsCard.tsx#SettingsCard:save` 외 39개; No UI execution exists for 43 production-matrix Upstreams action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
+- **PRODUCTION-UI-NOT-EXECUTED-UPSTREAMS** — `components/upstreams/ApiUsageCard.tsx#ApiUsageCard:metricToggle`, `components/upstreams/ApiUsageCard.tsx#ApiUsageCard:rangeToggle`, `components/upstreams/InlineNameEditor.tsx#InlineNameEditor:save`, `components/upstreams/SettingsCard.tsx#SettingsCard:save` plus 39 more; No UI execution exists for 43 production-matrix Upstreams action(s); direct API rows and source counts are excluded from UI execution.; evidence: `cc-lb-admin-web-qa-completion/qa/admin-web/api-query-inventory.yaml#production_matrix_ids`, `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`
 
 ### partial (5)
 
@@ -285,7 +285,7 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 - **PRODUCTION-GLOBAL-36** — `crates/cc-lb-admin/web/src/routes/status.tsx#StatusPage:toggle_killswitch`; Emergency traffic control was visible but never clicked.; evidence: `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl#72`
 - **PRODUCTION-GLOBAL-37** — `crates/cc-lb-admin/web/src/routes/credentials.tsx#CredentialsPage:rotate`; POST credential rotate mutation forbidden in production; control not invoked.; evidence: `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl#73`
 - **PRODUCTION-GLOBAL-38** — `crates/cc-lb-admin/web/src/routes/credentials.tsx#CredentialsPage:revoke`; POST credential revoke mutation forbidden in production; control not invoked.; evidence: `cc-lb-admin-web-qa-evidence/production-global-actions.jsonl#74`
-- **KEEPALIVE-DIRECT-SAFETY-STOP** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:summary_poll`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_horizon`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_status_filter`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:mount_and_poll` 외 1개; After five 2s and one 10s client deadlines, 248 direct denominator rows were not issued to avoid additional production load.; evidence: `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime-summary.json`
+- **KEEPALIVE-DIRECT-SAFETY-STOP** — `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:summary_poll`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_horizon`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:change_status_filter`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveSessionsDrawer.tsx#CacheKeepaliveSessionsDrawer:mount_and_poll` plus 1 more; After five 2s and one 10s client deadlines, 248 direct denominator rows were not issued to avoid additional production load.; evidence: `cc-lb-admin-web-qa-evidence/production-keepalive-runtime.jsonl`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime-summary.json`
 
 ### source_contract_mismatch (5)
 
@@ -297,29 +297,29 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 
 ### sqlcorrelationblocked (1)
 
-- **MEASURE-SQL-POOL** — `crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:query_principals`, `crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:query_upstreams`, `crates/cc-lb-admin/web/src/components/layout/AppShell.tsx#Topbar:health_poll`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:summary_poll` 외 18개; Browser timing and direct HTTP observations do not provide per-request server SQL/pool correlation; required SQL/pool measurement remains unavailable.; evidence: `cc-lb-admin-web-qa-evidence/production-global-actions-summary.json`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime-summary.json`, `cc-lb-admin-web-qa-evidence/production-heavy-principal-card.json`
+- **MEASURE-SQL-POOL** — `crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:query_principals`, `crates/cc-lb-admin/web/src/components/CommandPalette.tsx#CommandPalette:query_upstreams`, `crates/cc-lb-admin/web/src/components/layout/AppShell.tsx#Topbar:health_poll`, `crates/cc-lb-admin/web/src/components/principals/cache-keepalive/CacheKeepaliveCard.tsx#CacheKeepaliveCard:summary_poll` plus 18 more; Browser timing and direct HTTP observations do not provide per-request server SQL/pool correlation; required SQL/pool measurement remains unavailable.; evidence: `cc-lb-admin-web-qa-evidence/production-global-actions-summary.json`, `cc-lb-admin-web-qa-evidence/production-keepalive-runtime-summary.json`, `cc-lb-admin-web-qa-evidence/production-heavy-principal-card.json`
 
 ### unsupported (1)
 
 - **SETTINGS-635** — `settings.tsx#ConfigDraftSection:apply_draft`; variant=`success variant requested but file-backed serve returns 501`; FAIL_SOURCE_UNSUPPORTED; evidence: `cc-lb-admin-web-qa-evidence/local-settings/actions.jsonl#646`
 
-## 원본 FAIL 보존과 supersedes
+## Preserving original FAILs and supersedes
 
-- Settings의 10개 `SUPERSEDED_HARNESS_ATTEMPT`를 corrected cell에 연결했다.
-- Principals final `remaining_scope`에 없는 raw 실패/차단 attempt는 product FAIL로 승격하지 않았다.
-- Upstreams raw 142 step/retry와 final 111 variant cell을 분리했다. Raw FAIL 72개와 final FAIL 5개를 같은 수로 보지 않았다.
-- Approved-candidate 해결도 baseline FAIL을 삭제하지 않고 overlay로만 연결한다.
-- Machine artifact의 `historical_attempts[].superseded_by`가 연결 기준이다.
+- The 10 `SUPERSEDED_HARNESS_ATTEMPT` entries in Settings were linked to corrected cells.
+- Raw failure/blocked attempts absent from the Principals final `remaining_scope` were not promoted to product FAIL.
+- The Upstreams raw 142 step/retry records were separated from the final 111 variant cells. The 72 raw FAILs and 5 final FAILs were not treated as the same count.
+- Approved-candidate resolutions also do not delete baseline FAILs; they are linked only via overlay.
+- `historical_attempts[].superseded_by` in the machine artifact is the linking basis.
 
-## Baseline source 보존
+## Baseline source preservation
 
-- `baseline-source-catalog.zip` 7개 멤버의 sha256을 재계산해 catalog와 일치함을 확인했다.
-- Live source 파일은 approved uncommitted candidate 기준으로 재생성되어 archive와 더 이상 일치하지 않는다. `input_freeze`의 `archive_member`는 historical baseline 해시를 보존하고 `current_sha256`/`current_catalog_sha256`로 현재 상태를 기록한다(`approved-source-catalog-check.json` 참조).
-- Archive의 YAML은 empty-key 직렬화 결함을 포함한 historical catalog이며 현재 실행 inventory가 아니다. 현재 catalog는 standard parser 검증을 통과했다.
+- The sha256 of the 7 members of `baseline-source-catalog.zip` was recomputed and confirmed to match the catalog.
+- Live source files were regenerated against the approved uncommitted candidate and no longer match the archive. `archive_member` in `input_freeze` preserves the historical baseline hash, and `current_sha256`/`current_catalog_sha256` record the current state (see `approved-source-catalog-check.json`).
+- The archive YAML is a historical catalog containing an empty-key serialization defect, not the current execution inventory. The current catalog passed standard parser validation.
 
-## 총계 불일치와 해석
+## Total discrepancies and interpretation
 
-| ID | 관측 | 처리 |
+| ID | Observation | Handling |
 |---|---|---|
 | CANONICAL-YAML-STANDARD-PARSE | A standard YAML parser rejects line 50 because an empty mapping key is emitted. | The frozen YAML hash is recorded; interactions and production_matrix_ids were extracted only from the bounded interactions and production_matrix_ids blocks. Counts were rechecked as 433 interactions and 422 production IDs. |
 | SETTINGS-RECORDS-VS-CELLS | actions.jsonl has 654 records; 10 are SUPERSEDED_HARNESS_ATTEMPT, leaving 644 active records, but only 643 unique active cell_id values because one close-detail PASS cell is duplicated. | Record counts and normalized cell counts are reported separately. |
@@ -328,70 +328,70 @@ Production UI executed는 UI stage만 센다. Keepalive direct GET 성공 230개
 | UPSTREAM-RAW-ATTEMPTS-VS-FINAL-CELLS | The upstream action ledger has 142 step/retry records and 72 raw FAIL attempts; the final coverage ledger has 111 variant cells and 5 FAIL cells. | Raw attempts are preserved in historical_attempts with final coverage links; raw attempts are not counted as final cells. |
 | SOURCE-ROWS-ARE-NOT-EXECUTIONS | The canonical inventory has 433 rows and 422 production rows, while runtime evidence has separate action records, direct API rows, and UI cells. | Source rows, base variants, raw records, normalized cells, direct stages, and UI stages have separate counters. |
 
-## 한계 및 변경 경계
+## Limitations and change boundary
 
-- Actual page/entity/cursor/poll 완전 분모는 미확정이다. `full_runtime_cell_count`와 `unresolved_upper_bound`는 `null`이다.
-- backend-only, browser capability 미지원, 의도한 not-applicable은 실행 FAIL로 세지 않았다.
-- raw production entity/request ID, secret, raw URL/query를 포함하지 않았다.
-- application code, 운영 상태, Git/PR은 수정하지 않았다. 이 작업이 쓴 파일은 `runtime-progress.json`, `runtime-progress.md`, `current-findings.md` 세 개뿐이다.
+- The complete denominator of actual page/entity/cursor/poll is undetermined. `full_runtime_cell_count` and `unresolved_upper_bound` are `null`.
+- backend-only, browser-capability-unsupported, and intentional not-applicable items were not counted as execution FAILs.
+- No raw production entity/request IDs, secrets, or raw URLs/queries were included.
+- Application code, production state, and Git/PR were not modified. This work wrote only three files: `runtime-progress.json`, `runtime-progress.md`, and `current-findings.md`.
 
-## Instrumentation 증거 (isolated)
+## Instrumentation evidence (isolated)
 
-- `instrumentation/index.json` 19개 파일, candidate `132e831a…`, baseline `f564dcf5…`.
-- Correlation request 12, body privacy probe 2, A/B/A overhead 측정 300 request, proxy rejection/header control 12, library regression 191/191 PASS.
-- Timing contract: `handler_ms`는 next.run→response head, `sql_elapsed_secs`는 driver/query-stream lifetime(pure DB 실행 아님), `acquire_total_secs`는 queue/check/connect 포함 full acquire(pure queue wait 아님).
-- Isolated proof이며 production 배포·full-matrix PASS가 아니다.
+- `instrumentation/index.json`: 19 files, candidate `132e831a…`, baseline `f564dcf5…`.
+- 12 correlation requests, 2 body privacy probes, 300-request A/B/A overhead measurement, 12 proxy rejection/header controls, library regression 191/191 PASS.
+- Timing contract: `handler_ms` is next.run→response head, `sql_elapsed_secs` is driver/query-stream lifetime (not pure DB execution), `acquire_total_secs` is the full acquire including queue/check/connect (not pure queue wait).
+- Isolated proof, not production deployment or full-matrix PASS.
 
-## Server-timing 증거 (isolated)
+## Server-timing evidence (isolated)
 
-- `server-timing/index.json` 20개 파일, candidate `db564601…`, recorder v1.0.7.
-- Recorder source SHA: verification 시점 `003680df…`, 최종 `46549022…`(post-browser 변경: fetch observer registration·monitor failure까지 completeness gate에 포함, 세 failure code를 unit으로 독립 검증).
-- SQLite: resource entry 17 join, unique server ID 17, SQL-bearing 6. Source window는 sequence 106부터의 retained snapshot이며 이전 103개 drained entry는 미복구·미주장.
-- PostgreSQL: resource entry 19 join, unique server ID 19, SQL-bearing 6. `capture_complete=false`, 사유 `action_window_still_open`. 이전 PostgreSQL UI row(서버 로그 미보존)는 대체하지 않았다.
-- `fetch_observation=0`(isolated world); fake fetch lifecycle record를 만들지 않았다.
-- Pure DB 실행·pure pool queue wait는 미측정. `full_runtime_qa_complete=false`.
+- `server-timing/index.json`: 20 files, candidate `db564601…`, recorder v1.0.7.
+- Recorder source SHA: `003680df…` at verification time, final `46549022…` (post-browser change: fetch observer registration and monitor failure included in the completeness gate; three failure codes independently unit-verified).
+- SQLite: 17 resource entry joins, 17 unique server IDs, 6 SQL-bearing. The source window is the retained snapshot from sequence 106; the earlier 103 drained entries are unrecovered and unclaimed.
+- PostgreSQL: 19 resource entry joins, 19 unique server IDs, 6 SQL-bearing. `capture_complete=false`, reason `action_window_still_open`. The earlier PostgreSQL UI row (server log not preserved) was not replaced.
+- `fetch_observation=0` (isolated world); no fake fetch lifecycle record was created.
+- Pure DB execution and pure pool queue wait are unmeasured. `full_runtime_qa_complete=false`.
 
-## Production native 관측 (overlay, 미편입)
+## Production native observation (overlay, not merged)
 
-- `production-plugins-native-2026-09-15.json`, `production-upstreams-native-2026-09-15.json`: native Camofox bounded slice 관측. Raw 파일은 private이며 정확한 scope 확인이 pending이므로 `production_area_matrix`/`normalized_cells`에 편입하지 않고 별도 overlay로 기록한다.
-- Plugins: 33 rows / 20 unique item_id / PASS 15, PASS_TARGET_ONLY 4, BLOCKED 4, NOT_APPLICABLE 5, SKIPPED_WRITE 5 / writes 0 / measurement_blocked 4종 / unconfirmed 1(첫 Edit 클릭 미반응 — product bug 미확정).
-- Upstreams: 원시 212 rows / 44 unique item_id / PASS 88, SKIPPED_WRITE 94, BLOCKED 20, NOT_APPLICABLE 10 / writes 0. 이후 오프라인 대조에서 접미사 ID `UI-SRC-0D929B471D7A-name-edit`를 기존 이름 편집의 Escape 취소 변형으로 연결했다. 9개 쓰기 미실행 행과 원래 상태는 그대로다.
+- `production-plugins-native-2026-09-15.json`, `production-upstreams-native-2026-09-15.json`: native Camofox bounded slice observations. The raw files are private and exact scope confirmation is pending, so they are recorded as a separate overlay rather than merged into `production_area_matrix`/`normalized_cells`.
+- Plugins: 33 rows / 20 unique item_id / PASS 15, PASS_TARGET_ONLY 4, BLOCKED 4, NOT_APPLICABLE 5, SKIPPED_WRITE 5 / writes 0 / 4 kinds of measurement_blocked / 1 unconfirmed (first Edit click unresponsive — product bug not confirmed).
+- Upstreams: 212 raw rows / 44 unique item_id / PASS 88, SKIPPED_WRITE 94, BLOCKED 20, NOT_APPLICABLE 10 / writes 0. A later offline reconciliation linked the suffixed ID `UI-SRC-0D929B471D7A-name-edit` to the Escape-cancelled variant of the existing name edit. The 9 write-unexecuted rows and original status are unchanged.
 
-## Scope 외 production GET (분리 기록)
+## Out-of-scope production GETs (recorded separately)
 
-- `production-read-scope-deviation.json`: local-only 검증에 배정된 browser subtask가 production GET 5건을 실행했다. Write 0건.
-- GET `/admin/v1/auth/session` 404, `/admin/v1/status` 200, `/admin/v1/principals` 200(22건), `/admin/v1/upstreams` 200(9건), `/admin/v1/plugins/registry` 200(0건).
-- Local proof로도, historical production coverage로도, 부재로도 세지 않고 별도 기록한다.
+- `production-read-scope-deviation.json`: a browser subtask assigned to local-only verification executed 5 production GETs. 0 writes.
+- GET `/admin/v1/auth/session` 404, `/admin/v1/status` 200, `/admin/v1/principals` 200 (22 rows), `/admin/v1/upstreams` 200 (9 rows), `/admin/v1/plugins/registry` 200 (0 rows).
+- Recorded separately; counted neither as local proof, nor as historical production coverage, nor as absent.
 
-## 기존 제품 문제와 후속 승인 범위
+## Existing product issues and follow-up approval scope
 
-- `clearBaseURL`: 과거 미지원 동작을 별도 승인 후 로컬 후보에서 수정·검증했다. 운영 반영은 주장하지 않는다.
-- `SettingsApply`: 미지원 제공자의 버튼 활성화는 capability 표시로 수정했다. 지원 모드의 기존 응답 revision·expected_revision 처리·이력 생성 제한은 별도 미검증 사항이며 이번 capability 변경으로 해결됐다고 보지 않는다.
+- `clearBaseURL`: the past unsupported behavior was fixed and verified in the local candidate after separate approval. No production application is claimed.
+- `SettingsApply`: button enablement for unsupported providers was fixed via the capability display. The supported mode's existing response revision, `expected_revision` handling, and history creation limitations are separately unverified items and are not considered resolved by this capability change.
 
 ## Finalization gate (Main local, build/lint/test)
 
-- `finalization-gates/results.json`: rust-format, web-lint, web-typecheck, web-tests, inventory-check, recorder-syntax 전부 exit 0.
-- Main 보고 기준 web test 699, current library test 191, generator 433/170 + standard parse + counterproof, independent privacy scan 91 files 0 secret.
-- 이 gate는 build/lint/test 수준이며 runtime QA 완료가 아니다.
+- `finalization-gates/results.json`: rust-format, web-lint, web-typecheck, web-tests, inventory-check, recorder-syntax all exit 0.
+- Per Main's report: 699 web tests, 191 current library tests, generator 433/170 + standard parse + counterproof, independent privacy scan of 91 files with 0 secrets.
+- This gate is at the build/lint/test level and is not runtime QA completion.
 
 
-## 후속 승인·검증 overlay
+## Follow-up approval/verification overlay
 
-- 이 overlay 작성 시 source snapshot: 205 actions, 595 declared variant labels, 149 request occurrences. 후속 안전성 수정의 현재 labels는 아래 별도 overlay에 기록한다. runtime entity·page·poll 곱의 완전한 분모는 여전히 미확정이다.
-- Native source mapping: 보존된 245행 중 정식 ID 244행, 근거가 확인된 Escape 취소 별칭 1행. 원래 실행·측정 상태는 바꾸지 않았다.
-- `post-hold-reassessment/independent-page-oracle-check.json`: 로컬 PostgreSQL 한 페이지 탐색에서 사전 기대와 실제 DOM을 별도 비교하고 원본 PNG·종료된 window·서버 연결을 확인했다. 과거 열린 window나 유실 자료를 복구한 것은 아니다.
-- `post-hold-usage-status/verification.json`: `UPSTREAM-004` 사용량 표시와 `UPSTREAM-006` 오류 상태의 새 격리 SQLite 기능·상태 전이 증거. 운영 coverage나 모든 timing 필드 완료를 뜻하지 않는다.
-- `base-url-clear/verification.json`: 생략/명시적 null/URL 삼상태를 별도 승인 후 수정했다. 양 DB·HTTP·실제 Lifecycle dispatch 33개 회귀와 UI 저장·새 조회·새로고침을 확인했다.
-- `settings-apply-capability/verification.json`: backend 23개, Web 700개 및 실제 file-provider Save/Validate 뒤 Apply 차단을 확인했다. 해당 UI 관측 구간의 Apply 요청은 0건이다. 성공 metadata와 history 문제는 `preexisting-supported-apply-limit.json`에 별도 기록했다.
-- 마지막 검증 PR head는 `91cd5219bd9047d1339ff40e9aec11142867a36e`이며 11개 검사 성공, 조건부 1개 제외를 확인했다. PR #793은 draft이고 사용자 머지 보류가 유지된다. 이 값은 확인한 시점의 기록이며 자동으로 미래 head에 적용하지 않는다.
-- 후속 후보의 운영 활성화, 전체 운영 UI 행렬, 실제 비운영 OAuth 성공 경로, 순수 DB 실행·pool queue wait는 아직 충족되지 않았다. `runtime_complete=false`, `overall_pass=false`를 유지한다.
-- 사용자는 2026-09-16 비운영 OAuth 테스트 계정이 현재 없다고 확인했다. 실제 성공 경로는 차단 상태로 유지하며 운영 토큰·임의 계정·가짜 응답으로 대체하지 않는다. 이 답변으로 자격증명 접근이나 외부 호출이 승인된 것은 아니다.
+- Source snapshot at the time this overlay was written: 205 actions, 595 declared variant labels, 149 request occurrences. The current labels after the follow-up safety fixes are recorded in the separate overlay below. The complete denominator of the runtime entity·page·poll product remains undetermined.
+- Native source mapping: of the 245 preserved rows, 244 are canonical IDs and 1 is an Escape-cancel alias with confirmed basis. Original execution/measurement status was not changed.
+- `post-hold-reassessment/independent-page-oracle-check.json`: in a local PostgreSQL single-page navigation, prior expectations were compared against the actual DOM separately, and the original PNG, closed window, and server connection were verified. No past open window or lost data was recovered.
+- `post-hold-usage-status/verification.json`: new isolated SQLite functional/state-transition evidence for the `UPSTREAM-004` usage display and the `UPSTREAM-006` error state. Does not mean production coverage or completion of all timing fields.
+- `base-url-clear/verification.json`: the omitted/explicit-null/URL tri-state was fixed after separate approval. Verified 33 regressions across both DBs, HTTP, and real Lifecycle dispatch, plus UI save, fresh query, and reload.
+- `settings-apply-capability/verification.json`: verified 23 backend and 700 Web tests plus Apply blocking after real file-provider Save/Validate. Apply requests during that UI observation window: 0. Success metadata and history issues are recorded separately in `preexisting-supported-apply-limit.json`.
+- The last verified PR head is `91cd5219bd9047d1339ff40e9aec11142867a36e`, with 11 checks passing and 1 conditional exclusion confirmed. PR #793 is a draft and the user's merge hold remains. This value is a record of the checked point in time and does not automatically apply to future heads.
+- Production enablement of the follow-up candidate, the full production UI matrix, a real non-production OAuth success path, and pure DB execution/pool queue wait are still unmet. `runtime_complete=false` and `overall_pass=false` remain.
+- The user confirmed on 2026-09-16 that no non-production OAuth test account is currently available. The real success path remains blocked and is not substituted with a production token, arbitrary account, or fake response. This answer does not approve credential access or external calls.
 
-## 승인된 애플리케이션 안전성 수정 overlay
+## Approved application safety fix overlay
 
-- `application-safety/verification.json`과 `index.json`에 세 안전성 결함의 수정 전/후 자료를 연결했다. 과거 1,511개 관측 행·분류 계수·미해결 목록은 수정하거나 성공으로 다시 분류하지 않았다.
-- HTTP Base URL의 생략/null은 유지이며 명시적 `clear_base_url`만 초기화한다. 최종 브라우저에서 구 UI→새 서버의 무편집 저장 보존, 새 UI의 초기화, 새 UI→구 서버의 미확인 초기화 오류·편집 유지, Audit의 숨겨진 관리자 작업 표시를 확인했다. 원본 `base-url-clear`의 null 초기화는 이전 계약의 검증 이력이다.
-- 두 DB의 Audit 관리자 조건은 LIMIT 전에 적용되며 일반 API의 전체 기록 기본값은 유지된다. 최종 인덱스의 6개 조회 결과·generic plan·실제 migration runner와 읽기/쓰기 비용을 검증했다. 인덱스의 쓰기·WAL 비용 증가를 숨기지 않으며 큰 운영 PG에는 별도 승인된 온라인 사전 준비가 필요하다.
-- 현재 source는 205 actions / 597 declared variant labels / 149 request occurrences / 115 API endpoints / 433 inventory rows다. 실행 행렬 분모나 운영 완료율이 아니다.
-- 최종 로컬 검사는 Rust 112개, Web 706개, 타입 검사·빌드·영향 Rust Clippy·formatter·inventory check·표준 YAML 파싱이다. 이후 CI는 각 실제 PR head에 대해 별도로 확인하며 이 로컬 결과를 운영 전수 QA나 미래 head CI에 대신 쓰지 않는다.
-- 기존 머지 보류·운영 계측/배포 승인·OAuth 테스트 계정·전체 운영 행렬·순수 DB/queue wait 차단은 유지한다.
+- `application-safety/verification.json` and `index.json` link before/after materials for the three safety defects. The past 1,511 observation rows, classification coefficients, and unresolved list were not modified or reclassified as success.
+- HTTP Base URL omission/null is preserved; only explicit `clear_base_url` clears it. In the final browser run, verified: old UI → new server no-edit save preservation, new UI clear, new UI → old server unconfirmed-clear error with editing retained, and Audit display of previously hidden admin actions. The original `base-url-clear` null clearing is verification history of the earlier contract.
+- The Audit admin condition in both DBs is applied before LIMIT, and the general API's all-records default is preserved. Verified the final indexes' 6 query results, generic plan, real migration runner, and read/write costs. The index write/WAL cost increase is not hidden; large production PG requires separately approved online pre-preparation.
+- Current source: 205 actions / 597 declared variant labels / 149 request occurrences / 115 API endpoints / 433 inventory rows. Not an execution matrix denominator or production completion rate.
+- Final local checks: 112 Rust, 706 Web, typecheck, build, affected-Rust Clippy, formatter, inventory check, and standard YAML parsing. Subsequent CI is checked separately for each actual PR head; these local results are not used in place of full production QA or future head CI.
+- The existing merge hold, production instrumentation/deployment approval, OAuth test account, full production matrix, and pure DB/queue wait blocks remain in place.

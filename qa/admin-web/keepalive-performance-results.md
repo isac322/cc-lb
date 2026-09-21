@@ -1,24 +1,24 @@
-# Cache Keepalive 읽기 성능·동등성 검증 결과
+# Cache Keepalive Read Performance/Equivalence Verification Results
 
-- 기록일: 2026-09-15 UTC
-- 검증 대상: origin/master `4ed7cc8c` latest-base integration; historical candidate short head `9c420`은 비교 자료로 유지
-- 현재 상태: latest-base 57/57 QA PASS, browser 92/92 PASS, Rust 724 PASS, Admin Web 692 PASS
-- PR/CI 상태: PR 미생성, CI pending
-- 배포 상태: 생산 배포 없음
+- Recorded: 2026-09-15 UTC
+- Verification target: origin/master `4ed7cc8c` latest-base integration; historical candidate short head `9c420` retained as comparison material
+- Current status: latest-base 57/57 QA PASS, browser 92/92 PASS, Rust 724 PASS, Admin Web 692 PASS
+- PR/CI status: PR not created, CI pending
+- Deployment status: no production deployment
 
-## 1. 결론과 해석 범위
+## 1. Conclusion and interpretation scope
 
-Latest-base integration은 Principal Cache Keepalive summary, list, detail의 응답 계약을 유지하면서 대규모 decision history를 매 요청마다 전부 materialize하던 읽기 경로를 제거했다. 24h/7d cursor에는 첫 페이지의 시간 범위를 고정하는 `horizon` tag를 추가했다.
+The latest-base integration removed the read path that materialized the entire large decision history on every request while preserving the response contract of the Principal Cache Keepalive summary, list, and detail. A `horizon` tag was added to the 24h/7d cursor to fix the first page's time range.
 
-변경 없는 응답은 baseline과 exact하게 일치했다. Cursor는 기존 5개 필드가 exact했고 candidate에 `horizon: "24h"|"7d"|"all"` 필드만 추가됐다. 승인된 동작 차이는 시간 경과 후 24h/7d page 2가 baseline에서 HTTP 400이던 버그를 candidate에서 HTTP 200으로 수정한 것뿐이다.
+Unchanged responses matched the baseline exactly. The cursor's existing 5 fields were exact, and only a `horizon: "24h"|"7d"|"all"` field was added in the candidate. The only approved behavior difference is that 24h/7d page 2 after time elapsed, which was HTTP 400 on baseline, is fixed to HTTP 200 on the candidate.
 
-Origin/master `4ed7cc8c` 위 통합, PostgreSQL `0118`과 SQLite `0086` migration 번호 조정, Rust/Admin Web/API/browser/native/proxy latest-base 검증은 완료됐다. Application QA는 57 PASS, 0 FAIL, 0 BLOCKED, 0 NOT_RUN이다. PR은 아직 생성되지 않았으므로 PR CI는 통과 상태가 아니라 pending이다. Historical `9c420` 결과와 artifact는 아래 별도 구역에 그대로 남긴다.
+Integration on origin/master `4ed7cc8c`, PostgreSQL `0118` and SQLite `0086` migration number adjustment, and Rust/Admin Web/API/browser/native/proxy latest-base verification are complete. Application QA is 57 PASS, 0 FAIL, 0 BLOCKED, 0 NOT_RUN. Because the PR has not been created yet, PR CI is pending, not passed. Historical `9c420` results and artifacts are left as-is in a separate section below.
 
-## 2. 기능 동등성과 회귀 결과
+## 2. Functional equivalence and regression results
 
-### 2.1 57개 QA 상태
+### 2.1 57 QA statuses
 
-| 묶음 | ID | Historical 결과 | Latest-base 결과 |
+| Group | ID | Historical result | Latest-base result |
 |---|---|---:|---:|
 | Storage | ST-01..ST-16 | 16/16 PASS | 16/16 PASS |
 | API/semantic | SEM-01..SEM-12 | 12/12 PASS | 12/12 PASS |
@@ -26,38 +26,38 @@ Origin/master `4ed7cc8c` 위 통합, PostgreSQL `0118`과 SQLite `0086` migratio
 | Admin Web | UI-01..UI-12 | 12/12 PASS | 12/12 PASS |
 | Performance/evidence | PERF-01..PERF-06 | 6/6 PASS | 6/6 PASS |
 | Transition/E2E | FLOW-01..FLOW-08 | 8/8 PASS | 8/8 PASS |
-| 합계 | 57 | 57/57 PASS | 57/57 PASS |
+| Total | 57 | 57/57 PASS | 57/57 PASS |
 
-행별 명령, oracle, evidence anchor, 현재 상태는 `qa/admin-web/keepalive-performance-regression.md`에 있다.
+Per-row commands, oracles, evidence anchors, and current status are in `qa/admin-web/keepalive-performance-regression.md`.
 
-### 2.2 실제 test 수집 경로
+### 2.2 Actual test collection paths
 
-Rust test는 각 crate의 실제 target과 module path로 수집했다.
+Rust tests were collected by each crate's actual target and module path.
 
 - SQLite storage: `cargo test -p cc-lb-storage-sqlite --test integration 'cache_keepalive_session_reads' -- --nocapture`
 - PostgreSQL storage: `cargo test -p cc-lb-storage-postgres --test integration 'cache_keepalive_session_reads' -- --nocapture`
-- Admin HTTP/cursor: `cargo test -p cc-lb-admin --test integration 'cache_keepalive_contracts::read_equivalence' -- --nocapture`와 `cache_keepalive_contracts::cursor_window`
+- Admin HTTP/cursor: `cargo test -p cc-lb-admin --test integration 'cache_keepalive_contracts::read_equivalence' -- --nocapture` and `cache_keepalive_contracts::cursor_window`
 - Admin view: `cargo test -p cc-lb-admin --lib 'cache_keepalive_view::tests' -- --nocapture`
-- Browser: `crates/cc-lb-admin/web/qa/keepalive-performance-regression.spec.ts`, 실제 compiled server와 Vite proxy를 사용하는 opt-in Playwright config
+- Browser: `crates/cc-lb-admin/web/qa/keepalive-performance-regression.spec.ts`, an opt-in Playwright config using the real compiled server and Vite proxy
 
-`pnl_converter_invalid_input_is_http_400`은 public parent test 하나가 동일 integration binary의 exact private child 실행을 확인한다. Private child를 별도 test나 추가 PASS로 세지 않았다.
+`pnl_converter_invalid_input_is_http_400` is one public parent test that verifies the exact private child execution in the same integration binary. The private child was not counted as a separate test or an extra PASS.
 
-Latest-base 전체 Rust 기록은 `artifact://704`의 724 passed, 7 pre-existing ignored이며 mapper 경로를 포함한다. Clippy `--all-targets -D warnings`도 PASS했다. Admin Web은 72 test files, 692 tests와 build/lint/typecheck가 모두 PASS했다. Latest-base browser 기록은 `/data/tmp/cc-lb-keepalive-qa-lhetgoq3/pr-evidence/{sqlite,postgres}-{baseline,candidate}/browser-*.jsonl`의 dataset별 23 case, 합계 92/92 PASS다. Historical Rust `artifact://604`의 713 passed/7 skipped와 historical browser 92/92도 비교 자료로 유지한다.
+The latest-base full Rust record in `artifact://704` is 724 passed, 7 pre-existing ignored, including the mapper path. Clippy `--all-targets -D warnings` also passed. Admin Web passed 72 test files, 692 tests, and build/lint/typecheck. The latest-base browser record is 23 cases per dataset in `/data/tmp/cc-lb-keepalive-qa-lhetgoq3/pr-evidence/{sqlite,postgres}-{baseline,candidate}/browser-*.jsonl`, totaling 92/92 PASS. Historical Rust `artifact://604` (713 passed/7 skipped) and historical browser 92/92 are also retained as comparison material.
 
-### 2.3 응답 계약
+### 2.3 Response contract
 
-- `FILTERS`: 두 엔진 모두 21개 horizon/filter 조합이 baseline과 equal이다.
-- `SEMANTIC`: 두 엔진 모두 15개 대표 semantic request가 equal이다.
-- Semantic decoded original-field SHA는 SQLite `c18457839b91d5174db9e011789d2f1597591a3892b8590659ef844b593267e9`, PostgreSQL `b95e3c179690b8e9b526d9818de9478e611295fbd2c84532b2de1229432750a4`다.
-- Baseline original cursor SHA는 SQLite semantic `70ec17f468a2bc310ebd703251ca585e29eb534e86a1e78f6b60fca5889abcc2`, PostgreSQL semantic `6e7b66667331385331460481bc9684ce4475b02b3a4bd04128c889c29f4d5a0d`다.
-- Candidate cursor chain은 5 page를 유지했고 `24h`, `7d`, `all` tag를 확인했다.
-- 24h time advance는 SQLite/PostgreSQL 모두 baseline 400, candidate 200이며 frozen `horizon_start_ms`는 각각 `1789355647000`, `1789355649000`이다.
-- 7d time advance는 SQLite/PostgreSQL 모두 baseline 400, candidate 200이며 frozen `horizon_start_ms`는 각각 `1788837247000`, `1788837249000`이다.
-- Selected row, 현재 summary session/turn, 현재 page row의 corruption은 기존 오류 mapping을 유지한다. 좁은 query가 더 이상 읽지 않는 unrelated 과거 corrupt decision 때문에 전체 요청이 실패하던 부수 효과는 보존하지 않는다. 이것은 `SEM-12`의 승인된 scope 차이다.
+- `FILTERS`: all 21 horizon/filter combinations equal baseline on both engines.
+- `SEMANTIC`: all 15 representative semantic requests equal on both engines.
+- Semantic decoded original-field SHA: SQLite `c18457839b91d5174db9e011789d2f1597591a3892b8590659ef844b593267e9`, PostgreSQL `b95e3c179690b8e9b526d9818de9478e611295fbd2c84532b2de1229432750a4`.
+- Baseline original cursor SHA: SQLite semantic `70ec17f468a2bc310ebd703251ca585e29eb534e86a1e78f6b60fca5889abcc2`, PostgreSQL semantic `6e7b66667331385331460481bc9684ce4475b02b3a4bd04128c889c29f4d5a0d`.
+- The candidate cursor chain maintained 5 pages and the `24h`, `7d`, `all` tags were confirmed.
+- 24h time advance: baseline 400, candidate 200 on both SQLite/PostgreSQL; frozen `horizon_start_ms` is `1789355647000` and `1789355649000` respectively.
+- 7d time advance: baseline 400, candidate 200 on both SQLite/PostgreSQL; frozen `horizon_start_ms` is `1788837247000` and `1788837249000` respectively.
+- Corruption of the selected row, the current summary session/turn, and the current page row preserves the existing error mapping. The side effect where an unrelated past corrupt decision that the narrower query no longer reads caused the entire request to fail is not preserved. This is the approved scope difference of `SEM-12`.
 
-### 2.4 Latest-base 성능 결과
+### 2.4 Latest-base performance results
 
-아래 수치는 `/data/tmp/cc-lb-keepalive-qa-lhetgoq3/pr-evidence/performance-{sqlite,postgres}.json`에서 직접 파싱했다. 각 percentile 행은 `n=30`이며 p50, p95, max를 반올림 없이 파일 값 그대로 옮겼다. 실행 바이너리는 snapshot build metadata가 가리키는 개발용 debug build다. 첫 요청은 별도 순서 표지일 뿐 OS/DB cache를 비운 cold-cache 증거가 아니다.
+The figures below were parsed directly from `/data/tmp/cc-lb-keepalive-qa-lhetgoq3/pr-evidence/performance-{sqlite,postgres}.json`. Each percentile row has `n=30`, and p50, p95, max were copied from the file values without rounding. The executed binaries are development debug builds per the snapshot build metadata. The first request is only a separate ordering marker, not cold-cache evidence with OS/DB caches emptied.
 
 #### PERF-01 summary, D=100,000
 
@@ -98,19 +98,19 @@ Latest-base 전체 Rust 기록은 `artifact://704`의 724 passed, 7 pre-existing
 | PostgreSQL | baseline | 30 | 130.351 | 137.863 | 141.215 |
 | PostgreSQL | candidate | 30 | 128.114 | 134.717 | 137.216 |
 
-PERF-02는 1,205 rows를 25 pages로 순회했고 ordered ID SHA는 두 엔진 모두 `a0da2c69ead37b119d24b062ace4f162559a28028565a1dae380e7d89f53453a`다. SQLite first baseline/candidate는 8735.984/25.544ms, candidate middle/terminal은 19.069/18.911ms다. PostgreSQL first baseline/candidate는 2694.921/21.281ms, candidate middle/terminal은 18.139/20.071ms다.
+PERF-02 traversed 1,205 rows over 25 pages; the ordered ID SHA is `a0da2c69ead37b119d24b062ace4f162559a28028565a1dae380e7d89f53453a` on both engines. SQLite first baseline/candidate is 8735.984/25.544ms; candidate middle/terminal is 19.069/18.911ms. PostgreSQL first baseline/candidate is 2694.921/21.281ms; candidate middle/terminal is 18.139/20.071ms.
 
-## 3. Historical 성능 결과 (`9c420`)
+## 3. Historical performance results (`9c420`)
 
-모든 비교는 같은 host와 engine에서 동일 fixture와 빌드 설정을 사용한 개발용 debug 바이너리로 실행했다. 첫 요청은 별도 기록했지만 OS/DB cache를 강제로 비운 cold-cache 실험은 아니다. 이 결과는 release 바이너리의 절대 지연이나 provider·생산 runtime 전체의 개선율을 뜻하지 않는다.
+All comparisons ran as development debug binaries using the same fixture and build settings on the same host and engine. The first request was recorded separately, but this was not a cold-cache experiment that forcibly emptied OS/DB caches. These results do not represent the absolute latency of a release binary or the improvement rate across providers or the production runtime as a whole.
 
-이 절의 표는 historical `9c420` 실행값이다. Latest-base 값은 §2.4를 사용한다.
+The tables in this section are historical `9c420` run values. For latest-base values, use §2.4.
 
-Fixture는 D-scale에 old decisions 100,000개, 전체 decisions 100,750개를 포함한다. S/T scale은 sessions 2,000개와 session당 turns 5개, 즉 대상 turns 10,000개다. Manifest 전체 turns 10,074개에는 다른 fixture의 turn도 포함된다.
+The fixture includes 100,000 old decisions and 100,750 total decisions at D-scale. S/T scale has 2,000 sessions and 5 turns per session, i.e. 10,000 target turns. The manifest's total 10,074 turns also include turns from other fixtures.
 
 ### 3.1 PERF-01 summary, D=100,000
 
-각 행은 반복 sample `n=30`의 wall time이다. 첫 sample은 phase별 1회 별도로 raw record에 남겼으며 아래 percentile에는 포함하지 않았다. Raw record의 cold/warm label은 요청 순서 구분이며 실제 DB cache reset 증거가 아니다.
+Each row is the wall time of `n=30` repeated samples. The first sample was recorded once per phase separately in the raw record and is not included in the percentiles below. The cold/warm labels in the raw record distinguish request order; they are not evidence of an actual DB cache reset.
 
 | Engine | Phase | n | p50 ms | p95 ms | max ms |
 |---|---|---:|---:|---:|---:|
@@ -119,7 +119,7 @@ Fixture는 D-scale에 old decisions 100,000개, 전체 decisions 100,750개를 �
 | PostgreSQL | baseline | 30 | 3828.495 | 6260.857 | 7066.382 |
 | PostgreSQL | candidate | 30 | 21.611 | 38.391 | 45.549 |
 
-두 엔진 모두 fixed-snapshot body가 exact했다.
+The fixed-snapshot body was exact on both engines.
 
 ### 3.2 PERF-02 list pagination
 
@@ -128,11 +128,11 @@ Fixture는 D-scale에 old decisions 100,000개, 전체 decisions 100,750개를 �
 | SQLite | 7924.494 | 19.387 | 17.706 | 17.020 | 1205 | 25 |
 | PostgreSQL | 4990.123 | 26.028 | 16.987 | 15.288 | 1205 | 25 |
 
-두 엔진의 ordered ID SHA는 `a0da2c69ead37b119d24b062ace4f162559a28028565a1dae380e7d89f53453a`로 같았다. Candidate는 wire `next_cursor=null`까지 25 page를 순회했다. Page 2의 baseline 400과 candidate 200은 승인된 cursor bug delta다. Candidate response hash가 baseline과 달라지는 list record는 새 cursor의 `horizon` 필드 때문이다. Decoded original 5개 필드는 exact하다.
+The ordered ID SHA was identical on both engines: `a0da2c69ead37b119d24b062ace4f162559a28028565a1dae380e7d89f53453a`. The candidate traversed 25 pages until wire `next_cursor=null`. Baseline 400 versus candidate 200 on page 2 is the approved cursor bug delta. The only list records where the candidate response hash differs from baseline are due to the new cursor's `horizon` field. The decoded original 5 fields are exact.
 
 ### 3.3 PERF-03 direct detail, D=100,000
 
-각 detail case와 phase의 warm sample은 `n=30`이다.
+Warm samples for each detail case and phase are `n=30`.
 
 | Engine | Case | Phase | n | p50 ms | p95 ms | max ms |
 |---|---|---|---:|---:|---:|---:|
@@ -155,7 +155,7 @@ Fixture는 D-scale에 old decisions 100,000개, 전체 decisions 100,750개를 �
 
 ### 3.4 S/T scale
 
-S/T scale은 D=100,000 제거 효과와 별개로 session/turn 처리 비용을 확인한다. Candidate가 이 경로를 완전한 상수 시간으로 바꿨다는 주장은 하지 않는다.
+S/T scale checks session/turn processing cost separately from the D=100,000 removal effect. No claim is made that the candidate made this path fully constant-time.
 
 | Engine | Phase | n | p50 ms | p95 ms | max ms |
 |---|---|---:|---:|---:|---:|
@@ -164,9 +164,9 @@ S/T scale은 D=100,000 제거 효과와 별개로 session/turn 처리 비용을 
 | PostgreSQL | baseline | 30 | 131.205 | 141.248 | 142.286 |
 | PostgreSQL | candidate | 30 | 127.868 | 138.382 | 139.790 |
 
-### 3.5 세 읽기 동시 요청
+### 3.5 Three concurrent reads
 
-Summary, all-horizon list, session detail을 concurrency 3으로 동시에 요청했다.
+Summary, all-horizon list, and session detail were requested concurrently at concurrency 3.
 
 | Engine | Phase | Batch wall ms | Summary ms | List ms | Detail ms | HTTP |
 |---|---|---:|---:|---:|---:|---|
@@ -175,58 +175,58 @@ Summary, all-horizon list, session detail을 concurrency 3으로 동시에 요�
 | PostgreSQL | baseline | 5535.156 | 5397.065 | 5534.599 | 5196.271 | 200/200/200 |
 | PostgreSQL | candidate | 25.795 | 18.682 | 25.183 | 5.131 | 200/200/200 |
 
-Summary와 detail body SHA는 baseline/candidate가 exact했다. List는 candidate cursor의 승인된 `horizon` 추가 때문에 raw body SHA가 다르다.
+Summary and detail body SHAs were exact between baseline/candidate. The list raw body SHA differs because of the approved `horizon` addition in the candidate cursor.
 
-## 4. Planner와 index 판단
+## 4. Planner and index judgment
 
-Reviewed plan manifest에는 실제 124개 artifact가 있다. 각 artifact의 source path, source file SHA, SQL constant SHA가 비어 있지 않고 source lock 검증을 통과했다. Plan tree는 root 한 단계만 보지 않고 중첩 node까지 수집했다.
+The reviewed plan manifest contains 124 actual artifacts. Each artifact's source path, source file SHA, and SQL constant SHA are non-empty and passed source-lock verification. The plan tree collected nested nodes, not just the root level.
 
-PostgreSQL D-scale late-page plan에서 session과 decision index condition은 모두 `principal_id`, horizon lower bound, cursor timestamp upper bound를 index range에 포함했다. 대표 plan의 execution time은 0.135ms였다. Buffer는 shared hit 42 blocks, shared read 0 blocks, physical read 0 blocks였다. 이것은 warm-cache hit 기록이며 디스크 read가 42 blocks였다는 뜻이 아니다. SQLite `EXPLAIN QUERY PLAN`과 Python SQLite API는 cache hit와 physical read block 수를 제공하지 않으므로 같은 수치를 만들지 않았다.
+In the PostgreSQL D-scale late-page plan, both the session and decision index conditions include `principal_id`, the horizon lower bound, and the cursor timestamp upper bound in the index range. The representative plan's execution time was 0.135ms. Buffers were 42 shared hit blocks, 0 shared read blocks, 0 physical read blocks. This is a warm-cache hit record; it does not mean 42 blocks were read from disk. SQLite `EXPLAIN QUERY PLAN` and the Python SQLite API do not provide cache hit or physical read block counts, so the same figures were not produced.
 
-일부 plan에는 bounded result에 대한 sort가 남아 있다. PostgreSQL D-scale summary session plan도 실제 861 session row를 처리했다. 따라서 결과를 모든 source와 모든 scale에서 완전한 상수 시간이라고 표현하지 않는다.
+Some plans retain a sort over the bounded result. The PostgreSQL D-scale summary session plan also processed 861 actual session rows. Therefore the result is not described as fully constant-time across all sources and all scales.
 
-기존 index를 drop하는 제안은 거부했다. 정책은 additive index만 허용하며 raw row backfill, 삭제, column 의미 변경, 강제 `COLLATE C`를 허용하지 않는다. Historical evidence에서는 Cache Keepalive index가 PostgreSQL `0117`, SQLite `0085`였지만 최신 base가 그 번호를 사용하므로 최종 통합명은 `0118`/`0086`이어야 한다.
+The proposal to drop existing indexes was rejected. The policy allows only additive indexes; raw row backfill, deletion, column semantics changes, and forced `COLLATE C` are not allowed. In the historical evidence the Cache Keepalive indexes were PostgreSQL `0117` and SQLite `0085`, but because the latest base uses those numbers, the final integration names must be `0118`/`0086`.
 
-Disposable PostgreSQL rehearsal은 decision rows 302,250개와 decision table 103,628,800 bytes, 즉 98.83 MiB에서 exact CREATE INDEX 두 문장을 측정했다. 측정값은 3.357ms와 217.322ms였다. 관찰 lock은 각 대상 table의 `ShareLock`과 `AccessShareLock`이며 모두 granted였다. Transaction은 rollback했다. 이 결과로 생산 배포 시간이나 live-writer 무중단을 주장하지 않는다.
+The disposable PostgreSQL rehearsal measured the two exact CREATE INDEX statements on 302,250 decision rows and a 103,628,800-byte decision table, i.e. 98.83 MiB. The measured values were 3.357ms and 217.322ms. The observed locks were `ShareLock` and `AccessShareLock` on each target table, all granted. The transaction was rolled back. This result does not claim production deployment time or zero-downtime for live writers.
 
 ## 5. Browser, native visibility, sanitizer
 
-Latest-base real-browser matrix는 4개 dataset에서 각각 23 case를 통과했다. 합계 92/92다. Admin Web 제품 코드는 바꾸지 않았고 polling 5초, AbortSignal 미전달, query-key 격리, drawer/detail 동작을 baseline과 비교했다.
+The latest-base real-browser matrix passed 23 cases on each of 4 datasets, totaling 92/92. Admin Web product code was not changed; 5-second polling, no AbortSignal propagation, query-key isolation, and drawer/detail behavior were compared against baseline.
 
-Latest-base PERF-06은 page script로 `visibilityState`를 바꾼 DOM probe가 아니다. 기존 raw Chromium에 CDP로 연결하고 blank control tab을 앞으로 가져오는 `native_tab_switch` 방식이다.
+Latest-base PERF-06 is not a DOM probe that changes `visibilityState` via page script. It connects to the existing raw Chromium over CDP and brings a blank control tab to the front — the `native_tab_switch` method.
 
-- 상태: PASS
-- 전체 duration: 846,006ms
-- hidden steady: 600,002ms
-- target: SQLite/PostgreSQL × baseline/candidate 4개
-- hidden 이후 새 GET: 네 target 모두 0건
-- manual DOM cross-client match: before와 after 모두 true
-- embedded raw records: 209개, record ID unique
-- harness가 만든 tab 5/5 cleanup, Playwright CDP connection 종료, raw browser process 미종료
-- cleanup failures: 없음
+- Status: PASS
+- Total duration: 846,006ms
+- Hidden steady: 600,002ms
+- Targets: SQLite/PostgreSQL × baseline/candidate, 4 total
+- New GETs after hidden: 0 on all four targets
+- Manual DOM cross-client match: true both before and after
+- Embedded raw records: 209, unique record IDs
+- Harness-created tabs cleaned up 5/5, Playwright CDP connection closed, raw browser process not terminated
+- Cleanup failures: none
 
-Latest-base fault injection은 `pr-evidence/native-capture-negative.json`에 `status: FAIL`, `native network evidence capture failed`, Playwright connection 종료, raw browser process 미종료, `cleanup_failures=[]`를 기록했다. 실행은 exit 1이었고 transport-closed 경로를 정상 PASS로 오인하지 않았다.
+Latest-base fault injection recorded `status: FAIL`, `native network evidence capture failed`, Playwright connection closed, raw browser process not terminated, and `cleanup_failures=[]` in `pr-evidence/native-capture-negative.json`. The run exited 1 and did not mistake the transport-closed path for a normal PASS.
 
-Historical v5 sanitizer 결과도 유지한다. Token source가 없거나 빈 경우 각각 exit 2로 실패했고, 유효 token에서는 exit 0, 치환 marker 잔존 false, 결과 permission `0600`을 확인했다.
+The historical v5 sanitizer results are also retained. Missing or empty token sources each failed with exit 2; with a valid token, exit 0, no remaining replacement markers, and result permission `0600` were confirmed.
 
-## 6. 독립 검토 지적과 처분
+## 6. Independent review findings and dispositions
 
-| 지적 | 처분 |
+| Finding | Disposition |
 |---|---|
-| Cursor upper bound가 planner evidence에서 실제 index range인지 불명확 | Source-locked deep plan annotation을 추가하고 late-page session/decision의 `<= cursor timestamp` index condition을 raw plan에서 확인했다. |
-| Trace sanitizer가 token 부재를 성공으로 처리할 수 있음 | Missing/empty token을 exit 2로 fail closed하고 valid-token redaction과 잔존 marker 검사를 분리했다. |
-| DOM visibility probe를 native hidden-tab 증거로 오인 | DOM probe는 UI-11로 제한하고 PERF-06은 실제 `native_tab_switch` 600초 run으로 분리했다. |
-| 문서의 test target/module path가 실제 수집 경로와 다를 수 있음 | `tests/all.rs` integration target과 실제 module path를 기록했다. |
-| Overflow private child가 별도 test로 오인되거나 누락될 수 있음 | Public parent 하나가 exact private child를 실행하고 `1 passed`를 확인한다. Child는 별도 PASS로 세지 않는다. |
-| 기존 index drop으로 migration 위험을 줄이자는 제안 | 거부했다. Additive policy를 유지하고 latest-base 번호만 `0118`/`0086`으로 조정한다. |
+| Unclear whether the cursor upper bound is an actual index range in planner evidence | Added source-locked deep plan annotation and confirmed the `<= cursor timestamp` index condition for late-page session/decision in the raw plan. |
+| Trace sanitizer could treat a missing token as success | Missing/empty token fails closed with exit 2; valid-token redaction and residual-marker checks were separated. |
+| DOM visibility probe could be mistaken for native hidden-tab evidence | The DOM probe is limited to UI-11; PERF-06 was separated into a real `native_tab_switch` 600-second run. |
+| Documented test target/module path could differ from the actual collection path | Recorded the `tests/all.rs` integration target and the actual module path. |
+| Overflow private child could be mistaken for a separate test or omitted | One public parent executes the exact private child and confirms `1 passed`. The child is not counted as a separate PASS. |
+| Proposal to drop existing indexes to reduce migration risk | Rejected. The additive policy is kept; only the latest-base numbers were adjusted to `0118`/`0086`. |
 
-Historical source와 evidence에 대한 지적은 반영됐다. Latest-base 통합본의 재실행과 문서 반영은 완료됐고, PR 생성과 PR CI만 pending이다.
+Findings on historical source and evidence were incorporated. Re-execution and documentation of the latest-base integration are complete; only PR creation and PR CI are pending.
 
-## 7. 재현 manifest와 raw evidence
+## 7. Reproduction manifest and raw evidence
 
-Historical worktree short head는 `9c420`이다. Evidence manifest에는 full 40-character Git commit이 없으므로 이를 추정하지 않는다. 최신 통합 base는 `4ed7cc8c`다.
+The historical worktree short head is `9c420`. The evidence manifest has no full 40-character Git commit, so it is not inferred. The latest integration base is `4ed7cc8c`.
 
-### 7.1 Binary와 fixture
+### 7.1 Binary and fixture
 
 | Artifact | SHA-256 |
 |---|---|
@@ -234,7 +234,7 @@ Historical worktree short head는 `9c420`이다. Evidence manifest에는 full 40
 | `/data/tmp/cc-lb-keepalive-qa-lhetgoq3/cc-lb-candidate` | `b2eac6afd968ba2e50fb283f8e4838320e9663f40db4f36a7c1e61419850dfa8` |
 | `/data/tmp/cc-lb-keepalive-qa-lhetgoq3/fixture-manifest-v5.json` | `5f211ebb11bba581db798eddab58157891a623d760d0e59210fc12505644ae08` |
 
-Native와 plan capture 전에 사용한 manifest SHA는 `72b0e70627522486fa1d6c4b90c0bbadc1f0e16be742561e9661a62ed8e58b8b`다. Reviewed browser 재seed 후 manifest file SHA는 위 표의 `5f211e...`로 바뀌었지만 logical fixture SHA는 네 dataset 모두 `feb5749814321581d957d8fc8bddd182ddc645e614f4d2d12f1b66b3c03ad341`로 같다.
+The manifest SHA used before native and plan capture is `72b0e70627522486fa1d6c4b90c0bbadc1f0e16be742561e9661a62ed8e58b8b`. After the reviewed-browser reseed, the manifest file SHA changed to `5f211e...` in the table above, but the logical fixture SHA is identical across all four datasets: `feb5749814321581d957d8fc8bddd182ddc645e614f4d2d12f1b66b3c03ad341`.
 
 ### 7.2 API, planner, native
 
@@ -265,7 +265,7 @@ Native와 plan capture 전에 사용한 manifest SHA는 `72b0e70627522486fa1d6c4
 
 ### 7.4 Latest-base `4ed7cc8c` raw evidence
 
-Latest-base 실행은 `/data/tmp/cc-lb-keepalive-qa-lhetgoq3/pr-evidence` 아래에 있다. Binary snapshot build metadata는 두 바이너리를 개발용 debug build로 기록한다.
+Latest-base runs are under `/data/tmp/cc-lb-keepalive-qa-lhetgoq3/pr-evidence`. Binary snapshot build metadata records both binaries as development debug builds.
 
 | Artifact | Raw records | SHA-256 |
 |---|---:|---|
@@ -289,16 +289,16 @@ Latest-base 실행은 `/data/tmp/cc-lb-keepalive-qa-lhetgoq3/pr-evidence` 아래
 | `pr-evidence/proxy-smoke.json` | summary | `c237728025b6f2a11fe760f3d3ff2a786bf7c965695f715f3913ce4bae036936` |
 | `pr-evidence/credential-scan.json` | 227 files / 92 trace ZIPs | `fa4d7daf0e89b47dd719372cc3bb17821356eadcb4292f8e0d11e8a299b05e53` |
 
-Browser actual-stack manifests use fixture SHA `f7a84dfda4d8b499f235749d3f1becd4a03f5a0bc1aabfcb0d665c07efc27a33` for all four datasets and record live request clock separately from fixture anchor `1789440613000`.
+Browser actual-stack manifests use fixture SHA `f7a84dfda4d8b499f235749d3f1becd4a03f5a0bc1aabfcb0d665c07efc27a33` for all four datasets and record the live request clock separately from fixture anchor `1789440613000`.
 
-## 8. 배포 및 남은 gate
+## 8. Deployment and remaining gates
 
-Latest-base loopback smoke는 real client → proxy `54471` → fake upstream `19080` 요청 HTTP 200, credential revoke API HTTP 200, 같은 key의 revoke 이후 요청 HTTP 401을 기록했다. `production_calls=0`이다. Credential scan은 227 files와 92 trace ZIPs에서 actual fixture credential match 0건을 확인했다.
+The latest-base loopback smoke recorded HTTP 200 for a real client → proxy `54471` → fake upstream `19080` request, HTTP 200 for the credential revoke API, and HTTP 401 for a request after revoking the same key. `production_calls=0`. The credential scan confirmed 0 actual fixture credential matches across 227 files and 92 trace ZIPs.
 
-남은 gate는 다음과 같다.
+The remaining gates are:
 
-1. Main이 이 두 문서를 하나의 source로 확인하고 이번 성능 변경 23개 파일만 final commit한다.
-2. PR을 생성한다.
-3. 생성된 PR의 CI를 실행하고 결과를 확인한다.
+1. Main confirms these two documents as a single source and makes the final commit of only the 23 files in this performance change.
+2. Create the PR.
+3. Run CI on the created PR and check the result.
 
-현재 결과에는 production deployment, merge, PR 생성, PR CI PASS 주장이 포함되지 않는다. Application latest-base 검증은 PASS지만 PR은 아직 생성되지 않았고 CI는 pending이다.
+The current results include no claim of production deployment, merge, PR creation, or PR CI PASS. Application latest-base verification is PASS, but the PR has not been created and CI is pending.
