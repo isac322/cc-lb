@@ -13,7 +13,8 @@ use cc_lb_oauth_protocol::{
 use cc_lb_scheduler::error::{Result, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
-    OAuthRefreshConfig, OAuthRefreshJobHandler, OAuthRefreshUpstreams, RefreshedOAuthTokens,
+    OAuthRefreshConfig, OAuthRefreshJobHandler, OAuthRefreshUpstreams, RefreshOutcome,
+    RefreshedOAuthTokens,
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerBackend};
@@ -122,7 +123,7 @@ async fn refresh_tokens(
     aead: Arc<AeadService>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
     upstream: UpstreamRecord,
-) -> Result<RefreshedOAuthTokens> {
+) -> Result<RefreshOutcome> {
     let previous = upstream
         .oauth_credentials
         .as_ref()
@@ -153,14 +154,15 @@ async fn refresh_tokens(
             expires_at_unix_secs,
             refresh_token_expires_at_unix_secs: None,
             scopes: refreshed.scopes,
+            never_refresh: false,
         },
         upstream.id.as_bytes(),
     )
     .map_err(|error| SchedulerError::Job(error.to_string()))?;
-    Ok(RefreshedOAuthTokens {
+    Ok(RefreshOutcome::Refreshed(RefreshedOAuthTokens {
         encrypted_tokens,
         expires_at_unix_secs,
-    })
+    }))
 }
 
 async fn request_refresh(

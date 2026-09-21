@@ -1161,6 +1161,16 @@ const CONFIG_FIELD_GUIDANCE: readonly {
     },
   },
   {
+    pattern: 'oauth.anthropic.long_lived_scopes',
+    guidance: {
+      description:
+        'Scopes requested when connecting an upstream in long-lived 365-day mode.',
+      recommendation:
+        'Keep to inference-only scopes; Anthropic refuses a 365-day expiry for Remote Control, connectors, or API-key scopes and the connect flow then falls back to a refreshing credential.',
+      impactDimensions: ['security', 'availability'],
+    },
+  },
+  {
     pattern: 'oauth.anthropic.scopes',
     guidance: {
       description:

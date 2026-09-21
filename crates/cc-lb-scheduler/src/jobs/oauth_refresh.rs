@@ -80,9 +80,21 @@ impl Default for OAuthRefreshConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct RefreshedOAuthTokens {
     pub encrypted_tokens: EncryptedOAuthTokens,
     pub expires_at_unix_secs: u64,
+}
+
+/// Result of attempting a scheduled OAuth refresh.
+#[derive(Debug)]
+pub enum RefreshOutcome {
+    Refreshed(RefreshedOAuthTokens),
+    /// Credential is long-lived; refreshing it would destroy it.
+    ///
+    /// Refreshing a 365-day Anthropic access token revokes it and downgrades
+    /// the upstream to an 8-hour credential, so it must never be attempted.
+    NotRefreshable,
 }
 
 #[derive(Clone, Debug)]
@@ -128,7 +140,7 @@ where
     ) -> Result<JobOutcome>
     where
         Refresh: FnOnce(UpstreamRecord) -> Refreshed + Send,
-        Refreshed: Future<Output = Result<RefreshedOAuthTokens>> + Send,
+        Refreshed: Future<Output = Result<RefreshOutcome>> + Send,
         Enqueue: FnOnce(MetadataRefreshJob) -> Enqueued + Send,
         Enqueued: Future<Output = Result<()>> + Send,
         Schedule: FnOnce(Uuid, u64) -> Scheduled + Send,
@@ -142,7 +154,7 @@ where
         }
 
         match refresh(upstream).await {
-            Ok(refreshed) => {
+            Ok(RefreshOutcome::Refreshed(refreshed)) => {
                 let updated = match self
                     .upstreams
                     .complete_refresh(job.upstream_id, self.replica_id, refreshed.encrypted_tokens)
@@ -158,6 +170,7 @@ where
                 schedule_next_refresh(job.upstream_id, refreshed.expires_at_unix_secs).await?;
                 Ok(JobOutcome::Done)
             }
+            Ok(RefreshOutcome::NotRefreshable) => Ok(JobOutcome::Skip),
             Err(error) => {
                 tracing::warn!(upstream_id = %job.upstream_id, error = %error, "oauth refresh job failed");
                 Ok(JobOutcome::Retry {

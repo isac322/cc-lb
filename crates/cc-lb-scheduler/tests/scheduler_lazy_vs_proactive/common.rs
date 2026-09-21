@@ -101,6 +101,7 @@ where
             expires_at_unix_secs: near_expiry_secs(),
             refresh_token_expires_at_unix_secs: None,
             scopes: vec!["messages".to_owned()],
+            never_refresh: false,
         },
         record.id.as_bytes(),
     )?;

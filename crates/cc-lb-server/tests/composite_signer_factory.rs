@@ -61,6 +61,7 @@ impl Fixture {
             token_url: Url::parse(&format!("{fake_base}/oauth/token")).expect("token url"),
             redirect_uri: Url::parse("http://localhost/callback").expect("redirect url"),
             scopes: vec!["messages".to_owned()],
+            long_lived_scopes: vec!["user:profile".to_owned(), "user:inference".to_owned()],
         });
         Self {
             _dir: dir,
@@ -107,6 +108,7 @@ impl Fixture {
                 expires_at_unix_secs: now_secs() + 3600,
                 refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
+                never_refresh: false,
             },
         );
         self.storage

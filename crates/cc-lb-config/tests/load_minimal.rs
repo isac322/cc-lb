@@ -41,6 +41,44 @@ fn load_minimal_toml_applies_plan_defaults() {
     );
 }
 
+/// An operator upgrading across this release still has an `[oauth.anthropic]`
+/// section written before long-lived mode existed. `Config` uses
+/// `deny_unknown_fields`, so the new key must be optional or startup breaks
+/// on every existing deployment.
+#[test]
+fn pre_upgrade_oauth_toml_without_long_lived_scopes_loads_with_defaults() {
+    let (_dir, path) = crate::common::temp_config(
+        r#"
+[listener]
+
+[oauth.anthropic]
+client_id = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+auth_url = "https://claude.ai/oauth/authorize"
+token_url = "https://console.anthropic.com/v1/oauth/token"
+redirect_uri = "https://console.anthropic.com/oauth/code/callback"
+scopes = ["org:create_api_key", "user:profile", "user:inference"]
+"#,
+    );
+
+    let config = Config::load(&path).expect("pre-upgrade config still loads");
+
+    let anthropic = config.oauth.anthropic.expect("anthropic oauth configured");
+    // The operator's explicit refreshing scopes are preserved verbatim.
+    assert_eq!(
+        anthropic.scopes,
+        vec![
+            "org:create_api_key".to_owned(),
+            "user:profile".to_owned(),
+            "user:inference".to_owned(),
+        ]
+    );
+    // The long-lived preset is filled in, and never inherits `org:create_api_key`.
+    assert_eq!(
+        anthropic.long_lived_scopes,
+        vec!["user:profile".to_owned(), "user:inference".to_owned()]
+    );
+}
+
 #[test]
 fn upstream_affinity_ttl_loads_from_toml() {
     let (_dir, path) = crate::common::temp_config(

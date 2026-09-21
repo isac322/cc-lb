@@ -536,7 +536,7 @@ kill -TERM $(pgrep -f &#39;[c]c-lb serve&#39;)</code></pre><button class="copy">
       <a href="#uc-oauth" class="card">
         <span class="when">구독자</span>
         <h3>⑤ Claude Pro OAuth 토큰</h3>
-        <p>Claude Pro 구독 토큰 (<code>sk-ant-oat01-*</code>)을 cc-lb 뒤에서 자동 refresh.</p>
+        <p>Claude Pro 구독 토큰 (<code>sk-ant-oat01-*</code>)을 cc-lb 뒤에서 자동 refresh 또는 365일 long-lived 모드로 운영.</p>
       </a>
     </div>
 
@@ -706,7 +706,7 @@ curl -s -i http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: ck-internal-unk
     <h4>언제</h4>
     <ul>
       <li>본인이 Anthropic Pro 구독자이고 <code>sk-ant-oat01-*</code> 토큰을 cc-lb 뒤에 두고 싶다.</li>
-      <li>토큰 자동 refresh + 안전한 저장이 필요하다.</li>
+      <li>토큰 자동 refresh(또는 365일 long-lived) + 안전한 저장이 필요하다.</li>
     </ul>
 
     <h4>현실</h4>
@@ -714,6 +714,10 @@ curl -s -i http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: ck-internal-unk
       <li><code>examples/plugin-oauth-anthropic-pro/</code> + <code>anthropic_oauth</code> signer 조합. <span class="pill ok">자동 refresh + single-flight 검증됨 (T15)</span></li>
       <li>토큰은 sqlite에 ChaCha20-Poly1305로 AEAD 암호화되어 저장됩니다. 마스터키 (<code>CC_LB_MASTER_KEY</code>) 없으면 복호화 불가.</li>
       <li>최초 토큰 등록은 admin REST의 PKCE 흐름으로 합니다 (<code>POST /admin/v1/upstreams/{upstream_id}/oauth/start</code> → 본인 브라우저에서 인증 → callback → <code>POST /admin/v1/upstreams/{upstream_id}/oauth/complete</code>).</li>
+      <li>토큰 모드는 2가지입니다. <code>long_lived_365d</code> (새 연결 기본값): 365일 access token, 절대 refresh 안 함 — scope가 <code>user:profile</code> + <code>user:inference</code>로 제한되어 Remote Control (<code>user:sessions:claude_code</code>)과 커넥터 (<code>user:mcp_servers</code>)는 사용 불가. <code>refreshing</code>: 기존 8시간 토큰 + 자동 refresh, 전체 scope 사용 가능.</li>
+      <li>long-lived credential의 refresh token은 저장되지만 절대 사용하지 않습니다 — 사용하면 Anthropic이 365일 토큰을 회수하고 8시간짜리로 교체합니다. 401이 나오면 rotation 없이 재인증이 필요합니다.</li>
+      <li>cc-lb는 token endpoint가 실제로 반환한 access token 수명을 그대로 저장합니다 — 요청한 365일을 가정하거나 대체하지 않습니다. Anthropic이 365일 요청을 거절하면(<code>400 invalid_request</code>) 같은 authorization code로 custom expiry 없이 자동 재시도하고, 교환은 받아들이되 요청보다 훨씬 짧은 수명을 부여하면(clamp) 그것도 long-lived 거절로 간주합니다. 두 경우 모두 credential은 refreshing 모드로 유지되어 저장된 refresh token이 갱신 경로로 남고, upstream이 갱신 수단 없이 조용히 만료되는 일이 없습니다.</li>
+      <li>clamp 기준은 30일입니다 — Anthropic refresh token이 30일 윈도우에 고정되어 있어, 그 윈도우를 넘지 못하는 grant는 refreshing과 다를 바 없으면서 갱신 능력만 잃기 때문입니다. 30일을 넘지만 365일보다 짧은 grant는 long-lived를 유지하며 부여된 값 그대로 저장됩니다. complete 응답의 <code>fallback_reason</code>이 <code>rejected</code>와 <code>clamped</code>를 구분해 보고하고 <code>granted_expires_in_secs</code>에 실제 부여된 수명이 담기며, clamp는 warning 로그도 남겨 조용한 Anthropic 정책 변경이 운영에서도 보이게 합니다.</li>
     </ul>
 
     <h4>최소 config 발췌</h4>
@@ -733,12 +737,12 @@ token_env = &quot;CC_LB_ADMIN_TOKEN&quot;
 # then use /admin/v1/upstreams/{upstream_id}/oauth/start and /complete.</code></pre><button class="copy">복사</button></div>
 
     <h4>최초 토큰 등록 (PKCE)</h4>
-    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 1) 인증 URL 받기
+    <p>Admin UI에서는 upstream 생성 wizard와 Reconnect 모달에서 토큰 모드를 고릅니다. <code>long_lived_365d</code>는 1년에 한 번만 재인증하지만 inference 전용이고, <code>refreshing</code>은 약 30일마다 재인증하는 대신 자동 refresh와 전체 scope를 제공합니다.</p>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 1) 인증 URL 받기 (mode 생략 시 long_lived_365d)
 curl -s -X POST http://127.0.0.1:9090/admin/v1/upstreams/$UPSTREAM_ID/oauth/start \
   -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
   -H &quot;content-type: application/json&quot; \
-  -d &#39;{}&#39;
-# 응답에 들어있는 url을 브라우저에서 열고 Anthropic 로그인
+  -d &#39;{&quot;mode&quot;:&quot;long_lived_365d&quot;}&#39;
 
 # 2) 브라우저가 콜백한 code를 cc-lb에 전달 (PKCE verifier는 1단계에서 받은 값)
 curl -s -X POST http://127.0.0.1:9090/admin/v1/upstreams/$UPSTREAM_ID/oauth/complete \

@@ -4,7 +4,7 @@ use cc_lb_oauth_protocol::{ExistingTokenParts, refreshed_token_parts};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
-    OAuthRefreshJob, OAuthRefreshJobHandler, RefreshedOAuthTokens,
+    OAuthRefreshJob, OAuthRefreshJobHandler, RefreshOutcome, RefreshedOAuthTokens,
 };
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
 use cc_lb_scheduler::retry::JobOutcome;
@@ -43,11 +43,14 @@ impl SchedulerDispatch {
             .await
     }
 
-    async fn refresh_upstream(
-        &self,
-        upstream: UpstreamRecord,
-    ) -> SchedulerResult<RefreshedOAuthTokens> {
+    async fn refresh_upstream(&self, upstream: UpstreamRecord) -> SchedulerResult<RefreshOutcome> {
         let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
+        if bundle.never_refresh {
+            // Refreshing a 365-day token makes Anthropic revoke it and issue an
+            // 8-hour token instead; long-lived credentials must never reach the
+            // token endpoint.
+            return Ok(RefreshOutcome::NotRefreshable);
+        }
         let response = request_refresh(
             &self.http,
             self.oauth_cfg.as_ref(),
@@ -70,14 +73,15 @@ impl SchedulerDispatch {
             expires_at_unix_secs: refreshed.expires_at_unix_secs,
             refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
             scopes: refreshed.scopes,
+            never_refresh: bundle.never_refresh,
         };
         let encrypted_tokens =
             EncryptedOAuthTokens::encrypt(self.aead.as_ref(), &updated, upstream.id.as_bytes())
                 .map_err(|error| SchedulerError::Job(error.to_string()))?;
-        Ok(RefreshedOAuthTokens {
+        Ok(RefreshOutcome::Refreshed(RefreshedOAuthTokens {
             encrypted_tokens,
             expires_at_unix_secs: updated.expires_at_unix_secs,
-        })
+        }))
     }
 
     async fn enqueue_metadata_refresh(&self, job: MetadataRefreshJob) -> SchedulerResult<()> {
@@ -203,6 +207,10 @@ impl SchedulerDispatch {
             return Ok(());
         };
         let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
+        if bundle.never_refresh {
+            // Long-lived credentials are never refreshed.
+            return Ok(());
+        }
         if bundle
             .expires_at_unix_secs
             .saturating_sub(TOKEN_REFRESH_LOOKAHEAD_SECS)
@@ -230,6 +238,11 @@ impl SchedulerDispatch {
         let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
             return Ok(false);
         };
+        let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
+        if bundle.never_refresh {
+            // Long-lived credentials are never refreshed.
+            return Ok(false);
+        }
         lazy_refresher
             .refresh_one(upstream.id)
             .await

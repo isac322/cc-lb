@@ -928,6 +928,13 @@ export const UpstreamSchema = z.object({
 
 export type Upstream = z.infer<typeof UpstreamSchema>;
 
+export type OAuthTokenMode = 'long_lived_365d' | 'refreshing';
+
+// Why a long-lived 365-day request fell back to a refreshing credential:
+// 'rejected' = the token endpoint refused the custom expires_in outright,
+// 'clamped' = it accepted but granted a materially shorter lifetime.
+export type OAuthFallbackReason = 'rejected' | 'clamped';
+
 export interface UpstreamOAuthStatusResponse {
   upstream_id: string;
   kind: string;
@@ -936,6 +943,8 @@ export interface UpstreamOAuthStatusResponse {
   expires_at_unix_secs: number | null;
   refresh_token_present: boolean;
   refresh_token_expires_at_unix_secs: number | null;
+  mode: OAuthTokenMode | null;
+  can_refresh: boolean;
   scopes: string[];
 }
 
@@ -1228,13 +1237,18 @@ export interface DraftCompleteResponse {
   suggested_name: string;
   subscription_metadata: SubscriptionMetadataInner | null;
   organization_metadata: OrganizationMetadataInner | null;
+  mode: OAuthTokenMode;
+  long_lived_fallback: boolean;
+  fallback_reason: OAuthFallbackReason | null;
+  granted_expires_in_secs: number | null;
 }
 
-export function startOauthDraft(): Promise<{
+export function startOauthDraft(body?: { mode?: OAuthTokenMode }): Promise<{
   authorize_url: string;
   state_token: string;
+  mode: OAuthTokenMode;
 }> {
-  return postJson('/admin/v1/oauth/draft/start', {});
+  return postJson('/admin/v1/oauth/draft/start', body ?? {});
 }
 
 export function completeOauthDraft(body: {

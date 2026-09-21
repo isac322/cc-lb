@@ -39,7 +39,8 @@ use crate::AdminState;
 use crate::audit::{AdminAuditEvent, record_admin_audit};
 use crate::auth::AdminIdentity;
 use crate::oauth_pkce::{
-    HyperOAuthHttpClient, OAuthTokenError, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
+    HyperOAuthHttpClient, LongLivedFallbackReason, OAuthTokenError, OAuthTokenMode,
+    PkceExchangeOutcome, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
 };
 
 const PKCE_FLOW_TTL_SECS: u64 = 900;
@@ -76,10 +77,16 @@ struct UpstreamOAuthStatusResponse {
     refresh_token_present: bool,
     refresh_token_expires_at_unix_secs: Option<u64>,
     scopes: Vec<String>,
+    /// `None` when there are no decryptable credentials.
+    mode: Option<OAuthTokenMode>,
+    can_refresh: bool,
 }
-
 #[derive(Deserialize)]
-struct StartRequest {}
+struct StartRequest {
+    /// Requested credential mode; defaults to the 365-day long-lived grant.
+    #[serde(default)]
+    mode: OAuthTokenMode,
+}
 
 // `revision` is echoed so the frontend can refresh its cached `If-Match`
 // before a cancel-cleanup DELETE. start_oauth does not currently mutate
@@ -89,12 +96,14 @@ struct StartResponse {
     authorize_url: String,
     state_token: String,
     revision: u64,
+    mode: OAuthTokenMode,
 }
 
 #[derive(Serialize)]
 struct DraftStartResponse {
     authorize_url: String,
     state_token: String,
+    mode: OAuthTokenMode,
 }
 
 #[derive(Deserialize)]
@@ -116,6 +125,10 @@ struct CompleteResponse {
     upstream_id: Uuid,
     expires_at_unix_secs: u64,
     access_token_fingerprint: String,
+    mode: OAuthTokenMode,
+    long_lived_fallback: bool,
+    fallback_reason: Option<LongLivedFallbackReason>,
+    granted_expires_in_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -124,6 +137,10 @@ struct DraftCompleteResponse {
     suggested_name: String,
     subscription_metadata: UpstreamSubscriptionMetadataRecord,
     organization_metadata: Option<OrganizationMetadataRecord>,
+    mode: OAuthTokenMode,
+    long_lived_fallback: bool,
+    fallback_reason: Option<LongLivedFallbackReason>,
+    granted_expires_in_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -184,7 +201,7 @@ async fn start_oauth(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
     Path(upstream_id): Path<Uuid>,
-    Json(_payload): Json<StartRequest>,
+    Json(payload): Json<StartRequest>,
 ) -> Response {
     let Some(storage) = state.storage.as_ref() else {
         return StatusCode::NOT_IMPLEMENTED.into_response();
@@ -225,12 +242,19 @@ async fn start_oauth(
         Ok(url) => url,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
+    let mode = payload.mode;
+    let scopes = if mode.never_refresh() {
+        oauth.long_lived_scopes.clone()
+    } else {
+        oauth.scopes.clone()
+    };
     let handshake = start_pkce_flow(
         ClientId::new(oauth.client_id.clone()),
         authorize_endpoint,
         token_endpoint,
-        oauth.scopes.clone(),
+        scopes,
         oauth.redirect_uri.clone(),
+        mode,
     );
     let mut handshake_state = handshake.into_state();
     let state_token = match encode_state(upstream_id) {
@@ -298,6 +322,7 @@ async fn start_oauth(
         authorize_url: handshake_state.authorize_url.to_string(),
         state_token,
         revision: upstream_revision,
+        mode,
     })
     .into_response()
 }
@@ -305,6 +330,7 @@ async fn start_oauth(
 async fn start_oauth_draft(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
+    Json(payload): Json<StartRequest>,
 ) -> Response {
     let Some(storage) = state.storage.as_ref() else {
         return StatusCode::NOT_IMPLEMENTED.into_response();
@@ -325,12 +351,19 @@ async fn start_oauth_draft(
         Ok(url) => url,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
+    let mode = payload.mode;
+    let scopes = if mode.never_refresh() {
+        oauth.long_lived_scopes.clone()
+    } else {
+        oauth.scopes.clone()
+    };
     let handshake = start_pkce_flow(
         ClientId::new(oauth.client_id.clone()),
         authorize_endpoint,
         token_endpoint,
-        oauth.scopes.clone(),
+        scopes,
         oauth.redirect_uri.clone(),
+        mode,
     );
     let mut handshake_state = handshake.into_state();
     let state_token = match encode_state(Uuid::nil()) {
@@ -386,6 +419,7 @@ async fn start_oauth_draft(
     Json(DraftStartResponse {
         authorize_url: handshake_state.authorize_url.to_string(),
         state_token,
+        mode,
     })
     .into_response()
 }
@@ -427,7 +461,13 @@ async fn complete_oauth_draft(
         }
     };
     let code = normalize_oauth_code(&payload.code);
-    let credentials = match complete_pkce_flow(
+    let PkceExchangeOutcome {
+        credentials,
+        mode,
+        long_lived_fallback,
+        fallback_reason,
+        granted_expires_in_secs,
+    } = match complete_pkce_flow(
         handshake,
         code,
         payload.state_token.clone(),
@@ -436,16 +476,32 @@ async fn complete_oauth_draft(
     )
     .await
     {
-        Ok(credentials) => credentials,
+        Ok(outcome) => outcome,
         Err(error) => return token_exchange_error_response(error),
     };
+    if fallback_reason == Some(LongLivedFallbackReason::Clamped) {
+        tracing::warn!(
+            initiated_by = %initiated_by,
+            ?granted_expires_in_secs,
+            "oauth draft complete: provider granted a shorter token lifetime than \
+             requested; storing as a refreshing credential"
+        );
+    }
 
+    // The refresh token is stored even for long-lived credentials: it may be
+    // useful later, but it must never be used to refresh (that would revoke
+    // the 365-day access token). `mode.never_refresh()` is the single source
+    // of truth — a clamped grant is already demoted to refreshing mode by the
+    // exchange, so it is stored refreshable without a second check here.
     let bundle = OAuthTokenBundle {
         access_token: credentials.access_token,
         refresh_token: credentials.refresh_token,
+        // Always the lifetime the token endpoint granted; the requested
+        // lifetime is never substituted.
         expires_at_unix_secs: credentials.expires_at,
         refresh_token_expires_at_unix_secs: credentials.refresh_token_expires_at_unix_secs,
         scopes: credentials.scopes,
+        never_refresh: mode.never_refresh(),
     };
     let encrypted_tokens = match AeadEncryptedField::<OAuthTokenBundle>::encrypt(
         &state.aead,
@@ -550,6 +606,10 @@ async fn complete_oauth_draft(
         suggested_name,
         subscription_metadata: records.subscription_metadata_record,
         organization_metadata: records.organization_metadata_record,
+        mode,
+        long_lived_fallback,
+        fallback_reason,
+        granted_expires_in_secs,
     })
     .into_response()
 }
@@ -829,7 +889,13 @@ async fn complete_oauth(
     };
     // Anthropic's callback shows `<code>#<state>`; users may also paste the full callback URL.
     let code = normalize_oauth_code(&payload.code);
-    let credentials = match complete_pkce_flow(
+    let PkceExchangeOutcome {
+        credentials,
+        mode,
+        long_lived_fallback,
+        fallback_reason,
+        granted_expires_in_secs,
+    } = match complete_pkce_flow(
         handshake,
         code,
         payload.state_token.clone(),
@@ -838,24 +904,40 @@ async fn complete_oauth(
     )
     .await
     {
-        Ok(credentials) => credentials,
+        Ok(outcome) => outcome,
         Err(error) => {
             tracing::warn!(%upstream_id, %error, "oauth complete: token exchange rejected by provider");
             return token_exchange_error_response(error);
         }
     };
+    if fallback_reason == Some(LongLivedFallbackReason::Clamped) {
+        tracing::warn!(
+            %upstream_id,
+            ?granted_expires_in_secs,
+            "oauth complete: provider granted a shorter token lifetime than \
+             requested; storing as a refreshing credential"
+        );
+    }
 
     if let Err(response) = delete_pkce_flow(storage.as_ref(), &payload.state_token).await {
         return response;
     }
 
     let access_token_fingerprint = access_token_fingerprint(&credentials.access_token);
+    // The refresh token is stored even for long-lived credentials: it may be
+    // useful later, but it must never be used to refresh (that would revoke
+    // the 365-day access token). `mode.never_refresh()` is the single source
+    // of truth — a clamped grant is already demoted to refreshing mode by the
+    // exchange, so it is stored refreshable without a second check here.
     let bundle = OAuthTokenBundle {
         access_token: credentials.access_token,
         refresh_token: credentials.refresh_token,
+        // Always the lifetime the token endpoint granted; the requested
+        // lifetime is never substituted.
         expires_at_unix_secs: credentials.expires_at,
         refresh_token_expires_at_unix_secs: credentials.refresh_token_expires_at_unix_secs,
         scopes: credentials.scopes,
+        never_refresh: mode.never_refresh(),
     };
     let encrypted = match cc_lb_aead::AeadEncryptedField::<OAuthTokenBundle>::encrypt(
         &state.aead,
@@ -928,6 +1010,10 @@ async fn complete_oauth(
         upstream_id: updated.id,
         expires_at_unix_secs: bundle.expires_at_unix_secs,
         access_token_fingerprint,
+        mode,
+        long_lived_fallback,
+        fallback_reason,
+        granted_expires_in_secs,
     })
     .into_response();
     add_dynamic_rebind_headers(&mut response, &state).await;
@@ -957,6 +1043,8 @@ async fn get_oauth_status(
             refresh_token_present: false,
             refresh_token_expires_at_unix_secs: None,
             scopes: Vec::new(),
+            mode: None,
+            can_refresh: false,
         })
         .into_response();
     }
@@ -971,6 +1059,8 @@ async fn get_oauth_status(
             refresh_token_present: false,
             refresh_token_expires_at_unix_secs: None,
             scopes: Vec::new(),
+            mode: None,
+            can_refresh: false,
         })
         .into_response();
     };
@@ -990,8 +1080,16 @@ async fn get_oauth_status(
                 status,
                 expires_at_unix_secs: Some(bundle.expires_at_unix_secs),
                 refresh_token_present: !bundle.refresh_token.is_empty(),
-                refresh_token_expires_at_unix_secs: bundle.refresh_token_expires_at_unix_secs,
+                // The 30-day refresh-token clock is meaningless for a
+                // long-lived credential and must not drive a UI warning.
+                refresh_token_expires_at_unix_secs: if bundle.never_refresh {
+                    None
+                } else {
+                    bundle.refresh_token_expires_at_unix_secs
+                },
                 scopes: bundle.scopes,
+                mode: Some(OAuthTokenMode::from_never_refresh(bundle.never_refresh)),
+                can_refresh: !bundle.never_refresh,
             })
             .into_response()
         }
@@ -1010,6 +1108,8 @@ async fn get_oauth_status(
                 refresh_token_present: false,
                 refresh_token_expires_at_unix_secs: None,
                 scopes: Vec::new(),
+                mode: None,
+                can_refresh: false,
             })
             .into_response()
         }
@@ -1171,6 +1271,16 @@ async fn seed_oauth_bootstrap_tasks(
     let Some(scheduler) = state.scheduler.as_ref() else {
         return Ok(());
     };
+    // A long-lived (365-day) credential must never be refreshed: scheduling a
+    // refresh would revoke the 365-day access token within seconds. When the
+    // credentials cannot be decrypted, fall through and seed as before so
+    // existing refreshing upstreams are unaffected.
+    if let Some(encrypted) = upstream.oauth_credentials.as_ref()
+        && let Ok(bundle) = encrypted.decrypt(state.aead.as_ref(), upstream.id.as_bytes())
+        && bundle.never_refresh
+    {
+        return Ok(());
+    }
     let seed_secs = cc_lb_clock::unix_secs(state.clock.now());
     for task in oauth_bootstrap_tasks(upstream.id, seed_secs) {
         match scheduler.push_adaptive_task(task).await {
@@ -1338,6 +1448,9 @@ fn claude_code_default_oauth() -> AnthropicOAuthConfig {
             "user:profile".to_owned(),
             "user:inference".to_owned(),
         ],
+        // `org:create_api_key` is deliberately absent: Anthropic rejects
+        // long-lived grants that include it.
+        long_lived_scopes: vec!["user:profile".to_owned(), "user:inference".to_owned()],
     }
 }
 

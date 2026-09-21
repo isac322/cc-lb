@@ -1,6 +1,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -20,7 +23,8 @@ use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
-    OAuthRefreshJob, OAuthRefreshJobHandler, OAuthRefreshUpstreams, RefreshedOAuthTokens,
+    OAuthRefreshJob, OAuthRefreshJobHandler, OAuthRefreshUpstreams, RefreshOutcome,
+    RefreshedOAuthTokens,
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{
@@ -30,20 +34,23 @@ use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
 use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerBackend};
 use cc_lb_signer_anthropic_oauth::{
-    AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh,
+    AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshError,
+    LazyRefreshHandle,
 };
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamRecord,
     UpstreamStore, types::KeyStatus,
 };
 use cc_lb_upstream::{
-    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
-    shape_request, sign_request,
+    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerError,
+    UpstreamDialect, shape_request, sign_request,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
-use fake_anthropic::{AppConfig, MessageScript, OAuthRefreshPause, app as fake_anthropic_app};
+use fake_anthropic::{
+    AppConfig, MessageScript, OAuthRefreshPause, ScriptedMessageResponse, app as fake_anthropic_app,
+};
 use http::Request;
 use http::header::{AUTHORIZATION, LOCATION};
 use http_body_util::BodyExt;
@@ -85,7 +92,11 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let mut fixture = Self::new_without_scheduler(AppConfig::default()).await;
+        Self::new_with_fake_config(AppConfig::default()).await
+    }
+
+    async fn new_with_fake_config(fake_config: AppConfig) -> Self {
+        let mut fixture = Self::new_without_scheduler(fake_config).await;
         fixture.scheduler_worker = Some(spawn_oauth_refresh_worker(
             fixture.scheduler_backend.clone(),
             fixture.storage.clone(),
@@ -135,6 +146,7 @@ impl Fixture {
             token_url: Url::parse(&format!("{fake_base}/oauth/token")).expect("token url"),
             redirect_uri: Url::parse("http://localhost/callback").expect("redirect url"),
             scopes: vec!["messages".to_owned()],
+            long_lived_scopes: vec!["user:profile".to_owned(), "user:inference".to_owned()],
         });
         Self {
             _dir: dir,
@@ -151,7 +163,7 @@ impl Fixture {
 
     async fn create_oauth_upstream(&self, name: &str, expires_at: u64) -> Uuid {
         let tokens = initial_tokens(&self.fake_base).await;
-        self.create_oauth_upstream_with_tokens(name, expires_at, tokens, None)
+        self.create_oauth_upstream_with_tokens(name, expires_at, tokens, None, false)
             .await
     }
 
@@ -161,6 +173,7 @@ impl Fixture {
         expires_at: u64,
         tokens: InitialTokens,
         base_url: Option<Url>,
+        never_refresh: bool,
     ) -> Uuid {
         let record = self
             .storage
@@ -184,6 +197,7 @@ impl Fixture {
                 expires_at_unix_secs: expires_at,
                 refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
+                never_refresh,
             },
         );
         self.storage
@@ -276,6 +290,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
             now_secs(fixture.clock.as_ref()).saturating_sub(1),
             tokens,
             Some(Url::parse(&fixture.fake_base).expect("fake url")),
+            false,
         )
         .await;
     let cancel = CancellationToken::new();
@@ -332,6 +347,235 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
 
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert_eq!(refresh_history_len(&fixture.fake_base).await, 1);
+}
+
+#[tokio::test]
+async fn long_lived_expired_oauth_upstream_never_triggers_lazy_refresh() {
+    let fixture = Fixture::new().await;
+    let tokens = initial_tokens(&fixture.fake_base).await;
+    let initial_access_token = tokens.access_token.clone();
+    let upstream_id = fixture
+        .create_oauth_upstream_with_tokens(
+            "long-lived",
+            now_secs(fixture.clock.as_ref()),
+            tokens,
+            None,
+            true,
+        )
+        .await;
+    let initial_generation =
+        UpstreamStore::read_oauth_token_generation(fixture.storage.as_ref(), upstream_id)
+            .await
+            .expect("initial token generation read")
+            .expect("initial token generation exists");
+    let lazy = Arc::new(LazyRefresher::new(LazyRefresherParams {
+        deps: LazyRefresherDeps {
+            stores: fixture.stores.clone(),
+            aead: fixture.aead.clone(),
+            oauth_cfg: fixture.oauth_cfg.clone(),
+            clock: fixture.clock.clone(),
+        },
+        replica_id: Uuid::new_v4(),
+        metadata_hook: None,
+        cancel: CancellationToken::new(),
+        apalis_handle: fixture.scheduler_backend.clone(),
+    }));
+    let base = AnthropicOAuthSignerFactory::for_upstream_name(
+        fixture.storage.clone(),
+        fixture.aead.clone(),
+        "long-lived",
+        fixture.clock.clone(),
+    );
+    let factory = AnthropicOAuthSignerFactoryWithLazyRefresh::new(base, lazy, upstream_id);
+    let signer = cc_lb_upstream::SignerFactory::build(
+        &factory,
+        &Upstream::AnthropicDirect { base_url: None },
+    )
+    .await
+    .expect("signer");
+
+    let result = sign_request(signer.as_ref(), shaped_request()).await;
+
+    match result {
+        Err(SignerError::ExpiredToken { .. }) => {}
+        Ok(_) => panic!("long-lived credential must not be refreshed or re-signed"),
+        Err(other) => panic!("expected ExpiredToken, got: {other:?}"),
+    }
+    assert_eq!(
+        refresh_history_len(&fixture.fake_base).await,
+        0,
+        "long-lived credential must never reach the token endpoint"
+    );
+    let record = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+        .await
+        .expect("upstream read")
+        .expect("upstream exists");
+    let stored = record
+        .oauth_credentials
+        .as_ref()
+        .expect("oauth credentials present")
+        .decrypt(fixture.aead.as_ref(), upstream_id.as_bytes())
+        .expect("oauth credentials decrypt");
+    assert_eq!(stored.access_token, initial_access_token);
+    assert_eq!(
+        UpstreamStore::read_oauth_token_generation(fixture.storage.as_ref(), upstream_id)
+            .await
+            .expect("token generation read"),
+        Some(initial_generation),
+        "long-lived credential generation must not advance"
+    );
+}
+
+#[tokio::test]
+async fn long_lived_oauth_upstream_inside_soft_refresh_window_does_not_enqueue_refresh() {
+    let fixture = Fixture::new().await;
+    // Inside the soft-refresh buffer but still beyond the expiry skew: a
+    // refreshing credential would enqueue a background refresh on sign here.
+    let expires_at = now_secs(fixture.clock.as_ref()) + 120;
+    let tokens = initial_tokens(&fixture.fake_base).await;
+    let upstream_id = fixture
+        .create_oauth_upstream_with_tokens("long-lived-soft", expires_at, tokens, None, true)
+        .await;
+    let handle = Arc::new(RecordingLazyRefresh::default());
+    let base = AnthropicOAuthSignerFactory::for_upstream_name(
+        fixture.storage.clone(),
+        fixture.aead.clone(),
+        "long-lived-soft",
+        fixture.clock.clone(),
+    );
+    let factory =
+        AnthropicOAuthSignerFactoryWithLazyRefresh::new(base, handle.clone(), upstream_id);
+    let signer = cc_lb_upstream::SignerFactory::build(
+        &factory,
+        &Upstream::AnthropicDirect { base_url: None },
+    )
+    .await
+    .expect("signer");
+
+    let signed = sign_request(signer.as_ref(), shaped_request())
+        .await
+        .expect("long-lived credential still valid inside the soft window");
+    assert!(signed.headers().get(AUTHORIZATION).is_some());
+    // Drain the task the signer would have spawned for a refreshing credential.
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        handle.calls(),
+        0,
+        "long-lived credential must never trigger a background refresh"
+    );
+    assert_eq!(refresh_history_len(&fixture.fake_base).await, 0);
+}
+
+#[tokio::test]
+async fn long_lived_oauth_upstream_unauthorized_response_is_terminal() {
+    let message_script = MessageScript::new();
+    message_script.push_response(ScriptedMessageResponse::error(
+        StatusCode::UNAUTHORIZED,
+        "authentication_error",
+        "long-lived token rejected",
+    ));
+    let fixture = Fixture::new_with_fake_config(AppConfig {
+        message_script: Some(message_script.clone()),
+        ..AppConfig::default()
+    })
+    .await;
+    fixture.create_principal("oauth-principal").await;
+    let key_store = Arc::new(KeyStore::new(fixture.storage.clone()));
+    let (_key_record, key_secret) = key_store
+        .create(
+            "oauth-principal",
+            CreateParams {
+                label: "oauth-long-lived-401".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("managed key created");
+    let tokens = initial_tokens(&fixture.fake_base).await;
+    let initial_access_token = tokens.access_token.clone();
+    let upstream_id = fixture
+        .create_oauth_upstream_with_tokens(
+            "oauth-target",
+            now_secs(fixture.clock.as_ref()) + 3600,
+            tokens,
+            Some(Url::parse(&fixture.fake_base).expect("fake url")),
+            true,
+        )
+        .await;
+    let handle = Arc::new(RecordingLazyRefresh::default());
+    let lazy_handle: Arc<dyn LazyRefreshHandle> = handle.clone();
+    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let view = build_dynamic_view(
+        fixture.stores.as_ref(),
+        fixture.oauth_cfg.as_ref(),
+        fixture.aead.clone(),
+        Some(lazy_handle),
+        0,
+        &runtime,
+        fixture._dir.path(),
+        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        30,
+        None,
+        None,
+        1800,
+        fixture.clock.clone(),
+    )
+    .await
+    .expect("dynamic view builds");
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        Arc::new(BuiltinAuthn::new(key_store, fixture.clock.clone())),
+        Arc::new(DynamicViewHolder::new(view)),
+        cc_lb_engine::make_default_dispatcher(50),
+        LifecycleConfig::default(),
+        fixture.clock.clone(),
+    );
+
+    let response = lifecycle
+        .handle(message_request(key_secret.expose()))
+        .await
+        .expect("lifecycle response");
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body")
+        .to_bytes();
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        message_script.request_count(),
+        1,
+        "a rejected long-lived credential must not be retried"
+    );
+    assert_eq!(
+        handle.calls(),
+        0,
+        "long-lived credential must never reach the refresh handle"
+    );
+    assert_eq!(refresh_history_len(&fixture.fake_base).await, 0);
+    let record = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+        .await
+        .expect("upstream read")
+        .expect("upstream exists");
+    let stored = record
+        .oauth_credentials
+        .as_ref()
+        .expect("oauth credentials present")
+        .decrypt(fixture.aead.as_ref(), upstream_id.as_bytes())
+        .expect("oauth credentials decrypt");
+    assert_eq!(
+        stored.access_token, initial_access_token,
+        "long-lived access token must not rotate on 401"
+    );
 }
 
 #[derive(Deserialize)]
@@ -522,6 +766,32 @@ async fn refresh_history_len(base: &str) -> usize {
     body["refreshes"].as_array().expect("refreshes").len()
 }
 
+/// Records every `LazyRefreshHandle` invocation so tests can prove a
+/// long-lived credential never reaches the refresh path.
+#[derive(Default)]
+struct RecordingLazyRefresh {
+    calls: AtomicUsize,
+}
+
+impl RecordingLazyRefresh {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LazyRefreshHandle for RecordingLazyRefresh {
+    async fn refresh_one(&self, _upstream_id: Uuid) -> Result<(), LazyRefreshError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn enqueue_only(&self, _upstream_id: Uuid) -> Result<(), LazyRefreshError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 async fn sqlite_scheduler_backend(path: &std::path::Path, clock: ClockHandle) -> SchedulerBackend {
     use std::str::FromStr as _;
 
@@ -650,13 +920,18 @@ async fn refresh_tokens(
     oauth_cfg: Arc<AnthropicOAuthConfig>,
     clock: ClockHandle,
     upstream: UpstreamRecord,
-) -> SchedulerResult<RefreshedOAuthTokens> {
+) -> SchedulerResult<RefreshOutcome> {
     let previous = upstream
         .oauth_credentials
         .as_ref()
         .ok_or_else(|| SchedulerError::Job("missing oauth credentials".to_owned()))?
         .decrypt(aead.as_ref(), upstream.id.as_bytes())
         .map_err(|error| SchedulerError::Job(error.to_string()))?;
+    if previous.never_refresh {
+        // Long-lived credentials must never reach the token endpoint; mirror
+        // SchedulerDispatch::refresh_upstream.
+        return Ok(RefreshOutcome::NotRefreshable);
+    }
     let response = request_refresh(oauth_cfg.as_ref(), previous.refresh_token.as_str()).await?;
     let refreshed = refreshed_token_parts(
         ExistingTokenParts {
@@ -676,14 +951,15 @@ async fn refresh_tokens(
             expires_at_unix_secs,
             refresh_token_expires_at_unix_secs: None,
             scopes: refreshed.scopes,
+            never_refresh: previous.never_refresh,
         },
         upstream.id.as_bytes(),
     )
     .map_err(|error| SchedulerError::Job(error.to_string()))?;
-    Ok(RefreshedOAuthTokens {
+    Ok(RefreshOutcome::Refreshed(RefreshedOAuthTokens {
         encrypted_tokens,
         expires_at_unix_secs,
-    })
+    }))
 }
 
 async fn request_refresh(
