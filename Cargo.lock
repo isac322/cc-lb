@@ -889,7 +889,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "ulid 3.0.0",
+ "ulid 2.0.1",
  "uuid",
 ]
 
@@ -984,7 +984,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "trybuild",
- "ulid 3.0.0",
+ "ulid 2.0.1",
  "url",
  "uuid",
  "zstd 0.14.0",
@@ -1246,7 +1246,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "ulid 1.2.1",
+ "ulid 2.0.1",
  "url",
  "uuid",
 ]
@@ -6810,9 +6810,9 @@ dependencies = [
 
 [[package]]
 name = "ulid"
-version = "3.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "947dde63b6d514cc5e044edad4e0ca7261afd1099d16c83d942cb2b2f348689c"
+checksum = "39493d572b98fe1d142e132e7a726c50c68121bce84429216a5ec20e1ad7fec5"
 dependencies = [
  "rand 0.10.3",
  "web-time",
