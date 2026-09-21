@@ -1309,7 +1309,16 @@ describe('/upstreams mutation pending UX', () => {
       reset: vi.fn(),
     } as never);
     view.rerender(routeElement());
-    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    // The reconnect notice is the prominent entry point; the OAuth card keeps
+    // its own Connect button, so scope the click to the notice's status role.
+    const reconnectNotice = screen.getByRole('status');
+    expect(
+      within(reconnectNotice).getByText('OAuth not connected'),
+    ).toBeDefined();
+    fireEvent.click(
+      within(reconnectNotice).getByRole('button', { name: 'Connect' }),
+    );
 
     let dialog = screen.getByRole('dialog', {
       name: 'OAuth Authorization',
@@ -1452,5 +1461,55 @@ describe('/upstreams OAuth card', () => {
 
     expect(screen.queryByTestId('oauth-refresh-token-expiry')).toBeNull();
     expect(screen.getByTestId('oauth-status-loaded-grid')).toBeDefined();
+  });
+
+  test('shows the reconnect notice while the live record reports a renewal failure and clears it once resolved', () => {
+    mockOAuthStatus(2_100_000_000);
+    // The runtime /status snapshot reports no error; only the upstream
+    // record's live last_apply_error drives the classifier.
+    vi.mocked(queries.useStatus).mockReturnValue({
+      data: {
+        upstreams: [
+          {
+            id: upstream.id,
+            name: upstream.name,
+            status: 'applied',
+            last_apply_at_unix_secs: NOW_UNIX_SECS,
+            last_apply_error: null,
+          },
+        ],
+      },
+      isLoading: false,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    const failingUpstream: Upstream = {
+      ...upstream,
+      status: { ...upstream.status, last_apply_error: 'status_401' },
+    };
+    vi.mocked(queries.useUpstreams).mockReturnValue({
+      data: { upstreams: [failingUpstream, apiKeyUpstream] },
+      isLoading: false,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    const view = renderRoute();
+
+    const notice = screen.getByRole('alert');
+    expect(within(notice).getByText('Token renewal failed')).toBeDefined();
+    expect(
+      within(notice).getByRole('button', { name: 'Reconnect' }),
+    ).toBeDefined();
+
+    vi.mocked(queries.useUpstreams).mockReturnValue({
+      data: { upstreams: [upstream, apiKeyUpstream] },
+      isLoading: false,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    view.rerender(routeElement());
+
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

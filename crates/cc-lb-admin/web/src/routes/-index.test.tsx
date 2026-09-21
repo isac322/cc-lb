@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   act,
   cleanup,
@@ -13,6 +14,7 @@ import type {
   DashboardUsageResponse,
   PoolHistoryResponse,
   RequestEvent,
+  Upstream,
   UsageBucket,
 } from '../lib/api';
 import * as queries from '../lib/queries';
@@ -37,6 +39,7 @@ vi.mock('../lib/queries', async () => {
     useSummary: vi.fn(),
     useUpstreamNameMap: vi.fn(),
     useUsage: vi.fn(),
+    useUpstreams: vi.fn(),
   };
 });
 
@@ -87,7 +90,18 @@ vi.mock('recharts', () => ({
   YAxis: () => null,
 }));
 
-const OverviewPage = Route.options.component as ComponentType;
+const RouteComponent = Route.options.component as ComponentType;
+
+// OAuthReconnectSummary runs its own react-query hooks; give the page the
+// same provider the app shell supplies.
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false } },
+});
+const OverviewPage = () => (
+  <QueryClientProvider client={queryClient}>
+    <RouteComponent />
+  </QueryClientProvider>
+);
 
 const KPI_TIMESTAMPS = [
   Date.UTC(2026, 7, 17, 13, 30) / 1000,
@@ -459,6 +473,14 @@ function mockResolvedKpiQueries({
 beforeEach(() => {
   vi.clearAllMocks();
   rechartsMock.areaChartRenderCount = 0;
+  // OAuthReconnectSummary polls upstreams itself; default to a resolved
+  // empty list so no OAuth status queries spin up. Tests that need an
+  // OAuth upstream override this.
+  vi.mocked(queries.useUpstreams).mockReturnValue({
+    data: { upstreams: [] },
+    isPending: false,
+    isPlaceholderData: false,
+  } as never);
 });
 
 afterEach(() => {
@@ -1457,6 +1479,41 @@ describe('Overview KPI details', () => {
       'Tokens 100',
       'Cache miss —',
     ]);
+  });
+});
+
+describe('Overview OAuth reconnect summary', () => {
+  const oauthUpstream: Upstream = {
+    id: 'oauth-1',
+    name: 'OAuth Primary',
+    kind: 'anthropic_oauth',
+    enabled: true,
+    spec_revision: 1,
+    base_url: null,
+    api_key_env: null,
+    warmup_enabled: false,
+    warmup_dialect_plugin: null,
+    status: {
+      last_apply_error: null,
+      last_apply_at_unix_secs: null,
+      last_warmup_at_unix_secs: null,
+    },
+  };
+
+  it('warns instead of going silent when the OAuth status check fails', async () => {
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useUpstreams).mockReturnValue({
+      data: { upstreams: [oauthUpstream] },
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    // jsdom cannot reach the status endpoint, so the real nudge query errors
+    // and the summary must surface that rather than rendering nothing.
+    expect(await screen.findByText('OAuth status check failed')).toBeDefined();
+    expect(screen.getByText('Avg cache miss 44.4%')).toBeDefined();
   });
 });
 

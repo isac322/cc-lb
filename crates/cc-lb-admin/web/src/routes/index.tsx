@@ -44,6 +44,7 @@ import {
   emptyCostComponents,
   sumCostMicros,
 } from '../components/ui/usage/costCategories';
+import { OAuthReconnectSummary } from '../components/upstreams/OAuthReconnectNotice';
 import type { AggregateResponse } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import {
@@ -1616,6 +1617,7 @@ function OverviewPage() {
         reconnectAttempts={live.reconnectAttempts}
         onRetry={live.forceReconnect}
       />
+      <OAuthReconnectSummary />
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-lg font-medium">Overview</h1>
         <BaseToggleGroup
