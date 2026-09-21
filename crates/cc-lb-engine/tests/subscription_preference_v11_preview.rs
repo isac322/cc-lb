@@ -15,13 +15,13 @@ use subscription_preference_v11_preview_support::{
 
 const REQUEST_ID: &str = "preview-v11-transition";
 
-#[test]
-fn preview_selects_use_it_or_lose_it_candidate_and_traces_all_candidates() {
+#[tokio::test]
+async fn preview_selects_use_it_or_lose_it_candidate_and_traces_all_candidates() {
     // Given: one urgent and one on-pace OAuth candidate at a fixed instant.
     let fixture = PreviewFixture::new(urgent_quota(), on_pace_quota());
 
     // When: the real lifecycle preview surface evaluates the candidates.
-    let before = fixture.preview(REQUEST_ID);
+    let before = fixture.preview(REQUEST_ID).await;
     let before_trace = subscription_trace(&before);
     let urgent_before = candidate(before_trace, fixture.urgent_id);
     let steady_before = candidate(before_trace, fixture.steady_id);
@@ -60,7 +60,7 @@ fn preview_selects_use_it_or_lose_it_candidate_and_traces_all_candidates() {
     fixture.swap_quota_states();
 
     // When: the same request id is previewed again.
-    let after = fixture.preview(REQUEST_ID);
+    let after = fixture.preview(REQUEST_ID).await;
     let after_trace = subscription_trace(&after);
     let urgent_after = candidate(after_trace, fixture.urgent_id);
     let steady_after = candidate(after_trace, fixture.steady_id);
@@ -83,14 +83,14 @@ fn preview_selects_use_it_or_lose_it_candidate_and_traces_all_candidates() {
     print_outcome("after_transition", &after);
 }
 
-#[test]
-fn preview_all_on_pace_uses_deterministic_uniform_factor() {
+#[tokio::test]
+async fn preview_all_on_pace_uses_deterministic_uniform_factor() {
     // Given: both OAuth candidates are on pace and the request id is fixed.
     let fixture = PreviewFixture::new(on_pace_quota(), on_pace_quota());
 
     // When: the real lifecycle preview surface evaluates identical state twice.
-    let first = fixture.preview("preview-v11-uniform");
-    let second = fixture.preview("preview-v11-uniform");
+    let first = fixture.preview("preview-v11-uniform").await;
+    let second = fixture.preview("preview-v11-uniform").await;
     let trace = subscription_trace(&first);
 
     // Then: v11 uses uniform neutral factors and a stable WRH winner.
@@ -140,7 +140,7 @@ async fn handle_base_warning_preserves_selection_until_rejected() {
         .status = Some("allowed_warning".to_owned());
     fixture.set_quota(fixture.urgent_id, urgent.clone());
     assert_eq!(
-        fixture.preview("base-warning").winner_upstream_id,
+        fixture.preview("base-warning").await.winner_upstream_id,
         Some(fixture.urgent_id)
     );
     assert_eq!(fixture.handle_model("claude-test").await, StatusCode::OK);
@@ -157,7 +157,7 @@ async fn handle_base_warning_preserves_selection_until_rejected() {
         .status = Some("rejected".to_owned());
     fixture.set_quota(fixture.urgent_id, urgent);
     assert_eq!(
-        fixture.preview("base-rejected").winner_upstream_id,
+        fixture.preview("base-rejected").await.winner_upstream_id,
         Some(fixture.steady_id)
     );
     assert_eq!(fixture.handle_model("claude-test").await, StatusCode::OK);
@@ -232,14 +232,14 @@ async fn handle_stale_overage_positive_returns_503_without_dispatch() {
     assert!(fixture.dispatch_hosts().is_empty());
 }
 
-#[test]
-fn preview_fable_request_excludes_exhausted_scoped_quota() {
+#[tokio::test]
+async fn preview_fable_request_excludes_exhausted_scoped_quota() {
     // Given: shared quota is healthy on both OAuth upstreams, while only the
     // first upstream has exhausted its Fable-scoped weekly quota.
     let fixture = PreviewFixture::new(fable_quota(1.0), fable_quota(0.2));
-
-    // When: the default lifecycle preview evaluates a real Fable request body.
-    let outcome = fixture.preview_model("preview-fable-exhausted", "claude-fable-5");
+    let outcome = fixture
+        .preview_model("preview-fable-exhausted", "claude-fable-5")
+        .await;
     let trace = subscription_trace(&outcome);
 
     // Then: the exhausted upstream is absent from the assessed candidates and
@@ -277,9 +277,9 @@ async fn handle_fable_without_shared_7d_uses_available_quota_windows() {
         fable_quota_without_shared_seven_day(),
         fable_quota_without_shared_seven_day(),
     );
-
-    // When: the real lifecycle previews and handles a Fable request.
-    let preview = fixture.preview_model("preview-fable-without-shared-7d", "claude-fable-5");
+    let preview = fixture
+        .preview_model("preview-fable-without-shared-7d", "claude-fable-5")
+        .await;
     let status = fixture.handle_model("claude-fable-5").await;
 
     // Then: the available quota set is complete for this upstream, and the
@@ -297,8 +297,9 @@ async fn handle_fable_with_unobserved_shared_7d_remains_partial_base() {
         fable_quota_with_unobserved_shared_seven_day(),
         fable_quota_with_unobserved_shared_seven_day(),
     );
-
-    let preview = fixture.preview_model("preview-fable-unobserved-shared-7d", "claude-fable-5");
+    let preview = fixture
+        .preview_model("preview-fable-unobserved-shared-7d", "claude-fable-5")
+        .await;
     let status = fixture.handle_model("claude-fable-5").await;
 
     assert_eq!(

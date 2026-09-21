@@ -9,6 +9,14 @@ All notable changes to this project will be documented in this file.
 - Request Log tables now default to `/v1/messages` requests. The Logs page filters by Messages, Token count, Models, Files, Other proxy requests, Renewals, or Unclassified; Overview and principal/upstream previews show Messages only. Row contents and the set of recorded requests are unchanged.
 - New request logs retain endpoint-category metadata for consistent history and live filtering. Existing logs without that metadata remain available under Unclassified on the Logs page; existing renewal logs remain under Renewals.
 
+### Breaking changes
+
+- `prompt_cache_shadow.refresh_debounce_secs` and `prompt_cache_shadow.max_live_entries_per_partition` have been removed; configuration files containing them fail to load. Prompt cache observations are now read directly from the shared observation store rather than a pod-local cache, so the debounce window and per-partition entry ceiling no longer exist. `prompt_cache_shadow.grace_margin_secs` is unchanged.
+
+### Fixed
+
+- Prompt-cache routing reads a request-scoped shared-store snapshot, and out-of-order observation writes cannot shorten a committed expiry or replace its metadata with older data. Streaming observations are submitted when `message_start` usage arrives; response delivery never waits for their commit. Store lookup failures disable cache affinity for that decision without failing the request.
+
 ## [0.5.0] - 2026-09-20
 
 ### Breaking changes

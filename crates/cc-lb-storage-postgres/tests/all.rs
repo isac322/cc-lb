@@ -2,14 +2,14 @@
 mod api_key_usage;
 #[path = "audit.rs"]
 mod audit;
+#[path = "batch_lookup_50k_under_500ms.rs"]
+mod batch_lookup_50k_under_500ms;
 #[path = "cache_keepalive_session_reads.rs"]
 mod cache_keepalive_session_reads;
 #[path = "cache_keepalive_sessions.rs"]
 mod cache_keepalive_sessions;
 #[path = "crash_recovery.rs"]
 mod crash_recovery;
-#[path = "hydrate_50k_under_500ms.rs"]
-mod hydrate_50k_under_500ms;
 #[path = "migration_0037_warmup.rs"]
 mod migration_0037_warmup;
 #[path = "migration_0040_wasm_registry_wire_version.rs"]

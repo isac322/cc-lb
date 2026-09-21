@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::dynamic_view_builder::{Stores, build_dynamic_view};
-use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
+use crate::prompt_cache_thread_usage::PromptCacheThreadUsageTracker;
 use crate::revision_hash::compute_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 use cc_lb_engine::PromptCacheObservationSinkLike;
@@ -27,7 +27,8 @@ pub struct Reconciler {
     pub cancel: CancellationToken,
     pub data_dir: PathBuf,
     pub subscription_quota_cache: Arc<SubscriptionQuotaCache>,
-    pub prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+    pub prompt_cache_thread_usage: Option<Arc<PromptCacheThreadUsageTracker>>,
+    pub prompt_cache_grace_margin_secs: u64,
     pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub clock: ClockHandle,
@@ -45,7 +46,8 @@ impl Reconciler {
         cancel: CancellationToken,
         data_dir: PathBuf,
         subscription_quota_cache: Arc<SubscriptionQuotaCache>,
-        prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+        prompt_cache_thread_usage: Option<Arc<PromptCacheThreadUsageTracker>>,
+        prompt_cache_grace_margin_secs: u64,
         prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
         subscription_quota_routing_max_staleness_secs: u64,
         clock: ClockHandle,
@@ -60,7 +62,8 @@ impl Reconciler {
             cancel,
             data_dir,
             subscription_quota_cache,
-            prompt_cache_observation_cache,
+            prompt_cache_thread_usage,
+            prompt_cache_grace_margin_secs,
             prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs,
             clock,
@@ -113,7 +116,10 @@ impl Reconciler {
             &self.runtime,
             &self.data_dir,
             self.subscription_quota_cache.clone(),
-            self.prompt_cache_observation_cache.clone(),
+            self.prompt_cache_grace_margin_secs,
+            self.prompt_cache_thread_usage.clone().map(|tracker| {
+                tracker as Arc<dyn cc_lb_engine::lifecycle::PromptCacheThreadUsageTrackerLike>
+            }),
             self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             self.clock.clone(),

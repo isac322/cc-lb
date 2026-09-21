@@ -35,10 +35,10 @@ pub use redaction::{
 pub use trace_layer::{ObservabilityTraceLayer, ProxyMakeSpan, RouteTemplateFn, trace_layer};
 
 pub mod cache_observation_dropped_reason {
-    // Keep this enum-like set bounded: queue_full, below_threshold, abort.
+    // Fixed reasons keep metric label cardinality bounded.
     pub const QUEUE_FULL: &str = "queue_full";
+    pub const CHANNEL_CLOSED: &str = "channel_closed";
     pub const BELOW_THRESHOLD: &str = "below_threshold";
-    pub const ABORT: &str = "abort";
 }
 
 pub mod cache_observation_store_kind {
@@ -71,6 +71,11 @@ pub fn inc_cache_observation_dropped(reason: &str) {
         "reason" => reason.to_owned()
     )
     .increment(1);
+}
+
+/// Record a failed shared-cache lookup without classifying provider cache usage.
+pub fn inc_cache_observation_read_failed() {
+    metrics::counter!("cc_lb_cache_observation_read_failed_total").increment(1);
 }
 
 pub fn inc_cache_observation_write_failed(store: &str) {

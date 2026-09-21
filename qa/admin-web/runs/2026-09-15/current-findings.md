@@ -1,93 +1,93 @@
 # Current Findings — run anchored at 2026-09-15 UTC
 
-진행 중 관측 결과만 모은다. 완료 보고가 아니며, 어떤 항목도 production 배포·전수 PASS를 주장하지 않는다.
+This collects in-progress observations only. It is not a completion report, and no item claims production deployment or exhaustive PASS.
 
 ## 1. Controlled cache experiment (keepalive endpoints)
 
-- Verdict: PASS. `cache-experiment/result-summary.json` 기준.
-- 측정 범위: 고정된 `principalKeepalive` endpoint(detail/list/summary)와 seeded fixture key만 측정했다. 전체 product query가 아니다.
-- 조건 증명: cold cycle 48회, eviction 후 resident page 0 확인, cold-A → warm → cold-B 순서.
-- 결과 (median):
+- Verdict: PASS. Per `cache-experiment/result-summary.json`.
+- Measurement scope: only the fixed `principalKeepalive` endpoints (detail/list/summary) and seeded fixture keys were measured. Not the entire product query set.
+- Condition proof: 48 cold cycles, resident pages confirmed at 0 after eviction, cold-A → warm → cold-B order.
+- Results (median):
   - detail: cold-A TTFB 6.52ms / warm 3.80ms; db_exec 0.135ms → 0.085ms; blks_read 9 → 0.
   - list: cold-A TTFB 23.49ms / warm 20.65ms; db_exec 4.67ms → 6.15ms; blks_read 456 → 0, blks_hit 733 → 3,768.
   - summary: cold-A TTFB 20.35ms / warm 18.24ms; db_exec 4.21ms → 5.54ms; blks_read 453 → 0, blks_hit 689 → 3,721.
-- 해석: 이 격리 실험에서 PostgreSQL `shared_blks_read`는 0으로 줄고 buffer hit이 늘었으며, TTFB 중앙값은 list 약 2.8ms, summary 약 2.1ms 감소했다. `shared_blks_read`는 PostgreSQL buffer로 읽어온 블록 수이며 물리 디스크 I/O 횟수가 아니다. 이 결과만으로 운영 병목의 주원인이 캐시인지 판단하지 않는다.
-- 한계: mincore는 선택된 relation file만 측정(WAL/metadata/temp 제외); fadvise는 advisory; PostgreSQL restart는 shared_buffers만 초기화하고 storage-controller coldness를 증명하지 않는다.
-- pure pool wait: 현재 app metrics/pg_stat_statements로 관측 불가. 0으로 채우지 않고 `null`로 보고했다.
-- 측정 귀속: `isolated_serial_pg_stat_statements_delta`, request-ID tracing 아님. 비대상 shared_blks_read 합계 0, 비대상 statement interval 13(api_key_usage_writers_v1 계열). 동일 SQL family를 실행하는 미관측 background task 가능성은 배제하지 못했다.
+- Interpretation: in this isolated experiment, PostgreSQL `shared_blks_read` dropped to 0 and buffer hits increased, while median TTFB fell by about 2.8ms for list and about 2.1ms for summary. `shared_blks_read` is the number of blocks read into PostgreSQL buffers, not the number of physical disk I/O operations. This result alone does not determine whether cache is the primary cause of the production bottleneck.
+- Limitations: mincore measures only the selected relation files (WAL/metadata/temp excluded); fadvise is advisory; a PostgreSQL restart resets only shared_buffers and does not prove storage-controller coldness.
+- Pure pool wait: not observable with the current app metrics/pg_stat_statements. Reported as `null` rather than filled with 0.
+- Measurement attribution: `isolated_serial_pg_stat_statements_delta`, not request-ID tracing. Non-target shared_blks_read total 0, non-target statement intervals 13 (api_key_usage_writers_v1 family). The possibility of an unobserved background task running the same SQL family could not be excluded.
 
 ## 2. Production heavy principal card
 
-- `production-heavy-principal-card.json`: DOM-dispatched UI click 1건에서 최초 요청의 Resource Timing **전체 duration 8,442ms**, HTTP 200과 이후 자동 poll 8회를 관측했다. 이 파일은 해당 요청의 TTFB를 따로 기록하지 않았다.
-- 8,442ms를 순수 DB 실행이나 pool queue wait로 분해할 근거는 없다. direct GET 통계와의 관계도 미확정이다.
-- Keepalive 484 direct row 중 client deadline(2s×4, 3s×1, 10s×1) 6건은 right-censored lower bound이며 HTTP server FAIL이 아니다.
+- `production-heavy-principal-card.json`: from one DOM-dispatched UI click, observed the initial request's Resource Timing **total duration of 8,442ms**, HTTP 200, and 8 subsequent automatic polls. This file does not separately record that request's TTFB.
+- There is no basis to decompose 8,442ms into pure DB execution or pool queue wait. Its relationship to direct GET statistics is also undetermined.
+- Of the 484 keepalive direct rows, the 6 that hit client deadlines (2s×4, 3s×1, 10s×1) are right-censored lower bounds, not HTTP server FAILs.
 
-## 3. SQL/pool correlation 상태
+## 3. SQL/pool correlation status
 
-- Server-timing isolated 증거로 canonical RID join은 두 backend에서 측정됐다(SQLite 17 entry, PostgreSQL 19 entry, SQL-bearing 각 6).
-- 그러나 pure DB 실행 시간과 pure pool queue wait는 여전히 미측정이다. `sql_elapsed_secs`는 query-stream lifetime, `acquire_total_secs`는 full acquire다.
-- PostgreSQL capture는 `action_window_still_open`으로 incomplete다.
-- 과거 Camofox native 410 증거는 당시의 capability 한계로 보존한다. 이후 native 기능과 격리 SQL/acquire 연결을 확인했지만, 이 결과가 운영 계측 적용이나 전체 행렬 완료를 뜻하지는 않는다.
+- Server-timing isolated evidence measured the canonical RID join on both backends (SQLite 17 entries, PostgreSQL 19 entries, 6 SQL-bearing each).
+- However, pure DB execution time and pure pool queue wait remain unmeasured. `sql_elapsed_secs` is query-stream lifetime; `acquire_total_secs` is the full acquire.
+- The PostgreSQL capture is incomplete with `action_window_still_open`.
+- The earlier Camofox native 410 evidence is preserved as a capability limitation of that time. Native capability and the isolated SQL/acquire linkage have since been confirmed, but this does not mean production instrumentation was applied or the full matrix completed.
 
-## 4. Production native 관측 (overlay)
+## 4. Production native observation (overlay)
 
-- Plugins bounded slice: 33 rows / 20 unique item / PASS 15 + PASS_TARGET_ONLY 4 / BLOCKED 4 / NOT_APPLICABLE 5 / SKIPPED_WRITE 5.
-- Upstreams bounded slice: 212 rows / 44 unique item / PASS 88 / SKIPPED_WRITE 94 / BLOCKED 20 / NOT_APPLICABLE 10. unmatched item_id 1건(`UI-SRC-0D929B471D7A-name-edit`).
-- 두 파일 모두 write 0. 정확한 scope 확인 전이므로 production matrix에 미편입.
+- Plugins bounded slice: 33 rows / 20 unique items / PASS 15 + PASS_TARGET_ONLY 4 / BLOCKED 4 / NOT_APPLICABLE 5 / SKIPPED_WRITE 5.
+- Upstreams bounded slice: 212 rows / 44 unique items / PASS 88 / SKIPPED_WRITE 94 / BLOCKED 20 / NOT_APPLICABLE 10. One unmatched item_id (`UI-SRC-0D929B471D7A-name-edit`).
+- Both files have 0 writes. Not merged into the production matrix because exact scope confirmation is pending.
 
-## 5. Scope 외 production GET
+## 5. Out-of-scope production GETs
 
-- `production-read-scope-deviation.json`: local-only 배정 subtask가 production GET 5건 실행(write 0). 별도 기록, 어느 coverage 집합에도 편입하지 않았다.
+- `production-read-scope-deviation.json`: a browser subtask assigned to local-only verification executed 5 production GETs (0 writes). Recorded separately; not merged into any coverage set.
 
-## 6. Known bug (미수정)
+## 6. Known bug (unfixed)
 
-- `SettingsApply` 미지원 제공자의 잘못된 버튼 활성화는 2026-09-16 별도 승인한 capability 표시로 수정·검증했다. 실제 Apply 실행 구현과 아래의 기존 지원 모드 응답 계약 문제는 변경하지 않았다.
-- `clearBaseURL`: 2026-09-16 명시적 null 제거 계약을 별도로 승인받아 로컬 후보에서 수정·검증했다. 과거 관측은 보존하며 운영에 반영됐다고 주장하지 않는다.
+- The incorrect button enablement for providers without `SettingsApply` support was fixed and verified on 2026-09-16 via a separately approved capability display. The actual Apply execution implementation and the existing supported-mode response contract issue below were not changed.
+- `clearBaseURL`: on 2026-09-16, an explicit-null removal contract was separately approved and fixed/verified in the local candidate. Past observations are preserved; we do not claim it was applied to production.
 
-## 7. Source catalog 상태
+## 7. Source catalog status
 
-- Live source 파일은 approved uncommitted candidate 기준으로 재생성되었다(standard parser 통과). Baseline archive hash는 `input_freeze.archive_member`에 보존.
-- 현재 분모: 433 rows / 170 storage operations / 422 production matrix rows / ui_actions 205 / api_endpoints 115.
+- Live source files were regenerated against the approved uncommitted candidate (standard parser passed). Baseline archive hashes are preserved in `input_freeze.archive_member`.
+- Current denominators: 433 rows / 170 storage operations / 422 production matrix rows / ui_actions 205 / api_endpoints 115.
 
-## 8. 머지 보류 후 로컬 추가 검증
+## 8. Local additional verification after merge hold
 
-- PR #793 머지 보류는 유지한다. 후속 로컬 검증과 승인된 수정은 `80e1180f…`, `91cd5219…` 커밋으로 draft PR에 반영됐고 각 head의 CI를 별도로 확인했다. 이 반영은 머지나 운영 배포가 아니다.
-- `post-hold-reassessment/native-source-mapping.json`: 원래 native 관측 245행을 오프라인 대조했다. 244행은 정식 ID, 1행은 이름 편집 후 Escape 취소의 명시적 변형 별칭이다. 기존 실행 상태와 운영 행렬은 바꾸지 않았으며, 최신 분류는 runtime-progress의 후속 overlay에 연결했다.
-- `post-hold-reassessment/independent-page-oracle-check.json`: 실제 로컬 PostgreSQL Plugins 탐색에서 사전에 고정한 경로·제목을 DOM에서 별도 추출한 상태와 비교하고 원본 PNG를 확인했다. 종료된 관측 창과 실제 registry SQL/acquire 연결을 검증했다. 과거 열린 window·유실 자료·동일 HTML 해시를 양쪽에 복사한 oracle은 그대로 한계로 남긴다.
-- **2026-09-16 로컬 사용량 전이:** `post-hold-usage-status/verification.json`에 저장소·API·UI의 `$1.25 · 2.0K tok` → `$2.00 · 3.0K tok` 변화를 기록했다. 원시 request ingestion이 아닌 직접 시드한 rollup의 표시 경로 검증이다.
-- **2026-09-16 로컬 상태 전이:** OAuth credential 없는 upstream의 실제 적용 오류와 danger 도트·오류 title을 확인했다. disable API 뒤 저장소·status API·UI에서 disabled·neutral·title 없음으로 전이했다. 연결 불가능한 URL을 오류 발생 원인으로 간주했던 가설은 기각했다. native tooltip 픽셀은 미검증이다.
-- RT 수집 스크립트의 `/admin/v1` 전용 필터가 `/admin/usage`를 누락시킨 문제를 확인했다. 새 same-origin `/admin/` 관측에서 실제 UI 사용량 요청 3건을 각각 SQL 2개·acquire 2개에 연결했다. 과거 누락 구간을 새 측정값으로 채우지 않았다.
-- 이 결과는 두 로컬 변형의 기능·상태 전이 검증이며, 운영 전수 실행·순수 DB 시간·순수 pool wait·전체 QA PASS를 의미하지 않는다.
+- The PR #793 merge hold remains in place. Follow-up local verification and approved fixes were applied to the draft PR as commits `80e1180f…` and `91cd5219…`, and CI for each head was checked separately. This application is neither a merge nor a production deployment.
+- `post-hold-reassessment/native-source-mapping.json`: the original 245 native observation rows were reconciled offline. 244 rows are canonical IDs; 1 row is an explicit variant alias for a name edit cancelled with Escape. Existing execution status and the production matrix were not changed; the latest classification is linked to the follow-up overlay in runtime-progress.
+- `post-hold-reassessment/independent-page-oracle-check.json`: in a real local PostgreSQL Plugins page navigation, the pre-registered path/title was compared against a separately extracted DOM state, and the original PNG was checked. The closed observation window and the real registry SQL/acquire linkage were verified. The oracle that copied the same open window, lost data, and identical HTML hash to both sides remains a limitation.
+- **2026-09-16 local usage transition:** `post-hold-usage-status/verification.json` records the storage → API → UI change from `$1.25 · 2.0K tok` to `$2.00 · 3.0K tok`. This verifies the display path of a directly seeded rollup, not raw request ingestion.
+- **2026-09-16 local status transition:** confirmed the real apply error for an upstream without an OAuth credential, plus the danger dot and error title. After the disable API call, storage, the status API, and the UI transitioned to disabled, neutral, and no title. The hypothesis that an unreachable URL was the cause of the error was rejected. Native tooltip pixels are unverified.
+- Confirmed that the RT collection script's `/admin/v1`-only filter missed `/admin/usage`. In a new same-origin `/admin/` observation, 3 real UI usage requests were each linked to 2 SQL statements and 2 acquires. The past gap was not backfilled with new measurements.
+- This result verifies functional and state transitions of two local variants; it does not mean a full production run, pure DB time, pure pool wait, or overall QA PASS.
 
-## 9. 이전 Base URL 초기화 수정 — 후속 계약 변경은 §12 참조
+## 9. Earlier Base URL clearing fix — see §12 for the follow-up contract change
 
-- update에서 필드 생략은 유지, URL은 설정, 명시적 null은 override 제거로 구현했다. create/response nullable 표현과 API 키·OAuth 토큰 처리는 유지했다.
-- 기존 HTTP 회귀는 수정 전 `String(previous_url) != Null`로 실패했다. 수정 후 SQLite·PostgreSQL conformance, signer 및 실제 Lifecycle→RecordingDispatcher 기본 목적지 검증을 포함한 33개 검사가 모두 통과했다.
-- 실제 SettingsCard에서 입력 비우기→저장→독립 GET→새로고침을 수행했다. DB의 base_url NULL, 화면의 `—`, 기본 endpoint 메타데이터를 확인했다. 사용자에게 보이는 입력 동작과 저장된 상태가 이제 일치한다.
-- 격리 fixture는 원래 loopback override로 복원하고 서버·브라우저를 종료했다. revision과 audit 기록은 정상적으로 증가했으므로 byte-identical 복원으로 표기하지 않는다. 외부 Anthropic 요청과 운영 변경은 없었다.
+- Implemented: omitted field in update is preserved, a URL sets the value, and explicit null removes the override. Create/response nullable representation and API key/OAuth token handling were kept.
+- The existing HTTP regression failed before the fix with `String(previous_url) != Null`. After the fix, all 33 checks passed, including SQLite/PostgreSQL conformance, signer, and the real Lifecycle→RecordingDispatcher default destination verification.
+- In the real SettingsCard, performed clear input → save → independent GET → reload. Confirmed DB base_url NULL, the `—` on screen, and default endpoint metadata. User-visible input behavior and stored state now match.
+- The isolated fixture was restored to its original loopback override and the server/browser were stopped. Revision and audit records increased normally, so this is not marked as a byte-identical restore. There were no external Anthropic requests or production changes.
 
-## 10. Settings Apply 지원 여부
+## 10. Settings Apply support
 
-- 실제 제공자의 `apply_supported`를 draft 응답에 추가했다. true일 때만 기존 검증·revision 조건과 함께 Apply를 활성화하며, false·아직 확인되지 않은 상태에서는 비활성화한다. Save·Validate는 유지한다.
-- 지원/미지원 HTTP 경로를 포함한 backend 회귀 23개와 Web 700개가 통과했다. 실제 파일 기반 서버에서 Save·Validate 성공 후에도 Apply가 비활성화됐고, 해당 관측 구간의 서버 Apply 요청은 0건이었다.
-- Apply 전용 안내는 공유 aria-live pipeline 밖에 두고 Apply만 설명 대상으로 연결했다. Validate 설명은 그대로 유지했다. 초기 로딩·조회 오류·미확인 상태의 안내도 구분한다.
-- 최종 로컬 typecheck의 package-script 실행은 shell의 명령 검색 문제로 tsgo를 찾지 못했다. 설치된 동일 버전 tsgo를 절대경로로 실행한 `-b --noEmit` 검사는 통과했다. 전역 shell 설정이나 의존성을 변경하지 않았다.
-- **별도 기존 계약 제한:** 지원 모드 Apply handler는 `{status: applied}`를 반환하지만 client는 `applied_revision` 등을 기대한다. 성공 토스트의 잘못된 revision 표시는 소스 추론이며 이 브라우저 run에서 실행한 결과가 아니다. client의 `expected_revision`도 해당 handler가 추출하지 않는다. history 재조회는 있으나 새 이력 생성은 별도 미검증이다. 이번 capability 승인 범위 밖이므로 고치지 않았다.
+- Added the real provider's `apply_supported` to the draft response. Apply is enabled only when true, together with the existing validation/revision conditions; it is disabled when false or not yet confirmed. Save and Validate are unchanged.
+- 23 backend regressions including supported/unsupported HTTP paths and 700 Web tests passed. On a real file-backed server, Apply stayed disabled even after Save/Validate succeeded, and there were 0 server Apply requests during that observation window.
+- Apply-specific guidance was placed outside the shared aria-live pipeline, with only Apply connected as the described target. The Validate description was kept as-is. Guidance for initial loading, query errors, and unconfirmed states is also distinguished.
+- The final local typecheck's package-script run could not find tsgo due to the shell's command lookup. The `-b --noEmit` check run with the same installed tsgo version via absolute path passed. No global shell settings or dependencies were changed.
+- **Separate existing contract limitation:** the supported-mode Apply handler returns `{status: applied}` but the client expects `applied_revision` etc. The incorrect revision shown in the success toast is a source-level inference, not a result executed in this browser run. The client's `expected_revision` is also not extracted by that handler. History refetch exists, but new history creation is separately unverified. This is outside the approved capability scope, so it was not fixed.
 
-## 11. 현재 보고와 과거 관측의 구분
+## 11. Distinguishing the current report from past observations
 
-- `runtime-progress.json`과 `.md`는 2026-09-16 후속 overlay를 포함한다. 원래 정규화 1,511행·분류 계수·미해결 135항목은 과거 snapshot으로 보존하며 현재 남은 작업 수로 오인하지 않는다.
-- 앞선 보고 snapshot에는 205 actions와 595 variant labels가 있었다. 승인된 안전성 수정 후 현재 source는 205 actions와 597 labels다. label 수는 entity·page·poll을 전개한 실행 분모가 아니며 실행률 계산에 사용하지 않는다.
-- Base URL 초기화, file-provider Apply 비활성화, 두 로컬 usage/status 전이는 각각의 제한된 해결 범위를 갖는다. 전체 운영 행렬과 순수 DB/queue wait, 비운영 OAuth 성공 경로, 운영 계측 적용·머지는 여전히 미완료다.
-- 사용자가 비운영 OAuth 테스트 계정을 현재 제공할 수 없다고 확인했다. 실제 성공 경로만 외부 전제조건 차단으로 남기고, 이미 검증된 실패·취소·격리 기능 결과와 분리한다. 운영 토큰이나 임의 계정을 대신 사용하지 않는다.
+- `runtime-progress.json` and `.md` include the 2026-09-16 follow-up overlay. The original 1,511 normalized rows, classification coefficients, and 135 unresolved items are preserved as a past snapshot and must not be mistaken for the current remaining work count.
+- The earlier report snapshot had 205 actions and 595 variant labels. After the approved safety fixes, the current source has 205 actions and 597 labels. The label count is not an execution denominator expanded over entity·page·poll and is not used in execution-rate calculations.
+- Base URL clearing, file-provider Apply disablement, and the two local usage/status transitions each have their own limited resolution scope. The full production matrix, pure DB/queue wait, the non-production OAuth success path, production instrumentation application, and merge remain incomplete.
+- The user confirmed they cannot currently provide a non-production OAuth test account. Only the real success path remains blocked by an external prerequisite, kept separate from the already-verified failure/cancel/isolated capability results. No production token or arbitrary account is substituted.
 
-## 12. 승인된 애플리케이션 안전성 수정
+## 12. Approved application safety fixes
 
-- head `19b05570` 재검증에서 실제 회귀를 발견했다. 구버전에서 열어둔 폼의 무편집 저장이 Base URL을 지웠고, 최신 비관리자 기록 250건 뒤의 관리자 작업은 Audit 화면에서 사라졌다. 변경된 범위별 Audit 정렬의 추가 스캔·정렬도 확인했다. 실패 자료는 `application-safety/before/`에 보존했다.
-- 사용자의 명시적 승인 후 HTTP `base_url` 생략/null을 유지로 되돌리고 `clear_base_url: true`만 초기화하도록 수정했다. UI는 편집 진입 시 기준값과 비교하고, 초기화 응답의 `base_url === null`이 확인되지 않으면 성공으로 표시하거나 폼을 닫지 않는다. 키·토큰 null 의미와 CAS는 유지한다.
-- 최종 바이너리 `f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8`로 두 버전 방향을 실제 브라우저에서 검증했다. 구 UI→새 서버의 무편집 저장은 URL/revision을 유지했고, 새 UI의 의도한 초기화는 DB NULL을 저장했다. 새 UI→구 서버의 무시된 초기화(PUT 200 한 건)는 오류·편집 유지로 표시되고 DB URL은 보존됐다.
-- Audit UI는 `admin_only=true`를 사용하고 양 DB는 관리자 대상 조건을 LIMIT 전에 적용한다. 일반 API 기본 조회는 비관리자 기록을 계속 반환한다. 실제 UI에서 기존의 빈 목록이 관리자 작업 1건으로 바뀌었다. 브라우저 ResourceTiming에서 query string을 직접 포착하지 못한 한계는 원본 관측에 남겼으며 요청별 성능 상관 증거로 대체하지 않는다.
-- 두 DB에 각각 5개의 정렬/부분 인덱스를 추가했다. 6개 조회 결과의 A/B/A 일치, SQLite 임시 정렬 제거, PG 강제 generic actor plan의 부분 인덱스 사용, 10만 합성 행의 실제 migration runner와 concurrent 사전 생성 경로를 확인했다.
-- 인덱스 쓰기 비용은 증가했다. `application-safety/after/index-tradeoff-summary.json`에 SQLite autocommit 삽입 및 PG DB 실행/WAL 증가와 측정 한계를 기록했다. 원시 seed의 PG token NULL은 실제 writer와 달라 HTTP 500을 만들었으므로 테스트 데이터만 token 0으로 고쳤다. 이 fixture 오류를 앱 오류로 분류하거나 decoder를 완화하지 않았다.
-- **운영 배포 조건:** 큰 운영 PG 테이블에서는 별도 승인된 온라인 사전 인덱스 생성과 정확한 정의·valid/ready 확인이 필요하다. plain startup 생성은 쓰기를 막으며 `lock_timeout`은 생성 시간을 제한하지 않는다. 운영 DDL·배포·머지는 수행하지 않았다.
-- 최종 Rust 회귀 112개, Web 706개, 타입 검사·빌드·영향 Rust all-targets/all-features Clippy 및 formatter가 통과했다. Source inventory 433행 검사도 통과했다. 두 독립 리뷰의 실제 수정 요구를 처리했고 원시 증거·정리 결과는 `application-safety/verification.json`과 `index.json`에 연결했다. 이는 세 승인 수정의 격리 검증이지 전체 운영 QA 완료가 아니다.
+- Re-verification of head `19b05570` found real regressions. A no-edit save of a form left open from an older version cleared the Base URL, and admin actions after the newest 250 non-admin records disappeared from the Audit screen. The extra scan/sort of Audit ordering by changed scope was also confirmed. Failure materials are preserved in `application-safety/before/`.
+- After the user's explicit approval, HTTP `base_url` omission/null was reverted to preserve, and only `clear_base_url: true` clears it. The UI compares against the baseline value when entering edit mode, and does not show success or close the form unless the clear response's `base_url === null` is confirmed. Key/token null semantics and CAS are preserved.
+- With the final binary `f08348b6dcbb821de48ba5d5bf2576168e03ec6c184626d8033a344bdfb4e2b8`, both version directions were verified in a real browser. A no-edit save from old UI → new server preserved URL/revision; the new UI's intended clear stored DB NULL. The ignored clear from new UI → old server (one PUT 200) displayed as an error with editing retained, and the DB URL was preserved.
+- The Audit UI uses `admin_only=true`, and both DBs apply the admin-target condition before LIMIT. The general API default query continues to return non-admin records. In the real UI, the previously empty list changed to show 1 admin action. The limitation that the browser ResourceTiming could not directly capture the query string remains in the original observation and was not replaced with per-request performance correlation evidence.
+- Added 5 sorted/partial indexes to each of the two DBs. Verified A/B/A match of 6 query results, removal of the SQLite temp sort, partial-index use in the PG forced generic actor plan, and the real migration runner plus concurrent pre-creation path on 100k synthetic rows.
+- Index write cost increased. `application-safety/after/index-tradeoff-summary.json` records SQLite autocommit inserts and PG DB execution/WAL increases with measurement limitations. The raw seed's PG token NULL differed from a real writer and produced HTTP 500, so only the test data was fixed to token 0. This fixture error was not classified as an app error, and the decoder was not relaxed.
+- **Production deployment condition:** on large production PG tables, a separately approved online pre-index creation with exact definition and valid/ready verification is required. Plain startup creation blocks writes, and `lock_timeout` does not limit creation time. No production DDL, deployment, or merge was performed.
+- Final regressions: 112 Rust, 706 Web, plus typecheck, build, affected-Rust all-targets/all-features Clippy, and formatter all passed. The Source inventory 433-row check also passed. Real fix requests from two independent reviews were handled, and raw evidence/cleanup results are linked in `application-safety/verification.json` and `index.json`. This is isolated verification of the three approved fixes, not completion of the full production QA.

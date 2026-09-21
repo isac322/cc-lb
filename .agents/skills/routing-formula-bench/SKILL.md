@@ -1,6 +1,6 @@
 ---
 name: routing-formula-bench
-description: Benchmark arbitrary routing selection formulas against captured production traffic with dynamic quota and cache simulation. Use whenever asked for a routing formula benchmark, a cost/throughput test, selector comparison, quota/cache simulation replay, or "현재 코드 vs origin/master 성능"; also use to compare a worktree formula to one or more git refs, evaluate cache-hit or quota-aware routing alternatives, or stress routing under quota exhaustion.
+description: Benchmark arbitrary routing selection formulas against captured production traffic with dynamic quota and cache simulation. Use whenever asked for a routing formula benchmark, a cost/throughput test, selector comparison, quota/cache simulation replay, or "current code vs origin/master performance"; also use to compare a worktree formula to one or more git refs, evaluate cache-hit or quota-aware routing alternatives, or stress routing under quota exhaustion.
 ---
 
 # Routing Formula Benchmark

@@ -32,10 +32,9 @@ pub use subscription_metadata_hook::{
 };
 pub use traits::{
     DynamicViewControl, LimitControl, ManagedKeyControl, NoopSubscriptionQuotaCache,
-    PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
-    PromptCacheObservationInput, PromptCacheObservationSinkLike, PromptCacheThreadUsage,
-    RuntimeStatusControl, RuntimeStatusError, SubscriptionQuotaCacheLike,
-    SubscriptionQuotaSampleControl,
+    PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike, PromptCacheThreadUsage,
+    PromptCacheThreadUsageTrackerLike, RuntimeStatusControl, RuntimeStatusError,
+    SubscriptionQuotaCacheLike, SubscriptionQuotaSampleControl,
 };
 
 pub trait ReplicaIdentityProvider: Send + Sync {

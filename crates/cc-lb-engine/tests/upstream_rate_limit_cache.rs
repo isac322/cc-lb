@@ -1,5 +1,7 @@
 use crate::common;
 
+use std::collections::HashMap;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -49,9 +51,8 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
         &view,
         "principal",
         RequestKind::AnthropicMessages,
-        "",
         &[],
-        None,
+        &HashMap::new(),
         &cc_lb_engine::SystemClock,
     );
 

@@ -64,7 +64,11 @@ impl PromptCacheObservationSink {
                 inc_cache_observation_dropped(cache_observation_dropped_reason::QUEUE_FULL);
                 Err(EnqueueError::ChannelFull)
             }
-            Err(TrySendError::Closed(_)) => Err(EnqueueError::ChannelClosed),
+            Err(TrySendError::Closed(_)) => {
+                self.dropped_counter.fetch_add(1, Ordering::Relaxed);
+                inc_cache_observation_dropped(cache_observation_dropped_reason::CHANNEL_CLOSED);
+                Err(EnqueueError::ChannelClosed)
+            }
         }
     }
 
@@ -91,9 +95,9 @@ mod tests {
     use std::sync::{Arc, Mutex, atomic::AtomicU64};
     use std::time::Duration;
 
-    use crate::prompt_cache_observation_cache::HASH_SCHEMA_VERSION;
     use async_trait::async_trait;
     use cc_lb_domain::TtlClass;
+    use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
     use cc_lb_storage_api::{PromptCacheObservationRecord, StorageResult};
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -181,6 +185,6 @@ mod tests {
         let _ = writer.await;
 
         assert_eq!(sink.enqueue(record(0)), Err(EnqueueError::ChannelClosed));
-        assert_eq!(sink.dropped_total(), 0);
+        assert_eq!(sink.dropped_total(), 1);
     }
 }

@@ -147,6 +147,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
         &runtime,
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        30,
         None,
         None,
         1800,

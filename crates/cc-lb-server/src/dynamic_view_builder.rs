@@ -3,11 +3,10 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
-use cc_lb_config::{AnthropicOAuthConfig, PromptCacheShadowConfig};
+use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_domain::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Principal, RateLimitObservation, Upstream,
@@ -48,12 +47,10 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
-use cc_lb_engine::PromptCacheObservationSinkLike;
-
 use crate::PluginManifest;
-use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
 use crate::reconcile::collect_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
+use cc_lb_engine::lifecycle::{PromptCacheObservationSinkLike, PromptCacheThreadUsageTrackerLike};
 
 /// Maximum number of user-supplied router filters. The built-in
 /// `subscription-preference` entry is structural router-chain state.
@@ -194,7 +191,8 @@ pub async fn build_dynamic_view(
     runtime: &Arc<WasmtimeRuntime>,
     data_dir: &Path,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
-    prompt_cache_observation_cache: Option<Arc<PromptCacheObservationCache>>,
+    prompt_cache_grace_margin_secs: u64,
+    prompt_cache_thread_usage: Option<Arc<dyn PromptCacheThreadUsageTrackerLike>>,
     prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     subscription_quota_routing_max_staleness_secs: u64,
     clock: cc_lb_engine::ClockHandle,
@@ -207,41 +205,9 @@ pub async fn build_dynamic_view(
     subscription_quota_cache
         .hydrate_from_store(stores, &all_upstream_ids)
         .await?;
-    let prompt_cache_observation_handles = match prompt_cache_observation_cache {
-        Some(cache) => {
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                cache.hydrate_from_store(
-                    stores.prompt_cache_observations.as_ref(),
-                    &all_upstream_ids,
-                ),
-            )
-            .await
-            {
-                Ok(Ok(record_count)) => {
-                    tracing::info!(
-                        record_count,
-                        upstream_count = all_upstream_ids.len(),
-                        "hydrated prompt cache observation cache from store"
-                    );
-                }
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        %error,
-                        "failed to hydrate prompt cache observation cache from store; continuing with shared cache"
-                    );
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        timeout_secs = 5,
-                        "timed out hydrating prompt cache observation cache from store; continuing with shared cache"
-                    );
-                }
-            }
-            Some((cache, prompt_cache_observation_sink))
-        }
-        None => None,
-    };
+    // Prompt-cache observations are read per request from the shared store
+    // (`stores.prompt_cache_observations`); there is no pod-local warmth map
+    // to hydrate at build/rebind time.
     let upstream_rate_limit_records = stores
         .upstream_rate_limits
         .list_for_upstream_ids(&all_upstream_ids)
@@ -301,29 +267,24 @@ pub async fn build_dynamic_view(
         )
         .plan_info_by_upstream(plan_info_by_upstream)
         .upstream_records(upstreams.clone());
-    if let Some((cache, sink)) = prompt_cache_observation_handles {
-        builder = builder.prompt_cache_observation_cache(cache);
-        if let Some(sink) = sink {
-            builder = builder.prompt_cache_observation_sink(sink);
-        }
+    builder = builder
+        .prompt_cache_observation_store(stores.prompt_cache_observations.clone())
+        .prompt_cache_grace_margin_secs(prompt_cache_grace_margin_secs);
+    if let Some(tracker) = prompt_cache_thread_usage {
+        builder = builder.prompt_cache_thread_usage(tracker);
+    }
+    if let Some(sink) = prompt_cache_observation_sink {
+        builder = builder.prompt_cache_observation_sink(sink);
     }
     Ok(builder.build())
 }
 
-pub(crate) fn new_prompt_cache_observation_cache(
-    config: &PromptCacheShadowConfig,
-    clock: cc_lb_engine::ClockHandle,
-) -> Arc<PromptCacheObservationCache> {
-    let cache = Arc::new(
-        PromptCacheObservationCache::new_with_debounce(
-            clock,
-            config.grace_margin_secs,
-            config.refresh_debounce_secs,
-        )
-        .with_max_entries_per_partition(config.max_live_entries_per_partition),
-    );
-    cache.spawn_expiry_sweeper();
-    cache
+pub(crate) fn new_prompt_cache_thread_usage_tracker(
+    grace_margin_secs: u64,
+) -> Arc<crate::prompt_cache_thread_usage::PromptCacheThreadUsageTracker> {
+    Arc::new(
+        crate::prompt_cache_thread_usage::PromptCacheThreadUsageTracker::new(grace_margin_secs),
+    )
 }
 
 fn group_rate_limit_observations(
@@ -1210,17 +1171,15 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    use cc_lb_domain::{TtlClass as PluginTtlClass, TtlClass as StorageTtlClass};
-    use cc_lb_engine::clock::{Clock, TestClock};
-    use cc_lb_engine::lifecycle::PromptCacheObservationCacheLike;
+    use cc_lb_engine::clock::TestClock;
+    use cc_lb_engine::lifecycle::{HASH_SCHEMA_VERSION, PromptCacheThreadUsage};
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
     use cc_lb_storage_api::{BackendKind, MetaStore, PromptCacheObservationRecord, UpstreamCreate};
     use cc_lb_storage_sqlite::SqliteStorage as Storage;
 
     use super::*;
-    use crate::prompt_cache_observation_cache::HASH_SCHEMA_VERSION;
     use crate::prompt_cache_observation_sink::{
         DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY, PromptCacheObservationSink,
     };
@@ -1239,7 +1198,7 @@ mod tests {
         let (dir, storage) = storage_fixture(9).await;
         let stores = stores(
             storage.clone(),
-            Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
+            Arc::new(FakePromptCacheObservationStore::new()),
         );
         let runtime = Arc::new(
             cc_lb_runtime_wasmtime::WasmtimeRuntime::new(Default::default()).expect("runtime"),
@@ -1313,58 +1272,44 @@ mod tests {
         );
     }
 
-    #[derive(Clone)]
+    /// Observation store test double. `list_active_for_candidates` counts
+    /// calls so tests can prove the view build never reads the store —
+    /// routing reads happen per request, not at build/rebind time.
+    #[derive(Clone, Default)]
     struct FakePromptCacheObservationStore {
-        records: Arc<Vec<PromptCacheObservationRecord>>,
-        list_delay: Option<Duration>,
         upserts: Arc<tokio::sync::Mutex<Vec<PromptCacheObservationRecord>>>,
+        list_calls: Arc<AtomicU64>,
     }
 
     impl FakePromptCacheObservationStore {
-        fn new(records: Vec<PromptCacheObservationRecord>) -> Self {
-            Self {
-                records: Arc::new(records),
-                list_delay: None,
-                upserts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            }
+        fn new() -> Self {
+            Self::default()
         }
 
-        fn sleeping(delay: Duration) -> Self {
-            Self {
-                records: Arc::new(Vec::new()),
-                list_delay: Some(delay),
-                upserts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            }
-        }
-
-        async fn list_count(&self) -> usize {
+        async fn upsert_count(&self) -> usize {
             self.upserts.lock().await.len()
         }
 
-        async fn list_all(&self) -> Vec<PromptCacheObservationRecord> {
+        async fn upserted(&self) -> Vec<PromptCacheObservationRecord> {
             self.upserts.lock().await.clone()
+        }
+
+        fn list_call_count(&self) -> u64 {
+            self.list_calls.load(Ordering::SeqCst)
         }
     }
 
     #[async_trait]
     impl PromptCacheObservationStore for FakePromptCacheObservationStore {
-        async fn list_active_for_upstream(
+        async fn list_active_for_candidates(
             &self,
-            upstream_id: Uuid,
-            not_expired_at_unix_secs: u64,
+            _upstream_ids: &[Uuid],
+            _canonical_model_id: &str,
+            _v3_prefix_keys: &[String],
+            _not_expired_at_unix_secs: u64,
         ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
-            if let Some(delay) = self.list_delay {
-                tokio::time::sleep(delay).await;
-            }
-            Ok(self
-                .records
-                .iter()
-                .filter(|record| {
-                    record.upstream_id == upstream_id
-                        && record.expires_at_unix_secs > not_expired_at_unix_secs
-                })
-                .cloned()
-                .collect())
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
         }
 
         async fn upsert_observation(
@@ -1445,15 +1390,14 @@ mod tests {
         config: cc_lb_config::Config,
     ) -> Arc<DynamicView> {
         let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
-        let cache = new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
+        let tracker =
+            new_prompt_cache_thread_usage_tracker(config.prompt_cache_shadow.grace_margin_secs);
         let (sink, _writer) = PromptCacheObservationSink::new(
             stores.prompt_cache_observations.clone(),
             DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
             cc_lb_observability::cache_observation_store_kind::SQLITE,
         );
         let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
-        let prompt_cache_observation_cache = Some(cache);
-        let prompt_cache_observation_sink = Some(sink);
         build_dynamic_view(
             stores,
             &AnthropicOAuthConfig::default(),
@@ -1463,8 +1407,9 @@ mod tests {
             runtime,
             data_dir,
             Arc::new(SubscriptionQuotaCache::new()),
-            prompt_cache_observation_cache,
-            prompt_cache_observation_sink,
+            config.prompt_cache_shadow.grace_margin_secs,
+            Some(tracker),
+            Some(sink),
             1800,
             clock,
         )
@@ -1472,66 +1417,32 @@ mod tests {
         .expect("dynamic view builds")
     }
 
-    fn prompt_record(
-        upstream_id: Uuid,
-        prefix_hash: &str,
-        last_observed_at_unix_secs: u64,
-    ) -> PromptCacheObservationRecord {
-        PromptCacheObservationRecord {
-            upstream_id,
-            canonical_model_id: MODEL.to_owned(),
-            v3_prefix_key: prefix_hash.to_owned(),
-            ttl_class: StorageTtlClass::Ephemeral5m,
-            expires_at_unix_secs: 4_100_000_000,
-            last_observed_at_unix_secs,
-            hash_schema_version: HASH_SCHEMA_VERSION,
-            prefix_content_block_index: 0,
-            estimated_prefix_tokens: 0,
-            token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
-        }
-    }
-
     #[tokio::test]
-    async fn includes_prompt_cache() {
+    async fn wires_shared_observation_store_without_hydrating() {
         let (dir, storage) = storage_fixture(19).await;
-        let upstream = create_upstream(&storage, "prompt-cache-upstream").await;
-        let prompt_store = Arc::new(FakePromptCacheObservationStore::new(vec![
-            prompt_record(upstream.id, "hash-a", 1_700_000_001),
-            prompt_record(upstream.id, "hash-b", 1_700_000_002),
-            prompt_record(upstream.id, "hash-c", 1_700_000_003),
-        ]));
-        let stores = stores(storage, prompt_store);
+        create_upstream(&storage, "prompt-cache-upstream").await;
+        let prompt_store = Arc::new(FakePromptCacheObservationStore::new());
+        let stores = stores(storage, prompt_store.clone());
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
-        let clock = TestClock::new_at_secs(1_700_000_000);
-
-        let snapshot = dynamic_view
-            .prompt_cache_observation_cache_opt()
-            .expect("prompt cache enabled")
-            .snapshot_for_upstream(
-                upstream.id,
-                MODEL,
-                &[
-                    ("hash-a".to_owned(), PluginTtlClass::Ephemeral5m),
-                    ("hash-b".to_owned(), PluginTtlClass::Ephemeral5m),
-                    ("hash-c".to_owned(), PluginTtlClass::Ephemeral5m),
-                ],
-                unix_secs(clock.now()),
-            );
-        let prefix_hashes = snapshot
-            .into_iter()
-            .map(|entry| entry.prefix_hash)
-            .collect::<BTreeSet<_>>();
-
-        assert_eq!(
-            prefix_hashes,
-            BTreeSet::from_iter(["hash-a", "hash-b", "hash-c"].map(str::to_owned))
-        );
 
         assert!(
+            dynamic_view.prompt_cache_observation_store_opt().is_some(),
+            "shared observation store must be wired into DynamicView"
+        );
+        assert!(
             dynamic_view.prompt_cache_observation_sink_opt().is_some(),
-            "prompt cache observation sink must be wired into DynamicView when prompt_cache_shadow is enabled"
+            "prompt cache observation sink must be wired into DynamicView"
+        );
+        assert!(
+            dynamic_view.prompt_cache_thread_usage_opt().is_some(),
+            "thread usage tracker must be wired into DynamicView"
+        );
+        assert_eq!(
+            prompt_store.list_call_count(),
+            0,
+            "view build must not read the observation store; routing reads per request"
         );
     }
 
@@ -1539,7 +1450,7 @@ mod tests {
     async fn observation_sink_routes_records_to_store() {
         let (dir, storage) = storage_fixture(22).await;
         let upstream = create_upstream(&storage, "sink-wiring-upstream").await;
-        let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
+        let prompt_store = Arc::new(FakePromptCacheObservationStore::new());
         let stores = stores(storage, prompt_store.clone());
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
@@ -1563,12 +1474,12 @@ mod tests {
         sink.enqueue(record.clone())
             .expect("enqueue succeeds while writer is alive");
         for _ in 0..50 {
-            if prompt_store.list_count().await >= 1 {
+            if prompt_store.upsert_count().await >= 1 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        let stored = prompt_store.list_all().await;
+        let stored = prompt_store.upserted().await;
         assert_eq!(
             stored.len(),
             1,
@@ -1579,18 +1490,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_prompt_cache_observation_cache_sees_live_upsert_after_rebind() {
-        // Given: two DynamicView builds share the process-level observation cache handle.
+    async fn shared_thread_usage_tracker_sees_live_record_after_rebind() {
+        // Given: two DynamicView builds share the process-level thread-usage
+        // tracker handle (diagnostic telemetry, not warmth authority).
         let (dir, storage) = storage_fixture(23).await;
-        let upstream = create_upstream(&storage, "shared-cache-upstream").await;
-        let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
+        let upstream = create_upstream(&storage, "shared-tracker-upstream").await;
+        let prompt_store = Arc::new(FakePromptCacheObservationStore::new());
         let stores = stores(storage, prompt_store);
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-        let config = cc_lb_config::Config::default();
         let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
-        let shared_cache =
-            new_prompt_cache_observation_cache(&config.prompt_cache_shadow, clock.clone());
-        let shared_cache_trait: Arc<dyn PromptCacheObservationCacheLike> = shared_cache.clone();
+        let shared_tracker: Arc<dyn PromptCacheThreadUsageTrackerLike> =
+            new_prompt_cache_thread_usage_tracker(30);
 
         let view_a = build_dynamic_view(
             &stores,
@@ -1601,7 +1511,8 @@ mod tests {
             &runtime,
             dir.path(),
             Arc::new(SubscriptionQuotaCache::new()),
-            Some(shared_cache.clone()),
+            30,
+            Some(shared_tracker.clone()),
             None,
             1800,
             clock.clone(),
@@ -1617,7 +1528,8 @@ mod tests {
             &runtime,
             dir.path(),
             Arc::new(SubscriptionQuotaCache::new()),
-            Some(shared_cache.clone()),
+            30,
+            Some(shared_tracker.clone()),
             None,
             1800,
             clock.clone(),
@@ -1625,78 +1537,58 @@ mod tests {
         .await
         .expect("second dynamic view builds");
 
-        // When: the long-lived subscriber upserts into the shared cache after rebind.
-        shared_cache.upsert_observation(
-            crate::prompt_cache_observation_cache::PromptCacheObservationUpsert {
-                upstream_id: upstream.id,
-                canonical_model: MODEL.to_owned(),
-                prefix_hash: "live-prefix".to_owned(),
-                ttl_class: PluginTtlClass::Ephemeral5m,
-                expires_at_unix_secs: 4_100_000_000,
-                last_observed_at_unix_secs: 1_700_000_010,
-                prefix_content_block_index: 0,
-                estimated_prefix_tokens: 0,
-                token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
-            },
-        );
-
-        // Then: the rebuilt DynamicView routes against the same cache and sees the live write.
-        assert!(Arc::ptr_eq(
-            view_a
-                .prompt_cache_observation_cache_opt()
-                .expect("first view has shared cache"),
-            &shared_cache_trait,
-        ));
-        let view_b_cache = view_b
-            .prompt_cache_observation_cache_opt()
-            .expect("second view has shared cache");
-        assert!(Arc::ptr_eq(view_b_cache, &shared_cache_trait));
-        let snapshot = view_b_cache.snapshot_for_upstream(
+        // When: thread usage is recorded on the shared tracker after rebind.
+        shared_tracker.record_thread_usage(
             upstream.id,
             MODEL,
-            &[("live-prefix".to_owned(), PluginTtlClass::Ephemeral5m)],
-            unix_secs(clock.now()),
+            "thread-live",
+            PromptCacheThreadUsage {
+                cache_read_input_tokens: 512,
+                cache_creation_input_tokens_5m: 0,
+                cache_creation_input_tokens_1h: 0,
+            },
+            1_700_000_010,
         );
-        assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].prefix_hash, "live-prefix");
+
+        // Then: the rebuilt DynamicView observes the same tracker state.
+        assert!(Arc::ptr_eq(
+            view_a
+                .prompt_cache_thread_usage_opt()
+                .expect("first view has shared tracker"),
+            &shared_tracker,
+        ));
+        let view_b_tracker = view_b
+            .prompt_cache_thread_usage_opt()
+            .expect("second view has shared tracker");
+        assert!(Arc::ptr_eq(view_b_tracker, &shared_tracker));
+        let score = view_b_tracker
+            .thread_usage_score(upstream.id, MODEL, "thread-live", 1_700_000_020)
+            .expect("live thread usage visible through rebound view");
+        assert_eq!(score.predicted_cache_read_tokens, 512);
     }
 
     #[tokio::test]
-    async fn hydrate_timeout_logs_warn_and_continues() {
+    async fn build_never_reads_observation_store() {
         let (dir, storage) = storage_fixture(20).await;
-        let upstream = create_upstream(&storage, "timeout-upstream").await;
-        let stores = stores(
-            storage,
-            Arc::new(FakePromptCacheObservationStore::sleeping(
-                Duration::from_secs(30),
-            )),
-        );
+        create_upstream(&storage, "no-read-upstream").await;
+        let prompt_store = Arc::new(FakePromptCacheObservationStore::new());
+        let stores = stores(storage, prompt_store.clone());
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-        let started = tokio::time::Instant::now();
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
-        let clock = TestClock::new_at_secs(1_700_000_000);
 
-        assert!(started.elapsed() <= Duration::from_secs(6));
-        let snapshot = dynamic_view
-            .prompt_cache_observation_cache_opt()
-            .expect("prompt cache enabled")
-            .snapshot_for_upstream(
-                upstream.id,
-                MODEL,
-                &[("hash-a".to_owned(), PluginTtlClass::Ephemeral5m)],
-                unix_secs(clock.now()),
-            );
-        assert!(snapshot.is_empty());
+        assert!(dynamic_view.prompt_cache_observation_store_opt().is_some());
+        assert_eq!(
+            prompt_store.list_call_count(),
+            0,
+            "build/rebind must not hydrate observations; reads are per request"
+        );
     }
 
     #[tokio::test]
-    async fn default_config_constructs_cache() {
+    async fn default_config_wires_store_sink_and_tracker() {
         let (dir, storage) = storage_fixture(21).await;
-        let stores = stores(
-            storage,
-            Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
-        );
+        let stores = stores(storage, Arc::new(FakePromptCacheObservationStore::new()));
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
         let dynamic_view = build_view_with_config(
@@ -1707,30 +1599,24 @@ mod tests {
         )
         .await;
 
-        assert!(dynamic_view.prompt_cache_observation_cache_opt().is_some());
+        assert!(dynamic_view.prompt_cache_observation_store_opt().is_some());
         assert!(
             dynamic_view.prompt_cache_observation_sink_opt().is_some(),
             "prompt cache observation sink must always be wired"
         );
+        assert!(dynamic_view.prompt_cache_thread_usage_opt().is_some());
     }
 
     #[tokio::test]
-    async fn tunables_propagate_to_cache() {
+    async fn grace_margin_propagates_to_view() {
         let (dir, storage) = storage_fixture(22).await;
-        let stores = stores(
-            storage,
-            Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
-        );
+        let stores = stores(storage, Arc::new(FakePromptCacheObservationStore::new()));
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
         let mut config = cc_lb_config::Config::default();
         config.prompt_cache_shadow.grace_margin_secs = 99;
-        config.prompt_cache_shadow.refresh_debounce_secs = 123;
 
         let dynamic_view = build_view_with_config(&stores, &runtime, dir.path(), config).await;
 
-        let cache = dynamic_view
-            .prompt_cache_observation_cache_opt()
-            .expect("prompt cache enabled");
-        assert_eq!(cache.grace_margin_secs(), 99);
+        assert_eq!(dynamic_view.prompt_cache_grace_margin_secs, 99);
     }
 }

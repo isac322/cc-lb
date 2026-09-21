@@ -67,6 +67,7 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
         &runtime,
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        30,
         None,
         None,
         1800,

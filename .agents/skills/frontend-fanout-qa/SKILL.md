@@ -114,7 +114,7 @@ Every delegated prompt should include context, goal, downstream use, request, ex
    - use accessible modals/dialogs with title, body, destructive/non-destructive variants, keyboard behavior, and focus handling;
    - use real backend status/error truth instead of fake green/default success;
    - use semantic tokens/classes and remove hardcoded light/dark remnants when theme is affected;
-   - write all hardcoded user-facing strings in the project's chosen language. Locale-aware dynamic formatting (e.g., `Intl.RelativeTimeFormat` outputting localized text) and native locale labels in selectors (e.g., `한국어 (ko-KR)`) are exempt.
+   - write all hardcoded user-facing strings in the project's chosen language. Locale-aware dynamic formatting (e.g., `Intl.RelativeTimeFormat` outputting localized text) and native locale labels in selectors (e.g., `한국어 (ko-KR)`, the Korean-language autonym for "Korean") are exempt.
 
 ## Browser QA loop
 
@@ -162,14 +162,14 @@ Report in this order:
 
 Use this skill for prompts like:
 
-- "이 버튼 상태가 이상해. hover/focus/disabled까지 자연스럽게 고쳐."
-- "모달이 후져 보이는데 디자인 맞춰서 바꾸고 실제로 열어봐."
-- "대시보드 UI/UX 전부 갈아엎어. agent-browser로 직접 보면서 고쳐."
-- "모바일에서 테이블이 깨져. 체크리스트 만들고 브라우저로 검증해."
-- "OAuth status가 fake green으로 보여. 실제 상태 기준으로 UI 고쳐."
+- "This button's state looks off — fix hover/focus/disabled so it feels natural."
+- "The modal looks ugly — restyle it to match the design and actually open it."
+- "Rebuild the whole dashboard UI/UX — fix it while watching it yourself through agent-browser."
+- "The table breaks on mobile — build a checklist and verify it in the browser."
+- "The OAuth status shows a fake green — fix the UI to reflect the real state."
 
 Do not use it for prompts like:
 
-- "타입 에러 하나 고쳐줘" with no user-visible UI impact.
-- "변수명 바꿔줘" with no visual or UX effect.
-- "문구 오타 하나 고쳐줘" unless the text change affects layout, meaning, or interaction.
+- "Fix a single type error" with no user-visible UI impact.
+- "Rename a variable" with no visual or UX effect.
+- "Fix a single wording typo" unless the text change affects layout, meaning, or interaction.

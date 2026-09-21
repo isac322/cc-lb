@@ -125,9 +125,8 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
         &view,
         "limited",
         RequestKind::AnthropicMessages,
-        "",
         &[],
-        None,
+        &HashMap::new(),
         &cc_lb_engine::SystemClock,
     );
     assert_eq!(
@@ -139,9 +138,8 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
         &view,
         "all",
         RequestKind::AnthropicMessages,
-        "",
         &[],
-        None,
+        &HashMap::new(),
         &cc_lb_engine::SystemClock,
     );
     assert_eq!(
@@ -154,9 +152,8 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
             &view,
             "missing",
             RequestKind::AnthropicMessages,
-            "",
             &[],
-            None,
+            &HashMap::new(),
             &cc_lb_engine::SystemClock
         )
         .is_empty()
@@ -211,9 +208,8 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
         &view,
         "limited",
         RequestKind::AnthropicMessages,
-        "",
         &[],
-        None,
+        &HashMap::new(),
         &cc_lb_engine::SystemClock,
     );
     assert_eq!(candidate_ids(&built), vec![first, second, third]);

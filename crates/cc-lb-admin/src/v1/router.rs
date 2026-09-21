@@ -91,12 +91,15 @@ async fn preview_route(
         }
     };
 
-    match route_preview.preview_route(RoutePreviewInput {
-        principal_id: req.principal_id,
-        request_id: req.request_id,
-        headers,
-        body_bytes,
-    }) {
+    match route_preview
+        .preview_route(RoutePreviewInput {
+            principal_id: req.principal_id,
+            request_id: req.request_id,
+            headers,
+            body_bytes,
+        })
+        .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(RoutePreviewError::PrincipalNotFound(id)) => error_response(
             StatusCode::NOT_FOUND,
