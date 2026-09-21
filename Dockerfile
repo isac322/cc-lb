@@ -215,13 +215,25 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
   if [ "${cache_timeouts:-0}" -gt 0 ]; then
     echo "::warning::sccache reported ${cache_timeouts} cache timeouts; affected compilations fell back to local compilation"
   fi
+  # Generic "Cache errors" are not gated (only read/write errors are, below), so
+  # a green build used to discard the only record of why they happened. Surface
+  # the count and always dump the daemon's error log, otherwise the errors stay
+  # unattributable across runs. See #565.
+  cache_errors="$(awk '$1 == "Cache" && $2 == "errors" { print $3; exit }' /tmp/sccache-stats.txt)"
+  if [ "${cache_errors:-0}" -gt 0 ]; then
+    echo "::warning::sccache reported ${cache_errors} cache errors on ${target}; see the sccache error log below"
+  fi
   if grep -Eq '^Cache (read errors|write errors)[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
     echo "sccache reported a cache storage read or write error" >&2
     cache_status=1
   fi
   unset RUSTC_WRAPPER
-  if { [ "$cache_status" -ne 0 ] || [ "$build_status" -ne 0 ]; } && [ -s "${SCCACHE_ERROR_LOG}" ]; then
+  if [ -s "${SCCACHE_ERROR_LOG}" ]; then
+    echo "--- sccache error log (${target}, last 200 lines) ---" >&2
     tail -n 200 "${SCCACHE_ERROR_LOG}" >&2
+    echo "--- end sccache error log (${target}) ---" >&2
+  else
+    echo "sccache error log is empty for ${target}" >&2
   fi
 fi
 if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
