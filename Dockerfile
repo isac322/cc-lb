@@ -182,12 +182,7 @@ if [ -n "${AWS_ACCESS_KEY_ID}" ] && [ -n "${AWS_SECRET_ACCESS_KEY}" ] && [ -n "$
   # A filesystem socket is isolated by each container's mount namespace, keeping
   # its sccache server bound to the matching Rust sysroot and installed target.
   export SCCACHE_SERVER_UDS=/tmp/sccache.sock
-  # sccache increments the per-language "Cache errors" counter in
-  # server.rs (CompileResult::Error), and that site logs at debug only, so
-  # SCCACHE_LOG=warn could never explain a non-zero count. Raise just that
-  # module; opendal and everything else stay at warn. See #565.
-  export SCCACHE_LOG="warn,sccache::server=debug"
-  export SCCACHE_ERROR_LOG=/tmp/sccache-error.log
+  export SCCACHE_LOG=warn SCCACHE_ERROR_LOG=/tmp/sccache-error.log
   sccache --start-server
   test -S "${SCCACHE_SERVER_UDS}"
   set -x
@@ -220,42 +215,27 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
   if [ "${cache_timeouts:-0}" -gt 0 ]; then
     echo "::warning::sccache reported ${cache_timeouts} cache timeouts; affected compilations fell back to local compilation"
   fi
-  # Generic "Cache errors" are not gated (only read/write errors are, below), so
-  # a green build used to discard the only record of why they happened. Surface
-  # the count and always dump the daemon's error log, otherwise the errors stay
-  # unattributable across runs. See #565.
+  # Generic "Cache errors" is deliberately NOT gated. It counts compile requests
+  # whose hash-key preprocessing exited non-zero (sccache server.rs returns
+  # CompileResult::Error only from the generate_hash_key ProcessError arm), and
+  # every occurrence here is an autoconf feature probe: instrumented runs
+  # 35638161308 and 35641747730 captured exactly 8 per target on all four
+  # targets, every one of them compiling `conftest.c` with jemalloc's
+  # `-Werror -herror_on_warning` configure flags. Those probes are supposed to
+  # fail. They are counted in neither hits nor misses, which is why
+  # "Cache hits rate (C/C++)" stays at 100%. Gating them would fail every build.
+  # Storage faults are a different counter and stay fail-closed below. See #565.
   cache_errors="$(awk '$1 == "Cache" && $2 == "errors" { print $3; exit }' /tmp/sccache-stats.txt)"
-  if [ "${cache_errors:-0}" -gt 0 ]; then
-    echo "::warning::sccache reported ${cache_errors} cache errors on ${target}; see the sccache error log below"
+  if [ "${cache_errors:-0}" -gt 8 ]; then
+    echo "::warning::sccache reported ${cache_errors} cache errors on ${target}, above the 8 expected autoconf conftest probes; re-run with SCCACHE_LOG=warn,sccache::server=debug to list them"
   fi
   if grep -Eq '^Cache (read errors|write errors)[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
     echo "sccache reported a cache storage read or write error" >&2
     cache_status=1
   fi
   unset RUSTC_WRAPPER
-  if [ -s "${SCCACHE_ERROR_LOG}" ]; then
-    # opendal logs every cold-cache probe as "read failed NotFound", which is an
-    # ordinary miss rather than an error, and it dominates the file. Every
-    # filter below is wrapped so that "no match" (grep exit 1) cannot abort the
-    # build under `set -e` with pipefail.
-    log_lines="$(wc -l < "${SCCACHE_ERROR_LOG}")"
-    notfound_lines="$(grep -c 'NotFound' "${SCCACHE_ERROR_LOG}" || true)"
-    echo "sccache error log (${target}): ${log_lines} lines, ${notfound_lines:-0} NotFound cache probes" >&2
-    # CompileResult::Error has exactly one producer in sccache: generate_hash_key
-    # returning a ProcessError, i.e. the preprocessor run for the hash key exited
-    # non-zero. The preceding lines carry the argv, whose tail names the input.
-    echo "--- cache-error entries with context (${target}) ---" >&2
-    { grep -B 4 -F 'compile result: cache error' "${SCCACHE_ERROR_LOG}" \
-      | cut -c1-1400 || true; } >&2
-    echo "--- preprocessor failures (${target}) ---" >&2
-    { grep -E 'process error|preprocess' "${SCCACHE_ERROR_LOG}" \
-      | cut -c1-700 || true; } >&2
-    echo "--- other non-probe entries (${target}, last 60) ---" >&2
-    { grep -v 'NotFound' "${SCCACHE_ERROR_LOG}" \
-      | grep -vF 'compile result:' | tail -n 60 || true; } >&2
-    echo "--- end sccache error log (${target}) ---" >&2
-  else
-    echo "sccache error log is empty for ${target}" >&2
+  if { [ "$cache_status" -ne 0 ] || [ "$build_status" -ne 0 ]; } && [ -s "${SCCACHE_ERROR_LOG}" ]; then
+    tail -n 200 "${SCCACHE_ERROR_LOG}" >&2
   fi
 fi
 if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
