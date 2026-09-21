@@ -55,6 +55,13 @@ impl RequestEventBus for PgNotifyFanout {
     fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
         self.local_bus.subscribe_lifecycle()
     }
+
+    // Must delegate: the trait default of 0 would make the assembler's
+    // overflow-drain wait a no-op under Postgres storage, where this fanout
+    // is the installed bus.
+    fn assembler_overflow_in_flight(&self) -> usize {
+        self.local_bus.assembler_overflow_in_flight()
+    }
 }
 
 fn publish_partial_nonblocking(

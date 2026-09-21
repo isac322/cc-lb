@@ -17,6 +17,16 @@ pub enum FakeMode {
     TruncateMidStream,
     SenpiTools,
     OpenCodeTools,
+    /// An Anthropic content-safety refusal: HTTP 200 with
+    /// `stop_reason: "refusal"` and populated `stop_details`. Request-log QA
+    /// uses it to prove an abnormal stop is distinguishable from a success,
+    /// since both return HTTP 200.
+    Refusal,
+    /// A context-window exhaustion stop: HTTP 200 with
+    /// `stop_reason: "model_context_window_exceeded"` and null `stop_details`.
+    /// Request-log QA uses it to prove an abnormal stop is distinguishable
+    /// from a success, since both return HTTP 200.
+    ContextWindowExceeded,
 }
 
 impl FakeMode {
@@ -46,6 +56,8 @@ impl FakeMode {
             "truncate-mid-stream" => Self::TruncateMidStream,
             "opencode-tools" => Self::OpenCodeTools,
             "senpi-tools" => Self::SenpiTools,
+            "refusal" => Self::Refusal,
+            "context-window-exceeded" => Self::ContextWindowExceeded,
             _ => Self::Ok,
         }
     }

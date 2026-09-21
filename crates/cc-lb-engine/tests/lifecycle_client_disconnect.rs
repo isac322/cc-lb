@@ -39,8 +39,8 @@ use client_disconnect_support::{
     assert_dropped_terminal, assert_error_terminal, assert_one_final, assert_stream_error,
     assert_success_terminal, canonical_error_frame, encoded_sse_dispatch, json_dispatch, lifecycle,
     lifecycle_receiver, normal_sse_frame, pending_sse, persistent_upstream_frame_error,
-    sqlite_storage, sse_dispatch, transform_body, transform_lifecycle, upstream_frame_error,
-    upstream_frame_error_after,
+    refusal_sse_body, sqlite_storage, sse_dispatch, transform_body, transform_lifecycle,
+    upstream_frame_error, upstream_frame_error_after,
 };
 use common::{RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState, messages_request};
 use tokio::sync::mpsc::error::TrySendError;
@@ -775,6 +775,59 @@ async fn upstream_frame_error_preserves_http_error_classification()
     Ok(())
 }
 
+/// An Anthropic refusal is delivered to the client as a perfectly ordinary
+/// HTTP 200 stream, so before this was fixed it persisted as
+/// `status = 200, error_code = NULL` and was indistinguishable from a
+/// successful request. An operator had no way to see that a refusal had
+/// happened at all. The relayed bytes must stay untouched while the persisted
+/// row carries the abnormal outcome.
+#[tokio::test]
+async fn streaming_refusal_persists_distinguishable_row() -> Result<(), Box<dyn std::error::Error>>
+{
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir).await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
+        panic!("expected in-memory update receiver");
+    };
+    let lifecycle = lifecycle(sse_dispatch(StatusCode::OK, refusal_sse_body()), &test_bus);
+
+    let response = lifecycle
+        .handle(stream_request())
+        .await
+        .expect("lifecycle relays a refusal stream");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("relay body collects")
+        .to_bytes();
+    let text = std::str::from_utf8(&body).expect("relay body is SSE text");
+    // The client must receive the refusal verbatim: cc-lb observes, never edits.
+    assert!(text.contains("\"stop_reason\":\"refusal\""));
+    assert_eq!(text.matches("event: message_stop").count(), 1);
+
+    assert_one_final(&mut update_rx).await;
+    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, 200);
+    assert_eq!(rows[0].error_code.as_deref(), Some("upstream_refusal"));
+    assert_eq!(rows[0].upstream_error_type.as_deref(), Some("refusal"));
+    let message = rows[0]
+        .upstream_error_message
+        .as_deref()
+        .expect("refusal records an upstream error message");
+    assert!(
+        message.starts_with("category=reasoning_extraction;"),
+        "refusal category must be queryable from the row, got {message:?}"
+    );
+    // Stream accounting is still recorded: a refusal is a complete response.
+    assert!(rows[0].body_bytes.is_some());
+    Ok(())
+}
+
 #[tokio::test]
 async fn provider_error_before_body_failure_preserves_provider_error()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -887,12 +940,13 @@ async fn timeout_ordering(timeout_first: bool) {
         .expect("lifecycle handles request")
         .into_body();
 
+    let timeout = cc_lb_engine::TerminalClassification::TOWER_TIMEOUT;
     if timeout_first {
-        observer.terminate_tower_timeout();
+        observer.terminate(timeout.status, timeout.error_code);
         drop(body);
     } else {
         drop(body);
-        observer.terminate_tower_timeout();
+        observer.terminate(timeout.status, timeout.error_code);
     }
     drop(observer);
 

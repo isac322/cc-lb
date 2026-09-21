@@ -9,12 +9,23 @@ import type { LiveEventMap } from './upsertReducer';
 
 export const LOG_STATUS_CLASSES = ['2xx', '3xx', '4xx', '5xx'] as const;
 export type LogStatusClass = (typeof LOG_STATUS_CLASSES)[number];
+/**
+ * `errors` is a UI-only status filter: rows that ended abnormally — HTTP
+ * status >= 400, or a recorded `error_code` on a delivered 2xx (mid-stream
+ * error, upstream refusal, …). The backend `status_class` param cannot
+ * express it, so it is applied client-side and never sent to the server.
+ */
+export const LOG_STATUS_FILTER_VALUES = [
+  ...LOG_STATUS_CLASSES,
+  'errors',
+] as const;
+export type LogStatusFilter = (typeof LOG_STATUS_FILTER_VALUES)[number];
 export interface LogRowFilters {
   readonly principal_id?: string;
   readonly upstream_id?: string;
   readonly session?: string;
   readonly model?: string;
-  readonly status?: LogStatusClass;
+  readonly status?: LogStatusFilter;
   readonly event_kind?: RequestEventKind;
 }
 
@@ -129,11 +140,27 @@ export function filterLogRowsByStatusClass(
     return status >= lowerBound && status < lowerBound + 100;
   });
 }
+/**
+ * Whether a row ended abnormally: an HTTP error status (>= 400), or a
+ * recorded `error_code` — which also marks 2xx rows that were delivered to
+ * the client as a success but ended abnormally (mid-stream error, upstream
+ * refusal, …). In-flight rows use the upstream status once it arrives.
+ */
+export function isErrorLogRow(row: RequestEventWithPhase): boolean {
+  if (row._phase === 'final') {
+    return row.status >= 400 || row.error_code != null;
+  }
+  return (row.upstream_response_status ?? 0) >= 400;
+}
+
 export function filterLogRows(
   rows: readonly RequestEventWithPhase[],
   filters: LogRowFilters,
 ): readonly RequestEventWithPhase[] {
-  const statusRows = filterLogRowsByStatusClass(rows, filters.status);
+  const statusRows =
+    filters.status === 'errors'
+      ? rows.filter(isErrorLogRow)
+      : filterLogRowsByStatusClass(rows, filters.status);
   // Case-insensitive prefix, matching `lower(model) LIKE …` in storage and
   // `model_filter_matches` in the SSE fan-out. A row without a model never matches.
   const modelPrefix = filters.model?.trim().toLowerCase();

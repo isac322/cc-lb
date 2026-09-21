@@ -499,12 +499,16 @@ function flushEffects() {
   return act(async () => Promise.resolve());
 }
 
-function showCategory(view: RenderResult, name: string) {
+function showCategory(_view: RenderResult, name: string) {
   const nav = screen.getByTestId('config-category-nav');
+  // The click drives selectCategory → setSelectedCategory, which re-renders
+  // the editor with the new panel on its own. The navigate mock only mutates
+  // routerMocks.search; re-rendering the whole page to re-read it produces
+  // identical state (the category-sync effect sets the same value), so the
+  // extra full-page render is pure cost.
   fireEvent.click(
     within(nav).getByRole('button', { name: new RegExp(`^${name}`) }),
   );
-  view.rerender(<SettingsComponent />);
 }
 
 function categoryNavItems(nav: HTMLElement) {
@@ -585,9 +589,28 @@ function dimensionPx(element: HTMLElement, axis: 'h' | 'w'): number | null {
 
 beforeEach(() => {
   vi.useFakeTimers({
-    toFake: ['Date'],
+    // Fake the clock and the page's timers (the 1s "now" ticker in
+    // SettingsPage, react-timeago reschedules) so no stray render can fire
+    // mid-test. queueMicrotask stays real: the requestAnimationFrame stub
+    // below and act() flushing depend on it.
+    toFake: [
+      'Date',
+      'setTimeout',
+      'clearTimeout',
+      'setInterval',
+      'clearInterval',
+    ],
     now: new Date('2026-09-15T12:00:01.000Z'),
   });
+  // The localization card enumerates every ICU locale and timezone into
+  // <option> elements (~560 nodes) and re-sorts them on each render. No test
+  // here asserts those lists, so pin them to a single entry — it keeps the
+  // rendered DOM small enough that per-test wall time stays well inside the
+  // 5s budget even on a CPU-starved worker.
+  vi.spyOn(Intl, 'supportedValuesOf').mockReturnValue(['UTC']);
+  vi.spyOn(Intl.DateTimeFormat, 'supportedLocalesOf').mockReturnValue([
+    'en-US',
+  ]);
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     queueMicrotask(() => callback(0));
     return 1;
@@ -620,6 +643,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 test('settings cold load reserves version, editor, and history heights without a wide table', () => {

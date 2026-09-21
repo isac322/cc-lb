@@ -13,9 +13,10 @@ use cc_lb_pricing::{
     CatalogSnapshot, CatalogStatus, Pricing, UpstreamKind as PricingUpstreamKind, UsdPerMillion,
     global_catalog,
 };
+use cc_lb_server::drain::DrainController;
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore,
+    BackendKind, MetaStore, RequestEvent, RequestEventStore,
     principal::{
         Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
         PrincipalStore,
@@ -448,6 +449,187 @@ async fn terminal_tower_timeout() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_route_not_found() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = MockServer::start().await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+
+    let client = TestClient::new(Duration::from_secs(10));
+    let response = client
+        .request("GET", &format!("{}/models", server.proxy_url), &[], &[])
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = String::from_utf8_lossy(&response.body);
+    assert!(
+        body.contains("requested proxy path was not found"),
+        "unexpected 404 body: {body}"
+    );
+
+    let storage = sqlite_storage(&sqlite_path).await?;
+    let rows = wait_for_request_event_count(storage.as_ref(), 1).await?;
+    assert_eq!(rows[0].status, 404);
+    assert_eq!(rows[0].error_code.as_deref(), Some("route_not_found"));
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_method_not_allowed() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = MockServer::start().await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+
+    let client = TestClient::new(Duration::from_secs(10));
+    let response = client
+        .request(
+            "PUT",
+            &format!("{}/v1/messages", server.proxy_url),
+            &[("content-type", "application/json")],
+            &sample_request_body(false),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let body = String::from_utf8_lossy(&response.body);
+    assert!(
+        body.contains("method is not allowed for this proxy path"),
+        "unexpected 405 body: {body}"
+    );
+
+    let storage = sqlite_storage(&sqlite_path).await?;
+    let rows = wait_for_request_event_count(storage.as_ref(), 1).await?;
+    assert_eq!(rows[0].status, 405);
+    assert_eq!(rows[0].error_code.as_deref(), Some("method_not_allowed"));
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_drain_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = MockServer::start().await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _key_id) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+
+    server.drain_controller.set_draining(true);
+
+    let client = TestClient::new(Duration::from_secs(10));
+    let response = client
+        .request(
+            "POST",
+            &format!("{}/v1/messages", server.proxy_url),
+            &[
+                ("content-type", "application/json"),
+                ("x-api-key", &plaintext_key),
+            ],
+            &sample_request_body(false),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.body, b"draining");
+    assert_eq!(
+        response
+            .headers
+            .get(http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("60")
+    );
+    // The layer reorder that put request_id_middleware outermost means a
+    // drain rejection now carries a request-id header it did not carry before.
+    // Pin it so the change is deliberate rather than incidental.
+    assert!(
+        response
+            .headers
+            .get("request-id")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("req_server_")),
+        "drain rejection must carry the assigned request id"
+    );
+
+    let storage = sqlite_storage(&sqlite_path).await?;
+    let rows = wait_for_request_event_count(storage.as_ref(), 1).await?;
+    assert_eq!(rows[0].status, 503);
+    assert_eq!(rows[0].error_code.as_deref(), Some("drain_rejected"));
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_endpoints_persist_no_request_events() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = MockServer::start().await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+
+    let client = TestClient::new(Duration::from_secs(10));
+    assert_eq!(
+        client
+            .get_status(&format!("{}/healthz", server.proxy_url))
+            .await?,
+        StatusCode::OK
+    );
+    // /readyz only reports ready once the dynamic view marks an upstream
+    // active, which can lag wait_ready's /healthz probe — poll briefly.
+    let readyz_url = format!("{}/readyz", server.proxy_url);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if client.get_status(&readyz_url).await? == StatusCode::OK {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("/readyz never reported ready".into());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    // Give the async request-event writer a window to (incorrectly) persist
+    // rows for the health probes before asserting the table stayed empty.
+    sleep(Duration::from_millis(500)).await;
+    let storage = sqlite_storage(&sqlite_path).await?;
+    let rows = all_request_events(storage.as_ref()).await?;
+    assert!(
+        rows.is_empty(),
+        "health endpoints must not persist request events, found {} row(s)",
+        rows.len()
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
 fn happy_sse_stream() -> String {
     concat!(
         "event: message_start\n",
@@ -542,6 +724,7 @@ struct StartedServer {
     proxy_url: String,
     admin_url: String,
     signal: SignalHandle,
+    drain_controller: DrainController,
     task: Option<JoinHandle<Result<(), BuildError>>>,
 }
 
@@ -556,6 +739,7 @@ impl StartedServer {
         let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
         let app = build_app(config, clock).await?;
         let signal = app.signal_handle();
+        let drain_controller = app.drain_controller();
         // Keep all selected ports reserved while build_app performs its async setup.
         // App::start owns the real listeners immediately after this handoff.
         drop(listener_reservations);
@@ -564,6 +748,7 @@ impl StartedServer {
             proxy_url: format!("http://{proxy_addr}"),
             admin_url: format!("http://{admin_addr}"),
             signal,
+            drain_controller,
             task: Some(task),
         };
         server.wait_ready().await?;
@@ -851,6 +1036,44 @@ async fn query_latest_request_event(
         error_code,
         status: status as u16,
     }))
+}
+
+async fn all_request_events(
+    storage: &SqliteStorage,
+) -> Result<Vec<RequestEvent>, Box<dyn std::error::Error>> {
+    Ok(RequestEventStore::query_request_events(storage, 0, u64::MAX, 100).await?)
+}
+
+/// Poll until at least `expected` request-event rows exist, then settle and
+/// assert the count is *exactly* `expected` — a double-finalize regression
+/// that writes two rows for one request must fail this.
+async fn wait_for_request_event_count(
+    storage: &SqliteStorage,
+    expected: usize,
+) -> Result<Vec<RequestEvent>, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let rows = all_request_events(storage).await?;
+        if rows.len() >= expected {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "expected {expected} request_event row(s), found {}",
+                rows.len()
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    sleep(Duration::from_millis(300)).await;
+    let rows = all_request_events(storage).await?;
+    assert_eq!(
+        rows.len(),
+        expected,
+        "request must persist exactly {expected} row(s)"
+    );
+    Ok(rows)
 }
 
 async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {

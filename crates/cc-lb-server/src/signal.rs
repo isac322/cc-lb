@@ -86,8 +86,10 @@ async fn run_shutdown(
 ) {
     drain.trigger();
     let _ = shutdown.send(true);
-    shutdown_hooks.run_all().await;
 
+    // Drain in-flight requests BEFORE running shutdown hooks: the hooks stop
+    // background writers (request-event assembler, pricing, logger) that must
+    // still be alive to persist the terminal events of draining requests.
     let timed_out = drain.await_drained(drain_timeout).await;
     if timed_out {
         let force_closed = drain.mark_force_closed();
@@ -96,6 +98,9 @@ async fn run_shutdown(
             "graceful drain deadline elapsed with proxy request handlers still in flight"
         );
     }
+
+    // Runs even on drain timeout so shutdown cannot hang forever.
+    shutdown_hooks.run_all().await;
 
     let _ = drain_complete.send(true);
 }

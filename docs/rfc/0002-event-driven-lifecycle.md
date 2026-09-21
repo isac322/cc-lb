@@ -2,9 +2,10 @@
 
 - Feature Name: `event-driven-lifecycle`
 - Start Date: 2026-07-01
-- Status: Implemented — see §Implementation status (2026-07-02) below. The
-  original phased plan is preserved for historical context; the
-  as-shipped architecture is captured in the amendment.
+- Status: Implemented — see §Implementation status (2026-07-02) and the
+  §Amendment (2026-09-21) below. The original phased plan is preserved for
+  historical context; the as-shipped architecture is captured in the
+  amendments.
 - Related PRs: #207 (gzip decoder sidecar), #222 (terminal observation
   guarantee), #241 (16-path integration tests), #242 (unignore
   `terminal_success_stream`)
@@ -126,14 +127,61 @@ comparison machinery deleted with it.
 - `crates/cc-lb-server/tests/rfc_0002_fix_live_qa.rs` — end-to-end
   verification (5 tests).
 
+### Amendment (2026-09-21): widened guarantee and unified terminal API
+
+The observation guarantee's scope widened from "every request that reached
+the handler" to **every request the proxy listener accepts**. Unrouted paths
+(404), disallowed methods (405), drain rejections (503), and
+`/api/oauth/usage` are now inside the guarantee: each produces exactly one
+classified `request_events_v1` row. `/healthz`, `/readyz`, the admin
+health-state route, and the metrics listener remain deliberately outside —
+they are infrastructure probes, not client traffic, and rows for them would
+be noise rather than observation.
+
+Two open problems named in §Motivation are now closed:
+
+- **Termination-path complexity** is addressed structurally rather than
+  per-site. The seven bespoke `record_*`/`terminate_*` wrappers that had
+  accreted on `LifecycleContext` collapsed into the single generic
+  `LifecycleContext::terminate(status, error_code)` that this RFC's
+  guide-level section specified, plus one justified exception:
+  `terminate_body_too_large(limit_bytes)` also emits
+  `ParseCompleted { result: Err(ParseFailure::BodyTooLarge) }`, which a
+  bare status+code cannot express.
+- **Tower timeout classification** — and with it #222's deferred "hoisting
+  observer construction into axum middleware" — is closed. The lifecycle
+  middleware is now the outermost lifecycle-aware layer on the proxy
+  router, immediately inside `request_id_middleware`, which must run first
+  so the lifecycle context can read the request id it assigns. It
+  classifies non-handler terminals by reading one generalized
+  response-extension marker, `TerminalClassification { status, error_code }`,
+  replacing the single-purpose `TowerTimeoutMarker` sketched in
+  §LifecycleContext.
+  Handlers that produce a local (non-proxied) response attach the marker
+  and never touch `LifecycleContext` themselves.
+
+The marker is read only when present; the middleware must not terminate
+unconditionally, because a streaming proxy response returns headers long
+before its body completes and `finish()` runs inside the stream generator.
+`Drop` remains the backstop for everything unmarked, exactly as this RFC
+originally described.
+
+One new observation recorded with this change: an upstream refusal
+(`stop_reason: "refusal"`) or `model_context_window_exceeded` arrives as an
+HTTP 200, so the row records status 200 with a non-null `error_code`
+(`upstream_refusal` / `upstream_context_window_exceeded`), following the
+existing `upstream_stream_error` convention.
+
 ## Motivation
 
 ### The observation guarantee's remaining rough edges
 
 PR #222 established the "every request that reached the handler produces
 exactly one row, no exceptions except SIGKILL/OOM/abort" contract via
-`TerminalObserver`. It works — the 40-row live-QA sample after deploy shows
-`terminal_dropped = 0`, `event_id = NULL` count of 0, and no writer failures.
+`TerminalObserver` (scope since widened to every accepted request — see
+§Amendment (2026-09-21)). It works — the 40-row live-QA sample after deploy
+shows `terminal_dropped = 0`, `event_id = NULL` count of 0, and no writer
+failures.
 
 But the handler still owns work that has nothing to do with producing a
 response:

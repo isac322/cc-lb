@@ -6,6 +6,8 @@ mod cache_stats_injection;
 mod long_error_mode;
 #[path = "ok_path.rs"]
 mod ok_path;
+#[path = "refusal_mode.rs"]
+mod refusal_mode;
 #[path = "slow_mode.rs"]
 mod slow_mode;
 #[path = "unknown_event.rs"]

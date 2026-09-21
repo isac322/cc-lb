@@ -276,16 +276,21 @@ async fn live_qa_1_default_boot_happy_path_writes_row_and_reconciles() {
 }
 
 // ============================================================================
-// LIVE-2 · Non-lifecycle route must not write a row — H1
+// LIVE-2 · Local proxy route writes one classified row — H1
 // ============================================================================
 #[tokio::test]
-async fn live_qa_2_oauth_usage_does_not_produce_request_event_row() {
+async fn live_qa_2_oauth_usage_writes_one_classified_row() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
 
-    // /api/oauth/usage bypasses the proxy lifecycle. If middleware creates a
-    // LifecycleContext for this path, Drop will publish a `terminal_dropped` row.
+    // This test previously asserted /api/oauth/usage produced NO row: under
+    // the handler-scoped guarantee the only row it could produce was a
+    // garbage `terminal_dropped` from LifecycleContext::Drop. The guarantee
+    // now covers every request the proxy listener accepts (RFC-0002
+    // amendment 2026-09-21): the handler attaches a TerminalClassification
+    // marker and the lifecycle middleware terminates it, so exactly one
+    // classified row must appear — and `terminal_dropped` must still be zero.
     let response = common::proxy_get(
         server.proxy_addr,
         "/api/oauth/usage",
@@ -293,37 +298,50 @@ async fn live_qa_2_oauth_usage_does_not_produce_request_event_row() {
     )
     .await
     .expect("oauth usage GET");
-    // Whatever the response status, no request_events row should appear.
-    assert!(
-        response.status < 500 || response.status == 401 || response.status == 404,
-        "oauth usage returned unexpected server error: {}",
-        response.status
-    );
+    assert_eq!(response.status, 200, "oauth usage must return 200");
 
-    // Wait a bit to make sure any async publish would land.
-    sleep(Duration::from_millis(500)).await;
+    wait_for_row_count(&pool, "1=1", baseline + 1).await;
     let total = count_request_events(&pool, "1=1").await;
     assert_eq!(
-        total, baseline,
-        "GET /api/oauth/usage must not produce a request_events row"
+        total,
+        baseline + 1,
+        "GET /api/oauth/usage must produce exactly one request_events row"
     );
+
+    // The newest row is this request's: a local 200 response carries no
+    // error classification.
+    let newest_unclassified = count_request_events(
+        &pool,
+        "id = (SELECT MAX(id) FROM request_events_v1) AND error_code IS NULL",
+    )
+    .await;
+    assert_eq!(
+        newest_unclassified, 1,
+        "oauth usage row must have NULL error_code"
+    );
+    let payload = fetch_payload_json(&pool, "id = (SELECT MAX(id) FROM request_events_v1)").await;
+    assert_eq!(json_i64(&payload, "status"), 200);
 
     let dropped = count_request_events(&pool, "error_code = 'terminal_dropped'").await;
     assert_eq!(
         dropped, 0,
-        "terminal_dropped rows must be zero for non-lifecycle routes"
+        "terminal_dropped rows must be zero for locally-handled routes"
     );
 }
 
 // ============================================================================
-// LIVE-3 · 404 fallback must not write a row — H1
+// LIVE-3 · 404 and 405 fallbacks each write one classified row — H1
 // ============================================================================
 #[tokio::test]
-async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
+async fn live_qa_3_unknown_route_and_method_not_allowed_write_one_classified_row() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
 
+    // This test previously asserted the 404 fallback produced NO row — see
+    // LIVE-2 for why that changed. The fallback now attaches a
+    // TerminalClassification marker and the lifecycle middleware terminates
+    // it as route_not_found.
     let not_found = common::proxy_get(
         server.proxy_addr,
         "/definitely/not-a-route",
@@ -333,12 +351,35 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
     .expect("404 GET");
     assert_eq!(not_found.status, 404);
 
-    sleep(Duration::from_millis(300)).await;
-    let after_404 = count_request_events(&pool, "1=1").await;
+    wait_for_row_count(&pool, "1=1", baseline + 1).await;
     assert_eq!(
-        after_404, baseline,
-        "404 fallback must not produce a request_events row"
+        count_request_events(&pool, "error_code = 'route_not_found'").await,
+        1,
+        "404 fallback must produce exactly one route_not_found row"
     );
+    let payload = fetch_payload_json(&pool, "error_code = 'route_not_found'").await;
+    assert_eq!(json_i64(&payload, "status"), 404);
+
+    // POST to a GET-only route hits the method-not-allowed fallback.
+    let not_allowed = common::http_post(
+        server.proxy_addr,
+        "/v1/models",
+        &server.managed_key.plaintext,
+        "{}",
+        &[],
+    )
+    .await
+    .expect("405 POST");
+    assert_eq!(not_allowed.status, 405);
+
+    wait_for_row_count(&pool, "1=1", baseline + 2).await;
+    assert_eq!(
+        count_request_events(&pool, "error_code = 'method_not_allowed'").await,
+        1,
+        "405 fallback must produce exactly one method_not_allowed row"
+    );
+    let payload = fetch_payload_json(&pool, "error_code = 'method_not_allowed'").await;
+    assert_eq!(json_i64(&payload, "status"), 405);
 
     let dropped = count_request_events(&pool, "error_code = 'terminal_dropped'").await;
     assert_eq!(dropped, 0, "terminal_dropped rows must be zero");

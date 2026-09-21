@@ -219,6 +219,9 @@ pub(crate) mod error_codes {
     pub(crate) const ROUTER_PIPELINE_UNAVAILABLE: &str = "router_pipeline_unavailable";
     pub(crate) const ROUTE_NO_UPSTREAM_AFTER_FILTER: &str = "route_no_upstream_after_filter";
     pub(crate) const ROUTE_NOT_CONFIGURED: &str = "route_not_configured";
+    pub(crate) const ROUTE_NOT_FOUND: &str = "route_not_found";
+    pub(crate) const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
+    pub(crate) const DRAIN_REJECTED: &str = "drain_rejected";
     pub(crate) const UPSTREAM_AFFINITY_UNAVAILABLE: &str = "upstream_affinity_unavailable";
     pub(crate) const LIMIT_REJECTED: &str = "limit_rejected";
     pub(crate) const SIGNER_FAILED: &str = "signer_failed";
@@ -226,9 +229,65 @@ pub(crate) mod error_codes {
     pub(crate) const UPSTREAM_4XX: &str = "upstream_4xx";
     pub(crate) const UPSTREAM_5XX: &str = "upstream_5xx";
     pub(crate) const UPSTREAM_STREAM_ERROR: &str = "upstream_stream_error";
+    pub(crate) const UPSTREAM_REFUSAL: &str = "upstream_refusal";
+    pub(crate) const UPSTREAM_CONTEXT_WINDOW_EXCEEDED: &str = "upstream_context_window_exceeded";
     pub(crate) const TOWER_TIMEOUT: &str = "tower_timeout";
     pub(crate) const TERMINAL_DROPPED: &str = "terminal_dropped";
     pub(crate) const CLIENT_CLOSED_REQUEST: &str = "client_closed_request";
+}
+
+/// Terminal classification carried from a non-handler response producer to
+/// `lifecycle_middleware` as a response extension.
+///
+/// Handlers that answer locally (router fallback, drain gate, timeout layer,
+/// local JSON endpoints) attach one of these to the response instead of
+/// touching [`LifecycleContext`]; the middleware reads it and calls
+/// [`LifecycleContext::terminate`] exactly once. Responses without the marker
+/// are left to the `Drop` backstop, which is what keeps streaming proxy
+/// responses unfinalized until their body finishes.
+#[derive(Clone, Copy, Debug)]
+pub struct TerminalClassification {
+    /// Client-visible status recorded as the terminal outcome.
+    pub status: StatusCode,
+    /// Error classification; `None` means the status itself is the outcome.
+    pub error_code: Option<&'static str>,
+}
+
+impl TerminalClassification {
+    /// Router fallback: no registered route matched the path.
+    pub const ROUTE_NOT_FOUND: Self = Self {
+        status: StatusCode::NOT_FOUND,
+        error_code: Some(error_codes::ROUTE_NOT_FOUND),
+    };
+    /// Method-not-allowed fallback on an otherwise registered path.
+    pub const METHOD_NOT_ALLOWED: Self = Self {
+        status: StatusCode::METHOD_NOT_ALLOWED,
+        error_code: Some(error_codes::METHOD_NOT_ALLOWED),
+    };
+    /// Drain gate rejected the request while the instance is shutting down.
+    pub const DRAIN_REJECTED: Self = Self {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        error_code: Some(error_codes::DRAIN_REJECTED),
+    };
+    /// Tower timeout elapsed before the handler produced a response.
+    pub const TOWER_TIMEOUT: Self = Self {
+        status: StatusCode::GATEWAY_TIMEOUT,
+        error_code: Some(error_codes::TOWER_TIMEOUT),
+    };
+    /// Request body transport failure while reading the request body.
+    pub const BODY_READ_FAILED: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        error_code: Some(error_codes::BODY_READ_FAILED),
+    };
+
+    /// A locally produced response with no error classification; the status
+    /// itself is the outcome.
+    pub const fn local(status: StatusCode) -> Self {
+        Self {
+            status,
+            error_code: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -268,6 +327,7 @@ struct TerminalState {
     first_body_chunk_ms: Option<u64>,
     finalize_ms: Option<u64>,
     observe_finished_emitted: bool,
+    request_started_emitted: bool,
 }
 
 impl LifecycleContext {
@@ -433,15 +493,28 @@ impl LifecycleContext {
         self.inner.emit_terminated(None);
     }
 
-    /// Terminate with Tower timeout status (504 GATEWAY_TIMEOUT).
-    /// Sets the error code to `TOWER_TIMEOUT` and publishes the final event.
-    pub fn terminate_tower_timeout(&self) {
-        self.set_terminal(StatusCode::GATEWAY_TIMEOUT, error_codes::TOWER_TIMEOUT);
+    /// The single terminal entry point. Emits `RequestStarted` if it has not
+    /// been emitted, records the classification, and publishes
+    /// `RequestTerminated`. Idempotent: a later call is a no-op once
+    /// finalized.
+    ///
+    /// `error_code` of `None` means the status itself is the outcome, with no
+    /// error classification (a locally produced response).
+    pub fn terminate(&self, status: StatusCode, error_code: Option<&'static str>) {
+        self.emit_request_started(false);
+        match error_code {
+            Some(code) => self.set_terminal(status, code),
+            None => self.set_success_status(status),
+        }
         self.finish();
     }
 
-    /// Record a body-cap rejection before the server has read the request body.
-    pub fn record_body_too_large_rejection(&self, limit_bytes: u64) {
+    /// Body-cap rejection before the server has read the request body.
+    ///
+    /// The sole dedicated terminal entry point: unlike every other
+    /// classification it must also emit `ParseCompleted::BodyTooLarge`, which
+    /// callers cannot express through [`Self::terminate`].
+    pub fn terminate_body_too_large(&self, limit_bytes: u64) {
         self.emit_request_started(false);
         self.emit_lifecycle(LifecycleEvent::ParseCompleted {
             event_id: self.event_id().to_owned(),
@@ -451,25 +524,22 @@ impl LifecycleContext {
         self.finish();
     }
 
-    /// Record a request body transport failure and publish the terminal event
-    /// explicitly so the drop fallback cannot misclassify it.
-    pub fn record_body_read_failure(&self) {
-        self.emit_request_started(false);
-        self.set_terminal(StatusCode::BAD_REQUEST, error_codes::BODY_READ_FAILED);
-        self.finish();
-    }
-
     /// Publish the `RequestStarted` lifecycle event.
     ///
     /// Should be called exactly once at handler entry, after the request has
     /// been parsed enough to know whether the client asked for a streaming
-    /// response.
+    /// response. Idempotent: a second call is a no-op, so terminal paths may
+    /// emit it unconditionally to cover requests the handler never saw.
     pub(crate) fn emit_request_started(&self, stream: bool) {
         let Some(bus) = self.inner.bus.as_ref() else {
             return;
         };
         let (request_id, event_kind) = {
-            let state = self.lock_state();
+            let mut state = self.lock_state();
+            if state.request_started_emitted {
+                return;
+            }
+            state.request_started_emitted = true;
             (state.request_id.clone(), state.event_kind)
         };
         bus.publish_lifecycle(LifecycleEvent::RequestStarted {
@@ -1146,7 +1216,7 @@ mod tests {
             &clock,
         );
         observer.set_request_body_timing(12, None);
-        observer.record_body_read_failure();
+        observer.terminate(StatusCode::BAD_REQUEST, Some(error_codes::BODY_READ_FAILED));
 
         assert!(matches!(
             rx.recv().await.expect("request started delivered"),
@@ -1188,7 +1258,7 @@ mod tests {
             &clock,
         );
         observer.set_request_body_timing(3, None);
-        observer.record_body_too_large_rejection(1_024);
+        observer.terminate_body_too_large(1_024);
 
         assert!(matches!(
             rx.recv().await.expect("request started delivered"),
@@ -1227,7 +1297,7 @@ mod tests {
             &clock,
         );
         observer.set_event_kind(cc_lb_request_log::RequestEventKind::CountTokens);
-        observer.record_body_too_large_rejection(1_024);
+        observer.terminate_body_too_large(1_024);
 
         let started = rx.recv().await.expect("request started delivered");
         let LifecycleEvent::RequestStarted { event_kind, .. } = started else {
@@ -1245,7 +1315,7 @@ mod tests {
             &clock,
         );
         observer.set_event_kind(cc_lb_request_log::RequestEventKind::Files);
-        observer.record_body_read_failure();
+        observer.terminate(StatusCode::BAD_REQUEST, Some(error_codes::BODY_READ_FAILED));
 
         // Drain the first request's terminal event, then the second start.
         let _ = rx.recv().await.expect("first terminal delivered");

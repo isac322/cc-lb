@@ -14,6 +14,7 @@
 //! [`RequestEventBus::publish`] is synchronous and non-blocking; a
 //! `SendError` from no live receivers is silently swallowed.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cc_lb_lifecycle::LifecycleEvent;
@@ -57,6 +58,15 @@ pub trait RequestEventBus: Send + Sync + 'static {
     fn publish_lifecycle(&self, event: LifecycleEvent);
 
     fn subscribe_lifecycle(&self) -> LifecycleBusReceiver;
+
+    /// Detached overflow tasks currently parked on a full
+    /// lifecycle-assembler channel. The assembler polls this during its
+    /// shutdown drain so parked row-bearing events are delivered before the
+    /// receiver is dropped. Buses without an assembler overflow path return
+    /// 0; bus wrappers should delegate to their inner bus.
+    fn assembler_overflow_in_flight(&self) -> usize {
+        0
+    }
 }
 
 /// Default capacity for the broadcast channel powering admin SSE subscribers.
@@ -66,6 +76,12 @@ pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 /// [`LifecycleEventLogger`](crate::lifecycle_event_logger::LifecycleEventLogger).
 pub const DEFAULT_LIFECYCLE_WRITER_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY: usize = 4096;
+
+/// Upper bound on detached overflow tasks retrying a saturated
+/// lifecycle-assembler send. Row-bearing events must not be dropped on
+/// `TrySendError::Full`, so [`InMemoryBus`] parks them in a spawned task that
+/// awaits channel capacity; this cap bounds that fallback's task growth.
+const MAX_ASSEMBLER_OVERFLOW_TASKS: usize = 1024;
 pub const DEFAULT_LIFECYCLE_PRICING_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_LIMIT_RECONCILE_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_CACHE_OBS_CAPACITY: usize = 4096;
@@ -143,6 +159,9 @@ struct InMemoryBusInner {
     lifecycle_api_key_metrics_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_cache_hit_miss_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
     lifecycle_routing_tier_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
+    /// Detached tasks currently parked on a full assembler channel. Bounded
+    /// by [`MAX_ASSEMBLER_OVERFLOW_TASKS`].
+    assembler_overflow_in_flight: AtomicUsize,
 }
 
 impl InMemoryBus {
@@ -170,6 +189,7 @@ impl InMemoryBus {
                 lifecycle_limit_rejection_audit_tx: Mutex::new(None),
                 lifecycle_api_key_metrics_tx: Mutex::new(None),
                 lifecycle_cache_hit_miss_tx: Mutex::new(None),
+                assembler_overflow_in_flight: AtomicUsize::new(0),
                 lifecycle_routing_tier_tx: Mutex::new(None),
             }),
         }
@@ -319,6 +339,112 @@ impl InMemoryBus {
         *guard = Some(tx);
         rx
     }
+    /// Whether this event carries request-log meaning for the durable
+    /// assembler: it creates the row (`RequestStarted`), finalizes it
+    /// (`RequestTerminated`), or records an abnormal outcome
+    /// (`RequestLogUpstreamErrorObserved`, `StreamCompleted` errors). These
+    /// must not be dropped when the assembler channel is full.
+    fn carries_request_row(event: &LifecycleEvent) -> bool {
+        matches!(
+            event,
+            LifecycleEvent::RequestStarted { .. }
+                | LifecycleEvent::RequestTerminated { .. }
+                | LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
+                | LifecycleEvent::StreamCompleted { .. }
+        )
+    }
+
+    /// Non-blocking send to the lifecycle assembler. On `Full`, row-bearing
+    /// events are handed to a bounded overflow task that awaits capacity
+    /// instead of being dropped; other events keep the drop-on-full behavior.
+    fn send_to_assembler(&self, event: LifecycleEvent) {
+        let assembler_tx = {
+            let guard = match self.inner.lifecycle_assembler_tx.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.clone()
+        };
+        let Some(tx) = assembler_tx else {
+            return;
+        };
+        match tx.try_send(event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(dropped)) => {
+                if Self::carries_request_row(&dropped) {
+                    self.spawn_assembler_overflow(tx, dropped);
+                } else {
+                    record_dropped_events_by("lifecycle_assembler_full", 1);
+                    tracing::error!(
+                        kind = dropped.kind(),
+                        event_id = %dropped.event_id(),
+                        "lifecycle assembler mpsc full; dropping event (request row may be missing)",
+                    );
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!("lifecycle assembler mpsc closed");
+            }
+        }
+    }
+
+    /// Park a row-bearing event on a detached task that awaits assembler
+    /// channel capacity. Bounded by [`MAX_ASSEMBLER_OVERFLOW_TASKS`]; beyond
+    /// the cap the event is dropped loudly.
+    fn spawn_assembler_overflow(&self, tx: mpsc::Sender<LifecycleEvent>, event: LifecycleEvent) {
+        let in_flight = self
+            .inner
+            .assembler_overflow_in_flight
+            .fetch_add(1, Ordering::Relaxed);
+        if in_flight >= MAX_ASSEMBLER_OVERFLOW_TASKS {
+            self.inner
+                .assembler_overflow_in_flight
+                .fetch_sub(1, Ordering::Relaxed);
+            record_dropped_events_by("lifecycle_assembler_full", 1);
+            tracing::error!(
+                kind = event.kind(),
+                event_id = %event.event_id(),
+                in_flight,
+                "lifecycle assembler overflow task cap reached; dropping row-bearing event (request row may be missing)",
+            );
+            return;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            self.inner
+                .assembler_overflow_in_flight
+                .fetch_sub(1, Ordering::Relaxed);
+            record_dropped_events_by("lifecycle_assembler_full", 1);
+            tracing::error!(
+                kind = event.kind(),
+                event_id = %event.event_id(),
+                "lifecycle assembler mpsc full outside a tokio runtime; dropping row-bearing event (request row may be missing)",
+            );
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            if let Err(send_error) = tx.send(event).await {
+                let event = send_error.0;
+                tracing::error!(
+                    kind = event.kind(),
+                    event_id = %event.event_id(),
+                    "lifecycle assembler mpsc closed while overflow task waited; request row may be missing",
+                );
+            }
+            inner
+                .assembler_overflow_in_flight
+                .fetch_sub(1, Ordering::Relaxed);
+        });
+    }
+
+    /// Detached overflow tasks currently parked on a full assembler channel.
+    /// Read by the assembler's shutdown drain; see
+    /// [`RequestEventBus::assembler_overflow_in_flight`].
+    pub fn assembler_overflow_in_flight(&self) -> usize {
+        self.inner
+            .assembler_overflow_in_flight
+            .load(Ordering::Relaxed)
+    }
 }
 
 impl Default for InMemoryBus {
@@ -329,6 +455,9 @@ impl Default for InMemoryBus {
 
 impl RequestEventBus for InMemoryBus {
     fn publish(&self, update: RequestEventUpdate) {
+        // Advisory: this broadcast feeds live admin SSE dashboards only; the
+        // durable request row does not depend on it, so a full channel or an
+        // absent subscriber may drop the update.
         let _ = self.inner.broadcast_tx.send(update);
     }
 
@@ -341,31 +470,13 @@ impl RequestEventBus for InMemoryBus {
             &event,
             LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
         ) {
-            let assembler_tx = {
-                let guard = match self.inner.lifecycle_assembler_tx.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                guard.clone()
-            };
-            if let Some(tx) = assembler_tx {
-                match tx.try_send(event) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(dropped)) => {
-                        record_dropped_events_by("lifecycle_assembler_full", 1);
-                        tracing::warn!(
-                            kind = dropped.kind(),
-                            event_id = %dropped.event_id(),
-                            "lifecycle assembler mpsc full; dropping event (request row may be missing)",
-                        );
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        tracing::debug!("lifecycle assembler mpsc closed");
-                    }
-                }
-            }
+            // Row-bearing event routed only to the durable assembler; never
+            // broadcast or written to the metric writer channel.
+            self.send_to_assembler(event);
             return;
         }
+        // Advisory broadcast copy for live dashboards; the durable request
+        // row does not depend on it, so a dropped send is acceptable.
         let _ = self.inner.lifecycle_broadcast_tx.send(event.clone());
 
         let writer_tx = {
@@ -374,14 +485,6 @@ impl RequestEventBus for InMemoryBus {
                 .lifecycle_writer_tx
                 .lock()
                 .expect("event bus lifecycle writer mutex poisoned");
-            guard.clone()
-        };
-        let assembler_tx = {
-            let guard = self
-                .inner
-                .lifecycle_assembler_tx
-                .lock()
-                .expect("event bus lifecycle assembler mutex poisoned");
             guard.clone()
         };
         let pricing_tx = {
@@ -473,22 +576,7 @@ impl RequestEventBus for InMemoryBus {
                 }
             }
         }
-        if let Some(tx) = assembler_tx {
-            match tx.try_send(event.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(dropped)) => {
-                    record_dropped_events_by("lifecycle_assembler_full", 1);
-                    tracing::warn!(
-                        kind = dropped.kind(),
-                        event_id = %dropped.event_id(),
-                        "lifecycle assembler mpsc full; dropping event (request row may be missing)",
-                    );
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::debug!("lifecycle assembler mpsc closed");
-                }
-            }
-        }
+        self.send_to_assembler(event.clone());
         if let Some(tx) = pricing_tx {
             match tx.try_send(event.clone()) {
                 Ok(()) => {}
@@ -637,6 +725,10 @@ impl RequestEventBus for InMemoryBus {
 
     fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
         LifecycleBusReceiver::InMemory(self.inner.lifecycle_broadcast_tx.subscribe())
+    }
+
+    fn assembler_overflow_in_flight(&self) -> usize {
+        InMemoryBus::assembler_overflow_in_flight(self)
     }
 }
 

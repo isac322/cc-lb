@@ -236,7 +236,7 @@ pub use subscription_quota_events::{
     start_subscription_quota_writer,
 };
 #[cfg(not(loom))]
-pub use terminal_observer::LifecycleContext;
+pub use terminal_observer::{LifecycleContext, TerminalClassification};
 #[cfg(not(loom))]
 pub use upstream_rate_limit_events::{
     UpstreamRateLimitEnqueueError, UpstreamRateLimitSink, start_upstream_rate_limit_writer,

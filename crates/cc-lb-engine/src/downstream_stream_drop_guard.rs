@@ -613,8 +613,20 @@ mod tests {
             rx.try_recv().is_err(),
             "guard drop must leave finalization to the remaining lifecycle observer"
         );
-        observer.terminate_tower_timeout();
+        observer.terminate(
+            StatusCode::GATEWAY_TIMEOUT,
+            Some(crate::terminal_observer::error_codes::TOWER_TIMEOUT),
+        );
 
+        // `terminate` emits the otherwise-missing `RequestStarted` ahead of the
+        // terminal event so the assembler has a partial to attach to; this test
+        // asserts on the termination's fields, so skip past anything earlier.
+        let terminal = loop {
+            let event = rx.recv().await.expect("terminal event delivered");
+            if matches!(event, LifecycleEvent::RequestTerminated { .. }) {
+                break event;
+            }
+        };
         let LifecycleEvent::RequestTerminated {
             reason,
             client_status,
@@ -624,7 +636,7 @@ mod tests {
             upstream_body_ms,
             finalize_ms,
             ..
-        } = rx.recv().await.expect("terminal event delivered")
+        } = terminal
         else {
             panic!("expected request termination");
         };
