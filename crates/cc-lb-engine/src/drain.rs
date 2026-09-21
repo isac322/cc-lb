@@ -1,5 +1,7 @@
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -7,8 +9,8 @@ use axum::extract::State;
 use axum::http::header::{HeaderValue, RETRY_AFTER};
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
-use futures_core::Stream;
-use http_body_util::{BodyStream, StreamBody};
+use bytes::Bytes;
+use http_body::Frame;
 use tokio::sync::Notify;
 
 use crate::terminal_observer::TerminalClassification;
@@ -159,22 +161,46 @@ fn draining_response() -> Response<Body> {
 }
 
 /// Wraps `body` so `guard` is released only when the body is exhausted or
-/// dropped (client disconnect). Frames pass through unchanged.
+/// dropped (client disconnect). Frames pass through unchanged and the inner
+/// body's `size_hint`/`is_end_stream` are preserved, so a buffered response
+/// keeps its `content-length` instead of falling back to chunked framing.
 fn guard_body(body: Body, guard: InFlightGuard) -> Body {
-    let stream = async_stream::stream! {
-        let _guard = guard;
-        let mut frames = BodyStream::new(body);
-        while let Some(frame) = next_frame(&mut frames).await {
-            yield frame;
-        }
-    };
-    Body::new(StreamBody::new(stream))
+    Body::new(GuardedBody {
+        inner: body,
+        guard: Some(guard),
+    })
 }
 
-async fn next_frame(
-    stream: &mut BodyStream<Body>,
-) -> Option<Result<http_body::Frame<bytes::Bytes>, axum::Error>> {
-    std::future::poll_fn(|cx| std::pin::Pin::new(&mut *stream).poll_next(cx)).await
+struct GuardedBody {
+    inner: Body,
+    guard: Option<InFlightGuard>,
+}
+
+impl http_body::Body for GuardedBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        // `axum::body::Body` is `Unpin`, so no pin projection is needed.
+        let poll = Pin::new(&mut self.inner).poll_frame(cx);
+        if matches!(poll, Poll::Ready(None)) {
+            // End of stream: release in-flight now instead of waiting for the
+            // response to be dropped.
+            self.guard.take();
+        }
+        poll
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 struct InFlightGuard {
@@ -202,7 +228,7 @@ mod tests {
     use tokio::sync::Notify;
     use tower::ServiceExt;
 
-    use super::{DrainController, proxy_drain_middleware};
+    use super::{DrainController, guard_body, proxy_drain_middleware};
 
     #[tokio::test]
     async fn response_body_stream_holds_in_flight_until_dropped() {
@@ -270,6 +296,22 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         drop(response);
         assert_eq!(controller.in_flight(), 0);
+    }
+
+    #[test]
+    fn guard_body_preserves_size_hint() {
+        // A buffered body has an exact size hint; losing it makes hyper fall
+        // back to chunked framing while the stale `content-length` header
+        // survives, corrupting the payload for clients.
+        let controller = DrainController::new();
+        let guard = controller.try_track().unwrap();
+        let inner = Body::from("buffered");
+        let expected = http_body::Body::size_hint(&inner).exact();
+        assert!(expected.is_some());
+
+        let wrapped = guard_body(inner, guard);
+
+        assert_eq!(http_body::Body::size_hint(&wrapped).exact(), expected);
     }
 
     async fn streaming_response() -> Response {
