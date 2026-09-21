@@ -559,6 +559,17 @@ async fn terminal_drain_rejected() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|value| value.to_str().ok()),
         Some("60")
     );
+    // The layer reorder that put request_id_middleware outermost means a
+    // drain rejection now carries a request-id header it did not carry before.
+    // Pin it so the change is deliberate rather than incidental.
+    assert!(
+        response
+            .headers
+            .get("request-id")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("req_server_")),
+        "drain rejection must carry the assigned request id"
+    );
 
     let storage = sqlite_storage(&sqlite_path).await?;
     let rows = wait_for_request_event_count(storage.as_ref(), 1).await?;

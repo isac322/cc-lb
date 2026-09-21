@@ -150,10 +150,13 @@ Two open problems named in §Motivation are now closed:
   bare status+code cannot express.
 - **Tower timeout classification** — and with it #222's deferred "hoisting
   observer construction into axum middleware" — is closed. The lifecycle
-  middleware is now the outermost layer on the proxy router and classifies
-  non-handler terminals by reading one generalized response-extension
-  marker, `TerminalClassification { status, error_code }`, replacing the
-  single-purpose `TowerTimeoutMarker` sketched in §LifecycleContext.
+  middleware is now the outermost lifecycle-aware layer on the proxy
+  router, immediately inside `request_id_middleware`, which must run first
+  so the lifecycle context can read the request id it assigns. It
+  classifies non-handler terminals by reading one generalized
+  response-extension marker, `TerminalClassification { status, error_code }`,
+  replacing the single-purpose `TowerTimeoutMarker` sketched in
+  §LifecycleContext.
   Handlers that produce a local (non-proxied) response attach the marker
   and never touch `LifecycleContext` themselves.
 

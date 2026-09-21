@@ -7,7 +7,11 @@ use axum::extract::State;
 use axum::http::header::{HeaderValue, RETRY_AFTER};
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
+use futures_core::Stream;
+use http_body_util::{BodyStream, StreamBody};
 use tokio::sync::Notify;
+
+use crate::terminal_observer::TerminalClassification;
 
 #[derive(Clone)]
 pub struct DrainController {
@@ -137,8 +141,9 @@ pub async fn proxy_drain_middleware(
     };
 
     let response = next.run(request).await;
-    drop(guard);
-    response
+    // The request stays in flight until its response body is fully relayed or
+    // dropped, so `await_drained` covers streaming bodies — not just headers.
+    response.map(|body| guard_body(body, guard))
 }
 
 fn draining_response() -> Response<Body> {
@@ -148,6 +153,28 @@ fn draining_response() -> Response<Body> {
         .headers_mut()
         .insert(RETRY_AFTER, HeaderValue::from_static("60"));
     response
+        .extensions_mut()
+        .insert(TerminalClassification::DRAIN_REJECTED);
+    response
+}
+
+/// Wraps `body` so `guard` is released only when the body is exhausted or
+/// dropped (client disconnect). Frames pass through unchanged.
+fn guard_body(body: Body, guard: InFlightGuard) -> Body {
+    let stream = async_stream::stream! {
+        let _guard = guard;
+        let mut frames = BodyStream::new(body);
+        while let Some(frame) = next_frame(&mut frames).await {
+            yield frame;
+        }
+    };
+    Body::new(StreamBody::new(stream))
+}
+
+async fn next_frame(
+    stream: &mut BodyStream<Body>,
+) -> Option<Result<http_body::Frame<bytes::Bytes>, axum::Error>> {
+    std::future::poll_fn(|cx| std::pin::Pin::new(&mut *stream).poll_next(cx)).await
 }
 
 struct InFlightGuard {
@@ -178,7 +205,7 @@ mod tests {
     use super::{DrainController, proxy_drain_middleware};
 
     #[tokio::test]
-    async fn response_body_stream_does_not_hold_in_flight() {
+    async fn response_body_stream_holds_in_flight_until_dropped() {
         let controller = DrainController::new();
         let app = Router::new()
             .route("/", get(streaming_response))
@@ -192,11 +219,13 @@ mod tests {
             .await
             .unwrap();
 
+        // The guard lives in the response body: headers alone do not release it.
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(controller.in_flight(), 0);
-        assert!(!controller.await_drained(Duration::from_millis(1)).await);
+        assert_eq!(controller.in_flight(), 1);
+        assert!(controller.await_drained(Duration::from_millis(1)).await);
 
         drop(response);
+        assert_eq!(controller.in_flight(), 0);
     }
 
     #[tokio::test]
@@ -239,6 +268,7 @@ mod tests {
         release.notify_one();
         let response = request.await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
         assert_eq!(controller.in_flight(), 0);
     }
 

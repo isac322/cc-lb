@@ -1546,12 +1546,12 @@ async fn evict_oldest(
     let Some(partial) = partials.remove(&oldest_key) else {
         return;
     };
-    metrics::counter!(
-        "cc_lb_lifecycle_assembler_rows_total",
-        "outcome" => "cap_evicted"
-    )
-    .increment(1);
     let Some(term) = partial.termination.as_ref() else {
+        metrics::counter!(
+            "cc_lb_lifecycle_assembler_rows_total",
+            "outcome" => "cap_evicted"
+        )
+        .increment(1);
         tracing::warn!(
             lifecycle_event_id = %oldest_key,
             had_termination = false,

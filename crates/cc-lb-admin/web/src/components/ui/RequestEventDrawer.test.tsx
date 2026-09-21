@@ -85,8 +85,10 @@ describe('RequestEventDrawer', () => {
     expect(screen.queryByText('Live')).toBeNull();
     expect(screen.queryByText('In progress')).toBeNull();
 
-    // Terminal sections should appear
-    expect(screen.getAllByText('upstream_timeout').length).toBeGreaterThan(0);
+    // Terminal sections should appear. A 2xx carrying an error_code is an
+    // abnormal outcome, so the code shows twice: once in the outcome badge and
+    // once as the KvRow value. Pin the count so losing either one fails here.
+    expect(screen.getAllByText('upstream_timeout')).toHaveLength(2);
     expect(screen.getAllByText('150 ms').length).toBeGreaterThan(0);
   });
 
