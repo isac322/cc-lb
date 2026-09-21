@@ -25,11 +25,11 @@ describe('logsSearchSchema', () => {
     expect(parsed.time_range).toBeUndefined();
     expect(parsed.since_unix_secs).toBeUndefined();
     expect(parsed.until_unix_secs).toBeUndefined();
-    expect(parsed.event_kind).toBe('messages');
+    expect(parsed.event_kind).toBeUndefined();
   });
 
-  it('defaults the kind filter to messages and keeps explicit kinds', () => {
-    expect(logsSearchSchema.parse({}).event_kind).toBe('messages');
+  it('leaves the kind filter unset by default and keeps explicit kinds', () => {
+    expect(logsSearchSchema.parse({}).event_kind).toBeUndefined();
     expect(logsSearchSchema.parse({ event_kind: 'renewal' }).event_kind).toBe(
       'renewal',
     );
@@ -40,11 +40,11 @@ describe('logsSearchSchema', () => {
 
   it('ignores legacy source_kind params and invalid kind values', () => {
     const legacy = logsSearchSchema.parse({ source_kind: 'renewal' });
-    expect(legacy.event_kind).toBe('messages');
+    expect(legacy.event_kind).toBeUndefined();
     expect(legacy).not.toHaveProperty('source_kind');
 
     const invalid = logsSearchSchema.parse({ event_kind: 'bogus' });
-    expect(invalid.event_kind).toBe('messages');
+    expect(invalid.event_kind).toBeUndefined();
   });
 
   it('normalizes Unix bounds outside the JavaScript Date range', () => {
@@ -171,5 +171,10 @@ describe('buildHistoricalFilters', () => {
     expect(buildLiveFilters(filters)).toEqual(live);
     expect(buildLiveFilters(filters)).not.toHaveProperty('status');
     expect(buildLiveFilters(filters)).not.toHaveProperty('session');
+  });
+  it('keeps the client-side errors filter out of the backend contract', () => {
+    const filters = { status: 'errors' as const };
+    expect(buildLiveFilters(filters)).toEqual({});
+    expect(buildHistoricalFilters(filters)).toEqual({});
   });
 });

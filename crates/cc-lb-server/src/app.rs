@@ -92,8 +92,11 @@ const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
 const PRICE_CATALOG_LOCAL_INSTALL_INTERVAL: Duration = Duration::from_secs(60);
 const WASMTIME_POOL_METRICS_INTERVAL: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Copy)]
-struct TowerTimeoutMarker;
+/// Response extension carrying the terminal classification for a response
+/// produced outside the lifecycle handler. `lifecycle_middleware` reads it
+/// and finalizes the request's `LifecycleContext`; unmarked responses are
+/// left to the context's `Drop` backstop.
+type TerminalClassification = cc_lb_engine::TerminalClassification;
 
 #[derive(Clone, Copy)]
 struct RequestBodyCaps {
@@ -2300,7 +2303,18 @@ fn proxy_route_template(path: &str) -> Option<&'static str> {
 fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
     let request_ids = RequestIdState::default();
     let drain_controller = state.drain_controller.clone();
+    // request_id runs first so lifecycle_middleware can read the assigned id;
+    // lifecycle runs before the drain gate so drain rejections can hand their
+    // terminal classification back through the response extensions.
     let outer_sb = ServiceBuilder::new()
+        .layer(middleware::from_fn_with_state(
+            request_ids,
+            request_id_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            lifecycle_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             drain_controller,
             crate::drain::proxy_drain_middleware,
@@ -2310,27 +2324,17 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             cc_lb_observability::trace_layer(NoopObservabilityHook).make_span_with(
                 cc_lb_observability::ProxyMakeSpan::with_route_template(proxy_route_template),
             ),
-        )
-        .layer(middleware::from_fn_with_state(
-            request_ids,
-            request_id_middleware,
-        ));
+        );
 
-    let lifecycle_inner_sb = ServiceBuilder::new()
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            lifecycle_middleware,
-        ))
+    let inner_sb = ServiceBuilder::new()
         .layer(crate::chaos::ChaosLayer::from_env())
         .layer(HandleErrorLayer::new(timeout_error))
         .timeout(Duration::from_secs(timeout_secs.max(1)));
 
-    let non_lifecycle_inner_sb = ServiceBuilder::new()
-        .layer(crate::chaos::ChaosLayer::from_env())
-        .layer(HandleErrorLayer::new(timeout_error))
-        .timeout(Duration::from_secs(timeout_secs.max(1)));
-
-    let lifecycle_routes = Router::new()
+    // Every route on the proxy listener — including the router fallback and
+    // the method-not-allowed fallback below — runs under lifecycle_middleware
+    // so each accepted request produces exactly one request-log row.
+    let routes = Router::new()
         .route("/v1/messages", post(lifecycle_handler))
         .route("/v1/messages/count_tokens", post(lifecycle_handler))
         .route("/v1/models", get(lifecycle_handler))
@@ -2341,38 +2345,41 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             get(lifecycle_handler).delete(lifecycle_handler),
         )
         .route("/v1/files/{id}/content", get(lifecycle_handler))
+        .route("/api/oauth/usage", get(oauth_usage_handler))
         .route("/api/{*path}", any(lifecycle_handler))
         .route("/v1/{*path}", any(lifecycle_handler))
-        .with_state(state.clone())
-        .layer(lifecycle_inner_sb);
-
-    let non_lifecycle_routes = Router::new()
-        .route("/api/oauth/usage", get(oauth_usage_handler))
         .with_state(state)
-        .layer(non_lifecycle_inner_sb);
+        .layer(inner_sb);
 
     Router::new()
-        .merge(lifecycle_routes)
-        .merge(non_lifecycle_routes)
+        .merge(routes)
         .fallback(proxy_not_found)
         .method_not_allowed_fallback(proxy_method_not_allowed)
         .layer(outer_sb)
 }
 
-async fn proxy_not_found() -> Response<Body> {
-    anthropic_error_response(
+async fn proxy_not_found(_request: Request<Body>) -> Response<Body> {
+    let mut response = anthropic_error_response(
         StatusCode::NOT_FOUND,
         "not_found",
         "requested proxy path was not found",
-    )
+    );
+    response
+        .extensions_mut()
+        .insert(TerminalClassification::ROUTE_NOT_FOUND);
+    response
 }
 
-async fn proxy_method_not_allowed() -> Response<Body> {
-    anthropic_error_response(
+async fn proxy_method_not_allowed(_request: Request<Body>) -> Response<Body> {
+    let mut response = anthropic_error_response(
         StatusCode::METHOD_NOT_ALLOWED,
         "not_found",
         "method is not allowed for this proxy path",
-    )
+    );
+    response
+        .extensions_mut()
+        .insert(TerminalClassification::METHOD_NOT_ALLOWED);
+    response
 }
 
 async fn healthz(State(state): State<ProxyState>) -> Json<HealthBody> {
@@ -2467,7 +2474,9 @@ async fn timeout_error(error: tower::BoxError) -> Response<Body> {
     let mut response = Response::new(Body::from("request timed out"));
     *response.status_mut() = status;
     if is_elapsed {
-        response.extensions_mut().insert(TowerTimeoutMarker);
+        response
+            .extensions_mut()
+            .insert(TerminalClassification::TOWER_TIMEOUT);
     }
     response
 }
@@ -2514,7 +2523,7 @@ async fn lifecycle_handler(
             drop(body_read_span);
             if let Some(observer) = observer.as_ref() {
                 observer.set_request_body_timing(body_read_ms, None);
-                observer.record_body_too_large_rejection(cap as u64);
+                observer.terminate_body_too_large(cap as u64);
             }
             return body_too_large_response();
         }
@@ -2523,7 +2532,8 @@ async fn lifecycle_handler(
             drop(body_read_span);
             if let Some(observer) = observer.as_ref() {
                 observer.set_request_body_timing(body_read_ms, None);
-                observer.record_body_read_failure();
+                let terminal = TerminalClassification::BODY_READ_FAILED;
+                observer.terminate(terminal.status, terminal.error_code);
             }
             let mut response = Response::new(Body::from(format!("body read failed: {source}")));
             *response.status_mut() = StatusCode::BAD_REQUEST;
@@ -2636,13 +2646,17 @@ async fn oauth_usage_handler(
         .await
     {
         let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
-        return json_response(
+        let mut response = json_response(
             status,
             serde_json::json!({ "error": "authentication_error", "message": error.to_string() }),
         );
+        response
+            .extensions_mut()
+            .insert(TerminalClassification::local(status));
+        return response;
     }
 
-    match cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
+    let mut response = match cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
         state.storage.as_ref(),
         &state.dynamic_view,
         &*state.clock,
@@ -2657,7 +2671,12 @@ async fn oauth_usage_handler(
                 serde_json::json!({ "error": "usage_unavailable" }),
             )
         }
-    }
+    };
+    let status = response.status();
+    response
+        .extensions_mut()
+        .insert(TerminalClassification::local(status));
+    response
 }
 
 fn json_response(status: StatusCode, value: impl Serialize) -> Response<Body> {
@@ -2731,10 +2750,15 @@ async fn lifecycle_middleware(
         request.extensions_mut().insert(c.clone());
     }
     let response = next.run(request).await;
-    if response.extensions().get::<TowerTimeoutMarker>().is_some()
+    // Only a response carrying an explicit terminal classification is
+    // finalized here. A streaming proxy response returns headers long before
+    // its body finishes, so terminating unconditionally would finalize every
+    // stream at header time; unmarked responses fall through to the context's
+    // Drop backstop instead.
+    if let Some(marker) = response.extensions().get::<TerminalClassification>()
         && let Some(c) = ctx.as_ref()
     {
-        c.terminate_tower_timeout();
+        c.terminate(marker.status, marker.error_code);
     }
     response
 }

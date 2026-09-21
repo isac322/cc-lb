@@ -33,6 +33,18 @@ const FINALIZATION_GRACE: Duration = Duration::from_millis(200);
 /// waiting for the next tick.
 const FINALIZATION_TICK: Duration = Duration::from_millis(20);
 const PARTIAL_USAGE_THROTTLE: Duration = Duration::from_millis(250);
+/// Backoff between durable row-insert attempts. The insert is idempotent
+/// (`ON CONFLICT(event_id) DO NOTHING` in the storage adapter), so retrying a
+/// transient failure cannot duplicate the row. Total attempts =
+/// `STORAGE_WRITE_BACKOFF.len() + 1`.
+const STORAGE_WRITE_BACKOFF: [Duration; 2] =
+    [Duration::from_millis(50), Duration::from_millis(200)];
+
+/// Post-shutdown grace for draining events still parked on detached overflow
+/// tasks (`RequestEventBus::assembler_overflow_in_flight`). Bounded so the
+/// shutdown path can never hang on a saturated channel.
+const OVERFLOW_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 #[derive(Default)]
 struct ParseIdentity {
     thread_id: Option<String>,
@@ -562,6 +574,7 @@ async fn assembler_loop(
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut partials: HashMap<EventId, Partial> = HashMap::new();
+    let mut breaker = StorageCircuitBreaker::default();
     let mut sweeper = tokio::time::interval(SWEEP_INTERVAL);
     sweeper.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     sweeper.tick().await;
@@ -574,18 +587,19 @@ async fn assembler_loop(
             biased;
                 event = rx.recv() => {
                     match event {
-                        Some(event) => handle_event(&*storage, bus.as_deref(), metrics.as_ref(), &mut partials, map_cap, event).await,
+                        Some(event) => handle_event(&*storage, bus.as_deref(), metrics.as_ref(), &mut breaker, &mut partials, map_cap, event).await,
                         None => break,
                     }
                 }
                 _ = finalization_tick.tick() => {
-                    flush_expired_terminations(&*storage, bus.as_deref(), metrics.as_ref(), &mut partials).await;
+                    flush_expired_terminations(&*storage, bus.as_deref(), metrics.as_ref(), &mut breaker, &mut partials).await;
                 }
             _ = sweeper.tick() => {
                 flush_expired_orphans(
                     &*storage,
                     bus.as_deref(),
                     metrics.as_ref(),
+                    &mut breaker,
                     &mut partials,
                     ttl,
                 )
@@ -594,19 +608,103 @@ async fn assembler_loop(
             _ = &mut shutdown => break,
         }
     }
-
-    while let Ok(event) = rx.try_recv() {
-        handle_event(
-            &*storage,
-            bus.as_deref(),
-            metrics.as_ref(),
-            &mut partials,
-            map_cap,
-            event,
-        )
-        .await;
+    // Drain what is already queued, then keep receiving while overflow tasks
+    // are still parked on `tx.send(...)` — but only within a bounded grace
+    // window so shutdown can never hang on a saturated channel.
+    let drain_deadline = tokio::time::Instant::now() + OVERFLOW_DRAIN_GRACE;
+    loop {
+        while let Ok(event) = rx.try_recv() {
+            handle_event(
+                &*storage,
+                bus.as_deref(),
+                metrics.as_ref(),
+                &mut breaker,
+                &mut partials,
+                map_cap,
+                event,
+            )
+            .await;
+        }
+        let parked = bus
+            .as_deref()
+            .map(RequestEventBus::assembler_overflow_in_flight)
+            .unwrap_or(0);
+        if parked == 0 {
+            break;
+        }
+        match tokio::time::timeout_at(drain_deadline, rx.recv()).await {
+            Ok(Some(event)) => {
+                handle_event(
+                    &*storage,
+                    bus.as_deref(),
+                    metrics.as_ref(),
+                    &mut breaker,
+                    &mut partials,
+                    map_cap,
+                    event,
+                )
+                .await;
+            }
+            Ok(None) => break,
+            Err(_) => {
+                tracing::warn!(
+                    parked,
+                    "lifecycle event assembler: overflow drain grace elapsed; parked events may be lost",
+                );
+                break;
+            }
+        }
     }
-    force_flush_terminations(&*storage, bus.as_deref(), metrics.as_ref(), &mut partials).await;
+    force_flush_terminations(
+        &*storage,
+        bus.as_deref(),
+        metrics.as_ref(),
+        &mut breaker,
+        &mut partials,
+    )
+    .await;
+}
+
+/// Consecutive `append_request_event` failures that trip the storage circuit
+/// breaker. While the breaker is open, row writes degrade to a single attempt
+/// so a storage outage cannot stall the only task servicing the assembler
+/// channel behind `STORAGE_WRITE_BACKOFF` sleeps on every row.
+const STORAGE_CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
+
+/// Consecutive-failure circuit breaker for durable row inserts. Chosen over a
+/// per-row deadline: a deadline still sleeps through the backoff sequence on
+/// every row, so throughput still collapses during an outage. Failing fast
+/// keeps the assembler draining its channel, which is what the overflow-task
+/// fallback in the event bus depends on.
+#[derive(Default)]
+struct StorageCircuitBreaker {
+    consecutive_failures: u32,
+}
+
+impl StorageCircuitBreaker {
+    fn is_open(&self) -> bool {
+        self.consecutive_failures >= STORAGE_CIRCUIT_BREAKER_THRESHOLD
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+    }
+
+    fn record_failure(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+    }
+
+    /// Backoff to sleep before the next attempt, or `None` when the breaker
+    /// is open or the backoff sequence is exhausted — i.e. give up on this
+    /// row after the current attempt.
+    fn backoff_for(&self, attempt: u32) -> Option<Duration> {
+        if self.is_open() {
+            return None;
+        }
+        STORAGE_WRITE_BACKOFF
+            .get(attempt.saturating_sub(1) as usize)
+            .copied()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -614,6 +712,7 @@ async fn write_finalized_rows(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics_hook: &dyn EngineMetricsHook,
+    breaker: &mut StorageCircuitBreaker,
     event_id: &EventId,
     partial: &Partial,
     reason: &TerminationReason,
@@ -622,34 +721,53 @@ async fn write_finalized_rows(
     is_orphan: bool,
 ) {
     let row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
-    match storage.append_request_event(&row).await {
-        Ok(cursor) => {
-            if let Some(bus) = bus {
-                bus.publish(RequestEventUpdate::final_(row, cursor));
+    let mut attempts: u32 = 0;
+    let cursor = loop {
+        attempts += 1;
+        match storage.append_request_event(&row).await {
+            Ok(cursor) => {
+                breaker.record_success();
+                break cursor;
             }
-            let outcome = if is_orphan {
-                "written_orphan"
-            } else {
-                "written"
-            };
-            metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome)
-                .increment(1);
+            Err(error) => {
+                breaker.record_failure();
+                if let Some(backoff) = breaker.backoff_for(attempts) {
+                    tracing::warn!(
+                        %error,
+                        lifecycle_event_id = %event_id,
+                        attempts,
+                        "lifecycle event assembler: row insert failed; retrying",
+                    );
+                    tokio::time::sleep(backoff).await;
+                } else {
+                    tracing::error!(
+                        %error,
+                        lifecycle_event_id = %event_id,
+                        attempts,
+                        "lifecycle event assembler: failed to persist row after retries; request row lost",
+                    );
+                    metrics_hook.record_dropped_events_by("lifecycle_assembler_storage_error", 1);
+                    return;
+                }
+            }
         }
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                lifecycle_event_id = %event_id,
-                "lifecycle event assembler: failed to persist row",
-            );
-            metrics_hook.record_dropped_events_by("lifecycle_assembler_storage_error", 1);
-        }
+    };
+    if let Some(bus) = bus {
+        bus.publish(RequestEventUpdate::final_(row, cursor));
     }
+    let outcome = if is_orphan {
+        "written_orphan"
+    } else {
+        "written"
+    };
+    metrics::counter!("cc_lb_lifecycle_assembler_rows_total", "outcome" => outcome).increment(1);
 }
 
 async fn flush_expired_terminations(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics: &dyn EngineMetricsHook,
+    breaker: &mut StorageCircuitBreaker,
     partials: &mut HashMap<EventId, Partial>,
 ) {
     let now = Instant::now();
@@ -677,6 +795,7 @@ async fn flush_expired_terminations(
                 storage,
                 bus,
                 metrics,
+                breaker,
                 &event_id,
                 &partial,
                 &term.reason,
@@ -693,6 +812,7 @@ async fn force_flush_terminations(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics: &dyn EngineMetricsHook,
+    breaker: &mut StorageCircuitBreaker,
     partials: &mut HashMap<EventId, Partial>,
 ) {
     let pending: Vec<EventId> = partials
@@ -709,6 +829,7 @@ async fn force_flush_terminations(
                 storage,
                 bus,
                 metrics,
+                breaker,
                 &event_id,
                 &partial,
                 &term.reason,
@@ -769,6 +890,7 @@ async fn handle_event(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics: &dyn EngineMetricsHook,
+    breaker: &mut StorageCircuitBreaker,
     partials: &mut HashMap<EventId, Partial>,
     map_cap: usize,
     event: LifecycleEvent,
@@ -824,6 +946,7 @@ async fn handle_event(
                 storage,
                 bus,
                 metrics,
+                breaker,
                 &event_id,
                 &partial,
                 reason,
@@ -870,6 +993,7 @@ async fn handle_event(
                 storage,
                 bus,
                 metrics,
+                breaker,
                 &event_id,
                 &partial,
                 &termination.reason,
@@ -922,6 +1046,7 @@ async fn handle_event(
             storage,
             bus,
             metrics,
+            breaker,
             &event_id,
             &partial,
             &term.reason,
@@ -931,9 +1056,8 @@ async fn handle_event(
         )
         .await;
     }
-
     if partials.len() > map_cap {
-        drop_oldest(partials);
+        evict_oldest(storage, bus, metrics, breaker, partials).await;
     }
 }
 
@@ -1361,6 +1485,7 @@ async fn flush_expired_orphans(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics: &dyn EngineMetricsHook,
+    breaker: &mut StorageCircuitBreaker,
     partials: &mut HashMap<EventId, Partial>,
     ttl: Duration,
 ) {
@@ -1380,6 +1505,7 @@ async fn flush_expired_orphans(
                 storage,
                 bus,
                 metrics,
+                breaker,
                 &event_id,
                 &partial,
                 &TerminationReason::Dropped,
@@ -1392,7 +1518,24 @@ async fn flush_expired_orphans(
     }
 }
 
-fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
+/// Evict the oldest partial when the map exceeds `map_cap`.
+///
+/// The oldest entry is by construction the one most likely still in flight:
+/// terminated partials leave the map within `FINALIZATION_GRACE`. If the
+/// evicted partial already carries a termination, persist it with that
+/// termination's real outcome. Otherwise evict without writing — the
+/// guaranteed later `RequestTerminated` takes the orphan branch and persists
+/// the accurate row. Writing a fabricated row here would be worse than
+/// writing none: the storage adapter's `ON CONFLICT(event_id) DO NOTHING`
+/// would discard the real termination row, permanently recording a request
+/// that may have succeeded as 499/`terminal_without_partial`.
+async fn evict_oldest(
+    storage: &dyn RequestEventStore,
+    bus: Option<&dyn RequestEventBus>,
+    metrics: &dyn EngineMetricsHook,
+    breaker: &mut StorageCircuitBreaker,
+    partials: &mut HashMap<EventId, Partial>,
+) {
     let Some((oldest_key, _)) = partials
         .iter()
         .min_by_key(|(_, p)| p.inserted_at.unwrap_or_else(Instant::now))
@@ -1400,12 +1543,40 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
     else {
         return;
     };
-    partials.remove(&oldest_key);
-    metrics::counter!(
-        "cc_lb_lifecycle_assembler_rows_total",
-        "outcome" => "cap_evicted"
+    let Some(partial) = partials.remove(&oldest_key) else {
+        return;
+    };
+    let Some(term) = partial.termination.as_ref() else {
+        metrics::counter!(
+            "cc_lb_lifecycle_assembler_rows_total",
+            "outcome" => "cap_evicted"
+        )
+        .increment(1);
+        tracing::warn!(
+            lifecycle_event_id = %oldest_key,
+            had_termination = false,
+            "lifecycle event assembler: map capacity exceeded; evicted in-flight partial without writing (later termination persists the orphan row)",
+        );
+        return;
+    };
+    tracing::warn!(
+        lifecycle_event_id = %oldest_key,
+        had_termination = true,
+        "lifecycle event assembler: map capacity exceeded; persisting evicted partial with its real termination",
+    );
+    write_finalized_rows(
+        storage,
+        bus,
+        metrics,
+        breaker,
+        &oldest_key,
+        &partial,
+        &term.reason,
+        term.client_status,
+        term.duration_ms,
+        false,
     )
-    .increment(1);
+    .await;
 }
 
 #[cfg(test)]
@@ -1422,7 +1593,7 @@ mod tests {
     };
     use cc_lb_observability::{EngineMetricsHook, NoopMetricsHook};
     use cc_lb_request_log::{CostBreakdown, HeaderSnapshot};
-    use cc_lb_storage_api::{RequestEvent, StorageResult};
+    use cc_lb_storage_api::{RequestEvent, StorageError, StorageResult};
     use metrics::{Counter, CounterFn, Key, KeyName, Metadata, Recorder, SharedString, Unit};
     use proptest::prelude::*;
     use std::collections::HashMap as StdHashMap;
@@ -1434,11 +1605,25 @@ mod tests {
     struct CapturingStore {
         rows: StdMutex<Vec<RequestEvent>>,
         cursor: AtomicU64,
+        /// Number of `append_request_event` calls that fail before
+        /// succeeding; exercises the retry path in `write_finalized_rows`.
+        fail_next: AtomicU64,
+        attempts: AtomicU64,
     }
 
     #[async_trait]
     impl RequestEventStore for CapturingStore {
         async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<u64> {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            if self
+                .fail_next
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(StorageError::Unavailable {
+                    message: "injected transient failure".to_owned(),
+                });
+            }
             self.rows.lock().unwrap().push(event.clone());
             Ok(self.cursor.fetch_add(1, Ordering::Relaxed) + 1)
         }
@@ -1661,6 +1846,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestTerminated {
@@ -1707,6 +1893,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestTerminated {
@@ -1753,6 +1940,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestTerminated {
@@ -1776,7 +1964,14 @@ mod tests {
         )
         .await;
 
-        force_flush_terminations(&store, None, metrics.as_ref(), &mut partials).await;
+        force_flush_terminations(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
+            &mut partials,
+        )
+        .await;
 
         let rows = store.rows.lock().expect("capturing store lock");
         assert_eq!(rows.len(), 1);
@@ -2538,6 +2733,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestStarted {
@@ -2566,6 +2762,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_TTL,
         )
@@ -2586,6 +2783,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_TTL,
         )
@@ -2603,6 +2801,195 @@ mod tests {
             rows[0].error_code.as_deref(),
             Some("terminal_without_partial")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn transient_storage_error_retries_and_persists_single_row() {
+        let store = CapturingStore::default();
+        store.fail_next.store(1, Ordering::Relaxed);
+        let metrics = noop_metrics();
+        let event_id = eid("retry-transient-storage-error");
+        let mut partial = Partial::new(Instant::now(), event_id.clone());
+        partial.request_id = Some("req-retry-transient-storage-error".to_owned());
+
+        write_finalized_rows(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
+            &event_id,
+            &partial,
+            &TerminationReason::Success,
+            200,
+            12,
+            false,
+        )
+        .await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id.as_deref(), Some(event_id.as_str()));
+        drop(rows);
+        assert_eq!(store.attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn map_cap_eviction_persists_terminated_partial_with_real_outcome() {
+        let store = CapturingStore::default();
+        let metrics = noop_metrics();
+        let mut partials = HashMap::new();
+        let map_cap = 1;
+
+        // A partial that already observed its termination is persisted on
+        // eviction with the real outcome, not a fabricated 499.
+        let oldest_id = eid("cap-evicted-terminated");
+        let mut oldest = Partial::new(Instant::now(), oldest_id.clone());
+        oldest.request_id = Some("req-cap-evicted-terminated".to_owned());
+        oldest.inserted_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("monotonic clock has advanced past 1 second"),
+        );
+        oldest.termination = Some(TerminationInfo {
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 42,
+            deadline: Instant::now() + FINALIZATION_GRACE,
+            expects_priced: false,
+            expects_cache: false,
+        });
+        partials.insert(oldest_id.clone(), oldest);
+
+        let newest_id = eid("cap-evicted-newest");
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
+            &mut partials,
+            map_cap,
+            LifecycleEvent::RequestStarted {
+                event_id: newest_id.clone(),
+                request_id: "req-cap-evicted-newest".to_owned(),
+                ts_ms: 1_730_000_000_001,
+                stream: false,
+                source_kind: None,
+                source_ref_id: None,
+                event_kind: None,
+            },
+        )
+        .await;
+
+        assert!(!partials.contains_key(&oldest_id));
+        assert!(partials.contains_key(&newest_id));
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id.as_deref(), Some(oldest_id.as_str()));
+        assert_eq!(rows[0].status, 200);
+        assert_eq!(rows[0].duration_ms, 42);
+        assert_eq!(rows[0].error_code, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn map_cap_eviction_of_in_flight_partial_preserves_real_terminal_row() {
+        // Regression: evicting a still-in-flight partial must not write a
+        // fabricated 499/`terminal_without_partial` row — the storage
+        // adapter's ON CONFLICT would then discard the real termination.
+        let store = CapturingStore::default();
+        let metrics = noop_metrics();
+        let mut partials = HashMap::new();
+        let map_cap = 1;
+
+        let oldest_id = eid("cap-evicted-in-flight");
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
+            &mut partials,
+            map_cap,
+            LifecycleEvent::RequestStarted {
+                event_id: oldest_id.clone(),
+                request_id: "req-cap-evicted-in-flight".to_owned(),
+                ts_ms: 1_730_000_000_000,
+                stream: false,
+                source_kind: None,
+                source_ref_id: None,
+                event_kind: None,
+            },
+        )
+        .await;
+        // Make eviction deterministic: `Instant` resolution can tie two
+        // back-to-back inserts, so age the oldest partial explicitly.
+        partials
+            .get_mut(&oldest_id)
+            .expect("oldest partial is present")
+            .inserted_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("monotonic clock has advanced past 1 second"),
+        );
+
+        let newest_id = eid("cap-evicted-newest");
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
+            &mut partials,
+            map_cap,
+            LifecycleEvent::RequestStarted {
+                event_id: newest_id.clone(),
+                request_id: "req-cap-evicted-newest".to_owned(),
+                ts_ms: 1_730_000_000_001,
+                stream: false,
+                source_kind: None,
+                source_ref_id: None,
+                event_kind: None,
+            },
+        )
+        .await;
+
+        // The in-flight partial was evicted without writing a row.
+        assert!(!partials.contains_key(&oldest_id));
+        assert!(partials.contains_key(&newest_id));
+        assert!(store.rows.lock().expect("capturing store lock").is_empty());
+
+        // The request then completes for real: the orphan branch persists the
+        // accurate row instead of a fabricated 499.
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut StorageCircuitBreaker::default(),
+            &mut partials,
+            map_cap,
+            LifecycleEvent::RequestTerminated {
+                event_id: oldest_id.clone(),
+                reason: TerminationReason::Success,
+                client_status: 200,
+                duration_ms: 42,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                finalize_ms: None,
+                first_body_chunk_ms: None,
+                internal_errors: Vec::new(),
+                limit_reconcile_ms: None,
+                observability_post_ms: None,
+                proxy_setup_ms: None,
+                setup_timings: Default::default(),
+                io_timings: Default::default(),
+                upstream_body_ms: None,
+                event_kind: None,
+            },
+        )
+        .await;
+
+        let rows = store.rows.lock().expect("capturing store lock");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id.as_deref(), Some(oldest_id.as_str()));
+        assert_eq!(rows[0].status, 200);
+        assert_eq!(rows[0].duration_ms, 42);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -142,7 +142,12 @@ export function getRequestOutcome(
   if (status === 499 && error_code === 'client_closed_request') {
     return { type: 'client_disconnected', status, error_code };
   }
-  if (status >= 200 && status < 300 && error_code === 'upstream_stream_error') {
+  // A recorded error_code on a 2xx means the response was delivered to the
+  // client as a success but the request still ended abnormally (mid-stream
+  // error, upstream refusal, context-window overflow, …). The wire status
+  // stays 200 while the outcome is an error, so any terminal error code —
+  // not a per-code allowlist — marks the row.
+  if (status >= 200 && status < 300 && error_code != null) {
     return {
       type: 'semantic_error',
       status,

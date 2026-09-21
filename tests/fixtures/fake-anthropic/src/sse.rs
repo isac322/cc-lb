@@ -328,7 +328,100 @@ fn message_stop() -> (&'static str, String) {
     ("message_stop", json!({"type": "message_stop"}).to_string())
 }
 
+/// The `(stop_reason, stop_details)` pair carried by the `message_delta` of the
+/// abnormal-stop modes, and by the top-level fields of their non-streaming
+/// Messages response.
+pub(crate) fn abnormal_stop(mode: FakeMode) -> Option<(&'static str, Value)> {
+    match mode {
+        FakeMode::Refusal => Some((
+            "refusal",
+            json!({
+                "type": "refusal",
+                "category": "reasoning_extraction",
+                "explanation": "This request was blocked as it seems to violate Anthropic's Terms of Service restrictions on reverse engineering or duplicating model outputs. To learn more, visit https://www.anthropic.com/legal/commercial-terms.",
+                "fallback_credit_token": null,
+                "fallback_has_prefill_claim": null
+            }),
+        )),
+        FakeMode::ContextWindowExceeded => Some(("model_context_window_exceeded", Value::Null)),
+        _ => None,
+    }
+}
+
+/// The three-event stream emitted by the abnormal-stop modes: `message_start`,
+/// `message_delta`, `message_stop`, with no content blocks and no `ping`.
+fn abnormal_stop_stream_items(model: &str, mode: FakeMode) -> Vec<(&'static str, String)> {
+    let Some((stop_reason, stop_details)) = abnormal_stop(mode) else {
+        return Vec::new();
+    };
+    vec![
+        abnormal_stop_message_start(model),
+        abnormal_stop_message_delta(stop_reason, stop_details),
+        message_stop(),
+    ]
+}
+
+fn abnormal_stop_message_start(model: &str) -> (&'static str, String) {
+    (
+        "message_start",
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_fake_000000000000000000000000",
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "container": null,
+                "stop_reason": null,
+                "stop_sequence": null,
+                "stop_details": null,
+                "usage": {
+                    "input_tokens": 100,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 0,
+                        "ephemeral_1h_input_tokens": 0
+                    },
+                    "output_tokens": 0,
+                    "service_tier": "standard",
+                    "inference_geo": "not_available"
+                },
+                "context_management": null
+            }
+        })
+        .to_string(),
+    )
+}
+
+fn abnormal_stop_message_delta(stop_reason: &str, stop_details: Value) -> (&'static str, String) {
+    (
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": stop_reason,
+                "stop_sequence": null,
+                "stop_details": stop_details,
+                "container": null
+            },
+            "usage": {
+                "input_tokens": 100,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+            },
+            "context_management": {"applied_edits": []}
+        })
+        .to_string(),
+    )
+}
+
 fn stream_items(model: &str, mode: FakeMode, delta_count: u64) -> Vec<(&'static str, String)> {
+    if abnormal_stop(mode).is_some() {
+        return abnormal_stop_stream_items(model, mode);
+    }
     let mut items = Vec::new();
     items.push((
         "message_start",
