@@ -242,13 +242,14 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
     notfound_lines="$(grep -c 'NotFound' "${SCCACHE_ERROR_LOG}" || true)"
     echo "sccache error log (${target}): ${log_lines} lines, ${notfound_lines:-0} NotFound cache probes" >&2
     # CompileResult::Error has exactly one producer in sccache: generate_hash_key
-    # failing with a ProcessError, i.e. the preprocessor invocation exited
-    # non-zero. The preceding lines carry the argv and the failing output.
+    # returning a ProcessError, i.e. the preprocessor run for the hash key exited
+    # non-zero. The preceding lines carry the argv, whose tail names the input.
     echo "--- cache-error entries with context (${target}) ---" >&2
     { grep -B 4 -F 'compile result: cache error' "${SCCACHE_ERROR_LOG}" \
-      | cut -c1-500 || true; } >&2
-    echo "--- preprocessor process errors (${target}) ---" >&2
-    { grep -F 'process error:' "${SCCACHE_ERROR_LOG}" | cut -c1-500 || true; } >&2
+      | cut -c1-1400 || true; } >&2
+    echo "--- preprocessor failures (${target}) ---" >&2
+    { grep -E 'process error|preprocess' "${SCCACHE_ERROR_LOG}" \
+      | cut -c1-700 || true; } >&2
     echo "--- other non-probe entries (${target}, last 60) ---" >&2
     { grep -v 'NotFound' "${SCCACHE_ERROR_LOG}" \
       | grep -vF 'compile result:' | tail -n 60 || true; } >&2
