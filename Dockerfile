@@ -229,8 +229,14 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
   fi
   unset RUSTC_WRAPPER
   if [ -s "${SCCACHE_ERROR_LOG}" ]; then
-    echo "--- sccache error log (${target}, last 200 lines) ---" >&2
-    tail -n 200 "${SCCACHE_ERROR_LOG}" >&2
+    # opendal logs every cold-cache probe as "read failed NotFound", which is an
+    # ordinary miss rather than an error. Those lines outnumber everything else,
+    # so a blind tail shows only misses; report their count and dump the rest.
+    log_lines="$(wc -l < "${SCCACHE_ERROR_LOG}")"
+    notfound_lines="$(grep -c 'NotFound' "${SCCACHE_ERROR_LOG}" || true)"
+    echo "sccache error log (${target}): ${log_lines} lines, ${notfound_lines} benign NotFound cache probes" >&2
+    echo "--- sccache error log (${target}, NotFound probes filtered, last 200) ---" >&2
+    grep -v 'NotFound' "${SCCACHE_ERROR_LOG}" | tail -n 200 >&2
     echo "--- end sccache error log (${target}) ---" >&2
   else
     echo "sccache error log is empty for ${target}" >&2
