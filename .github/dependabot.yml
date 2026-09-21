@@ -123,3 +123,11 @@ updates:
       admin-web:
         patterns:
           - "*"
+    ignore:
+      # jsdom 30.1.0 breaks vitest's catchWindowErrors: the worker bootstrap
+      # calls addEventListener on a window that jsdom's EventTarget IDL wrapper
+      # then rejects ("not a valid instance of EventTarget"), so every forked
+      # test worker fails to start. Reproduced with vitest 5.0.1 under
+      # `vitest run --maxWorkers=1 --no-file-parallelism`; 30.0.1 is clean.
+      - dependency-name: "jsdom"
+        versions: ["30.1.0"]
