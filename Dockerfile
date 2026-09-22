@@ -225,12 +225,31 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
   if [ "${cache_timeouts:-0}" -gt 0 ]; then
     echo "::warning::sccache reported ${cache_timeouts} cache timeouts; affected compilations fell back to local compilation"
   fi
+  # Generic "Cache errors" is deliberately NOT gated. It counts compile requests
+  # whose hash-key preprocessing exited non-zero (sccache server.rs returns
+  # CompileResult::Error only from the generate_hash_key ProcessError arm), and
+  # every occurrence here is an autoconf feature probe: instrumented runs
+  # 35638161308 and 35641747730 captured exactly 8 per target on all four
+  # targets, every one of them compiling `conftest.c` with jemalloc's
+  # `-Werror -herror_on_warning` configure flags. Those probes are supposed to
+  # fail. They are counted in neither hits nor misses, which is why
+  # "Cache hits rate (C/C++)" stays at 100%. Gating them would fail every build.
+  # Storage faults are a different counter and stay fail-closed below. See #565.
+  cache_errors="$(awk '$1 == "Cache" && $2 == "errors" && $3 ~ /^[0-9]+$/ { print $3; exit }' /tmp/sccache-stats.txt)"
+  dump_error_log=0
+  if [ "${cache_errors:-0}" -gt 8 ]; then
+    echo "::warning::sccache reported ${cache_errors} cache errors on ${target}, above the 8 expected autoconf conftest probes"
+    # The individual entries log at debug only, so the dump below shows them
+    # only after SCCACHE_LOG above is raised to warn,sccache::server=debug.
+    dump_error_log=1
+  fi
   if grep -Eq '^Cache (read errors|write errors)[[:space:]]+[1-9][0-9]*$' /tmp/sccache-stats.txt; then
     echo "sccache reported a cache storage read or write error" >&2
     cache_status=1
   fi
   unset RUSTC_WRAPPER
-  if { [ "$cache_status" -ne 0 ] || [ "$build_status" -ne 0 ]; } && [ -s "${SCCACHE_ERROR_LOG}" ]; then
+  if { [ "$cache_status" -ne 0 ] || [ "$build_status" -ne 0 ] || [ "$dump_error_log" -ne 0 ]; } \
+    && [ -s "${SCCACHE_ERROR_LOG}" ]; then
     tail -n 200 "${SCCACHE_ERROR_LOG}" >&2
   fi
 fi
