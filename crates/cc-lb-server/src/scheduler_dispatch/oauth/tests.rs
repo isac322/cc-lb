@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
-use super::should_poll_oauth_usage;
+use super::{LONG_LIVED_METADATA_REFRESH_BUCKET_SECS, should_poll_oauth_usage};
 use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
 use crate::dynamic_view_builder::Stores;
 use crate::refresh::{LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefresher, LazyRefresherDeps};
@@ -243,11 +243,13 @@ async fn clear_recorded_apply_error_clears_stored_error() {
 }
 
 /// Long-lived upstreams never reach the token-refresh path that schedules
-/// `MetadataRefreshJob`, so the usage poll enqueues it instead. The job's
-/// idempotency key dedupes repeated ticks: a second enqueue for the same
-/// credential generation is a swallowed `Conflict`, not a second task.
+/// `MetadataRefreshJob`, so the usage poll enqueues it instead. The
+/// idempotency key carries a coarse time bucket: ticks inside one bucket
+/// collapse to a single job (a swallowed `Conflict`), while the first tick
+/// of the next bucket enqueues a fresh job — the same cadence at which a
+/// refreshing credential's generation would rotate the key.
 #[tokio::test]
-async fn enqueue_metadata_refresh_for_long_lived_dedupes_by_generation() {
+async fn enqueue_metadata_refresh_for_long_lived_rekeys_each_bucket() {
     let fixture = DispatchFixture::new().await;
     let upstream = fixture.oauth_upstream(true).await;
 
@@ -260,7 +262,16 @@ async fn enqueue_metadata_refresh_for_long_lived_dedupes_by_generation() {
         .dispatch
         .enqueue_metadata_refresh_for_long_lived(&upstream, None)
         .await
-        .expect("duplicate enqueue is a swallowed conflict");
+        .expect("same-bucket enqueue is a swallowed conflict");
+
+    fixture
+        .clock
+        .advance_secs(LONG_LIVED_METADATA_REFRESH_BUCKET_SECS);
+    fixture
+        .dispatch
+        .enqueue_metadata_refresh_for_long_lived(&upstream, None)
+        .await
+        .expect("next bucket enqueues a new job");
 
     let tasks = fixture
         .dispatch
@@ -276,7 +287,10 @@ async fn enqueue_metadata_refresh_for_long_lived_dedupes_by_generation() {
         .iter()
         .filter(|task| matches!(task.args, AdaptiveJob::MetadataRefresh(_)))
         .count();
-    assert_eq!(metadata_tasks, 1, "duplicate ticks must not pile up tasks");
+    assert_eq!(
+        metadata_tasks, 2,
+        "same-bucket ticks must collapse, the next bucket must enqueue a new job"
+    );
 }
 
 fn registered_oauth_upstream() -> UpstreamRecord {
@@ -313,6 +327,7 @@ struct DispatchFixture {
     storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
     aead: Arc<AeadService>,
     dispatch: SchedulerDispatch,
+    clock: Arc<TestClock>,
     refresh_entry_calls: Arc<AtomicUsize>,
     claim_calls: Arc<AtomicUsize>,
 }
@@ -342,7 +357,8 @@ impl DispatchFixture {
         .expect("open scheduler storage");
         let storage_dyn: Arc<dyn Storage> = storage.clone();
         let aead = Arc::new(AeadService::from_master_key([9; 32]));
-        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let test_clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let clock: ClockHandle = test_clock.clone();
         let oauth_cfg = Arc::new(AnthropicOAuthConfig {
             client_id: "test-client".to_owned(),
             auth_url: Url::parse("http://127.0.0.1/oauth/authorize").expect("auth url"),
@@ -434,6 +450,7 @@ impl DispatchFixture {
             storage,
             aead,
             dispatch,
+            clock: test_clock,
             refresh_entry_calls,
             claim_calls,
         }

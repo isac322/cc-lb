@@ -1753,6 +1753,120 @@ describe('/upstreams long-lived OAuth credential', () => {
     expect(notice.textContent).toContain('expires in 8 hours');
   });
 
+  test('shows the fallback notice when a reconnect falls back to a refreshing credential', () => {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue({
+      data: {
+        upstream_id: upstream.id,
+        kind: upstream.kind,
+        has_credentials: false,
+        status: 'missing',
+        expires_at_unix_secs: null,
+        refresh_token_present: false,
+        refresh_token_expires_at_unix_secs: null,
+        mode: null,
+        can_refresh: false,
+        scopes: [],
+      },
+      isLoading: false,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    const start = vi.fn(
+      (
+        _vars: { id: string },
+        options?: {
+          onSuccess?: (result: {
+            authorize_url: string;
+            state_token: string;
+            revision: number;
+          }) => void;
+        },
+      ) => {
+        options?.onSuccess?.({
+          authorize_url: 'https://example.com/authorize',
+          state_token: 'oauth-state-token',
+          revision: 2,
+        });
+      },
+    );
+    let completeData:
+      | {
+          upstream_id: string;
+          expires_at_unix_secs: number;
+          access_token_fingerprint: string;
+          mode: string;
+          long_lived_fallback: boolean;
+          fallback_reason: 'rejected' | 'clamped' | null;
+          granted_expires_in_secs: number | null;
+        }
+      | undefined;
+    const complete = vi.fn(
+      (
+        _vars: { id: string; state_token: string; code: string },
+        options?: { onSuccess?: (result: typeof completeData) => void },
+      ) => {
+        completeData = {
+          upstream_id: upstream.id,
+          expires_at_unix_secs: NOW_UNIX_SECS + 3600,
+          access_token_fingerprint: 'fp',
+          mode: 'refreshing',
+          long_lived_fallback: true,
+          fallback_reason: 'clamped',
+          granted_expires_in_secs: 3600,
+        };
+        options?.onSuccess?.(completeData);
+      },
+    );
+    vi.mocked(queries.useOAuthStart).mockReturnValue({
+      mutate: start,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+    vi.mocked(queries.useOAuthComplete).mockImplementation(
+      () =>
+        ({
+          mutate: complete,
+          isPending: false,
+          isSuccess: completeData !== undefined,
+          data: completeData,
+          reset: vi.fn(),
+        }) as never,
+    );
+
+    const view = renderRoute();
+
+    // The reconnect notice is the prominent entry point, same as the
+    // pending-UX test above.
+    const reconnectNotice = screen.getByRole('status');
+    fireEvent.click(
+      within(reconnectNotice).getByRole('button', { name: 'Connect' }),
+    );
+
+    const dialog = screen.getByRole('dialog', { name: 'OAuth Authorization' });
+    fireEvent.click(
+      within(dialog).getByRole('button', {
+        name: 'Generate authorization URL',
+      }),
+    );
+    fireEvent.change(within(dialog).getByPlaceholderText(/paste code/), {
+      target: { value: 'oauth-code' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+    expect(complete).toHaveBeenCalledTimes(1);
+
+    view.rerender(routeElement());
+
+    // The modal stays open so the operator sees the demotion, and the notice
+    // reports the same reason the wizard would.
+    const openDialog = screen.getByRole('dialog', {
+      name: 'OAuth Authorization',
+    });
+    const notice = within(openDialog).getByTestId(
+      'oauth-long-lived-fallback-notice',
+    );
+    expect(notice.getAttribute('data-reason')).toBe('clamped');
+  });
+
   test('nudges reconnect on the access-token clock and ignores the stored refresh token', () => {
     const now = Math.floor(Date.now() / 1000);
     vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(

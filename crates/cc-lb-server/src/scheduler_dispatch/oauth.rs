@@ -22,6 +22,14 @@ use super::SchedulerDispatch;
 
 const TOKEN_REFRESH_LOOKAHEAD_SECS: u64 = 60;
 
+/// Coarse time bucket that re-keys long-lived metadata refreshes. Anthropic
+/// refreshing access tokens live ~8 hours, so `oauth_token_generation` — the
+/// discriminator in `MetadataRefreshJob::idempotency_key` — advances about
+/// once per 8 hours on the refreshing path. No existing constant names that
+/// lifetime (it arrives in the token endpoint's `expires_in`), so it is
+/// pinned here: 8 * 60 * 60.
+const LONG_LIVED_METADATA_REFRESH_BUCKET_SECS: u64 = 28_800;
+
 impl SchedulerDispatch {
     pub(super) async fn dispatch_oauth_refresh(
         &self,
@@ -91,10 +99,18 @@ impl SchedulerDispatch {
     }
 
     /// Enqueues a metadata refresh for a long-lived credential, which never
-    /// reaches the token-refresh path that normally schedules this job. The
-    /// job's idempotency key dedupes repeated 60-second usage-poll ticks, so a
-    /// `Conflict` means a refresh for this credential generation is already
-    /// queued and is not an error.
+    /// reaches the token-refresh path that normally schedules this job. A
+    /// long-lived credential's `oauth_token_generation` is frozen, so the
+    /// generation in `MetadataRefreshJob::idempotency_key` cannot rotate the
+    /// key — and the unique index on `(job_type, idempotency_key)` covers
+    /// `Done` rows until housekeeping reaps them (`dlq_retention_days`,
+    /// default 30 days). Appending a coarse time bucket rotates the key on
+    /// the same ~8-hour cadence at which a refreshing credential's
+    /// generation advances, while repeated 60-second usage-poll ticks inside
+    /// one bucket still collapse into a single job. The job payload keeps
+    /// the real generation so the handler's stale check still applies, and a
+    /// `Conflict` means this bucket's refresh is already queued — not an
+    /// error.
     async fn enqueue_metadata_refresh_for_long_lived(
         &self,
         upstream: &UpstreamRecord,
@@ -102,7 +118,8 @@ impl SchedulerDispatch {
     ) -> SchedulerResult<()> {
         let mut job = MetadataRefreshJob::new(upstream.id, upstream.oauth_token_generation);
         job.traceparent = traceparent.map(str::to_owned);
-        let idempotency_key = job.idempotency_key();
+        let bucket = unix_secs(self.clock.now()) / LONG_LIVED_METADATA_REFRESH_BUCKET_SECS;
+        let idempotency_key = format!("{}:{bucket}", job.idempotency_key());
         let task = SchedulerPushTask {
             args: AdaptiveJob::MetadataRefresh(job),
             idempotency_key: Some(idempotency_key),

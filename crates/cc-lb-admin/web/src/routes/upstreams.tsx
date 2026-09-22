@@ -814,6 +814,57 @@ function PaymentWarning({
   );
 }
 
+function OAuthFallbackNotice({
+  fallback,
+  reason,
+  grantedExpiresInSecs,
+}: {
+  fallback: boolean;
+  reason: string | null;
+  grantedExpiresInSecs: number | null;
+}) {
+  if (!fallback) return null;
+  return (
+    <div
+      data-testid="oauth-long-lived-fallback-notice"
+      data-reason={reason ?? 'unknown'}
+      className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1"
+    >
+      <div className="font-medium flex items-center gap-1.5">
+        <Info className="w-3.5 h-3.5" />
+        365-day token unavailable
+      </div>
+      {reason === 'clamped' ? (
+        <p className="opacity-90">
+          Anthropic accepted the 365-day request but granted a shorter lifetime,
+          so the credential was kept refreshable instead of being locked to a
+          token that could not renew itself.
+          {grantedExpiresInSecs != null && (
+            <>
+              {' '}
+              The granted token expires{' '}
+              <RelativeOffsetTime offsetSeconds={grantedExpiresInSecs} />.
+            </>
+          )}
+        </p>
+      ) : reason === 'scope_rejected' ? (
+        <p className="opacity-90">
+          Anthropic refused the 365-day request because the configured
+          oauth.anthropic.scopes include a scope it will not grant a year-long
+          token for, so the credential was kept refreshable instead. It
+          auto-refreshes but needs reauthorization about every 30 days.
+        </p>
+      ) : (
+        <p className="opacity-90">
+          Anthropic refused the 365-day request, so a standard refreshing
+          credential was created instead. It auto-refreshes but needs
+          reauthorization about every 30 days.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function DetailView({
   upstream,
   onBack,
@@ -827,6 +878,7 @@ function DetailView({
   const del = useDeleteUpstream();
   const oauthStart = useOAuthStart();
   const oauthComplete = useOAuthComplete();
+  const resetOAuthComplete = oauthComplete.reset;
   const subscriptionMetadataQ = useUpstreamSubscriptionMetadata(upstream.id);
   const triggerSubscriptionMetadataRefresh =
     useTriggerSubscriptionMetadataRefresh();
@@ -857,8 +909,10 @@ function DetailView({
   // every surface shares the same modal.
   const startOAuthReconnect = useCallback(() => {
     setOauthState({});
+    // A previous completion's result must not leak into a reopened modal.
+    resetOAuthComplete();
     setOauthOpen(true);
-  }, []);
+  }, [resetOAuthComplete]);
 
   // ?action=reconnect deep link: consume the param exactly once, then start
   // the existing flow. The ref survives StrictMode's double effect pass;
@@ -2288,7 +2342,11 @@ function DetailView({
             <Button
               variant="primary"
               loading={oauthComplete.isPending}
-              disabled={!oauthState.code || !oauthState.state_token}
+              disabled={
+                !oauthState.code ||
+                !oauthState.state_token ||
+                oauthComplete.isSuccess
+              }
               onClick={() => {
                 const token = oauthState.state_token;
                 const oauthCode = oauthState.code;
@@ -2300,9 +2358,12 @@ function DetailView({
                     code: oauthCode,
                   },
                   {
-                    onSuccess: () => {
+                    onSuccess: (res) => {
                       toast.success('OAuth connected');
-                      setOauthOpen(false);
+                      // A fallback outcome must stay visible: the notice
+                      // lives inside this modal, so only close on a clean
+                      // long-lived grant.
+                      if (!res.long_lived_fallback) setOauthOpen(false);
                     },
                   },
                 );
@@ -2314,6 +2375,13 @@ function DetailView({
         }
       >
         <div className="space-y-3">
+          <OAuthFallbackNotice
+            fallback={oauthComplete.data?.long_lived_fallback ?? false}
+            reason={oauthComplete.data?.fallback_reason ?? null}
+            grantedExpiresInSecs={
+              oauthComplete.data?.granted_expires_in_secs ?? null
+            }
+          />
           <p className="text-xs text-text-faint">
             cc-lb requests a year-long token from Anthropic. If Anthropic
             declines, the credential is automatically kept refreshable instead.
@@ -2797,41 +2865,11 @@ function CreateUpstreamModal({
 
       return (
         <div className="space-y-4">
-          {draftResult?.long_lived_fallback && (
-            <div
-              data-testid="oauth-long-lived-fallback-notice"
-              data-reason={draftResult.fallback_reason ?? 'unknown'}
-              className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1"
-            >
-              <div className="font-medium flex items-center gap-1.5">
-                <Info className="w-3.5 h-3.5" />
-                365-day token unavailable
-              </div>
-              {draftResult.fallback_reason === 'clamped' ? (
-                <p className="opacity-90">
-                  Anthropic accepted the 365-day request but granted a shorter
-                  lifetime, so the credential was kept refreshable instead of
-                  being locked to a token that could not renew itself.
-                  {draftResult.granted_expires_in_secs != null && (
-                    <>
-                      {' '}
-                      The granted token expires{' '}
-                      <RelativeOffsetTime
-                        offsetSeconds={draftResult.granted_expires_in_secs}
-                      />
-                      .
-                    </>
-                  )}
-                </p>
-              ) : (
-                <p className="opacity-90">
-                  Anthropic refused the 365-day request, so a standard
-                  refreshing credential was created instead. It auto-refreshes
-                  but needs reauthorization about every 30 days.
-                </p>
-              )}
-            </div>
-          )}
+          <OAuthFallbackNotice
+            fallback={draftResult?.long_lived_fallback ?? false}
+            reason={draftResult?.fallback_reason ?? null}
+            grantedExpiresInSecs={draftResult?.granted_expires_in_secs ?? null}
+          />
 
           <div className="p-4 border border-subtle rounded-md bg-overlay-1 space-y-3">
             <h3 className="text-sm font-medium text-text">Account Preview</h3>
