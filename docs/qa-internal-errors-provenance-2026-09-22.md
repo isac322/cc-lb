@@ -4,7 +4,7 @@
 - 대상 이슈: [isac322/cc-lb#849](https://github.com/isac322/cc-lb/issues/849) — cc-lb 자체 실패 사유가 폐기됨 (`internal_errors` 6단계 선언, 3개만 실제 생성)
 - 기준 HEAD: `1561ee9f371ca74c01c70cca6d81145f6d2ae218` (worktree `isac322/cc-lbs-own-failure-reasons-are-discarded-interna`). 원격 master `26c9d7850c633effd5b8fd6e3fe3001739842c2a`와의 차이는 `composite_signer_dispatch` 테스트뿐이며 런타임 코드는 동일(Main이 gh로 검증) — worktree는 master 대비 테스트 1커밋 차이이며 fast-forward 완료 상태는 아님
 - 최신 릴리스: `cc-lb-v0.5.0` (2026-09-20T09:16:15Z 게시, 배포 digest 미확인)
-- 상태: **구현 완료 QA 문서**. Main이 2026-09-22 전체 게이트를 실행해 통과했다(engine lib 588 PASS·1 기존 ignored, engine integration 270 PASS·2 trybuild 로컬 환경 실패(Main 처리 — CI 대기), terminal_observation 31, proxy_error_fallbacks 3, rfc_0002_fix_live_qa 22, latency_stages 4, lifecycle_client_disconnect 24, lifecycle_event_policy 2, pre-authn timeout 1, provider contract 8 — 로그 `/tmp/cc-lb-849-*-tests.log`, `/tmp/cc-lb-849-preauth-timeout-fixed.log`, `/tmp/cc-lb-849-lint-pass.log`). **strict lint PASS**: `cargo clippy -p cc-lb-domain -p cc-lb-engine -p cc-lb-server --all-targets -- -D warnings` 클린. provider contract 테스트는 승인된 부분 type/message 파서 시맨틱으로 갱신됨(구 strict-envelope 기대 2건 재작성 + observe-plugin 훅 테스트 복원). §10의 `PASS`는 실제 실행된 테스트 또는 Main live 증거가 있는 케이스만 표시한다. DOWNGRADE 호환은 사용자가 범위에서 제외했다.
+- 최종 검증: 구현 커밋 `1a4ff7bad771cfce83669d0682daf8710b3696a2`의 CI `35725913107`과 publish-check `35725913252`가 통과했다. nextest는 **2,505 PASS / 15 skipped**이며 인증·시도 typestate compile-fail 테스트도 각각 PASS했다. E2E, coverage, fmt, SQLite/PostgreSQL clippy, cargo-deny, promtool, crate-version guard가 통과했고 release-artifact 검사는 조건부 skipped였다. 로컬 strict lint는 `cargo clippy -p cc-lb-server -p cc-lb-engine -p tests-integration --all-targets -- -D warnings`로 통과했다. 로컬 trybuild 링커 제한은 CI에서 검증 완료했다. §10의 PASS는 실제 실행 증거가 있는 항목만 뜻한다. **2026-09-22 사용자 승인으로 QA-ROUTE-03을 N/A 종결하여 최종 집계는 50 PASS / 1 N/A**이며 51개 실행 PASS가 아니다. DOWNGRADE 호환은 사용자 승인으로 제외했다.
 
 
 ---
@@ -15,9 +15,9 @@
 
 1. 수정 후 각 실패 경로가 `request_events_v1.payload.internal_errors`에 올바른 `(stage, kind, message)`를 남기는지 검증할 원자적 케이스를 열거한다.
 2. 내부 진단(`internal_errors`)과 업스트림 진단(`upstream_error_type`/`upstream_error_message`)의 상호 배타 규칙을 고정한다.
-3. 구현이 끝난 뒤 "어느 케이스가 실제로 실행되어 PASS했는가"를 추적할 상태 필드를 제공한다. **수정 후 실행은 현재 전부 미실행이다.** `BASELINE_CONFIRMED` 표기는 Main이 **결함의 현재 동작**을 실행 확인했다는 뜻이며 수정 후 기대값의 PASS가 아니다.
+3. 구현 후 각 항목의 실행 결과를 §10에 기록한다. 조사 당시 `BASELINE_CONFIRMED`는 수정 전 결함 재현이며 수정 후 PASS와 구분한다. 최종 실행 결과와 사용자 승인 N/A 판정은 위 요약과 §10의 상태를 따른다.
 
-비범위: #850(메트릭 레이블) 구현, 애플리케이션 코드 변경. 빌드/린트/테스트 게이트는 **이 문서 작성 단계에서만** 생략한다 — 최종 사용자 인도물에는 전체 CI 통과가 포함된다.
+비범위: #850(메트릭 레이블) 구현. 이 문서 작성 당시에는 애플리케이션 코드 변경과 빌드/린트/테스트를 보류했고, 이후 사용자 승인으로 구현과 QA·CI를 수행했다.
 
 **역사적 손실은 코드 수정으로 복구되지 않는다.** 32,527건은 이슈 보고자의 프로덕션 집계이며 로컬에서 재검증되지 않았다. 수정은 미래의 실패를 기록할 뿐이며, 백필을 만들지 않는다.
 
@@ -252,7 +252,7 @@
 |---|---|---|---|---|---|---|
 | QA-ROUTE-01 | 유효 키, **설정된 eligible upstream 0개**(Main 베이스라인과 동일 조건 — `allowed_upstreams=[]`는 "무제한"이지 후보 0이 아님) | POST /v1/messages | 503, `route_no_upstream_after_filter`, `internal_errors=[{router_filter,unavailable,...}]` 100% 유지 | 정상 참조 경로 회귀 방지 | live/int | **PASS** — live `fixed-route-tcp-dns.json`; `terminal_observation::terminal_route_no_upstream_after_filter` (실행 PASS) |
 | QA-ROUTE-02 | 라우터 파이프라인 인스턴스화 실패 주입 | POST /v1/messages | 502, `router_pipeline_unavailable`, `stage=router` | terminated | int | **PASS** — `lifecycle::tests::router_pipeline_instantiation_error_records_router_config` (engine-lib 실행 PASS — DI 주입으로 도달 불가 live 모드 커버) |
-| QA-ROUTE-03 | 라우트 미구성 upstream 선택 | POST /v1/messages | 502, `route_not_configured`, `stage=router` | terminated | int | **BLOCKED(도달 불가 문서화)** — 현재 라우터 구현에서 `route_not_configured`를 발생시키는 경로가 없음(PASS 아님) |
+| QA-ROUTE-03 | 라우트 미구성 upstream 선택 | POST /v1/messages | 502, `route_not_configured`, `stage=router` | terminated | int | **N/A — 2026-09-22 사용자 승인**. 아래 도달 불가 근거에 따라 실행 대상에서 제외하여 종결했다. 실행 PASS 아님. |
 | QA-ROUTE-04 | 필터 플러그인 trap/invalid-output 폴백 + 이후 치명적 실패 | POST /v1/messages | `internal_errors`에 선행 비치명 진단 + 터미널 사유 **둘 다** 존재(append 순서) | 누적 이력 보존 | int | **PASS** — `lifecycle::tests::filter_invalid_output_history_precedes_terminal_dispatch_cause` (engine-lib 실행 PASS — 비치명 filter 진단이 터미널 사유 앞에 보존) |
 | QA-LIMIT-01 | quota/rate limit 초과 | POST /v1/messages | 429, `limit_rejected`, `internal_errors`에 `stage=router,kind=unavailable` + `LimitDecision::Rejected`의 기존 typed reason 영속(quota 동작 불변) | terminated | int | **PASS** — `terminal_observation::terminal_limit_rejected` (실행 PASS) |
 | QA-SIGN-01 | `signer_factory.build` 실패(자격증명 해석 불가) | POST /v1/messages | 502, `signer_failed`, `stage=signer`, redact된 사유 | terminated | int | **PASS** — `lifecycle::tests::signer_factory_failure_records_signer_stage` (engine-lib 실행 PASS) |
@@ -308,7 +308,14 @@
 | QA-API-01 | admin API로 request_events 조회(기존 admin 인증 필요) | GET admin events | `internal_errors`가 API 응답에 전파. 프론트엔드 미러는 **검색한 심볼 범위에서 발견되지 않음**(Main 검색: cc-lb-admin 및 `web/src/lib/api.ts`/`logRows.ts`에 `InternalErrorStage`/`internal_errors` 미검출 — 절대적 부재 주장 아님). UI에 internal_errors 렌더링은 현재 없으며 **신규 구현 대상 아님** — 기존 로그 표시 회귀만 검증(SPA 미변경, `CC_LB_ADMIN_SKIP_SPA=1` 빌드) | API 전파 | int | **PASS** — live `fixed-admin-compat.json`; `terminal_observation::admin_event_detail_propagates_internal_errors` (실행 PASS) |
 | QA-GUARD-01 | `merge()`의 `_` 암/빈 암 정책 | 신규 variant 추가 시뮬레이션 | opt-out 미등록 variant가 무시되면 테스트/CI 실패 | 가드 동작 | unit | **PASS** — `lifecycle_event_policy::policy_rejects_wildcards_and_new_or_handled_noops` + `lifecycle_event_assembler_matches_are_explicit_and_documented` (실행 PASS) |
 
-케이스 수: 51 (10.1: 9 — AUTH 6, PARSE 2, BODY 1 / 10.2: 8 — ROUTE 4, LIMIT 1, SIGN 2, STOR 1 / 10.3: 7 — RELAY 6, RETRY 1 / 10.4: 7 — UPSTR 7 / 10.5: 20 — CTRL 16, SEC 1, COMPAT 1, API 1, GUARD 1). 상태 집계: **PASS 50** (live 증거 + 실행된 자동 테스트 — DI 주입 unit은 도달 불가 live 모드의 유효 수용 기준), **BLOCKED 1** (QA-ROUTE-03 — `route_not_configured` 도달 경로가 현재 라우터 구현에 없음, PASS 아님). 51 PASS 주장 아님.
+케이스 수: 51 (10.1: 9 — AUTH 6, PARSE 2, BODY 1 / 10.2: 8 — ROUTE 4, LIMIT 1, SIGN 2, STOR 1 / 10.3: 7 — RELAY 6, RETRY 1 / 10.4: 7 — UPSTR 7 / 10.5: 20 — CTRL 16, SEC 1, COMPAT 1, API 1, GUARD 1). 최종 상태: **PASS 50 / N/A 1**. QA-ROUTE-03은 도달 불가 근거를 재검토한 뒤 사용자가 N/A 종결을 명시 승인했다. 51 PASS 주장 아님.
+
+#### QA-ROUTE-03 도달 불가 근거
+
+- `Lifecycle::handle`은 하나의 불변 dynamic-view 스냅샷을 유지한다. `build_candidates_with_matches`는 그 스냅샷의 upstream 레코드에서만 후보를 생성한다.
+- `validate_filter_output`은 입력 후보에 없는 upstream ID를 거부한다. `keep_filter_candidates`와 `terminal_candidates`는 기존 후보를 선택할 뿐 새 ID를 만들지 않는다. 따라서 선택된 후보의 ID가 동일 스냅샷에서 사라지는 lookup 실패 조건은 성립하지 않는다.
+- `upstream_for_record`는 현재 `AnthropicApiKey`와 `AnthropicOauth` 두 종류를 exhaustive match하며 모두 `Ok`를 반환한다. 변환 실패 분기도 발생하지 않는다.
+- 독립 재검토와 Main의 현재 소스 확인으로 위 조건을 확인했다. 제품 불변식을 깨는 테스트 전용 public hook이나 런타임 변경은 추가하지 않았다. 향후 후보 생성·검증 또는 upstream 종류가 바뀌어 분기가 도달 가능해지면 이 QA 항목을 다시 활성화해야 한다.
 
 ---
 
