@@ -179,11 +179,8 @@ The guarantee's scope narrows from "every request the proxy listener
 accepts" to **every request that reaches the authentication attempt**: each
 such request produces exactly one `request_events_v1` row. A request that
 terminates before reaching authentication persists no row at all: an
-unrouted path (404), a disallowed method (405), a drain rejection (503), an
-oversized or unreadable request body (413/400) — the body is read to
-completion before `Lifecycle::handle` runs, so this holds even when the
-client did send a valid credential — or a timeout that elapses before the
-handler reaches `authenticate`.
+unrouted path (404), a disallowed method (405), a drain rejection (503), or
+a timeout that elapses before the handler reaches `authenticate`.
 
 Rationale: pre-auth traffic is arbitrary unauthenticated external input.
 Persisting it lets unauthenticated scanners amplify request-log writes, so
@@ -202,6 +199,45 @@ flushes in original order and subsequent events publish directly. If the
 request terminates first — via `finish`, `terminate`, or `Drop` — the
 buffer is discarded and no `RequestTerminated` is published, so the
 assembler never creates a partial and no row is written.
+
+### Amendment (2026-09-22b): authentication precedes all request work
+
+The 2026-09-22 amendment above originally also excluded an oversized body
+(413) and an invalid JSON body (400), because the body was read and parsed
+before `Lifecycle::handle` reached the credential check. That cost real
+observability: a legitimate caller who presented a valid credential and sent
+a body one byte over the cap produced no row at all, which is scanner
+treatment for an attributable client error.
+
+The ordering was an accident of the pipeline, not a decision.
+`authenticate` needs only headers, and headers are available immediately;
+the body was read first merely because `lifecycle_handler` buffered it
+before calling into the engine. So the pipeline was reordered rather than
+the guarantee re-narrowed.
+
+Authentication now runs **before the request body is touched at all**:
+
+1. `lifecycle_handler` marks the lifecycle context and calls
+   `Lifecycle::authenticate(&parts.headers)`.
+2. On failure it returns `reject_unauthenticated(...)` immediately, without
+   reading a single body byte.
+3. Only with the resulting proof does it call `read_request_body(..., &auth)`.
+4. `Lifecycle::handle(req, &auth)` receives the proof instead of
+   authenticating for itself.
+
+Consequences: 413 and 400 are now post-authentication and each persists
+exactly one attributable row. An unauthenticated caller can no longer make
+this process buffer a large body — the credential check happens first, so an
+oversized anonymous request is answered 401 rather than 413.
+
+This ordering is enforced by the type system, not by convention.
+`crates/cc-lb-engine/src/authn_rail.rs` defines `Authenticated`, a proof
+with private fields and no public constructor; `authenticate_first` is its
+only source and takes headers only, so there is no parameter through which a
+body could reach it. `read_request_body` and `Lifecycle::handle` both take
+`&Authenticated`, which makes "work before authentication" a compile error.
+The compile-fail proofs live in
+`crates/cc-lb-engine/tests/trybuild/authn_rail/`.
 
 ## Motivation
 

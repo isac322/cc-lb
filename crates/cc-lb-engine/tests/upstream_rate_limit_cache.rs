@@ -87,10 +87,15 @@ async fn lifecycle_updates_dynamic_view_cache_when_headers_are_observed() {
     )
     .with_event_bus(test_bus.bus_arc());
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, _body) = collect_body(response).await;

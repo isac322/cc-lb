@@ -11,6 +11,8 @@ pub mod anthropic_metadata {
 }
 #[cfg(not(loom))]
 pub mod attempt_rail;
+#[cfg(not(loom))]
+pub mod authn_rail;
 pub mod api_keys {
     pub use cc_lb_control::api_keys::*;
 }
@@ -111,6 +113,8 @@ mod usage_parser;
 pub mod warmup_attempts;
 #[cfg(not(loom))]
 pub use anthropic_metadata::make_metadata_http_client;
+#[cfg(not(loom))]
+pub use authn_rail::{Authenticated, authenticate_first, reject_unauthenticated};
 #[cfg(not(loom))]
 pub use bulkhead::{
     Bulkhead, BulkheadDispatch, BulkheadError, BulkheadRegistry, BulkheadRuntimeConfig,

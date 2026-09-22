@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_engine::{
-    DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock,
-    UpstreamDispatch,
+    DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, ProxyError,
+    TestClock, UpstreamDispatch,
 };
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamAffinityBinding, UpstreamAffinityKey,
@@ -20,7 +20,7 @@ use cc_lb_storage_api::{
 };
 use cc_lb_upstream::SignedRequest;
 use http::header::CONTENT_TYPE;
-use http::{HeaderValue, Response, StatusCode};
+use http::{HeaderValue, Request, Response, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -345,6 +345,17 @@ fn lifecycle_with_config_and_clock(
     }
 }
 
+async fn handle_authenticated(
+    lifecycle: &Lifecycle,
+    request: Request<Bytes>,
+) -> Result<Response<Body>, ProxyError> {
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    lifecycle.handle(request, &auth).await
+}
+
 fn opaque_request(ciphertexts: &[&str], stream: bool) -> Bytes {
     Bytes::from(
         json!({
@@ -414,13 +425,12 @@ async fn legacy_null_binding_expires_at_retention_boundary_without_read_extensio
         clock.clone(),
     );
 
-    let unexpired = lifecycle
-        .handle(messages_request(opaque_request(
-            &["retention-boundary"],
-            false,
-        )))
-        .await
-        .expect("unexpired request handled");
+    let unexpired = handle_authenticated(
+        &lifecycle,
+        messages_request(opaque_request(&["retention-boundary"], false)),
+    )
+    .await
+    .expect("unexpired request handled");
     assert_eq!(unexpired.status(), StatusCode::OK);
     assert_eq!(
         dispatch.urls.lock().expect("dispatch URL lock").as_slice(),
@@ -428,13 +438,12 @@ async fn legacy_null_binding_expires_at_retention_boundary_without_read_extensio
     );
 
     clock.advance_secs(1);
-    let expired = lifecycle
-        .handle(messages_request(opaque_request(
-            &["retention-boundary"],
-            false,
-        )))
-        .await
-        .expect("expired request handled");
+    let expired = handle_authenticated(
+        &lifecycle,
+        messages_request(opaque_request(&["retention-boundary"], false)),
+    )
+    .await
+    .expect("expired request handled");
     assert_eq!(expired.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(dispatch.call_count(), 1);
 }
@@ -538,12 +547,14 @@ async fn response_learning_pins_a_later_request_and_learns_pending_keys() {
         Some(store.clone()),
     );
 
-    let learned_response = learning
-        .handle(messages_request(Bytes::from_static(
+    let learned_response = handle_authenticated(
+        &learning,
+        messages_request(Bytes::from_static(
             br#"{"model":"claude-test","messages":[]}"#,
-        )))
-        .await
-        .expect("learning request handled");
+        )),
+    )
+    .await
+    .expect("learning request handled");
     assert_eq!(learned_response.status(), StatusCode::OK);
     assert_eq!(
         store.upstream_for(&affinity_key("opaque-known")),
@@ -562,13 +573,12 @@ async fn response_learning_pins_a_later_request_and_learns_pending_keys() {
         pinned_dispatch.clone(),
         Some(store.clone()),
     );
-    let response = pinned
-        .handle(messages_request(opaque_request(
-            &["opaque-known", "opaque-pending"],
-            false,
-        )))
-        .await
-        .expect("pinned request handled");
+    let response = handle_authenticated(
+        &pinned,
+        messages_request(opaque_request(&["opaque-known", "opaque-pending"], false)),
+    )
+    .await
+    .expect("pinned request handled");
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
@@ -608,10 +618,12 @@ async fn maximum_key_request_resolves_from_one_known_key_and_learns_the_rest() {
         Some(store.clone()),
     );
 
-    let response = lifecycle
-        .handle(messages_request(opaque_request(&ciphertext_refs, false)))
-        .await
-        .expect("maximum-size affinity request handled");
+    let response = handle_authenticated(
+        &lifecycle,
+        messages_request(opaque_request(&ciphertext_refs, false)),
+    )
+    .await
+    .expect("maximum-size affinity request handled");
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
@@ -637,11 +649,13 @@ async fn opaque_requests_fail_closed_before_dispatch_when_affinity_is_not_usable
         Some(unknown_store),
     );
     assert_eq!(
-        unknown
-            .handle(messages_request(opaque_request(&["unknown"], false)))
-            .await
-            .expect("unknown request handled")
-            .status(),
+        handle_authenticated(
+            &unknown,
+            messages_request(opaque_request(&["unknown"], false))
+        )
+        .await
+        .expect("unknown request handled")
+        .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(unknown_dispatch.call_count(), 0);
@@ -659,14 +673,13 @@ async fn opaque_requests_fail_closed_before_dispatch_when_affinity_is_not_usable
         Some(conflict_store),
     );
     assert_eq!(
-        conflict
-            .handle(messages_request(opaque_request(
-                &["to-first", "to-second"],
-                false,
-            )))
-            .await
-            .expect("conflicting request handled")
-            .status(),
+        handle_authenticated(
+            &conflict,
+            messages_request(opaque_request(&["to-first", "to-second"], false)),
+        )
+        .await
+        .expect("conflicting request handled")
+        .status(),
         StatusCode::BAD_REQUEST
     );
     assert_eq!(conflict_dispatch.call_count(), 0);
@@ -678,11 +691,13 @@ async fn opaque_requests_fail_closed_before_dispatch_when_affinity_is_not_usable
         None,
     );
     assert_eq!(
-        unavailable
-            .handle(messages_request(opaque_request(&["no-store"], false)))
-            .await
-            .expect("store-unavailable request handled")
-            .status(),
+        handle_authenticated(
+            &unavailable,
+            messages_request(opaque_request(&["no-store"], false)),
+        )
+        .await
+        .expect("store-unavailable request handled")
+        .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(unavailable_dispatch.call_count(), 0);
@@ -698,13 +713,12 @@ async fn opaque_requests_fail_closed_before_dispatch_when_affinity_is_not_usable
         target_dispatch.clone(),
         Some(target_store),
     );
-    let target_response = target_unavailable
-        .handle(messages_request(opaque_request(
-            &["disabled-target"],
-            false,
-        )))
-        .await
-        .expect("target-unavailable request handled");
+    let target_response = handle_authenticated(
+        &target_unavailable,
+        messages_request(opaque_request(&["disabled-target"], false)),
+    )
+    .await
+    .expect("target-unavailable request handled");
     assert_eq!(target_response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(target_dispatch.call_count(), 0);
 }
@@ -725,13 +739,12 @@ async fn lookup_and_bind_failures_do_not_expose_ciphertext() {
         Some(lookup_store),
     );
     let (_, _, lookup_body) = collect_body(
-        lookup
-            .handle(messages_request(opaque_request(
-                &[lookup_ciphertext],
-                false,
-            )))
-            .await
-            .expect("lookup failure handled"),
+        handle_authenticated(
+            &lookup,
+            messages_request(opaque_request(&[lookup_ciphertext], false)),
+        )
+        .await
+        .expect("lookup failure handled"),
     )
     .await;
     assert!(!String::from_utf8_lossy(&lookup_body).contains(lookup_ciphertext));
@@ -748,9 +761,12 @@ async fn lookup_and_bind_failures_do_not_expose_ciphertext() {
         Some(bind_store),
     );
     let (status, _, bind_body) = collect_body(
-        bind.handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
+        handle_authenticated(
+            &bind,
+            messages_request(Bytes::from_static(
+                br#"{"model":"claude-test","messages":[]}"#,
+            )),
+        )
         .await
         .expect("bind failure handled"),
     )
@@ -783,12 +799,14 @@ async fn sse_bind_failure_suppresses_the_encrypted_content_block() {
     );
 
     let (status, _, body) = collect_body(
-        lifecycle
-            .handle(messages_request(Bytes::from_static(
+        handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
                 br#"{"model":"claude-test","messages":[],"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}]}"#,
-            )))
-            .await
-            .expect("SSE bind failure handled"),
+            )),
+        )
+        .await
+        .expect("SSE bind failure handled"),
     )
     .await;
     let body = String::from_utf8_lossy(&body);
@@ -811,12 +829,14 @@ async fn ordinary_non_json_sse_without_affinity_signal_passes_through() {
     );
 
     let (status, _, body) = collect_body(
-        lifecycle
-            .handle(messages_request(Bytes::from_static(
+        handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
                 br#"{"model":"claude-test","messages":[],"stream":true}"#,
-            )))
-            .await
-            .expect("ordinary SSE response handled"),
+            )),
+        )
+        .await
+        .expect("ordinary SSE response handled"),
     )
     .await;
 
@@ -852,8 +872,7 @@ async fn request_key_limit_rejects_before_dispatch() {
     );
 
     let (status, _, body) = collect_body(
-        lifecycle
-            .handle(messages_request(request))
+        handle_authenticated(&lifecycle, messages_request(request))
             .await
             .expect("oversized affinity request handled"),
     )
@@ -887,12 +906,14 @@ async fn buffered_response_key_limit_fails_closed() {
     );
 
     let (status, _, body) = collect_body(
-        lifecycle
-            .handle(messages_request(Bytes::from_static(
+        handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
                 br#"{"model":"claude-test","messages":[]}"#,
-            )))
-            .await
-            .expect("oversized affinity response handled"),
+            )),
+        )
+        .await
+        .expect("oversized affinity response handled"),
     )
     .await;
     let body = String::from_utf8_lossy(&body);
@@ -925,12 +946,14 @@ async fn sse_response_key_limit_fails_closed_before_event_delivery() {
     );
 
     let (status, _, body) = collect_body(
-        lifecycle
-            .handle(messages_request(Bytes::from_static(
+        handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
                 br#"{"model":"claude-test","messages":[],"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}]}"#,
-            )))
-            .await
-            .expect("oversized SSE affinity response handled"),
+            )),
+        )
+        .await
+        .expect("oversized SSE affinity response handled"),
     )
     .await;
     let body = String::from_utf8_lossy(&body);
@@ -961,12 +984,14 @@ async fn incomplete_sse_budget_overflow_does_not_passthrough_opaque_bytes() {
     );
 
     let (status, _, body) = collect_body(
-        lifecycle
-            .handle(messages_request(Bytes::from_static(
+        handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
                 br#"{"model":"claude-test","messages":[],"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}]}"#,
-            )))
-            .await
-            .expect("incomplete SSE response handled"),
+            )),
+        )
+        .await
+        .expect("incomplete SSE response handled"),
     )
     .await;
     let body = String::from_utf8_lossy(&body);
@@ -991,12 +1016,14 @@ async fn malformed_and_uninspectable_success_sse_fail_closed() {
         None,
     );
     let (_, _, malformed_body) = collect_body(
-        malformed_lifecycle
-            .handle(messages_request(Bytes::from_static(
+        handle_authenticated(
+            &malformed_lifecycle,
+            messages_request(Bytes::from_static(
                 br#"{"model":"claude-test","messages":[],"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}]}"#,
-            )))
-            .await
-            .expect("malformed SSE response handled"),
+            )),
+        )
+        .await
+        .expect("malformed SSE response handled"),
     )
     .await;
     let malformed_body = String::from_utf8_lossy(&malformed_body);
@@ -1017,12 +1044,14 @@ async fn malformed_and_uninspectable_success_sse_fail_closed() {
         None,
     );
     let (_, _, encoded_body) = collect_body(
-        encoded_lifecycle
-            .handle(messages_request(Bytes::from_static(
+        handle_authenticated(
+            &encoded_lifecycle,
+            messages_request(Bytes::from_static(
                 br#"{"model":"claude-test","messages":[],"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}]}"#,
-            )))
-            .await
-            .expect("unsupported SSE encoding handled"),
+            )),
+        )
+        .await
+        .expect("unsupported SSE encoding handled"),
     )
     .await;
     let encoded_body = String::from_utf8_lossy(&encoded_body);
@@ -1052,12 +1081,14 @@ async fn buffered_body_frame_error_discards_partial_opaque_body() {
     );
 
     let (status, _, body) = collect_body(
-        lifecycle
-            .handle(messages_request(Bytes::from_static(
+        handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
                 br#"{"model":"claude-test","messages":[]}"#,
-            )))
-            .await
-            .expect("buffered frame error handled"),
+            )),
+        )
+        .await
+        .expect("buffered frame error handled"),
     )
     .await;
     let body = String::from_utf8_lossy(&body);

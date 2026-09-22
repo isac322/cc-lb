@@ -63,10 +63,15 @@ async fn happy_sse_relays_incrementally_and_observes_chunks() {
         hook.clone(),
     );
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
 
@@ -121,10 +126,15 @@ async fn happy_non_streaming_observes_usage_tokens() {
         hook.clone(),
     );
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
 
@@ -185,10 +195,15 @@ async fn requested_service_tier_reaches_limit_cost_estimator_before_dispatch() {
     .with_limit_cost_estimator(estimator.clone());
 
     // When the request crosses the proxy lifecycle.
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":16,"service_tier":"Priority-Raw","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","max_tokens":16,"service_tier":"Priority-Raw","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
 
@@ -258,10 +273,15 @@ async fn oauth_db_record_drives_route_pricing_and_rejection_audit_identity() {
     .with_limit_cost_estimator(estimator.clone())
     .with_event_bus(test_bus.bus_arc());
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","max_tokens":16,"messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","max_tokens":16,"messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
 
@@ -308,7 +328,7 @@ async fn oauth_db_record_drives_route_pricing_and_rejection_audit_identity() {
 }
 
 #[tokio::test]
-async fn global_hook_observes_authentication_error_without_event_bus() {
+async fn invalid_key_is_rejected_at_the_authentication_boundary() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
     let lifecycle = lifecycle_with(
@@ -327,38 +347,23 @@ async fn global_hook_observes_authentication_error_without_event_bus() {
         http::HeaderValue::from_static("invalid-managed-key"),
     );
 
-    let response = lifecycle
-        .handle(request)
-        .await
-        .expect("lifecycle handles invalid authentication");
+    // Authentication now runs before `handle`: an invalid key is rejected at
+    // the boundary and never reaches request work.
+    let Err(error) = lifecycle.authenticate(request.headers()).await else {
+        panic!("invalid key fails authentication");
+    };
+    let response = cc_lb_engine::reject_unauthenticated(&error, None);
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    timeout(
-        Duration::from_secs(1),
-        hook.wait_for_event(|event| {
-            matches!(
-                event,
-                cc_lb_observability::ObserveEvent::Error { code, source, .. }
-                    if code == "authentication_error" && source == "authn"
-            )
-        }),
-    )
-    .await
-    .expect("global hook authentication error arrives without event bus");
-    assert!(
-        hook.events
-            .lock()
-            .expect("events lock")
-            .iter()
-            .any(|event| matches!(
-                event,
-                cc_lb_observability::ObserveEvent::RequestFinished {
-                    status: StatusCode::UNAUTHORIZED,
-                    ..
-                }
-            )),
-        "global hook receives terminal observation for authentication rejection"
-    );
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body collects")
+        .to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("error body is JSON");
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "authentication_error");
 }
 
 fn oauth_upstream_record() -> UpstreamRecord {

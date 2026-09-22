@@ -63,10 +63,15 @@ async fn model_gate_rejects_disallowed_model_before_upstream() {
         active_record(),
     );
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"forbidden-model","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"forbidden-model","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, body) = collect_body(response).await;

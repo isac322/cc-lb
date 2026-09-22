@@ -25,8 +25,13 @@ async fn oversized_messages_body_returns_413_before_upstream() {
     );
 
     let oversized = Bytes::from(vec![b'x'; 33 * 1024 * 1024]);
+    let request = messages_request(oversized);
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(oversized))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, body) = collect_body(response).await;

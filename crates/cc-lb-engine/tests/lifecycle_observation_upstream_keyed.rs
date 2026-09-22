@@ -36,10 +36,15 @@ async fn successful_response_enqueues_records_keyed_by_selected_upstream() {
     )
     .with_event_bus(test_bus.bus_arc());
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, _body) = collect_body(response).await;
@@ -62,10 +67,15 @@ async fn too_many_requests_enqueues_but_server_error_does_not() {
     let lifecycle = lifecycle_for_response(StatusCode::TOO_MANY_REQUESTS, rate_limit_headers(0, 1))
         .with_event_bus(test_bus_ok.bus_arc());
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, _body) = collect_body(response).await;
@@ -81,10 +91,15 @@ async fn too_many_requests_enqueues_but_server_error_does_not() {
         lifecycle_for_response(StatusCode::INTERNAL_SERVER_ERROR, rate_limit_headers(9, 9))
             .with_event_bus(test_bus_err.bus_arc());
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, _body) = collect_body(response).await;

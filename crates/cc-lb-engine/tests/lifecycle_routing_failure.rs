@@ -52,11 +52,14 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"max_tokens":16}"#,
-        )))
-        .await?;
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"max_tokens":16}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
     let (status, _headers, body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

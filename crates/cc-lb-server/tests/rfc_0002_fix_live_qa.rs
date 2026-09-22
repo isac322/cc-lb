@@ -1071,7 +1071,7 @@ async fn lqa_6e_admin_sse_keeps_up_with_fifty_final_frames_without_lag() {
 }
 
 #[tokio::test]
-async fn lqa_6f_invalid_json_returns_400_before_auth_and_stops_before_routing() {
+async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
@@ -1089,23 +1089,25 @@ async fn lqa_6f_invalid_json_returns_400_before_auth_and_stops_before_routing() 
 
     assert_eq!(response.status, 400);
 
-    // The body is parsed before `Lifecycle::handle` reaches the
-    // authentication attempt, so this terminates pre-auth: no request_events
-    // row and no lifecycle events on the bus (RFC-0002 amendment
-    // 2026-09-22). The valid credential on the request is never inspected.
-    sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        count_request_events(&pool, "1=1").await,
-        baseline,
-        "pre-auth 400 must not produce a request_events row"
-    );
-
-    let post = fetch_metric_scrape(server.metrics_addr).await;
-    for kind in [
-        "parse_completed",
-        "request_terminated",
-        "route_completed",
-        "upstream_attempt",
+    // Authentication now runs before the body is parsed, so an invalid body
+    // from a credentialed caller is an attributable post-auth failure: it
+    // records one classified row and stops before routing.
+    wait_for_row_count(&pool, "1=1", baseline + 1).await;
+    let payload = fetch_payload_json(&pool, "1=1").await;
+    assert_eq!(json_i64(&payload, "status"), 400);
+    assert_json_field_populated(&payload, "error_code");
+    let post = wait_metric_delta(
+        server.metrics_addr,
+        &pre,
+        r#"cc_lb_lifecycle_events_total{kind="request_terminated"}"#,
+        1,
+    )
+    .await;
+    for (kind, expected) in [
+        ("parse_completed", 1),
+        ("request_terminated", 1),
+        ("route_completed", 0),
+        ("upstream_attempt", 0),
     ] {
         assert_eq!(
             diff_counter(
@@ -1113,8 +1115,8 @@ async fn lqa_6f_invalid_json_returns_400_before_auth_and_stops_before_routing() 
                 &post,
                 &format!(r#"cc_lb_lifecycle_events_total{{kind="{kind}"}}"#)
             ),
-            0,
-            "pre-auth 400 must publish no {kind} lifecycle event"
+            expected,
+            "invalid json must yield {expected} {kind} lifecycle event(s)"
         );
     }
 }

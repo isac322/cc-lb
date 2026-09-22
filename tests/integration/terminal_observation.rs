@@ -39,7 +39,7 @@ const MASTER_KEY_HEX: &str = "22222222222222222222222222222222222222222222222222
 const MODEL: &str = "claude-3-5-sonnet-20241022";
 
 #[tokio::test(flavor = "multi_thread")]
-async fn body_too_large_before_auth_persists_no_row() -> Result<(), Box<dyn std::error::Error>> {
+async fn body_too_large_after_auth_persists_one_row() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     ensure_env();
 
@@ -73,19 +73,66 @@ async fn body_too_large_before_auth_persists_no_row() -> Result<(), Box<dyn std:
         .await?;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-    // The request body is read to completion before `Lifecycle::handle` runs,
-    // so an oversized body is rejected before the authentication attempt and
-    // must not persist a request_events row — even though this client did
-    // send a valid credential. Give the async writer a window to
-    // (incorrectly) persist a row before asserting the table stayed empty.
-    sleep(Duration::from_millis(500)).await;
-    let storage = sqlite_storage(&sqlite_path).await?;
-    let rows = all_request_events(storage.as_ref()).await?;
-    assert!(
-        rows.is_empty(),
-        "pre-auth 413 must not persist request events, found {} row(s)",
-        rows.len()
+    // Authentication now runs before the body is read, so an oversized body
+    // from a caller who presented a valid credential is rejected *after*
+    // authentication and is attributable: it persists exactly one row.
+    let rows = {
+        let storage = sqlite_storage(&sqlite_path).await?;
+        wait_for_request_event_count(storage.as_ref(), 1).await?
+    };
+    assert_eq!(rows[0].status, 413);
+    assert_eq!(rows[0].error_code.as_deref(), Some("body_too_large"));
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_body_with_bad_credential_is_rejected_without_reading_body()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = MockServer::start().await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    // The project rule: authentication comes first, so nothing else happens.
+    // This request is both unauthenticated AND oversized. Because the
+    // credential is checked before the body is touched, the caller gets 401 —
+    // not 413 — which is the observable proof that the 33 MiB was never
+    // buffered on behalf of an anonymous caller.
+    let big_body = vec![b'x'; 33 * 1024 * 1024];
+    let client = TestClient::new(Duration::from_secs(10));
+    let response = client
+        .request(
+            "POST",
+            &format!("{}/v1/messages", server.proxy_url),
+            &[
+                ("content-type", "application/json"),
+                ("x-api-key", "sk-cclb-does-not-exist"),
+            ],
+            &big_body,
+        )
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "an oversized body must not be read before the credential is checked"
     );
+
+    let rows = {
+        let storage = sqlite_storage(&sqlite_path).await?;
+        wait_for_request_event_count(storage.as_ref(), 1).await?
+    };
+    assert_eq!(rows[0].status, 401);
+    assert_eq!(rows[0].error_code.as_deref(), Some("authentication_failed"));
 
     server.shutdown().await;
     Ok(())

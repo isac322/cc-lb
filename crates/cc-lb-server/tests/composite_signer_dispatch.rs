@@ -86,8 +86,13 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
         Arc::new(cc_lb_engine::SystemClock),
     );
 
+    let request = message_request(key_secret.expose());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(message_request(key_secret.expose()))
+        .handle(request, &auth)
         .await
         .expect("lifecycle response");
     let status = response.status();

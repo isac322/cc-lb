@@ -2486,11 +2486,22 @@ async fn lifecycle_handler(
     request: Request<Body>,
 ) -> Response<Body> {
     let (parts, body) = request.into_parts();
-    let cap = state.body_caps.for_path(parts.uri.path());
     let observer = parts
         .extensions
         .get::<cc_lb_engine::LifecycleContext>()
         .cloned();
+    // Authentication comes before any request work: an unauthenticated
+    // caller must not be able to make this process buffer its body.
+    if let Some(observer) = observer.as_ref() {
+        observer.mark_authn_reached();
+    }
+    let auth = match state.lifecycle.authenticate(&parts.headers).await {
+        Ok(auth) => auth,
+        Err(error) => {
+            return cc_lb_engine::reject_unauthenticated(&error, observer.as_ref());
+        }
+    };
+    let cap = state.body_caps.for_path(parts.uri.path());
     let body_read_started = Instant::now();
     let body_read_span = tracing::info_span!(
         "proxy.read_request_body",
@@ -2498,7 +2509,7 @@ async fn lifecycle_handler(
         "http.request.body.size" = tracing::field::Empty,
         outcome = tracing::field::Empty,
     );
-    let body_result = read_request_body(&parts.headers, body, cap, observer.clone())
+    let body_result = read_request_body(&parts.headers, body, cap, observer.clone(), &auth)
         .instrument(body_read_span.clone())
         .await;
     let body_read_ms = body_read_started
@@ -2541,7 +2552,7 @@ async fn lifecycle_handler(
         }
     };
     let request = Request::from_parts(parts, body);
-    match state.lifecycle.handle(request).await {
+    match state.lifecycle.handle(request, &auth).await {
         Ok(response) => response,
         Err(source) => {
             let mut response = Response::new(Body::from(source.to_string()));
@@ -2551,11 +2562,19 @@ async fn lifecycle_handler(
     }
 }
 
+/// Buffers the request body under `cap`.
+///
+/// `_auth` is the proof that the request was already authenticated: the body
+/// must never be buffered for a caller that has not authenticated. The
+/// parameter is unused here on purpose — it exists so that moving this call
+/// ahead of authentication fails to compile instead of silently reopening
+/// the pre-auth buffering hole.
 async fn read_request_body(
     headers: &HeaderMap,
     body: Body,
     cap: usize,
     observer: Option<cc_lb_engine::LifecycleContext>,
+    _auth: &cc_lb_engine::Authenticated,
 ) -> Result<Bytes, RequestBodyReadError> {
     let mut timings = RequestBodyTimingGuard::new(observer);
     let content_length_too_large = content_length_exceeds_cap(headers, cap);
@@ -2646,9 +2665,9 @@ async fn oauth_usage_handler(
     if let Some(ctx) = request.extensions().get::<cc_lb_engine::LifecycleContext>() {
         ctx.mark_authn_reached();
     }
-    if let Err(error) = authn
-        .authenticate(request.headers(), &dynamic_view.principal_view)
-        .await
+    if let Err(error) =
+        cc_lb_engine::authenticate_first(authn, request.headers(), &dynamic_view.principal_view)
+            .await
     {
         let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
         let mut response = json_response(
@@ -2900,15 +2919,20 @@ fn dispatcher(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::convert::Infallible;
     use std::io;
-    use std::sync::Arc;
+    use std::sync::{Arc, LazyLock};
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
+    use cc_lb_engine::api_keys::principal_view::PrincipalView;
+    use cc_lb_engine::api_keys::secret;
     use cc_lb_lifecycle::LifecycleEvent;
+    use cc_lb_storage_api::{
+        ApiKeyMutation, IssueParams, KeyStatus, StorageResult, StoredApiKeyRecord,
+    };
     use futures_util::stream;
     use http_body_util::BodyExt;
     use serde_json::Value;
@@ -2965,6 +2989,132 @@ mod tests {
         value
     }
 
+    const TEST_PRINCIPAL: &str = "principal-test";
+
+    struct TestKey {
+        plaintext: String,
+        key_id: String,
+        record: StoredApiKeyRecord,
+    }
+
+    static TEST_KEY: LazyLock<TestKey> = LazyLock::new(|| {
+        let generated = secret::generate_new();
+        TestKey {
+            plaintext: generated.plaintext.expose().to_owned(),
+            key_id: generated.key_id,
+            record: StoredApiKeyRecord {
+                label: "body-read test key".to_owned(),
+                verify_hash: generated.verify_hash,
+                secret_salt: generated.secret_salt,
+                status: KeyStatus::Active,
+                last_4: generated.last_4,
+                index_hash: generated.index_hash,
+                ..StoredApiKeyRecord::default()
+            },
+        }
+    });
+
+    /// In-memory `ManagedKeyStore` resolving exactly the fixture key for
+    /// `TEST_PRINCIPAL` (mirrors the engine `InMemoryManagedKeyStore`).
+    struct FixtureKeyStore;
+
+    #[async_trait]
+    impl ManagedKeyStore for FixtureKeyStore {
+        async fn issue(
+            &self,
+            _principal_id: &str,
+            _key_id: &str,
+            _params: IssueParams,
+        ) -> StorageResult<StoredApiKeyRecord> {
+            Ok(TEST_KEY.record.clone())
+        }
+
+        async fn get(
+            &self,
+            principal_id: &str,
+            key_id: &str,
+        ) -> StorageResult<Option<StoredApiKeyRecord>> {
+            Ok(
+                (principal_id == TEST_PRINCIPAL && key_id == TEST_KEY.key_id)
+                    .then(|| TEST_KEY.record.clone()),
+            )
+        }
+
+        async fn lookup_by_index_hash(
+            &self,
+            index_hash: &[u8; 32],
+        ) -> StorageResult<Option<(String, String, StoredApiKeyRecord)>> {
+            Ok((index_hash == &TEST_KEY.record.index_hash).then(|| {
+                (
+                    TEST_PRINCIPAL.to_owned(),
+                    TEST_KEY.key_id.clone(),
+                    TEST_KEY.record.clone(),
+                )
+            }))
+        }
+
+        async fn list_by_principal(
+            &self,
+            principal_id: &str,
+        ) -> StorageResult<Vec<StoredApiKeyRecord>> {
+            Ok((principal_id == TEST_PRINCIPAL)
+                .then(|| TEST_KEY.record.clone())
+                .into_iter()
+                .collect())
+        }
+
+        async fn list_all(&self) -> StorageResult<Vec<(String, String, StoredApiKeyRecord)>> {
+            Ok(vec![(
+                TEST_PRINCIPAL.to_owned(),
+                TEST_KEY.key_id.clone(),
+                TEST_KEY.record.clone(),
+            )])
+        }
+
+        async fn update(
+            &self,
+            _principal_id: &str,
+            _key_id: &str,
+            _mutation: ApiKeyMutation,
+        ) -> StorageResult<()> {
+            Ok(())
+        }
+
+        async fn revoke_zero_secrets(
+            &self,
+            _principal_id: &str,
+            _key_id: &str,
+        ) -> StorageResult<()> {
+            Ok(())
+        }
+    }
+
+    /// Runs the real authentication path so `read_request_body` receives a
+    /// genuine `Authenticated` proof token.
+    async fn authenticate_test_request(headers: &HeaderMap) -> cc_lb_engine::Authenticated {
+        let storage: Arc<dyn ManagedKeyStore> = Arc::new(FixtureKeyStore);
+        let authn = BuiltinAuthn::new(
+            Arc::new(KeyStore::new(storage)),
+            Arc::new(cc_lb_engine::SystemClock),
+        );
+        let view = PrincipalView::for_tests(
+            TEST_PRINCIPAL,
+            true,
+            vec!["*".to_owned()],
+            Vec::new(),
+            HashMap::new(),
+        );
+        let mut headers = headers.clone();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(TEST_KEY.plaintext.as_str())
+                .expect("fixture key is a valid header value"),
+        );
+        cc_lb_engine::authenticate_first(&authn, &headers, &view)
+            .await
+            .expect("fixture key should authenticate")
+    }
+
     async fn read_with_timings(
         headers: HeaderMap,
         body: Body,
@@ -2984,7 +3134,8 @@ mod tests {
             &clock,
         );
         observer.mark_authn_reached();
-        let result = read_request_body(&headers, body, cap, Some(observer.clone())).await;
+        let auth = authenticate_test_request(&headers).await;
+        let result = read_request_body(&headers, body, cap, Some(observer.clone()), &auth).await;
         drop(observer);
         let LifecycleEvent::RequestTerminated { io_timings, .. } = events
             .recv()
@@ -3280,8 +3431,9 @@ mod tests {
         observer.mark_authn_reached();
         let (chunk_tx, mut poll_rx, body) = controlled_body();
         let read_observer = observer.clone();
+        let auth = authenticate_test_request(&HeaderMap::new()).await;
         let read = tokio::spawn(async move {
-            read_request_body(&HeaderMap::new(), body, 6, Some(read_observer)).await
+            read_request_body(&HeaderMap::new(), body, 6, Some(read_observer), &auth).await
         });
         poll_rx
             .recv()
