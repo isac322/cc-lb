@@ -23,7 +23,7 @@ const CHANNEL: &str = "cclb_upstream_changed";
 
 macro_rules! split_upstream_columns {
     () => {
-        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, spec.created_at, spec.updated_at, spec.warmup_enabled, status.last_warmup_at, spec.warmup_dialect_plugin"
+        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, COALESCE(token.never_refresh, FALSE) AS oauth_never_refresh, spec.created_at, spec.updated_at, spec.warmup_enabled, status.last_warmup_at, spec.warmup_dialect_plugin"
     };
 }
 
@@ -106,7 +106,7 @@ impl UpstreamStore for PostgresStorage {
         id: Uuid,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
-        update_split_oauth_token(self, id, tokens).await
+        update_split_oauth_token(self, id, tokens, false).await
     }
 
     async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {
@@ -118,9 +118,10 @@ impl UpstreamStore for PostgresStorage {
         id: Uuid,
         expected_revision: u64,
         tokens: EncryptedOAuthTokens,
+        never_refresh: bool,
     ) -> StorageResult<UpstreamRecord> {
         ensure_split_spec_revision(&self.pool, id, expected_revision).await?;
-        self.update_oauth_token(id, tokens).await
+        update_split_oauth_token(self, id, tokens, never_refresh).await
     }
 
     async fn complete_refresh(
@@ -435,20 +436,23 @@ async fn update_split_oauth_token(
     storage: &PostgresStorage,
     id: Uuid,
     tokens: EncryptedOAuthTokens,
+    never_refresh: bool,
 ) -> StorageResult<UpstreamRecord> {
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     sqlx::query(
-        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, refreshed_at, created_at, updated_at)
-         VALUES ($1, $2, 1, NOW(), NOW(), NOW())
+        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, never_refresh, token_revision, refreshed_at, created_at, updated_at)
+         VALUES ($1, $2, $3, 1, NOW(), NOW(), NOW())
          ON CONFLICT (upstream_id) DO UPDATE
          SET oauth_credentials_ciphertext = EXCLUDED.oauth_credentials_ciphertext,
+             never_refresh = EXCLUDED.never_refresh,
              token_revision = upstream_oauth_token_v1.token_revision + 1,
              refreshed_at = NOW(),
              updated_at = NOW()",
     )
     .bind(id)
     .bind(tokens.ciphertext())
+    .bind(never_refresh)
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
@@ -795,6 +799,7 @@ fn split_row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamReco
             .try_get::<Option<Vec<u8>>, _>("oauth_credentials")
             .map_err(map_sqlx_error)?
             .map(EncryptedOAuthTokens::from_ciphertext),
+        oauth_never_refresh: row.try_get("oauth_never_refresh").map_err(map_sqlx_error)?,
         api_key_ciphertext: row.try_get("api_key_ciphertext").map_err(map_sqlx_error)?,
         last_apply_error: row.try_get("last_apply_error").map_err(map_sqlx_error)?,
         last_apply_at_unix_secs: optional_ts(

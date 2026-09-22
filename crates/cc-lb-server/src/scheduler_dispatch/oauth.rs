@@ -90,6 +90,43 @@ impl SchedulerDispatch {
             .await
     }
 
+    /// Enqueues a metadata refresh for a long-lived credential, which never
+    /// reaches the token-refresh path that normally schedules this job. The
+    /// job's idempotency key dedupes repeated 60-second usage-poll ticks, so a
+    /// `Conflict` means a refresh for this credential generation is already
+    /// queued and is not an error.
+    async fn enqueue_metadata_refresh_for_long_lived(
+        &self,
+        upstream: &UpstreamRecord,
+        traceparent: Option<&str>,
+    ) -> SchedulerResult<()> {
+        let mut job = MetadataRefreshJob::new(upstream.id, upstream.oauth_token_generation);
+        job.traceparent = traceparent.map(str::to_owned);
+        let idempotency_key = job.idempotency_key();
+        let task = SchedulerPushTask {
+            args: AdaptiveJob::MetadataRefresh(job),
+            idempotency_key: Some(idempotency_key),
+            run_at_unix_secs: None,
+            max_attempts: None,
+        };
+        match self.backend.push_adaptive_task(task).await {
+            Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Clears a previously recorded apply error once the credential proves
+    /// usable again, mirroring `complete_refresh` clearing the error on a
+    /// successful token refresh.
+    async fn clear_recorded_apply_error(&self, upstream: &UpstreamRecord) -> SchedulerResult<()> {
+        if upstream.last_apply_error.is_none() {
+            return Ok(());
+        }
+        UpstreamStore::set_last_apply_error(self.storage.as_ref(), upstream.id, None)
+            .await
+            .map_err(storage_scheduler_error)
+    }
+
     async fn push_next_oauth_refresh_task(
         &self,
         upstream_id: uuid::Uuid,
@@ -112,7 +149,7 @@ impl SchedulerDispatch {
     pub(super) async fn poll_usage(
         &self,
         upstream_id: uuid::Uuid,
-        _traceparent: Option<&str>,
+        traceparent: Option<&str>,
     ) -> SchedulerResult<OAuthUsagePollObservation> {
         let Some(mut upstream) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
             .await
@@ -171,6 +208,11 @@ impl SchedulerDispatch {
             &self.subscription_quota_sink,
             self.subscription_quota_cache.as_ref(),
         )?;
+        self.clear_recorded_apply_error(&upstream).await?;
+        if upstream.oauth_never_refresh {
+            self.enqueue_metadata_refresh_for_long_lived(&upstream, traceparent)
+                .await?;
+        }
         Ok(OAuthUsagePollObservation::Success {
             observed_at_unix_secs,
             window_start_unix_millis: observed_at_unix_millis,
@@ -235,14 +277,24 @@ impl SchedulerDispatch {
         &self,
         upstream: &mut UpstreamRecord,
     ) -> SchedulerResult<bool> {
+        let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
+        if bundle.never_refresh {
+            // Long-lived credentials are never refreshed; a 401 is terminal and
+            // must be recorded durably so the upstream surfaces as broken.
+            let reason = "status_401".to_owned();
+            UpstreamStore::set_last_apply_error(
+                self.storage.as_ref(),
+                upstream.id,
+                Some(reason.clone()),
+            )
+            .await
+            .map_err(storage_scheduler_error)?;
+            upstream.last_apply_error = Some(reason);
+            return Ok(false);
+        }
         let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
             return Ok(false);
         };
-        let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
-        if bundle.never_refresh {
-            // Long-lived credentials are never refreshed.
-            return Ok(false);
-        }
         lazy_refresher
             .refresh_one(upstream.id)
             .await

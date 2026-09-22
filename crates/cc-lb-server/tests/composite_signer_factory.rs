@@ -111,7 +111,7 @@ impl Fixture {
             },
         );
         self.storage
-            .store_oauth_tokens(record.id, record.revision, encrypted)
+            .store_oauth_tokens(record.id, record.revision, encrypted, false)
             .await
             .expect("tokens stored");
         record.id

@@ -51,6 +51,12 @@ pub(crate) enum LongLivedFallbackReason {
     /// Anthropic returned 400 invalid_request for the custom `expires_in`.
     #[serde(rename = "rejected")]
     Rejected,
+    /// Anthropic returned 400 invalid_request for the custom `expires_in`
+    /// while the configured scope set asked for a scope Anthropic will not
+    /// grant a year-long token for (for example `org:create_api_key`). The
+    /// operator's own `oauth.anthropic.scopes` is the likely cause.
+    #[serde(rename = "scope_rejected")]
+    ScopeRejected,
     /// Anthropic accepted the exchange but granted a materially shorter
     /// lifetime than requested.
     #[serde(rename = "clamped")]
@@ -239,7 +245,11 @@ pub(crate) async fn complete_pkce_flow(
                 credentials,
                 mode: OAuthTokenMode::Refreshing,
                 long_lived_fallback: true,
-                fallback_reason: Some(LongLivedFallbackReason::Rejected),
+                fallback_reason: Some(if requests_non_inference_scope(&handshake.scopes) {
+                    LongLivedFallbackReason::ScopeRejected
+                } else {
+                    LongLivedFallbackReason::Rejected
+                }),
             })
         }
     }
@@ -251,6 +261,21 @@ pub(crate) async fn complete_pkce_flow(
 /// buys nothing over the refreshing flow while giving up renewal.
 fn long_lived_grant_is_usable(granted_secs: u64) -> bool {
     granted_secs > cc_lb_config::LONG_LIVED_MIN_GRANT_SECS
+}
+
+/// Scope set Anthropic grants a year-long token for: the inference-only
+/// default `oauth.anthropic.scopes`. Any configured scope outside this set
+/// (for example `org:create_api_key`, `user:sessions:claude_code`, or
+/// `user:mcp_servers`) makes a 365-day grant impossible, so a rejection under
+/// such a configuration is reported as the operator's own scope choice.
+const LONG_LIVED_ELIGIBLE_SCOPES: [&str; 2] = ["user:profile", "user:inference"];
+
+/// `true` when the requested scope set contains a scope outside the
+/// inference-only set Anthropic grants year-long tokens for.
+fn requests_non_inference_scope(scopes: &[String]) -> bool {
+    scopes
+        .iter()
+        .any(|scope| !LONG_LIVED_ELIGIBLE_SCOPES.contains(&scope.as_str()))
 }
 
 /// `true` when Anthropic rejected the request purely because of the custom
@@ -608,6 +633,29 @@ mod tests {
             token_endpoint_error(StatusCode::BAD_REQUEST, Some("invalid_request"), None),
         ] {
             assert!(!is_long_lived_rejection(&error), "{error}");
+        }
+    }
+
+    #[test]
+    fn non_inference_scope_detection() {
+        assert!(!requests_non_inference_scope(&[
+            "user:profile".to_owned(),
+            "user:inference".to_owned(),
+        ]));
+        assert!(!requests_non_inference_scope(&[]));
+        for scope in [
+            "org:create_api_key",
+            "user:sessions:claude_code",
+            "user:mcp_servers",
+        ] {
+            assert!(
+                requests_non_inference_scope(&[
+                    "user:profile".to_owned(),
+                    "user:inference".to_owned(),
+                    scope.to_owned(),
+                ]),
+                "{scope}"
+            );
         }
     }
 

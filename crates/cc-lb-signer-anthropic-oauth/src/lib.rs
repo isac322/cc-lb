@@ -172,16 +172,22 @@ where
         let retry_shape = shaped.clone();
         match self.signer.sign(shaped, capability).await {
             Ok(signed) => Ok(signed),
-            Err(original @ SignerError::ExpiredToken { .. }) => {
-                if lazy_refresh_under_single_flight(
+            Err(SignerError::ExpiredToken { .. }) => {
+                if let Err(refresh_error) = lazy_refresh_under_single_flight(
                     &self.refresh_locks,
                     &self.refresh_handle,
                     self.upstream_id,
                 )
                 .await
-                .is_err()
                 {
-                    return Err(original);
+                    tracing::warn!(
+                        upstream_id = %self.upstream_id,
+                        reason = %refresh_error,
+                        "lazy OAuth refresh failed after token expiry"
+                    );
+                    return Err(match refresh_error {
+                        LazyRefreshError::Failed { reason } => SignerError::ExpiredToken { reason },
+                    });
                 }
                 let refreshed = self.inner.build(&self.upstream).await?;
                 refreshed.sign(retry_shape, capability).await
@@ -695,6 +701,7 @@ mod tests {
                 base_url: create.base_url,
                 enabled: true,
                 oauth_credentials: None,
+                oauth_never_refresh: false,
                 api_key_ciphertext: create.api_key_ciphertext,
                 last_apply_error: None,
                 last_apply_at_unix_secs: None,
@@ -842,6 +849,7 @@ mod tests {
             id: UpstreamRecordId,
             expected_revision: u64,
             tokens: EncryptedOAuthTokens,
+            _never_refresh: bool,
         ) -> StorageResult<UpstreamRecord> {
             self.mutate(id, Some(expected_revision), |record| {
                 record.oauth_credentials = Some(tokens);
@@ -946,6 +954,7 @@ mod tests {
                 record.id,
                 record.revision,
                 encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
+                false,
             )
             .await
             .unwrap();
@@ -973,6 +982,7 @@ mod tests {
                 record.id,
                 record.revision,
                 encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
+                false,
             )
             .await
             .unwrap();
@@ -1013,6 +1023,7 @@ mod tests {
                 record.id,
                 record.revision,
                 encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
+                false,
             )
             .await
             .unwrap();
@@ -1038,6 +1049,7 @@ mod tests {
                 record.id,
                 record.revision,
                 encrypted_tokens(&service, record.id, now_secs(clock.as_ref())),
+                false,
             )
             .await
             .unwrap();
@@ -1067,6 +1079,7 @@ mod tests {
                 record.id,
                 record.revision,
                 encrypted_tokens(&service, wrong_record.id, now_secs(clock.as_ref()) + 600),
+                false,
             )
             .await
             .unwrap();
@@ -1091,6 +1104,7 @@ mod tests {
                 record.id,
                 record.revision,
                 encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
+                false,
             )
             .await
             .unwrap();
@@ -1169,6 +1183,7 @@ mod tests {
                 record.id,
                 record.revision,
                 encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
+                false,
             )
             .await
             .unwrap();
@@ -1209,6 +1224,7 @@ mod tests {
                 record.id,
                 record.revision,
                 encrypted_tokens(&service, record.id, now_secs(clock.as_ref()) + 600),
+                false,
             )
             .await
             .unwrap();
@@ -1282,6 +1298,7 @@ mod tests {
                         "refreshed-access-token",
                         now_secs(self.clock.as_ref()) + 600,
                     ),
+                    false,
                 )
                 .await
                 .map_err(lazy_refresh_error)?;

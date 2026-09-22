@@ -306,6 +306,7 @@ fn upstream_record(base_url: Url) -> UpstreamRecord {
         base_url: Some(base_url),
         enabled: true,
         oauth_credentials: None,
+        oauth_never_refresh: false,
         api_key_ciphertext: Some(Vec::new()),
         last_apply_error: None,
         last_apply_at_unix_secs: None,

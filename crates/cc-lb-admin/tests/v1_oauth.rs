@@ -50,7 +50,12 @@ impl Fixture {
 
     async fn with_oauth_state(oauth_state: MockOAuthState) -> Self {
         let (oauth_addr, oauth_state) = spawn_mock_anthropic(oauth_state).await;
-        Self::build(oauth_addr, oauth_state, None).await
+        Self::build(oauth_addr, oauth_state, None, None).await
+    }
+
+    async fn with_oauth_state_and_scopes(oauth_state: MockOAuthState, scopes: Vec<String>) -> Self {
+        let (oauth_addr, oauth_state) = spawn_mock_anthropic(oauth_state).await;
+        Self::build(oauth_addr, oauth_state, None, Some(scopes)).await
     }
 
     #[cfg(feature = "sqlite")]
@@ -82,7 +87,7 @@ impl Fixture {
             ),
         );
         let (oauth_addr, oauth_state) = spawn_mock_anthropic(oauth_state).await;
-        let fixture = Self::build(oauth_addr, oauth_state, Some(scheduler.clone())).await;
+        let fixture = Self::build(oauth_addr, oauth_state, Some(scheduler.clone()), None).await;
         (fixture, scheduler)
     }
 
@@ -90,6 +95,7 @@ impl Fixture {
         oauth_addr: SocketAddr,
         oauth_state: MockOAuthState,
         scheduler: Option<cc_lb_scheduler::admin::SchedulerAdminHandle>,
+        scopes: Option<Vec<String>>,
     ) -> Self {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let test_clock = Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS));
@@ -101,7 +107,7 @@ impl Fixture {
         )
         .await;
         let aead = Arc::new(AeadService::from_master_key(MASTER_KEY));
-        let config = test_config(oauth_addr);
+        let config = test_config(oauth_addr, scopes);
         let state = AdminState {
             config_path: None,
             startup_config_overrides: Default::default(),
@@ -283,7 +289,12 @@ impl Fixture {
         )
         .expect("encrypt bundle");
         self.storage
-            .store_oauth_tokens(upstream.id, upstream.revision, encrypted)
+            .store_oauth_tokens(
+                upstream.id,
+                upstream.revision,
+                encrypted,
+                bundle.never_refresh,
+            )
             .await
             .expect("store oauth tokens")
     }
@@ -911,6 +922,44 @@ async fn long_lived_exchange_falls_back_on_custom_expires_in_not_allowed() {
 }
 
 #[tokio::test]
+async fn long_lived_exchange_reports_scope_rejected_for_non_inference_scope() {
+    // An operator who configures a scope Anthropic will not grant a year-long
+    // token for (here `org:create_api_key`) must see that their own scope
+    // choice caused the fallback, not a generic rejection.
+    let oauth_state = MockOAuthState::default().with_expires_in_rejection(
+        ExpiresInRejection::Scope("org:create_api_key".to_owned()),
+        RejectionShape::CustomExpiresInNotAllowed("org:create_api_key".to_owned()),
+    );
+    let fixture = Fixture::with_oauth_state_and_scopes(
+        oauth_state,
+        vec![
+            "user:profile".to_owned(),
+            "user:inference".to_owned(),
+            "org:create_api_key".to_owned(),
+        ],
+    )
+    .await;
+
+    let (complete, upstream_id) = run_draft_flow(&fixture, json!({})).await;
+
+    assert_eq!(complete["mode"], "refreshing");
+    assert_eq!(complete["long_lived_fallback"], true);
+    assert_eq!(complete["fallback_reason"], "scope_rejected");
+    assert_eq!(complete["granted_expires_in_secs"], 3600);
+    assert_eq!(
+        fixture.oauth_state.requested_expires_in().as_slice(),
+        &[
+            Some(cc_lb_config::LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS),
+            None
+        ],
+        "the rejected exchange must be retried without expires_in"
+    );
+    let bundle = fixture.decrypt_bundle(upstream_id).await;
+    assert!(!bundle.never_refresh);
+    assert!(bundle.access_token.starts_with("sk-ant-oat01-"));
+}
+
+#[tokio::test]
 async fn long_lived_grant_clamped_below_floor_demotes_to_refreshing() {
     const CLAMPED_EXPIRES_IN: u64 = 28_800;
     let fixture = Fixture::with_oauth_state(
@@ -1007,8 +1056,8 @@ async fn authorize_always_requests_the_configured_scopes() {
     assert_eq!(
         scopes,
         vec![
-            Some("org:profile".to_owned()),
-            Some("org:profile".to_owned()),
+            Some("user:profile user:inference".to_owned()),
+            Some("user:profile user:inference".to_owned()),
         ],
         "both authorization attempts must request oauth.scopes"
     );
@@ -1091,6 +1140,25 @@ async fn long_lived_upstream_seeds_no_oauth_refresh_task() {
         Some(i64::try_from(TEST_NOW_UNIX_SECS).expect("test timestamp fits")),
         "a refreshing credential must seed its bootstrap oauth refresh task"
     );
+    // Skipping the refresh bootstrap must not skip warmup: a long-lived
+    // upstream is otherwise fully managed and gets its connect-time warmup
+    // task exactly like a refreshing one.
+    assert_eq!(
+        long_lived_scheduler
+            .next_run_for_upstream(long_lived_id, "warmup")
+            .await
+            .expect("next run query succeeds"),
+        Some(i64::try_from(TEST_NOW_UNIX_SECS).expect("test timestamp fits")),
+        "a long-lived credential must still seed its bootstrap warmup task"
+    );
+    assert_eq!(
+        refreshing_scheduler
+            .next_run_for_upstream(refreshing_id, "warmup")
+            .await
+            .expect("next run query succeeds"),
+        Some(i64::try_from(TEST_NOW_UNIX_SECS).expect("test timestamp fits")),
+        "a refreshing credential must seed its bootstrap warmup task"
+    );
 }
 
 #[cfg(feature = "sqlite")]
@@ -1115,14 +1183,15 @@ async fn clamped_upstream_seeds_oauth_refresh_task() {
     );
 }
 
-fn test_config(oauth_addr: SocketAddr) -> Config {
+fn test_config(oauth_addr: SocketAddr, scopes: Option<Vec<String>>) -> Config {
     let mut config = Config::default();
     config.oauth.anthropic = Some(AnthropicOAuthConfig {
         client_id: "client-test".to_owned(),
         auth_url: Url::parse(&format!("http://{oauth_addr}/oauth/authorize")).expect("auth url"),
         token_url: Url::parse(&format!("http://{oauth_addr}/oauth/token")).expect("token url"),
         redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect url"),
-        scopes: vec!["org:profile".to_owned()],
+        scopes: scopes
+            .unwrap_or_else(|| vec!["user:profile".to_owned(), "user:inference".to_owned()]),
     });
     config
 }

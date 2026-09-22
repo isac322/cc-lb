@@ -479,6 +479,7 @@ impl Fixture {
                         never_refresh: false,
                     },
                 ),
+                false,
             )
             .await
             .expect("tokens stored");
@@ -640,8 +641,16 @@ impl UpstreamStore for OrderedUpstreamStore {
         id: Uuid,
         expected_revision: u64,
         tokens: EncryptedOAuthTokens,
+        never_refresh: bool,
     ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::store_oauth_tokens(self.inner.as_ref(), id, expected_revision, tokens).await
+        UpstreamStore::store_oauth_tokens(
+            self.inner.as_ref(),
+            id,
+            expected_revision,
+            tokens,
+            never_refresh,
+        )
+        .await
     }
 
     async fn complete_refresh(

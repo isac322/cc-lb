@@ -177,8 +177,16 @@ impl UpstreamStore for ControlledUpstreamStore {
         id: Uuid,
         expected_revision: u64,
         tokens: cc_lb_aead::EncryptedOAuthTokens,
+        never_refresh: bool,
     ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::store_oauth_tokens(&*self.inner, id, expected_revision, tokens).await
+        UpstreamStore::store_oauth_tokens(
+            &*self.inner,
+            id,
+            expected_revision,
+            tokens,
+            never_refresh,
+        )
+        .await
     }
 
     async fn complete_refresh(

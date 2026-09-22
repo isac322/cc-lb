@@ -2072,9 +2072,12 @@ function DetailView({
                             />
                           </Badge>
                         </div>
-                        <div className="mt-1 text-[10px] text-text-faint">
-                          Renews automatically while the refresh token is valid.
-                        </div>
+                        {principalEntry.mode === 'refreshing' ? (
+                          <div className="mt-1 text-[10px] text-text-faint">
+                            Renews automatically while the refresh token is
+                            valid.
+                          </div>
+                        ) : null}
                       </div>
                       <div>
                         <div className="text-[11px] uppercase tracking-wider text-text-faint">

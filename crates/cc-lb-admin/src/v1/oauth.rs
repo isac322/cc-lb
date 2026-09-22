@@ -697,7 +697,12 @@ async fn create_upstream_from_oauth_draft(
         }
     };
     let updated = match storage
-        .store_oauth_tokens(created.id, created.revision, encrypted_tokens)
+        .store_oauth_tokens(
+            created.id,
+            created.revision,
+            encrypted_tokens,
+            bundle.never_refresh,
+        )
         .await
     {
         Ok(updated) => updated,
@@ -924,7 +929,12 @@ async fn complete_oauth(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let updated = match storage
-        .store_oauth_tokens(upstream_id, expected_revision, encrypted)
+        .store_oauth_tokens(
+            upstream_id,
+            expected_revision,
+            encrypted,
+            bundle.never_refresh,
+        )
         .await
     {
         Ok(updated) => updated,
@@ -1247,21 +1257,17 @@ async fn seed_oauth_bootstrap_tasks(
     let Some(scheduler) = state.scheduler.as_ref() else {
         return Ok(());
     };
-    // A long-lived (365-day) credential must never be refreshed: scheduling a
-    // refresh would revoke the 365-day access token within seconds. When the
-    // credentials cannot be decrypted, fall through and seed as before so
-    // existing refreshing upstreams are unaffected.
-    if let Some(encrypted) = upstream.oauth_credentials.as_ref()
-        && let Ok(bundle) = encrypted.decrypt(state.aead.as_ref(), upstream.id.as_bytes())
-        && bundle.never_refresh
-    {
-        return Ok(());
-    }
     let seed_secs = cc_lb_clock::unix_secs(state.clock.now());
-    for task in oauth_bootstrap_tasks(upstream.id, seed_secs) {
-        match scheduler.push_adaptive_task(task).await {
-            Ok(()) | Err(SchedulerError::Conflict(_)) => {}
-            Err(error) => return Err(error),
+    // A long-lived (365-day) credential must never be refreshed: scheduling a
+    // refresh would revoke the 365-day access token within seconds. Only the
+    // OAuth refresh bootstrap is skipped — a long-lived upstream is otherwise
+    // fully managed and still receives its warmup bootstrap below.
+    if !upstream.oauth_never_refresh {
+        for task in oauth_bootstrap_tasks(upstream.id, seed_secs) {
+            match scheduler.push_adaptive_task(task).await {
+                Ok(()) | Err(SchedulerError::Conflict(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     if upstream.kind == UpstreamKind::AnthropicOauth

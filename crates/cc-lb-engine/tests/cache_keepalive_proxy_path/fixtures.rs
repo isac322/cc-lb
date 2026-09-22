@@ -138,6 +138,7 @@ pub(crate) fn upstream_record(id: Uuid, name: &str, base_url: &str) -> UpstreamR
         base_url: Some(Url::parse(base_url).expect("base URL parses")),
         enabled: true,
         oauth_credentials: None,
+        oauth_never_refresh: false,
         api_key_ciphertext: None,
         last_apply_error: None,
         last_apply_at_unix_secs: None,

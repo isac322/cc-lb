@@ -1,4 +1,3 @@
-use cc_lb_aead::AeadService;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{UpstreamRecord, UpstreamStore};
@@ -16,8 +15,15 @@ impl SchedulerDispatch {
             .await
     }
 
-    pub(super) async fn list_oauth_watchdog_upstream_ids(&self) -> SchedulerResult<Vec<Uuid>> {
+    pub(super) async fn list_oauth_refresh_watchdog_upstream_ids(
+        &self,
+    ) -> SchedulerResult<Vec<Uuid>> {
         self.list_watchdog_upstream_ids(WatchdogUpstreamFilter::OAuth)
+            .await
+    }
+
+    pub(super) async fn list_oauth_usage_poll_upstream_ids(&self) -> SchedulerResult<Vec<Uuid>> {
+        self.list_watchdog_upstream_ids(WatchdogUpstreamFilter::OAuthUsagePoll)
             .await
     }
 
@@ -36,7 +42,7 @@ impl SchedulerDispatch {
             }
             upstream_ids.extend(
                 page.iter()
-                    .filter(|upstream| filter.matches(upstream, self.aead.as_ref()))
+                    .filter(|upstream| filter.matches(upstream))
                     .map(|upstream| upstream.id),
             );
             after = page.last().map(|upstream| upstream.id);
@@ -52,10 +58,11 @@ impl SchedulerDispatch {
 enum WatchdogUpstreamFilter {
     Warmup,
     OAuth,
+    OAuthUsagePoll,
 }
 
 impl WatchdogUpstreamFilter {
-    fn matches(self, upstream: &UpstreamRecord, aead: &AeadService) -> bool {
+    fn matches(self, upstream: &UpstreamRecord) -> bool {
         if upstream.kind != UpstreamKind::AnthropicOauth
             || upstream.deleted_at_unix_secs.is_some()
             || upstream.oauth_credentials.is_none()
@@ -64,74 +71,68 @@ impl WatchdogUpstreamFilter {
         }
         match self {
             Self::Warmup => upstream.warmup_enabled,
-            Self::OAuth => !is_never_refresh_upstream(upstream, aead),
+            Self::OAuth => !upstream.oauth_never_refresh,
+            Self::OAuthUsagePoll => true,
         }
     }
 }
 
-/// `true` when the upstream's decrypted credential is long-lived and must never
-/// be refreshed. Undecryptable credentials keep being watched so a
-/// broken-but-refreshing upstream still gets a refresh job.
-fn is_never_refresh_upstream(upstream: &UpstreamRecord, aead: &AeadService) -> bool {
-    upstream
-        .oauth_credentials
-        .as_ref()
-        .and_then(|credentials| credentials.decrypt(aead, upstream.id.as_bytes()).ok())
-        .is_some_and(|bundle| bundle.never_refresh)
-}
-
 #[cfg(test)]
 mod tests {
-    use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+    use cc_lb_aead::EncryptedOAuthTokens;
 
     use super::*;
 
     #[test]
     fn oauth_filter_matches_disabled_registered_oauth_upstream() {
-        let aead = AeadService::from_master_key([7; 32]);
         let mut upstream = registered_oauth_upstream();
         upstream.enabled = false;
         upstream.warmup_enabled = false;
 
-        assert!(WatchdogUpstreamFilter::OAuth.matches(&upstream, &aead));
+        assert!(WatchdogUpstreamFilter::OAuth.matches(&upstream));
     }
 
     #[test]
     fn oauth_filter_rejects_deleted_or_missing_credentials() {
-        let aead = AeadService::from_master_key([7; 32]);
         let mut deleted = registered_oauth_upstream();
         deleted.deleted_at_unix_secs = Some(1_800_000_000);
         let mut missing_credentials = registered_oauth_upstream();
         missing_credentials.oauth_credentials = None;
 
-        assert!(!WatchdogUpstreamFilter::OAuth.matches(&deleted, &aead));
-        assert!(!WatchdogUpstreamFilter::OAuth.matches(&missing_credentials, &aead));
+        assert!(!WatchdogUpstreamFilter::OAuth.matches(&deleted));
+        assert!(!WatchdogUpstreamFilter::OAuth.matches(&missing_credentials));
     }
 
     #[test]
     fn oauth_filter_rejects_non_oauth_upstream() {
-        let aead = AeadService::from_master_key([7; 32]);
         let mut upstream = registered_oauth_upstream();
         upstream.kind = UpstreamKind::AnthropicApiKey;
 
-        assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream, &aead));
+        assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream));
     }
 
     #[test]
     fn oauth_filter_rejects_never_refresh_credentials() {
-        let aead = AeadService::from_master_key([7; 32]);
         let mut long_lived = registered_oauth_upstream();
-        long_lived.oauth_credentials = Some(encrypted_bundle(&aead, long_lived.id, true));
-        let mut refreshing = registered_oauth_upstream();
-        refreshing.oauth_credentials = Some(encrypted_bundle(&aead, refreshing.id, false));
+        long_lived.oauth_never_refresh = true;
+        let refreshing = registered_oauth_upstream();
 
-        assert!(!WatchdogUpstreamFilter::OAuth.matches(&long_lived, &aead));
-        assert!(WatchdogUpstreamFilter::OAuth.matches(&refreshing, &aead));
+        assert!(!WatchdogUpstreamFilter::OAuth.matches(&long_lived));
+        assert!(WatchdogUpstreamFilter::OAuth.matches(&refreshing));
+    }
+
+    #[test]
+    fn usage_poll_filter_includes_never_refresh_credentials() {
+        let mut long_lived = registered_oauth_upstream();
+        long_lived.oauth_never_refresh = true;
+        let refreshing = registered_oauth_upstream();
+
+        assert!(WatchdogUpstreamFilter::OAuthUsagePoll.matches(&long_lived));
+        assert!(WatchdogUpstreamFilter::OAuthUsagePoll.matches(&refreshing));
     }
 
     #[test]
     fn warmup_filter_uses_warmup_enabled_only() {
-        let aead = AeadService::from_master_key([7; 32]);
         let mut disabled_warmup = registered_oauth_upstream();
         disabled_warmup.enabled = true;
         disabled_warmup.warmup_enabled = false;
@@ -139,28 +140,8 @@ mod tests {
         enabled_warmup.enabled = false;
         enabled_warmup.warmup_enabled = true;
 
-        assert!(!WatchdogUpstreamFilter::Warmup.matches(&disabled_warmup, &aead));
-        assert!(WatchdogUpstreamFilter::Warmup.matches(&enabled_warmup, &aead));
-    }
-
-    fn encrypted_bundle(
-        aead: &AeadService,
-        upstream_id: Uuid,
-        never_refresh: bool,
-    ) -> EncryptedOAuthTokens {
-        EncryptedOAuthTokens::encrypt(
-            aead,
-            &OAuthTokenBundle {
-                access_token: "sk-ant-oat01-test".to_owned(),
-                refresh_token: "sk-ant-ort01-test".to_owned(),
-                expires_at_unix_secs: 9_999_999_999,
-                refresh_token_expires_at_unix_secs: None,
-                scopes: vec!["user:inference".to_owned()],
-                never_refresh,
-            },
-            upstream_id.as_bytes(),
-        )
-        .expect("bundle encrypts")
+        assert!(!WatchdogUpstreamFilter::Warmup.matches(&disabled_warmup));
+        assert!(WatchdogUpstreamFilter::Warmup.matches(&enabled_warmup));
     }
 
     fn registered_oauth_upstream() -> UpstreamRecord {
@@ -171,6 +152,7 @@ mod tests {
             base_url: None,
             enabled: true,
             oauth_credentials: Some(EncryptedOAuthTokens::from_ciphertext(vec![1])),
+            oauth_never_refresh: false,
             api_key_ciphertext: None,
             last_apply_error: None,
             last_apply_at_unix_secs: None,
