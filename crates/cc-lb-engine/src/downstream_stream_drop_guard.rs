@@ -6,7 +6,6 @@ use tracing::Span;
 use crate::body_io_timing::BodyIoTiming;
 use crate::terminal_observer::{
     LifecycleContext, StreamErrorClassification, StreamTerminationCause, StreamTerminationOutcome,
-    error_codes,
 };
 
 const CLIENT_CLOSED_STATUS: u16 = 499;
@@ -171,7 +170,7 @@ impl Drop for DownstreamStreamDropGuard {
             && let Ok(status) = StatusCode::from_u16(CLIENT_CLOSED_STATUS)
         {
             observer.set_upstream_body_ms_if_absent(response_body_ms);
-            observer.set_terminal(status, error_codes::CLIENT_CLOSED_REQUEST);
+            observer.set_client_closed(status);
             self.record_terminal(
                 StreamTerminationOutcome::ClientCancelled,
                 StreamTerminationCause::None,
@@ -199,7 +198,12 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use crate::body_io_timing::BodyIoPhase;
+    use crate::clock::{ClockHandle, SystemClock};
+    use crate::event_bus::InMemoryBus;
+    use crate::terminal_observer::{InternalFailure, UpstreamErrorCode, error_codes};
     use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
+    use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage};
     use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use tracing::Subscriber;
@@ -207,10 +211,6 @@ mod tests {
     use tracing::span::{Attributes, Id, Record};
     use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt as _};
     use tracing_subscriber::{Layer, Registry};
-
-    use crate::body_io_timing::BodyIoPhase;
-    use crate::clock::{ClockHandle, SystemClock};
-    use crate::event_bus::InMemoryBus;
 
     use super::*;
 
@@ -404,7 +404,7 @@ mod tests {
             &clock,
         );
         observer.mark_authn_reached();
-        observer.set_terminal(StatusCode::BAD_GATEWAY, error_codes::UPSTREAM_5XX);
+        observer.set_upstream_error(StatusCode::BAD_GATEWAY, UpstreamErrorCode::Upstream5xx);
         let relay_start = Instant::now()
             .checked_sub(Duration::from_millis(25))
             .expect("relay start before error drop");
@@ -616,12 +616,13 @@ mod tests {
             rx.try_recv().is_err(),
             "guard drop must leave finalization to the remaining lifecycle observer"
         );
-        observer.terminate(
-            StatusCode::GATEWAY_TIMEOUT,
-            Some(crate::terminal_observer::error_codes::TOWER_TIMEOUT),
-        );
+        observer.terminate_failure(InternalFailure::tower_timeout(InternalError {
+            stage: InternalErrorStage::Relay,
+            kind: InternalErrorKind::Timeout,
+            message: Some("request timed out".to_owned()),
+        }));
 
-        // `terminate` emits the otherwise-missing `RequestStarted` ahead of the
+        // `terminate_failure` emits the otherwise-missing `RequestStarted` ahead of the
         // terminal event so the assembler has a partial to attach to; this test
         // asserts on the termination's fields, so skip past anything earlier.
         let terminal = loop {

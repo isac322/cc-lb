@@ -88,28 +88,52 @@ async fn canonical_non_stream_429_records_structured_error_and_preserves_client_
 }
 
 #[tokio::test]
-async fn noncanonical_non_stream_429_captures_raw_body_as_error_message()
+async fn noncanonical_non_stream_429_extracts_partial_fields_or_raw_fallback()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Given
-    let raw_bodies = [
-        Bytes::from_static(b"not-json"),
-        Bytes::from_static(
-            br#"{"type":"message","error":{"type":"rate_limit_error","message":"no"}}"#,
+    // Given — each body exercises one branch of the approved parser
+    // contract: valid `error` objects are read regardless of the outer
+    // `type`; partial objects yield the present field only; non-JSON falls
+    // back to the raw body.
+    let cases: [(Bytes, Option<&str>, Option<&str>); 4] = [
+        // non-JSON: no type, raw body as message
+        (Bytes::from_static(b"not-json"), None, Some("not-json")),
+        // valid error object regardless of outer type: type + message
+        (
+            Bytes::from_static(
+                br#"{"type":"message","error":{"type":"rate_limit_error","message":"no"}}"#,
+            ),
+            Some("rate_limit_error"),
+            Some("no"),
         ),
-        Bytes::from_static(br#"{"type":"error","error":{"message":"missing type"}}"#),
-        Bytes::from_static(br#"{"type":"error","error":{"type":"rate_limit_error"}}"#),
+        // message only: no type, extracted message
+        (
+            Bytes::from_static(br#"{"type":"error","error":{"message":"missing type"}}"#),
+            None,
+            Some("missing type"),
+        ),
+        // type only: extracted type, raw body fallback as message
+        (
+            Bytes::from_static(br#"{"type":"error","error":{"type":"rate_limit_error"}}"#),
+            Some("rate_limit_error"),
+            Some(r#"{"type":"error","error":{"type":"rate_limit_error"}}"#),
+        ),
     ];
 
     // When / Then
-    for upstream_body in raw_bodies {
+    for (upstream_body, expected_type, expected_message) in cases {
         let observed = observe_non_stream_429(upstream_body.clone()).await?;
         assert_eq!(observed.status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(observed.body, upstream_body);
         assert_eq!(observed.event.error_code.as_deref(), Some("upstream_4xx"));
-        assert_eq!(observed.event.upstream_error_type, None);
+        assert_eq!(
+            observed.event.upstream_error_type.as_deref(),
+            expected_type,
+            "upstream_error_type mismatch for body: {upstream_body:?}"
+        );
         assert_eq!(
             observed.event.upstream_error_message.as_deref(),
-            Some(std::str::from_utf8(&upstream_body).expect("test bodies are utf8")),
+            expected_message,
+            "upstream_error_message mismatch for body: {upstream_body:?}"
         );
     }
     Ok(())
@@ -207,9 +231,10 @@ async fn canonical_non_stream_429_exposes_only_broad_error_to_observe_plugin()
 }
 
 #[tokio::test]
-async fn noncanonical_stream_429_captures_raw_body_as_error_message()
+async fn noncanonical_stream_429_extracts_message_without_type()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Given
+    // Given — a valid `error` object carrying only `message`: the streaming
+    // path extracts the message and leaves the type absent.
     let upstream_body =
         Bytes::from_static(br#"{"type":"error","error":{"message":"missing type"}}"#);
 
@@ -223,7 +248,7 @@ async fn noncanonical_stream_429_captures_raw_body_as_error_message()
     assert_eq!(observed.event.upstream_error_type, None);
     assert_eq!(
         observed.event.upstream_error_message.as_deref(),
-        Some(std::str::from_utf8(&upstream_body).expect("test body is utf8")),
+        Some("missing type"),
     );
     Ok(())
 }

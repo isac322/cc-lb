@@ -41,9 +41,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cc_lb_control::RequestEventBus;
-use cc_lb_domain::InternalError;
+use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage};
 use cc_lb_lifecycle::{LifecycleEvent, RequestIoTimings, RequestSetupTimings, TerminationReason};
-use cc_lb_observability::{ObservabilityHook, ObserveEvent, RedactionPolicy, truncate_reason};
+use cc_lb_observability::{
+    ObservabilityHook, ObserveEvent, RedactionPolicy, redact_internal_errors, truncate_reason,
+};
 use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
 use uuid::Uuid;
@@ -248,23 +250,28 @@ pub(crate) mod error_codes {
 /// Terminal classification carried from a non-handler response producer to
 /// `lifecycle_middleware` as a response extension.
 ///
-/// Handlers that answer locally (router fallback, drain gate, timeout layer,
-/// local JSON endpoints) attach one of these to the response instead of
-/// touching [`LifecycleContext`]; the middleware reads it and calls
-/// [`LifecycleContext::terminate`] exactly once. Responses without the marker
-/// are left to the `Drop` backstop, which is what keeps streaming proxy
-/// responses unfinalized until their body finishes.
+/// Handlers that answer locally (router fallback, drain gate, local JSON
+/// endpoints) attach one of these to the response instead of touching
+/// [`LifecycleContext`]; the middleware reads it and calls
+/// [`LifecycleContext::terminate_local`] exactly once. Responses without the
+/// marker are left to the `Drop` backstop, which is what keeps streaming
+/// proxy responses unfinalized until their body finishes.
 ///
-/// The marker only classifies the terminal outcome. A request-log row is
-/// still produced only when the request reached authentication
-/// ([`LifecycleContext::mark_authn_reached`]); a marked response on a
-/// pre-authentication request terminates it without emitting anything.
+/// Known internal failures (tower timeout, request-body read failure) do NOT
+/// use this marker: they attach [`InternalFailure`] instead so the terminal
+/// commit carries a typed `InternalError` cause. The marker only classifies
+/// the terminal outcome. A request-log row is still produced only when the
+/// request reached authentication ([`LifecycleContext::mark_authn_reached`]);
+/// a marked response on a pre-authentication request terminates it without
+/// emitting anything.
 #[derive(Clone, Copy, Debug)]
 pub struct TerminalClassification {
     /// Client-visible status recorded as the terminal outcome.
     pub status: StatusCode,
     /// Error classification; `None` means the status itself is the outcome.
-    pub error_code: Option<&'static str>,
+    /// Private so producers cannot attach a reasonless internal error code —
+    /// only the fixed local catalog below may set one.
+    error_code: Option<&'static str>,
 }
 
 impl TerminalClassification {
@@ -283,16 +290,6 @@ impl TerminalClassification {
         status: StatusCode::SERVICE_UNAVAILABLE,
         error_code: Some(error_codes::DRAIN_REJECTED),
     };
-    /// Tower timeout elapsed before the handler produced a response.
-    pub const TOWER_TIMEOUT: Self = Self {
-        status: StatusCode::GATEWAY_TIMEOUT,
-        error_code: Some(error_codes::TOWER_TIMEOUT),
-    };
-    /// Request body transport failure while reading the request body.
-    pub const BODY_READ_FAILED: Self = Self {
-        status: StatusCode::BAD_REQUEST,
-        error_code: Some(error_codes::BODY_READ_FAILED),
-    };
 
     /// A locally produced response with no error classification; the status
     /// itself is the outcome.
@@ -300,6 +297,78 @@ impl TerminalClassification {
         Self {
             status,
             error_code: None,
+        }
+    }
+
+    /// Error classification carried by this marker; `None` means the status
+    /// itself is the outcome.
+    pub const fn error_code(&self) -> Option<&'static str> {
+        self.error_code
+    }
+}
+
+/// A known internal failure that terminates the request.
+///
+/// Carries the client-visible outcome (`status` + `error_code`) together with
+/// the typed diagnostic `error` in a single value so a terminal commit can
+/// never record the outcome without its cause. Producers attach this to the
+/// response as an extension (or call [`LifecycleContext::terminate_failure`]
+/// directly); `error.message` is redacted centrally at commit time.
+#[derive(Clone, Debug)]
+pub struct InternalFailure {
+    /// Client-visible status recorded as the terminal outcome.
+    pub status: StatusCode,
+    /// Terminal `error_code` from the `error_codes` catalog.
+    pub error_code: &'static str,
+    /// Typed diagnostic appended to the request's `internal_errors` history.
+    pub error: InternalError,
+}
+
+/// Upstream-returned terminal error codes — the only codes that may be
+/// recorded without an `InternalError` cause, because the diagnostic lives in
+/// the `upstream_error_*` columns instead of `internal_errors`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpstreamErrorCode {
+    /// Upstream answered a 4xx status.
+    Upstream4xx,
+    /// Upstream answered a 5xx status.
+    Upstream5xx,
+    /// The upstream response stream failed mid-body.
+    StreamError,
+    /// Upstream stopped the response abnormally (refusal stop reason).
+    Refusal,
+    /// Upstream rejected the request for exceeding the context window.
+    ContextWindowExceeded,
+}
+
+impl UpstreamErrorCode {
+    /// Terminal `error_code` string for this classification.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Upstream4xx => error_codes::UPSTREAM_4XX,
+            Self::Upstream5xx => error_codes::UPSTREAM_5XX,
+            Self::StreamError => error_codes::UPSTREAM_STREAM_ERROR,
+            Self::Refusal => error_codes::UPSTREAM_REFUSAL,
+            Self::ContextWindowExceeded => error_codes::UPSTREAM_CONTEXT_WINDOW_EXCEEDED,
+        }
+    }
+}
+impl InternalFailure {
+    /// Request-body transport failure while reading the request body (400).
+    pub fn body_read_failed(error: InternalError) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error_code: error_codes::BODY_READ_FAILED,
+            error,
+        }
+    }
+
+    /// Tower timeout elapsed before the handler produced a response (504).
+    pub fn tower_timeout(error: InternalError) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            error_code: error_codes::TOWER_TIMEOUT,
+            error,
         }
     }
 }
@@ -341,6 +410,13 @@ struct TerminalState {
     shape_ms: Option<u64>,
     sign_ms: Option<u64>,
     upstream_ttfb_ms: Option<u64>,
+    /// Connection timings for the last dispatch attempt. Recorded via
+    /// `set_attempt_connection_timings` so dispatch failures (which never
+    /// produce `UpstreamResponseStarted`) still persist them on
+    /// `RequestTerminated`.
+    dns_ms: Option<u64>,
+    connect_ms: Option<u64>,
+    connection_reused: Option<bool>,
     upstream_body_ms: Option<u64>,
     first_body_chunk_ms: Option<u64>,
     finalize_ms: Option<u64>,
@@ -389,12 +465,6 @@ impl LifecycleContext {
         &self.inner.event_id
     }
 
-    pub(crate) fn set_terminal(&self, status: StatusCode, error_code: &'static str) {
-        let mut state = self.lock_state();
-        state.status = status.as_u16();
-        state.error_code = Some(error_code);
-    }
-
     pub(crate) fn set_success_status(&self, status: StatusCode) {
         let mut state = self.lock_state();
         state.status = status.as_u16();
@@ -428,11 +498,85 @@ impl LifecycleContext {
         }
     }
 
+    /// Record connection timings measured for the current dispatch attempt.
+    /// `Some` values merge without clobbering; `None` leaves the existing
+    /// observation untouched so a partially measured failure cannot erase a
+    /// successful stage.
+    pub(crate) fn set_attempt_connection_timings(
+        &self,
+        dns_ms: Option<u64>,
+        connect_ms: Option<u64>,
+        connection_reused: Option<bool>,
+    ) {
+        let mut state = self.lock_state();
+        if let Some(value) = dns_ms {
+            state.dns_ms = Some(value);
+        }
+        if let Some(value) = connect_ms {
+            state.connect_ms = Some(value);
+        }
+        if let Some(value) = connection_reused {
+            state.connection_reused = Some(value);
+        }
+    }
+
+    /// Clear all per-attempt timings before a retry so a later attempt never
+    /// inherits the previous attempt's measurements.
     pub(crate) fn reset_attempt_timings(&self) {
         let mut state = self.lock_state();
         state.shape_ms = None;
         state.sign_ms = None;
         state.upstream_ttfb_ms = None;
+        state.dns_ms = None;
+        state.connect_ms = None;
+        state.connection_reused = None;
+    }
+
+    /// Record an upstream-returned terminal outcome. Upstream error codes are
+    /// the only codes that may be committed without an `InternalError` cause:
+    /// their diagnostic lives in the `upstream_error_*` columns, not
+    /// `internal_errors`. Known internal failures must use
+    /// [`Self::set_failure`]/[`Self::terminate_failure`] instead — there is no
+    /// reasonless API that accepts them.
+    pub(crate) fn set_upstream_error(&self, status: StatusCode, code: UpstreamErrorCode) {
+        let mut state = self.lock_state();
+        state.status = status.as_u16();
+        state.error_code = Some(code.as_str());
+    }
+
+    /// Record a client-closed terminal outcome (499). Client disconnects are
+    /// not cc-lb internal failures, so no `InternalError` is synthesized.
+    pub(crate) fn set_client_closed(&self, status: StatusCode) {
+        let mut state = self.lock_state();
+        state.status = status.as_u16();
+        state.error_code = Some(error_codes::CLIENT_CLOSED_REQUEST);
+    }
+
+    /// Commit a known internal failure: status, error code, and typed cause
+    /// in a single state update so the outcome can never be recorded without
+    /// its reason. The cause is appended to the accumulated
+    /// `internal_errors` history (after any non-fatal diagnostics) and its
+    /// message is redacted centrally. No-op once finalized.
+    pub(crate) fn set_failure(&self, failure: InternalFailure) {
+        let mut state = self.lock_state();
+        if self.inner.finalized.load(Ordering::Acquire) {
+            return;
+        }
+        state.status = failure.status.as_u16();
+        state.error_code = Some(failure.error_code);
+        push_internal_error(&mut state, failure.error);
+    }
+
+    /// Append a non-fatal internal diagnostic (e.g. a filter or shape
+    /// fallback that recovered). The message is redacted centrally. No-op
+    /// once finalized — a diagnostic recorded after the terminal snapshot
+    /// would never be persisted.
+    pub(crate) fn record_internal_error(&self, error: InternalError) {
+        let mut state = self.lock_state();
+        if self.inner.finalized.load(Ordering::Acquire) {
+            return;
+        }
+        push_internal_error(&mut state, error);
     }
 
     pub(crate) fn set_termination_timings(
@@ -497,10 +641,6 @@ impl LifecycleContext {
         self.lock_state().setup_timings = timings;
     }
 
-    pub(crate) fn set_internal_errors(&self, errors: Vec<InternalError>) {
-        self.lock_state().internal_errors = errors;
-    }
-
     pub(crate) fn mark_observe_finished_emitted(&self) {
         self.lock_state().observe_finished_emitted = true;
     }
@@ -538,19 +678,37 @@ impl LifecycleContext {
         }
     }
 
-    /// The single terminal entry point. Emits `RequestStarted` if it has not
-    /// been emitted, records the classification, and publishes
+    /// Terminal entry point for locally produced responses classified by a
+    /// [`TerminalClassification`] response extension. Emits `RequestStarted`
+    /// if it has not been emitted, records the classification, and publishes
     /// `RequestTerminated`. Idempotent: a later call is a no-op once
     /// finalized.
     ///
-    /// `error_code` of `None` means the status itself is the outcome, with no
-    /// error classification (a locally produced response).
-    pub fn terminate(&self, status: StatusCode, error_code: Option<&'static str>) {
+    /// `classification.error_code()` of `None` means the status itself is the
+    /// outcome, with no error classification (a locally produced response).
+    /// Known internal failures must not pass through here — they carry an
+    /// [`InternalFailure`] extension and commit via [`Self::terminate_failure`].
+    pub fn terminate_local(&self, classification: TerminalClassification) {
         self.emit_request_started(false);
-        match error_code {
-            Some(code) => self.set_terminal(status, code),
-            None => self.set_success_status(status),
+        match classification.error_code() {
+            Some(code) => {
+                let mut state = self.lock_state();
+                state.status = classification.status.as_u16();
+                state.error_code = Some(code);
+            }
+            None => self.set_success_status(classification.status),
         }
+        self.finish();
+    }
+
+    /// Terminal entry point for a known internal failure. Emits
+    /// `RequestStarted` if it has not been emitted, commits status + error
+    /// code + typed cause in one state update via [`Self::set_failure`], and
+    /// publishes `RequestTerminated`. Idempotent: a later call is a no-op
+    /// once finalized.
+    pub fn terminate_failure(&self, failure: InternalFailure) {
+        self.emit_request_started(false);
+        self.set_failure(failure);
         self.finish();
     }
 
@@ -558,14 +716,24 @@ impl LifecycleContext {
     ///
     /// The sole dedicated terminal entry point: unlike every other
     /// classification it must also emit `ParseCompleted::BodyTooLarge`, which
-    /// callers cannot express through [`Self::terminate`].
+    /// callers cannot express through [`Self::terminate_failure`].
     pub fn terminate_body_too_large(&self, limit_bytes: u64) {
         self.emit_request_started(false);
         self.emit_lifecycle(LifecycleEvent::ParseCompleted {
             event_id: self.event_id().to_owned(),
             result: Err(cc_lb_lifecycle::ParseFailure::BodyTooLarge { limit_bytes }),
         });
-        self.set_terminal(StatusCode::PAYLOAD_TOO_LARGE, error_codes::BODY_TOO_LARGE);
+        self.set_failure(InternalFailure {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            error_code: error_codes::BODY_TOO_LARGE,
+            error: InternalError {
+                stage: InternalErrorStage::Ingress,
+                kind: InternalErrorKind::InvalidInput,
+                message: Some(format!(
+                    "request body exceeded limit of {limit_bytes} bytes"
+                )),
+            },
+        });
         self.finish();
     }
 
@@ -625,14 +793,14 @@ impl LifecycleContext {
             .expect("terminal observer hooks mutex poisoned") = hooks.iter().cloned().collect();
     }
 
-    pub(crate) fn emit_provider_error(&self, code: &str, message: &str, source: &str) {
-        self.inner
-            .emit_or_buffer(LifecycleEvent::ProviderErrorObserved {
-                event_id: self.inner.event_id.clone(),
-                code: code.to_owned(),
-                message: message.to_owned(),
-                source: source.to_owned(),
-            });
+    /// Notify observability hooks of an error observation.
+    ///
+    /// This is the surviving half of the removed `emit_provider_error`: the
+    /// `ProviderErrorObserved` bus event was deleted (the assembler discarded
+    /// it), so this only fans `ObserveEvent::Error` out to the registered
+    /// hooks, in registration order, with the same `code`/`message`/`source`
+    /// the caller would previously have published.
+    pub(crate) fn notify_error_hooks(&self, code: &str, message: &str, source: &str) {
         let hooks = self
             .inner
             .observability_hooks
@@ -655,6 +823,15 @@ impl LifecycleContext {
             .lock()
             .expect("terminal observer state mutex poisoned")
     }
+}
+
+/// Append a diagnostic to the accumulated internal-error history with its
+/// message redacted and truncated through the central policy. The observer is
+/// the sole owner of this vector; every producer enters through here so no
+/// unredacted message can reach the terminal snapshot.
+fn push_internal_error(state: &mut TerminalState, error: InternalError) {
+    let mut redacted = redact_internal_errors(std::slice::from_ref(&error));
+    state.internal_errors.append(&mut redacted);
 }
 fn merge_io_timings(current: &mut RequestIoTimings, update: RequestIoTimings) {
     if let Some(value) = update.request_body_first_chunk_ms {
@@ -780,6 +957,9 @@ impl Inner {
                 setup_timings: state.setup_timings,
                 io_timings: state.io_timings,
                 upstream_body_ms: state.upstream_body_ms,
+                dns_ms: state.dns_ms,
+                connect_ms: state.connect_ms,
+                connection_reused: state.connection_reused,
                 first_body_chunk_ms: state.first_body_chunk_ms,
                 finalize_ms: state.finalize_ms,
                 internal_errors: state.internal_errors.clone(),
@@ -968,7 +1148,7 @@ mod tests {
         );
         observer.mark_authn_reached();
         let expected_event_id = observer.event_id().to_owned();
-        observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
+        observer.set_upstream_error(StatusCode::OK, UpstreamErrorCode::Upstream4xx);
         observer.finish();
 
         let (event_id, reason, status) =
@@ -1084,7 +1264,7 @@ mod tests {
                 &clock,
             );
             observer.mark_authn_reached();
-            observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
+            observer.set_upstream_error(StatusCode::OK, UpstreamErrorCode::Upstream4xx);
             observer.finish();
         }
         let (_id, reason, _status) = expect_terminated(rx.recv().await.expect("first delivered"));
@@ -1300,7 +1480,11 @@ mod tests {
         );
         observer.mark_authn_reached();
         observer.set_request_body_timing(12, None);
-        observer.terminate(StatusCode::BAD_REQUEST, Some(error_codes::BODY_READ_FAILED));
+        observer.terminate_failure(InternalFailure::body_read_failed(InternalError {
+            stage: InternalErrorStage::Ingress,
+            kind: InternalErrorKind::InvalidInput,
+            message: Some("client closed the request body early".to_owned()),
+        }));
 
         assert!(matches!(
             rx.recv().await.expect("request started delivered"),
@@ -1402,7 +1586,11 @@ mod tests {
         );
         observer.mark_authn_reached();
         observer.set_event_kind(cc_lb_request_log::RequestEventKind::Files);
-        observer.terminate(StatusCode::BAD_REQUEST, Some(error_codes::BODY_READ_FAILED));
+        observer.terminate_failure(InternalFailure::body_read_failed(InternalError {
+            stage: InternalErrorStage::Ingress,
+            kind: InternalErrorKind::InvalidInput,
+            message: Some("client closed the request body early".to_owned()),
+        }));
 
         // Drain the first request's terminal event, then the second start.
         let _ = rx.recv().await.expect("first terminal delivered");
@@ -1631,7 +1819,7 @@ mod tests {
             let hooks: Vec<Arc<dyn cc_lb_observability::ObservabilityHook>> =
                 vec![Arc::new(PanickingHook)];
             observer.set_observability_hooks(&hooks);
-            observer.set_terminal(StatusCode::BAD_GATEWAY, error_codes::UPSTREAM_5XX);
+            observer.set_upstream_error(StatusCode::BAD_GATEWAY, UpstreamErrorCode::Upstream5xx);
             drop(observer);
         }));
 
@@ -1652,7 +1840,7 @@ mod tests {
             &clock,
         );
 
-        observer.terminate(StatusCode::NOT_FOUND, Some(error_codes::ROUTE_NOT_FOUND));
+        observer.terminate_local(TerminalClassification::ROUTE_NOT_FOUND);
         assert!(
             rx.try_recv().is_err(),
             "pre-authn termination must not publish any lifecycle event"
@@ -1691,5 +1879,310 @@ mod tests {
         observer.finish();
         let (_id, _reason, _status) =
             expect_terminated(rx.recv().await.expect("terminal event delivered"));
+    }
+
+    #[tokio::test]
+    async fn terminate_failure_carries_cause_and_accumulated_history() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_failure".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+
+        // A non-fatal diagnostic recorded earlier must survive in the
+        // terminal snapshot ahead of the fatal cause.
+        observer.record_internal_error(InternalError {
+            stage: InternalErrorStage::RouterFilter,
+            kind: InternalErrorKind::InvalidOutput,
+            message: Some("filter returned invalid output; fell back".to_owned()),
+        });
+        observer.terminate_failure(InternalFailure {
+            status: StatusCode::BAD_GATEWAY,
+            error_code: error_codes::UPSTREAM_DISPATCH_FAILED,
+            error: InternalError {
+                stage: InternalErrorStage::Relay,
+                kind: InternalErrorKind::Unavailable,
+                message: Some("connection refused".to_owned()),
+            },
+        });
+
+        assert!(matches!(
+            rx.recv().await.expect("request started delivered"),
+            LifecycleEvent::RequestStarted { .. }
+        ));
+        let event = rx.recv().await.expect("terminal event delivered");
+        let LifecycleEvent::RequestTerminated {
+            reason,
+            client_status,
+            internal_errors,
+            ..
+        } = event
+        else {
+            panic!("expected request termination");
+        };
+        assert!(matches!(
+            &reason,
+            TerminationReason::ErrorCode(code) if code == error_codes::UPSTREAM_DISPATCH_FAILED
+        ));
+        assert_eq!(client_status, StatusCode::BAD_GATEWAY.as_u16());
+        assert_eq!(
+            internal_errors,
+            vec![
+                InternalError {
+                    stage: InternalErrorStage::RouterFilter,
+                    kind: InternalErrorKind::InvalidOutput,
+                    message: Some("filter returned invalid output; fell back".to_owned()),
+                },
+                InternalError {
+                    stage: InternalErrorStage::Relay,
+                    kind: InternalErrorKind::Unavailable,
+                    message: Some("connection refused".to_owned()),
+                },
+            ],
+            "terminal snapshot must carry the full accumulated history"
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_error_messages_are_redacted_centrally() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_redact".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+
+        let secret = "Bearer abcdef.ghijkl";
+        observer.record_internal_error(InternalError {
+            stage: InternalErrorStage::Signer,
+            kind: InternalErrorKind::PluginError,
+            message: Some(format!("signer failed: {secret}")),
+        });
+        observer.finish();
+
+        let event = rx.recv().await.expect("terminal event delivered");
+        let LifecycleEvent::RequestTerminated {
+            internal_errors, ..
+        } = event
+        else {
+            panic!("expected request termination");
+        };
+        assert_eq!(internal_errors.len(), 1);
+        let message = internal_errors[0].message.as_deref().expect("message");
+        assert!(
+            !message.contains(secret),
+            "secret must not persist: {message}"
+        );
+        assert!(message.contains(cc_lb_observability::REDACTED));
+        assert!(message.len() <= cc_lb_domain::MAX_ERROR_MESSAGE_LEN);
+    }
+
+    #[tokio::test]
+    async fn record_internal_error_after_finalize_is_ignored() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_late".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+        observer.finish();
+
+        let event = rx.recv().await.expect("terminal event delivered");
+        let LifecycleEvent::RequestTerminated {
+            internal_errors, ..
+        } = event
+        else {
+            panic!("expected request termination");
+        };
+        assert!(internal_errors.is_empty());
+
+        // Late mutation must not panic and must not emit a second snapshot.
+        observer.record_internal_error(InternalError {
+            stage: InternalErrorStage::Relay,
+            kind: InternalErrorKind::Timeout,
+            message: Some("late".to_owned()),
+        });
+        observer.set_failure(InternalFailure {
+            status: StatusCode::BAD_GATEWAY,
+            error_code: error_codes::UPSTREAM_DISPATCH_FAILED,
+            error: InternalError {
+                stage: InternalErrorStage::Relay,
+                kind: InternalErrorKind::Unavailable,
+                message: Some("late".to_owned()),
+            },
+        });
+        assert!(
+            rx.try_recv().is_err(),
+            "post-finalize mutation must not emit another terminal event"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_snapshot_carries_attempt_connection_timings() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_conn_timings".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+
+        observer.set_attempt_connection_timings(Some(7), Some(42), Some(false));
+        // Absent values must not clobber recorded ones.
+        observer.set_attempt_connection_timings(None, None, None);
+        observer.finish();
+
+        let event = rx.recv().await.expect("terminal event delivered");
+        let LifecycleEvent::RequestTerminated {
+            dns_ms,
+            connect_ms,
+            connection_reused,
+            ..
+        } = event
+        else {
+            panic!("expected request termination");
+        };
+        assert_eq!(dns_ms, Some(7));
+        assert_eq!(connect_ms, Some(42));
+        assert_eq!(connection_reused, Some(false));
+    }
+
+    #[tokio::test]
+    async fn reset_attempt_timings_clears_connection_fields() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_conn_reset".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+
+        observer.set_attempt_connection_timings(Some(7), Some(42), Some(false));
+        observer.reset_attempt_timings();
+        observer.finish();
+
+        let event = rx.recv().await.expect("terminal event delivered");
+        let LifecycleEvent::RequestTerminated {
+            dns_ms,
+            connect_ms,
+            connection_reused,
+            ..
+        } = event
+        else {
+            panic!("expected request termination");
+        };
+        assert_eq!(dns_ms, None);
+        assert_eq!(connect_ms, None);
+        assert_eq!(connection_reused, None);
+    }
+
+    #[tokio::test]
+    async fn terminate_local_records_classification_code() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_local".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+        observer.terminate_local(TerminalClassification::DRAIN_REJECTED);
+
+        assert!(matches!(
+            rx.recv().await.expect("request started delivered"),
+            LifecycleEvent::RequestStarted { .. }
+        ));
+        let (_id, reason, status) =
+            expect_terminated(rx.recv().await.expect("terminal event delivered"));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        assert!(matches!(
+            &reason,
+            TerminationReason::ErrorCode(code) if code == error_codes::DRAIN_REJECTED
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminate_local_without_code_is_success() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_local_ok".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+        observer.terminate_local(TerminalClassification::local(StatusCode::OK));
+
+        let _started = rx.recv().await.expect("request started delivered");
+        let (_id, reason, status) =
+            expect_terminated(rx.recv().await.expect("terminal event delivered"));
+        assert_eq!(status, StatusCode::OK.as_u16());
+        assert!(matches!(reason, TerminationReason::Success));
+    }
+
+    #[tokio::test]
+    async fn notify_error_hooks_fans_out_without_bus_event() {
+        use parking_lot::Mutex as ParkingMutex;
+
+        struct RecordingHook {
+            events: ParkingMutex<Vec<ObserveEvent>>,
+        }
+        impl cc_lb_observability::ObservabilityHook for RecordingHook {
+            fn observe(
+                &self,
+                event: ObserveEvent,
+            ) -> Result<(), cc_lb_observability::ObservabilityError> {
+                self.events.lock().push(event);
+                Ok(())
+            }
+        }
+
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_hooks".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        let hook = Arc::new(RecordingHook {
+            events: ParkingMutex::new(Vec::new()),
+        });
+        let hooks: Vec<Arc<dyn cc_lb_observability::ObservabilityHook>> = vec![hook.clone()];
+        observer.set_observability_hooks(&hooks);
+        observer.mark_authn_reached();
+
+        observer.notify_error_hooks("signing_error", "signer blew up", "signer");
+
+        let events = hook.events.lock();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            ObserveEvent::Error { code, message, source }
+                if code == "signing_error" && message == "signer blew up" && source == "signer"
+        ));
+        drop(events);
+
+        // No lifecycle event is published for the hook notification.
+        assert!(
+            rx.try_recv().is_err(),
+            "notify_error_hooks must not publish a bus event"
+        );
     }
 }

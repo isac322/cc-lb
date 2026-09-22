@@ -10,14 +10,17 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_control::{BusReceiver, RequestEventBus};
-use cc_lb_domain::{Principal, TerminalStrategy, TtlClass, Upstream};
+use cc_lb_domain::{
+    InternalError, InternalErrorKind, InternalErrorStage, Principal, TerminalStrategy, TtlClass,
+    Upstream,
+};
 use cc_lb_engine::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache, ShapePluginCache,
 };
 use cc_lb_engine::{
-    DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, LifecycleContext,
-    PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike,
+    DynamicViewBuilder, DynamicViewHolder, InternalFailure, Lifecycle, LifecycleConfig,
+    LifecycleContext, PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike,
 };
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason, UsageSource};
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
@@ -1045,14 +1048,17 @@ async fn timeout_ordering(timeout_first: bool) {
         .await
         .expect("lifecycle handles request")
         .into_body();
-
-    let timeout = cc_lb_engine::TerminalClassification::TOWER_TIMEOUT;
+    let timeout = InternalFailure::tower_timeout(InternalError {
+        stage: InternalErrorStage::Relay,
+        kind: InternalErrorKind::Timeout,
+        message: Some("request timed out".to_owned()),
+    });
     if timeout_first {
-        observer.terminate(timeout.status, timeout.error_code);
+        observer.terminate_failure(timeout.clone());
         drop(body);
     } else {
         drop(body);
-        observer.terminate(timeout.status, timeout.error_code);
+        observer.terminate_failure(timeout);
     }
     drop(observer);
 
