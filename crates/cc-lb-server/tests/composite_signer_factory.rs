@@ -254,7 +254,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
 
     let signer_factory = view
         .signer_factory
-        .with_router_choice("sk-ant-downstream".to_owned(), "oauth-bob".to_owned());
+        .with_router_choice("oauth-bob".to_owned());
     let signer = signer_factory
         .build(&Upstream::AnthropicDirect { base_url: None })
         .await
@@ -296,9 +296,7 @@ async fn empty_router_choice_errors() {
     .await
     .expect("dynamic view builds");
 
-    let signer_factory = view
-        .signer_factory
-        .with_router_choice("sk-ant-downstream".to_owned(), String::new());
+    let signer_factory = view.signer_factory.with_router_choice(String::new());
     let result = signer_factory
         .build(&Upstream::AnthropicDirect { base_url: None })
         .await;

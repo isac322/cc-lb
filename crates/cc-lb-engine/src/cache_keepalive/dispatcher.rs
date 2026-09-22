@@ -11,8 +11,7 @@ use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, Signer,
     UpstreamDialect, shape_request,
 };
-use http::header::AUTHORIZATION;
-use http::{HeaderMap, StatusCode};
+use http::StatusCode;
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use url::Url;
@@ -66,7 +65,7 @@ impl AnthropicKeepaliveDispatcher {
             .dynamic_view
             .load()
             .signer_factory
-            .with_router_choice(downstream_api_key(&snapshot.headers), upstream.name.clone());
+            .with_router_choice(upstream.name.clone());
         let signer = signer_factory
             .build(&upstream_api)
             .await
@@ -251,26 +250,6 @@ impl UpstreamDialect for SnapshotDialect {
             context.body_bytes.clone(),
         ))
     }
-}
-
-fn downstream_api_key(headers: &HeaderMap) -> String {
-    if let Some(value) = headers
-        .get("x-api-key")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-    {
-        return value.to_owned();
-    }
-
-    headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .filter(|(scheme, credential)| {
-            scheme.eq_ignore_ascii_case("Bearer") && !credential.is_empty()
-        })
-        .map(|(_, credential)| credential.to_owned())
-        .unwrap_or_default()
 }
 
 #[derive(Deserialize, Default)]

@@ -5,6 +5,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use http::{HeaderMap, StatusCode};
 
+use cc_lb_aead::AeadService;
 use cc_lb_config::{AdminAuthProviderConfig, Config, StorageConfig};
 use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_pricing::{
@@ -663,19 +664,24 @@ async fn seed_runtime_state(
     principal_name: &str,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
     let storage = sqlite_storage(sqlite_path).await?;
-    UpstreamStore::create(
+    let created = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
             name: "anthropic-wiremock".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse(&upstream_url)?),
-            api_key_ciphertext: Some(Vec::new()),
+            api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },
     )
     .await?;
+    // Must match the 32 bytes decoded from MASTER_KEY_HEX, which the server
+    // loads via config.aead.key_env.
+    let aead = AeadService::from_master_key([0x11; 32]);
+    let ciphertext = aead.encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())?;
+    UpstreamStore::update_api_key_secret(storage.as_ref(), created.id, Some(ciphertext)).await?;
     PrincipalStore::create(
         storage.as_ref(),
         PrincipalCreate {

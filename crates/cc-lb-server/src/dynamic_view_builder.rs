@@ -988,7 +988,14 @@ fn validate_upstream(upstream: &UpstreamRecord, aead: &AeadService) -> Result<()
             None => {
                 return Err("anthropic api-key upstream missing api_key_ciphertext".to_owned());
             }
-            Some(ciphertext) if aead.decrypt(ciphertext, upstream.id.as_bytes()).is_err() => {
+            Some(ciphertext)
+                if aead
+                    .decrypt(ciphertext, upstream.id.as_bytes())
+                    // Scrub the decrypted probe copy; only decryptability is
+                    // being validated here.
+                    .map(zeroize::Zeroizing::new)
+                    .is_err() =>
+            {
                 return Err("anthropic api-key upstream credential is not decryptable".to_owned());
             }
             Some(_) => {}
@@ -1083,11 +1090,7 @@ impl DbCompositeSignerFactory {
 }
 
 impl cc_lb_engine::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
-    fn with_router_choice(
-        &self,
-        _api_key: String,
-        router_chosen_upstream_name: String,
-    ) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(&self, router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
         // The downstream caller's key is deliberately not forwarded upstream.
         Arc::new(self.with_router_choice_state(router_chosen_upstream_name))
     }

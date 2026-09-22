@@ -148,11 +148,7 @@ impl RenewalFixture {
 struct RenewalSignerFactory;
 
 impl ApiKeyAwareSignerFactory for RenewalSignerFactory {
-    fn with_router_choice(
-        &self,
-        _api_key: String,
-        _router_chosen_upstream_name: String,
-    ) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(&self, _router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
         Arc::new(RenewalSigner)
     }
 }

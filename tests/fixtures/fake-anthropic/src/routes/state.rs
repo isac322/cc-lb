@@ -18,6 +18,7 @@ pub struct AppState {
     pub(crate) oauth: OAuthState,
     request_counts: Mutex<BTreeMap<&'static str, u64>>,
     pub(crate) last_x_api_key: Mutex<Option<String>>,
+    pub(crate) last_authorization: Mutex<Option<String>>,
     pub(crate) last_selected_headers: Mutex<BTreeMap<&'static str, Option<String>>>,
     #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
     pub(crate) injected_usage:
@@ -33,6 +34,7 @@ impl AppState {
             oauth: OAuthState::default(),
             request_counts: Mutex::new(BTreeMap::new()),
             last_x_api_key: Mutex::new(None),
+            last_authorization: Mutex::new(None),
             last_selected_headers: Mutex::new(BTreeMap::from([
                 ("x-organization-uuid", None),
                 ("x-trusted-device-token", None),
@@ -58,6 +60,12 @@ impl AppState {
         if let Ok(mut last_x_api_key) = self.last_x_api_key.lock() {
             *last_x_api_key = headers
                 .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned);
+        }
+        if let Ok(mut last_authorization) = self.last_authorization.lock() {
+            *last_authorization = headers
+                .get("authorization")
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned);
         }

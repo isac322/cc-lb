@@ -226,12 +226,14 @@ async fn seed_upstream(
     )
     .await
     .unwrap();
-    let ciphertext = AeadService::from_master_key([0; 32])
-        .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
-        .unwrap();
-    UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
-        .await
-        .unwrap();
+    if kind == UpstreamKind::AnthropicApiKey {
+        let ciphertext = AeadService::from_master_key([0; 32])
+            .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
+            .unwrap();
+        UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
+            .await
+            .unwrap();
+    }
 }
 
 async fn seed_principal(

@@ -222,11 +222,7 @@ fn default_upstream_id() -> Uuid {
 struct TestSignerFactory;
 
 impl ApiKeyAwareSignerFactory for TestSignerFactory {
-    fn with_router_choice(
-        &self,
-        _api_key: String,
-        _router_chosen_upstream_name: String,
-    ) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(&self, _router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
         Arc::new(Self)
     }
 }

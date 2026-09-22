@@ -387,7 +387,8 @@ async fn create_upstream(
                 match encrypt_plaintext_value(&state, &plaintext, created.id.as_bytes()) {
                     Ok(ciphertext) => ciphertext,
                     Err(error) => {
-                        return Err(rollback_api_key_create(storage, &created, error).await);
+                        rollback_api_key_create(storage, &created, &error).await;
+                        return Err(error);
                     }
                 };
             match storage
@@ -396,7 +397,10 @@ async fn create_upstream(
             {
                 Ok(record) => record,
                 Err(error) => {
-                    return Err(rollback_api_key_create(storage, &created, error).await);
+                    rollback_api_key_create(storage, &created, &error).await;
+                    return Err(UpstreamError::Internal {
+                        detail: "failed to store upstream api-key credential".to_owned(),
+                    });
                 }
             }
         }
@@ -1725,21 +1729,22 @@ fn api_key_plaintext_for_create(
     }
 }
 
-/// Removes the upstream created moments ago when persisting its api-key
-/// credential fails, so callers never see a credential-less api-key upstream.
+/// Best-effort removal of the upstream created moments ago when persisting
+/// its api-key credential fails. The row is already committed, so a
+/// concurrent view rebuild — or a crash or failed `soft_delete` here — can
+/// leave a credential-less api-key upstream behind. That is safe: such a row
+/// fails closed via `last_apply_error` and a terminal 502 instead of falling
+/// back to the caller's key.
 async fn rollback_api_key_create(
     storage: &dyn Storage,
     created: &UpstreamRecord,
     error: impl std::fmt::Debug,
-) -> UpstreamError {
+) {
     tracing::error!(upstream_id = %created.id, ?error, "rolling back api-key upstream create");
     if let Err(rollback_error) =
         UpstreamStore::soft_delete(storage, created.id, created.revision).await
     {
         tracing::error!(upstream_id = %created.id, error = %rollback_error, "api-key upstream rollback delete failed");
-    }
-    UpstreamError::Internal {
-        detail: "failed to store upstream api-key credential".to_owned(),
     }
 }
 
@@ -1978,7 +1983,6 @@ mod tests {
     impl ApiKeyAwareSignerFactory for TestSignerFactory {
         fn with_router_choice(
             &self,
-            _api_key: String,
             _router_chosen_upstream_name: String,
         ) -> Arc<dyn SignerFactory> {
             Arc::new(TestSignerFactory)
