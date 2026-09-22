@@ -382,28 +382,7 @@ async fn create_upstream(
         Err(error) => return Err(error.into()),
     };
     let record = match api_key_plaintext {
-        Some(plaintext) => {
-            let ciphertext =
-                match encrypt_plaintext_value(&state, &plaintext, created.id.as_bytes()) {
-                    Ok(ciphertext) => ciphertext,
-                    Err(error) => {
-                        rollback_api_key_create(storage, &created, &error).await;
-                        return Err(error);
-                    }
-                };
-            match storage
-                .update_api_key_secret(created.id, Some(ciphertext))
-                .await
-            {
-                Ok(record) => record,
-                Err(error) => {
-                    rollback_api_key_create(storage, &created, &error).await;
-                    return Err(UpstreamError::Internal {
-                        detail: "failed to store upstream api-key credential".to_owned(),
-                    });
-                }
-            }
-        }
+        Some(plaintext) => store_api_key_credential(&state, storage, &created, &plaintext).await?,
         None => created,
     };
     let payload = AuditPayload::UpstreamCreate {
@@ -1748,6 +1727,76 @@ async fn rollback_api_key_create(
     }
 }
 
+/// Encrypts the operator-provided api key under the upstream id and stores it
+/// on the row committed moments ago, then clears the transient apply error a
+/// concurrent view rebuild may have written while the row was still
+/// credential-less. The clear is conditional and best-effort: it only runs when
+/// the stored record still carries an error (an unconditional clear would also
+/// stamp `last_apply_at` on every api-key create), and a failure to clear is
+/// logged rather than failing an otherwise successful create — the stored
+/// credential is already correct and the next rebuild resolves the status.
+async fn store_api_key_credential(
+    state: &AdminState,
+    storage: &dyn Storage,
+    created: &UpstreamRecord,
+    plaintext: &str,
+) -> Result<UpstreamRecord, UpstreamError> {
+    let ciphertext = match encrypt_plaintext_value(state, plaintext, created.id.as_bytes()) {
+        Ok(ciphertext) => ciphertext,
+        Err(error) => {
+            rollback_api_key_create(storage, created, &error).await;
+            return Err(error);
+        }
+    };
+    let record = match storage
+        .update_api_key_secret(created.id, Some(ciphertext))
+        .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            rollback_api_key_create(storage, created, &error).await;
+            return Err(UpstreamError::Internal {
+                detail: "failed to store upstream api-key credential".to_owned(),
+            });
+        }
+    };
+    if record.last_apply_error.is_none() {
+        return Ok(record);
+    }
+    if let Err(error) = UpstreamStore::set_last_apply_error(storage, record.id, None).await {
+        tracing::warn!(
+            upstream_id = %record.id,
+            error = %error,
+            "failed to clear transient apply error after storing upstream api-key credential"
+        );
+        return Ok(record);
+    }
+    match UpstreamStore::get_by_id(storage, record.id).await {
+        Ok(Some(record)) => Ok(record),
+        Ok(None) => {
+            tracing::warn!(
+                upstream_id = %record.id,
+                "upstream vanished while clearing transient apply error"
+            );
+            Ok(UpstreamRecord {
+                last_apply_error: None,
+                ..record
+            })
+        }
+        Err(error) => {
+            tracing::warn!(
+                upstream_id = %record.id,
+                error = %error,
+                "failed to re-read upstream after clearing transient apply error"
+            );
+            Ok(UpstreamRecord {
+                last_apply_error: None,
+                ..record
+            })
+        }
+    }
+}
+
 fn api_key_ciphertext_for_update(
     state: &AdminState,
     current: &UpstreamRecord,
@@ -2516,6 +2565,85 @@ mod tests {
                 .is_err(),
             "ciphertext must not decrypt under the upstream name"
         );
+    }
+
+    #[tokio::test]
+    async fn create_api_key_upstream_reports_null_last_apply_error() {
+        let context = test_context().await;
+        let body = serde_json::json!({
+            "name": "api-key-clean-status",
+            "kind": "anthropic_api_key",
+            "api_key_value": "sk-ant-CLEAN-STATUS",
+        });
+        let response = router()
+            .with_state(context.state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/v1/upstreams")
+                    .header("content-type", "application/json")
+                    .extension(test_admin_identity())
+                    .body(AxumBody::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body read succeeds");
+        let body: Value = serde_json::from_slice(&bytes).expect("response is json");
+        assert!(body["status"]["last_apply_error"].is_null());
+        assert!(body["status"]["last_apply_at_unix_secs"].is_null());
+    }
+
+    #[tokio::test]
+    async fn create_api_key_upstream_clears_raced_apply_error() {
+        let context = test_context().await;
+        let created = context
+            .storage
+            .create(UpstreamCreate {
+                name: format!("api-key-raced-{}", Uuid::new_v4().simple()),
+                kind: UpstreamKind::AnthropicApiKey,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_token_generation: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+            })
+            .await
+            .expect("upstream create succeeds");
+        // Simulate a view rebuild landing between the credential-less commit
+        // and the credential store: it marks the upstream errored.
+        context
+            .storage
+            .set_last_apply_error(
+                created.id,
+                Some("anthropic api-key upstream missing api_key_ciphertext".to_owned()),
+            )
+            .await
+            .expect("status seed succeeds");
+
+        let record = store_api_key_credential(
+            &context.state,
+            context.storage.as_ref(),
+            &created,
+            "sk-ant-RACED-SECRET",
+        )
+        .await
+        .expect("credential store succeeds");
+
+        let body = serde_json::to_value(upstream_response(&record)).expect("response serializes");
+        assert!(body["status"]["last_apply_error"].is_null());
+        let stored = context
+            .storage
+            .get_by_id(created.id)
+            .await
+            .expect("read succeeds")
+            .expect("upstream exists");
+        assert!(stored.last_apply_error.is_none());
+        assert!(stored.api_key_ciphertext.is_some());
     }
 
     #[tokio::test]

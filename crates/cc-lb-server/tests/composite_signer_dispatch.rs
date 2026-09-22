@@ -221,6 +221,137 @@ async fn api_key_upstream_without_stored_credential_fails_closed() {
     );
 }
 
+#[tokio::test]
+async fn api_key_upstream_resolves_canonical_raw_utf8_credential() {
+    let fixture = Fixture::new().await;
+    let upstream_id = fixture
+        .create_api_key_upstream_record("api-key-canonical")
+        .await;
+    fixture
+        .store_api_key_ciphertext(
+            upstream_id,
+            upstream_id.as_bytes(),
+            b"sk-ant-UPSTREAM-SECRET",
+        )
+        .await;
+
+    let (status, body) =
+        drive_proxied_request(&fixture, "api-key-canonical-principal", upstream_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let last = fetch_last_request(&fixture).await;
+    assert_eq!(last.x_api_key.as_deref(), Some("sk-ant-UPSTREAM-SECRET"));
+}
+
+#[tokio::test]
+async fn api_key_upstream_resolves_legacy_id_aad_json_quoted_credential() {
+    // Pre-PR PATCH/PUT writes: AAD = upstream.id, plaintext = serde_json::to_vec(&String),
+    // i.e. the key wrapped in literal double quotes.
+    let fixture = Fixture::new().await;
+    let upstream_id = fixture
+        .create_api_key_upstream_record("api-key-legacy-update")
+        .await;
+    let plaintext =
+        serde_json::to_vec(&"sk-ant-UPSTREAM-SECRET".to_owned()).expect("json plaintext");
+    fixture
+        .store_api_key_ciphertext(upstream_id, upstream_id.as_bytes(), &plaintext)
+        .await;
+
+    let (status, body) =
+        drive_proxied_request(&fixture, "api-key-legacy-update-principal", upstream_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let last = fetch_last_request(&fixture).await;
+    assert_eq!(
+        last.x_api_key.as_deref(),
+        Some("sk-ant-UPSTREAM-SECRET"),
+        "legacy JSON-quoted credential must be unquoted before signing"
+    );
+}
+
+#[tokio::test]
+async fn api_key_upstream_resolves_legacy_name_aad_json_quoted_credential() {
+    // Pre-PR POST /admin/v1/upstreams writes: AAD = upstream.name, plaintext =
+    // the same JSON-quoted form.
+    let fixture = Fixture::new().await;
+    let name = "api-key-legacy-create";
+    let upstream_id = fixture.create_api_key_upstream_record(name).await;
+    let plaintext =
+        serde_json::to_vec(&"sk-ant-UPSTREAM-SECRET".to_owned()).expect("json plaintext");
+    fixture
+        .store_api_key_ciphertext(upstream_id, name.as_bytes(), &plaintext)
+        .await;
+
+    let (status, body) =
+        drive_proxied_request(&fixture, "api-key-legacy-create-principal", upstream_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let last = fetch_last_request(&fixture).await;
+    assert_eq!(
+        last.x_api_key.as_deref(),
+        Some("sk-ant-UPSTREAM-SECRET"),
+        "legacy name-AAD credential must decrypt and be unquoted before signing"
+    );
+}
+
+#[tokio::test]
+async fn api_key_upstream_rejects_credential_that_is_not_a_valid_header_value() {
+    let fixture = Fixture::new().await;
+    let upstream_id = fixture
+        .create_api_key_upstream_record("api-key-invalid-header")
+        .await;
+    fixture
+        .store_api_key_ciphertext(upstream_id, upstream_id.as_bytes(), b"sk-ant-BAD\nKEY")
+        .await;
+
+    let (status, body) =
+        drive_proxied_request(&fixture, "api-key-invalid-header-principal", upstream_id).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_GATEWAY,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let last = fetch_last_request(&fixture).await;
+    assert_eq!(
+        last.x_api_key, None,
+        "upstream must not see the downstream caller's managed key"
+    );
+    assert_eq!(last.authorization, None);
+}
+
+#[tokio::test]
+async fn api_key_upstream_fails_closed_when_ciphertext_uses_unknown_aad() {
+    let fixture = Fixture::new().await;
+    let upstream_id = fixture
+        .create_api_key_upstream_record("api-key-unknown-aad")
+        .await;
+    fixture
+        .store_api_key_ciphertext(
+            upstream_id,
+            b"neither-the-id-nor-the-name",
+            b"sk-ant-UPSTREAM-SECRET",
+        )
+        .await;
+
+    let (status, body) =
+        drive_proxied_request(&fixture, "api-key-unknown-aad-principal", upstream_id).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_GATEWAY,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let last = fetch_last_request(&fixture).await;
+    assert_eq!(
+        last.x_api_key, None,
+        "upstream must not see the downstream caller's managed key"
+    );
+    assert_eq!(last.authorization, None);
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     storage: Arc<Storage>,
@@ -353,6 +484,15 @@ impl Fixture {
             .await
             .expect("api key secret stored");
         id
+    }
+
+    /// Persists an arbitrary (aad, plaintext) pair as the upstream's stored
+    /// credential so tests can seed each historical on-disk ciphertext shape.
+    async fn store_api_key_ciphertext(&self, id: Uuid, aad: &[u8], plaintext: &[u8]) {
+        let ciphertext = self.aead.encrypt(plaintext, aad).expect("api key encrypt");
+        UpstreamStore::update_api_key_secret(self.storage.as_ref(), id, Some(ciphertext))
+            .await
+            .expect("api key secret stored");
     }
 
     async fn create_api_key_upstream_record(&self, name: &str) -> Uuid {
@@ -707,6 +847,57 @@ fn encrypted(
     bundle: &OAuthTokenBundle,
 ) -> EncryptedOAuthTokens {
     EncryptedOAuthTokens::encrypt(aead, bundle, upstream_id.as_bytes()).expect("encrypt")
+}
+
+/// Creates a principal and managed key, builds the lifecycle, and drives one
+/// `POST /v1/messages` through the proxy. Returns the response status and body.
+async fn drive_proxied_request(
+    fixture: &Fixture,
+    principal_name: &str,
+    upstream_id: Uuid,
+) -> (StatusCode, Bytes) {
+    fixture
+        .create_principal(principal_name, vec![upstream_id])
+        .await;
+    let key_store = Arc::new(KeyStore::new(fixture.storage.clone()));
+    let (_key_record, key_secret) = key_store
+        .create(
+            principal_name,
+            CreateParams {
+                label: "composite-signer-dispatch".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("managed key created");
+    let lifecycle = fixture.lifecycle(key_store).await;
+
+    let response = lifecycle
+        .handle(message_request(key_secret.expose()))
+        .await
+        .expect("lifecycle response");
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body")
+        .to_bytes();
+    (status, body)
+}
+
+async fn fetch_last_request(fixture: &Fixture) -> LastRequest {
+    let last = raw_http(
+        "GET",
+        &format!("{}/__last_request", fixture.fake_base),
+        &[],
+        &[],
+    )
+    .await
+    .expect("last_request");
+    serde_json::from_slice(&last.body).expect("last_request json")
 }
 
 fn message_request(api_key: &str) -> Request<Bytes> {

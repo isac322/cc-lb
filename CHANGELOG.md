@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - New request logs retain endpoint-category metadata for consistent history and live filtering. Existing logs without that metadata remain available under Unclassified on the Logs page; existing renewal logs remain under Renewals.
 - Overview and Upstreams now surface OAuth reconnect guidance for known refresh-token expiry and failed renewal, with direct Connect/Reconnect actions. For a standard refreshing credential, warnings begin three days before a known deadline and routine access-token expiry does not trigger a warning while refresh remains available. A long-lived credential has no meaningful refresh deadline, so its guidance is driven by the access token instead and begins two weeks before it expires. Disabled upstreams are excluded from global attention counts.
 - Upstreams shows which credential mode an OAuth upstream uses. For a long-lived credential the stored refresh token is listed as retained but unused, and no refresh-token expiry warning is shown.
+- For `anthropic_api_key` upstreams, a credential supplied by the downstream client is no longer forwarded to the upstream in any header. The upstream receives only the operator-configured key, mirroring how OAuth upstreams already replace `x-api-key` with their own bearer token. A deployment that relied on passing a client-supplied `Authorization` header through cc-lb to an authenticating gateway named in `base_url` must move that gateway in front of cc-lb instead.
 
 ### Breaking changes
 
@@ -22,6 +23,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Prompt-cache routing reads a request-scoped shared-store snapshot, and out-of-order observation writes cannot shorten a committed expiry or replace its metadata with older data. Streaming observations are submitted when `message_start` usage arrives; response delivery never waits for their commit. Store lookup failures disable cache affinity for that decision without failing the request.
+- `anthropic_api_key` upstreams now sign upstream requests with the credential configured as `api_key_value` or `api_key_env`, which was previously validated, encrypted, and stored but never used. Credentials written by earlier versions continue to work unchanged, in either historical storage form, with no operator action and no re-entry of keys. A credential that cannot be resolved fails the request with a gateway error and is reported through the upstream's apply status; it never falls back to a client-supplied key.
 
 ## [0.5.0] - 2026-09-20
 
