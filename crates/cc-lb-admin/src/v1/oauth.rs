@@ -82,11 +82,7 @@ struct UpstreamOAuthStatusResponse {
     can_refresh: bool,
 }
 #[derive(Deserialize)]
-struct StartRequest {
-    /// Requested credential mode; defaults to the 365-day long-lived grant.
-    #[serde(default)]
-    mode: OAuthTokenMode,
-}
+struct StartRequest {}
 
 // `revision` is echoed so the frontend can refresh its cached `If-Match`
 // before a cancel-cleanup DELETE. start_oauth does not currently mutate
@@ -96,14 +92,12 @@ struct StartResponse {
     authorize_url: String,
     state_token: String,
     revision: u64,
-    mode: OAuthTokenMode,
 }
 
 #[derive(Serialize)]
 struct DraftStartResponse {
     authorize_url: String,
     state_token: String,
-    mode: OAuthTokenMode,
 }
 
 #[derive(Deserialize)]
@@ -201,7 +195,7 @@ async fn start_oauth(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
     Path(upstream_id): Path<Uuid>,
-    Json(payload): Json<StartRequest>,
+    Json(_payload): Json<StartRequest>,
 ) -> Response {
     let Some(storage) = state.storage.as_ref() else {
         return StatusCode::NOT_IMPLEMENTED.into_response();
@@ -226,14 +220,12 @@ async fn start_oauth(
     }
     let upstream_revision = upstream.revision;
 
-    let claude_default;
-    let oauth = match state.config.oauth.anthropic.as_ref() {
-        Some(oauth) => oauth,
-        None => {
-            claude_default = claude_code_default_oauth();
-            &claude_default
-        }
-    };
+    let oauth = state
+        .config
+        .oauth
+        .anthropic
+        .clone()
+        .unwrap_or_else(AnthropicOAuthConfig::default);
     let authorize_endpoint = match AuthUrl::new(oauth.auth_url.to_string()) {
         Ok(url) => url,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -242,19 +234,13 @@ async fn start_oauth(
         Ok(url) => url,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let mode = payload.mode;
-    let scopes = if mode.never_refresh() {
-        oauth.long_lived_scopes.clone()
-    } else {
-        oauth.scopes.clone()
-    };
+    let scopes = oauth.scopes.clone();
     let handshake = start_pkce_flow(
         ClientId::new(oauth.client_id.clone()),
         authorize_endpoint,
         token_endpoint,
         scopes,
         oauth.redirect_uri.clone(),
-        mode,
     );
     let mut handshake_state = handshake.into_state();
     let state_token = match encode_state(upstream_id) {
@@ -322,7 +308,6 @@ async fn start_oauth(
         authorize_url: handshake_state.authorize_url.to_string(),
         state_token,
         revision: upstream_revision,
-        mode,
     })
     .into_response()
 }
@@ -330,19 +315,17 @@ async fn start_oauth(
 async fn start_oauth_draft(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
-    Json(payload): Json<StartRequest>,
+    Json(_payload): Json<StartRequest>,
 ) -> Response {
     let Some(storage) = state.storage.as_ref() else {
         return StatusCode::NOT_IMPLEMENTED.into_response();
     };
-    let claude_default;
-    let oauth = match state.config.oauth.anthropic.as_ref() {
-        Some(oauth) => oauth,
-        None => {
-            claude_default = claude_code_default_oauth();
-            &claude_default
-        }
-    };
+    let oauth = state
+        .config
+        .oauth
+        .anthropic
+        .clone()
+        .unwrap_or_else(AnthropicOAuthConfig::default);
     let authorize_endpoint = match AuthUrl::new(oauth.auth_url.to_string()) {
         Ok(url) => url,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -351,19 +334,13 @@ async fn start_oauth_draft(
         Ok(url) => url,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let mode = payload.mode;
-    let scopes = if mode.never_refresh() {
-        oauth.long_lived_scopes.clone()
-    } else {
-        oauth.scopes.clone()
-    };
+    let scopes = oauth.scopes.clone();
     let handshake = start_pkce_flow(
         ClientId::new(oauth.client_id.clone()),
         authorize_endpoint,
         token_endpoint,
         scopes,
         oauth.redirect_uri.clone(),
-        mode,
     );
     let mut handshake_state = handshake.into_state();
     let state_token = match encode_state(Uuid::nil()) {
@@ -419,7 +396,6 @@ async fn start_oauth_draft(
     Json(DraftStartResponse {
         authorize_url: handshake_state.authorize_url.to_string(),
         state_token,
-        mode,
     })
     .into_response()
 }
@@ -721,7 +697,12 @@ async fn create_upstream_from_oauth_draft(
         }
     };
     let updated = match storage
-        .store_oauth_tokens(created.id, created.revision, encrypted_tokens)
+        .store_oauth_tokens(
+            created.id,
+            created.revision,
+            encrypted_tokens,
+            bundle.never_refresh,
+        )
         .await
     {
         Ok(updated) => updated,
@@ -948,7 +929,12 @@ async fn complete_oauth(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let updated = match storage
-        .store_oauth_tokens(upstream_id, expected_revision, encrypted)
+        .store_oauth_tokens(
+            upstream_id,
+            expected_revision,
+            encrypted,
+            bundle.never_refresh,
+        )
         .await
     {
         Ok(updated) => updated,
@@ -1271,21 +1257,17 @@ async fn seed_oauth_bootstrap_tasks(
     let Some(scheduler) = state.scheduler.as_ref() else {
         return Ok(());
     };
-    // A long-lived (365-day) credential must never be refreshed: scheduling a
-    // refresh would revoke the 365-day access token within seconds. When the
-    // credentials cannot be decrypted, fall through and seed as before so
-    // existing refreshing upstreams are unaffected.
-    if let Some(encrypted) = upstream.oauth_credentials.as_ref()
-        && let Ok(bundle) = encrypted.decrypt(state.aead.as_ref(), upstream.id.as_bytes())
-        && bundle.never_refresh
-    {
-        return Ok(());
-    }
     let seed_secs = cc_lb_clock::unix_secs(state.clock.now());
-    for task in oauth_bootstrap_tasks(upstream.id, seed_secs) {
-        match scheduler.push_adaptive_task(task).await {
-            Ok(()) | Err(SchedulerError::Conflict(_)) => {}
-            Err(error) => return Err(error),
+    // A long-lived (365-day) credential must never be refreshed: scheduling a
+    // refresh would revoke the 365-day access token within seconds. Only the
+    // OAuth refresh bootstrap is skipped — a long-lived upstream is otherwise
+    // fully managed and still receives its warmup bootstrap below.
+    if !upstream.oauth_never_refresh {
+        for task in oauth_bootstrap_tasks(upstream.id, seed_secs) {
+            match scheduler.push_adaptive_task(task).await {
+                Ok(()) | Err(SchedulerError::Conflict(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     if upstream.kind == UpstreamKind::AnthropicOauth
@@ -1434,24 +1416,6 @@ fn normalize_oauth_code(input: &str) -> String {
         return value.into_owned();
     }
     trimmed.split('#').next().unwrap_or(trimmed).to_string()
-}
-
-fn claude_code_default_oauth() -> AnthropicOAuthConfig {
-    AnthropicOAuthConfig {
-        client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e".to_owned(),
-        auth_url: Url::parse("https://claude.ai/oauth/authorize").expect("valid url"),
-        token_url: Url::parse("https://console.anthropic.com/v1/oauth/token").expect("valid url"),
-        redirect_uri: Url::parse("https://console.anthropic.com/oauth/code/callback")
-            .expect("valid url"),
-        scopes: vec![
-            "org:create_api_key".to_owned(),
-            "user:profile".to_owned(),
-            "user:inference".to_owned(),
-        ],
-        // `org:create_api_key` is deliberately absent: Anthropic rejects
-        // long-lived grants that include it.
-        long_lived_scopes: vec!["user:profile".to_owned(), "user:inference".to_owned()],
-    }
 }
 
 #[cfg(test)]

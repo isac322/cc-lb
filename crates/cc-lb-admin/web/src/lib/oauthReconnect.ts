@@ -86,10 +86,23 @@ export function classifyOAuthReconnect(
   }
 
   // A long-lived credential never refreshes: the refresh token is stored but
-  // unusable, and no renewal ever runs, so last_apply_error stays empty.
-  // Ignore the refresh token entirely and drive the nudge off the access
-  // token, which is the only real deadline.
+  // unusable, and no renewal ever runs. An authoritative authentication
+  // failure still means the credential was rejected and must be reconnected.
+  // Check it before access-token expiry so the actionable cause wins.
   if (status.mode === 'long_lived_365d') {
+    if (lastApplyError === 'status_400' || lastApplyError === 'status_401') {
+      return {
+        tone: 'danger',
+        label: 'Long-lived credential rejected',
+        description:
+          'The long-lived OAuth credential was rejected. Reconnect the account to restore requests.',
+        actionLabel: 'Reconnect',
+        expiresAt: null,
+      };
+    }
+
+    // Ignore the refresh token entirely and drive the nudge off the access
+    // token, which is the only real deadline.
     const accessExpiresAt = status.expires_at_unix_secs;
     // An unknown deadline gets no invented countdown.
     if (accessExpiresAt == null) return null;

@@ -2370,7 +2370,12 @@ mod tests {
             AeadEncryptedField::<OAuthTokenBundle>::encrypt(aead, &bundle, created.id.as_bytes())
                 .expect("token encryption succeeds");
         storage
-            .store_oauth_tokens(created.id, created.revision, encrypted)
+            .store_oauth_tokens(
+                created.id,
+                created.revision,
+                encrypted,
+                bundle.never_refresh,
+            )
             .await
             .expect("token store succeeds")
     }

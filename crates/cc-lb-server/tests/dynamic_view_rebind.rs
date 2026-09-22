@@ -225,6 +225,7 @@ async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
             corrupt.id,
             corrupt.revision,
             EncryptedOAuthTokens::from_ciphertext(vec![9]),
+            false,
         )
         .await
         .expect("corrupt oauth stored");

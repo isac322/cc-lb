@@ -36,6 +36,7 @@ impl UpstreamStore for MemoryUpstreamStore {
             base_url: create.base_url,
             enabled: true,
             oauth_credentials: None,
+            oauth_never_refresh: false,
             api_key_ciphertext: create.api_key_ciphertext,
             last_apply_error: None,
             last_apply_at_unix_secs: None,
@@ -218,9 +219,15 @@ impl UpstreamStore for MemoryUpstreamStore {
         id: Uuid,
         expected_revision: u64,
         tokens: EncryptedOAuthTokens,
+        never_refresh: bool,
     ) -> StorageResult<UpstreamRecord> {
         self.ensure_revision(id, expected_revision).await?;
-        self.update_oauth_token(id, tokens).await
+        self.update_oauth_token(id, tokens).await?;
+        self.mutate_without_revision(id, |record| {
+            record.oauth_never_refresh = never_refresh;
+            Ok(())
+        })
+        .await
     }
 
     async fn complete_refresh(
@@ -488,7 +495,7 @@ scenario!(
         let s = store();
         let r = create_default(&s, "primary").await;
         assert!(
-            s.store_oauth_tokens(r.id, r.revision, tokens("one"))
+            s.store_oauth_tokens(r.id, r.revision, tokens("one"), false)
                 .await
                 .unwrap()
                 .oauth_credentials
@@ -500,7 +507,7 @@ scenario!(upstream_store_11_oauth_tokens_decrypt_roundtrip, async {
     let s = store();
     let r = create_default(&s, "primary").await;
     let u = s
-        .store_oauth_tokens(r.id, r.revision, tokens("one"))
+        .store_oauth_tokens(r.id, r.revision, tokens("one"), false)
         .await
         .unwrap();
     let aead = AeadService::from_master_key([7; 32]);

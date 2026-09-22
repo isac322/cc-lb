@@ -1149,16 +1149,15 @@ export function useUpdateUpstreamWarmupSettings() {
 }
 export function useOAuthStart() {
   return useMutation({
-    mutationFn: ({ id, mode }: { id: string; mode?: OAuthTokenMode }) =>
+    mutationFn: ({ id }: { id: string }) =>
       postJson<
         {
           authorize_url: string;
           state_token: string;
           revision: number;
-          mode: OAuthTokenMode;
         },
-        { mode?: OAuthTokenMode }
-      >(`/admin/v1/upstreams/${id}/oauth/start`, { mode }),
+        Record<string, never>
+      >(`/admin/v1/upstreams/${id}/oauth/start`, {}),
   });
 }
 export function useOAuthComplete() {
@@ -1676,7 +1675,7 @@ export function useSaveConfigFile() {
 
 export function useStartOauthDraft() {
   return useMutation({
-    mutationFn: (body?: { mode?: OAuthTokenMode }) => startOauthDraft(body),
+    mutationFn: () => startOauthDraft(),
     meta: { inlineError: true },
   });
 }

@@ -119,12 +119,11 @@ async function installAppFixtures(
       return json(200, { ...oauthStatus, upstream_id: oauthStatusMatch[1] });
     }
     if (pathname === '/admin/v1/oauth/draft/start' && method === 'POST') {
-      const body = request.postDataJSON() as { mode?: string } | null;
+      const body = request.postDataJSON() as Record<string, unknown> | null;
       options.draftStartRequests?.push(body);
       return json(200, {
         authorize_url: 'https://claude.ai/oauth/authorize?mock=1',
         state_token: 'mock-state-token',
-        mode: body?.mode ?? 'long_lived_365d',
       });
     }
     if (pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)\/subscription-metadata/)) {
@@ -288,7 +287,7 @@ test.describe('OAuth long-lived credential display', () => {
     await expect(refreshExpiry).toContainText('expires');
   });
 
-  test('Scenario: create wizard offers the mode choice with the 365-day token selected by default', async ({
+  test('Scenario: create wizard starts the OAuth flow without a credential-mode choice', async ({
     page,
   }) => {
     const draftStartRequests: unknown[] = [];
@@ -305,21 +304,12 @@ test.describe('OAuth long-lived credential display', () => {
     await expect(dialog).toBeVisible();
     await dialog.getByRole('button', { name: 'Continue' }).click();
 
-    const modeChoice = page.getByTestId('oauth-mode-choice');
-    await expect(modeChoice).toBeVisible();
-    await expect(
-      modeChoice.getByRole('radio', { name: /365-day direct token/ }),
-    ).toBeChecked();
-    await expect(
-      modeChoice.getByRole('radio', { name: /Standard refreshing token/ }),
-    ).not.toBeChecked();
-
-    // Authorizing sends the chosen mode to the draft-start endpoint and
-    // reveals the code-paste step.
+    // Authorizing posts an empty body to the draft-start endpoint: cc-lb
+    // always requests the long-lived grant and decides the outcome itself.
     await dialog
       .getByRole('button', { name: 'Authorize with Anthropic' })
       .click();
     await expect(dialog.getByPlaceholder('paste code...')).toBeVisible();
-    expect(draftStartRequests).toEqual([{ mode: 'long_lived_365d' }]);
+    expect(draftStartRequests).toEqual([{}]);
   });
 });

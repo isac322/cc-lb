@@ -118,9 +118,19 @@ describe('classifyOAuthReconnect — long-lived credentials', () => {
     ).toBeNull();
   });
 
-  it('ignores a stale renewal-failure error — no renewal ever runs', () => {
-    const status = longLived({ expires_at_unix_secs: NOW + 335 * DAY });
-    expect(classifyOAuthReconnect(status, 'status_401', NOW)).toBeNull();
+  it('reports a rejected credential before access-token expiry nudges', () => {
+    const status = longLived({
+      expires_at_unix_secs: NOW + 10 * DAY,
+    });
+    const nudge = classifyOAuthReconnect(status, 'status_401', NOW);
+    expect(nudge).toMatchObject({
+      tone: 'danger',
+      label: 'Long-lived credential rejected',
+      description:
+        'The long-lived OAuth credential was rejected. Reconnect the account to restore requests.',
+      actionLabel: 'Reconnect',
+      expiresAt: null,
+    });
   });
 
   it('keeps the corrupted branch ahead of the mode branch', () => {

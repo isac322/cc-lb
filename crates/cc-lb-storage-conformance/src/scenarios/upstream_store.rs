@@ -215,8 +215,12 @@ scenario!(store_oauth_tokens_roundtrip, |store| async move {
     let bundle = token_bundle("access-a", "refresh-a");
     let encrypted = EncryptedOAuthTokens::encrypt(&aead, &bundle, record.id.as_bytes())?;
     let updated = store
-        .store_oauth_tokens(record.id, record.revision, encrypted)
+        .store_oauth_tokens(record.id, record.revision, encrypted, true)
         .await?;
+    ensure!(
+        updated.oauth_never_refresh,
+        "long-lived mode should round-trip"
+    );
     ensure!(
         updated
             .oauth_credentials
@@ -224,6 +228,15 @@ scenario!(store_oauth_tokens_roundtrip, |store| async move {
             .decrypt(&aead, record.id.as_bytes())?
             == bundle,
         "stored tokens should decrypt"
+    );
+    let bundle = token_bundle("access-b", "refresh-b");
+    let encrypted = EncryptedOAuthTokens::encrypt(&aead, &bundle, record.id.as_bytes())?;
+    let updated = store
+        .store_oauth_tokens(record.id, updated.revision, encrypted, false)
+        .await?;
+    ensure!(
+        !updated.oauth_never_refresh,
+        "refreshing mode should round-trip"
     );
     Ok(())
 });
