@@ -28,13 +28,13 @@ use cc_lb_storage_api::{
     UpstreamRateLimitObservationRecord, UpstreamRecord, types::StoredApiKeyRecord,
     upstream::UpstreamKind as StorageUpstreamKind,
 };
+#[cfg(test)]
+use cc_lb_upstream::SignerFactory;
 use cc_lb_upstream::{
     ApiKeyAwareSignerFactory, DialectError, DialectShapeContext, ResponseTransformError,
-    RetryDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer,
+    RetryDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
     TransformResponseRequest, UpstreamDialect, UpstreamError, shape_request,
 };
-#[cfg(test)]
-use cc_lb_upstream::{SignerError, SignerFactory};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body::Body as _;
@@ -74,14 +74,13 @@ use crate::prompt_cache_simulator::{
 };
 use crate::request_classification::classify_client_request_kind;
 use crate::request_context::RequestContext;
-use crate::request_timing::{
-    REQUEST_STAGE_TIMINGS, RequestStageTimings, finalize_connection_reused_if_unset,
-};
+use crate::request_timing::{REQUEST_STAGE_TIMINGS, RequestStageTimings};
 use crate::sse_error_frame::make_error_frame;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{
-    LifecycleContext, StreamTerminationCause, classify_stream_error, error_codes,
+    InternalFailure, LifecycleContext, StreamTerminationCause, UpstreamErrorCode,
+    classify_stream_error, error_codes,
 };
 use crate::upstream_affinity::{
     extract_anthropic_web_search_affinity_keys,
@@ -99,7 +98,7 @@ pub use cc_lb_control::{
     PromptCacheThreadUsageTrackerLike, SubscriptionQuotaCacheLike,
 };
 use cc_lb_domain::ReplicaIdentity;
-use cc_lb_observability::{redact_internal_errors, truncate_reason};
+use cc_lb_observability::truncate_reason;
 
 pub type Body = AxumBody;
 
@@ -1790,17 +1789,169 @@ pub enum ProxyError {
     #[error("response build failed: {reason}")]
     ResponseBuild { reason: String },
 }
-
 #[derive(Debug, Error)]
 pub enum DispatchError {
     #[error("invalid upstream uri: {reason}")]
     InvalidUri { reason: String },
     #[error("upstream request build failed: {reason}")]
     RequestBuild { reason: String },
-    #[error("upstream dispatch failed: {reason}")]
-    Transport { reason: String },
+    /// Transport failure with the typed source preserved: `source()` yields
+    /// the hyper/connect/io error chain so terminal classification can
+    /// distinguish DNS, TCP, TLS, and timeout failures without string
+    /// matching.
+    #[error("upstream dispatch failed: {source}")]
+    Transport {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("upstream bulkhead queue full; retry after {retry_after:?}")]
     BulkheadFull { retry_after: Duration },
+}
+
+/// Failure of the raw-passthrough fallback used when dialect shaping fails.
+#[derive(Debug, Error)]
+enum RawPassthroughError {
+    /// The configured or default upstream base URL failed to parse.
+    #[error("invalid raw passthrough base url: {0}")]
+    BaseUrl(#[from] url::ParseError),
+    /// The raw-passthrough dialect failed to shape the request.
+    #[error("raw passthrough shaping failed: {0}")]
+    Shape(#[from] DialectError),
+}
+
+/// A failed upstream attempt carrying the typed cause until the outer
+/// response-conversion point.
+///
+/// The attempt boundary used to fold every failure into a boxed
+/// `Response<Body>`, which destroyed the error chain and made the terminal
+/// commit reasonless. This enum keeps the real cause so the caller can build
+/// the client response and the [`InternalFailure`] diagnostic from the same
+/// value.
+#[derive(Debug)]
+enum AttemptFailure {
+    /// The raw-passthrough fallback itself failed after dialect shaping had
+    /// already failed.
+    RawPassthrough(RawPassthroughError),
+    /// Request signing failed.
+    Sign(SignerError),
+    /// Dispatch to the upstream failed.
+    Dispatch(DispatchError),
+}
+
+impl From<RawPassthroughError> for AttemptFailure {
+    fn from(source: RawPassthroughError) -> Self {
+        Self::RawPassthrough(source)
+    }
+}
+
+impl AttemptFailure {
+    /// Convert into the client-visible response and the terminal diagnostic.
+    ///
+    /// Response status, body, and `Retry-After` semantics are identical to the
+    /// previous inline mapping.
+    fn into_response_and_failure(self) -> (Response<Body>, InternalFailure) {
+        match self {
+            Self::RawPassthrough(source) => {
+                let response = anthropic_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    "failed to prepare raw upstream request",
+                );
+                let failure = InternalFailure {
+                    status: StatusCode::BAD_GATEWAY,
+                    error_code: error_codes::UPSTREAM_DISPATCH_FAILED,
+                    error: InternalError {
+                        stage: InternalErrorStage::Relay,
+                        kind: InternalErrorKind::Unavailable,
+                        message: Some(source.to_string()),
+                    },
+                };
+                (response, failure)
+            }
+            Self::Sign(source) => {
+                let response = anthropic_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    "failed to sign upstream request",
+                );
+                let failure = InternalFailure {
+                    status: StatusCode::BAD_GATEWAY,
+                    error_code: error_codes::SIGNER_FAILED,
+                    error: InternalError {
+                        stage: InternalErrorStage::Signer,
+                        kind: signer_error_kind(&source),
+                        message: Some(source.to_string()),
+                    },
+                };
+                (response, failure)
+            }
+            Self::Dispatch(source) => {
+                let (response, kind, message) = match &source {
+                    DispatchError::BulkheadFull { retry_after } => (
+                        anthropic_error_response_with_retry_after(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "overloaded_error",
+                            "upstream bulkhead queue is full",
+                            retry_after.as_secs().max(1),
+                        ),
+                        InternalErrorKind::Unavailable,
+                        source.to_string(),
+                    ),
+                    DispatchError::InvalidUri { .. } | DispatchError::RequestBuild { .. } => (
+                        anthropic_error_response(
+                            StatusCode::BAD_GATEWAY,
+                            "api_error",
+                            "upstream request failed",
+                        ),
+                        InternalErrorKind::ConfigError,
+                        source.to_string(),
+                    ),
+                    DispatchError::Transport { source: transport } => {
+                        let failure_kind =
+                            crate::bulkhead::classify_transport_error(transport.as_ref());
+                        let chain =
+                            crate::bulkhead::transport_error_chain(transport.as_ref()).join(" <- ");
+                        (
+                            anthropic_error_response(
+                                StatusCode::BAD_GATEWAY,
+                                "api_error",
+                                "upstream request failed",
+                            ),
+                            match failure_kind {
+                                crate::bulkhead::TransportFailureKind::Timeout => {
+                                    InternalErrorKind::Timeout
+                                }
+                                _ => InternalErrorKind::Unavailable,
+                            },
+                            format!("{failure_kind}: {chain}"),
+                        )
+                    }
+                };
+                let failure = InternalFailure {
+                    status: response.status(),
+                    error_code: error_codes::UPSTREAM_DISPATCH_FAILED,
+                    error: InternalError {
+                        stage: InternalErrorStage::Relay,
+                        kind,
+                        message: Some(message),
+                    },
+                };
+                (response, failure)
+            }
+        }
+    }
+}
+
+/// Map a signing failure to its diagnostic kind.
+fn signer_error_kind(error: &SignerError) -> InternalErrorKind {
+    match error {
+        SignerError::MissingCredentials { .. }
+        | SignerError::InvalidCredentials { .. }
+        | SignerError::WrongStrategy { .. } => InternalErrorKind::ConfigError,
+        SignerError::StorageUnavailable { .. } | SignerError::ExpiredToken { .. } => {
+            InternalErrorKind::Unavailable
+        }
+        SignerError::SigningFailed { .. } => InternalErrorKind::PluginError,
+    }
 }
 
 #[async_trait]
@@ -2455,15 +2606,7 @@ impl Lifecycle {
         store_setup_timings(observer.as_ref(), setup_timings);
         if let Some(response) = body_too_large {
             if let Some(o) = observer.as_ref() {
-                let cap = body_cap_for_path(&self.config, &ctx.path);
-                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
-                    event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_lifecycle::ParseFailure::BodyTooLarge {
-                        limit_bytes: cap as u64,
-                    }),
-                });
-                o.set_terminal(StatusCode::PAYLOAD_TOO_LARGE, error_codes::BODY_TOO_LARGE);
-                o.finish();
+                o.terminate_body_too_large(body_cap_for_path(&self.config, &ctx.path) as u64);
             }
             return Ok(*response);
         }
@@ -2473,8 +2616,15 @@ impl Lifecycle {
                     event_id: o.event_id().to_owned(),
                     result: Err(cc_lb_lifecycle::ParseFailure::InvalidJson),
                 });
-                o.set_terminal(StatusCode::BAD_REQUEST, error_codes::INVALID_JSON);
-                o.finish();
+                o.terminate_failure(InternalFailure {
+                    status: StatusCode::BAD_REQUEST,
+                    error_code: error_codes::INVALID_JSON,
+                    error: InternalError {
+                        stage: InternalErrorStage::Ingress,
+                        kind: InternalErrorKind::InvalidInput,
+                        message: Some("request body must be valid JSON".to_owned()),
+                    },
+                });
             }
             return Ok(anthropic_error_response(
                 StatusCode::BAD_REQUEST,
@@ -2569,7 +2719,7 @@ impl Lifecycle {
         let Some(cached) = principal_view.get(&principal_id) else {
             tracing::error!(%principal_id, "authenticated principal missing from principal view");
             if let Some(o) = observer.as_ref() {
-                o.emit_provider_error(
+                o.notify_error_hooks(
                     "principal_missing",
                     "authenticated principal is unavailable",
                     "authn",
@@ -2587,11 +2737,15 @@ impl Lifecycle {
                         principal_id: principal_id.clone(),
                     }),
                 });
-                o.set_terminal(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    error_codes::PRINCIPAL_MISSING,
-                );
-                o.finish();
+                o.terminate_failure(InternalFailure {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code: error_codes::PRINCIPAL_MISSING,
+                    error: InternalError {
+                        stage: InternalErrorStage::Authn,
+                        kind: InternalErrorKind::Unavailable,
+                        message: Some("authenticated principal is unavailable".to_owned()),
+                    },
+                });
             }
             return Ok(response);
         };
@@ -2639,8 +2793,15 @@ impl Lifecycle {
             Ok(keys) => keys.unwrap_or_default(),
             Err(_) => {
                 if let Some(o) = observer.as_ref() {
-                    o.set_terminal(StatusCode::BAD_REQUEST, error_codes::INVALID_JSON);
-                    o.finish();
+                    o.terminate_failure(InternalFailure {
+                        status: StatusCode::BAD_REQUEST,
+                        error_code: error_codes::INVALID_JSON,
+                        error: InternalError {
+                            stage: InternalErrorStage::Ingress,
+                            kind: InternalErrorKind::InvalidInput,
+                            message: Some(UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE.to_owned()),
+                        },
+                    });
                 }
                 return Ok(anthropic_error_response(
                     StatusCode::BAD_REQUEST,
@@ -2656,9 +2817,16 @@ impl Lifecycle {
             Ok(resolution) => resolution,
             Err(failure) => {
                 if let Some(o) = observer.as_ref() {
-                    o.emit_provider_error(UPSTREAM_AFFINITY_ERROR_TYPE, failure.message, "storage");
-                    o.set_terminal(failure.status, error_codes::UPSTREAM_AFFINITY_UNAVAILABLE);
-                    o.finish();
+                    o.notify_error_hooks(UPSTREAM_AFFINITY_ERROR_TYPE, failure.message, "storage");
+                    o.terminate_failure(InternalFailure {
+                        status: failure.status,
+                        error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                        error: InternalError {
+                            stage: InternalErrorStage::Storage,
+                            kind: InternalErrorKind::Unavailable,
+                            message: Some(failure.message.to_owned()),
+                        },
+                    });
                 }
                 return Ok(failure.response());
             }
@@ -2673,7 +2841,7 @@ impl Lifecycle {
         let router_pipeline = cached.resolved_pipeline(None);
         if let Some(error) = router_pipeline.instantiation_error.as_deref() {
             if let Some(o) = observer.as_ref() {
-                o.emit_provider_error("router_pipeline_unavailable", error, "router");
+                o.notify_error_hooks("router_pipeline_unavailable", error, "router");
             }
             let response = anthropic_error_response(
                 StatusCode::BAD_GATEWAY,
@@ -2686,11 +2854,15 @@ impl Lifecycle {
                     result: Err(cc_lb_lifecycle::RouteFailure::RouterPipelineUnavailable),
                     routing_trace: None,
                 });
-                o.set_terminal(
-                    StatusCode::BAD_GATEWAY,
-                    error_codes::ROUTER_PIPELINE_UNAVAILABLE,
-                );
-                o.finish();
+                o.terminate_failure(InternalFailure {
+                    status: StatusCode::BAD_GATEWAY,
+                    error_code: error_codes::ROUTER_PIPELINE_UNAVAILABLE,
+                    error: InternalError {
+                        stage: InternalErrorStage::Router,
+                        kind: InternalErrorKind::ConfigError,
+                        message: Some(error.to_owned()),
+                    },
+                });
             }
             return Ok(response);
         }
@@ -2728,13 +2900,18 @@ impl Lifecycle {
             selected_cache_matches
                 .retain(|upstream_id, _| *upstream_id == affinity.target_upstream_id);
         }
-        let pipeline_result = execute_filter_pipeline(
+        let mut pipeline_result = execute_filter_pipeline(
             &router_pipeline.user_filters,
             &ctx,
             &principal,
             candidates,
             observer.as_ref(),
         );
+        if let Some(o) = observer.as_ref() {
+            for error in pipeline_result.internal_errors.drain(..) {
+                o.record_internal_error(error);
+            }
+        }
         let terminal_decision = self.select_terminal_upstream(
             router_pipeline.terminal.clone(),
             &pipeline_result.candidates,
@@ -2742,18 +2919,12 @@ impl Lifecycle {
         if pipeline_result.candidates.is_empty() {
             let message = "no upstream candidates remain after routing filters";
             if let Some(o) = observer.as_ref() {
-                o.emit_provider_error("route_no_upstream_after_filter", message, "router");
+                o.notify_error_hooks("route_no_upstream_after_filter", message, "router");
             }
-            let internal_errors = redact_internal_errors(&[InternalError {
-                stage: InternalErrorStage::RouterFilter,
-                kind: InternalErrorKind::Unavailable,
-                message: Some(message.to_owned()),
-            }]);
             self.emit_routing_failure_event(
                 observer.as_ref(),
                 StatusCode::SERVICE_UNAVAILABLE,
                 Some(pipeline_result.routing_trace(terminal_decision.clone())),
-                internal_errors,
             );
             let response = anthropic_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2776,7 +2947,7 @@ impl Lifecycle {
             .find(|record| record.id == resolved_upstream_id)
         else {
             if let Some(o) = observer.as_ref() {
-                o.emit_provider_error(
+                o.notify_error_hooks(
                     "route_not_configured",
                     "router selected an upstream missing from the dynamic view",
                     "router",
@@ -2793,8 +2964,17 @@ impl Lifecycle {
                     result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
                     routing_trace: None,
                 });
-                o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
-                o.finish();
+                o.terminate_failure(InternalFailure {
+                    status: StatusCode::BAD_GATEWAY,
+                    error_code: error_codes::ROUTE_NOT_CONFIGURED,
+                    error: InternalError {
+                        stage: InternalErrorStage::Router,
+                        kind: InternalErrorKind::ConfigError,
+                        message: Some(
+                            "router selected an upstream missing from the dynamic view".to_owned(),
+                        ),
+                    },
+                });
             }
             return Ok(response);
         };
@@ -2814,7 +2994,7 @@ impl Lifecycle {
             Ok(upstream) => upstream,
             Err(reason) => {
                 if let Some(o) = observer.as_ref() {
-                    o.emit_provider_error("route_not_configured", &reason, "router");
+                    o.notify_error_hooks("route_not_configured", &reason, "router");
                 }
                 let response = anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
@@ -2827,8 +3007,15 @@ impl Lifecycle {
                         result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
                         routing_trace: None,
                     });
-                    o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::ROUTE_NOT_CONFIGURED);
-                    o.finish();
+                    o.terminate_failure(InternalFailure {
+                        status: StatusCode::BAD_GATEWAY,
+                        error_code: error_codes::ROUTE_NOT_CONFIGURED,
+                        error: InternalError {
+                            stage: InternalErrorStage::Router,
+                            kind: InternalErrorKind::ConfigError,
+                            message: Some(reason),
+                        },
+                    });
                 }
                 return Ok(response);
             }
@@ -2957,7 +3144,7 @@ impl Lifecycle {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
                         event_id: o.event_id().to_owned(),
                         decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
-                            reason: info.reason_label,
+                            reason: info.reason_label.clone(),
                             subject: Some(info.subject),
                             request_summary: Some(info.request_summary),
                             route_summary: Some(info.route_summary),
@@ -2965,8 +3152,15 @@ impl Lifecycle {
                         },
                     });
                     o.set_termination_timings(None, None, Some(proxy_setup_ms), None, None);
-                    o.set_terminal(status, error_codes::LIMIT_REJECTED);
-                    o.finish();
+                    o.terminate_failure(InternalFailure {
+                        status,
+                        error_code: error_codes::LIMIT_REJECTED,
+                        error: InternalError {
+                            stage: InternalErrorStage::Router,
+                            kind: InternalErrorKind::Unavailable,
+                            message: Some(info.reason_label),
+                        },
+                    });
                 }
                 return Ok(response);
             }
@@ -3015,7 +3209,7 @@ impl Lifecycle {
             Ok(signer) => signer,
             Err(source) => {
                 if let Some(o) = observer.as_ref() {
-                    o.emit_provider_error("signing_error", &source.to_string(), "signer_factory");
+                    o.notify_error_hooks("signing_error", &source.to_string(), "signer_factory");
                 }
                 let mut response = anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
@@ -3024,8 +3218,15 @@ impl Lifecycle {
                 );
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
                 if let Some(o) = observer.as_ref() {
-                    o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::SIGNER_FAILED);
-                    o.finish();
+                    o.terminate_failure(InternalFailure {
+                        status: StatusCode::BAD_GATEWAY,
+                        error_code: error_codes::SIGNER_FAILED,
+                        error: InternalError {
+                            stage: InternalErrorStage::Signer,
+                            kind: signer_error_kind(&source),
+                            message: Some(source.to_string()),
+                        },
+                    });
                 }
                 return Ok(response);
             }
@@ -3035,7 +3236,6 @@ impl Lifecycle {
         let dispatch_unix_secs = unix_now_ms(&*self.clock) / 1000;
         let proxy_setup_ms = duration_to_ms(dispatch_started.saturating_duration_since(started));
         let mut attempt_timings = AttemptTimings::default();
-        let mut internal_errors = pipeline_result.internal_errors.clone();
         let mut keepalive_shaped_body = None;
         let mut keepalive_discard_shaped_body = None;
         if let Some(o) = observer.as_ref() {
@@ -3060,7 +3260,6 @@ impl Lifecycle {
                 signer.clone(),
                 observer.as_ref(),
                 &mut attempt_timings,
-                &mut internal_errors,
                 if track_keepalive_response {
                     &mut keepalive_shaped_body
                 } else {
@@ -3094,18 +3293,21 @@ impl Lifecycle {
                 }
                 response
             }
-            Err(response) => {
-                let mut response = *response;
+            Err(failure) => {
+                let (mut response, failure) = failure.into_response_and_failure();
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
-                let status = response.status();
                 if let Some(o) = observer.as_ref() {
                     o.set_attempt_timings(
                         attempt_timings.shape_ms,
                         attempt_timings.sign_ms,
                         attempt_timings.upstream_ttfb_ms,
                     );
-                    o.set_terminal(status, error_codes::UPSTREAM_DISPATCH_FAILED);
-                    o.finish();
+                    o.set_attempt_connection_timings(
+                        attempt_timings.dns_ms,
+                        attempt_timings.connect_ms,
+                        attempt_timings.connection_reused,
+                    );
+                    o.terminate_failure(failure);
                 }
                 return Ok(response);
             }
@@ -3154,7 +3356,6 @@ impl Lifecycle {
                         new_signer,
                         observer.as_ref(),
                         &mut attempt_timings,
-                        &mut internal_errors,
                         if track_keepalive_response {
                             &mut keepalive_shaped_body
                         } else {
@@ -3189,23 +3390,48 @@ impl Lifecycle {
                         }
                         response
                     }
-                    Err(response) => {
-                        let mut response = *response;
+                    Err(failure) => {
+                        let (mut response, failure) = failure.into_response_and_failure();
                         self.attach_limit_headers(&mut response, active_limit.as_ref());
-                        let status = response.status();
                         if let Some(o) = observer.as_ref() {
                             o.set_attempt_timings(
                                 attempt_timings.shape_ms,
                                 attempt_timings.sign_ms,
                                 attempt_timings.upstream_ttfb_ms,
                             );
-                            o.set_terminal(status, error_codes::UPSTREAM_DISPATCH_FAILED);
-                            o.finish();
+                            o.set_attempt_connection_timings(
+                                attempt_timings.dns_ms,
+                                attempt_timings.connect_ms,
+                                attempt_timings.connection_reused,
+                            );
+                            o.terminate_failure(failure);
                         }
                         return Ok(response);
                     }
                 };
             } else {
+                if let Some(o) = observer.as_ref()
+                    && let Ok(Some(error_body)) = decode_full_body(
+                        &unauthorized.headers,
+                        &unauthorized.body,
+                        decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
+                    )
+                    && !error_body.is_empty()
+                {
+                    let (error_type, error_message) =
+                        usage_parser::observe_http_error_body(&error_body)
+                            .map(usage_parser::CanonicalUpstreamError::into_parts)
+                            .unwrap_or_default();
+                    o.emit_lifecycle(
+                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                            event_id: o.event_id().to_owned(),
+                            error_type: error_type.unwrap_or_default(),
+                            error_message: error_message.unwrap_or_else(|| {
+                                bounded_lossy_upstream_error_body(&error_body, false)
+                            }),
+                        },
+                    );
+                }
                 let mut response = response_from_collected(unauthorized);
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
                 let status = response.status();
@@ -3216,12 +3442,12 @@ impl Lifecycle {
                         attempt_timings.upstream_ttfb_ms,
                     );
                     let code = if status.is_client_error() {
-                        error_codes::UPSTREAM_4XX
+                        UpstreamErrorCode::Upstream4xx
                     } else {
-                        error_codes::UPSTREAM_5XX
+                        UpstreamErrorCode::Upstream5xx
                     };
-                    o.emit_provider_error(code, status.as_str(), "upstream");
-                    o.set_terminal(status, code);
+                    o.notify_error_hooks(code.as_str(), status.as_str(), "upstream");
+                    o.set_upstream_error(status, code);
                     o.finish();
                 }
                 return Ok(response);
@@ -3265,7 +3491,6 @@ impl Lifecycle {
                     canonical_model_id: ctx.canonical_model_id.clone(),
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
-                    internal_errors,
                 },
                 ResponseTransformContext {
                     principal: principal.clone(),
@@ -3528,20 +3753,25 @@ impl Lifecycle {
             .and_then(usage_parser::detect_abnormal_stop_non_stream);
         let usage = observation.usage;
         let canonical_upstream_error = if status.is_client_error() || status.is_server_error() {
-            observation.canonical_error
-        } else {
-            None
-        };
-        let raw_upstream_error_message = if (status.is_client_error() || status.is_server_error())
-            && canonical_upstream_error.is_none()
-        {
-            semantic_body
+            response_body_json
                 .as_ref()
-                .filter(|body| !body.is_empty())
-                .map(|body| bounded_lossy_upstream_error_body(body, false))
+                .and_then(usage_parser::observe_http_error_value)
         } else {
             None
         };
+        let (upstream_error_type, parsed_upstream_message) = canonical_upstream_error
+            .map(usage_parser::CanonicalUpstreamError::into_parts)
+            .unwrap_or_default();
+        let upstream_error_message = parsed_upstream_message.or_else(|| {
+            if status.is_client_error() || status.is_server_error() {
+                semantic_body
+                    .as_ref()
+                    .filter(|body| !body.is_empty())
+                    .map(|body| bounded_lossy_upstream_error_body(body, false))
+            } else {
+                None
+            }
+        });
         let mut downstream_body = if body_collect_failed {
             parts.status = StatusCode::BAD_GATEWAY;
             parts.headers.clear();
@@ -3718,47 +3948,42 @@ impl Lifecycle {
                 Some(body_collect_ms),
                 first_body_chunk_ms,
             );
-            o.set_internal_errors(event_ctx.internal_errors.clone());
             if status.is_client_error() || status.is_server_error() {
-                if let Some(error) = canonical_upstream_error {
-                    let (error_type, error_message) = error.into_parts();
+                if upstream_error_type.is_some() || upstream_error_message.is_some() {
                     o.emit_lifecycle(
                         cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
                             event_id: o.event_id().to_owned(),
-                            error_type,
-                            error_message,
-                        },
-                    );
-                } else if let Some(error_message) = raw_upstream_error_message {
-                    o.emit_lifecycle(
-                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
-                            event_id: o.event_id().to_owned(),
-                            error_type: String::new(),
-                            error_message,
+                            error_type: upstream_error_type.unwrap_or_default(),
+                            error_message: upstream_error_message.unwrap_or_default(),
                         },
                     );
                 }
                 let code = if status.is_client_error() {
-                    error_codes::UPSTREAM_4XX
+                    UpstreamErrorCode::Upstream4xx
                 } else {
-                    error_codes::UPSTREAM_5XX
+                    UpstreamErrorCode::Upstream5xx
                 };
-                o.emit_provider_error(code, status.as_str(), "upstream");
-                o.set_terminal(status, code);
+                o.notify_error_hooks(code.as_str(), status.as_str(), "upstream");
+                o.set_upstream_error(status, code);
             } else if body_collect_failed {
-                o.set_terminal(StatusCode::BAD_GATEWAY, error_codes::UPSTREAM_STREAM_ERROR);
+                o.set_upstream_error(StatusCode::BAD_GATEWAY, UpstreamErrorCode::StreamError);
             } else if affinity_bind_failed {
-                o.emit_provider_error(
+                o.notify_error_hooks(
                     UPSTREAM_AFFINITY_ERROR_TYPE,
                     UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
                     "storage",
                 );
-                o.set_terminal(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
-                );
+                o.set_failure(InternalFailure {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                    error: InternalError {
+                        stage: InternalErrorStage::Storage,
+                        kind: InternalErrorKind::Unavailable,
+                        message: Some(UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned()),
+                    },
+                });
             } else if buffered_transform_error.is_some() {
-                o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+                o.set_upstream_error(status, UpstreamErrorCode::StreamError);
             } else if let Some(stop) = abnormal_stop.as_ref() {
                 o.emit_lifecycle(
                     cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
@@ -3768,10 +3993,10 @@ impl Lifecycle {
                     },
                 );
                 let code = match stop.stop_reason.as_str() {
-                    "refusal" => error_codes::UPSTREAM_REFUSAL,
-                    _ => error_codes::UPSTREAM_CONTEXT_WINDOW_EXCEEDED,
+                    "refusal" => UpstreamErrorCode::Refusal,
+                    _ => UpstreamErrorCode::ContextWindowExceeded,
                 };
-                o.set_terminal(client_status, code);
+                o.set_upstream_error(client_status, code);
             } else {
                 o.set_success_status(client_status);
             }
@@ -3807,16 +4032,22 @@ impl Lifecycle {
         observer: Option<&LifecycleContext>,
         status: StatusCode,
         routing_trace: Option<RoutingTrace>,
-        internal_errors: Vec<InternalError>,
     ) {
         if let Some(o) = observer {
-            o.set_internal_errors(internal_errors);
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
                 event_id: o.event_id().to_owned(),
                 result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
                 routing_trace,
             });
-            o.set_terminal(status, error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
+            o.set_failure(InternalFailure {
+                status,
+                error_code: error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER,
+                error: InternalError {
+                    stage: InternalErrorStage::RouterFilter,
+                    kind: InternalErrorKind::Unavailable,
+                    message: Some("no upstream candidates remain after routing filters".to_owned()),
+                },
+            });
             o.finish();
         }
     }
@@ -3919,9 +4150,8 @@ impl Lifecycle {
         signer: Arc<dyn Signer>,
         observer: Option<&LifecycleContext>,
         timings: &mut AttemptTimings,
-        internal_errors: &mut Vec<InternalError>,
         shaped_body_out: &mut Option<Bytes>,
-    ) -> Result<Response<Body>, Box<Response<Body>>> {
+    ) -> Result<Response<Body>, AttemptFailure> {
         if let Some(upstream_id) = route.upstream_id {
             tracing::Span::current()
                 .record("cc_lb.upstream.id", tracing::field::display(upstream_id));
@@ -3944,9 +4174,9 @@ impl Lifecycle {
                 let message = source.to_string();
                 tracing::warn!(%source, "shape_request failed; falling back to raw passthrough");
                 if let Some(o) = observer {
-                    o.emit_provider_error("shape_error", &message, "dialect");
+                    o.notify_error_hooks("shape_error", &message, "dialect");
                 }
-                push_shape_internal_error(internal_errors, &message);
+                record_shape_internal_error(observer, &message);
                 (
                     raw_passthrough_request(raw_passthrough_base_url, ctx, principal)?,
                     false,
@@ -3965,14 +4195,11 @@ impl Lifecycle {
             .await
             .map_err(|source| {
                 tracing::error!(%source, "sign_request failed");
+                timings.sign_ms = Some(duration_to_ms(sign_start.elapsed()));
                 if let Some(o) = observer {
-                    o.emit_provider_error("signing_error", &source.to_string(), "signer");
+                    o.notify_error_hooks("signing_error", &source.to_string(), "signer");
                 }
-                Box::new(anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    "failed to sign upstream request",
-                ))
+                AttemptFailure::Sign(source)
             })?;
         timings.sign_ms = Some(duration_to_ms(sign_start.elapsed()));
 
@@ -3993,11 +4220,7 @@ impl Lifecycle {
         let dispatch_start = Instant::now();
         let stage_timings_carrier = Arc::new(Mutex::new(RequestStageTimings::default()));
         let dispatch_result = REQUEST_STAGE_TIMINGS
-            .scope(stage_timings_carrier.clone(), async {
-                let result = signed.dispatch(dispatcher).await;
-                finalize_connection_reused_if_unset();
-                result
-            })
+            .scope(stage_timings_carrier.clone(), signed.dispatch(dispatcher))
             .await;
         let connection_snapshot = stage_timings_carrier.lock().unwrap().clone();
         timings.bulkhead_wait_ms = connection_snapshot.bulkhead_wait_ms;
@@ -4017,25 +4240,9 @@ impl Lifecycle {
                 },
             );
             if let Some(o) = observer {
-                o.emit_provider_error("upstream_dispatch_error", &source.to_string(), "dispatch");
+                o.notify_error_hooks("upstream_dispatch_error", &source.to_string(), "dispatch");
             }
-            match source {
-                DispatchError::BulkheadFull { retry_after } => {
-                    Box::new(anthropic_error_response_with_retry_after(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "overloaded_error",
-                        "upstream bulkhead queue is full",
-                        retry_after.as_secs().max(1),
-                    ))
-                }
-                DispatchError::InvalidUri { .. }
-                | DispatchError::RequestBuild { .. }
-                | DispatchError::Transport { .. } => Box::new(anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    "upstream request failed",
-                )),
-            }
+            AttemptFailure::Dispatch(source)
         })?;
         // hyper dispatch().await resolves at response HEADERS, not full body, so this is real TTFB.
         timings.upstream_ttfb_ms = Some(duration_to_ms(dispatch_start.elapsed()));
@@ -4101,12 +4308,12 @@ impl Lifecycle {
         let response_has_content_length = parts.headers.contains_key(CONTENT_LENGTH);
         if upstream_error_status && let Some(o) = observer.as_ref() {
             let code = if status.is_client_error() {
-                error_codes::UPSTREAM_4XX
+                UpstreamErrorCode::Upstream4xx
             } else {
-                error_codes::UPSTREAM_5XX
+                UpstreamErrorCode::Upstream5xx
             };
-            o.emit_provider_error(code, status.as_str(), "upstream");
-            o.set_terminal(status, code);
+            o.notify_error_hooks(code.as_str(), status.as_str(), "upstream");
+            o.set_upstream_error(status, code);
         }
         let stream_span = tracing::info_span!(
             "proxy.response_stream",
@@ -4222,9 +4429,9 @@ impl Lifecycle {
                                     total_bytes: frame.len(),
                                 });
                                 if let Some(o) = observer.as_ref() {
-                                    o.set_terminal(
+                                    o.set_upstream_error(
                                         StatusCode::OK,
-                                        error_codes::UPSTREAM_STREAM_ERROR,
+                                        UpstreamErrorCode::StreamError,
                                     );
                                 }
                                 downstream_drop_guard.mark_upstream_error(
@@ -4279,9 +4486,9 @@ impl Lifecycle {
                                             total_bytes: frame.len(),
                                         });
                                         if let Some(o) = observer.as_ref() {
-                                            o.set_terminal(
+                                            o.set_upstream_error(
                                                 StatusCode::OK,
-                                                error_codes::UPSTREAM_STREAM_ERROR,
+                                                UpstreamErrorCode::StreamError,
                                             );
                                         }
                                         downstream_drop_guard.mark_upstream_error(
@@ -4326,9 +4533,9 @@ impl Lifecycle {
                                             if let Some(o) = observer.as_ref()
                                                 && !upstream_error_status
                                             {
-                                                o.set_terminal(
+                                                o.set_upstream_error(
                                                     status,
-                                                    error_codes::UPSTREAM_STREAM_ERROR,
+                                                    UpstreamErrorCode::StreamError,
                                                 );
                                             }
                                             downstream_drop_guard.mark_upstream_error(
@@ -4369,9 +4576,9 @@ impl Lifecycle {
                                             if let Some(o) = observer.as_ref()
                                                 && !upstream_error_status
                                             {
-                                                o.set_terminal(
+                                                o.set_upstream_error(
                                                     StatusCode::OK,
-                                                    error_codes::UPSTREAM_STREAM_ERROR,
+                                                    UpstreamErrorCode::StreamError,
                                                 );
                                             }
                                             downstream_drop_guard.mark_proxy_error(
@@ -4420,9 +4627,9 @@ impl Lifecycle {
                                             },
                                         );
                                         if !upstream_error_status {
-                                            o.set_terminal(
+                                            o.set_upstream_error(
                                                 StatusCode::OK,
-                                                error_codes::UPSTREAM_STREAM_ERROR,
+                                                UpstreamErrorCode::StreamError,
                                             );
                                         }
                                     }
@@ -4477,9 +4684,9 @@ impl Lifecycle {
                                             );
                                             batch_index = batch_index.saturating_add(1);
                                             if let Some(o) = observer.as_ref() {
-                                                o.set_terminal(
+                                                o.set_upstream_error(
                                                     StatusCode::OK,
-                                                    error_codes::UPSTREAM_STREAM_ERROR,
+                                                    UpstreamErrorCode::StreamError,
                                                 );
                                             }
                                             downstream_drop_guard.mark_upstream_error(
@@ -4541,9 +4748,9 @@ impl Lifecycle {
                                             yield Ok::<Bytes, Infallible>(frame);
                                         }
                                         if let Some(o) = observer.as_ref() {
-                                            o.set_terminal(
+                                            o.set_upstream_error(
                                                 StatusCode::OK,
-                                                error_codes::UPSTREAM_STREAM_ERROR,
+                                                UpstreamErrorCode::StreamError,
                                             );
                                         }
                                         downstream_drop_guard.mark_proxy_error(
@@ -4699,9 +4906,9 @@ impl Lifecycle {
                                                     if let Some(o) = observer.as_ref()
                                                         && !upstream_error_status
                                                     {
-                                                        o.set_terminal(
+                                                        o.set_upstream_error(
                                                             StatusCode::OK,
-                                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                                            UpstreamErrorCode::StreamError,
                                                         );
                                                     }
                                                     downstream_drop_guard.mark_proxy_error(
@@ -4757,9 +4964,9 @@ impl Lifecycle {
                                                     if let Some(o) = observer.as_ref()
                                                         && !upstream_error_status
                                                     {
-                                                        o.set_terminal(
+                                                        o.set_upstream_error(
                                                             StatusCode::OK,
-                                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                                            UpstreamErrorCode::StreamError,
                                                         );
                                                     }
                                                     downstream_drop_guard.mark_proxy_error(
@@ -4861,9 +5068,9 @@ impl Lifecycle {
                                         total_bytes: frame.len(),
                                     });
                                     if let Some(o) = observer.as_ref() {
-                                        o.set_terminal(
+                                        o.set_upstream_error(
                                             StatusCode::OK,
-                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                            UpstreamErrorCode::StreamError,
                                         );
                                     }
                                     downstream_drop_guard.mark_upstream_error(
@@ -4898,9 +5105,9 @@ impl Lifecycle {
                                         if let Some(o) = observer.as_ref()
                                             && !upstream_error_status
                                         {
-                                            o.set_terminal(
+                                            o.set_upstream_error(
                                                 StatusCode::OK,
-                                                error_codes::UPSTREAM_STREAM_ERROR,
+                                                UpstreamErrorCode::StreamError,
                                             );
                                         }
                                         downstream_drop_guard.mark_proxy_error(
@@ -4999,7 +5206,7 @@ impl Lifecycle {
                             if let Some(o) = observer.as_ref()
                                 && !upstream_error_status
                             {
-                                o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+                                o.set_upstream_error(status, UpstreamErrorCode::StreamError);
                             }
                             yield Ok::<Bytes, Infallible>(frame);
                         }
@@ -5141,9 +5348,9 @@ impl Lifecycle {
                                         },
                                     );
                                     if !upstream_error_status {
-                                        o.set_terminal(
+                                        o.set_upstream_error(
                                             StatusCode::OK,
-                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                            UpstreamErrorCode::StreamError,
                                         );
                                     }
                                 }
@@ -5296,9 +5503,9 @@ impl Lifecycle {
                                     if let Some(o) = observer.as_ref()
                                         && !upstream_error_status
                                     {
-                                        o.set_terminal(
+                                        o.set_upstream_error(
                                             StatusCode::OK,
-                                            error_codes::UPSTREAM_STREAM_ERROR,
+                                            UpstreamErrorCode::StreamError,
                                         );
                                     }
                                     yield Ok::<Bytes, Infallible>(frame);
@@ -5394,7 +5601,7 @@ impl Lifecycle {
                             if let Some(o) = observer.as_ref()
                                 && !upstream_error_status
                             {
-                                o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+                                o.set_upstream_error(status, UpstreamErrorCode::StreamError);
                             }
                             yield Ok::<Bytes, Infallible>(frame);
                         }
@@ -5480,7 +5687,7 @@ impl Lifecycle {
                     if let Some(o) = observer.as_ref()
                         && !upstream_error_status
                     {
-                        o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+                        o.set_upstream_error(status, UpstreamErrorCode::StreamError);
                     }
                     yield Ok::<Bytes, Infallible>(frame);
                 }
@@ -5636,33 +5843,40 @@ impl Lifecycle {
                     Some(stream_total_ms),
                     elapsed_ms(first_chunk_at),
                 );
-                o.set_internal_errors(event_ctx.internal_errors.clone());
                 if upstream_error_status
                     && !upstream_error_body_decode_failed
                     && !upstream_error_body.is_empty()
                 {
-                    o.emit_lifecycle(
-                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
-                            event_id: o.event_id().to_owned(),
-                            error_type: String::new(),
-                            error_message: bounded_lossy_upstream_error_body(
-                                &upstream_error_body,
-                                upstream_error_body_truncated,
-                            ),
-                        },
-                    );
+                    let (error_type, message) = usage_parser::observe_http_error_body(&upstream_error_body)
+                        .map(usage_parser::CanonicalUpstreamError::into_parts)
+                        .unwrap_or_default();
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                        event_id: o.event_id().to_owned(),
+                        error_type: error_type.unwrap_or_default(),
+                        error_message: message.unwrap_or_else(|| bounded_lossy_upstream_error_body(
+                            &upstream_error_body, upstream_error_body_truncated,
+                        )),
+                    });
                 }
                 if stream_affinity_error.is_some() && !upstream_error_status {
-                    o.emit_provider_error(
+                    o.notify_error_hooks(
                         UPSTREAM_AFFINITY_ERROR_TYPE,
                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
                         "storage",
                     );
-                    o.set_terminal(StatusCode::OK, error_codes::UPSTREAM_STREAM_ERROR);
+                    o.set_failure(InternalFailure {
+                        status: StatusCode::OK,
+                        error_code: error_codes::UPSTREAM_STREAM_ERROR,
+                        error: InternalError {
+                            stage: InternalErrorStage::Storage,
+                            kind: InternalErrorKind::Unavailable,
+                            message: Some(UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned()),
+                        },
+                    });
                 } else if stream_upstream_error.is_some() && !upstream_error_status {
-                    o.set_terminal(status, error_codes::UPSTREAM_STREAM_ERROR);
+                    o.set_upstream_error(status, UpstreamErrorCode::StreamError);
                 } else if stream_transform_error.is_some() && !upstream_error_status {
-                    o.set_terminal(StatusCode::OK, error_codes::UPSTREAM_STREAM_ERROR);
+                    o.set_upstream_error(StatusCode::OK, UpstreamErrorCode::StreamError);
                 } else if let Some(stop) = stream_abnormal_stop.as_ref()
                     && !upstream_error_status
                     && !stream_provider_error_seen
@@ -5675,10 +5889,10 @@ impl Lifecycle {
                         },
                     );
                     let code = match stop.stop_reason.as_str() {
-                        "refusal" => error_codes::UPSTREAM_REFUSAL,
-                        _ => error_codes::UPSTREAM_CONTEXT_WINDOW_EXCEEDED,
+                        "refusal" => UpstreamErrorCode::Refusal,
+                        _ => UpstreamErrorCode::ContextWindowExceeded,
                     };
-                    o.set_terminal(status, code);
+                    o.set_upstream_error(status, code);
                 } else if !upstream_error_status {
                     o.set_success_status(status);
                 }
@@ -5841,7 +6055,7 @@ fn execute_filter_pipeline(
                             "router filter returned invalid output; passing candidates through"
                         );
                         if let Some(o) = observer {
-                            o.emit_provider_error(
+                            o.notify_error_hooks(
                                 "router_filter_invalid_output",
                                 &message,
                                 "router",
@@ -5889,7 +6103,7 @@ fn execute_filter_pipeline(
                     "router filter stage failed; passing candidates through"
                 );
                 if let Some(o) = observer {
-                    o.emit_provider_error("router_filter_passthrough", &message, "router");
+                    o.notify_error_hooks("router_filter_passthrough", &message, "router");
                 }
                 stages.push(StageDecision {
                     stage_name,
@@ -6062,13 +6276,14 @@ fn response_from_collected(collected: CollectedResponse) -> Response<Body> {
     response
 }
 
-fn push_shape_internal_error(internal_errors: &mut Vec<InternalError>, message: &str) {
-    let errors = redact_internal_errors(&[InternalError {
-        stage: InternalErrorStage::Shape,
-        kind: InternalErrorKind::Trap,
-        message: Some(truncate_reason(message)),
-    }]);
-    internal_errors.extend(errors);
+fn record_shape_internal_error(observer: Option<&LifecycleContext>, message: &str) {
+    if let Some(observer) = observer {
+        observer.record_internal_error(InternalError {
+            stage: InternalErrorStage::Shape,
+            kind: InternalErrorKind::Trap,
+            message: Some(truncate_reason(message)),
+        });
+    }
 }
 
 fn default_anthropic_base_url() -> Url {
@@ -6079,16 +6294,12 @@ fn raw_passthrough_request(
     base_url: Option<&Url>,
     ctx: &RequestContext,
     principal: &Principal,
-) -> Result<ShapedRequest, Box<Response<Body>>> {
+) -> Result<ShapedRequest, RawPassthroughError> {
     let base_url = match base_url {
         Some(base_url) => base_url.clone(),
         None => Url::parse(DEFAULT_ANTHROPIC_BASE_URL).map_err(|source| {
             tracing::error!(%source, "default raw passthrough base URL failed to parse");
-            Box::new(anthropic_error_response(
-                StatusCode::BAD_GATEWAY,
-                "api_error",
-                "failed to prepare raw upstream request",
-            ))
+            RawPassthroughError::BaseUrl(source)
         })?,
     };
     let upstream = Upstream::AnthropicDirect {
@@ -6103,11 +6314,7 @@ fn raw_passthrough_request(
     )
     .map_err(|source| {
         tracing::error!(%source, "raw passthrough request failed");
-        Box::new(anthropic_error_response(
-            StatusCode::BAD_GATEWAY,
-            "api_error",
-            "failed to prepare raw upstream request",
-        ))
+        RawPassthroughError::Shape(source)
     })
 }
 
@@ -6321,7 +6528,6 @@ pub(crate) struct RequestEventContext {
     pub(crate) canonical_model_id: String,
     pub(crate) proxy_setup_ms: Option<u64>,
     pub(crate) stage_timings: AttemptTimings,
-    pub(crate) internal_errors: Vec<InternalError>,
 }
 
 pub(crate) use crate::response_transform::{
@@ -9610,5 +9816,1590 @@ mod tests {
         assert!(usage.present, "usage must be marked present after parsing");
         assert_eq!(usage.input_tokens, 48);
         assert_eq!(usage.output_tokens, 72);
+    }
+
+    // ------------------------------------------------------------------
+    // Failure-provenance tests: every known internal failure must reach the
+    // terminal snapshot with a typed stage/kind/message, and non-fatal
+    // diagnostics must accumulate ahead of it.
+    // ------------------------------------------------------------------
+
+    struct FailureKeyFixture {
+        plaintext: String,
+        key_id: String,
+        record: StoredApiKeyRecord,
+    }
+
+    static FAILURE_KEY_FIXTURE: std::sync::LazyLock<FailureKeyFixture> =
+        std::sync::LazyLock::new(|| {
+            let generated = crate::api_keys::secret::generate_new();
+            FailureKeyFixture {
+                plaintext: generated.plaintext.expose().to_owned(),
+                key_id: generated.key_id,
+                record: StoredApiKeyRecord {
+                    label: "failure provenance key".to_owned(),
+                    verify_hash: generated.verify_hash,
+                    secret_salt: generated.secret_salt,
+                    status: cc_lb_storage_api::KeyStatus::Active,
+                    last_4: generated.last_4,
+                    index_hash: generated.index_hash,
+                    ..StoredApiKeyRecord::default()
+                },
+            }
+        });
+
+    fn failure_key_fixture() -> &'static FailureKeyFixture {
+        &FAILURE_KEY_FIXTURE
+    }
+
+    struct InMemoryManagedKeyStore {
+        principal_id: String,
+    }
+
+    #[async_trait]
+    impl cc_lb_storage_api::ManagedKeyStore for InMemoryManagedKeyStore {
+        async fn issue(
+            &self,
+            _principal_id: &str,
+            _key_id: &str,
+            _params: cc_lb_storage_api::IssueParams,
+        ) -> cc_lb_storage_api::StorageResult<StoredApiKeyRecord> {
+            Ok(failure_key_fixture().record.clone())
+        }
+
+        async fn get(
+            &self,
+            principal_id: &str,
+            key_id: &str,
+        ) -> cc_lb_storage_api::StorageResult<Option<StoredApiKeyRecord>> {
+            Ok(
+                (principal_id == self.principal_id && key_id == failure_key_fixture().key_id)
+                    .then(|| failure_key_fixture().record.clone()),
+            )
+        }
+
+        async fn lookup_by_index_hash(
+            &self,
+            index_hash: &[u8; 32],
+        ) -> cc_lb_storage_api::StorageResult<Option<(String, String, StoredApiKeyRecord)>>
+        {
+            Ok(
+                (index_hash == &failure_key_fixture().record.index_hash).then(|| {
+                    (
+                        self.principal_id.clone(),
+                        failure_key_fixture().key_id.clone(),
+                        failure_key_fixture().record.clone(),
+                    )
+                }),
+            )
+        }
+
+        async fn list_by_principal(
+            &self,
+            principal_id: &str,
+        ) -> cc_lb_storage_api::StorageResult<Vec<StoredApiKeyRecord>> {
+            Ok((principal_id == self.principal_id)
+                .then(|| failure_key_fixture().record.clone())
+                .into_iter()
+                .collect())
+        }
+
+        async fn list_all(
+            &self,
+        ) -> cc_lb_storage_api::StorageResult<Vec<(String, String, StoredApiKeyRecord)>> {
+            Ok(vec![(
+                self.principal_id.clone(),
+                failure_key_fixture().key_id.clone(),
+                failure_key_fixture().record.clone(),
+            )])
+        }
+
+        async fn update(
+            &self,
+            _principal_id: &str,
+            _key_id: &str,
+            _mutation: cc_lb_storage_api::ApiKeyMutation,
+        ) -> cc_lb_storage_api::StorageResult<()> {
+            Ok(())
+        }
+
+        async fn revoke_zero_secrets(
+            &self,
+            _principal_id: &str,
+            _key_id: &str,
+        ) -> cc_lb_storage_api::StorageResult<()> {
+            Ok(())
+        }
+    }
+
+    fn failure_authn() -> Arc<BuiltinAuthn> {
+        let storage: Arc<dyn cc_lb_storage_api::ManagedKeyStore> =
+            Arc::new(InMemoryManagedKeyStore {
+                principal_id: "principal-test".to_owned(),
+            });
+        Arc::new(BuiltinAuthn::new(
+            Arc::new(crate::api_keys::key_store::KeyStore::new(storage)),
+            Arc::new(crate::clock::SystemClock),
+        ))
+    }
+
+    #[derive(Default)]
+    struct RecordingHook {
+        events: Mutex<Vec<ObserveEvent>>,
+    }
+
+    impl ObservabilityHook for RecordingHook {
+        fn observe(
+            &self,
+            event: ObserveEvent,
+        ) -> Result<(), cc_lb_observability::ObservabilityError> {
+            self.events.lock().expect("recording hook lock").push(event);
+            Ok(())
+        }
+    }
+
+    /// Deterministic dispatcher: replays a scripted queue of outcomes.
+    struct QueueDispatch {
+        calls: AtomicUsize,
+        outcomes: Mutex<std::collections::VecDeque<Result<Response<Body>, DispatchError>>>,
+    }
+
+    impl QueueDispatch {
+        fn new(outcomes: Vec<Result<Response<Body>, DispatchError>>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                outcomes: Mutex::new(outcomes.into()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl UpstreamDispatch for QueueDispatch {
+        async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.outcomes
+                .lock()
+                .expect("queue dispatch lock")
+                .pop_front()
+                .expect("dispatch called more times than scripted")
+        }
+    }
+
+    fn upstream_response(status: StatusCode, body: &'static [u8]) -> Response<Body> {
+        let mut response = Response::new(Body::from(Bytes::from_static(body)));
+        *response.status_mut() = status;
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        response
+    }
+
+    /// Signer factory whose `build` always fails with a fixed error.
+    struct FailingSignerFactory(fn() -> SignerError);
+
+    impl ApiKeyAwareSignerFactory for FailingSignerFactory {
+        fn with_router_choice(
+            &self,
+            _router_chosen_upstream_name: String,
+        ) -> Arc<dyn SignerFactory> {
+            Arc::new(Self(self.0))
+        }
+    }
+
+    #[async_trait]
+    impl SignerFactory for FailingSignerFactory {
+        async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+            Err((self.0)())
+        }
+    }
+
+    /// Signer whose `sign` always fails; `on_unauthorized` never refreshes.
+    struct FailingSigner(fn() -> SignerError);
+
+    #[async_trait]
+    impl Signer for FailingSigner {
+        async fn sign(
+            &self,
+            _shaped: ShapedRequest,
+            _capability: &mut cc_lb_upstream::SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
+            Err((self.0)())
+        }
+
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
+        }
+    }
+
+    /// Signer factory that hands out `FailingSigner`.
+    struct FailingSignerFactoryForAttempt(fn() -> SignerError);
+
+    impl ApiKeyAwareSignerFactory for FailingSignerFactoryForAttempt {
+        fn with_router_choice(
+            &self,
+            _router_chosen_upstream_name: String,
+        ) -> Arc<dyn SignerFactory> {
+            Arc::new(Self(self.0))
+        }
+    }
+
+    #[async_trait]
+    impl SignerFactory for FailingSignerFactoryForAttempt {
+        async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+            Ok(Arc::new(FailingSigner(self.0)))
+        }
+    }
+
+    /// Signer that always asks for a credential refresh on 401.
+    struct RefreshingSigner;
+
+    #[async_trait]
+    impl Signer for RefreshingSigner {
+        async fn sign(
+            &self,
+            shaped: ShapedRequest,
+            capability: &mut cc_lb_upstream::SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
+            Ok(SignedRequest::from_shaped(shaped, capability))
+        }
+
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+            RetryDecision::Refresh {
+                new_signer: Arc::new(TestSigner),
+            }
+        }
+    }
+
+    /// Signer factory that hands out `RefreshingSigner`.
+    struct RefreshingSignerFactory;
+
+    impl ApiKeyAwareSignerFactory for RefreshingSignerFactory {
+        fn with_router_choice(
+            &self,
+            _router_chosen_upstream_name: String,
+        ) -> Arc<dyn SignerFactory> {
+            Arc::new(Self)
+        }
+    }
+
+    #[async_trait]
+    impl SignerFactory for RefreshingSignerFactory {
+        async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+            Ok(Arc::new(RefreshingSigner))
+        }
+    }
+
+    /// Dialect whose shaping always fails, forcing the raw-passthrough fallback.
+    struct FailingDialect;
+
+    impl UpstreamDialect for FailingDialect {
+        fn shape(
+            &self,
+            _context: &DialectShapeContext,
+            _upstream: &Upstream,
+            _principal: &Principal,
+            _builder: &mut ShapedRequestBuilder,
+        ) -> Result<ShapedRequest, DialectError> {
+            Err(DialectError::UnsupportedRequest {
+                reason: "injected dialect failure".to_owned(),
+            })
+        }
+    }
+
+    /// Affinity store whose resolve always fails.
+    struct FailingAffinityStore;
+
+    #[async_trait]
+    impl UpstreamAffinityStore for FailingAffinityStore {
+        async fn resolve_upstream_affinities(
+            &self,
+            _keys: &[UpstreamAffinityKey],
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<Vec<UpstreamAffinityBinding>> {
+            Err(cc_lb_storage_api::StorageError::Unavailable {
+                message: "affinity store down".to_owned(),
+            })
+        }
+
+        async fn bind_upstream_affinities(
+            &self,
+            _bindings: &[UpstreamAffinityBinding],
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+        ) -> cc_lb_storage_api::StorageResult<()> {
+            Err(cc_lb_storage_api::StorageError::Unavailable {
+                message: "affinity store down".to_owned(),
+            })
+        }
+
+        async fn purge_expired_upstream_affinities(
+            &self,
+            _now_unix_secs: u64,
+            _ttl_secs: u64,
+            _batch_size: usize,
+        ) -> cc_lb_storage_api::StorageResult<u64> {
+            Err(cc_lb_storage_api::StorageError::Unavailable {
+                message: "affinity store down".to_owned(),
+            })
+        }
+    }
+
+    /// Filter plugin that returns an upstream id outside the candidate set,
+    /// tripping output validation and the invalid-output passthrough.
+    struct InvalidOutputFilter;
+
+    impl FilterPlugin for InvalidOutputFilter {
+        fn filter(
+            &self,
+            _ctx: &cc_lb_routing::RoutingContext,
+            _principal: &Principal,
+            _candidates: &[UpstreamCandidate],
+        ) -> Result<FilterOutput, FilterError> {
+            Ok(FilterOutput {
+                kept_upstream_ids: vec![Uuid::new_v4()],
+                reason: "injected invalid output".to_owned(),
+                per_candidate_reasons: Vec::new(),
+                subscription_preference: None,
+            })
+        }
+
+        fn plugin_id(&self) -> Uuid {
+            Uuid::nil()
+        }
+
+        fn plugin_name(&self) -> &str {
+            "invalid-output-filter"
+        }
+    }
+
+    fn failure_principal_view(
+        principal_id: &str,
+        artifacts: crate::api_keys::principal_view::PrincipalRoutingArtifacts,
+    ) -> Arc<PrincipalView> {
+        let mut chains: HashMap<
+            String,
+            crate::api_keys::principal_view::PrincipalRoutingArtifacts,
+        > = HashMap::new();
+        chains.insert(principal_id.to_owned(), artifacts);
+        Arc::new(PrincipalView::for_tests(
+            principal_id,
+            true,
+            vec!["*".to_owned()],
+            Vec::new(),
+            chains,
+        ))
+    }
+
+    fn default_artifacts() -> crate::api_keys::principal_view::PrincipalRoutingArtifacts {
+        (
+            None,
+            crate::api_keys::principal_view::ObservabilityHooksCache::Inherit,
+            crate::api_keys::principal_view::DialectCache::Inherit,
+        )
+    }
+
+    fn provenance_view(
+        principal_view: Arc<PrincipalView>,
+        signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
+        hooks: Vec<Arc<dyn ObservabilityHook>>,
+        upstreams: Vec<UpstreamRecord>,
+    ) -> Arc<DynamicView> {
+        DynamicViewBuilder::new(0)
+            .signer_factory(signer_factory)
+            .global_router(Arc::new(TestRouter))
+            .global_observability_hooks(hooks)
+            .principal_view(principal_view)
+            .upstream_records(upstreams)
+            .build()
+    }
+
+    fn provenance_lifecycle(
+        view: Arc<DynamicView>,
+        dispatcher: Arc<dyn UpstreamDispatch>,
+        bus: &Arc<crate::event_bus::InMemoryBus>,
+    ) -> Lifecycle {
+        Lifecycle::new_with_dynamic_view(
+            failure_authn(),
+            Arc::new(DynamicViewHolder::new(view)),
+            dispatcher,
+            LifecycleConfig::default(),
+            Arc::new(crate::clock::SystemClock),
+        )
+        .with_event_bus(bus.clone() as Arc<dyn RequestEventBus>)
+    }
+
+    fn failure_request(body: Bytes) -> Request<Bytes> {
+        Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/messages")
+            .header("x-api-key", failure_key_fixture().plaintext.as_str())
+            .header("anthropic-version", "2023-06-01")
+            .body(body)
+            .expect("failure request builds")
+    }
+
+    fn subscribe_lifecycle(
+        bus: &Arc<crate::event_bus::InMemoryBus>,
+    ) -> tokio::sync::broadcast::Receiver<cc_lb_lifecycle::LifecycleEvent> {
+        let cc_lb_control::LifecycleBusReceiver::InMemory(rx) = bus.subscribe_lifecycle() else {
+            panic!("expected InMemory lifecycle receiver");
+        };
+        rx
+    }
+
+    fn drain_events(
+        rx: &mut tokio::sync::broadcast::Receiver<cc_lb_lifecycle::LifecycleEvent>,
+    ) -> Vec<cc_lb_lifecycle::LifecycleEvent> {
+        let mut events = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(event) => events.push(event),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+            }
+        }
+        events
+    }
+
+    struct TerminalSnapshot {
+        reason: cc_lb_lifecycle::TerminationReason,
+        client_status: u16,
+        internal_errors: Vec<InternalError>,
+        dns_ms: Option<u64>,
+        connect_ms: Option<u64>,
+        connection_reused: Option<bool>,
+    }
+
+    fn terminal_snapshot(events: &[cc_lb_lifecycle::LifecycleEvent]) -> TerminalSnapshot {
+        for event in events {
+            if let cc_lb_lifecycle::LifecycleEvent::RequestTerminated {
+                reason,
+                client_status,
+                internal_errors,
+                dns_ms,
+                connect_ms,
+                connection_reused,
+                ..
+            } = event
+            {
+                return TerminalSnapshot {
+                    reason: reason.clone(),
+                    client_status: *client_status,
+                    internal_errors: internal_errors.clone(),
+                    dns_ms: *dns_ms,
+                    connect_ms: *connect_ms,
+                    connection_reused: *connection_reused,
+                };
+            }
+        }
+        panic!("expected RequestTerminated in drained events");
+    }
+
+    fn expect_error_code(reason: &cc_lb_lifecycle::TerminationReason, expected: &str) {
+        match reason {
+            cc_lb_lifecycle::TerminationReason::ErrorCode(code) => {
+                assert_eq!(code, expected, "unexpected terminal error code");
+            }
+            other => panic!("expected ErrorCode({expected}), got {other:?}"),
+        }
+    }
+
+    async fn collect_response_body(response: Response<Body>) -> (StatusCode, Bytes) {
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body collects")
+            .to_bytes();
+        (status, body)
+    }
+
+    /// QA-AUTH-03b: authentication succeeds, then the principal disappears
+    /// from the view before `handle` resolves it.
+    #[tokio::test]
+    async fn post_auth_principal_missing_records_authn_unavailable() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let view_a = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let holder = Arc::new(DynamicViewHolder::new(view_a));
+        let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
+        let lifecycle = Lifecycle::new_with_dynamic_view(
+            failure_authn(),
+            holder.clone(),
+            dispatcher.clone(),
+            LifecycleConfig::default(),
+            Arc::new(crate::clock::SystemClock),
+        )
+        .with_event_bus(bus.clone() as Arc<dyn RequestEventBus>);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        // Swap the view so the authenticated principal is gone at handle time.
+        holder.store(provenance_view(
+            failure_principal_view("other-principal", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        ));
+
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body,
+            anthropic_error_body("api_error", "authenticated principal is unavailable"),
+            "client response must stay byte-identical"
+        );
+        assert_eq!(
+            dispatcher.call_count(),
+            0,
+            "no dispatch on principal failure"
+        );
+
+        let events = drain_events(&mut rx);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+                    result: Err(cc_lb_lifecycle::AuthFailure::PrincipalMissing { .. }),
+                    ..
+                }
+            )),
+            "expected AuthCompleted::PrincipalMissing, got {events:?}"
+        );
+        let terminal = terminal_snapshot(&events);
+        assert_eq!(terminal.client_status, 500);
+        expect_error_code(&terminal.reason, error_codes::PRINCIPAL_MISSING);
+        assert_eq!(terminal.internal_errors.len(), 1);
+        assert_eq!(terminal.internal_errors[0].stage, InternalErrorStage::Authn);
+        assert_eq!(
+            terminal.internal_errors[0].kind,
+            InternalErrorKind::Unavailable
+        );
+        assert_eq!(
+            terminal.internal_errors[0].message.as_deref(),
+            Some("authenticated principal is unavailable")
+        );
+    }
+
+    /// QA-ROUTE-02: the resolved router pipeline carries an instantiation
+    /// error, so routing cannot run at all.
+    #[tokio::test]
+    async fn router_pipeline_instantiation_error_records_router_config() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let pipeline = crate::api_keys::principal_view::RouterPipelineCache {
+            user_filters: Vec::new(),
+            terminal: TerminalStrategy::FirstPick,
+            instantiation_error: Some(Arc::from("pipeline exploded")),
+        };
+        let view = provenance_view(
+            failure_principal_view(
+                "principal-test",
+                (
+                    Some(Arc::new(pipeline)),
+                    crate::api_keys::principal_view::ObservabilityHooksCache::Inherit,
+                    crate::api_keys::principal_view::DialectCache::Inherit,
+                ),
+            ),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, _body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(dispatcher.call_count(), 0);
+
+        let events = drain_events(&mut rx);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                    result: Err(cc_lb_lifecycle::RouteFailure::RouterPipelineUnavailable),
+                    ..
+                }
+            )),
+            "expected RouteCompleted::RouterPipelineUnavailable, got {events:?}"
+        );
+        let terminal = terminal_snapshot(&events);
+        assert_eq!(terminal.client_status, 502);
+        expect_error_code(&terminal.reason, error_codes::ROUTER_PIPELINE_UNAVAILABLE);
+        assert_eq!(terminal.internal_errors.len(), 1);
+        assert_eq!(
+            terminal.internal_errors[0].stage,
+            InternalErrorStage::Router
+        );
+        assert_eq!(
+            terminal.internal_errors[0].kind,
+            InternalErrorKind::ConfigError
+        );
+        assert_eq!(
+            terminal.internal_errors[0].message.as_deref(),
+            Some("pipeline exploded")
+        );
+    }
+
+    /// QA-ROUTE-04: a filter stage fails validation, candidates pass through,
+    /// and the non-fatal diagnostic must precede the terminal dispatch cause.
+    #[tokio::test]
+    async fn filter_invalid_output_history_precedes_terminal_dispatch_cause() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let pipeline = crate::api_keys::principal_view::RouterPipelineCache {
+            user_filters: vec![Arc::new(InvalidOutputFilter)],
+            terminal: TerminalStrategy::FirstPick,
+            instantiation_error: None,
+        };
+        let view = provenance_view(
+            failure_principal_view(
+                "principal-test",
+                (
+                    Some(Arc::new(pipeline)),
+                    crate::api_keys::principal_view::ObservabilityHooksCache::Inherit,
+                    crate::api_keys::principal_view::DialectCache::Inherit,
+                ),
+            ),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(vec![Err(DispatchError::Transport {
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "refused",
+            )),
+        })]));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, _body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(dispatcher.call_count(), 1);
+
+        let events = drain_events(&mut rx);
+        let terminal = terminal_snapshot(&events);
+        expect_error_code(&terminal.reason, error_codes::UPSTREAM_DISPATCH_FAILED);
+        assert_eq!(
+            terminal.internal_errors.len(),
+            2,
+            "non-fatal filter diagnostic and terminal dispatch cause must both persist: {:?}",
+            terminal.internal_errors
+        );
+        assert_eq!(
+            terminal.internal_errors[0].stage,
+            InternalErrorStage::RouterFilter
+        );
+        assert_eq!(
+            terminal.internal_errors[0].kind,
+            InternalErrorKind::InvalidOutput
+        );
+        assert_eq!(terminal.internal_errors[1].stage, InternalErrorStage::Relay);
+    }
+
+    /// QA-SIGN-01: the signer factory cannot build a signer for the route.
+    #[tokio::test]
+    async fn signer_factory_failure_records_signer_stage() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(FailingSignerFactory(|| SignerError::MissingCredentials {
+                reason: "no credential material".to_owned(),
+            })),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body,
+            anthropic_error_body("api_error", "failed to prepare upstream credentials"),
+            "client response must stay byte-identical"
+        );
+        assert_eq!(dispatcher.call_count(), 0);
+
+        let events = drain_events(&mut rx);
+        let terminal = terminal_snapshot(&events);
+        assert_eq!(terminal.client_status, 502);
+        expect_error_code(&terminal.reason, error_codes::SIGNER_FAILED);
+        assert_eq!(terminal.internal_errors.len(), 1);
+        assert_eq!(
+            terminal.internal_errors[0].stage,
+            InternalErrorStage::Signer
+        );
+        assert_eq!(
+            terminal.internal_errors[0].kind,
+            InternalErrorKind::ConfigError
+        );
+        assert_eq!(
+            terminal.internal_errors[0].message.as_deref(),
+            Some("missing credentials: no credential material")
+        );
+    }
+
+    /// QA-SIGN-02: signing fails inside `attempt` after the factory succeeded.
+    #[tokio::test]
+    async fn attempt_sign_failure_records_signer_stage() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(FailingSignerFactoryForAttempt(|| {
+                SignerError::SigningFailed {
+                    reason: "hmac exploded".to_owned(),
+                }
+            })),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body,
+            anthropic_error_body("api_error", "failed to sign upstream request"),
+            "client response must stay byte-identical"
+        );
+        assert_eq!(dispatcher.call_count(), 0);
+
+        let events = drain_events(&mut rx);
+        let terminal = terminal_snapshot(&events);
+        assert_eq!(terminal.client_status, 502);
+        expect_error_code(&terminal.reason, error_codes::SIGNER_FAILED);
+        assert_eq!(terminal.internal_errors.len(), 1);
+        assert_eq!(
+            terminal.internal_errors[0].stage,
+            InternalErrorStage::Signer
+        );
+        assert_eq!(
+            terminal.internal_errors[0].kind,
+            InternalErrorKind::PluginError
+        );
+        assert_eq!(
+            terminal.internal_errors[0].message.as_deref(),
+            Some("signing failed: hmac exploded")
+        );
+    }
+
+    /// QA-STOR-01: the affinity store fails while resolving request keys.
+    #[tokio::test]
+    async fn affinity_store_failure_records_storage_stage() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus)
+            .with_upstream_affinity_store(Arc::new(FailingAffinityStore));
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","tools":[{"type":"web_search_20250305"}],"messages":[{"role":"user","content":[{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","encrypted_content":"opaque-ciphertext"}]}]}]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, _body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(dispatcher.call_count(), 0);
+
+        let events = drain_events(&mut rx);
+        let terminal = terminal_snapshot(&events);
+        assert_eq!(terminal.client_status, 503);
+        expect_error_code(&terminal.reason, error_codes::UPSTREAM_AFFINITY_UNAVAILABLE);
+        assert_eq!(terminal.internal_errors.len(), 1);
+        assert_eq!(
+            terminal.internal_errors[0].stage,
+            InternalErrorStage::Storage
+        );
+        assert_eq!(
+            terminal.internal_errors[0].kind,
+            InternalErrorKind::Unavailable
+        );
+        assert_eq!(
+            terminal.internal_errors[0].message.as_deref(),
+            Some(UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE)
+        );
+    }
+
+    /// QA-RELAY-01/02: a typed transport source reaches the terminal snapshot
+    /// with a classified relay cause, not a string bucket.
+    #[tokio::test]
+    async fn transport_failure_records_typed_relay_cause() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(vec![Err(DispatchError::Transport {
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "connection refused",
+            )),
+        })]));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body,
+            anthropic_error_body("api_error", "upstream request failed"),
+            "client response must stay byte-identical"
+        );
+        assert_eq!(dispatcher.call_count(), 1);
+
+        let events = drain_events(&mut rx);
+        let terminal = terminal_snapshot(&events);
+        assert_eq!(terminal.client_status, 502);
+        expect_error_code(&terminal.reason, error_codes::UPSTREAM_DISPATCH_FAILED);
+        assert_eq!(terminal.internal_errors.len(), 1);
+        assert_eq!(terminal.internal_errors[0].stage, InternalErrorStage::Relay);
+        assert_eq!(
+            terminal.internal_errors[0].kind,
+            InternalErrorKind::Unavailable
+        );
+        let message = terminal.internal_errors[0]
+            .message
+            .as_deref()
+            .expect("relay cause message");
+        assert!(
+            message.starts_with("connection_refused: "),
+            "typed tier-2 classification must prefix the chain, got {message}"
+        );
+        assert!(
+            message.contains("connection refused"),
+            "typed source chain must be preserved, got {message}"
+        );
+        // Connection timings are carried on the terminal snapshot even though
+        // no UpstreamResponseStarted was emitted; a mock dispatcher leaves
+        // them unobserved (None).
+    }
+
+    /// QA-RELAY-05: a saturated bulkhead is a relay-stage unavailable failure
+    /// with the Retry-After header preserved.
+    #[tokio::test]
+    async fn bulkhead_full_records_relay_unavailable() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(vec![Err(DispatchError::BulkheadFull {
+            retry_after: Duration::from_secs(3),
+        })]));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("3"),
+            "Retry-After must be preserved"
+        );
+        let (_status, body) = collect_response_body(response).await;
+        assert_eq!(
+            body,
+            anthropic_error_body("overloaded_error", "upstream bulkhead queue is full")
+        );
+
+        let events = drain_events(&mut rx);
+        let terminal = terminal_snapshot(&events);
+        assert_eq!(terminal.client_status, 503);
+        expect_error_code(&terminal.reason, error_codes::UPSTREAM_DISPATCH_FAILED);
+        assert_eq!(terminal.internal_errors.len(), 1);
+        assert_eq!(terminal.internal_errors[0].stage, InternalErrorStage::Relay);
+        assert_eq!(
+            terminal.internal_errors[0].kind,
+            InternalErrorKind::Unavailable
+        );
+        assert!(
+            terminal.internal_errors[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("bulkhead queue full")),
+            "bulkhead cause must be preserved: {:?}",
+            terminal.internal_errors[0].message
+        );
+        // A pre-transport rejection never touched the connector: all
+        // connection timings must be unobserved.
+        assert_eq!(terminal.dns_ms, None);
+        assert_eq!(terminal.connect_ms, None);
+        assert_eq!(terminal.connection_reused, None);
+    }
+
+    /// QA-RETRY-01: a provider 401 refreshes the signer and retries; the 401
+    /// itself is not an internal failure, and the second attempt's typed
+    /// cause is the only terminal diagnostic.
+    #[tokio::test]
+    async fn retry_after_401_keeps_provider_error_out_of_internal_errors() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(RefreshingSignerFactory),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(vec![
+            Ok(upstream_response(
+                StatusCode::UNAUTHORIZED,
+                br#"{"type":"error","error":{"type":"authentication_error","message":"bad key"}}"#,
+            )),
+            Err(DispatchError::Transport {
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "connect timed out",
+                )),
+            }),
+        ]));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, _body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(dispatcher.call_count(), 2, "401 must trigger one retry");
+
+        let events = drain_events(&mut rx);
+        let attempt_nums: Vec<u32> = events
+            .iter()
+            .filter_map(|event| match event {
+                cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt { attempt_num, .. } => {
+                    Some(*attempt_num)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(attempt_nums, vec![1, 2], "both attempts must be emitted");
+        let terminal = terminal_snapshot(&events);
+        expect_error_code(&terminal.reason, error_codes::UPSTREAM_DISPATCH_FAILED);
+        assert_eq!(
+            terminal.internal_errors.len(),
+            1,
+            "provider 401 must not enter internal_errors: {:?}",
+            terminal.internal_errors
+        );
+        assert_eq!(terminal.internal_errors[0].stage, InternalErrorStage::Relay);
+        assert_eq!(terminal.internal_errors[0].kind, InternalErrorKind::Timeout);
+        let message = terminal.internal_errors[0]
+            .message
+            .as_deref()
+            .expect("relay cause message");
+        assert!(
+            message.starts_with("timeout: "),
+            "typed tier-2 classification must prefix the chain, got {message}"
+        );
+    }
+
+    /// QA-CTRL-09: a dialect shape failure falls back to raw passthrough and
+    /// the request still succeeds; the non-fatal shape diagnostic persists.
+    #[tokio::test]
+    async fn shape_fallback_success_keeps_shape_diagnostic() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let view = provenance_view(
+            failure_principal_view(
+                "principal-test",
+                (
+                    None,
+                    crate::api_keys::principal_view::ObservabilityHooksCache::Inherit,
+                    crate::api_keys::principal_view::DialectCache::Explicit(
+                        crate::api_keys::principal_view::ShapePluginCache {
+                            dialect: Arc::new(FailingDialect),
+                        },
+                    ),
+                ),
+            ),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(vec![Ok(upstream_response(
+            StatusCode::OK,
+            br#"{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-test","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ))]));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, _body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dispatcher.call_count(), 1);
+
+        let events = drain_events(&mut rx);
+        let terminal = terminal_snapshot(&events);
+        assert!(
+            matches!(terminal.reason, cc_lb_lifecycle::TerminationReason::Success),
+            "fallback success must terminate as success, got {:?}",
+            terminal.reason
+        );
+        assert_eq!(terminal.internal_errors.len(), 1);
+        assert_eq!(terminal.internal_errors[0].stage, InternalErrorStage::Shape);
+        assert_eq!(terminal.internal_errors[0].kind, InternalErrorKind::Trap);
+        assert!(
+            terminal.internal_errors[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("injected dialect failure")),
+            "shape diagnostic must carry the dialect failure: {:?}",
+            terminal.internal_errors[0].message
+        );
+    }
+
+    /// QA-UPSTR-06 (negative gate): a 200 body containing an "error" key must
+    /// not be classified as an upstream error.
+    #[tokio::test]
+    async fn success_body_with_error_key_is_not_upstream_error() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(vec![Ok(upstream_response(
+            StatusCode::OK,
+            br#"{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-test","stop_reason":"end_turn","error":{"type":"not_an_error"},"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ))]));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, _body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let events = drain_events(&mut rx);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
+            )),
+            "error-shaped JSON inside a 200 must not emit upstream error observation"
+        );
+        let terminal = terminal_snapshot(&events);
+        assert!(
+            matches!(terminal.reason, cc_lb_lifecycle::TerminationReason::Success),
+            "200 with error-shaped body must stay success, got {:?}",
+            terminal.reason
+        );
+        assert!(terminal.internal_errors.is_empty());
+    }
+
+    /// QA-CTRL-13 (handle path): `ObserveEvent::Error` hooks still fire with
+    /// the same payload and relative order after the emit migration.
+    #[tokio::test]
+    async fn error_hooks_preserve_payload_and_order_on_dispatch_failure() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let hook = Arc::new(RecordingHook::default());
+        let upstream_id = Uuid::new_v4();
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            vec![hook.clone()],
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(vec![Err(DispatchError::Transport {
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "refused",
+            )),
+        })]));
+        let lifecycle = provenance_lifecycle(view, dispatcher, &bus);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, _body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+        let events = hook.events.lock().expect("recording hook lock").clone();
+        let authn_pos = events
+            .iter()
+            .position(|event| matches!(event, ObserveEvent::AuthnComplete { .. }))
+            .expect("AuthnComplete hook event");
+        let error_pos = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    ObserveEvent::Error { code, source, .. }
+                        if code == "upstream_dispatch_error" && source == "dispatch"
+                )
+            })
+            .expect("upstream_dispatch_error hook event");
+        let finished_pos = events
+            .iter()
+            .position(|event| matches!(event, ObserveEvent::RequestFinished { .. }))
+            .expect("RequestFinished hook event");
+        assert!(
+            authn_pos < error_pos && error_pos < finished_pos,
+            "hook order must be AuthnComplete < Error < RequestFinished: {events:?}"
+        );
+    }
+
+    /// QA-AUTH-01/05 + QA-CTRL-13 (authn_rail site): `reject_unauthenticated`
+    /// persists the exact BuiltinAuthError Display literal with the typed
+    /// stage/kind, and the error hook fires before the terminal hook.
+    #[tokio::test]
+    async fn reject_unauthenticated_records_exact_auth_error() {
+        for (error, expected_status, expected_kind) in [
+            (
+                BuiltinAuthError::InvalidFormat,
+                StatusCode::UNAUTHORIZED,
+                InternalErrorKind::InvalidInput,
+            ),
+            (
+                BuiltinAuthError::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                InternalErrorKind::Unavailable,
+            ),
+        ] {
+            let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+            let mut rx = subscribe_lifecycle(&bus);
+            let hook = Arc::new(RecordingHook::default());
+            let clock: ClockHandle = Arc::new(crate::clock::SystemClock);
+            let observer = LifecycleContext::new(
+                "req-authn-reject".to_owned(),
+                bus.clone() as Arc<dyn RequestEventBus>,
+                &clock,
+            );
+            observer.mark_authn_reached();
+            let hook_trait: Arc<dyn ObservabilityHook> = hook.clone();
+            observer.set_observability_hooks(std::slice::from_ref(&hook_trait));
+
+            let response = crate::authn_rail::reject_unauthenticated(&error, Some(&observer));
+            assert_eq!(response.status(), expected_status);
+            let (_status, body) = collect_response_body(response).await;
+            assert_eq!(
+                body,
+                anthropic_error_body("authentication_error", &error.to_string()),
+                "client response must stay byte-identical"
+            );
+            drop(observer);
+
+            let events = drain_events(&mut rx);
+            let started_pos = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        cc_lb_lifecycle::LifecycleEvent::RequestStarted { .. }
+                    )
+                })
+                .expect("RequestStarted must be emitted by terminate_failure");
+            let auth_pos = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+                            result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed { .. }),
+                            ..
+                        }
+                    )
+                })
+                .expect("expected AuthCompleted::AuthenticationFailed");
+            let terminated_pos = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
+                    )
+                })
+                .expect("RequestTerminated must be emitted");
+            assert!(
+                started_pos < auth_pos && auth_pos < terminated_pos,
+                "event order must be RequestStarted < AuthCompleted < RequestTerminated: {events:?}"
+            );
+            let terminal = terminal_snapshot(&events);
+            assert_eq!(terminal.client_status, expected_status.as_u16());
+            expect_error_code(&terminal.reason, error_codes::AUTHENTICATION_FAILED);
+            assert_eq!(terminal.internal_errors.len(), 1);
+            assert_eq!(terminal.internal_errors[0].stage, InternalErrorStage::Authn);
+            assert_eq!(terminal.internal_errors[0].kind, expected_kind);
+            assert_eq!(
+                terminal.internal_errors[0].message.as_deref(),
+                Some(error.to_string().as_str()),
+                "exact BuiltinAuthError Display literal must persist"
+            );
+
+            let hook_events = hook.events.lock().expect("recording hook lock").clone();
+            let error_pos = hook_events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        ObserveEvent::Error { code, source, .. }
+                            if code == "authentication_error" && source == "authn"
+                    )
+                })
+                .expect("authentication_error hook event");
+            let finished_pos = hook_events
+                .iter()
+                .position(|event| matches!(event, ObserveEvent::RequestFinished { .. }))
+                .expect("RequestFinished hook event");
+            assert!(
+                error_pos < finished_pos,
+                "error hook must precede terminal hook: {hook_events:?}"
+            );
+        }
+    }
+
+    /// QA-CTRL-12: a termination committed before `mark_authn_reached`
+    /// publishes nothing — the pre-authn silence invariant.
+    #[tokio::test]
+    async fn pre_authn_termination_publishes_nothing() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let clock: ClockHandle = Arc::new(crate::clock::SystemClock);
+        {
+            let observer = LifecycleContext::new(
+                "req-pre-authn".to_owned(),
+                bus.clone() as Arc<dyn RequestEventBus>,
+                &clock,
+            );
+            observer.terminate_failure(InternalFailure {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                error_code: error_codes::TOWER_TIMEOUT,
+                error: InternalError {
+                    stage: InternalErrorStage::Relay,
+                    kind: InternalErrorKind::Timeout,
+                    message: Some("pre-authn timeout".to_owned()),
+                },
+            });
+        }
+        let events = drain_events(&mut rx);
+        assert!(
+            events.is_empty(),
+            "pre-authn termination must publish no events, got {events:?}"
+        );
+    }
+
+    /// QA-CTRL-11: a terminal committed without a prior explicit
+    /// `emit_request_started` still emits RequestStarted before
+    /// RequestTerminated — the orphan-terminal policy input.
+    #[tokio::test]
+    async fn orphan_terminal_emits_started_then_terminated() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let clock: ClockHandle = Arc::new(crate::clock::SystemClock);
+        {
+            let observer = LifecycleContext::new(
+                "req-orphan".to_owned(),
+                bus.clone() as Arc<dyn RequestEventBus>,
+                &clock,
+            );
+            observer.mark_authn_reached();
+            observer.terminate_failure(InternalFailure {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                error_code: error_codes::PRINCIPAL_MISSING,
+                error: InternalError {
+                    stage: InternalErrorStage::Authn,
+                    kind: InternalErrorKind::Unavailable,
+                    message: Some("orphan terminal".to_owned()),
+                },
+            });
+        }
+        let events = drain_events(&mut rx);
+        let started_pos = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    cc_lb_lifecycle::LifecycleEvent::RequestStarted { .. }
+                )
+            })
+            .expect("RequestStarted must be emitted by terminate_failure");
+        let terminated_pos = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
+                )
+            })
+            .expect("RequestTerminated must be emitted");
+        assert!(
+            started_pos < terminated_pos,
+            "RequestStarted must precede RequestTerminated: {events:?}"
+        );
+        let terminal = terminal_snapshot(&events);
+        expect_error_code(&terminal.reason, error_codes::PRINCIPAL_MISSING);
+        assert_eq!(terminal.internal_errors.len(), 1);
+    }
+
+    /// QA-RELAY-04: a connect timeout is a relay-stage timeout failure with
+    /// the typed tier-2 classification preserved.
+    #[tokio::test]
+    async fn transport_timeout_records_relay_timeout() {
+        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+        let mut rx = subscribe_lifecycle(&bus);
+        let upstream_id = Uuid::new_v4();
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+            vec![upstream_record(upstream_id)],
+        );
+        let dispatcher = Arc::new(QueueDispatch::new(vec![Err(DispatchError::Transport {
+            source: Box::new(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+        })]));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+        let request = failure_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles request");
+        let (status, _body) = collect_response_body(response).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(dispatcher.call_count(), 1);
+
+        let events = drain_events(&mut rx);
+        let terminal = terminal_snapshot(&events);
+        assert_eq!(terminal.client_status, 502);
+        expect_error_code(&terminal.reason, error_codes::UPSTREAM_DISPATCH_FAILED);
+        assert_eq!(terminal.internal_errors.len(), 1);
+        assert_eq!(terminal.internal_errors[0].stage, InternalErrorStage::Relay);
+        assert_eq!(terminal.internal_errors[0].kind, InternalErrorKind::Timeout);
+        let message = terminal.internal_errors[0]
+            .message
+            .as_deref()
+            .expect("relay cause message");
+        assert!(
+            message.starts_with("timeout: "),
+            "typed tier-2 classification must prefix the chain, got {message}"
+        );
+    }
+
+    /// QA-RELAY-06: invalid-URI and request-build dispatch failures are
+    /// relay-stage config errors carrying their own reasons.
+    #[tokio::test]
+    async fn invalid_uri_and_request_build_record_relay_config_error() {
+        for (source, expected_fragment) in [
+            (
+                DispatchError::InvalidUri {
+                    reason: "bad scheme".to_owned(),
+                },
+                "invalid upstream uri: bad scheme",
+            ),
+            (
+                DispatchError::RequestBuild {
+                    reason: "header rejected".to_owned(),
+                },
+                "upstream request build failed: header rejected",
+            ),
+        ] {
+            let bus = Arc::new(crate::event_bus::InMemoryBus::new());
+            let mut rx = subscribe_lifecycle(&bus);
+            let upstream_id = Uuid::new_v4();
+            let view = provenance_view(
+                failure_principal_view("principal-test", default_artifacts()),
+                Arc::new(TestSignerFactory),
+                Vec::new(),
+                vec![upstream_record(upstream_id)],
+            );
+            let dispatcher = Arc::new(QueueDispatch::new(vec![Err(source)]));
+            let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+
+            let request = failure_request(Bytes::from_static(
+                br#"{"model":"claude-test","messages":[]}"#,
+            ));
+            let auth = lifecycle
+                .authenticate(request.headers())
+                .await
+                .expect("request authenticates");
+            let response = lifecycle
+                .handle(request, &auth)
+                .await
+                .expect("lifecycle handles request");
+            let (status, body) = collect_response_body(response).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert_eq!(
+                body,
+                anthropic_error_body("api_error", "upstream request failed"),
+                "client response must stay byte-identical"
+            );
+            assert_eq!(dispatcher.call_count(), 1);
+
+            let events = drain_events(&mut rx);
+            let terminal = terminal_snapshot(&events);
+            assert_eq!(terminal.client_status, 502);
+            expect_error_code(&terminal.reason, error_codes::UPSTREAM_DISPATCH_FAILED);
+            assert_eq!(terminal.internal_errors.len(), 1);
+            assert_eq!(terminal.internal_errors[0].stage, InternalErrorStage::Relay);
+            assert_eq!(
+                terminal.internal_errors[0].kind,
+                InternalErrorKind::ConfigError
+            );
+            assert_eq!(
+                terminal.internal_errors[0].message.as_deref(),
+                Some(expected_fragment),
+                "dispatch variant reason must be preserved"
+            );
+        }
     }
 }

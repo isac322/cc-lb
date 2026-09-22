@@ -66,7 +66,6 @@ pub struct RequestIoTimings {
 ///
 /// See the crate-level documentation for the expected sequences.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[non_exhaustive]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LifecycleEvent {
     /// Handler entry; emitted once per request before any pipeline work.
@@ -143,12 +142,6 @@ pub enum LifecycleEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         upstream_ttfb_ms: Option<u64>,
     },
-    ProviderErrorObserved {
-        event_id: EventId,
-        code: String,
-        message: String,
-        source: String,
-    },
     RequestLogUpstreamErrorObserved {
         event_id: EventId,
         error_type: String,
@@ -188,6 +181,16 @@ pub enum LifecycleEvent {
         io_timings: RequestIoTimings,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         upstream_body_ms: Option<u64>,
+        /// Connection timings measured for the last dispatch attempt.
+        /// Carried on the terminal snapshot so dispatch failures (which never
+        /// produce `UpstreamResponseStarted`) still persist `dns_ms` /
+        /// `connect_ms` / `connection_reused`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dns_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connect_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection_reused: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         first_body_chunk_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,7 +233,6 @@ impl LifecycleEvent {
             | Self::LimitDecision { event_id, .. }
             | Self::UpstreamAttempt { event_id, .. }
             | Self::UpstreamResponseStarted { event_id, .. }
-            | Self::ProviderErrorObserved { event_id, .. }
             | Self::RequestLogUpstreamErrorObserved { event_id, .. }
             | Self::UsageObserved { event_id, .. }
             | Self::StreamCompleted { event_id, .. }
@@ -251,7 +253,6 @@ impl LifecycleEvent {
             Self::LimitDecision { .. } => "limit_decision",
             Self::UpstreamAttempt { .. } => "upstream_attempt",
             Self::UpstreamResponseStarted { .. } => "upstream_response_started",
-            Self::ProviderErrorObserved { .. } => "provider_error_observed",
             Self::RequestLogUpstreamErrorObserved { .. } => "request_log_upstream_error_observed",
             Self::UsageObserved { .. } => "usage_observed",
             Self::StreamCompleted { .. } => "stream_completed",

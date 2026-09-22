@@ -481,11 +481,11 @@ impl UpstreamDispatch for SequenceDispatch {
             .responses
             .lock()
             .map_err(|_| DispatchError::Transport {
-                reason: "test response queue lock poisoned".to_owned(),
+                source: Box::new(std::io::Error::other("test response queue lock poisoned")),
             })?
             .pop_front()
             .ok_or_else(|| DispatchError::Transport {
-                reason: "test response queue exhausted".to_owned(),
+                source: Box::new(std::io::Error::other("test response queue exhausted")),
             })?;
         let mut response = Response::new(Body::from(spec.body.clone()));
         response.headers_mut().insert(

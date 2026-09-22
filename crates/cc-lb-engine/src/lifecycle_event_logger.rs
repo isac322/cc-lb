@@ -594,6 +594,9 @@ mod tests {
             upstream_body_ms: timing.upstream_body_ms,
             first_body_chunk_ms: None,
             finalize_ms: timing.finalize_ms,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
         }

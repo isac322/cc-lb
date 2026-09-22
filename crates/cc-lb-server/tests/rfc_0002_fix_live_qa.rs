@@ -18,7 +18,7 @@ use fake_anthropic::{AppConfig, MessageScript, ScriptedMessageResponse};
 use http::StatusCode;
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, Row, SqlitePool, sqlite::SqlitePoolOptions};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
@@ -584,14 +584,6 @@ async fn lqa_2b_lifecycle_metrics_increment_for_happy_non_stream() {
         let prefix = format!(r#"cc_lb_lifecycle_events_total{{kind="{kind}"}}"#);
         assert_eq!(diff_counter(&pre, &post, &prefix), 1, "metric {kind}");
     }
-    assert_eq!(
-        diff_counter(
-            &pre,
-            &post,
-            r#"cc_lb_lifecycle_events_total{kind="provider_error_observed"}"#,
-        ),
-        0
-    );
 }
 
 #[tokio::test]
@@ -705,6 +697,16 @@ async fn lqa_5b_api_key_auth_invalid_key_returns_401_metrics_and_row() {
     wait_for_row_count(&pool, "1=1", baseline + 1).await;
     let payload = fetch_payload_json(&pool, "error_code = 'authentication_failed'").await;
     assert_eq!(json_i64(&payload, "status"), 401);
+    // #849: the persisted row must carry the typed authn diagnostic with the
+    // exact BuiltinAuthError reason — "not-a-cclb-key" fails secret parsing.
+    assert_eq!(
+        payload["internal_errors"],
+        serde_json::json!([{
+            "stage": "authn",
+            "kind": "invalid_input",
+            "message": "invalid api key format"
+        }])
+    );
     let post = wait_metric_delta(
         server.metrics_addr,
         &pre,
@@ -985,7 +987,7 @@ async fn lqa_6b_non_stream_and_stream_rows_have_cache_and_cost_fields() {
 }
 
 #[tokio::test]
-async fn lqa_6c_upstream_rate_limit_error_records_provider_error_metric() {
+async fn lqa_6c_upstream_rate_limit_error_records_typed_upstream_error() {
     let script = MessageScript::new();
     script.push_response(ScriptedMessageResponse::error(
         StatusCode::TOO_MANY_REQUESTS,
@@ -1002,7 +1004,6 @@ async fn lqa_6c_upstream_rate_limit_error_records_provider_error_metric() {
     .await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
-    let pre = fetch_metric_scrape(server.metrics_addr).await;
 
     let response = post_happy(&server).await;
 
@@ -1012,20 +1013,23 @@ async fn lqa_6c_upstream_rate_limit_error_records_provider_error_metric() {
     assert_eq!(json_i64(&payload, "status"), 429);
     let error_code = json_str(&payload, "error_code");
     assert_eq!(error_code, "upstream_4xx");
-    let post = wait_metric_delta(
-        server.metrics_addr,
-        &pre,
-        r#"cc_lb_lifecycle_events_total{kind="provider_error_observed"}"#,
-        1,
-    )
-    .await;
+    // #849: the typed upstream error replaces the provider_error_observed
+    // metric counter — the observable contract is the persisted
+    // upstream_error_type/message pair, not an incidental counter.
     assert_eq!(
-        diff_counter(
-            &pre,
-            &post,
-            r#"cc_lb_lifecycle_events_total{kind="provider_error_observed"}"#
-        ),
-        1
+        json_str(&payload, "upstream_error_type"),
+        "rate_limit_error"
+    );
+    assert_eq!(
+        json_str(&payload, "upstream_error_message"),
+        "Test rate-limited"
+    );
+    // Upstream failures are not cc-lb internal failures.
+    assert!(
+        payload["internal_errors"]
+            .as_array()
+            .is_none_or(|errors| errors.is_empty()),
+        "upstream 4xx must not record internal_errors: {payload}"
     );
 }
 
@@ -1096,6 +1100,18 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
     let payload = fetch_payload_json(&pool, "1=1").await;
     assert_eq!(json_i64(&payload, "status"), 400);
     assert_json_field_populated(&payload, "error_code");
+    // #849: the persisted row must carry the typed ingress diagnostic —
+    // "request body must be valid JSON" was previously discarded.
+    assert_eq!(json_str(&payload, "error_code"), "invalid_json");
+    assert_eq!(
+        payload["internal_errors"],
+        serde_json::json!([{
+            "stage": "ingress",
+            "kind": "invalid_input",
+            "message": "request body must be valid JSON"
+        }])
+    );
+    assert!(payload["upstream_error_type"].is_null());
     let post = wait_metric_delta(
         server.metrics_addr,
         &pre,
@@ -1119,4 +1135,56 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
             "invalid json must yield {expected} {kind} lifecycle event(s)"
         );
     }
+}
+
+#[tokio::test]
+async fn lqa_6g_truncated_body_records_typed_ingress_reason() {
+    let server = common::spawn_test_server().await;
+    let pool = open_sqlite_pool(&server.sqlite_path).await;
+    let baseline = settled_row_count(&pool, "1=1").await;
+
+    // Declare a Content-Length larger than what is sent but under the
+    // fixture's messages_cap_bytes (256 for TestTopology::Single), then
+    // half-close: the server fails while reading the request body —
+    // post-auth, so the row is attributable and must carry the typed
+    // ingress diagnostic.
+    let mut stream = TcpStream::connect(server.proxy_addr)
+        .await
+        .expect("connect proxy");
+    let head = format!(
+        "POST /v1/messages HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nx-api-key: {}\r\nContent-Length: 200\r\n\r\n",
+        server.proxy_addr, server.managed_key.plaintext
+    );
+    stream.write_all(head.as_bytes()).await.expect("write head");
+    stream
+        .write_all(b"{\"model\":\"claude")
+        .await
+        .expect("write partial body");
+    stream.shutdown().await.expect("half-close write side");
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.expect("read response");
+    let head_text = String::from_utf8_lossy(&buf);
+    assert!(
+        head_text.starts_with("HTTP/1.1 400"),
+        "expected 400 for truncated body, got: {}",
+        head_text.lines().next().unwrap_or_default()
+    );
+
+    wait_for_row_count(&pool, "1=1", baseline + 1).await;
+    let payload = fetch_payload_json(&pool, "error_code = 'body_read_failed'").await;
+    assert_eq!(json_i64(&payload, "status"), 400);
+    // #849: the transport read failure is the persisted reason — previously
+    // this row carried only the coarse error_code.
+    let errors = payload["internal_errors"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(errors.len(), 1, "expected one internal error: {payload}");
+    assert_eq!(errors[0]["stage"], "ingress");
+    assert_eq!(errors[0]["kind"], "invalid_input");
+    assert!(
+        errors[0]["message"].as_str().is_some_and(|m| !m.is_empty()),
+        "body_read_failed must carry the transport message: {payload}"
+    );
+    assert!(payload["upstream_error_type"].is_null());
 }

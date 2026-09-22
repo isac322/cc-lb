@@ -64,7 +64,7 @@ impl UpstreamDispatch for FailingSecondAttemptDispatch {
             self.first.dispatch(request).await
         } else {
             Err(DispatchError::Transport {
-                reason: "simulated retry connection reset".to_owned(),
+                source: Box::new(std::io::Error::other("simulated retry connection reset")),
             })
         }
     }

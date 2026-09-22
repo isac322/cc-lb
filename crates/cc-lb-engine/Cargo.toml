@@ -59,6 +59,7 @@ parking_lot = "0.12"
 opentelemetry.workspace = true
 rand = "0.10"
 reqwest.workspace = true
+rustls.workspace = true
 secrecy.workspace = true
 serde_json.workspace = true
 sonic-rs.workspace = true
@@ -91,6 +92,7 @@ tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 tower = { workspace = true, features = ["util"] }
 trybuild = "1"
+syn = { version = "2.0.119", features = ["full", "visit"] }
 
 [target.'cfg(loom)'.dependencies]
 arc-swap.workspace = true

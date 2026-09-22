@@ -1,3 +1,5 @@
+use std::error::Error as StdError;
+use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Once};
 use std::time::Duration;
@@ -20,7 +22,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 #[cfg(test)]
 use tokio::time::Instant;
 
-use crate::dns_cache::{CachingDnsConnector, DnsResolverConfig};
+use crate::dns_cache::{CachingDnsConnector, DnsCacheError, DnsResolverConfig};
 use crate::instrumented_connector::InstrumentedHttpsConnector;
 use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
 
@@ -371,9 +373,10 @@ where
     let response = client.request(request).await.map_err(|source| {
         record_dispatch_failure(&span, "transport");
         DispatchError::Transport {
-            reason: source.to_string(),
+            source: Box::new(source),
         }
     })?;
+    crate::request_timing::finalize_connection_reused_if_unset();
     let status = response.status();
     span.record("http.response.status_code", u64::from(status.as_u16()));
     if status.is_client_error() || status.is_server_error() {
@@ -410,6 +413,126 @@ fn register_bulkhead_metrics() {
             "Active in-flight upstream requests admitted by each bulkhead."
         );
     });
+}
+
+/// Stable classification of a transport-layer dispatch failure.
+///
+/// Derived only from typed `source()`/`get_ref()` chains — never from error
+/// message text, which is platform- and locale-dependent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransportFailureKind {
+    /// Name resolution failed; no TCP connect was attempted.
+    Dns,
+    /// The TCP connect was refused by the peer.
+    ConnectionRefused,
+    /// The TLS handshake failed after TCP connected.
+    Tls,
+    /// A timeout elapsed (connect timeout, or a hyper-level timeout).
+    Timeout,
+    /// The failure could not be attributed to a known typed cause.
+    Unknown,
+}
+
+impl TransportFailureKind {
+    /// Stable machine-readable name for metrics, logs, and persisted kinds.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dns => "dns",
+            Self::ConnectionRefused => "connection_refused",
+            Self::Tls => "tls",
+            Self::Timeout => "timeout",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for TransportFailureKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Maximum depth walked when traversing an error source chain.
+const MAX_ERROR_CHAIN_DEPTH: usize = 8;
+
+/// Classify a transport failure by walking its typed error chain.
+///
+/// Accepts any error in the chain: `DispatchError` itself (whose `source()`
+/// yields the preserved transport error), the boxed transport source, or any
+/// intermediate node. `io::Error` nodes are traversed via `get_ref()` because
+/// `io::Error::source()` skips the wrapped error itself — that is where
+/// `rustls::Error` and wrapped `DnsCacheError` values live. Chains deeper than
+/// [`MAX_ERROR_CHAIN_DEPTH`] classify as [`TransportFailureKind::Unknown`].
+pub(crate) fn classify_transport_error(error: &(dyn StdError + 'static)) -> TransportFailureKind {
+    let mut current: Option<&(dyn StdError + 'static)> = Some(error);
+    let mut depth = 0;
+    while let Some(err) = current {
+        if depth >= MAX_ERROR_CHAIN_DEPTH {
+            break;
+        }
+        depth += 1;
+
+        if err.is::<DnsCacheError>() {
+            return TransportFailureKind::Dns;
+        }
+        if err.is::<rustls::Error>() {
+            return TransportFailureKind::Tls;
+        }
+        if err.is::<tokio::time::error::Elapsed>() {
+            return TransportFailureKind::Timeout;
+        }
+        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+            match io_err.kind() {
+                std::io::ErrorKind::ConnectionRefused => {
+                    return TransportFailureKind::ConnectionRefused;
+                }
+                std::io::ErrorKind::TimedOut => return TransportFailureKind::Timeout,
+                _ => {}
+            }
+            // io::Error::source() skips the wrapped error itself; get_ref()
+            // exposes it so wrapped rustls/DNS causes are still inspected.
+            current = io_err
+                .get_ref()
+                .map(|inner| inner as &(dyn StdError + 'static))
+                .or_else(|| err.source());
+            continue;
+        }
+        if let Some(hyper_err) = err.downcast_ref::<hyper::Error>()
+            && hyper_err.is_timeout()
+        {
+            return TransportFailureKind::Timeout;
+        }
+        current = err.source();
+    }
+    TransportFailureKind::Unknown
+}
+
+/// Render the preserved transport error chain as bounded display strings.
+///
+/// Returns each chain node's `Display` in outermost-first order, capped at
+/// [`MAX_ERROR_CHAIN_DEPTH`] entries. Consecutive duplicates are dropped
+/// (`io::Error` displays its wrapped error's message). Callers must still run
+/// the result through `redact_internal_errors` before persisting.
+pub(crate) fn transport_error_chain(error: &(dyn StdError + 'static)) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut current: Option<&(dyn StdError + 'static)> = Some(error);
+    while let Some(err) = current {
+        if chain.len() >= MAX_ERROR_CHAIN_DEPTH {
+            break;
+        }
+        let rendered = err.to_string();
+        if chain.last() != Some(&rendered) {
+            chain.push(rendered);
+        }
+        current = match err.downcast_ref::<std::io::Error>() {
+            Some(io_err) => io_err
+                .get_ref()
+                .map(|inner| inner as &(dyn StdError + 'static))
+                .or_else(|| err.source()),
+            None => err.source(),
+        };
+    }
+    chain
 }
 
 #[cfg(test)]
@@ -687,5 +810,122 @@ mod tests {
         async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
             RetryDecision::Fail
         }
+    }
+
+    #[test]
+    fn classify_dns_error_wrapped_in_io() {
+        // Mirrors hyper's ConnectError("dns error", DnsCacheError): the DNS
+        // error sits inside an opaque wrapper, reachable via get_ref/source.
+        let dns = DnsCacheError::Resolve {
+            host: "example.invalid".to_owned(),
+            message: "no records".to_owned(),
+        };
+        let wrapped = std::io::Error::other(dns);
+
+        assert_eq!(
+            classify_transport_error(&wrapped),
+            TransportFailureKind::Dns
+        );
+    }
+
+    #[test]
+    fn classify_connection_refused_io_error() {
+        let err = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+
+        assert_eq!(
+            classify_transport_error(&err),
+            TransportFailureKind::ConnectionRefused
+        );
+    }
+
+    #[test]
+    fn classify_tls_error_wrapped_in_io() {
+        // hyper-rustls surfaces handshake failures as
+        // io::Error::other(io::Error::other(rustls::Error)).
+        let tls = rustls::Error::HandshakeNotComplete;
+        let wrapped = std::io::Error::other(std::io::Error::other(tls));
+
+        assert_eq!(
+            classify_transport_error(&wrapped),
+            TransportFailureKind::Tls
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn classify_timeout_from_elapsed_and_timed_out_kind() {
+        let elapsed = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        })
+        .await
+        .expect_err("timeout elapses under paused time");
+        // hyper wraps connect timeouts as io::Error::new(TimedOut, Elapsed).
+        let wrapped = std::io::Error::new(std::io::ErrorKind::TimedOut, elapsed);
+
+        assert_eq!(
+            classify_transport_error(&wrapped),
+            TransportFailureKind::Timeout
+        );
+
+        let bare = std::io::Error::from(std::io::ErrorKind::TimedOut);
+        assert_eq!(
+            classify_transport_error(&bare),
+            TransportFailureKind::Timeout
+        );
+    }
+
+    #[test]
+    fn classify_unknown_for_untyped_error() {
+        let err = std::io::Error::other("mystery");
+
+        assert_eq!(
+            classify_transport_error(&err),
+            TransportFailureKind::Unknown
+        );
+    }
+
+    #[test]
+    fn classify_walks_dispatch_error_source_chain() {
+        // A DispatchError whose source is a boxed transport error classifies
+        // through the enum's own source() link.
+        let err = DispatchError::Transport {
+            source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)),
+        };
+
+        assert_eq!(
+            classify_transport_error(&err),
+            TransportFailureKind::ConnectionRefused
+        );
+    }
+
+    #[test]
+    fn transport_error_chain_renders_outermost_first_and_dedups() {
+        let inner = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        let outer = std::io::Error::other(inner);
+
+        let chain = transport_error_chain(&outer);
+
+        assert_eq!(chain.len(), 1, "io::Error displays its inner message");
+        assert!(chain[0].contains("refused"), "got {chain:?}");
+    }
+
+    #[test]
+    fn transport_error_chain_preserves_multi_level_causes() {
+        let leaf = DnsCacheError::Resolve {
+            host: "example.invalid".to_owned(),
+            message: "no records".to_owned(),
+        };
+        let mid = std::io::Error::other(leaf);
+        let outer = DispatchError::Transport {
+            source: Box::new(mid),
+        };
+
+        let chain = transport_error_chain(&outer);
+
+        assert_eq!(chain.len(), 2, "got {chain:?}");
+        assert!(
+            chain[0].contains("upstream dispatch failed"),
+            "got {chain:?}"
+        );
+        assert!(chain[1].contains("dns resolution failed"), "got {chain:?}");
     }
 }

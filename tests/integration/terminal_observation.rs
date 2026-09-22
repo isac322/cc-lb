@@ -17,12 +17,12 @@ use cc_lb_pricing::{
 use cc_lb_server::drain::DrainController;
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, RequestEvent, RequestEventStore,
+    BackendKind, ManagedKeyStore, MetaStore, RequestEvent, RequestEventStore,
     principal::{
         Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
         PrincipalStore,
     },
-    types::{Limit as KeyLimit, LimitKind as KeyLimitKind},
+    types::{ApiKeyMutation, KeyStatus, Limit as KeyLimit, LimitKind as KeyLimitKind},
     upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -83,6 +83,18 @@ async fn body_too_large_after_auth_persists_one_row() -> Result<(), Box<dyn std:
     };
     assert_eq!(rows[0].status, 413);
     assert_eq!(rows[0].error_code.as_deref(), Some("body_too_large"));
+    // #849: the persisted row must carry the typed ingress diagnostic, not
+    // just the coarse error_code — the cap value is part of the reason.
+    assert_eq!(
+        internal_errors_json(&rows[0]),
+        json!([{
+            "stage": "ingress",
+            "kind": "invalid_input",
+            "message": "request body exceeded limit of 33554432 bytes"
+        }])
+    );
+    assert!(rows[0].upstream_error_type.is_none());
+    assert!(rows[0].upstream_error_message.is_none());
 
     server.shutdown().await;
     Ok(())
@@ -134,6 +146,17 @@ async fn oversized_body_with_bad_credential_is_rejected_without_reading_body()
     };
     assert_eq!(rows[0].status, 401);
     assert_eq!(rows[0].error_code.as_deref(), Some("authentication_failed"));
+    // #849: auth rejection persists the typed authn diagnostic with the
+    // exact BuiltinAuthError reason — "sk-cclb-does-not-exist" fails secret
+    // parsing, so the persisted message is "invalid api key format".
+    assert_eq!(
+        internal_errors_json(&rows[0]),
+        json!([{
+            "stage": "authn",
+            "kind": "invalid_input",
+            "message": "invalid api key format"
+        }])
+    );
 
     server.shutdown().await;
     Ok(())
@@ -175,6 +198,19 @@ async fn terminal_authentication_failed() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(row.error_code.as_deref(), Some("authentication_failed"));
     assert_eq!(row.status, 401);
     assert!(row.event_id.is_some());
+    // #849: the authn stage/kind and the exact BuiltinAuthError display
+    // string must be persisted — the bogus fixture key fails secret
+    // parsing, so the message is "invalid api key format".
+    assert_eq!(
+        internal_errors_json(&row),
+        json!([{
+            "stage": "authn",
+            "kind": "invalid_input",
+            "message": "invalid api key format"
+        }])
+    );
+    assert!(row.upstream_error_type.is_none());
+    assert!(row.upstream_error_message.is_none());
 
     server.shutdown().await;
     Ok(())
@@ -215,6 +251,15 @@ async fn missing_api_key_authentication_failed_persists_one_row()
     let rows = wait_for_request_event_count(storage.as_ref(), 1).await?;
     assert_eq!(rows[0].status, 401);
     assert_eq!(rows[0].error_code.as_deref(), Some("authentication_failed"));
+    // #849: missing credential persists the exact authn reason.
+    assert_eq!(
+        internal_errors_json(&rows[0]),
+        json!([{
+            "stage": "authn",
+            "kind": "invalid_input",
+            "message": "missing x-api-key header"
+        }])
+    );
 
     server.shutdown().await;
     Ok(())
@@ -250,6 +295,15 @@ async fn terminal_upstream_4xx() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(row.error_code.as_deref(), Some("upstream_4xx"));
     assert_eq!(row.status, 400);
     assert!(row.event_id.is_some());
+    // #849: upstream diagnostics live in upstream_error_* — the typed
+    // provider error replaces the old provider_error_observed metric.
+    assert_eq!(
+        row.upstream_error_type.as_deref(),
+        Some("invalid_request_error")
+    );
+    assert_eq!(row.upstream_error_message.as_deref(), Some("bad model"));
+    // Upstream failures are not cc-lb internal failures.
+    assert!(row.internal_errors.is_empty());
 
     server.shutdown().await;
     Ok(())
@@ -287,6 +341,10 @@ async fn terminal_upstream_5xx() -> Result<(), Box<dyn std::error::Error>> {
 
     let row = wait_for_request_event(&sqlite_path).await?;
     assert_eq!(row.error_code.as_deref(), Some("upstream_5xx"));
+    // #849: typed upstream error replaces the provider_error_observed metric.
+    assert_eq!(row.upstream_error_type.as_deref(), Some("overloaded_error"));
+    assert_eq!(row.upstream_error_message.as_deref(), Some("overloaded"));
+    assert!(row.internal_errors.is_empty());
     assert!(row.status >= 500);
     assert!(row.event_id.is_some());
 
@@ -319,6 +377,17 @@ async fn terminal_upstream_dispatch_failed() -> Result<(), Box<dyn std::error::E
 
     let row = wait_for_request_event(&sqlite_path).await?;
     assert_eq!(row.error_code.as_deref(), Some("upstream_dispatch_failed"));
+    // #849: dispatch failure persists the typed relay diagnostic — the
+    // transport error chain is the message, kind is unavailable.
+    let errors = internal_errors_json(&row);
+    assert_eq!(errors[0]["stage"], "relay");
+    assert_eq!(errors[0]["kind"], "unavailable");
+    assert!(
+        errors[0]["message"].as_str().is_some_and(|m| !m.is_empty()),
+        "relay diagnostic must carry the transport error chain: {errors}"
+    );
+    assert!(row.upstream_error_type.is_none());
+    assert!(row.upstream_error_message.is_none());
     assert!(row.event_id.is_some());
 
     server.shutdown().await;
@@ -360,6 +429,16 @@ async fn terminal_route_no_upstream_after_filter() -> Result<(), Box<dyn std::er
         Some("route_no_upstream_after_filter")
     );
     assert!(row.event_id.is_some());
+    // #849: the router_filter stage diagnostic explains why no upstream was
+    // eligible — previously this reason was discarded entirely.
+    assert_eq!(
+        internal_errors_json(&row),
+        json!([{
+            "stage": "router_filter",
+            "kind": "unavailable",
+            "message": "no upstream candidates remain after routing filters"
+        }])
+    );
 
     server.shutdown().await;
     Ok(())
@@ -396,6 +475,15 @@ async fn terminal_limit_rejected() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(row.error_code.as_deref(), Some("limit_rejected"));
     assert_eq!(row.status, 429);
     assert!(row.event_id.is_some());
+    // #849: the limit rejection persists the typed router diagnostic — the
+    // LimitDecision reason was previously discarded.
+    let errors = internal_errors_json(&row);
+    assert_eq!(errors[0]["stage"], "router");
+    assert_eq!(errors[0]["kind"], "unavailable");
+    assert!(
+        errors[0]["message"].as_str().is_some_and(|m| !m.is_empty()),
+        "limit rejection must carry the typed reason: {errors}"
+    );
 
     server.shutdown().await;
     Ok(())
@@ -504,6 +592,14 @@ async fn terminal_upstream_stream_error() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(row.error_code.as_deref(), Some("upstream_stream_error"));
     assert_eq!(row.status, 200);
     assert!(row.event_id.is_some());
+    // #849: the mid-stream provider error is persisted as typed upstream
+    // diagnostics, not an internal error.
+    assert_eq!(row.upstream_error_type.as_deref(), Some("overloaded_error"));
+    assert_eq!(
+        row.upstream_error_message.as_deref(),
+        Some("stream aborted by upstream")
+    );
+    assert!(row.internal_errors.is_empty());
 
     server.shutdown().await;
     Ok(())
@@ -536,11 +632,18 @@ async fn terminal_tower_timeout() -> Result<(), Box<dyn std::error::Error>> {
 
     let response = send_messages(&server, &plaintext_key, false).await?;
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-
     let row = wait_for_request_event(&sqlite_path).await?;
     assert_eq!(row.error_code.as_deref(), Some("tower_timeout"));
     assert_eq!(row.status, 504);
     assert!(row.event_id.is_some(), "event_id must be populated");
+    // #849: tower timeout persists the typed relay/timeout diagnostic.
+    let errors = internal_errors_json(&row);
+    assert_eq!(errors[0]["stage"], "relay");
+    assert_eq!(errors[0]["kind"], "timeout");
+    assert!(
+        errors[0]["message"].as_str().is_some_and(|m| !m.is_empty()),
+        "timeout diagnostic must carry a message: {errors}"
+    );
 
     server.shutdown().await;
     Ok(())
@@ -747,6 +850,707 @@ async fn health_endpoints_persist_no_request_events() -> Result<(), Box<dyn std:
 
     server.shutdown().await;
     Ok(())
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_expired_and_disabled_keys_record_authn_reason()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = MockServer::start().await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    // Issue an expired key and a disabled key for the same principal. The
+    // seeded key stays valid so the server has a working view.
+    let storage = sqlite_storage(&sqlite_path).await?;
+    let key_store =
+        KeyStore::new(Arc::clone(&storage) as Arc<dyn cc_lb_storage_api::ManagedKeyStore>);
+    let (_expired_record, expired_plaintext) = key_store
+        .create(
+            "u1",
+            CreateParams {
+                label: "expired".to_owned(),
+                description: None,
+                expires_at_unix_secs: Some(1),
+                limit_overrides: vec![],
+            },
+        )
+        .await?;
+    let (_disabled_record, disabled_plaintext) = key_store
+        .create(
+            "u1",
+            CreateParams {
+                label: "disabled".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: vec![],
+            },
+        )
+        .await?;
+    let (disabled_key_id, _) = cc_lb_engine::api_keys::secret::parse(disabled_plaintext.expose())?;
+    ManagedKeyStore::update(
+        storage.as_ref(),
+        "u1",
+        &disabled_key_id,
+        ApiKeyMutation {
+            status: Some(KeyStatus::Disabled),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let client = TestClient::new(Duration::from_secs(10));
+    let expired = client
+        .request(
+            "POST",
+            &format!("{}/v1/messages", server.proxy_url),
+            &[
+                ("content-type", "application/json"),
+                ("x-api-key", expired_plaintext.expose()),
+            ],
+            &sample_request_body(false),
+        )
+        .await?;
+    assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
+    let row = wait_for_request_event_status(&sqlite_path, 401).await?;
+    assert_eq!(
+        internal_errors_json(&row),
+        json!([{
+            "stage": "authn",
+            "kind": "invalid_input",
+            "message": "api key expired"
+        }])
+    );
+
+    let disabled = client
+        .request(
+            "POST",
+            &format!("{}/v1/messages", server.proxy_url),
+            &[
+                ("content-type", "application/json"),
+                ("x-api-key", disabled_plaintext.expose()),
+            ],
+            &sample_request_body(false),
+        )
+        .await?;
+    assert_eq!(disabled.status(), StatusCode::FORBIDDEN);
+    let row = wait_for_request_event_status(&sqlite_path, 403).await?;
+    assert_eq!(
+        internal_errors_json(&row),
+        json!([{
+            "stage": "authn",
+            "kind": "invalid_input",
+            "message": "api key disabled"
+        }])
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_key_for_missing_principal_records_authn_reason()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = MockServer::start().await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    // Issue a key under a principal that does not exist: the credential
+    // verifies, but the principal lookup fails after authentication.
+    let storage = sqlite_storage(&sqlite_path).await?;
+    let key_store =
+        KeyStore::new(Arc::clone(&storage) as Arc<dyn cc_lb_storage_api::ManagedKeyStore>);
+    let (_record, orphan_plaintext) = key_store
+        .create(
+            "ghost-principal",
+            CreateParams {
+                label: "orphan".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: vec![],
+            },
+        )
+        .await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let client = TestClient::new(Duration::from_secs(10));
+    let response = client
+        .request(
+            "POST",
+            &format!("{}/v1/messages", server.proxy_url),
+            &[
+                ("content-type", "application/json"),
+                ("x-api-key", orphan_plaintext.expose()),
+            ],
+            &sample_request_body(false),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert_eq!(row.error_code.as_deref(), Some("authentication_failed"));
+    assert_eq!(
+        internal_errors_json(&row),
+        json!([{
+            "stage": "authn",
+            "kind": "invalid_input",
+            "message": "principal not found"
+        }])
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_upstream_4xx_error_code_fallback() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    // A non-Anthropic-shaped error body: `error.code` instead of `error.type`.
+    // The persisted upstream_error_type must come from `code` when `type` is
+    // absent — previously this field was dropped entirely.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": {"code": "model_not_found", "message": "no such model"}
+        })))
+        .mount(&upstream)
+        .await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let response = send_messages(&server, &plaintext_key, false).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_4xx"));
+    assert_eq!(row.upstream_error_type.as_deref(), Some("model_not_found"));
+    assert_eq!(row.upstream_error_message.as_deref(), Some("no such model"));
+    assert!(row.internal_errors.is_empty());
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_upstream_401_error_code_parsed_and_body_unchanged()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    // The API-key signer never retries on 401 (RetryDecision::Fail), so the
+    // upstream response passes through untouched — but the persisted row
+    // must still parse `error.code` into upstream_error_type.
+    let upstream = MockServer::start().await;
+    let error_body = json!({
+        "error": {"code": "authentication_error", "message": "upstream key rejected"}
+    });
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(error_body.clone()))
+        .mount(&upstream)
+        .await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let response = send_messages(&server, &plaintext_key, false).await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // The client-visible body is the upstream's own — byte-identical.
+    let body_json: Value = serde_json::from_slice(&response.body)?;
+    assert_eq!(body_json, error_body);
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_4xx"));
+    assert_eq!(
+        row.upstream_error_type.as_deref(),
+        Some("authentication_error")
+    );
+    assert_eq!(
+        row.upstream_error_message.as_deref(),
+        Some("upstream key rejected")
+    );
+    assert!(row.internal_errors.is_empty());
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_upstream_4xx_streaming_request() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    // A streaming request whose upstream rejects with a non-2xx status: the
+    // error body is buffered and must still populate upstream_error_*.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "type": "error",
+            "error": {"type": "rate_limit_error", "message": "slow down"}
+        })))
+        .mount(&upstream)
+        .await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let response = send_messages(&server, &plaintext_key, true).await?;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_4xx"));
+    assert_eq!(row.upstream_error_type.as_deref(), Some("rate_limit_error"));
+    assert_eq!(row.upstream_error_message.as_deref(), Some("slow down"));
+    assert!(row.internal_errors.is_empty());
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_upstream_5xx_malformed_body() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    // A 500 whose body is not JSON at all: upstream_error_type stays null and
+    // the bounded raw body is preserved as the message.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("<html>gateway exploded</html>"))
+        .mount(&upstream)
+        .await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let response = send_messages(&server, &plaintext_key, false).await?;
+    assert!(response.status().is_server_error());
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_5xx"));
+    assert!(row.upstream_error_type.is_none());
+    assert_eq!(
+        row.upstream_error_message.as_deref(),
+        Some("<html>gateway exploded</html>")
+    );
+    assert!(row.internal_errors.is_empty());
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_upstream_refusal() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = ChunkedSseMock::start(refusal_sse_stream()).await?;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let response = send_messages(&server, &plaintext_key, true).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_refusal"));
+    assert_eq!(row.status, 200);
+    assert_eq!(row.upstream_error_type.as_deref(), Some("refusal"));
+    assert!(row.upstream_error_message.is_some());
+    assert!(row.internal_errors.is_empty());
+
+    server.shutdown().await;
+    upstream.stop().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_success_body_with_error_key_not_misclassified()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    // A 200 body that happens to contain an "error" key must NOT populate
+    // upstream_error_* — the status gate is what prevents misclassification.
+    let upstream = MockServer::start().await;
+    let mut body = happy_response();
+    body["error"] = json!({"type": "bogus", "message": "not a real error"});
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&upstream)
+        .await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let response = send_messages(&server, &plaintext_key, false).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert!(row.error_code.is_none());
+    assert_eq!(row.status, 200);
+    assert!(row.upstream_error_type.is_none());
+    assert!(row.upstream_error_message.is_none());
+    assert!(row.internal_errors.is_empty());
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_upstream_dispatch_failed_dns() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    // `.invalid` is guaranteed to never resolve (RFC 2606), so dispatch fails
+    // at the DNS stage — the persisted row must record dns_ms.
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _) =
+        seed_runtime_state(&sqlite_path, "http://nonexistent.invalid".to_owned(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let response = send_messages(&server, &plaintext_key, false).await?;
+    assert!(response.status().is_server_error());
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_dispatch_failed"));
+    let errors = internal_errors_json(&row);
+    assert_eq!(errors[0]["stage"], "relay");
+    assert_eq!(errors[0]["kind"], "unavailable");
+    assert!(row.dns_ms.is_some(), "dns failure must record dns_ms");
+    assert!(row.connect_ms.is_none());
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_upstream_dispatch_failed_tls() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    // Plain-HTTP mock behind an https:// URL: TCP connect succeeds, the TLS
+    // handshake fails — connect_ms is recorded, dns_ms is not (literal IP).
+    let upstream = MockServer::start().await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let https_url = upstream.uri().replacen("http://", "https://", 1);
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, https_url, "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let response = send_messages(&server, &plaintext_key, false).await?;
+    assert!(response.status().is_server_error());
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_dispatch_failed"));
+    let errors = internal_errors_json(&row);
+    assert_eq!(errors[0]["stage"], "relay");
+    assert!(
+        row.connect_ms.is_some(),
+        "tls failure must record connect_ms"
+    );
+    assert!(row.dns_ms.is_none(), "literal IP must not record dns_ms");
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_bulkhead_full() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    // One upstream slot + a slow upstream: the second request overflows the
+    // bulkhead queue and is rejected with 503 overloaded_error.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(happy_response())
+                .set_delay(Duration::from_secs(5)),
+        )
+        .mount(&upstream)
+        .await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let mut config = base_config(sqlite_path.clone(), litellm.uri());
+    config.config.bulkhead.semaphore_per_upstream = 1;
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    let key = plaintext_key.clone();
+    let proxy = server.proxy_url.clone();
+    let first = tokio::spawn(async move {
+        let client = TestClient::new(Duration::from_secs(15));
+        client
+            .request(
+                "POST",
+                &format!("{proxy}/v1/messages"),
+                &[("content-type", "application/json"), ("x-api-key", &key)],
+                &sample_request_body(false),
+            )
+            .await
+    });
+    // Give the first request a head start so it holds the only permit.
+    sleep(Duration::from_millis(300)).await;
+    let second = send_messages(&server, &plaintext_key, false).await?;
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let row = wait_for_request_event_status(&sqlite_path, 503).await?;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_dispatch_failed"));
+    let errors = internal_errors_json(&row);
+    assert_eq!(errors[0]["stage"], "relay");
+    assert_eq!(errors[0]["kind"], "unavailable");
+    assert!(
+        errors[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("bulkhead")),
+        "bulkhead diagnostic must name the queue: {errors}"
+    );
+
+    let _ = first.await;
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_client_closed_mid_stream() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    // The upstream sends one SSE event then stalls; the client disconnects
+    // mid-stream. The drop guard must classify this as client_closed_request
+    // — a downstream cancellation, not an internal or upstream error.
+    let upstream = ChunkedSseMock::start_stalled(stalled_sse_stream()).await?;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    // Raw client: read the response head + first chunk, then drop.
+    let url = Url::parse(&format!("{}/v1/messages", server.proxy_url))?;
+    let host = url.host_str().expect("host");
+    let port = url.port_or_known_default().expect("port");
+    let mut stream = TcpStream::connect((host, port)).await?;
+    let body = sample_request_body(true);
+    let request = format!(
+        "POST /v1/messages HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nx-api-key: {plaintext_key}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(&body).await?;
+    let mut buf = vec![0u8; 8192];
+    let n = stream.read(&mut buf).await?;
+    assert!(n > 0, "expected response head before disconnect");
+    drop(stream);
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert_eq!(row.error_code.as_deref(), Some("client_closed_request"));
+    assert_eq!(row.status, 499);
+    // Client cancellation is neither an internal failure nor an upstream
+    // error — all three diagnostic fields stay empty.
+    assert!(row.internal_errors.is_empty());
+    assert!(row.upstream_error_type.is_none());
+    assert!(row.upstream_error_message.is_none());
+
+    server.shutdown().await;
+    upstream.stop().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_connection_reused() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(happy_response()))
+        .mount(&upstream)
+        .await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (plaintext_key, _) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    // Two sequential requests to the same upstream: the second must reuse the
+    // pooled connection — connection_reused=true, no fresh connect_ms.
+    let first = send_messages(&server, &plaintext_key, false).await?;
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = send_messages(&server, &plaintext_key, false).await?;
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let row = wait_for_request_event(&sqlite_path).await?;
+    assert_eq!(row.status, 200);
+    assert_eq!(row.connection_reused, Some(true));
+    assert!(row.connect_ms.is_none());
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_event_detail_propagates_internal_errors() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = MockServer::start().await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let mut config = base_config(sqlite_path.clone(), litellm.uri());
+    config.config.admin.auth.providers = vec![cc_lb_config::AdminAuthProviderConfig::StaticToken {
+        id: "test-admin".to_owned(),
+        token_env: "CC_LB_TERMINAL_OBS_ADMIN_TOKEN".to_owned(),
+    }];
+    unsafe {
+        std::env::set_var("CC_LB_TERMINAL_OBS_ADMIN_TOKEN", "test-admin-token");
+    }
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    // Trigger an auth failure so a row with internal_errors exists.
+    let client = TestClient::new(Duration::from_secs(10));
+    let response = client
+        .request(
+            "POST",
+            &format!("{}/v1/messages", server.proxy_url),
+            &[
+                ("content-type", "application/json"),
+                (
+                    "x-api-key",
+                    "sk-cclb-invalid_bogusbogusbogusbogusbogusbogusbogusbogusbogus",
+                ),
+            ],
+            &sample_request_body(false),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let row = wait_for_request_event(&sqlite_path).await?;
+    let event_id = row.event_id.clone().expect("event_id persisted");
+
+    // The admin detail endpoint must surface the same typed diagnostics.
+    let detail = client
+        .request(
+            "GET",
+            &format!("{}/admin/v1/events/detail/{event_id}", server.admin_url),
+            &[("authorization", "Bearer test-admin-token")],
+            &[],
+        )
+        .await?;
+    assert_eq!(detail.status(), StatusCode::OK);
+    let detail_json: Value = serde_json::from_slice(&detail.body)?;
+    assert_eq!(
+        detail_json["internal_errors"],
+        json!([{
+            "stage": "authn",
+            "kind": "invalid_input",
+            "message": "invalid api key format"
+        }])
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+fn refusal_sse_stream() -> String {
+    concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet-20241022\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":8,\"output_tokens\":1}}}\n",
+        "\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\"usage\":{\"output_tokens\":4}}\n",
+        "\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n",
+        "\n",
+    )
+    .to_owned()
+}
+
+fn stalled_sse_stream() -> String {
+    concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet-20241022\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":8,\"output_tokens\":1}}}\n",
+        "\n",
+    )
+    .to_owned()
 }
 
 fn happy_sse_stream() -> String {
@@ -1073,16 +1877,9 @@ fn parse_raw_response(bytes: &[u8]) -> std::io::Result<TestResponse> {
     })
 }
 
-#[derive(Debug)]
-struct RequestEventRow {
-    event_id: Option<String>,
-    error_code: Option<String>,
-    status: u16,
-}
-
 async fn wait_for_request_event(
     sqlite_path: &Path,
-) -> Result<RequestEventRow, Box<dyn std::error::Error>> {
+) -> Result<RequestEvent, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(row) = query_latest_request_event(sqlite_path).await? {
@@ -1104,9 +1901,9 @@ async fn wait_for_request_event(
 async fn wait_for_request_event_status(
     sqlite_path: &Path,
     expected_status: u16,
-) -> Result<RequestEventRow, Box<dyn std::error::Error>> {
+) -> Result<RequestEvent, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut last_seen: Option<RequestEventRow> = None;
+    let mut last_seen: Option<RequestEvent> = None;
     loop {
         if let Some(row) = query_latest_request_event(sqlite_path).await?
             && row.status == expected_status
@@ -1127,7 +1924,7 @@ async fn wait_for_request_event_status(
 
 async fn query_latest_request_event(
     sqlite_path: &Path,
-) -> Result<Option<RequestEventRow>, Box<dyn std::error::Error>> {
+) -> Result<Option<RequestEvent>, Box<dyn std::error::Error>> {
     use sqlx::Row;
     use sqlx::sqlite::SqlitePoolOptions;
 
@@ -1136,25 +1933,23 @@ async fn query_latest_request_event(
         .max_connections(1)
         .connect(&database_url)
         .await?;
-    let row_opt = sqlx::query(
-        "SELECT event_id, error_code, json_extract(payload, '$.status') AS status \
-         FROM request_events_v1 ORDER BY id DESC LIMIT 1",
-    )
-    .fetch_optional(&pool)
-    .await?;
+    let row_opt = sqlx::query("SELECT payload FROM request_events_v1 ORDER BY id DESC LIMIT 1")
+        .fetch_optional(&pool)
+        .await?;
     pool.close().await;
 
     let Some(row) = row_opt else {
         return Ok(None);
     };
-    let event_id: Option<String> = row.try_get("event_id")?;
-    let error_code: Option<String> = row.try_get("error_code")?;
-    let status: i64 = row.try_get("status")?;
-    Ok(Some(RequestEventRow {
-        event_id,
-        error_code,
-        status: status as u16,
-    }))
+    let payload: String = row.try_get("payload")?;
+    Ok(Some(serde_json::from_str(&payload)?))
+}
+
+/// Serialize `internal_errors` for assertions. `RequestEvent` stores typed
+/// `InternalError` values; comparing against `serde_json::json!` literals
+/// keeps these tests free of a `cc-lb-domain` dependency.
+fn internal_errors_json(row: &RequestEvent) -> Value {
+    serde_json::to_value(&row.internal_errors).expect("internal_errors serializes")
 }
 
 async fn all_request_events(
@@ -1472,6 +2267,20 @@ impl ChunkedSseMock {
             task: Some(task),
         })
     }
+    /// Variant whose handler writes the SSE head and the given frames, then
+    /// holds the connection open without completing the stream — used to
+    /// exercise downstream disconnect mid-stream.
+    async fn start_stalled(sse_body: String) -> std::io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(stalled_sse_accept_loop(listener, shutdown_rx, sse_body));
+        Ok(Self {
+            addr,
+            shutdown_tx: Some(shutdown_tx),
+            task: Some(task),
+        })
+    }
 
     fn uri(&self) -> String {
         format!("http://{}", self.addr)
@@ -1533,6 +2342,48 @@ async fn chunked_sse_handle(mut socket: tokio::net::TcpStream, sse_body: String)
     }
     let _ = socket.write_all(b"0\r\n\r\n").await;
     let _ = socket.shutdown().await;
+}
+async fn stalled_sse_accept_loop(
+    listener: TcpListener,
+    mut shutdown: oneshot::Receiver<()>,
+    sse_body: String,
+) {
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return,
+            accept = listener.accept() => {
+                let Ok((socket, _)) = accept else { return };
+                let body = sse_body.clone();
+                tokio::spawn(stalled_sse_handle(socket, body));
+            }
+        }
+    }
+}
+
+/// Writes the SSE head and the given frames, then parks the connection: the
+/// stream never completes, so a downstream disconnect is the only way the
+/// request resolves.
+async fn stalled_sse_handle(mut socket: tokio::net::TcpStream, sse_body: String) {
+    if drain_http_request(&mut socket).await.is_err() {
+        return;
+    }
+    let head = "HTTP/1.1 200 OK\r\n\
+                Content-Type: text/event-stream\r\n\
+                Transfer-Encoding: chunked\r\n\
+                Connection: close\r\n\
+                \r\n";
+    if socket.write_all(head.as_bytes()).await.is_err() {
+        return;
+    }
+    for frame in sse_body.split_inclusive("\n\n") {
+        let framed = format!("{:x}\r\n{}\r\n", frame.len(), frame);
+        if socket.write_all(framed.as_bytes()).await.is_err() {
+            return;
+        }
+    }
+    // Hold the connection open; the task is abandoned when the test runtime
+    // shuts down.
+    sleep(Duration::from_secs(300)).await;
 }
 
 async fn drain_http_request(socket: &mut tokio::net::TcpStream) -> std::io::Result<()> {

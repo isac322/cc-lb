@@ -483,6 +483,21 @@ impl Partial {
     }
 }
 
+/// Events that trigger a partial-row publish. Every `LifecycleEvent` variant
+/// is listed explicitly — the compiler rejects this match when a new variant
+/// is added, so a variant can never be silently dropped by a wildcard.
+///
+/// Intentional non-triggers (each returns `None`):
+/// - `ParseCompleted{Err}` / `AuthCompleted{Err}`: failure payloads are
+///   committed as terminal causes by the producer; no partial update.
+/// - `AuthenticationCompleted`: principal identity is already carried by
+///   `AuthCompleted`; this variant is metrics-only.
+/// - `LimitDecision`: quota decisions do not change the published row shape.
+/// - `UpstreamAttempt`: attempt counters are internal bookkeeping.
+/// - `RequestLogUpstreamErrorObserved`: merged into `stream_error_*` fields
+///   but not worth a partial publish on its own.
+/// - `Priced` / `CacheObserved`: merged into the row but published only with
+///   the final write.
 fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
     match event {
         LifecycleEvent::RequestStarted { .. } => Some(PartialTrigger::RequestStarted),
@@ -502,14 +517,9 @@ fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
         | LifecycleEvent::AuthenticationCompleted { .. }
         | LifecycleEvent::LimitDecision { .. }
         | LifecycleEvent::UpstreamAttempt { .. }
-        | LifecycleEvent::ProviderErrorObserved { .. }
         | LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
         | LifecycleEvent::Priced { .. }
         | LifecycleEvent::CacheObserved { .. } => None,
-        _ => {
-            tracing::warn!("lifecycle event assembler saw unknown lifecycle event variant");
-            None
-        }
     }
 }
 
@@ -911,6 +921,9 @@ async fn handle_event(
         proxy_setup_ms,
         setup_timings,
         upstream_body_ms,
+        dns_ms,
+        connect_ms,
+        connection_reused,
         first_body_chunk_ms,
         io_timings,
         internal_errors,
@@ -935,6 +948,11 @@ async fn handle_event(
             partial.proxy_setup_ms = *proxy_setup_ms;
             apply_setup_timings(&mut partial, setup_timings);
             partial.upstream_body_ms = *upstream_body_ms;
+            // Orphan rows have no prior `UpstreamResponseStarted`, so the
+            // terminal snapshot is the only carrier of connection timings.
+            partial.dns_ms = *dns_ms;
+            partial.connect_ms = *connect_ms;
+            partial.connection_reused = *connection_reused;
             partial.first_body_chunk_ms = *first_body_chunk_ms;
             partial.internal_errors = internal_errors.clone();
             partial.io_timings = *io_timings;
@@ -966,6 +984,11 @@ async fn handle_event(
         partial.proxy_setup_ms = partial.proxy_setup_ms.or(*proxy_setup_ms);
         apply_setup_timings(&mut partial, setup_timings);
         partial.upstream_body_ms = partial.upstream_body_ms.or(*upstream_body_ms);
+        // Terminal-carried connection timings fill gaps only: a successful
+        // `UpstreamResponseStarted` already recorded the authoritative values.
+        partial.dns_ms = partial.dns_ms.or(*dns_ms);
+        partial.connect_ms = partial.connect_ms.or(*connect_ms);
+        partial.connection_reused = partial.connection_reused.or(*connection_reused);
         merge_io_timings(&mut partial.io_timings, *io_timings);
         if partial.first_body_chunk_ms.is_none() {
             partial.first_body_chunk_ms = *first_body_chunk_ms;
@@ -1061,6 +1084,21 @@ async fn handle_event(
     }
 }
 
+/// Merge a non-terminal event into the in-flight partial row.
+///
+/// Every `LifecycleEvent` variant is listed explicitly — the compiler rejects
+/// this match when a new variant is added, so a variant can never be silently
+/// dropped by a wildcard arm. Intentional no-ops (each documented at its arm):
+/// - `ParseCompleted{Err}` / `AuthCompleted{Err}`: the failure payload is
+///   committed as the terminal cause by the producer (`terminate_failure` /
+///   `terminate_body_too_large`); the assembler does not re-derive it.
+/// - `AuthenticationCompleted`: principal identity is already carried by
+///   `AuthCompleted`; this variant is metrics-only.
+/// - `LimitDecision{non-Reserved}`: `Rejected` reasons are committed as
+///   terminal causes by the producer; only `Reserved.limit_reserve_ms` is a
+///   row field.
+/// - `RequestTerminated`: handled by `handle_event`'s dedicated branch before
+///   `merge` is reached; this arm is unreachable in practice.
 fn merge(partial: &mut Partial, event: LifecycleEvent) {
     match event {
         LifecycleEvent::RequestStarted {
@@ -1097,12 +1135,14 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             partial.cache_prefix_hash = info.cache_prefix_hash.clone();
             partial.parse = Some(info);
         }
+        // Intentional no-op: parse failures are committed as terminal causes.
         LifecycleEvent::ParseCompleted { .. } => {}
         LifecycleEvent::AuthCompleted {
             result: Ok(info), ..
         } => {
             partial.auth = Some(info);
         }
+        // Intentional no-op: auth failures are committed as terminal causes.
         LifecycleEvent::AuthCompleted { .. } => {}
         LifecycleEvent::RouteCompleted {
             result,
@@ -1129,6 +1169,8 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         } => {
             partial.limit_reserve_ms = limit_reserve_ms;
         }
+        // Intentional no-op: non-Reserved decisions carry no row fields; the
+        // rejection reason is committed as the terminal cause by the producer.
         LifecycleEvent::LimitDecision { .. } => {}
         LifecycleEvent::UpstreamAttempt { attempt_num, .. } => {
             if attempt_num > 1 {
@@ -1209,7 +1251,8 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.stream_error_message = Some(error_message);
             }
         }
-        LifecycleEvent::ProviderErrorObserved { .. } => {}
+        // Intentional no-op: `handle_event` consumes `RequestTerminated`
+        // before `merge` runs; this arm exists only for exhaustiveness.
         LifecycleEvent::RequestTerminated { .. } => {}
         LifecycleEvent::Priced { cost, .. } => {
             partial.cost = Some(cost);
@@ -1217,7 +1260,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::CacheObserved { cache_state, .. } => {
             partial.cache_state = Some(cache_state);
         }
-        _ => {}
+        // Intentional no-op: principal identity is already carried by
+        // `AuthCompleted`; this variant is metrics-only.
+        LifecycleEvent::AuthenticationCompleted { .. } => {}
     }
 }
 
@@ -1858,6 +1903,9 @@ mod tests {
                 request_body_bytes: None,
                 finalize_ms: None,
                 first_body_chunk_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
                 internal_errors: Vec::new(),
                 limit_reconcile_ms: None,
                 observability_post_ms: None,
@@ -1930,6 +1978,9 @@ mod tests {
                 },
                 upstream_body_ms: Some(41),
                 first_body_chunk_ms: Some(0),
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
                 internal_errors: Vec::new(),
                 event_kind: None,
             },
@@ -1958,6 +2009,9 @@ mod tests {
                 io_timings: Default::default(),
                 upstream_body_ms: None,
                 first_body_chunk_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
                 internal_errors: Vec::new(),
                 event_kind: None,
             },
@@ -2040,6 +2094,9 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
             observability_post_ms: None,
@@ -2112,6 +2169,9 @@ mod tests {
                 io_timings: Default::default(),
                 upstream_body_ms: None,
                 first_body_chunk_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
                 internal_errors: Vec::new(),
                 event_kind: None,
             })
@@ -2168,6 +2228,9 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
         })
@@ -2215,6 +2278,9 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
         })
@@ -2262,6 +2328,9 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
         })
@@ -2299,6 +2368,9 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
         })
@@ -2339,6 +2411,9 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
         })
@@ -2383,6 +2458,9 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
         })
@@ -2431,6 +2509,9 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: Some(RequestEventKind::Messages),
         })
@@ -2479,6 +2560,9 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
             observability_post_ms: None,
@@ -2542,6 +2626,9 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
         })
@@ -2592,6 +2679,9 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
             observability_post_ms: None,
@@ -2627,6 +2717,9 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
             observability_post_ms: None,
@@ -2656,6 +2749,130 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn orphan_terminated_carries_connection_timings_and_internal_errors() {
+        // A dispatch failure never produces `UpstreamResponseStarted`, so the
+        // terminal snapshot is the only carrier of connection timings and the
+        // accumulated internal-error history.
+        let (tx, rx) = mpsc::channel(16);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id: eid("orphan-dispatch"),
+            reason: TerminationReason::ErrorCode("upstream_dispatch_failed".into()),
+            client_status: 502,
+            duration_ms: 30,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            first_body_chunk_ms: None,
+            dns_ms: Some(5),
+            connect_ms: Some(18),
+            connection_reused: Some(false),
+            internal_errors: vec![InternalError {
+                stage: cc_lb_domain::InternalErrorStage::Relay,
+                kind: cc_lb_domain::InternalErrorKind::Unavailable,
+                message: Some("connection refused".to_owned()),
+            }],
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            upstream_body_ms: None,
+            event_kind: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].dns_ms, Some(5));
+        assert_eq!(rows[0].connect_ms, Some(18));
+        assert_eq!(rows[0].connection_reused, Some(false));
+        assert_eq!(
+            rows[0].internal_errors,
+            vec![InternalError {
+                stage: cc_lb_domain::InternalErrorStage::Relay,
+                kind: cc_lb_domain::InternalErrorKind::Unavailable,
+                message: Some("connection refused".to_owned()),
+            }]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_connection_timings_fill_but_do_not_clobber_response_started() {
+        // When `UpstreamResponseStarted` already recorded connection timings,
+        // the terminal snapshot must not overwrite them; absent terminal
+        // values leave the measured values intact.
+        let (tx, rx) = mpsc::channel(16);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("conn-merge");
+
+        tx.send(LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: "req-conn-merge".into(),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+            source_kind: None,
+            source_ref_id: None,
+            event_kind: None,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::UpstreamResponseStarted {
+            event_id: event_id.clone(),
+            status: 200,
+            headers: Default::default(),
+            bulkhead_wait_ms: None,
+            dns_ms: Some(4),
+            connect_ms: Some(9),
+            connection_reused: Some(true),
+            shape_ms: None,
+            sign_ms: None,
+            upstream_ttfb_ms: Some(20),
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RequestTerminated {
+            event_id: event_id.clone(),
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 30,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            first_body_chunk_ms: None,
+            // Terminal snapshot carries nothing for this attempt — the
+            // response-started values must survive.
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            internal_errors: Vec::new(),
+            limit_reconcile_ms: None,
+            observability_post_ms: None,
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            upstream_body_ms: None,
+            event_kind: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].dns_ms, Some(4));
+        assert_eq!(rows[0].connect_ms, Some(9));
+        assert_eq!(rows[0].connection_reused, Some(true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn request_terminated_before_started_writes_orphan_and_increments_metric() {
         let recorder = install_counting_recorder();
         let before = recorder.count_matching(
@@ -2676,6 +2893,9 @@ mod tests {
             request_body_bytes: Some(0),
             finalize_ms: Some(1),
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: Some(1),
             observability_post_ms: Some(2),
@@ -2973,6 +3193,9 @@ mod tests {
                 request_body_bytes: None,
                 finalize_ms: None,
                 first_body_chunk_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
                 internal_errors: Vec::new(),
                 limit_reconcile_ms: None,
                 observability_post_ms: None,
@@ -3043,6 +3266,9 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
             observability_post_ms: None,
@@ -3246,6 +3472,9 @@ mod tests {
                 request_body_bytes: None,
                 finalize_ms: None,
                 first_body_chunk_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
                 internal_errors: Vec::new(),
                 limit_reconcile_ms: None,
                 observability_post_ms: None,
@@ -3351,6 +3580,9 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
             observability_post_ms: None,
@@ -3584,6 +3816,9 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: Some(3),
             first_body_chunk_ms: Some(11),
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
             observability_post_ms: None,
@@ -3786,6 +4021,9 @@ mod tests {
             io_timings: Default::default(),
             upstream_body_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             event_kind: None,
         })
@@ -3900,6 +4138,9 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             first_body_chunk_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
             observability_post_ms: None,

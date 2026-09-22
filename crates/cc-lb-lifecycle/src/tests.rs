@@ -83,6 +83,9 @@ fn request_terminated_preserves_nested_io_timings_and_defaults_legacy_payloads()
             retry_overhead_ms: None,
         },
         upstream_body_ms: None,
+        dns_ms: Some(3),
+        connect_ms: Some(41),
+        connection_reused: Some(false),
         first_body_chunk_ms: None,
         finalize_ms: None,
         internal_errors: Vec::new(),
@@ -97,6 +100,9 @@ fn request_terminated_preserves_nested_io_timings_and_defaults_legacy_payloads()
     assert_eq!(json["io_timings"]["request_body_chunk_count"], 0);
     assert_eq!(json["io_timings"]["response_body_process_ms"], 0.375);
     assert!(json["io_timings"].get("retry_overhead_ms").is_none());
+    assert_eq!(json["dns_ms"], 3);
+    assert_eq!(json["connect_ms"], 41);
+    assert_eq!(json["connection_reused"], false);
     assert!(json.get("request_body_first_chunk_ms").is_none());
     let restored: LifecycleEvent =
         serde_json::from_value(json).expect("deserialize terminal setup timings");
@@ -214,13 +220,6 @@ fn kind_labels_cover_every_variant() {
             upstream_ttfb_ms: None,
         }
         .kind(),
-        LifecycleEvent::ProviderErrorObserved {
-            event_id: sample_event_id(),
-            code: "provider_error".into(),
-            message: "redacted".into(),
-            source: "provider".into(),
-        }
-        .kind(),
         LifecycleEvent::RequestLogUpstreamErrorObserved {
             event_id: sample_event_id(),
             error_type: "rate_limit_error".into(),
@@ -251,6 +250,9 @@ fn kind_labels_cover_every_variant() {
             setup_timings: Default::default(),
             io_timings: Default::default(),
             upstream_body_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
             first_body_chunk_ms: None,
             finalize_ms: None,
             internal_errors: Vec::new(),
@@ -279,7 +281,6 @@ fn kind_labels_cover_every_variant() {
             "limit_decision",
             "upstream_attempt",
             "upstream_response_started",
-            "provider_error_observed",
             "request_log_upstream_error_observed",
             "usage_observed",
             "stream_completed",
