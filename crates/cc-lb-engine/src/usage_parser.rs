@@ -106,17 +106,26 @@ impl BoundedErrorMessage {
     }
 }
 
+/// A structured upstream error extracted from an HTTP error response body.
+///
+/// `error_type` is `error.type`, or `error.code` when the provider emits no
+/// `type` (non-Anthropic gateways). `error_message` is `error.message`. Either
+/// field may be absent; present fields are never empty or fabricated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CanonicalUpstreamError {
-    error_type: BoundedErrorType,
-    error_message: BoundedErrorMessage,
+    error_type: Option<BoundedErrorType>,
+    error_message: Option<BoundedErrorMessage>,
 }
 
 impl CanonicalUpstreamError {
-    pub(crate) fn into_parts(self) -> (String, String) {
+    /// `(error_type, error_message)`; each is `None` when the upstream body
+    /// carried no usable value, so callers can fall back per field (e.g. a
+    /// bounded raw body for a missing message) instead of emitting a
+    /// zero-value fake message.
+    pub(crate) fn into_parts(self) -> (Option<String>, Option<String>) {
         (
-            self.error_type.into_string(),
-            self.error_message.into_string(),
+            self.error_type.map(BoundedErrorType::into_string),
+            self.error_message.map(BoundedErrorMessage::into_string),
         )
     }
 }
@@ -417,9 +426,54 @@ fn canonical_upstream_error_from_value(value: &Value) -> Option<CanonicalUpstrea
     }
     let (error_type, error_message) = bounded_upstream_error(value);
     Some(CanonicalUpstreamError {
-        error_type: error_type?,
-        error_message: error_message?,
+        error_type: Some(error_type?),
+        error_message: Some(error_message?),
     })
+}
+
+/// Extract a structured upstream error from an already-parsed HTTP error
+/// response body.
+///
+/// Unlike [`canonical_upstream_error_from_value`], this does not require the
+/// Anthropic `{"type":"error", ...}` envelope: any JSON object carrying an
+/// `error` object qualifies, with `error.type` preferred over `error.code`.
+///
+/// Callers MUST only invoke this behind an upstream non-success status; the
+/// extractor performs no status check, so the status gate is what prevents a
+/// 200 body that merely contains error-shaped content from being
+/// misclassified.
+///
+/// Type and message are independent: a type-only body still yields `Some` so
+/// `upstream_error_type` stays groupable, and a message-only body preserves
+/// the message. `None` is returned only when neither field is usable, so the
+/// caller keeps its bounded raw-body fallback.
+pub(crate) fn observe_http_error_value(value: &Value) -> Option<CanonicalUpstreamError> {
+    let error_obj = value.get("error")?;
+    let error_type = ["type", "code"]
+        .iter()
+        .filter_map(|key| error_obj.get(*key).and_then(Value::as_str))
+        .filter(|candidate| !candidate.is_empty())
+        .find_map(BoundedErrorType::parse);
+    let error_message = error_obj
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.is_empty())
+        .map(BoundedErrorMessage::parse);
+    if error_type.is_none() && error_message.is_none() {
+        return None;
+    }
+    Some(CanonicalUpstreamError {
+        error_type,
+        error_message,
+    })
+}
+
+/// [`observe_http_error_value`] for a raw body buffer; parses once with
+/// sonic-rs. Used by paths that never needed the body as JSON otherwise
+/// (e.g. the streaming upstream-error fallback).
+pub(crate) fn observe_http_error_body(body: &[u8]) -> Option<CanonicalUpstreamError> {
+    let value = sonic_rs::from_slice::<Value>(body).ok()?;
+    observe_http_error_value(&value)
 }
 
 /// Detect a mid-stream `event: error` (or `data: {"type":"error",...}`)
@@ -910,8 +964,11 @@ mod tests {
             .expect("canonical error");
 
         // Then
-        assert_eq!(error.error_type.0, "rate_limit_error");
-        assert_eq!(error.error_message.0, "forced fake rate limit response");
+        assert_eq!(error.error_type.expect("type").0, "rate_limit_error");
+        assert_eq!(
+            error.error_message.expect("message").0,
+            "forced fake rate limit response"
+        );
     }
 
     #[test]
@@ -933,12 +990,10 @@ mod tests {
             .expect("canonical error with long message");
 
         // Then
-        assert_eq!(
-            error.error_message.0.len(),
-            UPSTREAM_ERROR_MESSAGE_MAX_BYTES
-        );
-        assert!(error.error_message.0.is_char_boundary(1021));
-        assert_eq!(error.error_message.0, format!("{}...", "a".repeat(1021)));
+        let message = error.error_message.expect("message").0;
+        assert_eq!(message.len(), UPSTREAM_ERROR_MESSAGE_MAX_BYTES);
+        assert!(message.is_char_boundary(1021));
+        assert_eq!(message, format!("{}...", "a".repeat(1021)));
     }
 
     #[test]
@@ -961,10 +1016,11 @@ mod tests {
             let error = observe_non_stream_json_body(body.as_bytes())
                 .canonical_error
                 .expect("canonical error");
-            assert!(error.error_message.0.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES);
-            assert_eq!(error.error_message.0.ends_with("..."), truncated);
+            let extracted = error.error_message.expect("message").0;
+            assert!(extracted.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES);
+            assert_eq!(extracted.ends_with("..."), truncated);
             if !truncated {
-                assert_eq!(error.error_message.0, message);
+                assert_eq!(extracted, message);
             }
         }
     }
@@ -1020,8 +1076,148 @@ mod tests {
         assert_eq!(observation.usage.input_tokens, 12);
         assert_eq!(observation.usage.output_tokens, 3);
         let error = observation.canonical_error.expect("canonical error");
-        assert_eq!(error.error_type.0, "rate_limit_error");
-        assert_eq!(error.error_message.0, "bounded");
+        assert_eq!(error.error_type.expect("type").0, "rate_limit_error");
+        assert_eq!(error.error_message.expect("message").0, "bounded");
+    }
+
+    #[test]
+    fn http_error_body_does_not_require_outer_error_envelope() {
+        // Given: non-Anthropic error bodies without `{"type":"error", ...}`.
+        let bodies: &[&[u8]] = &[
+            br#"{"error":{"code":"rate_limit_exceeded","message":"isolated upstream rejection"}}"#,
+            br#"{"error":{"type":"rate_limit_error","message":"no envelope"}}"#,
+            br#"{"type":"message","error":{"type":"api_error","message":"wrong outer type"}}"#,
+        ];
+        let expected = [
+            ("rate_limit_exceeded", "isolated upstream rejection"),
+            ("rate_limit_error", "no envelope"),
+            ("api_error", "wrong outer type"),
+        ];
+
+        // When / Then
+        for (body, (error_type, message)) in bodies.iter().zip(expected) {
+            let error = observe_http_error_body(body).expect("upstream error extracted");
+            assert_eq!(error.error_type.expect("type").0, error_type);
+            assert_eq!(error.error_message.expect("message").0, message);
+        }
+    }
+
+    #[test]
+    fn http_error_body_prefers_type_over_code() {
+        // Given
+        let body =
+            br#"{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"m"}}"#;
+
+        // When
+        let error = observe_http_error_body(body).expect("upstream error extracted");
+
+        // Then
+        assert_eq!(error.error_type.expect("type").0, "rate_limit_error");
+    }
+
+    #[test]
+    fn http_error_body_falls_back_to_code_when_type_unusable() {
+        // Given: `type` present but non-string or over the 256-byte bound.
+        let long_type = "a".repeat(UPSTREAM_ERROR_TYPE_MAX_BYTES + 1);
+        let bodies = [
+            br#"{"error":{"type":429,"code":"rate_limit_exceeded","message":"m"}}"#.to_vec(),
+            serde_json::json!({
+                "error": {
+                    "type": long_type,
+                    "code": "rate_limit_exceeded",
+                    "message": "m",
+                }
+            })
+            .to_string()
+            .into_bytes(),
+        ];
+
+        // When / Then
+        for body in &bodies {
+            let error = observe_http_error_body(body).expect("code fallback extracted");
+            assert_eq!(error.error_type.expect("type").0, "rate_limit_exceeded");
+        }
+    }
+
+    #[test]
+    fn http_error_body_preserves_message_without_type_or_code() {
+        // Given
+        let body = br#"{"error":{"message":"bare upstream message"}}"#;
+
+        // When
+        let error = observe_http_error_body(body).expect("message preserved");
+
+        // Then
+        assert_eq!(
+            error.into_parts(),
+            (None, Some("bare upstream message".to_owned()))
+        );
+    }
+
+    #[test]
+    fn http_error_body_preserves_type_without_message() {
+        // Given: a type-only body still yields Some so `upstream_error_type`
+        // stays groupable; the caller supplies its bounded raw body as the
+        // message instead of a fabricated one.
+        let bodies: &[&[u8]] = &[
+            br#"{"error":{"type":"rate_limit_error"}}"#,
+            br#"{"error":{"type":"rate_limit_error","message":""}}"#,
+            br#"{"error":{"code":"rate_limit_exceeded","message":null}}"#,
+        ];
+        let expected = [
+            "rate_limit_error",
+            "rate_limit_error",
+            "rate_limit_exceeded",
+        ];
+
+        // When / Then
+        for (body, error_type) in bodies.iter().zip(expected) {
+            let error = observe_http_error_body(body).expect("type preserved");
+            assert_eq!(error.into_parts(), (Some(error_type.to_owned()), None),);
+        }
+    }
+
+    #[test]
+    fn http_error_body_returns_none_without_usable_fields() {
+        // Given: callers keep the bounded raw-body fallback for these.
+        let bodies: &[&[u8]] = &[
+            b"",
+            b"not-json",
+            br#"{"error":{"message":null}}"#,
+            br#"{"error":{"type":"","message":""}}"#,
+            br#"{"error":"rate limited"}"#,
+            br#"{"message":"top-level only"}"#,
+        ];
+
+        // When / Then
+        for body in bodies {
+            assert!(observe_http_error_body(body).is_none());
+        }
+    }
+
+    #[test]
+    fn strict_non_stream_observer_still_requires_canonical_envelope() {
+        // Given: the relaxed code fallback must not leak into the canonical
+        // observer used for success-path usage extraction.
+        let body = br#"{"error":{"code":"rate_limit_exceeded","message":"m"}}"#;
+
+        // When / Then
+        assert!(observe_non_stream_json_body(body).canonical_error.is_none());
+        assert!(observe_http_error_body(body).is_some());
+    }
+
+    #[test]
+    fn mid_stream_error_ignores_code_fallback() {
+        // Given: SSE native semantics unchanged — `error.code` is not a
+        // mid-stream error type.
+        let raw = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"m\"}}\n\n";
+
+        // When
+        let err = detect_raw_mid_stream_error(raw).expect("named error event");
+
+        // Then
+        assert!(err.error_type.is_none());
+        assert_eq!(err.error_message.as_deref(), Some("m"));
     }
 
     #[test]

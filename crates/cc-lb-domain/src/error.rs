@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum InternalErrorStage {
+    /// Ingress stage: request-body transport and pre-parse failures.
+    Ingress,
     /// Authentication stage.
     Authn,
     /// Routing stage.
@@ -17,6 +19,8 @@ pub enum InternalErrorStage {
     Signer,
     /// Request relay stage.
     Relay,
+    /// Storage stage (upstream-affinity reads/binds, durable lookups).
+    Storage,
 }
 
 /// Kind of internal error that occurred.
@@ -28,6 +32,8 @@ pub enum InternalErrorKind {
     PluginError,
     /// Plugin returned invalid output.
     InvalidOutput,
+    /// Client-supplied input was invalid (malformed body, bad key, oversize).
+    InvalidInput,
     /// Plugin trapped during execution.
     Trap,
     /// Configuration error.

@@ -404,7 +404,7 @@ impl UpstreamDispatch for CircuitBreakerDispatch {
 
 fn dispatch_error_from_breaker(error: BreakerError) -> DispatchError {
     DispatchError::Transport {
-        reason: error.to_string(),
+        source: Box::new(error),
     }
 }
 

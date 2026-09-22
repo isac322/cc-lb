@@ -1,19 +1,22 @@
 use std::error::Error;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_aead::AeadService;
 use cc_lb_config::Config;
-use cc_lb_server::app::{build_app_for_testing, build_app_with_storage};
+use cc_lb_server::app::build_app_with_storage;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    BackendKind, ManagedKeyStore, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore,
-    Storage as StorageTrait, UpstreamCreate, UpstreamStore,
+    ApiKeyMutation, BackendKind, IssueParams, ManagedKeyStore, MetaStore, PrincipalCreate,
+    PrincipalKind, PrincipalStore, RequestEventStore, Storage as StorageTrait, StorageError,
+    StorageResult, StoredApiKeyRecord, UpstreamCreate, UpstreamStore,
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use http_body_util::BodyExt;
 use serde_json::Value;
+use tokio::time::{Instant, sleep};
 use tower::ServiceExt;
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -88,7 +91,21 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
 #[tokio::test]
 async fn proxy_fallbacks_return_anthropic_json_errors() -> TestResult<()> {
     let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
-    let app = build_app_for_testing(Config::default(), clock.clone()).await?;
+    let dir = tempfile::tempdir()?;
+    let storage_path = dir.path().join("storage.sqlite");
+    let storage_arc = sqlite_storage(&storage_path).await?;
+    let aead = Arc::new(AeadService::from_master_key([0; 32]));
+    let managed_store: Arc<dyn ManagedKeyStore> = storage_arc.clone();
+    let storage: Arc<dyn StorageTrait> = storage_arc.clone();
+    let mut config = Config {
+        storage: cc_lb_config::StorageConfig::Sqlite {
+            path: storage_path.clone(),
+        },
+        ..Default::default()
+    };
+    config.runtime.data_dir = Some(dir.path().to_path_buf());
+    config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
+    let app = build_app_with_storage(config, None, managed_store, storage, aead, clock).await?;
 
     for (method, path, expected_status, expected_message) in [
         (
@@ -130,6 +147,150 @@ async fn proxy_fallbacks_return_anthropic_json_errors() -> TestResult<()> {
         assert_eq!(json["error"]["type"], "not_found");
         assert_eq!(json["error"]["message"], expected_message);
     }
+
+    // #849: pre-auth router fallbacks are silent — they must persist zero
+    // request_events rows. Give the async writer a window to (incorrectly)
+    // persist before asserting the table stayed empty.
+    sleep(Duration::from_millis(500)).await;
+    let rows =
+        RequestEventStore::query_request_events(storage_arc.as_ref(), 0, u64::MAX, 10).await?;
+    assert!(
+        rows.is_empty(),
+        "pre-auth 404/405 fallbacks must not persist request events, found {} row(s)",
+        rows.len()
+    );
+
+    Ok(())
+}
+
+/// ManagedKeyStore wrapper whose credential lookup always fails — used to
+/// exercise the authn-storage-outage path end to end.
+struct FailingManagedKeyStore {
+    inner: Arc<SqliteStorage>,
+}
+
+#[async_trait::async_trait]
+impl ManagedKeyStore for FailingManagedKeyStore {
+    async fn issue(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        params: IssueParams,
+    ) -> StorageResult<StoredApiKeyRecord> {
+        self.inner.issue(principal_id, key_id, params).await
+    }
+
+    async fn get(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+    ) -> StorageResult<Option<StoredApiKeyRecord>> {
+        self.inner.get(principal_id, key_id).await
+    }
+
+    async fn lookup_by_index_hash(
+        &self,
+        _index_hash: &[u8; 32],
+    ) -> StorageResult<Option<(String, String, StoredApiKeyRecord)>> {
+        Err(StorageError::Unavailable {
+            message: "injected key store outage".to_owned(),
+        })
+    }
+
+    async fn list_by_principal(
+        &self,
+        principal_id: &str,
+    ) -> StorageResult<Vec<StoredApiKeyRecord>> {
+        self.inner.list_by_principal(principal_id).await
+    }
+
+    async fn list_all(&self) -> StorageResult<Vec<(String, String, StoredApiKeyRecord)>> {
+        self.inner.list_all().await
+    }
+
+    async fn update(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        mutation: ApiKeyMutation,
+    ) -> StorageResult<()> {
+        ManagedKeyStore::update(self.inner.as_ref(), principal_id, key_id, mutation).await
+    }
+
+    async fn revoke_zero_secrets(&self, principal_id: &str, key_id: &str) -> StorageResult<()> {
+        self.inner.revoke_zero_secrets(principal_id, key_id).await
+    }
+}
+
+#[tokio::test]
+async fn key_store_unavailable_persists_typed_authn_reason() -> TestResult<()> {
+    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let dir = tempfile::tempdir()?;
+    let storage_path = dir.path().join("storage.sqlite");
+    let storage_arc = sqlite_storage(&storage_path).await?;
+    let aead = Arc::new(AeadService::from_master_key([0; 32]));
+    let managed_store: Arc<dyn ManagedKeyStore> = Arc::new(FailingManagedKeyStore {
+        inner: storage_arc.clone(),
+    });
+    let storage: Arc<dyn StorageTrait> = storage_arc.clone();
+    let mut config = Config {
+        storage: cc_lb_config::StorageConfig::Sqlite {
+            path: storage_path.clone(),
+        },
+        ..Default::default()
+    };
+    config.runtime.data_dir = Some(dir.path().to_path_buf());
+    config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
+    let app = build_app_with_storage(config, None, managed_store, storage, aead, clock).await?;
+
+    // A well-formed credential whose lookup fails: the caller sees 503 and
+    // the persisted row must carry the typed authn/unavailable diagnostic.
+    let plaintext = cc_lb_engine::api_keys::secret::generate_new().plaintext;
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("x-api-key", plaintext.expose())
+                .body(Body::from(r#"{"model":"m","messages":[],"max_tokens":1}"#))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("1")
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let row = loop {
+        let rows =
+            RequestEventStore::query_request_events(storage_arc.as_ref(), 0, u64::MAX, 10).await?;
+        if let Some(row) = rows.into_iter().next() {
+            break row;
+        }
+        if Instant::now() >= deadline {
+            return Err("no request_event row persisted within 5s".into());
+        }
+        sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(row.status, 503);
+    assert_eq!(row.error_code.as_deref(), Some("authentication_failed"));
+    assert_eq!(
+        serde_json::to_value(&row.internal_errors)?,
+        serde_json::json!([{
+            "stage": "authn",
+            "kind": "unavailable",
+            "message": "api key storage unavailable"
+        }])
+    );
+    assert!(row.upstream_error_type.is_none());
+    assert!(row.upstream_error_message.is_none());
 
     Ok(())
 }

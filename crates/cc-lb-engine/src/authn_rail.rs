@@ -92,7 +92,7 @@ pub fn reject_unauthenticated(
     observer: Option<&LifecycleContext>,
 ) -> Response<Body> {
     if let Some(o) = observer {
-        o.emit_provider_error("authentication_error", &error.to_string(), "authn");
+        o.notify_error_hooks("authentication_error", &error.to_string(), "authn");
     }
     let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
     let response = match error {
@@ -105,6 +105,7 @@ pub fn reject_unauthenticated(
         _ => anthropic_error_response(status, "authentication_error", &error.to_string()),
     };
     if let Some(o) = observer {
+        o.emit_request_started(false);
         o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
             event_id: o.event_id().to_owned(),
             result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
@@ -112,8 +113,19 @@ pub fn reject_unauthenticated(
                 reason: Some(key_auth_failure_reason(error).to_owned()),
             }),
         });
-        o.set_terminal(status, error_codes::AUTHENTICATION_FAILED);
-        o.finish();
+        o.terminate_failure(crate::terminal_observer::InternalFailure {
+            status,
+            error_code: error_codes::AUTHENTICATION_FAILED,
+            error: cc_lb_domain::InternalError {
+                stage: cc_lb_domain::InternalErrorStage::Authn,
+                kind: if matches!(error, BuiltinAuthError::Unavailable) {
+                    cc_lb_domain::InternalErrorKind::Unavailable
+                } else {
+                    cc_lb_domain::InternalErrorKind::InvalidInput
+                },
+                message: Some(error.to_string()),
+            },
+        });
     }
     response
 }

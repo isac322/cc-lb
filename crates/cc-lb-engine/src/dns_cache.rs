@@ -189,7 +189,10 @@ impl Service<Name> for MetricDnsResolver {
             let ips = resolver.resolve(host.clone()).await;
             match ips {
                 Ok(ips) => {
-                    crate::request_timing::record_dns(start.elapsed());
+                    crate::request_timing::record_dns(
+                        start.elapsed(),
+                        crate::request_timing::DnsResolutionOutcome::Resolved,
+                    );
                     emit_dns_metric(if was_hit { "hit" } else { "miss" });
                     metric_cache.insert(host, Instant::now() + metric_ttl);
                     Ok(ips
@@ -199,6 +202,10 @@ impl Service<Name> for MetricDnsResolver {
                         .into_iter())
                 }
                 Err(err) => {
+                    crate::request_timing::record_dns(
+                        start.elapsed(),
+                        crate::request_timing::DnsResolutionOutcome::Failed,
+                    );
                     emit_dns_metric("error");
                     Err(err)
                 }
@@ -284,6 +291,10 @@ mod tests {
             "expected dns_ms >= 100, got {:?}",
             timings.dns_ms
         );
+        assert_eq!(
+            timings.dns_outcome,
+            Some(crate::request_timing::DnsResolutionOutcome::Resolved)
+        );
     }
 
     #[tokio::test]
@@ -296,8 +307,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dns_resolver_failure_does_not_record() {
+    async fn dns_resolver_failure_records_elapsed_and_failed_outcome() {
         let stub = StubResolver::new(|name| async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
             Err(DnsCacheError::Resolve {
                 host: name,
                 message: "boom".to_owned(),
@@ -311,7 +323,16 @@ mod tests {
         })
         .await;
 
-        assert_eq!(timings.dns_ms, None);
+        assert!(
+            timings.dns_ms.is_some_and(|dns_ms| dns_ms >= 20),
+            "expected failed dns_ms >= 20, got {:?}",
+            timings.dns_ms
+        );
+        assert_eq!(
+            timings.dns_outcome,
+            Some(crate::request_timing::DnsResolutionOutcome::Failed)
+        );
+        assert_eq!(timings.dns_attempts, 1);
     }
 
     #[tokio::test]

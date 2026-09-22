@@ -178,7 +178,7 @@ async fn assemble_route(
     finalize_ms: None,
     setup_timings: Default::default(),
     io_timings: Default::default(),
-    upstream_body_ms: None, event_kind: None })
+    upstream_body_ms: None, dns_ms: None, connect_ms: None, connection_reused: None, event_kind: None })
     .await
     .unwrap();
     drop(tx);

@@ -273,11 +273,11 @@ impl UpstreamDispatch for OneResponseDispatch {
         self.response
             .lock()
             .map_err(|_| DispatchError::Transport {
-                reason: "test response lock poisoned".to_owned(),
+                source: Box::new(std::io::Error::other("test response lock poisoned")),
             })?
             .take()
             .ok_or_else(|| DispatchError::Transport {
-                reason: "test response already consumed".to_owned(),
+                source: Box::new(std::io::Error::other("test response already consumed")),
             })
     }
 }

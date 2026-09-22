@@ -95,7 +95,9 @@ const WASMTIME_POOL_METRICS_INTERVAL: Duration = Duration::from_secs(10);
 /// Response extension carrying the terminal classification for a response
 /// produced outside the lifecycle handler. `lifecycle_middleware` reads it
 /// and finalizes the request's `LifecycleContext`; unmarked responses are
-/// left to the context's `Drop` backstop.
+/// left to the context's `Drop` backstop. Responses that terminate on a
+/// known internal failure carry `cc_lb_engine::InternalFailure` instead,
+/// which the middleware consumes first.
 type TerminalClassification = cc_lb_engine::TerminalClassification;
 
 #[derive(Clone, Copy)]
@@ -2486,7 +2488,13 @@ async fn timeout_error(error: tower::BoxError) -> Response<Body> {
     if is_elapsed {
         response
             .extensions_mut()
-            .insert(TerminalClassification::TOWER_TIMEOUT);
+            .insert(cc_lb_engine::InternalFailure::tower_timeout(
+                cc_lb_domain::InternalError {
+                    stage: cc_lb_domain::InternalErrorStage::Relay,
+                    kind: cc_lb_domain::InternalErrorKind::Timeout,
+                    message: Some(error.to_string()),
+                },
+            ));
     }
     response
 }
@@ -2553,11 +2561,18 @@ async fn lifecycle_handler(
             drop(body_read_span);
             if let Some(observer) = observer.as_ref() {
                 observer.set_request_body_timing(body_read_ms, None);
-                let terminal = TerminalClassification::BODY_READ_FAILED;
-                observer.terminate(terminal.status, terminal.error_code);
             }
             let mut response = Response::new(Body::from(format!("body read failed: {source}")));
             *response.status_mut() = StatusCode::BAD_REQUEST;
+            response
+                .extensions_mut()
+                .insert(cc_lb_engine::InternalFailure::body_read_failed(
+                    cc_lb_domain::InternalError {
+                        stage: cc_lb_domain::InternalErrorStage::Ingress,
+                        kind: cc_lb_domain::InternalErrorKind::InvalidInput,
+                        message: Some(source.to_string()),
+                    },
+                ));
             return response;
         }
     };
@@ -2783,16 +2798,22 @@ async fn lifecycle_middleware(
     if let Some(c) = ctx.as_ref() {
         request.extensions_mut().insert(c.clone());
     }
-    let response = next.run(request).await;
-    // Only a response carrying an explicit terminal classification is
-    // finalized here. A streaming proxy response returns headers long before
-    // its body finishes, so terminating unconditionally would finalize every
-    // stream at header time; unmarked responses fall through to the context's
-    // Drop backstop instead.
-    if let Some(marker) = response.extensions().get::<TerminalClassification>()
-        && let Some(c) = ctx.as_ref()
-    {
-        c.terminate(marker.status, marker.error_code);
+    let mut response = next.run(request).await;
+    // Only a response carrying an explicit terminal marker is finalized here.
+    // A streaming proxy response returns headers long before its body
+    // finishes, so terminating unconditionally would finalize every stream at
+    // header time; unmarked responses fall through to the context's Drop
+    // backstop instead. `InternalFailure` (typed internal error) is checked
+    // before `TerminalClassification` (local status-only outcome).
+    if let Some(c) = ctx.as_ref() {
+        if let Some(failure) = response
+            .extensions_mut()
+            .remove::<cc_lb_engine::InternalFailure>()
+        {
+            c.terminate_failure(failure);
+        } else if let Some(marker) = response.extensions().get::<TerminalClassification>() {
+            c.terminate_local(*marker);
+        }
     }
     response
 }
@@ -3884,5 +3905,157 @@ mod tests {
             .to_bytes();
         let payload: Value = serde_json::from_slice(&body).expect("body should be json");
         assert_eq!(payload.get("state").and_then(Value::as_str), Some(expected));
+    }
+
+    /// QA-CTRL-14: a tower timeout that fires before the handler runs (and
+    /// therefore before `mark_authn_reached`) must produce no request-log row
+    /// and no `RequestTerminated` event — the pre-authentication silent
+    /// invariant. The handler and the request body must never be polled.
+    #[tokio::test]
+    async fn pre_authn_timeout_emits_no_lifecycle_events() {
+        struct PendingSignerFactory;
+
+        impl cc_lb_upstream::ApiKeyAwareSignerFactory for PendingSignerFactory {
+            fn with_router_choice(
+                &self,
+                _router_chosen_upstream_name: String,
+            ) -> Arc<dyn cc_lb_upstream::SignerFactory> {
+                unreachable!("pre-authn timeout never signs")
+            }
+        }
+
+        struct PendingRouter;
+
+        impl cc_lb_routing::RouterPlugin for PendingRouter {
+            fn route(
+                &self,
+                _ctx: &cc_lb_routing::RoutingContext,
+                _principal: &cc_lb_domain::Principal,
+                _candidates: &[cc_lb_domain::UpstreamCandidate],
+            ) -> Result<cc_lb_routing::RouteDecision, cc_lb_routing::RouteError> {
+                unreachable!("pre-authn timeout never routes")
+            }
+        }
+
+        struct PendingDispatch;
+
+        #[async_trait]
+        impl UpstreamDispatch for PendingDispatch {
+            async fn dispatch(
+                &self,
+                _request: SignedRequest,
+            ) -> Result<Response<Body>, cc_lb_engine::DispatchError> {
+                unreachable!("pre-authn timeout never dispatches")
+            }
+        }
+
+        async fn pending_handler() -> Response<Body> {
+            std::future::pending::<()>().await;
+            unreachable!("pre-authn timeout never reaches the handler")
+        }
+
+        let bus = Arc::new(cc_lb_engine::InMemoryBus::new());
+        let LifecycleBusReceiver::InMemory(mut events) = bus.subscribe_lifecycle() else {
+            panic!("expected in-memory lifecycle receiver");
+        };
+        let clock: ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+        let storage = cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+            .await
+            .expect("in-memory storage opens");
+        let builtin_authn = Arc::new(BuiltinAuthn::new(
+            Arc::new(KeyStore::new(
+                Arc::new(FixtureKeyStore) as Arc<dyn ManagedKeyStore>
+            )),
+            clock.clone(),
+        ));
+        let view = cc_lb_engine::DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(PendingSignerFactory))
+            .global_router(Arc::new(PendingRouter))
+            .global_observability_hooks(Vec::new())
+            .principal_view(Arc::new(PrincipalView::for_tests(
+                TEST_PRINCIPAL,
+                true,
+                vec!["*".to_owned()],
+                Vec::new(),
+                HashMap::new(),
+            )))
+            .upstream_records(Vec::new())
+            .build();
+        let dynamic_view = Arc::new(DynamicViewHolder::new(view));
+        let lifecycle = Arc::new(
+            Lifecycle::new_with_dynamic_view(
+                builtin_authn.clone(),
+                dynamic_view.clone(),
+                Arc::new(PendingDispatch),
+                LifecycleConfig::default(),
+                clock.clone(),
+            )
+            .with_event_bus(bus as Arc<dyn RequestEventBus>),
+        );
+        let state = ProxyState {
+            lifecycle,
+            body_caps: RequestBodyCaps {
+                messages: 1024,
+                files: 1024,
+            },
+            server_state: Arc::new(ServerStateHandle::new_starting()),
+            start_time: Instant::now(),
+            drain_controller: DrainController::new(),
+            aead: Arc::new(AeadService::from_master_key([0; 32])),
+            storage: Arc::new(storage),
+            dynamic_view,
+            builtin_authn,
+            clock,
+        };
+
+        // Same middleware order as `proxy_router`: request_id → lifecycle →
+        // drain → (HandleError(timeout_error) → timeout) → routes.
+        let router = Router::new()
+            .route("/v1/messages", post(pending_handler))
+            .with_state(state.clone())
+            .layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(timeout_error))
+                    .timeout(Duration::from_secs(1)),
+            )
+            .layer(middleware::from_fn_with_state(
+                state.drain_controller.clone(),
+                crate::drain::proxy_drain_middleware,
+            ))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                lifecycle_middleware,
+            ))
+            .layer(middleware::from_fn_with_state(
+                RequestIdState::default(),
+                request_id_middleware,
+            ));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .body(Body::from_stream(stream::once(panic_when_polled())))
+            .expect("request builds");
+        // Pause only after all real-clock setup (sqlite open, router build)
+        // completed: the pending handler then lets the 1s tower timeout fire
+        // deterministically without racing external worker threads.
+        tokio::time::pause();
+        let response = router.oneshot(request).await.expect("router responds");
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("timeout body collects")
+            .to_bytes();
+        assert_eq!(&body[..], b"request timed out");
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "pre-authn timeout must emit no lifecycle events"
+        );
     }
 }

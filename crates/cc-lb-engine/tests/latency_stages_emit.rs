@@ -504,8 +504,9 @@ where
                 .request(request)
                 .await
                 .map_err(|source| DispatchError::Transport {
-                    reason: source.to_string(),
+                    source: Box::new(source),
                 })?;
+        cc_lb_engine::request_timing::finalize_connection_reused_if_unset();
         let (parts, body) = response.into_parts();
         Ok(Response::from_parts(parts, Body::new(body)))
     }
