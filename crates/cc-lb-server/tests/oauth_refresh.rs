@@ -146,7 +146,6 @@ impl Fixture {
             token_url: Url::parse(&format!("{fake_base}/oauth/token")).expect("token url"),
             redirect_uri: Url::parse("http://localhost/callback").expect("redirect url"),
             scopes: vec!["messages".to_owned()],
-            long_lived_scopes: vec!["user:profile".to_owned(), "user:inference".to_owned()],
         });
         Self {
             _dir: dir,
@@ -201,7 +200,7 @@ impl Fixture {
             },
         );
         self.storage
-            .store_oauth_tokens(record.id, record.revision, encrypted)
+            .store_oauth_tokens(record.id, record.revision, encrypted, false)
             .await
             .expect("tokens stored");
         record.id

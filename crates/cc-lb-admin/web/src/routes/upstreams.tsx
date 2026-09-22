@@ -70,7 +70,6 @@ import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMini
 import {
   ApiError,
   type DraftCompleteResponse,
-  type OAuthTokenMode,
   type OrganizationMetadataInner,
   type QuotaSnapshot,
   type UpstreamOAuthStatusResponse,
@@ -681,60 +680,6 @@ function oauthBadge(entry: UpstreamOAuthStatusResponse): OAuthBadge {
   return { tone: 'ok', label: 'Connected' };
 }
 
-// Shared by the create wizard and the reconnect modal: the mode must be
-// chosen before the authorize URL is generated, because the URL bakes in the
-// requested grant. A long-lived credential can never be refreshed, so the
-// trade-off is spelled out next to each option.
-function OAuthModeChoice({
-  value,
-  onChange,
-}: {
-  value: OAuthTokenMode;
-  onChange: (mode: OAuthTokenMode) => void;
-}) {
-  return (
-    <BaseRadioGroup
-      name="oauth-mode"
-      value={value}
-      onValueChange={(mode) => onChange(mode)}
-      className="space-y-2"
-      data-testid="oauth-mode-choice"
-    >
-      <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
-        <BaseRadio.Root
-          value="long_lived_365d"
-          className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle bg-bg transition-colors data-[checked]:border-[color:var(--color-accent)]"
-        >
-          <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
-        </BaseRadio.Root>
-        <div>
-          <div className="font-medium text-text">
-            365-day direct token (recommended)
-          </div>
-          <div className="text-xs text-text-faint mt-1">
-            Inference only. No monthly reauthorization. Cannot be refreshed.
-          </div>
-        </div>
-      </label>
-      <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
-        <BaseRadio.Root
-          value="refreshing"
-          className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle bg-bg transition-colors data-[checked]:border-[color:var(--color-accent)]"
-        >
-          <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
-        </BaseRadio.Root>
-        <div>
-          <div className="font-medium text-text">Standard refreshing token</div>
-          <div className="text-xs text-text-faint mt-1">
-            Full scope set including Remote Control and connectors. Reauthorize
-            about every 30 days.
-          </div>
-        </div>
-      </label>
-    </BaseRadioGroup>
-  );
-}
-
 const DETAIL_WINDOWS = [
   '5h',
   '7d',
@@ -869,6 +814,57 @@ function PaymentWarning({
   );
 }
 
+function OAuthFallbackNotice({
+  fallback,
+  reason,
+  grantedExpiresInSecs,
+}: {
+  fallback: boolean;
+  reason: string | null;
+  grantedExpiresInSecs: number | null;
+}) {
+  if (!fallback) return null;
+  return (
+    <div
+      data-testid="oauth-long-lived-fallback-notice"
+      data-reason={reason ?? 'unknown'}
+      className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1"
+    >
+      <div className="font-medium flex items-center gap-1.5">
+        <Info className="w-3.5 h-3.5" />
+        365-day token unavailable
+      </div>
+      {reason === 'clamped' ? (
+        <p className="opacity-90">
+          Anthropic accepted the 365-day request but granted a shorter lifetime,
+          so the credential was kept refreshable instead of being locked to a
+          token that could not renew itself.
+          {grantedExpiresInSecs != null && (
+            <>
+              {' '}
+              The granted token expires{' '}
+              <RelativeOffsetTime offsetSeconds={grantedExpiresInSecs} />.
+            </>
+          )}
+        </p>
+      ) : reason === 'scope_rejected' ? (
+        <p className="opacity-90">
+          Anthropic refused the 365-day request because the configured
+          oauth.anthropic.scopes include a scope it will not grant a year-long
+          token for, so the credential was kept refreshable instead. It
+          auto-refreshes but needs reauthorization about every 30 days.
+        </p>
+      ) : (
+        <p className="opacity-90">
+          Anthropic refused the 365-day request, so a standard refreshing
+          credential was created instead. It auto-refreshes but needs
+          reauthorization about every 30 days.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function DetailView({
   upstream,
   onBack,
@@ -882,6 +878,7 @@ function DetailView({
   const del = useDeleteUpstream();
   const oauthStart = useOAuthStart();
   const oauthComplete = useOAuthComplete();
+  const resetOAuthComplete = oauthComplete.reset;
   const subscriptionMetadataQ = useUpstreamSubscriptionMetadata(upstream.id);
   const triggerSubscriptionMetadataRefresh =
     useTriggerSubscriptionMetadataRefresh();
@@ -901,7 +898,6 @@ function DetailView({
     state_token?: string;
     code?: string;
   }>({});
-  const [oauthMode, setOauthMode] = useState<OAuthTokenMode>('long_lived_365d');
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [range, setRange] = useState<'1h' | '6h' | '24h' | '7d'>('7d');
   const [isolatedWindow, setIsolatedWindow] = useState<string | null>(null);
@@ -910,18 +906,13 @@ function DetailView({
 
   // Single entry point for the OAuth authorize flow: the card button, the
   // reconnect notice, and the ?action=reconnect deep link all funnel here so
-  // every surface shares the same modal. The authorize URL bakes in the
-  // requested grant, so the modal opens on the mode choice first and only
-  // generates the URL once the operator has confirmed the mode. Reconnect
-  // doubles as the mode-conversion path, so seed it with the current mode.
-  const currentOAuthMode = upstreamOAuthQ.data?.has_credentials
-    ? upstreamOAuthQ.data.mode
-    : null;
+  // every surface shares the same modal.
   const startOAuthReconnect = useCallback(() => {
-    setOauthMode(currentOAuthMode ?? 'long_lived_365d');
     setOauthState({});
+    // A previous completion's result must not leak into a reopened modal.
+    resetOAuthComplete();
     setOauthOpen(true);
-  }, [currentOAuthMode]);
+  }, [resetOAuthComplete]);
 
   // ?action=reconnect deep link: consume the param exactly once, then start
   // the existing flow. The ref survives StrictMode's double effect pass;
@@ -2135,9 +2126,12 @@ function DetailView({
                             />
                           </Badge>
                         </div>
-                        <div className="mt-1 text-[10px] text-text-faint">
-                          Renews automatically while the refresh token is valid.
-                        </div>
+                        {principalEntry.mode === 'refreshing' ? (
+                          <div className="mt-1 text-[10px] text-text-faint">
+                            Renews automatically while the refresh token is
+                            valid.
+                          </div>
+                        ) : null}
                       </div>
                       <div>
                         <div className="text-[11px] uppercase tracking-wider text-text-faint">
@@ -2348,7 +2342,11 @@ function DetailView({
             <Button
               variant="primary"
               loading={oauthComplete.isPending}
-              disabled={!oauthState.code || !oauthState.state_token}
+              disabled={
+                !oauthState.code ||
+                !oauthState.state_token ||
+                oauthComplete.isSuccess
+              }
               onClick={() => {
                 const token = oauthState.state_token;
                 const oauthCode = oauthState.code;
@@ -2360,9 +2358,12 @@ function DetailView({
                     code: oauthCode,
                   },
                   {
-                    onSuccess: () => {
+                    onSuccess: (res) => {
                       toast.success('OAuth connected');
-                      setOauthOpen(false);
+                      // A fallback outcome must stay visible: the notice
+                      // lives inside this modal, so only close on a clean
+                      // long-lived grant.
+                      if (!res.long_lived_fallback) setOauthOpen(false);
                     },
                   },
                 );
@@ -2374,27 +2375,24 @@ function DetailView({
         }
       >
         <div className="space-y-3">
-          <div className="flex flex-col gap-1.5">
-            <span className="text-[11px] uppercase tracking-wider text-text-faint">
-              Credential mode
-            </span>
-            <OAuthModeChoice
-              value={oauthMode}
-              onChange={(mode) => {
-                setOauthMode(mode);
-                // The mode is baked into the authorize URL, so a change
-                // discards any URL/code already generated.
-                setOauthState({});
-              }}
-            />
-          </div>
+          <OAuthFallbackNotice
+            fallback={oauthComplete.data?.long_lived_fallback ?? false}
+            reason={oauthComplete.data?.fallback_reason ?? null}
+            grantedExpiresInSecs={
+              oauthComplete.data?.granted_expires_in_secs ?? null
+            }
+          />
+          <p className="text-xs text-text-faint">
+            cc-lb requests a year-long token from Anthropic. If Anthropic
+            declines, the credential is automatically kept refreshable instead.
+          </p>
           {!oauthState.authorize_url ? (
             <Button
               variant="primary"
               loading={oauthStart.isPending}
               onClick={() => {
                 oauthStart.mutate(
-                  { id: upstream.id, mode: oauthMode },
+                  { id: upstream.id },
                   {
                     onSuccess: (res) => {
                       setOauthState({
@@ -2536,7 +2534,6 @@ function CreateUpstreamModal({
   );
   const [oauthName, setOauthName] = useState('');
   const [oauthError, setOauthError] = useState<string | null>(null);
-  const [oauthMode, setOauthMode] = useState<OAuthTokenMode>('long_lived_365d');
 
   const createPending = create.isPending;
   const startDraftPending = startDraft.isPending;
@@ -2567,7 +2564,6 @@ function CreateUpstreamModal({
       setDraftResult(null);
       setOauthName('');
       setOauthError(null);
-      setOauthMode('long_lived_365d');
       onPendingCreatedIdChange(null);
     }
   }, [open, onPendingCreatedIdChange]);
@@ -2604,18 +2600,15 @@ function CreateUpstreamModal({
 
   const handleAuthorizeClick = () => {
     setOauthError(null);
-    startDraft.mutate(
-      { mode: oauthMode },
-      {
-        onSuccess: (res: { authorize_url: string; state_token: string }) => {
-          setAuthState(res);
-          window.open(res.authorize_url, '_blank');
-        },
-        onError: (err: unknown) => {
-          setOauthError(err instanceof Error ? err.message : String(err));
-        },
+    startDraft.mutate(undefined, {
+      onSuccess: (res: { authorize_url: string; state_token: string }) => {
+        setAuthState(res);
+        window.open(res.authorize_url, '_blank');
       },
-    );
+      onError: (err: unknown) => {
+        setOauthError(err instanceof Error ? err.message : String(err));
+      },
+    });
   };
 
   const handleVerifyCode = () => {
@@ -2786,25 +2779,11 @@ function CreateUpstreamModal({
       return (
         <div className="space-y-4">
           <p className="text-sm text-text-faint">
-            We'll authorize a Claude account via Anthropic. Click Authorize,
-            complete the flow, then paste the code below.
+            We'll authorize a Claude account via Anthropic. cc-lb requests a
+            year-long token; if Anthropic declines, the credential is
+            automatically kept refreshable instead. Click Authorize, complete
+            the flow, then paste the code below.
           </p>
-
-          <div className="flex flex-col gap-1.5">
-            <span className="text-[11px] uppercase tracking-wider text-text-faint">
-              Credential mode
-            </span>
-            <OAuthModeChoice
-              value={oauthMode}
-              onChange={(mode) => {
-                setOauthMode(mode);
-                // The mode is baked into the authorize URL, so a change
-                // discards any URL/code already generated.
-                setAuthState(null);
-                setCode('');
-              }}
-            />
-          </div>
 
           <Button
             variant="primary"
@@ -2886,41 +2865,11 @@ function CreateUpstreamModal({
 
       return (
         <div className="space-y-4">
-          {draftResult?.long_lived_fallback && (
-            <div
-              data-testid="oauth-long-lived-fallback-notice"
-              data-reason={draftResult.fallback_reason ?? 'unknown'}
-              className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1"
-            >
-              <div className="font-medium flex items-center gap-1.5">
-                <Info className="w-3.5 h-3.5" />
-                365-day token unavailable
-              </div>
-              {draftResult.fallback_reason === 'clamped' ? (
-                <p className="opacity-90">
-                  Anthropic accepted the 365-day request but granted a shorter
-                  lifetime, so the credential was kept refreshable instead of
-                  being locked to a token that could not renew itself.
-                  {draftResult.granted_expires_in_secs != null && (
-                    <>
-                      {' '}
-                      The granted token expires{' '}
-                      <RelativeOffsetTime
-                        offsetSeconds={draftResult.granted_expires_in_secs}
-                      />
-                      .
-                    </>
-                  )}
-                </p>
-              ) : (
-                <p className="opacity-90">
-                  Anthropic refused the 365-day request, so a standard
-                  refreshing credential was created instead. It auto-refreshes
-                  but needs reauthorization about every 30 days.
-                </p>
-              )}
-            </div>
-          )}
+          <OAuthFallbackNotice
+            fallback={draftResult?.long_lived_fallback ?? false}
+            reason={draftResult?.fallback_reason ?? null}
+            grantedExpiresInSecs={draftResult?.granted_expires_in_secs ?? null}
+          />
 
           <div className="p-4 border border-subtle rounded-md bg-overlay-1 space-y-3">
             <h3 className="text-sm font-medium text-text">Account Preview</h3>

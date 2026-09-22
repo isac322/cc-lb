@@ -374,6 +374,7 @@ fn oauth_upstream_record() -> UpstreamRecord {
         base_url: Some("http://upstream.local/".parse().expect("test URL parses")),
         enabled: true,
         oauth_credentials: None,
+        oauth_never_refresh: false,
         api_key_ciphertext: None,
         last_apply_error: None,
         last_apply_at_unix_secs: None,

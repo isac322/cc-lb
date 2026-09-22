@@ -155,7 +155,6 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         token_url: Url::parse("http://unused.invalid/token").expect("token url"),
         redirect_uri: Url::parse("http://unused.invalid/callback").expect("redirect url"),
         scopes: vec!["messages".to_owned()],
-        long_lived_scopes: vec!["user:profile".to_owned(), "user:inference".to_owned()],
     });
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
@@ -384,8 +383,16 @@ impl UpstreamStore for NameSortedUpstreamStore {
         id: Uuid,
         expected_revision: u64,
         tokens: EncryptedOAuthTokens,
+        never_refresh: bool,
     ) -> StorageResult<UpstreamRecord> {
-        UpstreamStore::store_oauth_tokens(self.inner.as_ref(), id, expected_revision, tokens).await
+        UpstreamStore::store_oauth_tokens(
+            self.inner.as_ref(),
+            id,
+            expected_revision,
+            tokens,
+            never_refresh,
+        )
+        .await
     }
 
     async fn complete_refresh(

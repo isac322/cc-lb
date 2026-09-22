@@ -106,7 +106,7 @@ where
         record.id.as_bytes(),
     )?;
     storage
-        .store_oauth_tokens(record.id, record.revision, encrypted)
+        .store_oauth_tokens(record.id, record.revision, encrypted, false)
         .await?;
     Ok(record.id)
 }

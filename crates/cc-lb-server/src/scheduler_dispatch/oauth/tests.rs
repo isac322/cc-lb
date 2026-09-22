@@ -20,7 +20,7 @@ use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_runtime_wasmtime::{HotEngineConfig, WasmtimeRuntime};
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::oauth_refresh::RefreshOutcome;
-use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
+use cc_lb_scheduler::worker::{AdaptiveJob, Filter, SchedulerPushTask, TaskStatus};
 use cc_lb_storage_api::upstream::{
     UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
     UpstreamUpdate,
@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
-use super::should_poll_oauth_usage;
+use super::{LONG_LIVED_METADATA_REFRESH_BUCKET_SECS, should_poll_oauth_usage};
 use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
 use crate::dynamic_view_builder::Stores;
 use crate::refresh::{LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefresher, LazyRefresherDeps};
@@ -68,6 +68,14 @@ fn usage_poll_excludes_non_oauth_upstream() {
     upstream.kind = UpstreamKind::AnthropicApiKey;
 
     assert!(!should_poll_oauth_usage(&upstream));
+}
+
+#[test]
+fn usage_poll_includes_never_refresh_upstream() {
+    let mut upstream = registered_oauth_upstream();
+    upstream.oauth_never_refresh = true;
+
+    assert!(should_poll_oauth_usage(&upstream));
 }
 
 /// A long-lived (365-day) credential must never reach the token endpoint:
@@ -147,7 +155,9 @@ async fn ensure_fresh_usage_token_invokes_lazy_refresh_for_refreshing_credential
 }
 
 /// The 401-retry force refresh must also skip long-lived credentials and
-/// report that no refresh happened.
+/// report that no refresh happened. Because a long-lived credential can never
+/// be rotated, the terminal 401 is recorded durably as `status_401` so the
+/// upstream surfaces as broken.
 #[tokio::test]
 async fn force_refresh_usage_token_skips_lazy_refresh_for_long_lived_credential() {
     let fixture = DispatchFixture::new().await;
@@ -166,6 +176,11 @@ async fn force_refresh_usage_token_skips_lazy_refresh_for_long_lived_credential(
         "the lazy refresher must not be invoked for a long-lived credential"
     );
     assert_eq!(fixture.claim_calls.load(Ordering::SeqCst), 0);
+    let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+        .await
+        .expect("upstream fetch")
+        .expect("upstream exists");
+    assert_eq!(stored.last_apply_error.as_deref(), Some("status_401"));
 }
 
 /// Contrast case: a refreshing credential reaches the lazy refresher; the
@@ -188,6 +203,96 @@ async fn force_refresh_usage_token_invokes_lazy_refresh_for_refreshing_credentia
     assert_eq!(fixture.claim_calls.load(Ordering::SeqCst), 1);
 }
 
+/// A successful usage poll clears a previously recorded apply error, mirroring
+/// `complete_refresh` clearing the error on a successful token refresh. A
+/// clean upstream is a no-op.
+#[tokio::test]
+async fn clear_recorded_apply_error_clears_stored_error() {
+    let fixture = DispatchFixture::new().await;
+    let upstream = fixture.oauth_upstream(true).await;
+
+    fixture
+        .dispatch
+        .clear_recorded_apply_error(&upstream)
+        .await
+        .expect("clean upstream is a no-op");
+
+    UpstreamStore::set_last_apply_error(
+        fixture.storage.as_ref(),
+        upstream.id,
+        Some("status_401".to_owned()),
+    )
+    .await
+    .expect("error recorded");
+    let errored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+        .await
+        .expect("upstream fetch")
+        .expect("upstream exists");
+    assert_eq!(errored.last_apply_error.as_deref(), Some("status_401"));
+
+    fixture
+        .dispatch
+        .clear_recorded_apply_error(&errored)
+        .await
+        .expect("error cleared");
+    let cleared = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+        .await
+        .expect("upstream fetch")
+        .expect("upstream exists");
+    assert_eq!(cleared.last_apply_error, None);
+}
+
+/// Long-lived upstreams never reach the token-refresh path that schedules
+/// `MetadataRefreshJob`, so the usage poll enqueues it instead. The
+/// idempotency key carries a coarse time bucket: ticks inside one bucket
+/// collapse to a single job (a swallowed `Conflict`), while the first tick
+/// of the next bucket enqueues a fresh job — the same cadence at which a
+/// refreshing credential's generation would rotate the key.
+#[tokio::test]
+async fn enqueue_metadata_refresh_for_long_lived_rekeys_each_bucket() {
+    let fixture = DispatchFixture::new().await;
+    let upstream = fixture.oauth_upstream(true).await;
+
+    fixture
+        .dispatch
+        .enqueue_metadata_refresh_for_long_lived(&upstream, None)
+        .await
+        .expect("first enqueue succeeds");
+    fixture
+        .dispatch
+        .enqueue_metadata_refresh_for_long_lived(&upstream, None)
+        .await
+        .expect("same-bucket enqueue is a swallowed conflict");
+
+    fixture
+        .clock
+        .advance_secs(LONG_LIVED_METADATA_REFRESH_BUCKET_SECS);
+    fixture
+        .dispatch
+        .enqueue_metadata_refresh_for_long_lived(&upstream, None)
+        .await
+        .expect("next bucket enqueues a new job");
+
+    let tasks = fixture
+        .dispatch
+        .backend
+        .list_adaptive_tasks(&Filter {
+            status: Some(TaskStatus::Pending),
+            page: 1,
+            page_size: Some(100),
+        })
+        .await
+        .expect("list adaptive tasks");
+    let metadata_tasks = tasks
+        .iter()
+        .filter(|task| matches!(task.args, AdaptiveJob::MetadataRefresh(_)))
+        .count();
+    assert_eq!(
+        metadata_tasks, 2,
+        "same-bucket ticks must collapse, the next bucket must enqueue a new job"
+    );
+}
+
 fn registered_oauth_upstream() -> UpstreamRecord {
     UpstreamRecord {
         id: uuid::Uuid::new_v4(),
@@ -196,6 +301,7 @@ fn registered_oauth_upstream() -> UpstreamRecord {
         base_url: None,
         enabled: true,
         oauth_credentials: Some(EncryptedOAuthTokens::from_ciphertext(vec![1])),
+        oauth_never_refresh: false,
         api_key_ciphertext: None,
         last_apply_error: None,
         last_apply_at_unix_secs: None,
@@ -221,6 +327,7 @@ struct DispatchFixture {
     storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
     aead: Arc<AeadService>,
     dispatch: SchedulerDispatch,
+    clock: Arc<TestClock>,
     refresh_entry_calls: Arc<AtomicUsize>,
     claim_calls: Arc<AtomicUsize>,
 }
@@ -250,14 +357,14 @@ impl DispatchFixture {
         .expect("open scheduler storage");
         let storage_dyn: Arc<dyn Storage> = storage.clone();
         let aead = Arc::new(AeadService::from_master_key([9; 32]));
-        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let test_clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let clock: ClockHandle = test_clock.clone();
         let oauth_cfg = Arc::new(AnthropicOAuthConfig {
             client_id: "test-client".to_owned(),
             auth_url: Url::parse("http://127.0.0.1/oauth/authorize").expect("auth url"),
             token_url: refused_token_url(),
             redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect url"),
             scopes: vec!["messages".to_owned()],
-            long_lived_scopes: Vec::new(),
         });
         let refresh_entry_calls = Arc::new(AtomicUsize::new(0));
         let claim_calls = Arc::new(AtomicUsize::new(0));
@@ -343,6 +450,7 @@ impl DispatchFixture {
             storage,
             aead,
             dispatch,
+            clock: test_clock,
             refresh_entry_calls,
             claim_calls,
         }
@@ -385,6 +493,7 @@ impl DispatchFixture {
             record.id,
             record.revision,
             encrypted,
+            never_refresh,
         )
         .await
         .expect("tokens stored")
@@ -481,9 +590,10 @@ impl UpstreamStore for CountingUpstreamStore {
         id: Uuid,
         expected_revision: u64,
         tokens: EncryptedOAuthTokens,
+        never_refresh: bool,
     ) -> StorageResult<UpstreamRecord> {
         self.inner
-            .store_oauth_tokens(id, expected_revision, tokens)
+            .store_oauth_tokens(id, expected_revision, tokens, never_refresh)
             .await
     }
 

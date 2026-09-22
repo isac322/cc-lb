@@ -187,6 +187,7 @@ fn test_upstream_record() -> UpstreamRecord {
         base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
         enabled: true,
         oauth_credentials: None,
+        oauth_never_refresh: false,
         api_key_ciphertext: None,
         last_apply_error: None,
         last_apply_at_unix_secs: None,

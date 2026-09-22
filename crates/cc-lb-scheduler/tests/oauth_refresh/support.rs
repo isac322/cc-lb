@@ -81,6 +81,7 @@ pub fn refreshable_record(upstream_id: Uuid, generation: u64) -> UpstreamRecord 
         base_url: None,
         enabled: true,
         oauth_credentials: Some(encrypted_tokens(1)),
+        oauth_never_refresh: false,
         api_key_ciphertext: None,
         last_apply_error: None,
         last_apply_at_unix_secs: None,

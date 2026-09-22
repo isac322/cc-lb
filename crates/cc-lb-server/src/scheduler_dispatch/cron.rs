@@ -177,7 +177,7 @@ impl SchedulerDispatch {
         &self,
         job: OAuthRefreshWatchdogJob,
     ) -> SchedulerResult<JobOutcome> {
-        let upstream_ids = self.list_oauth_watchdog_upstream_ids().await?;
+        let upstream_ids = self.list_oauth_refresh_watchdog_upstream_ids().await?;
         let stats = run_entity_watchdog(
             &self.backend,
             WatchdogEntityKind::OAuthRefresh,
@@ -198,7 +198,7 @@ impl SchedulerDispatch {
         &self,
         job: OAuthUsagePollCronJob,
     ) -> SchedulerResult<JobOutcome> {
-        let upstream_ids = self.list_oauth_watchdog_upstream_ids().await?;
+        let upstream_ids = self.list_oauth_usage_poll_upstream_ids().await?;
         let total = upstream_ids.len();
         let traceparent = job.traceparent.as_deref();
         // Poll upstreams concurrently so one slow/hanging upstream cannot

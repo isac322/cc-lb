@@ -444,6 +444,7 @@ impl UpstreamStore for BlockingUpstreamStore {
         _id: Uuid,
         _expected_revision: u64,
         _tokens: cc_lb_aead::EncryptedOAuthTokens,
+        _never_refresh: bool,
     ) -> StorageResult<UpstreamRecord> {
         unimplemented!()
     }

@@ -48,6 +48,13 @@ pub struct UpstreamRecord {
     pub base_url: Option<Url>,
     pub enabled: bool,
     pub oauth_credentials: Option<EncryptedOAuthTokens>,
+    /// Mirrors `OAuthTokenBundle.never_refresh` for the stored credential.
+    ///
+    /// Persisted as its own column so list enumeration can filter on the
+    /// credential mode without decrypting every upstream's AEAD bundle.
+    /// Always `false` for non-OAuth or credential-less upstreams.
+    #[serde(default)]
+    pub oauth_never_refresh: bool,
     pub api_key_ciphertext: Option<Vec<u8>>,
     pub last_apply_error: Option<String>,
     pub last_apply_at_unix_secs: Option<u64>,
@@ -158,6 +165,7 @@ pub trait UpstreamStore: Send + Sync {
         id: Uuid,
         expected_revision: u64,
         tokens: EncryptedOAuthTokens,
+        never_refresh: bool,
     ) -> StorageResult<UpstreamRecord>;
     async fn complete_refresh(
         &self,

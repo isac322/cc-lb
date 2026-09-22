@@ -86,6 +86,7 @@ async fn export_contains_no_plaintext_oauth_tokens() {
             upstream.id,
             upstream.revision,
             EncryptedOAuthTokens::from_ciphertext(b"plain-alpha plain-renew".to_vec()),
+            false,
         )
         .await
         .unwrap();

@@ -682,12 +682,6 @@ async fn refresh_flow(
         .ok_or(RefreshError::MissingCredentials)?
         .decrypt(aead, upstream.id.as_bytes())
         .map_err(|_| RefreshError::Decrypt)?;
-    if previous.never_refresh {
-        // Refreshing a 365-day token makes Anthropic revoke it and issue an
-        // 8-hour token instead; long-lived credentials must never reach the
-        // token endpoint.
-        return Err(RefreshError::NotRefreshable);
-    }
     let token = request_refresh(http, oauth_cfg, cancel, &previous.refresh_token).await;
     match token {
         Ok(response) => {
@@ -879,6 +873,10 @@ fn reason_for(error: &RefreshError) -> String {
         RefreshError::Decrypt => "decrypt".to_owned(),
         RefreshError::Encrypt => "encrypt".to_owned(),
         RefreshError::Storage(_) => "storage".to_owned(),
+        // Unreachable in practice: `reason_for` is only called on errors from
+        // `request_refresh`, and a long-lived credential is stopped by the
+        // `refresh_one` guard long before that. The arm exists because the
+        // variant does, and a catch-all would silently swallow future ones.
         RefreshError::NotRefreshable => "not_refreshable".to_owned(),
     }
 }
@@ -1174,7 +1172,6 @@ mod tests {
                 token_url,
                 redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect url"),
                 scopes: vec!["messages".to_owned()],
-                long_lived_scopes: Vec::new(),
             });
             let clock = Arc::new(TestClock::new_at_secs(1_700_000_000)) as ClockHandle;
             Self {
@@ -1224,7 +1221,7 @@ mod tests {
             )
             .expect("tokens encrypt");
             self.storage
-                .store_oauth_tokens(record.id, record.revision, encrypted)
+                .store_oauth_tokens(record.id, record.revision, encrypted, never_refresh)
                 .await
                 .expect("tokens stored");
             record.id
