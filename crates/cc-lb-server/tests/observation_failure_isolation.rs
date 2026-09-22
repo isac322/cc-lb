@@ -28,6 +28,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_aead::AeadService;
 use cc_lb_domain::{Principal, TtlClass, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_engine::api_keys::key_store::KeyStore;
@@ -567,18 +568,21 @@ impl PromptCacheObservationStore for CommitWatchStore {
 }
 
 fn fixture_upstream_record() -> UpstreamRecord {
+    let id = Uuid::from_u128(1);
+    let ciphertext = AeadService::from_master_key([0; 32])
+        .encrypt(b"sk-ant-fixture-secret", id.as_bytes())
+        .expect("api-key ciphertext");
     UpstreamRecord {
-        id: Uuid::from_u128(1),
+        id,
         name: "test-upstream".to_owned(),
         kind: UpstreamKind::AnthropicApiKey,
         base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
         enabled: true,
-        api_key_ciphertext: Some(Vec::new()),
+        api_key_ciphertext: Some(ciphertext),
         revision: 1,
         ..UpstreamRecord::default()
     }
 }
-
 /// Build a `Lifecycle` whose `DynamicView` publishes prompt-cache observations
 /// through the given production sink and routes through the given dialect.
 fn lifecycle_with_sink(

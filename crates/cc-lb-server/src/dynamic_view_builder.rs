@@ -235,7 +235,7 @@ pub async fn build_dynamic_view(
     }
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_secs(clock.now());
-    let statuses = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
+    let statuses = apply_upstreams(stores, &upstreams, oauth_anthropic, &aead, now).await?;
     let revision_hash = collect_revision_hash(stores).await?;
     let global_router = Arc::new(FirstCandidateRouter);
     let signer_factory = Arc::new(DbCompositeSignerFactory::new(
@@ -929,6 +929,7 @@ async fn apply_upstreams(
     stores: &Stores,
     upstreams: &[UpstreamRecord],
     _oauth_anthropic: &AnthropicOAuthConfig,
+    aead: &AeadService,
     now: u64,
 ) -> StorageResult<HashMap<String, UpstreamStatusEntry>> {
     let mut statuses = HashMap::new();
@@ -949,7 +950,7 @@ async fn apply_upstreams(
             continue;
         }
 
-        if let Err(message) = validate_upstream(upstream) {
+        if let Err(message) = validate_upstream(upstream, aead) {
             stores
                 .upstreams
                 .set_last_apply_error(upstream.id, Some(message.clone()))
@@ -981,11 +982,17 @@ async fn apply_upstreams(
     Ok(statuses)
 }
 
-fn validate_upstream(upstream: &UpstreamRecord) -> Result<(), String> {
+fn validate_upstream(upstream: &UpstreamRecord, aead: &AeadService) -> Result<(), String> {
     match upstream.kind {
-        UpstreamKind::AnthropicApiKey if upstream.api_key_ciphertext.is_none() => {
-            return Err("anthropic api-key upstream missing api_key_ciphertext".to_owned());
-        }
+        UpstreamKind::AnthropicApiKey => match upstream.api_key_ciphertext.as_deref() {
+            None => {
+                return Err("anthropic api-key upstream missing api_key_ciphertext".to_owned());
+            }
+            Some(ciphertext) if aead.decrypt(ciphertext, upstream.id.as_bytes()).is_err() => {
+                return Err("anthropic api-key upstream credential is not decryptable".to_owned());
+            }
+            Some(_) => {}
+        },
         UpstreamKind::AnthropicOauth => {
             let ciphertext = upstream
                 .oauth_credentials
@@ -996,7 +1003,6 @@ fn validate_upstream(upstream: &UpstreamRecord) -> Result<(), String> {
                 return Err("anthropic oauth credentials ciphertext is corrupt".to_owned());
             }
         }
-        _ => {}
     }
     Ok(())
 }
@@ -1042,7 +1048,6 @@ struct DbCompositeSignerFactory {
     upstream_store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
-    downstream_api_key: Option<String>,
     router_chosen_upstream_name: Option<String>,
     clock: cc_lb_engine::ClockHandle,
 }
@@ -1060,23 +1065,17 @@ impl DbCompositeSignerFactory {
             upstream_store,
             aead,
             lazy_refresher,
-            downstream_api_key: None,
             router_chosen_upstream_name: None,
             clock,
         }
     }
 
-    fn with_router_choice_state(
-        &self,
-        api_key: String,
-        router_chosen_upstream_name: String,
-    ) -> Self {
+    fn with_router_choice_state(&self, router_chosen_upstream_name: String) -> Self {
         Self {
             upstreams: self.upstreams.clone(),
             upstream_store: self.upstream_store.clone(),
             aead: self.aead.clone(),
             lazy_refresher: self.lazy_refresher.clone(),
-            downstream_api_key: Some(api_key),
             router_chosen_upstream_name: Some(router_chosen_upstream_name),
             clock: self.clock.clone(),
         }
@@ -1086,10 +1085,11 @@ impl DbCompositeSignerFactory {
 impl cc_lb_engine::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
     fn with_router_choice(
         &self,
-        api_key: String,
+        _api_key: String,
         router_chosen_upstream_name: String,
     ) -> Arc<dyn SignerFactory> {
-        Arc::new(self.with_router_choice_state(api_key, router_chosen_upstream_name))
+        // The downstream caller's key is deliberately not forwarded upstream.
+        Arc::new(self.with_router_choice_state(router_chosen_upstream_name))
     }
 }
 
@@ -1105,11 +1105,22 @@ impl SignerFactory for DbCompositeSignerFactory {
             })?;
         match record.kind {
             UpstreamKind::AnthropicApiKey => {
-                let api_key = self.downstream_api_key.clone().ok_or_else(|| {
+                let ciphertext = record.api_key_ciphertext.as_deref().ok_or_else(|| {
                     SignerError::MissingCredentials {
-                        reason: "dynamic api-key signer requires downstream api key until Task 22 storage signer lands".to_owned(),
+                        reason: "anthropic api-key upstream has no stored credential".to_owned(),
                     }
                 })?;
+                let plaintext = self
+                    .aead
+                    .decrypt(ciphertext, record.id.as_bytes())
+                    .map_err(|_| SignerError::MissingCredentials {
+                        reason: "anthropic api-key upstream credential could not be decrypted; re-set api_key_value for this upstream".to_owned(),
+                    })?;
+                let api_key =
+                    String::from_utf8(plaintext).map_err(|_| SignerError::MissingCredentials {
+                        reason: "anthropic api-key upstream credential is not valid utf-8"
+                            .to_owned(),
+                    })?;
                 cc_lb_signer_anthropic_key::AnthropicKeySignerFactory::new(api_key)
                     .build(upstream)
                     .await
@@ -1358,20 +1369,29 @@ mod tests {
     }
 
     async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
-        UpstreamStore::create(
+        let created = UpstreamStore::create(
             storage,
             UpstreamCreate {
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: None,
-                api_key_ciphertext: Some(vec![1, 2, 3]),
+                api_key_ciphertext: None,
                 oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             },
         )
         .await
-        .expect("upstream created")
+        .expect("upstream created");
+        // Mirrors the admin two-phase flow: the ciphertext is bound to the
+        // upstream id, which only exists after create.
+        let aead = AeadService::from_master_key([19; 32]);
+        let ciphertext = aead
+            .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
+            .expect("api-key ciphertext encrypts");
+        UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
+            .await
+            .expect("api-key secret stored")
     }
 
     async fn build_view(

@@ -12,7 +12,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use bytes::Bytes;
-use cc_lb_aead::{AeadEncryptedField, OAuthTokenBundle};
+use cc_lb_aead::OAuthTokenBundle;
 use cc_lb_clock::Clock;
 use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
@@ -206,6 +206,7 @@ struct FireNowNotFiredResponse {
     outcome: WarmupAttemptOutcome,
 }
 
+#[derive(Debug)]
 enum UpstreamError {
     StorageUnavailable,
     NotFound,
@@ -346,7 +347,7 @@ async fn create_upstream(
     Json(body): Json<UpstreamCreateBody>,
 ) -> Result<Response, UpstreamError> {
     let storage = storage(&state)?;
-    let api_key_ciphertext = api_key_ciphertext_for_create(&state, &body)?;
+    let api_key_plaintext = api_key_plaintext_for_create(&body)?;
     let name = body.name.clone();
     let kind = body.kind;
     let warmup_enabled = body
@@ -358,7 +359,7 @@ async fn create_upstream(
             name: body.name,
             kind,
             base_url: body.base_url,
-            api_key_ciphertext,
+            api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled,
             warmup_dialect_plugin: body.warmup_dialect_plugin,
@@ -380,9 +381,30 @@ async fn create_upstream(
         }
         Err(error) => return Err(error.into()),
     };
+    let record = match api_key_plaintext {
+        Some(plaintext) => {
+            let ciphertext =
+                match encrypt_plaintext_value(&state, &plaintext, created.id.as_bytes()) {
+                    Ok(ciphertext) => ciphertext,
+                    Err(error) => {
+                        return Err(rollback_api_key_create(storage, &created, error).await);
+                    }
+                };
+            match storage
+                .update_api_key_secret(created.id, Some(ciphertext))
+                .await
+            {
+                Ok(record) => record,
+                Err(error) => {
+                    return Err(rollback_api_key_create(storage, &created, error).await);
+                }
+            }
+        }
+        None => created,
+    };
     let payload = AuditPayload::UpstreamCreate {
-        upstream_id: created.id.to_string(),
-        kind: created.kind.as_str().to_owned(),
+        upstream_id: record.id.to_string(),
+        kind: record.kind.as_str().to_owned(),
     };
     let action = payload.to_string();
     if let Err(error) = record_admin_audit(
@@ -393,7 +415,7 @@ async fn create_upstream(
             action: &action,
             route: "/admin/v1/upstreams",
             target_principal_id: None,
-            target_upstream: Some(&created.name),
+            target_upstream: Some(&record.name),
             api_key_id: None,
             status: StatusCode::CREATED.as_u16(),
             payload: None,
@@ -404,11 +426,10 @@ async fn create_upstream(
         tracing::error!(error = %error, action = %action, "admin audit write failed");
         return Err(UpstreamError::AuditWriteFailed);
     }
-
-    let mut response = (StatusCode::CREATED, Json(upstream_response(&created))).into_response();
+    let mut response = (StatusCode::CREATED, Json(upstream_response(&record))).into_response();
     response.headers_mut().insert(
         axum::http::header::LOCATION,
-        HeaderValue::from_str(&format!("/admin/v1/upstreams/{}", created.id)).map_err(|error| {
+        HeaderValue::from_str(&format!("/admin/v1/upstreams/{}", record.id)).map_err(|error| {
             UpstreamError::BadRequest {
                 error: "invalid_location",
                 detail: error.to_string(),
@@ -1657,10 +1678,9 @@ fn etag_value(revision: u64) -> Result<HeaderValue, UpstreamError> {
     })
 }
 
-fn api_key_ciphertext_for_create(
-    state: &AdminState,
+fn api_key_plaintext_for_create(
     body: &UpstreamCreateBody,
-) -> Result<Option<Vec<u8>>, UpstreamError> {
+) -> Result<Option<String>, UpstreamError> {
     let plaintext = body
         .api_key_value
         .as_deref()
@@ -1678,10 +1698,14 @@ fn api_key_ciphertext_for_create(
                 error: "conflicting_api_key",
                 detail: "provide either api_key_value or api_key_env, not both".to_owned(),
             }),
-            (Some(value), None) => {
-                encrypt_plaintext_value(state, value, body.name.as_bytes()).map(Some)
+            (Some(value), None) => Ok(Some(value.to_owned())),
+            (None, Some(env)) => {
+                let value = std::env::var(env).map_err(|error| UpstreamError::BadRequest {
+                    error: "missing_api_key_env_value",
+                    detail: format!("{env}: {error}"),
+                })?;
+                Ok(Some(value))
             }
-            (None, Some(env)) => encrypt_env_value(state, env, body.name.as_bytes()).map(Some),
             (None, None) => Err(UpstreamError::BadRequest {
                 error: "missing_api_key",
                 detail: "anthropic_api_key upstreams require api_key_value or api_key_env"
@@ -1698,6 +1722,24 @@ fn api_key_ciphertext_for_create(
             }
             Ok(None)
         }
+    }
+}
+
+/// Removes the upstream created moments ago when persisting its api-key
+/// credential fails, so callers never see a credential-less api-key upstream.
+async fn rollback_api_key_create(
+    storage: &dyn Storage,
+    created: &UpstreamRecord,
+    error: impl std::fmt::Debug,
+) -> UpstreamError {
+    tracing::error!(upstream_id = %created.id, ?error, "rolling back api-key upstream create");
+    if let Err(rollback_error) =
+        UpstreamStore::soft_delete(storage, created.id, created.revision).await
+    {
+        tracing::error!(upstream_id = %created.id, error = %rollback_error, "api-key upstream rollback delete failed");
+    }
+    UpstreamError::Internal {
+        detail: "failed to store upstream api-key credential".to_owned(),
     }
 }
 
@@ -1761,13 +1803,13 @@ fn encrypt_plaintext_value(
     plaintext: &str,
     aad: &[u8],
 ) -> Result<Vec<u8>, UpstreamError> {
-    let value = plaintext.to_owned();
-    let encrypted = AeadEncryptedField::<String>::encrypt(state.aead.as_ref(), &value, aad)
+    state
+        .aead
+        .encrypt(plaintext.as_bytes(), aad)
         .map_err(|error| UpstreamError::BadRequest {
             error: "credential_encryption_failed",
             detail: error.to_string(),
-        })?;
-    Ok(encrypted.ciphertext().to_vec())
+        })
 }
 
 fn changed_fields(body: &UpstreamUpdateBody) -> Vec<&'static str> {
@@ -1839,7 +1881,7 @@ mod tests {
 
     use async_trait::async_trait;
     use axum::body::{Body as AxumBody, to_bytes};
-    use cc_lb_aead::AeadService;
+    use cc_lb_aead::{AeadEncryptedField, AeadService};
     use cc_lb_config::Config;
     use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
     use cc_lb_control::api_keys::limit_engine::LimitEngine;
@@ -2413,6 +2455,101 @@ mod tests {
             .expect("body read succeeds");
         let body: Value = serde_json::from_slice(&bytes).expect("response is json");
         assert_eq!(body["warmup_enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn create_api_key_upstream_binds_ciphertext_to_upstream_id() {
+        let context = test_context().await;
+        let body = serde_json::json!({
+            "name": "api-key-aad-bound",
+            "kind": "anthropic_api_key",
+            "api_key_value": "sk-ant-UPSTREAM-SECRET",
+        });
+        let response = router()
+            .with_state(context.state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/v1/upstreams")
+                    .header("content-type", "application/json")
+                    .extension(test_admin_identity())
+                    .body(AxumBody::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body read succeeds");
+        let body: Value = serde_json::from_slice(&bytes).expect("response is json");
+        let upstream_id: Uuid = body["id"]
+            .as_str()
+            .expect("id is a string")
+            .parse()
+            .expect("id is a uuid");
+        let stored = context
+            .storage
+            .get_by_id(upstream_id)
+            .await
+            .expect("read succeeds")
+            .expect("upstream exists");
+        assert_eq!(body["spec_revision"].as_u64(), Some(stored.revision));
+        let ciphertext = stored
+            .api_key_ciphertext
+            .as_deref()
+            .expect("api-key ciphertext stored");
+        let plaintext = context
+            .aead
+            .decrypt(ciphertext, upstream_id.as_bytes())
+            .expect("ciphertext decrypts under the upstream id");
+        assert_eq!(plaintext, b"sk-ant-UPSTREAM-SECRET");
+        assert!(
+            context
+                .aead
+                .decrypt(ciphertext, stored.name.as_bytes())
+                .is_err(),
+            "ciphertext must not decrypt under the upstream name"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_api_key_upstream_missing_secret_writes_no_row() {
+        let context = test_context().await;
+        let body = serde_json::json!({
+            "name": "api-key-missing-secret",
+            "kind": "anthropic_api_key",
+        });
+        let response = router()
+            .with_state(context.state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/v1/upstreams")
+                    .header("content-type", "application/json")
+                    .extension(test_admin_identity())
+                    .body(AxumBody::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body read succeeds");
+        let body: Value = serde_json::from_slice(&bytes).expect("response is json");
+        assert_eq!(body["error"], "missing_api_key");
+        assert!(
+            context
+                .storage
+                .get_by_name("api-key-missing-secret")
+                .await
+                .expect("lookup succeeds")
+                .is_none(),
+            "invalid create must not leave an upstream row"
+        );
     }
 
     #[tokio::test]

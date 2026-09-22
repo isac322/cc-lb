@@ -101,6 +101,159 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
 }
 
+#[tokio::test]
+async fn api_key_upstream_signs_with_configured_credential_not_client_key() {
+    let fixture = Fixture::new().await;
+    let upstream_id = fixture
+        .create_api_key_upstream("api-key-target", "sk-ant-UPSTREAM-SECRET")
+        .await;
+    fixture
+        .create_principal("api-key-principal", vec![upstream_id])
+        .await;
+    let key_store = Arc::new(KeyStore::new(fixture.storage.clone()));
+    let (_key_record, key_secret) = key_store
+        .create(
+            "api-key-principal",
+            CreateParams {
+                label: "composite-signer-dispatch".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("managed key created");
+    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let view = build_dynamic_view(
+        fixture.stores.as_ref(),
+        fixture.oauth_cfg.as_ref(),
+        fixture.aead.clone(),
+        None,
+        0,
+        &runtime,
+        fixture._dir.path(),
+        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        30,
+        None,
+        None,
+        1800,
+        Arc::new(cc_lb_engine::SystemClock),
+    )
+    .await
+    .expect("dynamic view builds");
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        Arc::new(BuiltinAuthn::new(
+            key_store,
+            Arc::new(cc_lb_engine::SystemClock),
+        )),
+        Arc::new(DynamicViewHolder::new(view)),
+        cc_lb_engine::make_default_dispatcher(50),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_engine::SystemClock),
+    );
+
+    let response = lifecycle
+        .handle(message_request(key_secret.expose()))
+        .await
+        .expect("lifecycle response");
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body")
+        .to_bytes();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let last = raw_http(
+        "GET",
+        &format!("{}/__last_request", fixture.fake_base),
+        &[],
+        &[],
+    )
+    .await
+    .expect("last_request");
+    let last: LastRequest = serde_json::from_slice(&last.body).expect("last_request json");
+    assert_eq!(last.x_api_key.as_deref(), Some("sk-ant-UPSTREAM-SECRET"));
+    assert_ne!(
+        last.x_api_key.as_deref(),
+        Some(key_secret.expose()),
+        "downstream client key must never be forwarded to the upstream"
+    );
+}
+
+#[tokio::test]
+async fn api_key_upstream_without_stored_credential_fails_closed() {
+    let fixture = Fixture::new().await;
+    let upstream_id = fixture
+        .create_api_key_upstream_record("api-key-no-credential")
+        .await;
+    fixture
+        .create_principal("api-key-no-credential-principal", vec![upstream_id])
+        .await;
+    let key_store = Arc::new(KeyStore::new(fixture.storage.clone()));
+    let (_key_record, key_secret) = key_store
+        .create(
+            "api-key-no-credential-principal",
+            CreateParams {
+                label: "composite-signer-dispatch".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("managed key created");
+    let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let view = build_dynamic_view(
+        fixture.stores.as_ref(),
+        fixture.oauth_cfg.as_ref(),
+        fixture.aead.clone(),
+        None,
+        0,
+        &runtime,
+        fixture._dir.path(),
+        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        30,
+        None,
+        None,
+        1800,
+        Arc::new(cc_lb_engine::SystemClock),
+    )
+    .await
+    .expect("dynamic view builds");
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        Arc::new(BuiltinAuthn::new(
+            key_store,
+            Arc::new(cc_lb_engine::SystemClock),
+        )),
+        Arc::new(DynamicViewHolder::new(view)),
+        cc_lb_engine::make_default_dispatcher(50),
+        LifecycleConfig::default(),
+        Arc::new(cc_lb_engine::SystemClock),
+    );
+
+    let response = lifecycle
+        .handle(message_request(key_secret.expose()))
+        .await
+        .expect("lifecycle response");
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body")
+        .to_bytes();
+    // SignerError::MissingCredentials maps to 502; the request must fail rather
+    // than fall back to the downstream client's key.
+    assert_eq!(
+        status,
+        StatusCode::BAD_GATEWAY,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     storage: Arc<Storage>,
@@ -222,6 +375,36 @@ impl Fixture {
             .await;
         assert_ne!(id, before);
     }
+
+    async fn create_api_key_upstream(&self, name: &str, secret: &str) -> Uuid {
+        let id = self.create_api_key_upstream_record(name).await;
+        let ciphertext = self
+            .aead
+            .encrypt(secret.as_bytes(), id.as_bytes())
+            .expect("api key encrypt");
+        UpstreamStore::update_api_key_secret(self.storage.as_ref(), id, Some(ciphertext))
+            .await
+            .expect("api key secret stored");
+        id
+    }
+
+    async fn create_api_key_upstream_record(&self, name: &str) -> Uuid {
+        UpstreamStore::create(
+            self.storage.as_ref(),
+            UpstreamCreate {
+                name: name.to_owned(),
+                kind: UpstreamKind::AnthropicApiKey,
+                base_url: Some(Url::parse(&self.fake_base).expect("fake url")),
+                api_key_ciphertext: None,
+                oauth_token_generation: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+            },
+        )
+        .await
+        .expect("upstream created")
+        .id
+    }
 }
 
 struct OrderedUpstreamStore {
@@ -338,6 +521,11 @@ impl UpstreamStore for OrderedUpstreamStore {
 struct InitialTokens {
     access_token: String,
     refresh_token: String,
+}
+
+#[derive(Deserialize)]
+struct LastRequest {
+    x_api_key: Option<String>,
 }
 
 async fn initial_tokens(base: &str) -> InitialTokens {

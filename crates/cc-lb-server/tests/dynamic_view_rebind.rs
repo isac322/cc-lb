@@ -73,20 +73,26 @@ async fn create_api_key_upstream(
     storage: &SqliteStorage,
     name: &str,
 ) -> cc_lb_storage_api::UpstreamRecord {
-    UpstreamStore::create(
+    let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
-            api_key_ciphertext: Some(vec![1, 2, 3]),
+            api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },
     )
     .await
-    .expect("upstream created")
+    .expect("upstream created");
+    let ciphertext = AeadService::from_master_key([1; 32])
+        .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
+        .expect("api-key ciphertext");
+    UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
+        .await
+        .expect("upstream api-key secret")
 }
 
 async fn attach_plan_metadata(storage: &SqliteStorage, upstream_id: uuid::Uuid) {

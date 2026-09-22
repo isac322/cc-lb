@@ -735,7 +735,7 @@ pub async fn seed_app_testing_storage(
                 name: "test-upstream".to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: upstream_base_url,
-                api_key_ciphertext: Some(Vec::new()),
+                api_key_ciphertext: None,
                 oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
@@ -743,7 +743,17 @@ pub async fn seed_app_testing_storage(
         )
         .await
         {
-            Ok(_) | Err(StorageError::Conflict { .. }) => {}
+            Ok(record) => {
+                // Same master key as build_app_for_testing_postgres; the
+                // ciphertext is bound to the upstream id like OAuth secrets.
+                let ciphertext = AeadService::from_master_key([0u8; 32])
+                    .encrypt(b"sk-ant-fixture-secret", record.id.as_bytes())
+                    .map_err(|error| BuildError::StorageConnect {
+                        message: format!("test upstream api-key encryption failed: {error}"),
+                    })?;
+                UpstreamStore::update_api_key_secret(storage, record.id, Some(ciphertext)).await?;
+            }
+            Err(StorageError::Conflict { .. }) => {}
             Err(error) => return Err(error.into()),
         }
     }

@@ -93,20 +93,26 @@ async fn create_principal(storage: &Storage, name: &str) -> PrincipalRecord {
 }
 
 async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
-    UpstreamStore::create(
+    let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
-            api_key_ciphertext: Some(vec![1, 2, 3]),
+            api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },
     )
     .await
-    .expect("upstream created")
+    .expect("upstream created");
+    let ciphertext = AeadService::from_master_key([25; 32])
+        .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
+        .expect("api-key ciphertext");
+    UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
+        .await
+        .expect("upstream api-key secret")
 }
 
 async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryEntry {
