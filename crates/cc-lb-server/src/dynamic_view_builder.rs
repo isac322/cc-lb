@@ -235,7 +235,7 @@ pub async fn build_dynamic_view(
     }
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_secs(clock.now());
-    let statuses = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
+    let statuses = apply_upstreams(stores, &upstreams, oauth_anthropic, &aead, now).await?;
     let revision_hash = collect_revision_hash(stores).await?;
     let global_router = Arc::new(FirstCandidateRouter);
     let signer_factory = Arc::new(DbCompositeSignerFactory::new(
@@ -929,6 +929,7 @@ async fn apply_upstreams(
     stores: &Stores,
     upstreams: &[UpstreamRecord],
     _oauth_anthropic: &AnthropicOAuthConfig,
+    aead: &AeadService,
     now: u64,
 ) -> StorageResult<HashMap<String, UpstreamStatusEntry>> {
     let mut statuses = HashMap::new();
@@ -949,7 +950,7 @@ async fn apply_upstreams(
             continue;
         }
 
-        if let Err(message) = validate_upstream(upstream) {
+        if let Err(message) = validate_upstream(upstream, aead) {
             stores
                 .upstreams
                 .set_last_apply_error(upstream.id, Some(message.clone()))
@@ -981,10 +982,86 @@ async fn apply_upstreams(
     Ok(statuses)
 }
 
-fn validate_upstream(upstream: &UpstreamRecord) -> Result<(), String> {
+/// Why an anthropic api-key credential could not be resolved. Callers map each
+/// reason onto their own error type; the variants carry no key material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiKeyResolutionError {
+    Missing,
+    NotDecryptable,
+    NotUtf8,
+    InvalidHeaderValue,
+}
+
+/// Resolve the operator-configured anthropic api key for an upstream record.
+///
+/// Three ciphertext shapes exist on disk for `api_key_ciphertext`:
+///
+/// 1. pre-PR-#848 `POST /admin/v1/upstreams`: AAD `upstream.name`, plaintext
+///    `serde_json::to_vec(&String)` (the key with literal surrounding quotes);
+/// 2. pre-PR-#848 `PATCH`/`PUT`: AAD `upstream.id`, same JSON-quoted plaintext;
+/// 3. current writes: AAD `upstream.id`, raw UTF-8 key bytes.
+///
+/// The legacy shapes are read-only compatibility: rows are never re-encrypted
+/// or rewritten here, and writes always use the canonical shape (3). A raw
+/// `sk-ant-…` key is never valid JSON while the legacy payload always is, so
+/// `serde_json::from_slice::<String>` cleanly discriminates the two plaintext
+/// forms. Resolution fails closed: any error means no credential, never a
+/// fallback to the downstream caller's key.
+fn resolve_api_key(
+    aead: &AeadService,
+    record: &UpstreamRecord,
+) -> Result<zeroize::Zeroizing<String>, ApiKeyResolutionError> {
+    let ciphertext = record
+        .api_key_ciphertext
+        .as_deref()
+        .ok_or(ApiKeyResolutionError::Missing)?;
+    // Canonical AAD first, then the pre-PR create binding (shape 1).
+    let plaintext = aead
+        .decrypt(ciphertext, record.id.as_bytes())
+        .or_else(|_| aead.decrypt(ciphertext, record.name.as_bytes()))
+        .map(zeroize::Zeroizing::new)
+        .map_err(|_| ApiKeyResolutionError::NotDecryptable)?;
+    // Legacy rows hold a JSON-quoted string (shapes 1 and 2); canonical rows
+    // hold raw UTF-8. The key must reach the upstream byte-identical to what
+    // the operator stored, so neither form is trimmed or rewritten.
+    let key = match serde_json::from_slice::<String>(&plaintext) {
+        Ok(legacy) => legacy,
+        Err(_) => std::str::from_utf8(&plaintext)
+            .map_err(|_| ApiKeyResolutionError::NotUtf8)?
+            .to_owned(),
+    };
+    let key = zeroize::Zeroizing::new(key);
+    // The signer applies `HeaderValue::from_str` to this value at request time;
+    // reject here so a malformed key surfaces as a view-build error instead of
+    // a runtime signing failure.
+    if key.trim().is_empty() || http::HeaderValue::from_str(&key).is_err() {
+        return Err(ApiKeyResolutionError::InvalidHeaderValue);
+    }
+    Ok(key)
+}
+
+fn validate_upstream(upstream: &UpstreamRecord, aead: &AeadService) -> Result<(), String> {
     match upstream.kind {
-        UpstreamKind::AnthropicApiKey if upstream.api_key_ciphertext.is_none() => {
-            return Err("anthropic api-key upstream missing api_key_ciphertext".to_owned());
+        UpstreamKind::AnthropicApiKey => {
+            // The resolved probe is only used to prove the credential is
+            // usable; `Zeroizing` scrubs it when this arm returns.
+            if let Err(reason) = resolve_api_key(aead, upstream) {
+                return Err(match reason {
+                    ApiKeyResolutionError::Missing => {
+                        "anthropic api-key upstream missing api_key_ciphertext".to_owned()
+                    }
+                    ApiKeyResolutionError::NotDecryptable => {
+                        "anthropic api-key upstream credential is not decryptable".to_owned()
+                    }
+                    ApiKeyResolutionError::NotUtf8 => {
+                        "anthropic api-key upstream credential is not valid utf-8".to_owned()
+                    }
+                    ApiKeyResolutionError::InvalidHeaderValue => {
+                        "anthropic api-key upstream credential is not a valid header value"
+                            .to_owned()
+                    }
+                });
+            }
         }
         UpstreamKind::AnthropicOauth => {
             let ciphertext = upstream
@@ -996,7 +1073,6 @@ fn validate_upstream(upstream: &UpstreamRecord) -> Result<(), String> {
                 return Err("anthropic oauth credentials ciphertext is corrupt".to_owned());
             }
         }
-        _ => {}
     }
     Ok(())
 }
@@ -1042,7 +1118,6 @@ struct DbCompositeSignerFactory {
     upstream_store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
-    downstream_api_key: Option<String>,
     router_chosen_upstream_name: Option<String>,
     clock: cc_lb_engine::ClockHandle,
 }
@@ -1060,23 +1135,17 @@ impl DbCompositeSignerFactory {
             upstream_store,
             aead,
             lazy_refresher,
-            downstream_api_key: None,
             router_chosen_upstream_name: None,
             clock,
         }
     }
 
-    fn with_router_choice_state(
-        &self,
-        api_key: String,
-        router_chosen_upstream_name: String,
-    ) -> Self {
+    fn with_router_choice_state(&self, router_chosen_upstream_name: String) -> Self {
         Self {
             upstreams: self.upstreams.clone(),
             upstream_store: self.upstream_store.clone(),
             aead: self.aead.clone(),
             lazy_refresher: self.lazy_refresher.clone(),
-            downstream_api_key: Some(api_key),
             router_chosen_upstream_name: Some(router_chosen_upstream_name),
             clock: self.clock.clone(),
         }
@@ -1084,12 +1153,9 @@ impl DbCompositeSignerFactory {
 }
 
 impl cc_lb_engine::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
-    fn with_router_choice(
-        &self,
-        api_key: String,
-        router_chosen_upstream_name: String,
-    ) -> Arc<dyn SignerFactory> {
-        Arc::new(self.with_router_choice_state(api_key, router_chosen_upstream_name))
+    fn with_router_choice(&self, router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
+        // The downstream caller's key is deliberately not forwarded upstream.
+        Arc::new(self.with_router_choice_state(router_chosen_upstream_name))
     }
 }
 
@@ -1105,12 +1171,22 @@ impl SignerFactory for DbCompositeSignerFactory {
             })?;
         match record.kind {
             UpstreamKind::AnthropicApiKey => {
-                let api_key = self.downstream_api_key.clone().ok_or_else(|| {
+                let api_key = resolve_api_key(&self.aead, record).map_err(|reason| {
                     SignerError::MissingCredentials {
-                        reason: "dynamic api-key signer requires downstream api key until Task 22 storage signer lands".to_owned(),
+                        reason: match reason {
+                            ApiKeyResolutionError::Missing => {
+                                "anthropic api-key upstream has no stored credential".to_owned()
+                            }
+                            ApiKeyResolutionError::NotDecryptable => "anthropic api-key upstream credential could not be decrypted; re-set api_key_value for this upstream".to_owned(),
+                            ApiKeyResolutionError::NotUtf8 => {
+                                "anthropic api-key upstream credential is not valid utf-8"
+                                    .to_owned()
+                            }
+                            ApiKeyResolutionError::InvalidHeaderValue => "anthropic api-key upstream credential is not a valid header value; re-set api_key_value for this upstream".to_owned(),
+                        },
                     }
                 })?;
-                cc_lb_signer_anthropic_key::AnthropicKeySignerFactory::new(api_key)
+                cc_lb_signer_anthropic_key::AnthropicKeySignerFactory::new(api_key.as_str())
                     .build(upstream)
                     .await
             }
@@ -1358,20 +1434,29 @@ mod tests {
     }
 
     async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
-        UpstreamStore::create(
+        let created = UpstreamStore::create(
             storage,
             UpstreamCreate {
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: None,
-                api_key_ciphertext: Some(vec![1, 2, 3]),
+                api_key_ciphertext: None,
                 oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             },
         )
         .await
-        .expect("upstream created")
+        .expect("upstream created");
+        // Mirrors the admin two-phase flow: the ciphertext is bound to the
+        // upstream id, which only exists after create.
+        let aead = AeadService::from_master_key([19; 32]);
+        let ciphertext = aead
+            .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
+            .expect("api-key ciphertext encrypts");
+        UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
+            .await
+            .expect("api-key secret stored")
     }
 
     async fn build_view(
@@ -1618,5 +1703,113 @@ mod tests {
         let dynamic_view = build_view_with_config(&stores, &runtime, dir.path(), config).await;
 
         assert_eq!(dynamic_view.prompt_cache_grace_margin_secs, 99);
+    }
+
+    fn api_key_record(name: &str, ciphertext: Option<Vec<u8>>) -> UpstreamRecord {
+        UpstreamRecord {
+            id: Uuid::new_v4(),
+            name: name.to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            api_key_ciphertext: ciphertext,
+            ..UpstreamRecord::default()
+        }
+    }
+
+    #[test]
+    fn resolve_api_key_reads_canonical_raw_id_aad_shape() {
+        let aead = AeadService::from_master_key([19; 32]);
+        let mut record = api_key_record("canonical", None);
+        record.api_key_ciphertext = Some(
+            aead.encrypt(b"sk-ant-canonical", record.id.as_bytes())
+                .expect("encrypt"),
+        );
+
+        let resolved = resolve_api_key(&aead, &record).expect("canonical shape resolves");
+        assert_eq!(resolved.as_str(), "sk-ant-canonical");
+    }
+
+    #[test]
+    fn resolve_api_key_unquotes_legacy_json_payload_under_id_aad() {
+        let aead = AeadService::from_master_key([19; 32]);
+        let record = api_key_record("legacy-patch", None);
+        // Pre-PR PATCH/PUT shape: id AAD over serde_json::to_vec(&String).
+        let legacy_plaintext =
+            serde_json::to_vec(&"sk-ant-legacy-id".to_owned()).expect("json encodes");
+        let ciphertext = aead
+            .encrypt(&legacy_plaintext, record.id.as_bytes())
+            .expect("encrypt");
+        let record = UpstreamRecord {
+            api_key_ciphertext: Some(ciphertext),
+            ..record
+        };
+
+        let resolved = resolve_api_key(&aead, &record).expect("legacy id-AAD shape resolves");
+        assert_eq!(resolved.as_str(), "sk-ant-legacy-id");
+    }
+
+    #[test]
+    fn resolve_api_key_unquotes_legacy_json_payload_under_name_aad() {
+        let aead = AeadService::from_master_key([19; 32]);
+        let record = api_key_record("legacy-create", None);
+        // Pre-PR POST shape: name AAD over serde_json::to_vec(&String).
+        let legacy_plaintext =
+            serde_json::to_vec(&"sk-ant-legacy-name".to_owned()).expect("json encodes");
+        let ciphertext = aead
+            .encrypt(&legacy_plaintext, record.name.as_bytes())
+            .expect("encrypt");
+        let record = UpstreamRecord {
+            api_key_ciphertext: Some(ciphertext),
+            ..record
+        };
+
+        let resolved = resolve_api_key(&aead, &record).expect("legacy name-AAD shape resolves");
+        assert_eq!(resolved.as_str(), "sk-ant-legacy-name");
+    }
+
+    #[test]
+    fn resolve_api_key_rejects_ciphertext_under_unrelated_aad() {
+        let aead = AeadService::from_master_key([19; 32]);
+        let record = api_key_record("bound-elsewhere", None);
+        let ciphertext = aead
+            .encrypt(b"sk-ant-bound-elsewhere", b"some-other-aad")
+            .expect("encrypt");
+        let record = UpstreamRecord {
+            api_key_ciphertext: Some(ciphertext),
+            ..record
+        };
+
+        assert!(matches!(
+            resolve_api_key(&aead, &record),
+            Err(ApiKeyResolutionError::NotDecryptable)
+        ));
+    }
+
+    #[test]
+    fn resolve_api_key_rejects_key_with_invalid_header_byte() {
+        let aead = AeadService::from_master_key([19; 32]);
+        let record = api_key_record("bad-key", None);
+        let ciphertext = aead
+            .encrypt(b"sk-ant-\nnewline", record.id.as_bytes())
+            .expect("encrypt");
+        let record = UpstreamRecord {
+            api_key_ciphertext: Some(ciphertext),
+            ..record
+        };
+
+        assert!(matches!(
+            resolve_api_key(&aead, &record),
+            Err(ApiKeyResolutionError::InvalidHeaderValue)
+        ));
+    }
+
+    #[test]
+    fn resolve_api_key_reports_missing_ciphertext() {
+        let aead = AeadService::from_master_key([19; 32]);
+        let record = api_key_record("no-credential", None);
+
+        assert!(matches!(
+            resolve_api_key(&aead, &record),
+            Err(ApiKeyResolutionError::Missing)
+        ));
     }
 }

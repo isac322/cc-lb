@@ -33,7 +33,7 @@ impl UpstreamDialect for DirectDialect {
 }
 
 #[tokio::test]
-async fn sign_inserts_header() {
+async fn sign_sets_api_key_and_drops_inherited_authorization() {
     let ctx = DialectShapeContext {
         request_id: "req-1".to_owned(),
         downstream_headers: HeaderMap::new(),
@@ -86,11 +86,8 @@ async fn sign_inserts_header() {
             .and_then(|value| value.to_str().ok()),
         Some("test-agent")
     );
-    assert_eq!(
-        signed
-            .headers()
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok()),
-        Some("Bearer original")
+    assert!(
+        !signed.headers().contains_key(AUTHORIZATION),
+        "a credential inherited from the shaped request must not reach the upstream"
     );
 }

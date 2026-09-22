@@ -54,10 +54,7 @@ pub trait SignerFactory: Send + Sync {
 
 /// Factory extension that binds signer construction to the router-selected upstream.
 pub trait ApiKeyAwareSignerFactory: Send + Sync {
-    /// Returns a signer factory using the downstream API key and router-selected upstream name.
-    fn with_router_choice(
-        &self,
-        api_key: String,
-        router_chosen_upstream_name: String,
-    ) -> Arc<dyn SignerFactory>;
+    /// Returns a signer factory for the router-selected upstream. Upstream
+    /// credentials come from storage, never from the caller.
+    fn with_router_choice(&self, router_chosen_upstream_name: String) -> Arc<dyn SignerFactory>;
 }

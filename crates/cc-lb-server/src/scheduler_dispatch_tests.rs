@@ -927,10 +927,7 @@ async fn durable_cache_keepalive_job_reschedules_without_rewriting_payload() {
     assert_eq!(body["max_tokens"], 0);
     assert!(body.get("stream").is_none());
     let signer_calls = fixture.signer_calls.lock().expect("signer calls lock");
-    assert_eq!(
-        signer_calls.as_slice(),
-        &["fake-upstream:", "fake-upstream:"]
-    );
+    assert_eq!(signer_calls.as_slice(), &["fake-upstream", "fake-upstream"]);
 }
 
 #[tokio::test]

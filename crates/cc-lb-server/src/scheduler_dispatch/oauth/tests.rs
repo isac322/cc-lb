@@ -586,11 +586,7 @@ impl KeepaliveDispatcher for NoopKeepaliveDispatcher {
 struct StubSignerFactory;
 
 impl ApiKeyAwareSignerFactory for StubSignerFactory {
-    fn with_router_choice(
-        &self,
-        _api_key: String,
-        _router_chosen_upstream_name: String,
-    ) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(&self, _router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
         Arc::new(StubSigner)
     }
 }

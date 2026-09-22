@@ -1331,6 +1331,7 @@ dependencies = [
  "uuid",
  "wat",
  "xxhash-rust",
+ "zeroize",
  "zstd 0.14.0",
 ]
 
@@ -6215,6 +6216,7 @@ dependencies = [
 name = "tests-integration"
 version = "0.5.0"
 dependencies = [
+ "cc-lb-aead",
  "cc-lb-config",
  "cc-lb-engine",
  "cc-lb-pricing",

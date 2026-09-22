@@ -25,6 +25,11 @@ pub(crate) async fn last_request(State(state): State<Arc<AppState>>) -> Response
         .lock()
         .ok()
         .and_then(|value| value.clone());
+    let authorization = state
+        .last_authorization
+        .lock()
+        .ok()
+        .and_then(|value| value.clone());
     let headers = state
         .last_selected_headers
         .lock()
@@ -33,7 +38,7 @@ pub(crate) async fn last_request(State(state): State<Arc<AppState>>) -> Response
         .unwrap_or_default();
     json_response(
         StatusCode::OK,
-        json!({"x_api_key": x_api_key, "headers": headers}),
+        json!({"x_api_key": x_api_key, "authorization": authorization, "headers": headers}),
     )
 }
 

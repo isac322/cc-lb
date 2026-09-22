@@ -372,11 +372,7 @@ impl ManagedKeyStore for FixtureKeyStore {
 struct FixtureSignerChain;
 
 impl ApiKeyAwareSignerFactory for FixtureSignerChain {
-    fn with_router_choice(
-        &self,
-        _api_key: String,
-        _router_chosen_upstream_name: String,
-    ) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(&self, _router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
         Arc::new(Self)
     }
 }

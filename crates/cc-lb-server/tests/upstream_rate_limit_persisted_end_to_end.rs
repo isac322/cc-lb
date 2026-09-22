@@ -30,7 +30,7 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
     let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let upstream_server = spawn_upstream().await?;
     let dir = tempfile::tempdir()?;
-    let key = [0; 32];
+    let aead = Arc::new(AeadService::from_master_key([0; 32]));
     let storage_path = dir.path().join("storage.sqlite");
     let storage_arc = sqlite_storage(&storage_path).await?;
     let upstream = UpstreamStore::create(
@@ -39,13 +39,17 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
             name: "fake-anthropic".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse(&format!("http://{}", upstream_server.addr))?),
-            api_key_ciphertext: Some(vec![0; 32]),
+            api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },
     )
     .await?;
+    let ciphertext = aead.encrypt(b"sk-ant-fixture-secret", upstream.id.as_bytes())?;
+    let upstream =
+        UpstreamStore::update_api_key_secret(storage_arc.as_ref(), upstream.id, Some(ciphertext))
+            .await?;
     PrincipalStore::create(
         storage_arc.as_ref(),
         PrincipalCreate {
@@ -85,7 +89,7 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
         None,
         managed_store,
         storage.clone(),
-        Arc::new(AeadService::from_master_key(key)),
+        aead.clone(),
         clock.clone(),
     )
     .await?;

@@ -7,6 +7,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle as ThreadJoinHandle;
 
+use cc_lb_aead::AeadService;
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
     UpstreamStore, principal::Limit,
@@ -414,8 +415,11 @@ async fn seed_storage(
         .initialize(BackendKind::Sqlite)
         .await
         .expect("test storage initializes");
+    // The spawned server reads CC_LB_MASTER_KEY (64 zero hex chars) in
+    // TestProcess::spawn, so the same [0; 32] key encrypts seeded credentials.
+    let aead = AeadService::from_master_key([0; 32]);
     for name in topology.upstream_names() {
-        UpstreamStore::create(
+        let upstream = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
                 name: (*name).to_owned(),
@@ -424,7 +428,7 @@ async fn seed_storage(
                     Url::parse(&format!("http://{upstream_addr}"))
                         .expect("fake upstream URL parses"),
                 ),
-                api_key_ciphertext: Some(vec![0; 32]),
+                api_key_ciphertext: None,
                 oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
@@ -432,6 +436,12 @@ async fn seed_storage(
         )
         .await
         .expect("seed upstream");
+        let ciphertext = aead
+            .encrypt(b"sk-ant-fixture-secret", upstream.id.as_bytes())
+            .expect("seed api-key ciphertext");
+        UpstreamStore::update_api_key_secret(storage.as_ref(), upstream.id, Some(ciphertext))
+            .await
+            .expect("seed upstream api-key secret");
     }
     PrincipalStore::create(
         storage.as_ref(),

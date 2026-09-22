@@ -24,19 +24,23 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
     let dir = tempfile::tempdir()?;
     let storage_path = dir.path().join("storage.sqlite");
     let storage_arc = sqlite_storage(&storage_path).await?;
-    UpstreamStore::create(
+    let aead = Arc::new(AeadService::from_master_key([0; 32]));
+    let upstream = UpstreamStore::create(
         storage_arc.as_ref(),
         UpstreamCreate {
             name: "declared-upstream".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
-            api_key_ciphertext: Some(vec![0; 32]),
+            api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },
     )
     .await?;
+    let ciphertext = aead.encrypt(b"sk-ant-fixture-secret", upstream.id.as_bytes())?;
+    UpstreamStore::update_api_key_secret(storage_arc.as_ref(), upstream.id, Some(ciphertext))
+        .await?;
     PrincipalStore::create(
         storage_arc.as_ref(),
         PrincipalCreate {
@@ -59,15 +63,8 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
     };
     config.runtime.data_dir = Some(dir.path().to_path_buf());
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
-    let app = build_app_with_storage(
-        config,
-        None,
-        managed_store,
-        storage,
-        Arc::new(AeadService::from_master_key([0; 32])),
-        clock.clone(),
-    )
-    .await?;
+    let app =
+        build_app_with_storage(config, None, managed_store, storage, aead, clock.clone()).await?;
 
     let response = app
         .router
