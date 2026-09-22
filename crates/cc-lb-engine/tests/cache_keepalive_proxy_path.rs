@@ -106,7 +106,14 @@ async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
         HeaderValue::from_static("prompt-caching-2024-07-31"),
     );
 
-    let response = lifecycle.handle(request).await.expect("request succeeds");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("request succeeds");
     let (status, _headers, _body) = collect_body(response).await;
     assert_eq!(status, StatusCode::OK);
 

@@ -326,8 +326,13 @@ async fn send_message(lifecycle: &Lifecycle) {
 
 async fn send_message_with_model(lifecycle: &Lifecycle, model: &str) {
     let request = format!(r#"{{"model":"{model}","max_tokens":32,"messages":[]}}"#);
+    let request = messages_request(Bytes::from(request));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from(request)))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     assert_eq!(response.status(), StatusCode::OK);

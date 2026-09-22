@@ -333,8 +333,13 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         fixture.clock.clone(),
     );
 
+    let request = message_request(key_secret.expose());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(message_request(key_secret.expose()))
+        .handle(request, &auth)
         .await
         .expect("lifecycle response");
     let status = response.status();
@@ -533,8 +538,13 @@ async fn long_lived_oauth_upstream_unauthorized_response_is_terminal() {
         fixture.clock.clone(),
     );
 
+    let request = message_request(key_secret.expose());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(message_request(key_secret.expose()))
+        .handle(request, &auth)
         .await
         .expect("lifecycle response");
     let status = response.status();

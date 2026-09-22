@@ -101,10 +101,15 @@ async fn unauthorized_refresh_retries_once_then_stops() {
     )
     .with_event_bus(test_bus.bus_arc());
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, _body) = collect_body(response).await;
@@ -204,10 +209,15 @@ async fn unauthorized_refresh_second_attempt_dispatch_error_clears_stale_stage_t
     )
     .with_event_bus(test_bus.bus_arc());
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, _body) = collect_body(response).await;

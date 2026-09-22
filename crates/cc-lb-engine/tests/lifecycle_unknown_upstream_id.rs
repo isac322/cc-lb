@@ -26,10 +26,15 @@ async fn unknown_router_upstream_id_is_rejected_before_signing_or_dispatch() {
         state.clone(),
     );
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, _body) = collect_body(response).await;

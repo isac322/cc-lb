@@ -2373,6 +2373,21 @@ impl Lifecycle {
         )
     }
 
+    /// Authenticate a request before doing anything else with it. Reads only
+    /// headers: the body is not touched until the returned proof exists.
+    pub async fn authenticate(
+        &self,
+        headers: &http::HeaderMap,
+    ) -> Result<crate::authn_rail::Authenticated, BuiltinAuthError> {
+        let view = self.dynamic_view.load();
+        crate::authn_rail::authenticate_first(&self.authn, headers, &view.principal_view)
+            .instrument(tracing::info_span!("proxy.authenticate"))
+            .await
+    }
+
+    /// Handle a request that has already been authenticated. `auth` is the
+    /// proof: callers must obtain it from [`Lifecycle::authenticate`] before
+    /// the request body is read.
     #[allow(clippy::explicit_auto_deref)]
     #[tracing::instrument(
         name = "proxy.handle",
@@ -2390,7 +2405,11 @@ impl Lifecycle {
             cc_lb.request.unaccounted_ms = tracing::field::Empty,
         )
     )]
-    pub async fn handle(&self, req: Request<Bytes>) -> Result<Response<Body>, ProxyError> {
+    pub async fn handle(
+        &self,
+        req: Request<Bytes>,
+        auth: &crate::authn_rail::Authenticated,
+    ) -> Result<Response<Body>, ProxyError> {
         let view = self.dynamic_view.load();
         let principal_view = Arc::clone(&view.principal_view);
         let started = Instant::now();
@@ -2423,6 +2442,11 @@ impl Lifecycle {
             ));
         }
         if let Some(o) = observer.as_ref() {
+            // Holding `auth` is proof that authentication already succeeded, so
+            // this request is inside the observation guarantee. Mark it here
+            // rather than at the HTTP handler: `handle` is a public entry point
+            // and every caller reaching it has passed the credential check.
+            o.mark_authn_reached();
             o.set_observability_hooks(&view.global_observability_hooks);
             o.set_request_span(handle_span.clone());
             o.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(&ctx.path));
@@ -2536,48 +2560,10 @@ impl Lifecycle {
             ctx.requested_service_tier.as_deref(),
         );
 
-        let auth_start = Instant::now();
-        let success = match self
-            .authn
-            .authenticate(&ctx.downstream_headers, &principal_view)
-            .instrument(tracing::info_span!("proxy.authenticate"))
-            .await
-        {
-            Ok(success) => success,
-            Err(source) => {
-                if let Some(o) = observer.as_ref() {
-                    o.emit_provider_error("authentication_error", &source.to_string(), "authn");
-                }
-                let status =
-                    StatusCode::from_u16(source.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
-                let response = match &source {
-                    BuiltinAuthError::Unavailable => anthropic_error_response_with_retry_after(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "authentication_error",
-                        &source.to_string(),
-                        1,
-                    ),
-                    _ => anthropic_error_response(
-                        status,
-                        "authentication_error",
-                        &source.to_string(),
-                    ),
-                };
-                if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
-                        event_id: o.event_id().to_owned(),
-                        result: Err(cc_lb_lifecycle::AuthFailure::AuthenticationFailed {
-                            http_status: status.as_u16(),
-                            reason: Some(key_auth_failure_reason(&source).to_owned()),
-                        }),
-                    });
-                    o.set_terminal(status, error_codes::AUTHENTICATION_FAILED);
-                    o.finish();
-                }
-                return Ok(response);
-            }
-        };
-        let auth_ms = duration_to_ms(auth_start.elapsed());
+        // Authentication already succeeded: `auth` is the proof obtained from
+        // `Lifecycle::authenticate` before the body was read.
+        let success = auth.success();
+        let auth_ms = auth.auth_ms();
         let principal_id = success.principal_id.clone();
         handle_span.record("cc_lb.principal.id", principal_id.as_str());
         let Some(cached) = principal_view.get(&principal_id) else {
@@ -2958,7 +2944,7 @@ impl Lifecycle {
                 &ctx,
                 &principal,
                 resolved_record,
-                &success,
+                success,
                 &body_view,
             )
             .await
@@ -6784,21 +6770,6 @@ fn duration_to_ms(duration: Duration) -> u64 {
 
 fn duration_to_us(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
-}
-
-fn key_auth_failure_reason(source: &BuiltinAuthError) -> &'static str {
-    match source {
-        BuiltinAuthError::Expired => "Expired",
-        BuiltinAuthError::KeyDisabled => "Disabled",
-        BuiltinAuthError::KeyRevoked => "Revoked",
-        BuiltinAuthError::PrincipalDisabled => "PrincipalDisabled",
-        BuiltinAuthError::Unavailable => "Unavailable",
-        BuiltinAuthError::MissingHeader
-        | BuiltinAuthError::InvalidFormat
-        | BuiltinAuthError::NotFound
-        | BuiltinAuthError::SignatureMismatch
-        | BuiltinAuthError::PrincipalMissing => "InvalidKey",
-    }
 }
 
 fn attach_limit_headers_from_engine(

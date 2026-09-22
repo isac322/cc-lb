@@ -3,9 +3,9 @@
 - Feature Name: `event-driven-lifecycle`
 - Start Date: 2026-07-01
 - Status: Implemented — see §Implementation status (2026-07-02) and the
-  §Amendment (2026-09-21) below. The original phased plan is preserved for
-  historical context; the as-shipped architecture is captured in the
-  amendments.
+  §Amendments (2026-09-21, 2026-09-22) below. The original phased plan is
+  preserved for historical context; the as-shipped architecture is captured
+  in the amendments.
 - Related PRs: #207 (gzip decoder sidecar), #222 (terminal observation
   guarantee), #241 (16-path integration tests), #242 (unignore
   `terminal_success_stream`)
@@ -124,13 +124,14 @@ comparison machinery deleted with it.
 ### Amendment (2026-09-21): widened guarantee and unified terminal API
 
 The observation guarantee's scope widened from "every request that reached
-the handler" to **every request the proxy listener accepts**. Unrouted paths
-(404), disallowed methods (405), drain rejections (503), and
-`/api/oauth/usage` are now inside the guarantee: each produces exactly one
-classified `request_events_v1` row. `/healthz`, `/readyz`, the admin
-health-state route, and the metrics listener remain deliberately outside —
-they are infrastructure probes, not client traffic, and rows for them would
-be noise rather than observation.
+the handler" to **every request the proxy listener accepts** — and was then
+bounded at the authentication attempt by the §Amendment (2026-09-22) below.
+Unrouted paths (404), disallowed methods (405), and drain rejections (503)
+terminate before authentication and therefore persist no row;
+`/api/oauth/usage` authenticates and remains inside the guarantee.
+`/healthz`, `/readyz`, the admin health-state route, and the metrics
+listener remain deliberately outside — they are infrastructure probes, not
+client traffic, and rows for them would be noise rather than observation.
 
 Two open problems named in §Motivation are now closed:
 
@@ -166,16 +167,81 @@ HTTP 200, so the row records status 200 with a non-null `error_code`
 (`upstream_refusal` / `upstream_context_window_exceeded`), following the
 existing `upstream_stream_error` convention.
 
+### Amendment (2026-09-22): authentication boundary on the observation guarantee
+
+The guarantee's scope narrows from "every request the proxy listener
+accepts" to **every request that reaches the authentication attempt**: each
+such request produces exactly one `request_events_v1` row. A request that
+terminates before reaching authentication persists no row at all: an
+unrouted path (404), a disallowed method (405), a drain rejection (503), or
+a timeout that elapses before the handler reaches `authenticate`.
+
+Rationale: pre-auth traffic is arbitrary unauthenticated external input.
+Persisting it lets unauthenticated scanners amplify request-log writes, so
+the guarantee starts at the first point where the request has presented
+itself to an admission control.
+
+Authentication failure is not "before authentication": a request that
+reaches `authenticate` and is rejected (401/403) still produces exactly one
+row, because auth failures are operationally necessary signal.
+
+Mechanism: `LifecycleContext` buffers lifecycle events emitted before
+`mark_authn_reached()` instead of publishing them to the bus. The proxy
+calls it immediately before `authn.authenticate(...)`, and
+`oauth_usage_handler` before its own authenticate; on the call the buffer
+flushes in original order and subsequent events publish directly. If the
+request terminates first — via `finish`, `terminate`, or `Drop` — the
+buffer is discarded and no `RequestTerminated` is published, so the
+assembler never creates a partial and no row is written.
+
+### Amendment (2026-09-22b): authentication precedes all request work
+
+The 2026-09-22 amendment above originally also excluded an oversized body
+(413) and an invalid JSON body (400), because the body was read and parsed
+before `Lifecycle::handle` reached the credential check. That cost real
+observability: a legitimate caller who presented a valid credential and sent
+a body one byte over the cap produced no row at all, which is scanner
+treatment for an attributable client error.
+
+The ordering was an accident of the pipeline, not a decision.
+`authenticate` needs only headers, and headers are available immediately;
+the body was read first merely because `lifecycle_handler` buffered it
+before calling into the engine. So the pipeline was reordered rather than
+the guarantee re-narrowed.
+
+Authentication now runs **before the request body is touched at all**:
+
+1. `lifecycle_handler` marks the lifecycle context and calls
+   `Lifecycle::authenticate(&parts.headers)`.
+2. On failure it returns `reject_unauthenticated(...)` immediately, without
+   reading a single body byte.
+3. Only with the resulting proof does it call `read_request_body(..., &auth)`.
+4. `Lifecycle::handle(req, &auth)` receives the proof instead of
+   authenticating for itself.
+
+Consequences: 413 and 400 are now post-authentication and each persists
+exactly one attributable row. An unauthenticated caller can no longer make
+this process buffer a large body — the credential check happens first, so an
+oversized anonymous request is answered 401 rather than 413.
+
+This ordering is enforced by the type system, not by convention.
+`crates/cc-lb-engine/src/authn_rail.rs` defines `Authenticated`, a proof
+with private fields and no public constructor; `authenticate_first` is its
+only source and takes headers only, so there is no parameter through which a
+body could reach it. `read_request_body` and `Lifecycle::handle` both take
+`&Authenticated`, which makes "work before authentication" a compile error.
+The compile-fail proofs live in
+`crates/cc-lb-engine/tests/trybuild/authn_rail/`.
+
 ## Motivation
 
 ### The observation guarantee's remaining rough edges
 
 PR #222 established the "every request that reached the handler produces
 exactly one row, no exceptions except SIGKILL/OOM/abort" contract via
-`TerminalObserver` (scope since widened to every accepted request — see
-§Amendment (2026-09-21)). It works — the 40-row live-QA sample after deploy
-shows `terminal_dropped = 0`, `event_id = NULL` count of 0, and no writer
-failures.
+`TerminalObserver` (scope since widened to every accepted request, then
+bounded at the authentication attempt — see §Amendments (2026-09-21,
+2026-09-22)).
 
 But the handler still owns work that has nothing to do with producing a
 response:

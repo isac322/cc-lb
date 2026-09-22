@@ -181,8 +181,13 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         Arc::new(cc_lb_engine::SystemClock),
     );
 
+    let request = message_request(key_secret.expose());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(message_request(key_secret.expose()))
+        .handle(request, &auth)
         .await
         .expect("lifecycle response");
     let status = response.status();
@@ -246,8 +251,13 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     .expect("dynamic view rebuilds after clearing");
     assert!(holder.try_store_if_newer(refreshed));
 
+    let request = message_request(key_secret.expose());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(message_request(key_secret.expose()))
+        .handle(request, &auth)
         .await
         .expect("lifecycle response after clearing");
     assert_eq!(response.status(), StatusCode::OK);

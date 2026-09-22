@@ -8,6 +8,8 @@ mod assembler_partial_property;
 mod attempt_rail_trybuild;
 #[path = "audit_writer_smoke.rs"]
 mod audit_writer_smoke;
+#[path = "authn_rail_trybuild.rs"]
+mod authn_rail_trybuild;
 #[path = "batched_observation_count.rs"]
 mod batched_observation_count;
 #[path = "bulkhead_drops_release_permit.rs"]

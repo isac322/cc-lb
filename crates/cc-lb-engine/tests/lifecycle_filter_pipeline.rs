@@ -39,11 +39,14 @@ async fn pipeline_filters_candidates_before_terminal_strategy()
     })];
     let lifecycle = lifecycle_with_pipeline(filters, router_calls.clone(), state.clone(), hook);
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
-        .await?;
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
     let (status, _headers, _body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -70,11 +73,14 @@ async fn request_model_reaches_filters_without_prompt_cache_shadow()
     })];
     let lifecycle = lifecycle_with_pipeline(filters, router_calls, state, hook);
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-fable-5","messages":[]}"#,
-        )))
-        .await?;
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-fable-5","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
     let (status, _headers, _body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -107,11 +113,14 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
         let lifecycle =
             lifecycle_with_pipeline(filters, router_calls.clone(), state.clone(), hook.clone());
 
-        let response = lifecycle
-            .handle(messages_request(Bytes::from_static(
-                br#"{"model":"claude-test","messages":[]}"#,
-            )))
-            .await?;
+        let request = messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        ));
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("test request authenticates");
+        let response = lifecycle.handle(request, &auth).await?;
         let (status, _headers, _body) = collect_body(response).await;
 
         assert_eq!(status, StatusCode::OK);
@@ -164,11 +173,14 @@ async fn empty_stage_output_propagates_to_later_stages_and_terminal_strategy()
     ];
     let lifecycle = lifecycle_with_pipeline(filters, router_calls.clone(), state.clone(), hook);
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
-        .await?;
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
     let (status, _headers, _body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

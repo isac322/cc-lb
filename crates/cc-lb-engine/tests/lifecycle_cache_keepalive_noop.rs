@@ -51,8 +51,12 @@ async fn cache_keepalive_without_scheduler_is_response_noop() {
         ))
         .expect("test request builds");
 
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(request)
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request without keepalive scheduler");
 
@@ -99,8 +103,12 @@ async fn cache_keepalive_enqueue_failure_does_not_change_proxy_response() {
         ))
         .expect("test request builds");
 
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(request)
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request despite keepalive enqueue failure");
 

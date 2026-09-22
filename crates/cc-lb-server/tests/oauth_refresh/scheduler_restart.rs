@@ -217,8 +217,12 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
             br#"{"model":"claude-3-5-sonnet-20241022","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
         ))
         .expect("request builds");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let mut request_task =
-        tokio::spawn(async move { timeout(qa_timeout, lifecycle.handle(request)).await });
+        tokio::spawn(async move { timeout(qa_timeout, lifecycle.handle(request, &auth)).await });
 
     let dispatched_b = tokio::select! {
         worker_result = &mut generation_two_task => {

@@ -1,0 +1,9 @@
+error[E0451]: fields `success` and `auth_ms` of struct `Authenticated` are private
+ --> tests/trybuild/authn_rail/fail_authenticated_direct_construction.rs:6:9
+  |
+5 |     let _proof = Authenticated {
+  |                  ------------- in this type
+6 |         success,
+  |         ^^^^^^^ private field
+7 |         auth_ms: 0,
+  |         ^^^^^^^ private field

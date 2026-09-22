@@ -115,11 +115,12 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
         Arc::new(cc_lb_engine::SystemClock),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude","messages":[]}"#,
-        )))
-        .await?;
+    let request = messages_request(Bytes::from_static(br#"{"model":"claude","messages":[]}"#));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
     let (status, _headers, _body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

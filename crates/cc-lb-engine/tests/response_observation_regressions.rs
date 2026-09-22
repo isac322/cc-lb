@@ -154,8 +154,13 @@ async fn finite_gzip_eos_case(
         &test_bus,
     );
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle returns the streaming response");
     assert_eq!(response.status(), StatusCode::OK);
@@ -254,8 +259,13 @@ async fn delivered_body_drop_case(
         &test_bus,
     );
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle returns the streaming response");
     assert_eq!(response.status(), StatusCode::OK);
@@ -343,8 +353,13 @@ async fn callback_panic_preserves_bodies_and_worker_handles_next_completion() {
         &test_bus,
     );
 
+    let first_request = stream_request();
+    let first_auth = lifecycle
+        .authenticate(first_request.headers())
+        .await
+        .expect("test request authenticates");
     let first_response = lifecycle
-        .handle(stream_request())
+        .handle(first_request, &first_auth)
         .await
         .expect("first response is returned");
     assert_eq!(first_response.status(), StatusCode::OK);
@@ -359,8 +374,13 @@ async fn callback_panic_preserves_bodies_and_worker_handles_next_completion() {
         .expect("first body reaches EOS despite callback panic")
         .to_bytes();
 
+    let second_request = stream_request();
+    let second_auth = lifecycle
+        .authenticate(second_request.headers())
+        .await
+        .expect("test request authenticates");
     let second_response = lifecycle
-        .handle(stream_request())
+        .handle(second_request, &second_auth)
         .await
         .expect("second response is returned");
     assert_eq!(second_response.status(), StatusCode::OK);

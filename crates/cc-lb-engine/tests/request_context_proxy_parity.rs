@@ -27,8 +27,12 @@ async fn fixed_request_preserves_routing_shape_and_signing_observables() {
         br#"{"model":"claude-test","messages":[{"role":"user","content":"hi"}]}"#,
     ));
 
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(request)
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
 
@@ -59,8 +63,12 @@ async fn four_breakpoint_request_preserves_upstream_bytes_and_response() {
     );
     let request = messages_request(body.clone());
 
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(request)
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles cache-control request");
 

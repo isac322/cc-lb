@@ -223,17 +223,18 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
         Arc::new(cc_lb_engine::SystemClock),
     );
 
-    let response = lifecycle
-        .handle(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/messages")
-                .header("x-api-key", managed_api_key())
-                .body(Bytes::from_static(
-                    br#"{"model":"claude-test","messages":[],"max_tokens":1}"#,
-                ))?,
-        )
-        .await?;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("x-api-key", managed_api_key())
+        .body(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"max_tokens":1}"#,
+        ))?;
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
