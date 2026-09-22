@@ -39,7 +39,7 @@ const MASTER_KEY_HEX: &str = "22222222222222222222222222222222222222222222222222
 const MODEL: &str = "claude-3-5-sonnet-20241022";
 
 #[tokio::test(flavor = "multi_thread")]
-async fn terminal_body_too_large() -> Result<(), Box<dyn std::error::Error>> {
+async fn body_too_large_before_auth_persists_no_row() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     ensure_env();
 
@@ -73,10 +73,19 @@ async fn terminal_body_too_large() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-    let row = wait_for_request_event(&sqlite_path).await?;
-    assert_eq!(row.error_code.as_deref(), Some("body_too_large"));
-    assert_eq!(row.status, 413);
-    assert!(row.event_id.is_some(), "event_id must be populated");
+    // The request body is read to completion before `Lifecycle::handle` runs,
+    // so an oversized body is rejected before the authentication attempt and
+    // must not persist a request_events row — even though this client did
+    // send a valid credential. Give the async writer a window to
+    // (incorrectly) persist a row before asserting the table stayed empty.
+    sleep(Duration::from_millis(500)).await;
+    let storage = sqlite_storage(&sqlite_path).await?;
+    let rows = all_request_events(storage.as_ref()).await?;
+    assert!(
+        rows.is_empty(),
+        "pre-auth 413 must not persist request events, found {} row(s)",
+        rows.len()
+    );
 
     server.shutdown().await;
     Ok(())
@@ -118,6 +127,46 @@ async fn terminal_authentication_failed() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(row.error_code.as_deref(), Some("authentication_failed"));
     assert_eq!(row.status, 401);
     assert!(row.event_id.is_some());
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_api_key_authentication_failed_persists_one_row()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    ensure_env();
+
+    let upstream = MockServer::start().await;
+    let litellm = start_price_mock().await;
+
+    let sqlite_path = dir.path().join("term-obs.sqlite");
+    let (_key, _key_id) = seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
+
+    let config = base_config(sqlite_path.clone(), litellm.uri());
+    let server = StartedServer::start(config).await?;
+    wait_for_price_catalog().await?;
+
+    // A request with no credential still reaches the authentication attempt,
+    // so its rejection is an observed auth failure — not pre-auth traffic —
+    // and must persist exactly one row. This is the boundary that separates
+    // "before authentication" (no row) from "authentication failed" (a row).
+    let client = TestClient::new(Duration::from_secs(10));
+    let response = client
+        .request(
+            "POST",
+            &format!("{}/v1/messages", server.proxy_url),
+            &[("content-type", "application/json")],
+            &sample_request_body(false),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let storage = sqlite_storage(&sqlite_path).await?;
+    let rows = wait_for_request_event_count(storage.as_ref(), 1).await?;
+    assert_eq!(rows[0].status, 401);
+    assert_eq!(rows[0].error_code.as_deref(), Some("authentication_failed"));
 
     server.shutdown().await;
     Ok(())
@@ -450,7 +499,7 @@ async fn terminal_tower_timeout() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn terminal_route_not_found() -> Result<(), Box<dyn std::error::Error>> {
+async fn route_not_found_before_auth_persists_no_row() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     ensure_env();
 
@@ -474,17 +523,27 @@ async fn terminal_route_not_found() -> Result<(), Box<dyn std::error::Error>> {
         "unexpected 404 body: {body}"
     );
 
+    // A 404 router fallback never reaches authentication, so it must not
+    // persist a request_events row — pre-auth traffic is unauthenticated
+    // external input and logging it would let scanners amplify writes.
+    // Give the async request-event writer a window to (incorrectly) persist
+    // a row before asserting the table stayed empty.
+    sleep(Duration::from_millis(500)).await;
     let storage = sqlite_storage(&sqlite_path).await?;
-    let rows = wait_for_request_event_count(storage.as_ref(), 1).await?;
-    assert_eq!(rows[0].status, 404);
-    assert_eq!(rows[0].error_code.as_deref(), Some("route_not_found"));
+    let rows = all_request_events(storage.as_ref()).await?;
+    assert!(
+        rows.is_empty(),
+        "pre-auth 404 must not persist request events, found {} row(s)",
+        rows.len()
+    );
 
     server.shutdown().await;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn terminal_method_not_allowed() -> Result<(), Box<dyn std::error::Error>> {
+async fn method_not_allowed_before_auth_persists_no_row() -> Result<(), Box<dyn std::error::Error>>
+{
     let dir = tempfile::tempdir()?;
     ensure_env();
 
@@ -513,17 +572,23 @@ async fn terminal_method_not_allowed() -> Result<(), Box<dyn std::error::Error>>
         "unexpected 405 body: {body}"
     );
 
+    // A 405 rejection never reaches authentication, so it must not persist a
+    // request_events row.
+    sleep(Duration::from_millis(500)).await;
     let storage = sqlite_storage(&sqlite_path).await?;
-    let rows = wait_for_request_event_count(storage.as_ref(), 1).await?;
-    assert_eq!(rows[0].status, 405);
-    assert_eq!(rows[0].error_code.as_deref(), Some("method_not_allowed"));
+    let rows = all_request_events(storage.as_ref()).await?;
+    assert!(
+        rows.is_empty(),
+        "pre-auth 405 must not persist request events, found {} row(s)",
+        rows.len()
+    );
 
     server.shutdown().await;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn terminal_drain_rejected() -> Result<(), Box<dyn std::error::Error>> {
+async fn drain_rejected_before_auth_persists_no_row() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     ensure_env();
 
@@ -571,10 +636,16 @@ async fn terminal_drain_rejected() -> Result<(), Box<dyn std::error::Error>> {
         "drain rejection must carry the assigned request id"
     );
 
+    // A drain rejection never reaches authentication, so it must not persist
+    // a request_events row.
+    sleep(Duration::from_millis(500)).await;
     let storage = sqlite_storage(&sqlite_path).await?;
-    let rows = wait_for_request_event_count(storage.as_ref(), 1).await?;
-    assert_eq!(rows[0].status, 503);
-    assert_eq!(rows[0].error_code.as_deref(), Some("drain_rejected"));
+    let rows = all_request_events(storage.as_ref()).await?;
+    assert!(
+        rows.is_empty(),
+        "pre-auth drain rejection must not persist request events, found {} row(s)",
+        rows.len()
+    );
 
     server.shutdown().await;
     Ok(())

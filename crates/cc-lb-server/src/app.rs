@@ -2641,6 +2641,11 @@ async fn oauth_usage_handler(
 ) -> Response<Body> {
     let authn = &state.builtin_authn;
     let dynamic_view = state.dynamic_view.load();
+    // The request reached the authentication attempt: replay buffered
+    // pre-auth lifecycle events so the request-log row is complete.
+    if let Some(ctx) = request.extensions().get::<cc_lb_engine::LifecycleContext>() {
+        ctx.mark_authn_reached();
+    }
     if let Err(error) = authn
         .authenticate(request.headers(), &dynamic_view.principal_view)
         .await
@@ -2978,6 +2983,7 @@ mod tests {
             bus as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         let result = read_request_body(&headers, body, cap, Some(observer.clone())).await;
         drop(observer);
         let LifecycleEvent::RequestTerminated { io_timings, .. } = events
@@ -3271,6 +3277,7 @@ mod tests {
             bus as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         let (chunk_tx, mut poll_rx, body) = controlled_body();
         let read_observer = observer.clone();
         let read = tokio::spawn(async move {

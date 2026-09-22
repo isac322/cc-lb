@@ -403,6 +403,7 @@ mod tests {
             bus as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         observer.set_terminal(StatusCode::BAD_GATEWAY, error_codes::UPSTREAM_5XX);
         let relay_start = Instant::now()
             .checked_sub(Duration::from_millis(25))
@@ -515,6 +516,7 @@ mod tests {
             bus as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         observer.set_request_body_timing(11, Some(123));
         observer.set_termination_timings(None, None, Some(17), None, None);
         let relay_start = Instant::now()
@@ -592,6 +594,7 @@ mod tests {
             bus as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         observer.set_request_body_timing(13, Some(456));
         observer.set_termination_timings(None, None, Some(19), None, None);
         let relay_start = Instant::now()
@@ -677,6 +680,7 @@ mod tests {
             bus as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         let body_io_timing = BodyIoTiming::default();
         body_io_timing.transition(Some(BodyIoPhase::Wait));
         let mut guard = DownstreamStreamDropGuard::armed(

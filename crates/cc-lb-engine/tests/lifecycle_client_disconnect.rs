@@ -891,6 +891,7 @@ async fn generic_observer_drop_remains_terminal_dropped() {
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let observer = LifecycleContext::new("generic-drop".to_owned(), test_bus.bus_arc(), &clock);
+    observer.mark_authn_reached();
 
     drop(observer);
 
@@ -927,6 +928,7 @@ async fn timeout_ordering(timeout_first: bool) {
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let observer = LifecycleContext::new("timeout-ordering".to_owned(), test_bus.bus_arc(), &clock);
+    observer.mark_authn_reached();
     let waiting = Arc::new(tokio::sync::Notify::new());
     let lifecycle = lifecycle(
         sse_dispatch(StatusCode::OK, pending_sse(waiting)),

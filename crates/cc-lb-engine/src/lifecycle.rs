@@ -2536,6 +2536,13 @@ impl Lifecycle {
             ctx.requested_service_tier.as_deref(),
         );
 
+        // The request reached the authentication attempt: replay buffered
+        // pre-auth lifecycle events so the request-log row is complete.
+        // Placed before `auth_start` so the flush is not billed to authn.
+        if let Some(o) = observer.as_ref() {
+            o.mark_authn_reached();
+        }
+
         let auth_start = Instant::now();
         let success = match self
             .authn
