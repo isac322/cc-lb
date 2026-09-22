@@ -103,8 +103,13 @@ async fn api_key_upstream_signs_with_configured_credential_not_client_key() {
         .expect("managed key created");
     let lifecycle = fixture.lifecycle(key_store).await;
 
+    let request = message_request(key_secret.expose());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(message_request(key_secret.expose()))
+        .handle(request, &auth)
         .await
         .expect("lifecycle response");
     let status = response.status();
@@ -152,8 +157,13 @@ async fn api_key_upstream_does_not_forward_downstream_bearer_credential() {
         .expect("managed key created");
     let lifecycle = fixture.lifecycle(key_store).await;
 
+    let request = message_request_bearer(key_secret.expose());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(message_request_bearer(key_secret.expose()))
+        .handle(request, &auth)
         .await
         .expect("lifecycle response");
     let status = response.status();
@@ -205,8 +215,13 @@ async fn api_key_upstream_without_stored_credential_fails_closed() {
         .expect("managed key created");
     let lifecycle = fixture.lifecycle(key_store).await;
 
+    let request = message_request(key_secret.expose());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(message_request(key_secret.expose()))
+        .handle(request, &auth)
         .await
         .expect("lifecycle response");
     let status = response.status();
@@ -879,8 +894,13 @@ async fn drive_proxied_request(
         .expect("managed key created");
     let lifecycle = fixture.lifecycle(key_store).await;
 
+    let request = message_request(key_secret.expose());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(message_request(key_secret.expose()))
+        .handle(request, &auth)
         .await
         .expect("lifecycle response");
     let status = response.status();
