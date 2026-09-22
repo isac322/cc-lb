@@ -29,11 +29,7 @@ pub(crate) struct RecordingSignerFactory {
 }
 
 impl ApiKeyAwareSignerFactory for RecordingSignerFactory {
-    fn with_router_choice(
-        &self,
-        _api_key: String,
-        router_chosen_upstream_name: String,
-    ) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(&self, router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
         self.calls
             .lock()
             .expect("signer log lock")

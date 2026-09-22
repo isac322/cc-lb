@@ -125,13 +125,21 @@ impl Fixture {
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: None,
-                api_key_ciphertext: Some(b"test-key-ciphertext".to_vec()),
+                api_key_ciphertext: None,
                 oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             })
             .await
             .expect("upstream created");
+        let ciphertext = self
+            .aead
+            .encrypt(b"sk-ant-fixture-secret", record.id.as_bytes())
+            .expect("api-key ciphertext");
+        self.storage
+            .update_api_key_secret(record.id, Some(ciphertext))
+            .await
+            .expect("api-key secret stored");
         record.id
     }
 
@@ -246,7 +254,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
 
     let signer_factory = view
         .signer_factory
-        .with_router_choice("sk-ant-downstream".to_owned(), "oauth-bob".to_owned());
+        .with_router_choice("oauth-bob".to_owned());
     let signer = signer_factory
         .build(&Upstream::AnthropicDirect { base_url: None })
         .await
@@ -288,9 +296,7 @@ async fn empty_router_choice_errors() {
     .await
     .expect("dynamic view builds");
 
-    let signer_factory = view
-        .signer_factory
-        .with_router_choice("sk-ant-downstream".to_owned(), String::new());
+    let signer_factory = view.signer_factory.with_router_choice(String::new());
     let result = signer_factory
         .build(&Upstream::AnthropicDirect { base_url: None })
         .await;

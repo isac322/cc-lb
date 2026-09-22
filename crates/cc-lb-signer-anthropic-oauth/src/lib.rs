@@ -338,11 +338,7 @@ impl LazyRefreshConfigurable for AnthropicOAuthSignerFactory {
 }
 
 impl ApiKeyAwareSignerFactory for AnthropicOAuthSignerFactory {
-    fn with_router_choice(
-        &self,
-        _api_key: String,
-        router_chosen_upstream_name: String,
-    ) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(&self, router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
         let mut factory = self.clone();
         factory.upstream_name = Some(router_chosen_upstream_name);
         Arc::new(factory)

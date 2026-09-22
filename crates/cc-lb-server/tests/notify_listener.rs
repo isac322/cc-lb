@@ -456,7 +456,7 @@ async fn hydrate_notifications_refresh_peer_caches_without_view_rebuild() {
             name: "hydrate-upstream".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
-            api_key_ciphertext: Some(vec![1, 2, 3]),
+            api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
@@ -464,6 +464,13 @@ async fn hydrate_notifications_refresh_peer_caches_without_view_rebuild() {
     )
     .await
     .expect("upstream created");
+    let ciphertext = fixture
+        .aead
+        .encrypt(b"sk-ant-fixture-secret", upstream.id.as_bytes())
+        .expect("api-key ciphertext");
+    UpstreamStore::update_api_key_secret(&*fixture.storage, upstream.id, Some(ciphertext))
+        .await
+        .expect("upstream api-key secret");
     fixture
         .stores
         .upstream_rate_limits

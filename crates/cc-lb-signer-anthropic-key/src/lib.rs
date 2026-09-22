@@ -9,7 +9,7 @@ use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, UpstreamError,
 };
-use http::HeaderValue;
+use http::header::{AUTHORIZATION, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 
 #[derive(Clone)]
@@ -47,7 +47,13 @@ impl Signer for AnthropicKeySigner {
                     reason: source.to_string(),
                 }
             })?;
-        shaped.headers_mut().insert("x-api-key", header_value);
+        let headers = shaped.headers_mut();
+        // The Anthropic direct dialect clones downstream headers verbatim and
+        // `authorization` is not hop-by-hop, so a downstream
+        // `Authorization: Bearer sk-cclb-…` would otherwise be forwarded to the
+        // upstream alongside the configured key.
+        headers.remove(AUTHORIZATION);
+        headers.insert("x-api-key", header_value);
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
@@ -101,5 +107,106 @@ impl SignerFactory for AnthropicKeySignerFactory {
         Ok(Arc::new(AnthropicKeySigner {
             api_key: self.api_key.clone(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use cc_lb_upstream::{
+        DialectError, DialectShapeContext, ShapedRequestBuilder, UpstreamDialect, shape_request,
+        sign_request,
+    };
+    use http::header::AUTHORIZATION;
+    use http::{HeaderMap, HeaderValue, Method};
+
+    use super::*;
+
+    fn shaped_request() -> ShapedRequest {
+        let ctx = DialectShapeContext {
+            request_id: "req-1".to_owned(),
+            downstream_headers: HeaderMap::new(),
+            method: Method::POST,
+            path: "/v1/messages".to_owned(),
+            query: None,
+            body_bytes: Bytes::from_static(b"{}"),
+        };
+        let principal = cc_lb_domain::Principal {
+            id: "principal".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::ApiKey,
+            claims: serde_json::Map::new(),
+        };
+        shape_request(
+            &DirectDialect,
+            &ctx,
+            &Upstream::AnthropicDirect { base_url: None },
+            &principal,
+        )
+        .expect("shape request")
+    }
+
+    struct DirectDialect;
+
+    impl UpstreamDialect for DirectDialect {
+        fn shape(
+            &self,
+            _context: &DialectShapeContext,
+            _upstream: &Upstream,
+            _principal: &cc_lb_domain::Principal,
+            builder: &mut ShapedRequestBuilder,
+        ) -> Result<ShapedRequest, DialectError> {
+            Ok(builder.shaped_request(
+                "https://api.anthropic.com/v1/messages"
+                    .parse()
+                    .expect("url"),
+                Method::POST,
+                HeaderMap::new(),
+                Bytes::from_static(b"{}"),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn sign_replaces_downstream_credentials_with_configured_key() {
+        let mut shaped = shaped_request();
+        shaped
+            .headers_mut()
+            .insert("x-api-key", HeaderValue::from_static("sk-cclb-downstream"));
+        shaped.headers_mut().insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer sk-cclb-downstream"),
+        );
+        let signer = AnthropicKeySigner::new("sk-ant-configured");
+
+        let signed = sign_request(&signer, shaped).await.expect("sign request");
+
+        assert_eq!(
+            signed
+                .headers()
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("sk-ant-configured")
+        );
+        assert!(!signed.headers().contains_key(AUTHORIZATION));
+    }
+
+    #[tokio::test]
+    async fn sign_preserves_unrelated_headers() {
+        let mut shaped = shaped_request();
+        shaped.headers_mut().insert(
+            "anthropic-beta",
+            HeaderValue::from_static("prompt-caching-2024-07-31"),
+        );
+        let signer = AnthropicKeySigner::new("sk-ant-configured");
+
+        let signed = sign_request(&signer, shaped).await.expect("sign request");
+
+        assert_eq!(
+            signed
+                .headers()
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok()),
+            Some("prompt-caching-2024-07-31")
+        );
     }
 }

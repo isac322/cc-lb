@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use cc_lb_aead::AeadService;
 use cc_lb_engine::LifecycleConfig;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::preflight::{self, PreflightReport};
@@ -211,13 +212,13 @@ async fn seed_upstream(
     kind: UpstreamKind,
     base_url: Option<&str>,
 ) {
-    UpstreamStore::create(
+    let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
             name: name.to_owned(),
             kind,
             base_url: base_url.map(|value| value.parse().unwrap()),
-            api_key_ciphertext: Some(vec![1, 2, 3]),
+            api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
@@ -225,6 +226,14 @@ async fn seed_upstream(
     )
     .await
     .unwrap();
+    if kind == UpstreamKind::AnthropicApiKey {
+        let ciphertext = AeadService::from_master_key([0; 32])
+            .encrypt(b"sk-ant-fixture-secret", created.id.as_bytes())
+            .unwrap();
+        UpstreamStore::update_api_key_secret(storage, created.id, Some(ciphertext))
+            .await
+            .unwrap();
+    }
 }
 
 async fn seed_principal(

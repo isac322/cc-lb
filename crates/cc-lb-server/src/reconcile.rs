@@ -10,6 +10,7 @@ use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{PluginSlotKind, StorageResult};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::dynamic_view_builder::{Stores, build_dynamic_view};
 use crate::prompt_cache_thread_usage::PromptCacheThreadUsageTracker;
@@ -157,7 +158,18 @@ pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64>
             break;
         }
         after_upstream = page.last().map(|record| record.id);
-        upstreams.extend(page.into_iter().map(|record| (record.id, record.revision)));
+        upstreams.extend(page.into_iter().map(|record| {
+            // Rotating the api-key credential bumps only
+            // `upstream_api_key_secret_v1.secret_revision`, not
+            // `record.revision`; fold the ciphertext (fresh nonce per
+            // encryption) into the hash so a secret-only rotation still
+            // converges on peers that missed the NOTIFY.
+            let material = xxh3_64_with_seed(
+                record.api_key_ciphertext.as_deref().unwrap_or_default(),
+                record.revision,
+            );
+            (record.id, material)
+        }));
     }
 
     let mut registry_entries = Vec::new();

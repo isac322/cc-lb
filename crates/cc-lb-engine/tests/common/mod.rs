@@ -203,11 +203,7 @@ fn default_principal_view() -> Arc<PrincipalView> {
 }
 
 impl ApiKeyAwareSignerFactory for TestAuthn {
-    fn with_router_choice(
-        &self,
-        _api_key: String,
-        _router_chosen_upstream_name: String,
-    ) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(&self, _router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
         Arc::new(TestSignerFactory {
             state: self.state.clone(),
             refresh_allowed: self.refresh_allowed,

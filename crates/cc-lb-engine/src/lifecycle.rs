@@ -3000,10 +3000,9 @@ impl Lifecycle {
             .and_then(|active_limit| active_limit.reservation.take())
             .map(|reservation| AttemptIntent::from_reservation(reservation).into_reserved());
 
-        let signer_factory = view.signer_factory.with_router_choice(
-            success.api_key.clone().unwrap_or_default(),
-            router_chosen_upstream_name.clone(),
-        );
+        let signer_factory = view
+            .signer_factory
+            .with_router_choice(router_chosen_upstream_name.clone());
         let prepare_signer_started = Instant::now();
         let signer_result = signer_factory
             .build(&route.upstream)
@@ -9507,7 +9506,6 @@ mod tests {
     impl ApiKeyAwareSignerFactory for TestSignerFactory {
         fn with_router_choice(
             &self,
-            _api_key: String,
             _router_chosen_upstream_name: String,
         ) -> Arc<dyn SignerFactory> {
             Arc::new(Self)

@@ -61,13 +61,14 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     // The principal allows only B. `routes.first()` (sorted by name via the
     // wrapper below) will be A, so the buggy code path leaks A's dialect into
     // the dispatch — pointing at api.anthropic.com instead of target.invalid.
+    let aead = Arc::new(AeadService::from_master_key([33; 32]));
     let primary = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
             name: "aaa-primary".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
-            api_key_ciphertext: Some(vec![1, 2, 3]),
+            api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
@@ -75,6 +76,12 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     )
     .await
     .expect("primary upstream created");
+    let ciphertext = aead
+        .encrypt(b"sk-ant-fixture-secret", primary.id.as_bytes())
+        .expect("primary api-key ciphertext");
+    UpstreamStore::update_api_key_secret(storage.as_ref(), primary.id, Some(ciphertext))
+        .await
+        .expect("primary api-key secret");
 
     let target = UpstreamStore::create(
         storage.as_ref(),
@@ -82,7 +89,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
             name: "bbb-target".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse("http://target.invalid").expect("target base_url parses")),
-            api_key_ciphertext: Some(vec![1, 2, 3]),
+            api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
@@ -90,6 +97,13 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     )
     .await
     .expect("target upstream created");
+    let ciphertext = aead
+        .encrypt(b"sk-ant-fixture-secret", target.id.as_bytes())
+        .expect("target api-key ciphertext");
+    let target =
+        UpstreamStore::update_api_key_secret(storage.as_ref(), target.id, Some(ciphertext))
+            .await
+            .expect("target api-key secret");
 
     PrincipalStore::create(
         storage.as_ref(),
@@ -135,7 +149,6 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         prompt_cache_observations: storage.clone(),
     });
 
-    let aead = Arc::new(AeadService::from_master_key([33; 32]));
     let oauth_cfg = Arc::new(AnthropicOAuthConfig {
         client_id: "unused-by-this-test".to_owned(),
         auth_url: Url::parse("http://unused.invalid/authorize").expect("auth url"),
