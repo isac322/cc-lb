@@ -1104,19 +1104,17 @@ describe('/upstreams mutation pending UX', () => {
     vi.spyOn(window, 'open').mockImplementation(() => null);
     const startDraft = vi.fn(
       (
-        _body: { mode?: string } | undefined,
+        _vars: undefined,
         options?: {
           onSuccess?: (result: {
             authorize_url: string;
             state_token: string;
-            mode: string;
           }) => void;
         },
       ) => {
         options?.onSuccess?.({
           authorize_url: 'https://example.com/authorize',
           state_token: 'draft-state-token',
-          mode: 'long_lived_365d',
         });
       },
     );
@@ -1170,7 +1168,6 @@ describe('/upstreams mutation pending UX', () => {
 
     let dialog = screen.getByRole('dialog', { name: 'New upstream' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
-    expect(within(dialog).getByTestId('oauth-mode-choice')).toBeDefined();
     fireEvent.click(
       within(dialog).getByRole('button', {
         name: 'Authorize with Anthropic',
@@ -1187,10 +1184,10 @@ describe('/upstreams mutation pending UX', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
 
     expect(startDraft).toHaveBeenCalledTimes(1);
-    expect(startDraft).toHaveBeenCalledWith(
-      { mode: 'long_lived_365d' },
-      expect.anything(),
-    );
+    // The draft-start request carries no mode: cc-lb always requests the
+    // long-lived grant and decides the outcome itself.
+    const draftVars = startDraft.mock.calls[0]?.[0] as unknown;
+    expect(draftVars).toBeUndefined();
     expect(completeDraft).toHaveBeenCalledTimes(1);
     expect(createFromDraft).toHaveBeenCalledTimes(1);
     expect(createFromDraft).toHaveBeenCalledWith(
@@ -1319,12 +1316,16 @@ describe('/upstreams mutation pending UX', () => {
       within(reconnectNotice).getByRole('button', { name: 'Connect' }),
     );
 
-    // Connect only opens the modal on the mode choice; the start mutation
-    // fires from the Generate button, so its pending state lives there.
+    // Connect only opens the modal; the start mutation fires from the
+    // Generate button, so its pending state lives there.
     let dialog = screen.getByRole('dialog', {
       name: 'OAuth Authorization',
     });
-    expect(within(dialog).getByTestId('oauth-mode-choice')).toBeDefined();
+    expect(
+      within(dialog).getByRole('button', {
+        name: 'Generate authorization URL',
+      }),
+    ).toBeDefined();
     expect(start).not.toHaveBeenCalled();
 
     vi.mocked(queries.useOAuthStart).mockReturnValue({
@@ -1344,13 +1345,12 @@ describe('/upstreams mutation pending UX', () => {
 
     const startResolved = vi.fn(
       (
-        _vars: { id: string; mode?: string },
+        _vars: { id: string },
         options?: {
           onSuccess?: (result: {
             authorize_url: string;
             state_token: string;
             revision: number;
-            mode: string;
           }) => void;
         },
       ) => {
@@ -1358,7 +1358,6 @@ describe('/upstreams mutation pending UX', () => {
           authorize_url: 'https://example.com/authorize',
           state_token: 'oauth-state-token',
           revision: 2,
-          mode: 'long_lived_365d',
         });
       },
     );
@@ -1374,8 +1373,10 @@ describe('/upstreams mutation pending UX', () => {
       }),
     );
     expect(startResolved).toHaveBeenCalledTimes(1);
+    // The start request carries no mode: cc-lb always requests the
+    // long-lived grant and decides the outcome itself.
     expect(startResolved).toHaveBeenCalledWith(
-      { id: upstream.id, mode: 'long_lived_365d' },
+      { id: upstream.id },
       expect.anything(),
     );
     expect(
@@ -1652,19 +1653,17 @@ describe('/upstreams long-lived OAuth credential', () => {
     let grantedExpiresInSecs: number | null = null;
     const startDraft = vi.fn(
       (
-        _body: { mode?: string } | undefined,
+        _vars: undefined,
         options?: {
           onSuccess?: (result: {
             authorize_url: string;
             state_token: string;
-            mode: string;
           }) => void;
         },
       ) => {
         options?.onSuccess?.({
           authorize_url: 'https://example.com/authorize',
           state_token: 'draft-state-token',
-          mode: 'long_lived_365d',
         });
       },
     );
@@ -1752,36 +1751,6 @@ describe('/upstreams long-lived OAuth credential', () => {
     expect(notice.getAttribute('data-reason')).toBe('clamped');
     // The granted lifetime (28800s = 8 hours) is surfaced to the operator.
     expect(notice.textContent).toContain('expires in 8 hours');
-  });
-
-  test('requests a refreshing credential when the standard mode is chosen', () => {
-    const startDraft = vi.fn();
-    vi.mocked(queries.useStartOauthDraft).mockReturnValue({
-      mutate: startDraft,
-      isPending: false,
-      reset: vi.fn(),
-    } as never);
-
-    renderRoute();
-    fireEvent.click(screen.getByRole('button', { name: 'New' }));
-    const dialog = screen.getByRole('dialog', { name: 'New upstream' });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
-
-    const modeChoice = within(dialog).getByTestId('oauth-mode-choice');
-    fireEvent.click(
-      within(modeChoice).getByRole('radio', {
-        name: /Standard refreshing token/,
-      }),
-    );
-    fireEvent.click(
-      within(dialog).getByRole('button', { name: 'Authorize with Anthropic' }),
-    );
-
-    expect(startDraft).toHaveBeenCalledTimes(1);
-    expect(startDraft).toHaveBeenCalledWith(
-      { mode: 'refreshing' },
-      expect.anything(),
-    );
   });
 
   test('nudges reconnect on the access-token clock and ignores the stored refresh token', () => {

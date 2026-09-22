@@ -257,7 +257,6 @@ impl DispatchFixture {
             token_url: refused_token_url(),
             redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect url"),
             scopes: vec!["messages".to_owned()],
-            long_lived_scopes: Vec::new(),
         });
         let refresh_entry_calls = Arc::new(AtomicUsize::new(0));
         let claim_calls = Arc::new(AtomicUsize::new(0));

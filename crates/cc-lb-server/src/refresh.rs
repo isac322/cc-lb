@@ -1174,7 +1174,6 @@ mod tests {
                 token_url,
                 redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect url"),
                 scopes: vec!["messages".to_owned()],
-                long_lived_scopes: Vec::new(),
             });
             let clock = Arc::new(TestClock::new_at_secs(1_700_000_000)) as ClockHandle;
             Self {

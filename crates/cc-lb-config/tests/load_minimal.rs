@@ -42,11 +42,12 @@ fn load_minimal_toml_applies_plan_defaults() {
 }
 
 /// An operator upgrading across this release still has an `[oauth.anthropic]`
-/// section written before long-lived mode existed. `Config` uses
-/// `deny_unknown_fields`, so the new key must be optional or startup breaks
-/// on every existing deployment.
+/// section that names the pre-existing scope set, including `org:create_api_key`.
+/// The default scope list narrowed to profile+inference so Anthropic will grant a
+/// year-long token, but an explicit operator value must never be silently
+/// replaced by that new default.
 #[test]
-fn pre_upgrade_oauth_toml_without_long_lived_scopes_loads_with_defaults() {
+fn explicitly_configured_oauth_scopes_survive_the_narrowed_default() {
     let (_dir, path) = crate::common::temp_config(
         r#"
 [listener]
@@ -63,7 +64,7 @@ scopes = ["org:create_api_key", "user:profile", "user:inference"]
     let config = Config::load(&path).expect("pre-upgrade config still loads");
 
     let anthropic = config.oauth.anthropic.expect("anthropic oauth configured");
-    // The operator's explicit refreshing scopes are preserved verbatim.
+    // Preserved verbatim, not narrowed to the new profile+inference default.
     assert_eq!(
         anthropic.scopes,
         vec![
@@ -71,11 +72,6 @@ scopes = ["org:create_api_key", "user:profile", "user:inference"]
             "user:profile".to_owned(),
             "user:inference".to_owned(),
         ]
-    );
-    // The long-lived preset is filled in, and never inherits `org:create_api_key`.
-    assert_eq!(
-        anthropic.long_lived_scopes,
-        vec!["user:profile".to_owned(), "user:inference".to_owned()]
     );
 }
 

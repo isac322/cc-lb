@@ -1243,12 +1243,11 @@ export interface DraftCompleteResponse {
   granted_expires_in_secs: number | null;
 }
 
-export function startOauthDraft(body?: { mode?: OAuthTokenMode }): Promise<{
+export function startOauthDraft(): Promise<{
   authorize_url: string;
   state_token: string;
-  mode: OAuthTokenMode;
 }> {
-  return postJson('/admin/v1/oauth/draft/start', body ?? {});
+  return postJson('/admin/v1/oauth/draft/start', {});
 }
 
 export function completeOauthDraft(body: {

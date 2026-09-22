@@ -56,7 +56,6 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
         token_url: fake.token_url(),
         redirect_uri: Url::parse("http://localhost/callback")?,
         scopes: vec!["messages".to_owned()],
-        long_lived_scopes: vec!["user:profile".to_owned(), "user:inference".to_owned()],
     });
     let upstream_id = create_oauth_upstream(
         storage.as_ref(),

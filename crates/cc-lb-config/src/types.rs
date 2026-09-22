@@ -420,7 +420,7 @@ struct RecurringJobConfigOverride {
 /// `expires_in` requested for a long-lived (365-day) Anthropic OAuth grant.
 ///
 /// Anthropic honours this only on the `authorization_code` exchange and only
-/// for a restricted scope set; see [`AnthropicOAuthConfig::long_lived_scopes`].
+/// for a restricted scope set; see [`AnthropicOAuthConfig::scopes`].
 pub const LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS: u64 = 31_536_000;
 
 /// Shortest access-token lifetime that still justifies long-lived mode.
@@ -431,16 +431,6 @@ pub const LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS: u64 = 31_536_000;
 /// treated as refusing long-lived mode.
 pub const LONG_LIVED_MIN_GRANT_SECS: u64 = 2_592_000;
 
-/// Scopes requested for a long-lived grant.
-///
-/// `org:create_api_key` is stripped by the claude.ai surface anyway,
-/// `user:sessions:claude_code` caps `expires_in` at 30 days, and
-/// `user:mcp_servers` rejects a custom `expires_in` outright, so none of them
-/// can appear on a 365-day grant.
-fn default_long_lived_scopes() -> Vec<String> {
-    vec!["user:profile".to_owned(), "user:inference".to_owned()]
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct AnthropicOAuthConfig {
@@ -448,11 +438,16 @@ pub struct AnthropicOAuthConfig {
     pub auth_url: Url,
     pub token_url: Url,
     pub redirect_uri: Url,
+    /// Scopes requested on every Anthropic OAuth authorization.
+    ///
+    /// Connecting always asks Anthropic for a 365-day access token, which it
+    /// only grants for inference-only scopes: `org:create_api_key`,
+    /// `user:sessions:claude_code`, and `user:mcp_servers` would each force a
+    /// shorter lifetime, and cc-lb uses none of them. If Anthropic still
+    /// refuses or shortens the grant, the connect flow keeps the credential
+    /// refreshable instead.
     #[serde(default)]
     pub scopes: Vec<String>,
-    /// Scopes requested when connecting in long-lived (365-day) mode.
-    #[serde(default = "default_long_lived_scopes")]
-    pub long_lived_scopes: Vec<String>,
 }
 
 impl Default for AnthropicOAuthConfig {
@@ -464,12 +459,7 @@ impl Default for AnthropicOAuthConfig {
                 .expect("valid url"),
             redirect_uri: Url::parse("https://console.anthropic.com/oauth/code/callback")
                 .expect("valid url"),
-            scopes: vec![
-                "org:create_api_key".to_owned(),
-                "user:profile".to_owned(),
-                "user:inference".to_owned(),
-            ],
-            long_lived_scopes: default_long_lived_scopes(),
+            scopes: vec!["user:profile".to_owned(), "user:inference".to_owned()],
         }
     }
 }

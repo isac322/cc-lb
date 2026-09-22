@@ -1161,23 +1161,12 @@ const CONFIG_FIELD_GUIDANCE: readonly {
     },
   },
   {
-    pattern: 'oauth.anthropic.long_lived_scopes',
-    guidance: {
-      description:
-        'Scopes requested when connecting an upstream in long-lived 365-day mode.',
-      recommendation:
-        'Keep to inference-only scopes; Anthropic refuses a 365-day expiry for Remote Control, connectors, or API-key scopes and the connect flow then falls back to a refreshing credential.',
-      impactDimensions: ['security', 'availability'],
-    },
-  },
-  {
     pattern: 'oauth.anthropic.scopes',
     guidance: {
-      description:
-        'OAuth scopes requested when authorizing Anthropic accounts.',
+      description: 'OAuth scopes requested on every Anthropic authorization.',
       recommendation:
-        'Request only the scopes upstream features need; extra scopes widen token access.',
-      impactDimensions: ['security'],
+        'The default inference-only set (user:profile, user:inference) is what lets Anthropic grant a year-long token; adding API-key, Remote Control, or connector scopes shortens the granted lifetime and forces the refreshing fallback.',
+      impactDimensions: ['security', 'availability'],
     },
   },
   {

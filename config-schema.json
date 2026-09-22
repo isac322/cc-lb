@@ -326,23 +326,13 @@
           "type": "string",
           "default": "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
         },
-        "long_lived_scopes": {
-          "description": "Scopes requested when connecting in long-lived (365-day) mode.",
-          "type": "array",
-          "default": [
-            "user:profile",
-            "user:inference"
-          ],
-          "items": {
-            "type": "string"
-          }
-        },
         "redirect_uri": {
           "type": "string",
           "format": "uri",
           "default": "https://console.anthropic.com/oauth/code/callback"
         },
         "scopes": {
+          "description": "Scopes requested on every Anthropic OAuth authorization.\n\nConnecting always asks Anthropic for a 365-day access token, which it\nonly grants for inference-only scopes: `org:create_api_key`,\n`user:sessions:claude_code`, and `user:mcp_servers` would each force a\nshorter lifetime, and cc-lb uses none of them. If Anthropic still\nrefuses or shortens the grant, the connect flow keeps the credential\nrefreshable instead.",
           "type": "array",
           "default": [],
           "items": {

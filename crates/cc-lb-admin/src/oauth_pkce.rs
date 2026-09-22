@@ -22,7 +22,7 @@ use url::Url;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum OAuthTokenMode {
-    /// 365-day access token, never refreshed. Default for new connections.
+    /// 365-day access token, never refreshed. Requested on every connect.
     #[default]
     #[serde(rename = "long_lived_365d")]
     LongLived365d,
@@ -65,7 +65,6 @@ pub(crate) struct PkceHandshake {
     scopes: Vec<String>,
     redirect_uri: Url,
     verifier: SecretString,
-    pub(crate) mode: OAuthTokenMode,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,8 +75,6 @@ pub(crate) struct PkceHandshakeState {
     scopes: Vec<String>,
     redirect_uri: Url,
     verifier: String,
-    #[serde(default)]
-    pub(crate) mode: OAuthTokenMode,
 }
 
 impl PkceHandshake {
@@ -89,7 +86,6 @@ impl PkceHandshake {
             scopes: self.scopes,
             redirect_uri: self.redirect_uri,
             verifier: self.verifier.expose_secret().to_owned(),
-            mode: self.mode,
         }
     }
 }
@@ -103,7 +99,6 @@ impl PkceHandshakeState {
             scopes: self.scopes,
             redirect_uri: self.redirect_uri,
             verifier: SecretString::new(self.verifier.into_boxed_str()),
-            mode: self.mode,
         })
     }
 }
@@ -118,7 +113,6 @@ impl fmt::Debug for PkceHandshake {
             .field("scopes", &self.scopes)
             .field("redirect_uri", &self.redirect_uri)
             .field("verifier", &"[REDACTED]")
-            .field("mode", &self.mode)
             .finish()
     }
 }
@@ -129,7 +123,6 @@ pub(crate) fn start_pkce_flow(
     token_endpoint: TokenUrl,
     scopes: Vec<String>,
     redirect_uri: Url,
-    mode: OAuthTokenMode,
 ) -> PkceHandshake {
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let authorize_url = authorize_url(
@@ -153,7 +146,6 @@ pub(crate) fn start_pkce_flow(
         scopes,
         redirect_uri,
         verifier: SecretString::new(verifier.into_secret().into_boxed_str()),
-        mode,
     }
 }
 
@@ -167,8 +159,6 @@ pub(crate) struct PkceExchangeOutcome {
     /// Which fallback path produced a refreshing credential, if any.
     pub(crate) fallback_reason: Option<LongLivedFallbackReason>,
     /// Access-token lifetime the server actually granted, in seconds.
-    /// `None` for the plain refreshing path, which never asked for a
-    /// custom lifetime.
     pub(crate) granted_expires_in_secs: Option<u64>,
 }
 
@@ -180,6 +170,8 @@ pub(crate) async fn complete_pkce_flow(
     clock: &dyn Clock,
 ) -> Result<PkceExchangeOutcome, OAuthTokenError> {
     let now_epoch_secs = cc_lb_clock::unix_secs(clock.now());
+    // Every connect requests the 365-day grant; Anthropic may reject the
+    // custom `expires_in` outright or silently clamp the granted lifetime.
     let first = exchange_pkce_code(
         http.as_ref(),
         handshake.token_endpoint.url(),
@@ -189,24 +181,12 @@ pub(crate) async fn complete_pkce_flow(
         &handshake.verifier,
         &handshake.redirect_uri,
         now_epoch_secs,
-        match handshake.mode {
-            OAuthTokenMode::Refreshing => None,
-            OAuthTokenMode::LongLived365d => {
-                Some(cc_lb_config::LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS)
-            }
-        },
+        Some(cc_lb_config::LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS),
     )
     .await;
 
-    match (handshake.mode, first) {
-        (OAuthTokenMode::Refreshing, result) => Ok(PkceExchangeOutcome {
-            credentials: result?,
-            mode: OAuthTokenMode::Refreshing,
-            long_lived_fallback: false,
-            fallback_reason: None,
-            granted_expires_in_secs: None,
-        }),
-        (OAuthTokenMode::LongLived365d, Ok(credentials)) => {
+    match first {
+        Ok(credentials) => {
             // The granted lifetime comes from the token response, never from
             // the value we requested: Anthropic may silently clamp it.
             let granted_secs = credentials.expires_at.saturating_sub(now_epoch_secs);
@@ -232,7 +212,7 @@ pub(crate) async fn complete_pkce_flow(
                 })
             }
         }
-        (OAuthTokenMode::LongLived365d, Err(error)) => {
+        Err(error) => {
             if !is_long_lived_rejection(&error) {
                 return Err(error);
             }

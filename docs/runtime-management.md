@@ -201,13 +201,12 @@ curl -X POST http://localhost:8001/admin/v1/upstreams/<UPSTREAM_ID>/oauth/start 
   -d '{}'
 ```
 
-The request body accepts an optional `mode` field: `"long_lived_365d"` (the default) or `"refreshing"`. `POST /admin/v1/oauth/draft/start` accepts the same field. The response echoes the requested mode:
+The request body is an empty object; `POST /admin/v1/oauth/draft/start` takes the same body. Every start requests a 365-day long-lived credential — there is no mode to choose. The response returns the authorization URL and state token:
 
 ```json
 {
   "authorize_url": "https://provider.com/oauth/authorize?client_id=<CLIENT_ID>&state=<STATE_TOKEN>...",
-  "state_token": "<STATE_TOKEN>",
-  "mode": "long_lived_365d"
+  "state_token": "<STATE_TOKEN>"
 }
 ```
 
@@ -239,21 +238,19 @@ Response:
 }
 ```
 
-`mode` reports the credential mode actually negotiated. `long_lived_fallback` is `true` when a `long_lived_365d` request did not produce a long-lived credential and cc-lb stored a normal refreshing credential instead; `fallback_reason` says which of the two fallbacks occurred — `"rejected"` when the provider returned `400 invalid_request` for the custom expiry and cc-lb transparently retried the same authorization code without it, or `"clamped"` when the provider accepted the exchange but granted a materially shorter lifetime than requested. `granted_expires_in_secs` reports the access-token lifetime the token endpoint actually granted for a `long_lived_365d` request, and is `null` for a plain `refreshing` request. `POST /admin/v1/oauth/draft/complete` returns the same fields.
-
+`mode` reports the credential mode actually negotiated. `long_lived_fallback` is `true` when the long-lived request did not produce a long-lived credential and cc-lb stored a normal refreshing credential instead; `fallback_reason` says which of the two fallbacks occurred — `"rejected"` when the provider returned `400 invalid_request` for the custom expiry and cc-lb transparently retried the same authorization code without it, or `"clamped"` when the provider accepted the exchange but granted a materially shorter lifetime than requested. `granted_expires_in_secs` reports the access-token lifetime the token endpoint actually granted. `POST /admin/v1/oauth/draft/complete` returns the same fields.
 ### Credential Modes
 
-Anthropic OAuth credentials come in two modes:
+Every Anthropic OAuth connect requests a 365-day long-lived access token; there is no mode setting. cc-lb resolves the outcome itself and stores the credential in one of two modes:
 
-- **`long_lived_365d`** (default for new connections): requests a 365-day access token that is never refreshed. The grant is restricted to `user:profile` and `user:inference`; Remote Control (`user:sessions:claude_code`) and connectors (`user:mcp_servers`) are not available on a long-lived credential because Anthropic caps or forbids a custom `expires_in` for those scopes, and `org:create_api_key` is omitted for the same reason. The operator reauthorizes roughly once a year instead of roughly every 30 days.
-- **`refreshing`**: the classic 8-hour access token kept alive by the background and lazy refresh paths described below.
+- **`long_lived_365d`**: a long-lived access token that is never refreshed. The operator reauthorizes roughly once a year instead of roughly every 30 days.
+- **`refreshing`**: the classic 8-hour access token kept alive by the background and lazy refresh paths described below. cc-lb stores this mode when the token endpoint refuses the year-long `expires_in`, or accepts it but grants a lifetime that does not outlive the 30-day refresh-token window.
 
-The scope set used for a long-lived request is configurable via `oauth.anthropic.long_lived_scopes` in `cc-lb.toml` (default `["user:profile", "user:inference"]`).
+Every authorization requests `user:profile` and `user:inference`, the only scopes cc-lb uses. That inference-only set is what lets Anthropic grant a year-long token; scopes such as `org:create_api_key`, `user:sessions:claude_code` (Remote Control), or `user:mcp_servers` (connectors) would force a shorter granted lifetime, and cc-lb has no use for them. The scope list is configurable via `oauth.anthropic.scopes` in `cc-lb.toml` (default `["user:profile", "user:inference"]`).
 
-cc-lb always stores the access-token lifetime the token endpoint actually returned; the requested 365 days is never assumed or substituted. If Anthropic accepts the exchange but grants a materially shorter lifetime than requested — at or below the 30-day `LONG_LIVED_MIN_GRANT_SECS` threshold — cc-lb treats that as a refusal of long-lived mode and keeps the credential in `refreshing` mode, so the stored refresh token remains the renewal path and the upstream cannot silently expire with no way to renew. The threshold exists because Anthropic anchors refresh tokens to a 30-day window: a grant that does not outlive that window buys nothing over the refreshing flow while giving up the ability to renew. A grant longer than 30 days but shorter than the requested 365 stays long-lived and is stored verbatim. A clamp is logged with a warning so a silent Anthropic policy change is visible in operations, not only in the one-off API response.
+cc-lb always stores the access-token lifetime the token endpoint actually returned; the requested 365 days is never assumed or substituted. If Anthropic accepts the exchange but grants a materially shorter lifetime than requested — at or below the 30-day `LONG_LIVED_MIN_GRANT_SECS` threshold — cc-lb treats that as a refusal of the long-lived grant and keeps the credential in `refreshing` mode, so the stored refresh token remains the renewal path and the upstream cannot silently expire with no way to renew. The threshold exists because Anthropic anchors refresh tokens to a 30-day window: a grant that does not outlive that window buys nothing over the refreshing flow while giving up the ability to renew. A grant longer than 30 days but shorter than the requested 365 stays long-lived and is stored verbatim. A clamp is logged with a warning so a silent Anthropic policy change is visible in operations, not only in the one-off API response.
 
-Long-lived credentials still store the refresh token returned with the grant, but cc-lb never uses it: redeeming it would make Anthropic revoke the 365-day access token and hand back a short-lived one. A 401 on a long-lived credential is terminal and means reauthorization is required; cc-lb does not attempt a rotation as a recovery path. To convert an upstream back to refreshing mode, re-run the connect/reconnect flow and pick the standard refreshing token option.
-
+Long-lived credentials still store the refresh token returned with the grant, but cc-lb never uses it: redeeming it would make Anthropic revoke the 365-day access token and hand back a short-lived one. A 401 on a long-lived credential is terminal and means reauthorization is required; cc-lb does not attempt a rotation as a recovery path. Re-running the connect/reconnect flow requests a long-lived credential again, so an upstream returns to `refreshing` mode only when the provider refuses or clamps the grant.
 ### Refresh Semantics
 
 The system runs a background sweeper every 60 seconds to refresh tokens that expire within 300 seconds. To prevent multiple replicas from refreshing the same token, the replica must claim a 90-second database lease.
@@ -377,11 +374,11 @@ This section lists common failures and their diagnosis steps.
 
 - **Symptom**: Requests through an OAuth upstream fail with expired token errors, and no refresh is attempted.
 - **Diagnosis**: Check `GET /admin/v1/upstreams/{id}/oauth/status`; a `long_lived_365d` credential reports `can_refresh: false`. A 401 on a long-lived credential is terminal — cc-lb never rotates it.
-- **Workaround**: Re-run the connect/reconnect flow to reauthorize. To switch the upstream back to automatic refresh, pick the standard refreshing token option during reconnect.
+- **Workaround**: Re-run the connect/reconnect flow to reauthorize. The flow requests a long-lived credential again; the upstream ends up in `refreshing` mode only when the provider refuses or clamps the grant.
 
-### Upstream connected in long-lived mode reports `refreshing`
+### Upstream reports `refreshing` instead of a long-lived credential
 
-- **Symptom**: An OAuth upstream was connected with the `long_lived_365d` mode, but `GET /admin/v1/upstreams/{id}/oauth/status` and the completion response report `mode: "refreshing"`.
+- **Symptom**: An OAuth upstream was connected expecting a `long_lived_365d` credential, but `GET /admin/v1/upstreams/{id}/oauth/status` and the completion response report `mode: "refreshing"`.
 - **Diagnosis**: Anthropic accepted the exchange but granted a materially shorter lifetime than the requested 365 days — at or below the 30-day threshold — so cc-lb treated the grant as a refusal of long-lived mode and kept the credential refreshable. The completion response reports this as `long_lived_fallback: true` with `fallback_reason: "clamped"`, and a clamp is logged with a warning. This is the safe outcome: the stored refresh token remains the renewal path, so the upstream cannot silently expire with no way to renew. An outright `400 invalid_request` rejection produces the same `refreshing` result with `fallback_reason: "rejected"`.
 - **Workaround**: None required — the credential renews normally. To attempt long-lived mode again, re-run the connect/reconnect flow; if Anthropic still clamps the grant, the provider does not currently honour the custom expiry for this account.
 
