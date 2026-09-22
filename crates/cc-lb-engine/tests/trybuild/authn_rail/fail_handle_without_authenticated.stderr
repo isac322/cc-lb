@@ -1,0 +1,15 @@
+error[E0061]: this method takes 2 arguments but 1 argument was supplied
+ --> tests/trybuild/authn_rail/fail_handle_without_authenticated.rs:4:31
+  |
+4 |     let _response = lifecycle.handle(req).await;
+  |                               ^^^^^^----- argument #2 of type `&Authenticated` is missing
+  |
+note: method defined here
+ --> src/lifecycle.rs
+  |
+  |     pub async fn handle(
+  |                  ^^^^^^
+help: provide the argument
+  |
+4 |     let _response = lifecycle.handle(req, /* &Authenticated */).await;
+  |                                         ++++++++++++++++++++++

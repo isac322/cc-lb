@@ -1,3 +1,24 @@
+## Authentication comes first
+
+An unauthenticated request gets nothing. Not a buffered body, not a JSON parse, not a routing decision, not a quota reservation, not a durable row. An unauthenticated caller must not be able to cost this process more than reading its headers and writing back a rejection. This is the one ordering rule in the request path that is never traded away for convenience.
+
+The rule is enforced by the type system, not by review. `crates/cc-lb-engine/src/authn_rail.rs` defines `Authenticated`, a proof that authentication already succeeded. It has private fields and therefore no public constructor; `authenticate_first` is the only way to obtain one, and it takes headers only — there is no parameter through which a body could be passed. Every API that does work on a request's behalf takes `&Authenticated`, so violating the order is a compile error rather than a review comment.
+
+Rules:
+- Authenticate before touching the request body. Buffering, parsing, routing, upstream selection, signing, quota reservation, and durable writes all happen after authentication, never before.
+- Obtain `Authenticated` from `authenticate_first` (or `Lifecycle::authenticate`, which wraps it). Never reconstruct, forge, transmute, or clone a proof into existence by another route.
+- Keep `&Authenticated` on every function that consumes a request body or dispatches upstream. Removing that parameter to make code compile defeats the entire mechanism.
+- Authentication *failure* is not "before authentication". It reached the credential check and was rejected, so it persists exactly one `request_events_v1` row. Only requests that never reach the check — 404 router fallback, 405, drain 503, pre-handler timeout — stay silent.
+- The intentionally public endpoints are exactly `/healthz`, `/readyz`, `/admin/health`, `/admin/health/state`, the two admin SPA asset routes, and the metrics listener. Adding to that list requires explicit user approval.
+- Keep every admin route behind the `require_admin_auth` `route_layer` in `crates/cc-lb-admin/src/routes.rs`. Never register an admin route outside that layer.
+
+Forbidden shortcuts:
+- Dropping the `&Authenticated` parameter from a body-reading or dispatching function.
+- Deleting, weakening, or `#[ignore]`-ing the compile-fail proofs in `crates/cc-lb-engine/tests/trybuild/authn_rail/`.
+- Adding a public or `#[doc(hidden)]` constructor for `Authenticated` so a caller can skip authentication.
+- Moving a body read, JSON parse, or upstream call above the authentication call "just to measure it" or "just for this one path".
+- Registering a new unauthenticated route on the proxy or admin listener without explicit user approval.
+
 ## SQLite Storage Backend
 
 SQLite is now the default storage backend for local development and CI. The historical redb backend has been removed entirely.

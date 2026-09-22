@@ -743,8 +743,13 @@ fn queue_full_case(mode: RequestMode) {
             Arc::new(FixtureDialect),
             Arc::new(CannedDispatch::new(upstream_response(mode))),
         );
+        let request = cacheable_request(mode);
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("test request authenticates");
         let response = lifecycle
-            .handle(cacheable_request(mode))
+            .handle(request, &auth)
             .await
             .expect("lifecycle handles request");
         assert_eq!(response.status(), StatusCode::OK);
@@ -802,8 +807,13 @@ fn queue_closed_case(mode: RequestMode) {
             Arc::new(FixtureDialect),
             Arc::new(CannedDispatch::new(upstream_response(mode))),
         );
+        let request = cacheable_request(mode);
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("test request authenticates");
         let response = lifecycle
-            .handle(cacheable_request(mode))
+            .handle(request, &auth)
             .await
             .expect("lifecycle handles request");
         assert_eq!(response.status(), StatusCode::OK);
@@ -849,8 +859,13 @@ fn write_failure_case(mode: RequestMode) {
             Arc::new(FixtureDialect),
             Arc::new(CannedDispatch::new(upstream_response(mode))),
         );
+        let request = cacheable_request(mode);
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("test request authenticates");
         let response = lifecycle
-            .handle(cacheable_request(mode))
+            .handle(request, &auth)
             .await
             .expect("lifecycle handles request");
         assert_eq!(response.status(), StatusCode::OK);
@@ -930,8 +945,13 @@ fn early_commit_case(dialect: Arc<dyn UpstreamDialect>) {
                 release_frames.clone(),
             ))),
         );
+        let request = cacheable_request(RequestMode::Streamed);
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("test request authenticates");
         let response = lifecycle
-            .handle(cacheable_request(RequestMode::Streamed))
+            .handle(request, &auth)
             .await
             .expect("lifecycle handles request");
         assert_eq!(response.status(), StatusCode::OK);
@@ -1042,7 +1062,14 @@ fn completed_responses_preserve_thread_usage_diagnostics() {
                 "x-hermes-session-id",
                 HeaderValue::from_static("lineage-session"),
             );
-            let response = lifecycle.handle(request).await.expect("request succeeds");
+            let auth = lifecycle
+                .authenticate(request.headers())
+                .await
+                .expect("test request authenticates");
+            let response = lifecycle
+                .handle(request, &auth)
+                .await
+                .expect("request succeeds");
             assert_eq!(response.status(), StatusCode::OK);
             response
                 .into_body()

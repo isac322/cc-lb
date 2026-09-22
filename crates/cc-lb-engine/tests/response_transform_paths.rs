@@ -12,7 +12,7 @@ use cc_lb_engine::api_keys::principal_view::{
     RouterPipelineCache, ShapePluginCache,
 };
 use cc_lb_engine::{
-    DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
+    DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, ProxyError,
     UpstreamDispatch,
 };
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
@@ -48,10 +48,10 @@ async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
     let transform = Arc::new(BufferedToolNameTransform::default());
     let lifecycle = lifecycle_with_transforms(Some(transform.clone()), None, buffered_dispatch());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles buffered response");
     let (_status, headers, body) = collect_body(response).await;
@@ -93,10 +93,10 @@ async fn buffered_transform_rewrites_upstream_error_response() {
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles buffered error response");
     let (status, _headers, body) = collect_body(response).await;
@@ -121,10 +121,10 @@ async fn buffered_unchanged_preserves_compressed_upstream_bytes() {
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles compressed buffered response");
     let (_status, headers, body) = collect_body(response).await;
@@ -157,10 +157,10 @@ async fn buffered_header_only_transform_preserves_compressed_upstream_bytes() {
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles compressed header-only transform");
     let (_status, headers, body) = collect_body(response).await;
@@ -199,10 +199,10 @@ async fn buffered_unsupported_encoding_skips_transform() {
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles unsupported encoded response");
     let (_status, headers, body) = collect_body(response).await;
@@ -220,10 +220,10 @@ async fn buffered_transform_failure_fails_open_to_original_response() {
     let transform = Arc::new(FailingBufferedTransform);
     let lifecycle = lifecycle_with_transforms(Some(transform), None, buffered_dispatch());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles buffered response");
     let (_status, headers, body) = collect_body(response).await;
@@ -250,10 +250,10 @@ async fn buffered_transform_failure_is_observed_as_error() -> Result<(), Box<dyn
     let lifecycle = lifecycle_with_transforms(Some(transform), None, buffered_dispatch())
         .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles buffered response");
     let (status, _headers, body) = collect_body(response).await;
@@ -290,10 +290,10 @@ async fn buffered_http_error_preserves_canonical_error_over_transform_failure()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles buffered upstream error");
     let (status, _headers, output) = collect_body(response).await;
@@ -354,10 +354,10 @@ async fn buffered_accounting_uses_pre_transform_usage() {
         recording.clone(),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles buffered response");
     let (_status, _headers, body) = collect_body(response).await;
@@ -381,10 +381,10 @@ async fn sse_transform_rewrites_content_block_start_event() {
     let transform = Arc::new(SseToolNameTransform::default());
     let lifecycle = lifecycle_with_transforms(None, Some(transform.clone()), sse_dispatch(false));
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles SSE response by upstream content-type");
     let (_status, _headers, body) = collect_body(response).await;
@@ -418,10 +418,10 @@ async fn sse_transform_receives_sanitized_response_headers() {
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles SSE response");
     let (_status, _headers, _body) = collect_body(response).await;
@@ -453,10 +453,10 @@ async fn sse_unchanged_transform_preserves_raw_event_bytes() {
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles unchanged SSE response");
     let (_status, _headers, output) = collect_body(response).await;
@@ -485,10 +485,10 @@ async fn sse_transform_decodes_gzip_and_emits_identity_sse() {
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles gzip SSE response");
     let (_status, headers, body) = collect_body(response).await;
@@ -539,10 +539,10 @@ async fn gzip_content_length_passthrough_preserves_upstream_bytes_and_headers() 
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles chunked gzip passthrough");
     let (_status, headers, output) = collect_body(response).await;
@@ -585,10 +585,10 @@ async fn content_length_client_stops_after_declared_gzip_bytes_without_terminal_
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles content-length gzip passthrough");
     assert_eq!(
@@ -652,10 +652,10 @@ async fn content_length_malformed_sse_delivers_raw_bytes_before_error_telemetry(
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles malformed content-length SSE");
     let mut body = response.into_body();
@@ -722,10 +722,10 @@ async fn truncated_gzip_passthrough_is_recorded_as_upstream_decode_error()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles truncated gzip passthrough");
     let (_status, headers, output) = collect_body(response).await;
@@ -774,10 +774,10 @@ async fn sse_transform_decodes_brotli_and_emits_identity_sse() {
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles brotli SSE response");
     let (_status, headers, body) = collect_body(response).await;
@@ -819,10 +819,10 @@ async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles truncated gzip SSE response");
     let (_status, headers, body) = collect_body(response).await;
@@ -893,10 +893,10 @@ async fn truncated_gzip_before_transformed_output_emits_decode_error()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles truncated gzip before transform output");
     let (_status, headers, output) = collect_body(response).await;
@@ -941,10 +941,10 @@ async fn gzip_transform_failure_preserves_transform_error() -> Result<(), Box<dy
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles gzip transform failure");
     let (_status, _headers, body) = collect_body(response).await;
@@ -985,10 +985,10 @@ async fn raw_deflate_passthrough_decode_failure_remains_success()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles raw deflate passthrough");
     let (_status, headers, output) = collect_body(response).await;
@@ -1039,10 +1039,10 @@ async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles non-SSE gzip response");
     let (_status, headers, output) = collect_body(response).await;
@@ -1076,10 +1076,10 @@ async fn sse_unsupported_encoding_skips_transform_and_raw_passes_through() {
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles unsupported encoded SSE response");
     let (_status, headers, output) = collect_body(response).await;
@@ -1097,10 +1097,10 @@ async fn sse_transform_failure_before_output_fails_open_raw() {
     let transform = Arc::new(AlwaysFailingSseTransform);
     let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(false));
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles SSE response");
     let (_status, _headers, body) = collect_body(response).await;
@@ -1122,10 +1122,10 @@ async fn sse_unterminated_final_event_is_upstream_framing_error() {
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles unterminated identity SSE event");
     let (_status, _headers, output) = collect_body(response).await;
@@ -1157,10 +1157,10 @@ async fn sse_unterminated_passthrough_is_upstream_framing_error()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles unterminated passthrough SSE event");
     let (_status, _headers, output) = collect_body(response).await;
@@ -1202,10 +1202,10 @@ async fn sse_trailing_line_terminators_remain_success() -> Result<(), Box<dyn st
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles trailing SSE line terminators");
     let (_status, _headers, output) = collect_body(response).await;
@@ -1237,10 +1237,10 @@ async fn sse_body_failure_after_parser_budget_starts_separate_error_frame() {
         config,
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles body failure after parser budget");
     let (_status, _headers, output) = collect_body(response).await;
@@ -1270,10 +1270,10 @@ async fn sse_gzip_unterminated_final_event_emits_upstream_framing_error() {
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles unterminated compressed SSE event");
     let (_status, headers, output) = collect_body(response).await;
@@ -1309,10 +1309,10 @@ async fn sse_unterminated_http_error_preserves_upstream_status()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles unterminated HTTP error SSE event");
     let (status, _headers, output) = collect_body(response).await;
@@ -1352,10 +1352,10 @@ async fn sse_unterminated_http_error_passthrough_preserves_upstream_body()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles unterminated HTTP error passthrough");
     let (status, _headers, output) = collect_body(response).await;
@@ -1404,10 +1404,10 @@ async fn sse_gzip_transform_failure_preserves_http_error_status()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles transform failure on HTTP error response");
     let (status, _headers, output) = collect_body(response).await;
@@ -1445,10 +1445,10 @@ async fn assert_gzip_transform_failure_before_output(transform: Arc<dyn SseEvent
         }),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles compressed SSE transform failure");
     let (_status, headers, output) = collect_body(response).await;
@@ -1465,10 +1465,10 @@ async fn sse_transform_invalid_event_name_fails_open_without_injection() {
     let transform = Arc::new(InvalidEventNameSseTransform);
     let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(false));
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles SSE response");
     let (_status, _headers, body) = collect_body(response).await;
@@ -1483,10 +1483,10 @@ async fn sse_transform_failure_after_transformed_output_terminates_classified() 
     let transform = Arc::new(FailAfterFirstSseTransform::default());
     let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(false));
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles SSE response");
     let (_status, _headers, body) = collect_body(response).await;
@@ -1520,10 +1520,10 @@ async fn sse_decompression_budget_before_output_emits_transform_error() {
         config,
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles over-budget gzip SSE response");
     let (_status, headers, output) = collect_body(response).await;
@@ -1558,10 +1558,10 @@ async fn sse_gzip_incomplete_event_budget_before_output_emits_transform_error() 
         config,
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles compressed incomplete SSE event");
     let (_status, headers, output) = collect_body(response).await;
@@ -1597,10 +1597,10 @@ async fn sse_brotli_incomplete_event_budget_never_replays_compressed_bytes() {
         config,
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles brotli incomplete SSE event");
     let (_status, headers, output) = collect_body(response).await;
@@ -1634,10 +1634,10 @@ async fn sse_incomplete_event_budget_after_output_uses_existing_error_frame() {
         config,
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":true}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles over-budget incomplete SSE event");
     let (_status, _headers, output) = collect_body(response).await;
@@ -1660,10 +1660,10 @@ async fn sse_accounting_uses_pre_transform_usage() {
         recording.clone(),
     );
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
         .await
         .expect("lifecycle handles SSE response");
     let (_status, _headers, body) = collect_body(response).await;
@@ -1685,6 +1685,17 @@ async fn sse_accounting_uses_pre_transform_usage() {
         panic!("expected request-finished observation");
     };
     assert_eq!((input_tokens, output_tokens), (Some(7), Some(11)));
+}
+
+async fn handle_authenticated(
+    lifecycle: &Lifecycle,
+    request: http::Request<Bytes>,
+) -> Result<Response<Body>, ProxyError> {
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    lifecycle.handle(request, &auth).await
 }
 
 fn lifecycle_with_transforms(

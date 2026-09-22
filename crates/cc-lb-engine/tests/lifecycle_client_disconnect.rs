@@ -64,7 +64,12 @@ async fn unpolled_stream_body_drop_persists_one_client_closed_final()
         &test_bus,
     );
 
-    let response = lifecycle.handle(stream_request()).await?;
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
     drop(response.into_body());
 
     assert_error_terminal(&mut lifecycle_rx, 499, "client_closed_request").await;
@@ -86,8 +91,13 @@ async fn stream_body_drop_after_normal_frame_is_client_closed() {
         &test_bus,
     );
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let mut body = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request")
         .into_body();
@@ -108,8 +118,13 @@ async fn stream_body_drop_while_awaiting_upstream_is_client_closed() {
         &test_bus,
     );
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let mut body = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request")
         .into_body();
@@ -133,8 +148,13 @@ async fn normal_stream_eof_remains_success() {
         &test_bus,
     );
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let _ = response.into_body().collect().await.expect("body collects");
@@ -159,10 +179,15 @@ async fn aborted_sse_with_only_below_threshold_cache_candidates_emits_no_observa
         Some(sink.clone() as Arc<dyn PromptCacheObservationSinkLike>),
     );
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-sonnet-4-5-20250929","stream":true,"system":[{"type":"text","text":"brief system","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-sonnet-4-5-20250929","stream":true,"system":[{"type":"text","text":"brief system","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles aborted prompt-cache stream");
     assert_eq!(response.status(), StatusCode::OK);
@@ -247,8 +272,13 @@ async fn message_start_publishes_cache_observation_before_final_frames() {
         Some(sink.clone() as Arc<dyn PromptCacheObservationSinkLike>),
     );
 
+    let request = cacheable_stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let mut body = lifecycle
-        .handle(cacheable_stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request")
         .into_body();
@@ -307,8 +337,13 @@ async fn transformed_sse_message_start_publishes_cache_observation_before_final_
         sink.clone(),
     );
 
+    let request = cacheable_stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let mut body = lifecycle
-        .handle(cacheable_stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request")
         .into_body();
@@ -359,8 +394,13 @@ async fn first_frame_arrives_while_observation_store_write_is_blocked() {
         Some(sink.clone() as Arc<dyn PromptCacheObservationSinkLike>),
     );
 
+    let request = cacheable_stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let mut body = lifecycle
-        .handle(cacheable_stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request")
         .into_body();
@@ -417,8 +457,13 @@ async fn disconnect_after_message_start_keeps_single_committed_observation() {
         Some(sink.clone() as Arc<dyn PromptCacheObservationSinkLike>),
     );
 
+    let request = cacheable_stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let mut body = lifecycle
-        .handle(cacheable_stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request")
         .into_body();
@@ -468,8 +513,13 @@ async fn disconnect_before_message_start_publishes_no_observation() {
         &test_bus,
         Some(sink.clone() as Arc<dyn PromptCacheObservationSinkLike>),
     );
+    let request = cacheable_stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let mut body = lifecycle
-        .handle(cacheable_stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request")
         .into_body();
@@ -497,8 +547,13 @@ async fn streaming_http_error_body_drop_remains_upstream_error() {
         &test_bus,
     );
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     drop(response.into_body());
@@ -520,8 +575,13 @@ async fn canonical_sse_error_then_drop_remains_upstream_stream_error() {
         &test_bus,
     );
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let mut body = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request")
         .into_body();
@@ -537,8 +597,13 @@ async fn fatal_transform_frame_then_drop_remains_transform_error() {
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let lifecycle = transform_lifecycle(sse_dispatch(StatusCode::OK, transform_body()), &test_bus);
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let mut body = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request")
         .into_body();
@@ -571,8 +636,13 @@ async fn upstream_frame_error_is_recorded_as_upstream_stream_error() {
         &test_bus,
     );
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let body = response
@@ -649,8 +719,13 @@ async fn terminal_body_error_case(
     };
     let lifecycle = lifecycle(dispatcher, &test_bus);
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles persistent upstream body error");
     let (parts, body) = response.into_parts();
@@ -701,8 +776,13 @@ async fn upstream_frame_error_after_partial_event_starts_separate_error_frame() 
         &test_bus,
     );
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles partial upstream event");
     let body = response
@@ -738,8 +818,13 @@ async fn upstream_frame_error_preserves_http_error_classification()
         &test_bus,
     );
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let _ = response
@@ -793,8 +878,13 @@ async fn streaming_refusal_persists_distinguishable_row() -> Result<(), Box<dyn 
     };
     let lifecycle = lifecycle(sse_dispatch(StatusCode::OK, refusal_sse_body()), &test_bus);
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle relays a refusal stream");
     assert_eq!(response.status(), StatusCode::OK);
@@ -846,8 +936,13 @@ async fn provider_error_before_body_failure_preserves_provider_error()
         &test_bus,
     );
 
+    let request = stream_request();
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(stream_request())
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles provider error before body failure");
     let body = response
@@ -891,6 +986,7 @@ async fn generic_observer_drop_remains_terminal_dropped() {
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let observer = LifecycleContext::new("generic-drop".to_owned(), test_bus.bus_arc(), &clock);
+    observer.mark_authn_reached();
 
     drop(observer);
 
@@ -911,10 +1007,15 @@ async fn non_stream_body_drop_remains_success() {
         &test_bus,
     );
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     drop(response.into_body());
@@ -927,6 +1028,7 @@ async fn timeout_ordering(timeout_first: bool) {
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
     let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
     let observer = LifecycleContext::new("timeout-ordering".to_owned(), test_bus.bus_arc(), &clock);
+    observer.mark_authn_reached();
     let waiting = Arc::new(tokio::sync::Notify::new());
     let lifecycle = lifecycle(
         sse_dispatch(StatusCode::OK, pending_sse(waiting)),
@@ -934,8 +1036,12 @@ async fn timeout_ordering(timeout_first: bool) {
     );
     let mut request = stream_request();
     request.extensions_mut().insert(observer.clone());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let body = lifecycle
-        .handle(request)
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request")
         .into_body();

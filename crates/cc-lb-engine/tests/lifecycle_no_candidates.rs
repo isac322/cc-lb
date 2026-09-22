@@ -21,10 +21,15 @@ async fn no_candidates_are_passed_to_router_and_return_route_error() {
         state.clone(),
     );
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, body) = collect_body(response).await;

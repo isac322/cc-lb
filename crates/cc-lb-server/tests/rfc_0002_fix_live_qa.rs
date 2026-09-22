@@ -330,18 +330,18 @@ async fn live_qa_2_oauth_usage_writes_one_classified_row() {
 }
 
 // ============================================================================
-// LIVE-3 · 404 and 405 fallbacks each write one classified row — H1
+// LIVE-3 · 404 and 405 fallbacks must not write a row — H1
 // ============================================================================
 #[tokio::test]
-async fn live_qa_3_unknown_route_and_method_not_allowed_write_one_classified_row() {
+async fn live_qa_3_unknown_route_and_method_not_allowed_do_not_write_row() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
 
-    // This test previously asserted the 404 fallback produced NO row — see
-    // LIVE-2 for why that changed. The fallback now attaches a
-    // TerminalClassification marker and the lifecycle middleware terminates
-    // it as route_not_found.
+    // Both fallbacks answer before `Lifecycle::handle` reaches the
+    // authentication attempt, so neither may persist a row (RFC-0002
+    // amendment 2026-09-22). A valid credential on the request changes
+    // nothing: the fallback never inspects it.
     let not_found = common::proxy_get(
         server.proxy_addr,
         "/definitely/not-a-route",
@@ -351,14 +351,12 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_write_one_classified_row
     .expect("404 GET");
     assert_eq!(not_found.status, 404);
 
-    wait_for_row_count(&pool, "1=1", baseline + 1).await;
+    sleep(Duration::from_millis(300)).await;
+    let after_404 = count_request_events(&pool, "1=1").await;
     assert_eq!(
-        count_request_events(&pool, "error_code = 'route_not_found'").await,
-        1,
-        "404 fallback must produce exactly one route_not_found row"
+        after_404, baseline,
+        "404 fallback must not produce a request_events row"
     );
-    let payload = fetch_payload_json(&pool, "error_code = 'route_not_found'").await;
-    assert_eq!(json_i64(&payload, "status"), 404);
 
     // POST to a GET-only route hits the method-not-allowed fallback.
     let not_allowed = common::http_post(
@@ -372,14 +370,12 @@ async fn live_qa_3_unknown_route_and_method_not_allowed_write_one_classified_row
     .expect("405 POST");
     assert_eq!(not_allowed.status, 405);
 
-    wait_for_row_count(&pool, "1=1", baseline + 2).await;
+    sleep(Duration::from_millis(300)).await;
+    let after_405 = count_request_events(&pool, "1=1").await;
     assert_eq!(
-        count_request_events(&pool, "error_code = 'method_not_allowed'").await,
-        1,
-        "405 fallback must produce exactly one method_not_allowed row"
+        after_405, baseline,
+        "405 fallback must not produce a request_events row"
     );
-    let payload = fetch_payload_json(&pool, "error_code = 'method_not_allowed'").await;
-    assert_eq!(json_i64(&payload, "status"), 405);
 
     let dropped = count_request_events(&pool, "error_code = 'terminal_dropped'").await;
     assert_eq!(dropped, 0, "terminal_dropped rows must be zero");
@@ -1092,6 +1088,10 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
     .expect("post invalid json");
 
     assert_eq!(response.status, 400);
+
+    // Authentication now runs before the body is parsed, so an invalid body
+    // from a credentialed caller is an attributable post-auth failure: it
+    // records one classified row and stops before routing.
     wait_for_row_count(&pool, "1=1", baseline + 1).await;
     let payload = fetch_payload_json(&pool, "1=1").await;
     assert_eq!(json_i64(&payload, "status"), 400);
@@ -1103,36 +1103,20 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
         1,
     )
     .await;
-    assert_eq!(
-        diff_counter(
-            &pre,
-            &post,
-            r#"cc_lb_lifecycle_events_total{kind="parse_completed"}"#
-        ),
-        1
-    );
-    assert_eq!(
-        diff_counter(
-            &pre,
-            &post,
-            r#"cc_lb_lifecycle_events_total{kind="request_terminated"}"#
-        ),
-        1
-    );
-    assert_eq!(
-        diff_counter(
-            &pre,
-            &post,
-            r#"cc_lb_lifecycle_events_total{kind="route_completed"}"#
-        ),
-        0
-    );
-    assert_eq!(
-        diff_counter(
-            &pre,
-            &post,
-            r#"cc_lb_lifecycle_events_total{kind="upstream_attempt"}"#
-        ),
-        0
-    );
+    for (kind, expected) in [
+        ("parse_completed", 1),
+        ("request_terminated", 1),
+        ("route_completed", 0),
+        ("upstream_attempt", 0),
+    ] {
+        assert_eq!(
+            diff_counter(
+                &pre,
+                &post,
+                &format!(r#"cc_lb_lifecycle_events_total{{kind="{kind}"}}"#)
+            ),
+            expected,
+            "invalid json must yield {expected} {kind} lifecycle event(s)"
+        );
+    }
 }

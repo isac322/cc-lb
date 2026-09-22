@@ -48,10 +48,15 @@ async fn unauthorized_refresh_observes_only_final_attempt() {
     )
     .with_event_bus(test_bus.bus_arc());
 
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, _body) = collect_body(response).await;

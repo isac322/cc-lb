@@ -40,10 +40,15 @@ async fn non_stream_429_preserves_client_status_and_body_bytes() {
     );
 
     // When
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"stream":false}"#,
-        )))
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles request");
     let (status, _headers, downstream_body) = collect_body(response).await;
@@ -268,7 +273,12 @@ async fn observe_429(
     } else {
         Bytes::from_static(br#"{"model":"claude-test","messages":[],"stream":false}"#)
     };
-    let response = lifecycle.handle(messages_request(request_body)).await?;
+    let request = messages_request(request_body);
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
     let (status, _headers, body) = collect_body(response).await;
     let event = timeout(Duration::from_secs(1), async {
         loop {

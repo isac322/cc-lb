@@ -212,19 +212,22 @@ async fn handle_keepalive_response(
     )
     .with_cache_keepalive_enqueuer(enqueuer);
 
+    let request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/messages")
+        .header("x-api-key", managed_api_key())
+        .header("x-session-id", "session-1")
+        .header("anthropic-version", "2023-06-01")
+        .body(Bytes::from_static(
+            br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}]}"#,
+        ))
+        .expect("test request builds");
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
     lifecycle
-        .handle(
-            http::Request::builder()
-                .method(http::Method::POST)
-                .uri("/v1/messages")
-                .header("x-api-key", managed_api_key())
-                .header("x-session-id", "session-1")
-                .header("anthropic-version", "2023-06-01")
-                .body(Bytes::from_static(
-                    br#"{"model":"claude-test","max_tokens":32,"system":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral","ttl":"5m"}}],"messages":[{"role":"user","content":"hello"}]}"#,
-                ))
-                .expect("test request builds"),
-        )
+        .handle(request, &auth)
         .await
         .expect("lifecycle handles keepalive response")
 }

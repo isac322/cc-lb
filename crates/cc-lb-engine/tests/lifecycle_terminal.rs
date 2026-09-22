@@ -144,11 +144,14 @@ async fn signer_build_failure_preserves_request_setup_timings()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"max_tokens":16}"#,
-        )))
-        .await?;
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"max_tokens":16}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 
     let events = wait_for_events(storage.as_ref(), 1).await?;
@@ -182,10 +185,15 @@ async fn eof_tail_error_yield_preserves_terminal_timings_on_drop()
         }),
     )
     .with_event_bus(cancelled_bus.bus_arc());
+    let cancelled_request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","stream":true,"messages":[],"max_tokens":16}"#,
+    ));
+    let cancelled_auth = cancelled_lifecycle
+        .authenticate(cancelled_request.headers())
+        .await
+        .expect("test request authenticates");
     let cancelled_response = cancelled_lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","stream":true,"messages":[],"max_tokens":16}"#,
-        )))
+        .handle(cancelled_request, &cancelled_auth)
         .await?;
     let mut cancelled_body = cancelled_response.into_body();
     let original_frame = cancelled_body
@@ -254,10 +262,15 @@ async fn eof_tail_error_yield_preserves_terminal_timings_on_drop()
         }),
     )
     .with_event_bus(completed_bus.bus_arc());
+    let completed_request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","stream":true,"messages":[],"max_tokens":16}"#,
+    ));
+    let completed_auth = completed_lifecycle
+        .authenticate(completed_request.headers())
+        .await
+        .expect("test request authenticates");
     let completed_response = completed_lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","stream":true,"messages":[],"max_tokens":16}"#,
-        )))
+        .handle(completed_request, &completed_auth)
         .await?;
     let completed_body = completed_response
         .into_body()
@@ -419,11 +432,14 @@ async fn random_sequence(
 }
 
 async fn send_message(lifecycle: &Lifecycle) -> Result<(), Box<dyn std::error::Error>> {
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"max_tokens":16}"#,
-        )))
-        .await?;
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"max_tokens":16}"#,
+    ));
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
     let (status, _headers, _body) = collect_body(response).await;
     assert_eq!(status, StatusCode::OK);
     Ok(())

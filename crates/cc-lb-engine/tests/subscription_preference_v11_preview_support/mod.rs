@@ -89,9 +89,15 @@ impl PreviewFixture {
 
     pub async fn handle_model(&self, model: &str) -> StatusCode {
         let body = format!(r#"{{"model":"{model}","messages":[]}}"#);
+        let request = messages_request(Bytes::from(body));
+        let auth = self
+            .lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("test request authenticates");
         let response = self
             .lifecycle
-            .handle(messages_request(Bytes::from(body)))
+            .handle(request, &auth)
             .await
             .expect("handle succeeds");
         collect_body(response).await.0

@@ -47,9 +47,12 @@ async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
     )
     .with_event_bus(test_bus.bus_arc());
 
-    let response = lifecycle
-        .handle(messages_request(original_body.clone()))
-        .await?;
+    let request = messages_request(original_body.clone());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle.handle(request, &auth).await?;
     assert_eq!(response.status(), StatusCode::OK);
     response.into_body().collect().await?;
 

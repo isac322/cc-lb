@@ -6,7 +6,9 @@
 //!
 //! 1. `LifecycleContext::new(...)` is constructed at the top of
 //!    `lifecycle::handle` (before authn). It generates a fresh `event_id`
-//!    (UUID v7) used as the DB row uniqueness key.
+//!    (UUID v7) used as the DB row uniqueness key. Until the request
+//!    reaches authentication, emitted events stay buffered inside the
+//!    context and nothing is published to the bus.
 //! 2. As each request phase completes, the lifecycle code calls
 //!    `emit_lifecycle` with a `LifecycleEvent::*` variant. The event-driven
 //!    subscribers (assembler, pricing, cache observation, etc.) rebuild the
@@ -16,6 +18,13 @@
 //!    `LifecycleEvent::RequestTerminated`.
 //! 4. On abnormal termination (Drop) the guard runs the same emit path with
 //!    `reason = TerminationReason::Dropped`.
+//!
+//! [`LifecycleContext::mark_authn_reached`] runs immediately before the
+//! authentication attempt and replays the buffer in order. Terminating
+//! earlier (router fallback, drain rejection, body-read failure,
+//! pre-handler timeout) discards it and suppresses `RequestTerminated`,
+//! so a request that never reaches authentication produces no request-log
+//! row.
 //!
 //! # Race safety
 //!
@@ -245,6 +254,11 @@ pub(crate) mod error_codes {
 /// [`LifecycleContext::terminate`] exactly once. Responses without the marker
 /// are left to the `Drop` backstop, which is what keeps streaming proxy
 /// responses unfinalized until their body finishes.
+///
+/// The marker only classifies the terminal outcome. A request-log row is
+/// still produced only when the request reached authentication
+/// ([`LifecycleContext::mark_authn_reached`]); a marked response on a
+/// pre-authentication request terminates it without emitting anything.
 #[derive(Clone, Copy, Debug)]
 pub struct TerminalClassification {
     /// Client-visible status recorded as the terminal outcome.
@@ -298,6 +312,10 @@ pub struct LifecycleContext {
 struct Inner {
     event_id: String,
     bus: Option<Arc<dyn RequestEventBus>>,
+    /// Set once the request reaches the authentication attempt. Until then
+    /// lifecycle events are buffered in `TerminalState::pending_events`
+    /// instead of reaching the bus.
+    authn_reached: AtomicBool,
     started_unix_ms: u64,
     started: Instant,
     state: Mutex<TerminalState>,
@@ -328,6 +346,10 @@ struct TerminalState {
     finalize_ms: Option<u64>,
     observe_finished_emitted: bool,
     request_started_emitted: bool,
+    /// Lifecycle events emitted before the request reached authentication.
+    /// Flushed to the bus in order by `mark_authn_reached`, or discarded if
+    /// the request terminates first.
+    pending_events: Vec<LifecycleEvent>,
 }
 
 impl LifecycleContext {
@@ -358,6 +380,7 @@ impl LifecycleContext {
                     ..TerminalState::default()
                 }),
                 finalized: AtomicBool::new(false),
+                authn_reached: AtomicBool::new(false),
             }),
         }
     }
@@ -493,6 +516,28 @@ impl LifecycleContext {
         self.inner.emit_terminated(None);
     }
 
+    /// Marks that this request reached the authentication attempt. Until this
+    /// is called, no lifecycle event reaches the bus: pre-auth events are
+    /// buffered and replayed here, or discarded if the request terminates
+    /// first.
+    ///
+    /// The state lock is held across the flag flip and the drain so a
+    /// concurrent `emit_or_buffer` waiting on that lock cannot publish a later
+    /// event ahead of the buffered earlier ones.
+    pub fn mark_authn_reached(&self) {
+        let Some(bus) = self.inner.bus.as_ref() else {
+            self.inner.authn_reached.store(true, Ordering::Release);
+            return;
+        };
+        let mut state = self.lock_state();
+        if self.inner.authn_reached.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        for event in std::mem::take(&mut state.pending_events) {
+            bus.publish_lifecycle(event);
+        }
+    }
+
     /// The single terminal entry point. Emits `RequestStarted` if it has not
     /// been emitted, records the classification, and publishes
     /// `RequestTerminated`. Idempotent: a later call is a no-op once
@@ -531,9 +576,6 @@ impl LifecycleContext {
     /// response. Idempotent: a second call is a no-op, so terminal paths may
     /// emit it unconditionally to cover requests the handler never saw.
     pub(crate) fn emit_request_started(&self, stream: bool) {
-        let Some(bus) = self.inner.bus.as_ref() else {
-            return;
-        };
         let (request_id, event_kind) = {
             let mut state = self.lock_state();
             if state.request_started_emitted {
@@ -542,7 +584,7 @@ impl LifecycleContext {
             state.request_started_emitted = true;
             (state.request_id.clone(), state.event_kind)
         };
-        bus.publish_lifecycle(LifecycleEvent::RequestStarted {
+        self.inner.emit_or_buffer(LifecycleEvent::RequestStarted {
             event_id: self.inner.event_id.clone(),
             request_id,
             ts_ms: self.inner.started_unix_ms,
@@ -559,9 +601,7 @@ impl LifecycleContext {
     /// This is fire-and-forget: overflow drops the event and increments the
     /// bus-side drop counter.
     pub(crate) fn emit_lifecycle(&self, event: LifecycleEvent) {
-        if let Some(bus) = self.inner.bus.as_ref() {
-            bus.publish_lifecycle(event);
-        }
+        self.inner.emit_or_buffer(event);
     }
 
     pub(crate) fn emit_authentication_completed(
@@ -569,13 +609,12 @@ impl LifecycleContext {
         principal_id: String,
         principal_kind: PrincipalKindLite,
     ) {
-        if let Some(bus) = self.inner.bus.as_ref() {
-            bus.publish_lifecycle(LifecycleEvent::AuthenticationCompleted {
+        self.inner
+            .emit_or_buffer(LifecycleEvent::AuthenticationCompleted {
                 event_id: self.inner.event_id.clone(),
                 principal_id,
                 principal_kind,
             });
-        }
     }
 
     pub fn set_observability_hooks(&self, hooks: &[Arc<dyn ObservabilityHook>]) {
@@ -587,14 +626,13 @@ impl LifecycleContext {
     }
 
     pub(crate) fn emit_provider_error(&self, code: &str, message: &str, source: &str) {
-        if let Some(bus) = self.inner.bus.as_ref() {
-            bus.publish_lifecycle(LifecycleEvent::ProviderErrorObserved {
+        self.inner
+            .emit_or_buffer(LifecycleEvent::ProviderErrorObserved {
                 event_id: self.inner.event_id.clone(),
                 code: code.to_owned(),
                 message: message.to_owned(),
                 source: source.to_owned(),
             });
-        }
         let hooks = self
             .inner
             .observability_hooks
@@ -671,11 +709,43 @@ fn terminal_accounted_ms(state: &TerminalState) -> u64 {
 }
 
 impl Inner {
-    fn emit_terminated(&self, fallback_error_code: Option<&'static str>) {
-        let state = self
+    /// Publish a lifecycle event on the bus, or buffer it until the request
+    /// reaches authentication. Without a bus the event is dropped, matching
+    /// the previous fire-and-forget behavior.
+    fn emit_or_buffer(&self, event: LifecycleEvent) {
+        let Some(bus) = self.bus.as_ref() else {
+            return;
+        };
+        if self.authn_reached.load(Ordering::Acquire) {
+            bus.publish_lifecycle(event);
+            return;
+        }
+        let mut state = self
             .state
             .lock()
             .expect("terminal observer state mutex poisoned");
+        // Re-check under the lock: `mark_authn_reached` may have flipped the
+        // flag and drained the buffer between the load and the lock.
+        if self.authn_reached.load(Ordering::Acquire) {
+            drop(state);
+            bus.publish_lifecycle(event);
+        } else {
+            state.pending_events.push(event);
+        }
+    }
+
+    fn emit_terminated(&self, fallback_error_code: Option<&'static str>) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("terminal observer state mutex poisoned");
+        // A request that never reached authentication leaves no request-log
+        // row: drop any buffered pre-auth events and skip `RequestTerminated`.
+        // Observability hooks below still run; only bus emission is gated.
+        // When authentication was reached, any events still buffered are
+        // drained here so they always precede `RequestTerminated` on the bus.
+        let publish_terminated = self.authn_reached.load(Ordering::Acquire);
+        let pending = std::mem::take(&mut state.pending_events);
         let effective_error_code = state.error_code.or(fallback_error_code);
         let reason = match effective_error_code {
             None => TerminationReason::Success,
@@ -693,7 +763,10 @@ impl Inner {
             }
             span.record("cc_lb.request.unaccounted_ms", unaccounted_ms);
         }
-        if let Some(bus) = self.bus.as_ref() {
+        if publish_terminated && let Some(bus) = self.bus.as_ref() {
+            for event in pending {
+                bus.publish_lifecycle(event);
+            }
             bus.publish_lifecycle(LifecycleEvent::RequestTerminated {
                 event_id: self.event_id.clone(),
                 reason,
@@ -868,6 +941,7 @@ mod tests {
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
 
         observer.emit_request_started(false);
 
@@ -892,6 +966,7 @@ mod tests {
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         let expected_event_id = observer.event_id().to_owned();
         observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
         observer.finish();
@@ -916,6 +991,7 @@ mod tests {
                 bus.clone() as Arc<dyn RequestEventBus>,
                 &clock,
             );
+            observer.mark_authn_reached();
             let _ = observer.event_id();
         }
         let (_id, reason, _status) =
@@ -935,6 +1011,7 @@ mod tests {
                     bus.clone() as Arc<dyn RequestEventBus>,
                     &clock,
                 );
+                observer.mark_authn_reached();
                 observer.set_event_kind(cc_lb_request_log::RequestEventKind::Messages);
                 if finish_explicitly {
                     observer.finish();
@@ -964,6 +1041,7 @@ mod tests {
                     bus.clone() as Arc<dyn RequestEventBus>,
                     &clock,
                 );
+                observer.mark_authn_reached();
                 observer.set_setup_timings(RequestSetupTimings {
                     json_parse_ms: Some(0.125),
                     cache_structure_ms: Some(0.25),
@@ -1005,6 +1083,7 @@ mod tests {
                 bus.clone() as Arc<dyn RequestEventBus>,
                 &clock,
             );
+            observer.mark_authn_reached();
             observer.set_terminal(StatusCode::OK, error_codes::UPSTREAM_4XX);
             observer.finish();
         }
@@ -1029,6 +1108,7 @@ mod tests {
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         let clone1 = observer.clone();
         let clone2 = observer.clone();
         drop(observer);
@@ -1051,6 +1131,7 @@ mod tests {
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         observer.set_io_timings(RequestIoTimings {
             request_body_first_chunk_ms: Some(0.125),
             request_body_receive_ms: Some(3.5),
@@ -1123,6 +1204,7 @@ mod tests {
             bus as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
 
         observer.set_attempt_timings(Some(0), Some(2), Some(3));
         observer.set_attempt_timings(None, None, None);
@@ -1180,6 +1262,7 @@ mod tests {
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         let (span, recorded) = request_span();
         observer.set_request_span(span);
         observer.set_request_body_timing(u64::MAX, None);
@@ -1215,6 +1298,7 @@ mod tests {
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         observer.set_request_body_timing(12, None);
         observer.terminate(StatusCode::BAD_REQUEST, Some(error_codes::BODY_READ_FAILED));
 
@@ -1257,6 +1341,7 @@ mod tests {
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         observer.set_request_body_timing(3, None);
         observer.terminate_body_too_large(1_024);
 
@@ -1296,6 +1381,7 @@ mod tests {
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         observer.set_event_kind(cc_lb_request_log::RequestEventKind::CountTokens);
         observer.terminate_body_too_large(1_024);
 
@@ -1314,6 +1400,7 @@ mod tests {
             bus.clone() as Arc<dyn RequestEventBus>,
             &clock,
         );
+        observer.mark_authn_reached();
         observer.set_event_kind(cc_lb_request_log::RequestEventKind::Files);
         observer.terminate(StatusCode::BAD_REQUEST, Some(error_codes::BODY_READ_FAILED));
 
@@ -1552,5 +1639,57 @@ mod tests {
             result.is_ok(),
             "hook panic must not escape LifecycleContext drop"
         );
+    }
+
+    #[tokio::test]
+    async fn pre_authn_termination_publishes_no_events() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_pre_authn".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+
+        observer.terminate(StatusCode::NOT_FOUND, Some(error_codes::ROUTE_NOT_FOUND));
+        assert!(
+            rx.try_recv().is_err(),
+            "pre-authn termination must not publish any lifecycle event"
+        );
+
+        drop(observer);
+        assert!(
+            rx.try_recv().is_err(),
+            "dropping a pre-authn context must not publish any lifecycle event"
+        );
+    }
+
+    #[tokio::test]
+    async fn authn_reached_replays_buffered_events_in_order() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_authn_replay".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+
+        observer.emit_request_started(true);
+        assert!(
+            rx.try_recv().is_err(),
+            "pre-authn events must be buffered, not published"
+        );
+
+        observer.mark_authn_reached();
+        assert!(matches!(
+            rx.recv().await.expect("buffered request started delivered"),
+            LifecycleEvent::RequestStarted { .. }
+        ));
+
+        observer.finish();
+        let (_id, _reason, _status) =
+            expect_terminated(rx.recv().await.expect("terminal event delivered"));
     }
 }
