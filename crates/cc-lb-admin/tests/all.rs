@@ -88,6 +88,8 @@ mod subscription_quota_slim_parity;
 mod subscription_quotas;
 #[path = "upstream_health.rs"]
 mod upstream_health;
+#[path = "v1_limit_resets.rs"]
+mod v1_limit_resets;
 #[path = "v1_oauth.rs"]
 mod v1_oauth;
 #[path = "v1_plugins.rs"]

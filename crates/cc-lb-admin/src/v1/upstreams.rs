@@ -104,6 +104,14 @@ pub fn router() -> Router<AdminState> {
             post(fire_now_upstream_warmup),
         )
         .route(
+            "/admin/v1/upstreams/{id}/limit-resets",
+            get(super::limit_resets::get_upstream_limit_resets),
+        )
+        .route(
+            "/admin/v1/upstreams/{id}/limit-resets/claim",
+            post(super::limit_resets::claim_upstream_limit_reset),
+        )
+        .route(
             "/admin/v1/upstreams/{id}/warmup",
             get(super::upstream_warmup::get_upstream_warmup),
         )
@@ -207,24 +215,126 @@ struct FireNowNotFiredResponse {
 }
 
 #[derive(Debug)]
-enum UpstreamError {
+pub(crate) enum UpstreamError {
     StorageUnavailable,
     NotFound,
-    BadRequest { error: &'static str, detail: String },
+    BadRequest {
+        error: &'static str,
+        detail: String,
+    },
     MissingIfMatch,
-    StaleRevision { current_revision: u64 },
-    InvalidInput { field: String, reason: String },
-    NameConflict { name: String, existing_id: Uuid },
-    Conflict { detail: String },
+    StaleRevision {
+        current_revision: u64,
+    },
+    InvalidInput {
+        field: String,
+        reason: String,
+    },
+    NameConflict {
+        name: String,
+        existing_id: Uuid,
+    },
+    Conflict {
+        detail: String,
+    },
     NotOauthUpstream,
     CredentialDecrypt,
     RefreshUnavailable,
-    RefreshFailed { detail: String },
+    RefreshFailed {
+        detail: String,
+    },
     MetadataRefreshTimeout,
     WarmupUnavailable,
-    Internal { detail: String },
+    /// Claim body account/org no longer matches the live OAuth identity.
+    StaleIdentity,
+    /// Provider rejected the claim with a 4xx — a definite non-consumption.
+    ProviderRejected {
+        status: u16,
+    },
+    /// Provider answered a non-success status on a read path.
+    ProviderError {
+        status: u16,
+    },
+    /// The request never reached the provider.
+    ProviderUnreachable {
+        detail: String,
+    },
+    /// Provider answered 2xx with a body outside the contract.
+    ProviderMalformed {
+        detail: String,
+    },
+    ProviderTimeout,
+    /// The claim may have been applied but the outcome never arrived.
+    ClaimOutcomeUnknown,
+    Internal {
+        detail: String,
+    },
     AuditWriteFailed,
     Storage(StorageError),
+}
+
+impl UpstreamError {
+    /// HTTP status this error maps to; mirrors `into_response` so callers
+    /// (e.g. audit recording) can log the outcome without consuming it.
+    pub(crate) fn status(&self) -> StatusCode {
+        match self {
+            Self::StorageUnavailable => StatusCode::NOT_IMPLEMENTED,
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::BadRequest { .. } | Self::InvalidInput { .. } => StatusCode::BAD_REQUEST,
+            Self::MissingIfMatch => StatusCode::PRECONDITION_REQUIRED,
+            Self::StaleRevision { .. }
+            | Self::NameConflict { .. }
+            | Self::Conflict { .. }
+            | Self::StaleIdentity => StatusCode::CONFLICT,
+            Self::NotOauthUpstream => StatusCode::BAD_REQUEST,
+            Self::CredentialDecrypt => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::RefreshUnavailable | Self::WarmupUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::RefreshFailed { .. }
+            | Self::ProviderError { .. }
+            | Self::ProviderUnreachable { .. }
+            | Self::ProviderMalformed { .. } => StatusCode::BAD_GATEWAY,
+            Self::MetadataRefreshTimeout | Self::ProviderTimeout | Self::ClaimOutcomeUnknown => {
+                StatusCode::GATEWAY_TIMEOUT
+            }
+            Self::ProviderRejected { status } => {
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_REQUEST)
+            }
+            Self::Internal { .. } | Self::AuditWriteFailed | Self::Storage(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        }
+    }
+
+    /// Stable machine-readable error code matching the `"error"` field in
+    /// `into_response`; safe for audit payloads (no provider/user content).
+    pub(crate) fn error_code(&self) -> &'static str {
+        match self {
+            Self::StorageUnavailable => "storage_unavailable",
+            Self::NotFound => "upstream_not_found",
+            Self::BadRequest { error, .. } => error,
+            Self::MissingIfMatch => "if_match_required",
+            Self::StaleRevision { .. } => "stale_revision",
+            Self::InvalidInput { .. } => "invalid_input",
+            Self::NameConflict { .. } => "upstream_name_conflict",
+            Self::Conflict { .. } => "conflict",
+            Self::NotOauthUpstream => "not_oauth_upstream",
+            Self::CredentialDecrypt => "oauth_credential_decrypt_failed",
+            Self::RefreshUnavailable => "oauth_refresh_unavailable",
+            Self::RefreshFailed { .. } => "oauth_refresh_failed",
+            Self::MetadataRefreshTimeout => "metadata_refresh_timeout",
+            Self::WarmupUnavailable => "warmup_unavailable",
+            Self::StaleIdentity => "stale_identity",
+            Self::ProviderRejected { .. } => "provider_rejected",
+            Self::ProviderError { .. } => "provider_error",
+            Self::ProviderUnreachable { .. } => "provider_unreachable",
+            Self::ProviderMalformed { .. } => "provider_malformed_response",
+            Self::ProviderTimeout => "provider_timeout",
+            Self::ClaimOutcomeUnknown => "claim_outcome_unknown",
+            Self::Internal { .. } => "internal_error",
+            Self::AuditWriteFailed => "audit_write_failed",
+            Self::Storage(_) => "storage_error",
+        }
+    }
 }
 
 impl IntoResponse for UpstreamError {
@@ -303,6 +413,47 @@ impl IntoResponse for UpstreamError {
             Self::WarmupUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "error": "warmup_unavailable" })),
+            )
+                .into_response(),
+            Self::StaleIdentity => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "stale_identity",
+                    "detail": "submitted account_id/organization_id no longer match the live OAuth identity; refetch limit-resets"
+                })),
+            )
+                .into_response(),
+            Self::ProviderRejected { status } => (
+                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
+                Json(json!({ "error": "provider_rejected", "provider_status": status })),
+            )
+                .into_response(),
+            Self::ProviderError { status } => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "provider_error", "provider_status": status })),
+            )
+                .into_response(),
+            Self::ProviderUnreachable { detail } => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "provider_unreachable", "detail": detail })),
+            )
+                .into_response(),
+            Self::ProviderMalformed { detail } => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "provider_malformed_response", "detail": detail })),
+            )
+                .into_response(),
+            Self::ProviderTimeout => (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({ "error": "provider_timeout" })),
+            )
+                .into_response(),
+            Self::ClaimOutcomeUnknown => (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({
+                    "error": "claim_outcome_unknown",
+                    "detail": "the claim may have been applied but the outcome never arrived; recheck limit-resets before retrying"
+                })),
             )
                 .into_response(),
             Self::Internal { detail } => (
@@ -1139,7 +1290,7 @@ async fn record_warmup_attempt(
     Ok(warmup_port.record_attempt(input).await)
 }
 
-fn upstream_base_url(upstream: &UpstreamRecord) -> Result<Url, UpstreamError> {
+pub(super) fn upstream_base_url(upstream: &UpstreamRecord) -> Result<Url, UpstreamError> {
     match upstream.base_url.clone() {
         Some(base_url) => Ok(base_url),
         None => Url::parse(DEFAULT_ANTHROPIC_BASE_URL)
@@ -1523,7 +1674,7 @@ fn storage(state: &AdminState) -> Result<&dyn Storage, UpstreamError> {
         .ok_or(UpstreamError::StorageUnavailable)
 }
 
-fn storage_arc(state: &AdminState) -> Result<Arc<dyn Storage>, UpstreamError> {
+pub(super) fn storage_arc(state: &AdminState) -> Result<Arc<dyn Storage>, UpstreamError> {
     state
         .storage
         .clone()
@@ -1551,7 +1702,7 @@ async fn subscription_metadata_response(
     })
 }
 
-async fn fresh_enough_access_token(
+pub(super) async fn fresh_enough_access_token(
     state: &AdminState,
     storage: Arc<dyn Storage>,
     upstream: &UpstreamRecord,
@@ -1591,7 +1742,7 @@ async fn fresh_enough_access_token(
     Ok(decrypt_oauth_bundle(state, &upstream)?.access_token)
 }
 
-fn decrypt_oauth_bundle(
+pub(super) fn decrypt_oauth_bundle(
     state: &AdminState,
     upstream: &UpstreamRecord,
 ) -> Result<OAuthTokenBundle, UpstreamError> {
@@ -1603,7 +1754,7 @@ fn decrypt_oauth_bundle(
         .map_err(|_| UpstreamError::CredentialDecrypt)
 }
 
-async fn metadata_user_agent(storage: &dyn Storage) -> Result<String, UpstreamError> {
+pub(super) async fn metadata_user_agent(storage: &dyn Storage) -> Result<String, UpstreamError> {
     let version = storage
         .get_compatibility_kv(CLAUDE_CODE_STABLE_VERSION_KEY)
         .await?
