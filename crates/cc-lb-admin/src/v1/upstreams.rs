@@ -311,7 +311,7 @@ impl UpstreamError {
         match self {
             Self::StorageUnavailable => "storage_unavailable",
             Self::NotFound => "upstream_not_found",
-            Self::BadRequest { error, .. } => *error,
+            Self::BadRequest { error, .. } => error,
             Self::MissingIfMatch => "if_match_required",
             Self::StaleRevision { .. } => "stale_revision",
             Self::InvalidInput { .. } => "invalid_input",

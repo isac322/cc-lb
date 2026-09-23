@@ -254,6 +254,19 @@ pub async fn fetch_cedar_ember_status(
     Ok(envelope.cedar_ember)
 }
 
+/// Borrowed identifiers for a single claim dispatch. Carries no credentials;
+/// the access token stays a separate argument.
+#[derive(Debug, Clone, Copy)]
+pub struct CedarEmberClaimRequest<'a> {
+    /// Organization UUID; interpolated into the `reset_rate_limits` path.
+    pub org_uuid: &'a str,
+    /// The caller's chosen grant — forwarded verbatim, never substituted
+    /// with `next_grant_id`.
+    pub grant_id: &'a str,
+    /// Client-generated idempotency key forwarded to the provider.
+    pub request_id: &'a str,
+}
+
 /// Dispatches the claim exactly once. `grant_id` is the caller's choice —
 /// forwarded verbatim, never substituted with `next_grant_id`.
 pub async fn claim_cedar_ember_reset(
@@ -261,11 +274,14 @@ pub async fn claim_cedar_ember_reset(
     base_url: &Url,
     access_token: &str,
     user_agent: &str,
-    org_uuid: &str,
-    grant_id: &str,
-    request_id: &str,
+    request: CedarEmberClaimRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<CedarEmberClaimResult, CedarEmberError> {
+    let CedarEmberClaimRequest {
+        org_uuid,
+        grant_id,
+        request_id,
+    } = request;
     let url = join_url(
         base_url,
         &format!("{RESET_RATE_LIMITS_PATH_PREFIX}{org_uuid}{RESET_RATE_LIMITS_PATH_SUFFIX}"),

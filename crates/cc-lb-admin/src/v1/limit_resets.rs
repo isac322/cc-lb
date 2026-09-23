@@ -17,8 +17,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use cc_lb_control::anthropic_metadata::{
-    CedarEmberClaimOutcome, CedarEmberError, CedarEmberStatus, claim_cedar_ember_reset,
-    fetch_cedar_ember_status, fetch_oauth_profile_at, is_valid_grant_id, make_metadata_http_client,
+    CedarEmberClaimOutcome, CedarEmberClaimRequest, CedarEmberError, CedarEmberStatus,
+    claim_cedar_ember_reset, fetch_cedar_ember_status, fetch_oauth_profile_at, is_valid_grant_id,
+    make_metadata_http_client,
 };
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
@@ -222,9 +223,11 @@ async fn claim_limit_reset_inner(
         &base_url,
         &access_token,
         &user_agent,
-        &organization_id,
-        &body.grant_id,
-        &body.request_id,
+        CedarEmberClaimRequest {
+            org_uuid: &organization_id,
+            grant_id: &body.grant_id,
+            request_id: &body.request_id,
+        },
         &cancel,
     )
     .await
