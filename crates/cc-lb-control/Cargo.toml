@@ -44,6 +44,7 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 tokio-util.workspace = true
 tracing.workspace = true
 ulid = "3"
+url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

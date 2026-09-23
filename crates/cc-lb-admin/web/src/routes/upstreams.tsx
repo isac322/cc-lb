@@ -57,7 +57,9 @@ import {
   buildQuotaChartData,
   type ChartMarker,
 } from '../components/upstreams/buildQuotaChartData';
+import { SidebarCouponNudge } from '../components/upstreams/CouponNudge';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
+import { LimitResetAction } from '../components/upstreams/LimitResetAction';
 import { OAuthReconnectNotice } from '../components/upstreams/OAuthReconnectNotice';
 import { QuotaObservedAt } from '../components/upstreams/QuotaObservedAt';
 import {
@@ -413,6 +415,12 @@ function UpstreamsPage() {
                           </div>
                         );
                       })}
+                      <SidebarCouponNudge
+                        upstream={u}
+                        windows={
+                          quotaLatest.isError ? [] : (latest?.windows ?? [])
+                        }
+                      />
                     </div>
                   ) : (
                     <div className="flex min-h-3 items-center gap-2 text-[10px] font-mono text-text-faint">
@@ -591,7 +599,7 @@ function UpstreamDetailLoadingShell() {
       </div>
 
       <div className="flex-1 space-y-6 overflow-y-auto p-4 pb-8 md:p-6 md:pb-12">
-        <Section title="Subscription Quota">
+        <Section>
           <Card>
             <CardHeader
               title="Quota History"
@@ -1344,10 +1352,16 @@ function DetailView({
                   {togglePendingLabel}
                 </span>
               ) : null}
-              <Badge tone="mono">{upstream.kind}</Badge>
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            <LimitResetAction
+              key={upstream.id}
+              upstream={upstream}
+              quotaWindows={
+                quotaLatest.isError ? [] : (selectedLatest?.windows ?? [])
+              }
+            />
             <Button
               size="sm"
               variant="danger"
@@ -1462,7 +1476,7 @@ function DetailView({
         ) : null}
 
         {isOauth && (
-          <Section title="Subscription Quota">
+          <Section>
             <Card>
               <CardHeader
                 title="Quota History"
