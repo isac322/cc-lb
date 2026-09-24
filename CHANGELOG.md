@@ -4,10 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-25
+
+### Added
+
+- Anthropic OAuth upstreams now support Anthropic's subscription limit-reset coupons. The periodic quota poll collects coupon status in the same provider request as quota windows and extra usage, and `GET /admin/v1/upstreams/{id}/limit-resets` serves that stored snapshot without contacting the provider. A coupon is reported only while the snapshot is fresh and bound to the current credential and account; before the first observation or after a credential change, the API reports no coupon rather than a possibly-consumed one. ([#857](https://github.com/isac322/cc-lb/pull/857), [#858](https://github.com/isac322/cc-lb/pull/858))
+- The upstream detail page gains a "Reset quota" action, and the upstream list a coupon badge that highlights a coupon nearing expiry or a cleared window observed at its limit. The confirmation dialog lists each active coupon's remaining uses, the limits it clears, and its expiry, alongside provider blocking reasons and account cooldowns, and warns when the account is not at its limit; nothing is consumed until the operator confirms. Eligibility, cooldowns, and expiry are entirely provider-controlled — cc-lb caches the polled snapshot and invents no eligibility of its own.
+- Confirming re-verifies the live OAuth account and organization, then dispatches exactly one reset request. Claims are serialized per upstream across replicas, and a successful reset queues a fresh usage poll so quota and coupon state reconcile.
+- A claim is never retried, and an unknown outcome is never reported as failure: a timeout, cancellation, mid-flight transport failure, unreadable success body, or provider 5xx returns `claim_outcome_unknown` (504), because the provider may already have consumed the grant. A provider 4xx is a definite rejection and a connect failure means the request was never sent; only those are reported as definite outcomes. The dashboard keeps a "Reset result not confirmed" record until the operator dismisses it or the account changes, and each claim attempt is audited with its request ID. After an unknown outcome, check the account's usage (for example at claude.ai/settings/usage) before taking further action; nothing resubmits automatically.
+
 ### Changed
 
-- OAuth quota polling now collects reset-coupon status in the same provider request, preserving extra-usage data. Admin coupon reads use the stored observation instead of issuing separate profile and usage requests. Credential-bound identity and atomic claim fencing prevent stale observations from advertising consumed coupons.
-- Quota polling uses the stored Claude Code client version for usage and profile requests, so the provider reports eligible reset coupons instead of rejecting the client surface.
+- Quota polling now identifies itself with the stored Claude Code client version on usage and profile requests, so the provider reports eligible reset coupons instead of rejecting the client surface. ([#858](https://github.com/isac322/cc-lb/pull/858))
+- A claim interrupted before its outcome is recorded — cancelled, or its bookkeeping write lost — is reconciled by usage polling from a fresh provider observation; recovery never repeats the reset request.
+
+### Upgrade notes
+
+- Upgrading from 0.6.0 requires only a restart: no new configuration keys and no database migrations. Coupons appear after the next quota poll; until the first observation the dashboard reports no current coupon data.
 
 ## [0.6.0] - 2026-09-22
 
@@ -235,3 +248,6 @@ All notable changes to this project will be documented in this file.
 - Validation, preflight checks, and hot-reload behavior now operate on an all-or-nothing basis.
 - Admin `/status` JSON response now includes a `principals` map showing active overrides with redacted configuration hashes.
 - Backward compatibility is fully preserved: zero-principal-plugin configurations remain unchanged, producing a byte-identical observe stream.
+
+[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.7.0...HEAD
+[0.7.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.6.0...cc-lb-v0.7.0
