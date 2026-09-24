@@ -751,15 +751,31 @@ impl RouterPlugin for NoRouteRouter {
 /// `cedar_ember` snapshot. The OAuth identity is fetched exactly once per
 /// credential, and only because a coupon was observed. A later malformed
 /// block persists as a cleared snapshot and triggers no profile fetch.
+///
+/// Like the real provider, the loopback only exposes an eligible coupon to a
+/// recognised Claude Code client: any other user agent sees
+/// `eligible: false`. The client version comes from the compat-refreshed
+/// store, not the pinned fallback.
 #[tokio::test]
 async fn poll_usage_persists_quota_and_cedar_ember_from_one_response() {
     use axum::extract::Request as AxumRequest;
+    use cc_lb_control::anthropic_compat::{CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent};
     use cc_lb_control::anthropic_metadata::{
         CedarEmberIdentityRecord, CedarEmberPollRecord, cedar_ember_epoch_meta_key,
         cedar_ember_identity_meta_key, cedar_ember_meta_key,
     };
     use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
-    use cc_lb_storage_api::MetaStore;
+    use cc_lb_storage_api::{AnthropicCompatibilityKvStore, MetaStore};
+
+    const STORED_CLI_VERSION: &str = "2.1.999";
+    let cli_user_agent = claude_code_user_agent(STORED_CLI_VERSION);
+    fn is_cli_client(request: &AxumRequest, cli_user_agent: &str) -> bool {
+        request
+            .headers()
+            .get(http::header::USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            == Some(cli_user_agent)
+    }
 
     let requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let coupon = Arc::new(std::sync::Mutex::new(serde_json::json!({
@@ -771,18 +787,29 @@ async fn poll_usage_persists_quota_and_cedar_ember_from_one_response() {
     let usage_requests = requests.clone();
     let usage_coupon = coupon.clone();
     let profile_requests = requests.clone();
+    let usage_cli_user_agent = cli_user_agent.clone();
     let app = axum::Router::new()
         .route(
             "/api/oauth/usage",
             axum::routing::get(move |request: AxumRequest| {
                 let requests = usage_requests.clone();
                 let coupon = usage_coupon.clone();
+                let recognised = is_cli_client(&request, &usage_cli_user_agent);
                 async move {
                     requests
                         .lock()
                         .expect("requests lock")
                         .push(request.uri().to_string());
-                    let cedar_ember = coupon.lock().expect("coupon lock").clone();
+                    let cedar_ember = if recognised {
+                        coupon.lock().expect("coupon lock").clone()
+                    } else {
+                        serde_json::json!({
+                            "eligible": false,
+                            "ineligible_reason": "surface",
+                            "at_limit": true,
+                            "grants": []
+                        })
+                    };
                     axum::Json(serde_json::json!({
                         "five_hour": {"utilization": 95.0, "resets_at": "2026-09-24T20:00:00Z"},
                         "extra_usage": {"is_enabled": true, "monthly_limit": 30000, "used_credits": 1500},
@@ -840,6 +867,17 @@ async fn poll_usage_persists_quota_and_cedar_ember_from_one_response() {
         .put_meta_value(&cedar_ember_epoch_meta_key(upstream.id), &epoch.to_string())
         .await
         .expect("seed epoch");
+    // The daily compat refresh already stored a newer CLI version than the
+    // pinned fallback; the poll must present exactly that client.
+    AnthropicCompatibilityKvStore::put_compatibility_kv_value(
+        fixture.storage.as_ref(),
+        CLAUDE_CODE_STABLE_VERSION_KEY,
+        STORED_CLI_VERSION,
+        1_700_000_000,
+        None,
+    )
+    .await
+    .expect("seed stored cli version");
 
     async fn poll(fixture: &DispatchFixture, upstream_id: Uuid) {
         let observation = fixture
@@ -896,14 +934,10 @@ async fn poll_usage_persists_quota_and_cedar_ember_from_one_response() {
     assert_eq!(record.credential_fingerprint, fingerprint);
     assert_eq!(record.epoch, Some(epoch));
     assert_eq!(record.observed_at_unix_millis, 1_700_000_000_000);
-    assert_eq!(
-        record
-            .status
-            .expect("coupon status persisted")
-            .next_grant_id
-            .as_deref(),
-        Some("grant_01")
-    );
+    let status = record.status.expect("coupon status persisted");
+    assert!(status.eligible, "CLI client must see the eligible coupon");
+    assert_eq!(status.ineligible_reason, None);
+    assert_eq!(status.next_grant_id.as_deref(), Some("grant_01"));
     let identity_raw = fixture
         .storage
         .get_meta_value(&cedar_ember_identity_meta_key(upstream.id))

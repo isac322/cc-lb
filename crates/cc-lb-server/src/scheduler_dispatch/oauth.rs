@@ -11,7 +11,11 @@ use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{UpstreamRecord, UpstreamStore};
+use cc_lb_storage_api::{AnthropicCompatibilityKvStore, UpstreamRecord, UpstreamStore};
+
+use cc_lb_control::anthropic_compat::{
+    CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
+};
 
 use cc_lb_control::anthropic_metadata::{
     CEDAR_EMBER_FENCE_RECOVERY_AFTER_MILLIS, CedarEmberIdentityRecord, CedarEmberPollRecord,
@@ -187,13 +191,20 @@ impl SchedulerDispatch {
             return Ok(OAuthUsagePollObservation::Skip);
         }
         self.ensure_fresh_usage_token(&mut upstream).await?;
+        // The provider gates the `cedar_ember` coupon surface on a recognised
+        // Claude Code client, so both the usage GET and the one-time profile
+        // fetch present the same stored-version CLI user agent.
+        let user_agent = self.claude_code_user_agent().await?;
         // The invalidation epoch is captured before the provider request is
         // issued: a claim that lands mid-flight bumps the epoch, and the
         // snapshot this response produces is then unservable regardless of
         // write ordering or replica clock skew.
         let epoch = self.cedar_ember_epoch(upstream.id).await;
         let observed_at_unix_secs = unix_secs(self.clock.now());
-        let first_response = match self.fetch_usage_with_current_token(&upstream).await {
+        let first_response = match self
+            .fetch_usage_with_current_token(&upstream, &user_agent)
+            .await
+        {
             FetchOutcome::Response(response) => response,
             FetchOutcome::Network => {
                 return Ok(OAuthUsagePollObservation::NetworkFailure {
@@ -203,7 +214,10 @@ impl SchedulerDispatch {
         };
         let response = if first_response.status == http::StatusCode::UNAUTHORIZED {
             match self.force_refresh_usage_token(&mut upstream).await {
-                Ok(true) => match self.fetch_usage_with_current_token(&upstream).await {
+                Ok(true) => match self
+                    .fetch_usage_with_current_token(&upstream, &user_agent)
+                    .await
+                {
                     FetchOutcome::Response(retry_response) => retry_response,
                     FetchOutcome::Network => {
                         return Ok(OAuthUsagePollObservation::NetworkFailure {
@@ -250,7 +264,7 @@ impl SchedulerDispatch {
             )
             .await;
             if cedar_ember.is_some() {
-                self.ensure_cedar_ember_identity(&upstream, fingerprint)
+                self.ensure_cedar_ember_identity(&upstream, fingerprint, &user_agent)
                     .await;
             }
         }
@@ -360,6 +374,7 @@ impl SchedulerDispatch {
         &self,
         upstream: &UpstreamRecord,
         credential_fingerprint: u64,
+        user_agent: &str,
     ) {
         let upstream_id = upstream.id;
         let key = cedar_ember_identity_meta_key(upstream_id);
@@ -397,7 +412,7 @@ impl SchedulerDispatch {
             &client,
             &base_url,
             &bundle.access_token,
-            "cc-lb scheduler oauth usage poller",
+            user_agent,
             &self.cancel,
         )
         .await
@@ -434,7 +449,25 @@ impl SchedulerDispatch {
         }
     }
 
-    async fn fetch_usage_with_current_token(&self, upstream: &UpstreamRecord) -> FetchOutcome {
+    /// Mirrors the metadata-refresh runner: the daily compat-refreshed Claude
+    /// Code stable version, or the pinned fallback before the first refresh.
+    async fn claude_code_user_agent(&self) -> SchedulerResult<String> {
+        let version = AnthropicCompatibilityKvStore::get_compatibility_kv(
+            self.storage.as_ref(),
+            CLAUDE_CODE_STABLE_VERSION_KEY,
+        )
+        .await
+        .map_err(storage_scheduler_error)?
+        .map(|record| record.value)
+        .unwrap_or_else(|| CLAUDE_CODE_STABLE_VERSION_FALLBACK.to_owned());
+        Ok(claude_code_user_agent(&version))
+    }
+
+    async fn fetch_usage_with_current_token(
+        &self,
+        upstream: &UpstreamRecord,
+        user_agent: &str,
+    ) -> FetchOutcome {
         let bundle = match decrypt_bundle(upstream, self.aead.as_ref()) {
             Ok(bundle) => bundle,
             Err(error) => {
@@ -453,7 +486,7 @@ impl SchedulerDispatch {
             &self.http,
             &base_url,
             &bundle.access_token,
-            "cc-lb scheduler oauth usage poller",
+            user_agent,
             &self.cancel,
         )
         .await

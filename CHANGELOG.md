@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - OAuth quota polling now collects reset-coupon status in the same provider request, preserving extra-usage data. Admin coupon reads use the stored observation instead of issuing separate profile and usage requests. Credential-bound identity and atomic claim fencing prevent stale observations from advertising consumed coupons.
+- Quota polling uses the stored Claude Code client version for usage and profile requests, so the provider reports eligible reset coupons instead of rejecting the client surface.
 
 ## [0.6.0] - 2026-09-22
 
