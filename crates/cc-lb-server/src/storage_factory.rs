@@ -1,6 +1,59 @@
 //! Storage factory — the ONLY place in cc-lb-server that contains
 //! #[cfg(feature = "postgres")] blocks.
 
+#[cfg(all(test, feature = "postgres"))]
+mod pool_metrics_tests {
+    use super::record_postgres_pool_metrics;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use sqlx::postgres::PgPoolOptions;
+
+    fn assert_pool_samples(rendered: &str, size: u32, idle: u32) {
+        for (name, value) in [("size", size), ("idle", idle), ("in_use", size - idle)] {
+            assert!(
+                rendered.contains(&format!(
+                    "cc_lb_sqlx_pool_{name}{{store=\"postgres\"}} {value}"
+                )),
+                "missing {name}={value} in rendered metrics:\n{rendered}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_pool_metrics_track_live_connections() {
+        let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+            eprintln!("skipped: CI_POSTGRES_URL unset");
+            return;
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .min_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect isolated test pool");
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || record_postgres_pool_metrics(&pool));
+        assert_pool_samples(&handle.render(), pool.size(), pool.num_idle() as u32);
+
+        let connection = pool.acquire().await.expect("acquire connection");
+        let mut second_connection = pool.acquire().await.expect("acquire second connection");
+        sqlx::query("SELECT 1")
+            .execute(&mut *second_connection)
+            .await
+            .expect("execute independent query");
+        metrics::with_local_recorder(&recorder, || record_postgres_pool_metrics(&pool));
+        assert_eq!((pool.size(), pool.num_idle()), (2, 0));
+        assert_pool_samples(&handle.render(), 2, 0);
+
+        drop(second_connection);
+        drop(connection);
+        pool.close().await;
+        metrics::with_local_recorder(&recorder, || record_postgres_pool_metrics(&pool));
+        assert_pool_samples(&handle.render(), 0, 0);
+    }
+}
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -157,22 +210,46 @@ async fn open_postgres(
     let plugin_blob_repo = Arc::new(cc_lb_storage_postgres::PostgresPluginBlobRepo::new(
         pool.clone(),
     )) as Arc<dyn PluginBlobRepo>;
-    let storage = cc_lb_storage_postgres::PostgresStorage::new(pool.clone(), clock.clone());
-    let storage: Arc<dyn Storage> = Arc::new(storage);
+    let storage = Arc::new(cc_lb_storage_postgres::PostgresStorage::new(
+        pool.clone(),
+        clock.clone(),
+    ));
     storage
         .initialize(BackendKind::Postgres)
         .await
         .map_err(|error| map_init_error(error, BackendKind::Postgres))?;
+    record_postgres_pool_metrics(storage.pool());
+    let weak_storage = Arc::downgrade(&storage);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let Some(storage) = weak_storage.upgrade() else {
+                break;
+            };
+            record_postgres_pool_metrics(storage.pool());
+        }
+    });
     let managed_key_store = Arc::new(cc_lb_storage_postgres::PostgresManagedKeyStore::new(
         pool,
         Arc::new(cc_lb_storage_postgres::adapter::retry::RetryPolicy::default()),
         clock,
     ));
     Ok(OpenedStorage {
-        storage,
+        storage: storage as Arc<dyn Storage>,
         managed_key_store,
         plugin_blob_repo,
     })
+}
+
+#[cfg(feature = "postgres")]
+fn record_postgres_pool_metrics(pool: &sqlx::PgPool) {
+    let size = pool.size();
+    let idle = pool.num_idle() as u32;
+    metrics::gauge!("cc_lb_sqlx_pool_size", "store" => "postgres").set(f64::from(size));
+    metrics::gauge!("cc_lb_sqlx_pool_idle", "store" => "postgres").set(f64::from(idle));
+    metrics::gauge!("cc_lb_sqlx_pool_in_use", "store" => "postgres")
+        .set(f64::from(size.saturating_sub(idle)));
 }
 
 #[cfg(feature = "postgres")]
