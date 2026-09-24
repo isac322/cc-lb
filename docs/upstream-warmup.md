@@ -95,6 +95,14 @@ Seven-day exhaustion does not stamp the upstream as successfully warmed. Instead
 
 The watchdog treats any pending, queued, running, or retryable failed warm-up task with that cycle-key family as active, even when its `run_at` is in the future. It will not pull a future reset task forward. If the only remaining warm-up task is dead-lettered (`Failed` at max attempts or `Killed`), the watchdog may bootstrap a new immediate warm-up on its next tick.
 
+### Shared usage and reset-coupon observations
+
+The OAuth usage poll requests `/api/oauth/usage?cedar_ember=1` once per upstream. The same response supplies quota windows, extra usage, and reset-coupon status. It does not send `skip_spend=1`, so the existing extra-usage collection is retained.
+
+`GET /admin/v1/upstreams/{id}/limit-resets` reads the stored observation without contacting Anthropic. The poll resolves account identity once per credential version when coupon data is present; subsequent polls reuse that identity. Before the first observation, after credential replacement, or when the observation is stale, the API does not advertise a usable coupon.
+
+Coupon claims still verify the live account identity and send a single provider POST. A durable, atomically acquired fence prevents overlapping claims and stops an older poll response from restoring a consumed coupon. A successful reset queues a usage poll. If a claim leaves an unresolved fence, a poll may recover it after five minutes by fetching new provider state; recovery never repeats the claim POST.
+
 ## Multi-replica notes
 
 Warm-up is implemented as an Apalis entity job (`UpstreamWarmupJob`). Cross-replica coordination no longer depends on per-upstream scheduling columns.

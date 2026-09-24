@@ -174,7 +174,7 @@ export function LimitResetAction({
   // previous account must never follow the new one. Everything else waits
   // for the user to refresh the status or dismiss the record.
   useEffect(() => {
-    if (!pendingOp || !data) return;
+    if (!pendingOp || !data?.account_id || !data.organization_id) return;
     if (
       pendingOp.account_id !== data.account_id ||
       pendingOp.organization_id !== data.organization_id
@@ -278,7 +278,7 @@ export function LimitResetAction({
     // The account/org pair submitted with the claim must come from the same
     // payload the user reviewed; the server revalidates it against the live
     // profile and rejects a stale identity with 409.
-    if (!data) return;
+    if (!data?.account_id || !data.organization_id) return;
     // Latch: a claim already in flight must never dispatch a second request.
     // The shared flag covers remounts; the ref covers same-tick repeats.
     if (claimInFlight || dispatchLatch.current) return;
@@ -402,7 +402,7 @@ export function LimitResetAction({
     data != null &&
     !usableCoupons
       ? ember == null
-        ? 'No reset coupon data reported for this account.'
+        ? 'No current reset coupon data. Status updates with quota polling.'
         : (() => {
             const candidate = defaultGrant ?? grants.at(0);
             const block = candidate ? grantBlock(candidate, nowMs) : null;
@@ -592,7 +592,7 @@ export function LimitResetAction({
 
           {data && ember == null ? (
             <p className="text-xs text-text-faint">
-              No reset coupon data reported for this account.
+              No current reset coupon data. Status updates with quota polling.
             </p>
           ) : null}
 

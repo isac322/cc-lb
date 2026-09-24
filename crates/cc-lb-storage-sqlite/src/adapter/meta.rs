@@ -94,6 +94,34 @@ impl MetaStore for SqliteStorage {
         .map_err(map_sqlx_error)?;
         Ok(())
     }
+
+    async fn compare_and_put_meta_value(
+        &self,
+        key: &str,
+        expected: Option<&str>,
+        value: &str,
+    ) -> StorageResult<bool> {
+        let result =
+            match expected {
+                Some(expected) => {
+                    sqlx::query("UPDATE meta_v1 SET value = ? WHERE key = ? AND value = ?")
+                        .bind(value)
+                        .bind(key)
+                        .bind(expected)
+                        .execute(self.pool())
+                        .await
+                }
+                None => sqlx::query(
+                    "INSERT INTO meta_v1 (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+                )
+                .bind(key)
+                .bind(value)
+                .execute(self.pool())
+                .await,
+            }
+            .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected() == 1)
+    }
 }
 
 fn parse_backend_kind(value: &str) -> StorageResult<BackendKind> {

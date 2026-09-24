@@ -1,12 +1,15 @@
 //! Per-upstream subscription limit-reset ("cedar_ember" coupon) endpoints.
 //!
-//! `GET /admin/v1/upstreams/{id}/limit-resets` proxies the provider's grant
-//! status; `POST .../limit-resets/claim` dispatches a single reset claim.
-//! All coupon state is provider-owned: the backend stores nothing, invents no
-//! eligibility, and never retries the claim POST. A timeout or mid-flight
-//! transport failure on the claim is reported as `claim_outcome_unknown`
-//! (504) because the provider may have consumed the grant; only a connect
-//! failure is a definite non-delivery.
+//! `GET /admin/v1/upstreams/{id}/limit-resets` serves the snapshot collected
+//! by the scheduler's usage poll (`GET /api/oauth/usage?cedar_ember=1`), so
+//! it never calls the provider itself; `POST .../limit-resets/claim`
+//! dispatches a single reset claim, serialized per upstream by a durable
+//! compare-and-put epoch fence. Coupon eligibility is provider-owned: the
+//! backend only caches the polled snapshot, invents no eligibility, and
+//! never retries the claim POST. A timeout or mid-flight transport failure
+//! on the claim is reported as `claim_outcome_unknown` (504) because the
+//! provider may have consumed the grant; only a connect failure is a
+//! definite non-delivery.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,9 +20,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use cc_lb_control::anthropic_metadata::{
-    CedarEmberClaimOutcome, CedarEmberClaimRequest, CedarEmberError, CedarEmberStatus,
-    claim_cedar_ember_reset, fetch_cedar_ember_status, fetch_oauth_profile_at, is_valid_grant_id,
-    make_metadata_http_client,
+    CedarEmberClaimOutcome, CedarEmberClaimRequest, CedarEmberError, CedarEmberIdentityRecord,
+    CedarEmberPollRecord, CedarEmberStatus, cedar_ember_epoch_fence, cedar_ember_epoch_meta_key,
+    cedar_ember_identity_meta_key, cedar_ember_meta_key, claim_cedar_ember_reset,
+    fetch_oauth_profile_at, is_valid_grant_id, make_metadata_http_client,
+    settled_cedar_ember_epoch,
 };
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
@@ -42,8 +47,10 @@ use crate::{
 
 #[derive(Debug, Serialize)]
 pub(crate) struct LimitResetsResponse {
-    account_id: String,
-    organization_id: String,
+    /// Null until the metadata hook has observed the OAuth identity; the
+    /// claim endpoint re-verifies the live identity regardless.
+    account_id: Option<String>,
+    organization_id: Option<String>,
     cedar_ember: Option<CedarEmberStatusResponse>,
 }
 
@@ -104,27 +111,67 @@ pub(crate) async fn get_upstream_limit_resets(
     let upstream = UpstreamStore::get_by_id(storage.as_ref(), upstream_id)
         .await?
         .ok_or(UpstreamError::NotFound)?;
-    if upstream.kind != UpstreamKind::AnthropicOauth {
+    if upstream.kind != UpstreamKind::AnthropicOauth || upstream.oauth_credentials.is_none() {
         return Err(UpstreamError::NotOauthUpstream);
     }
-    let bundle = decrypt_oauth_bundle(&state, &upstream)?;
-    let access_token =
-        fresh_enough_access_token(&state, storage.clone(), &upstream, bundle).await?;
-    let user_agent = metadata_user_agent(storage.as_ref()).await?;
-    let base_url = upstream_base_url(&upstream)?;
-    let client = make_metadata_http_client();
-    let cancel = CancellationToken::new();
+    let fingerprint = upstream.oauth_credential_fingerprint();
+    let coupon_key = cedar_ember_meta_key(upstream_id);
+    let identity_key = cedar_ember_identity_meta_key(upstream_id);
+    let epoch_key = cedar_ember_epoch_meta_key(upstream_id);
+    let (coupon_raw, identity_raw, epoch_raw) = tokio::join!(
+        storage.get_meta_value(&coupon_key),
+        storage.get_meta_value(&identity_key),
+        storage.get_meta_value(&epoch_key),
+    );
+    let coupon = coupon_raw?.and_then(|raw| {
+        serde_json::from_str::<CedarEmberPollRecord>(&raw)
+            .map_err(|error| {
+                tracing::warn!(%upstream_id, %error, "cedar_ember snapshot unreadable");
+                error
+            })
+            .ok()
+    });
+    let identity = identity_raw?.and_then(|raw| {
+        serde_json::from_str::<CedarEmberIdentityRecord>(&raw)
+            .map_err(|error| {
+                tracing::warn!(%upstream_id, %error, "cedar_ember identity unreadable");
+                error
+            })
+            .ok()
+    });
+    // `None` = a claim fence is pending or the value is unreadable: fail
+    // closed and serve no coupon.
+    let current_epoch = settled_cedar_ember_epoch(epoch_raw?.as_deref());
+    let now_unix_millis =
+        cc_lb_clock::unix_millis(state.clock.now()).min(u128::from(u64::MAX)) as u64;
+    let max_staleness_secs = state
+        .dynamic_view
+        .load()
+        .subscription_quota_routing_max_staleness_secs;
 
-    let profile = fetch_oauth_profile_at(&client, &base_url, &access_token, &user_agent, &cancel)
-        .await
-        .map_err(provider_read_error)?;
-    let (account_id, organization_id) = live_identity(&profile)?;
-
-    let cedar_ember =
-        fetch_cedar_ember_status(&client, &base_url, &access_token, &user_agent, &cancel)
-            .await
-            .map_err(provider_read_error)?
-            .map(|status| cedar_ember_response(&status));
+    // Identity is served only while bound to the current credential — a
+    // rotated credential's account may differ.
+    let (account_id, organization_id) = match identity {
+        Some(record) if Some(record.credential_fingerprint) == fingerprint => {
+            (Some(record.account_id), Some(record.organization_id))
+        }
+        _ => (None, None),
+    };
+    // The coupon is served only while fresh, bound to the current credential,
+    // backed by a known identity, and stamped with the still-current
+    // invalidation epoch — anything else reports `null` rather than a
+    // possibly-consumed or foreign-account coupon.
+    let cedar_ember = match (coupon, account_id.as_ref(), fingerprint) {
+        (Some(record), Some(_), Some(fingerprint))
+            if record.credential_fingerprint == fingerprint
+                && current_epoch == Some(record.epoch)
+                && now_unix_millis.saturating_sub(record.observed_at_unix_millis)
+                    <= max_staleness_secs.saturating_mul(1_000) =>
+        {
+            record.status.map(|status| cedar_ember_response(&status))
+        }
+        _ => None,
+    };
 
     Ok(Json(LimitResetsResponse {
         account_id,
@@ -180,6 +227,15 @@ pub(crate) async fn claim_upstream_limit_reset(
     result
 }
 
+/// 409 for a claim refused before dispatch because the upstream's epoch is
+/// not settled: another claim holds the fence, an abandoned fence awaits
+/// poll recovery, or the value is unreadable. Nothing was sent.
+fn claim_in_progress() -> UpstreamError {
+    UpstreamError::Conflict {
+        detail: "a limit-reset claim for this upstream is in progress or awaiting a fresh usage observation; refetch limit-resets".to_owned(),
+    }
+}
+
 async fn claim_limit_reset_inner(
     state: &AdminState,
     storage: Arc<dyn Storage>,
@@ -217,7 +273,37 @@ async fn claim_limit_reset_inner(
     if body.account_id != account_id || body.organization_id != organization_id {
         return Err(UpstreamError::StaleIdentity);
     }
-
+    // Durable per-attempt fence before the POST, compare-and-put over the
+    // settled epoch just read: every snapshot is unservable (on every
+    // replica) while it is current, and only one claim per upstream can hold
+    // it. Any unsettled value — another claim in flight, an abandoned fence
+    // awaiting poll recovery, or an unreadable value — refuses the claim
+    // without dispatching, so a grant is never claimed again before a fresh
+    // post-claim observation. If the fence cannot be written, nothing is
+    // dispatched and nothing has been consumed.
+    let epoch_key = cedar_ember_epoch_meta_key(upstream.id);
+    let settled =
+        storage
+            .get_meta_value(&epoch_key)
+            .await
+            .map_err(|error| UpstreamError::Internal {
+                detail: format!("cedar_ember epoch read failed: {error}"),
+            })?;
+    if settled_cedar_ember_epoch(settled.as_deref()).is_none() {
+        return Err(claim_in_progress());
+    }
+    let now_unix_millis =
+        cc_lb_clock::unix_millis(state.clock.now()).min(u128::from(u64::MAX)) as u64;
+    let fence = cedar_ember_epoch_fence(Uuid::new_v4(), now_unix_millis);
+    let fenced = storage
+        .compare_and_put_meta_value(&epoch_key, settled.as_deref(), &fence)
+        .await
+        .map_err(|error| UpstreamError::Internal {
+            detail: format!("cedar_ember claim fence write failed: {error}"),
+        })?;
+    if !fenced {
+        return Err(claim_in_progress());
+    }
     let result = claim_cedar_ember_reset(
         &client,
         &base_url,
@@ -230,8 +316,25 @@ async fn claim_limit_reset_inner(
         },
         &cancel,
     )
-    .await
-    .map_err(provider_claim_error)?;
+    .await;
+
+    // Settle our own fence with a fresh epoch after any outcome. Snapshots
+    // from polls issued before the claim carry the old epoch and polls during
+    // it wrote none (the fence was pending), so neither can match. If this
+    // write fails the fence stays pending — fail closed until the poll's
+    // expired-fence recovery settles it after a fresh observation — and the
+    // failure surfaces instead of a silent success. A lost compare-and-put
+    // means that recovery already replaced our fence, which is equally safe.
+    let settled = storage
+        .compare_and_put_meta_value(&epoch_key, Some(&fence), &Uuid::new_v4().to_string())
+        .await
+        .map_err(|error| UpstreamError::Internal {
+            detail: format!("cedar_ember invalidation write failed: {error}"),
+        })?;
+    if !settled {
+        tracing::warn!(upstream_id = %upstream.id, "cedar_ember claim fence was already recovered");
+    }
+    let result = result.map_err(provider_claim_error)?;
 
     if result.result == CedarEmberClaimOutcome::Reset {
         trigger_usage_poll(state);
@@ -378,8 +481,9 @@ fn claim_outcome_str(outcome: CedarEmberClaimOutcome) -> &'static str {
     }
 }
 
-/// Read-path failures: the provider answered nothing usable, so the GET can
-/// safely report a definite error — nothing was consumed.
+/// Read-path failures on the claim's live profile fetch: the provider
+/// answered nothing usable, so a definite error is safe — nothing was
+/// consumed.
 fn provider_read_error(error: CedarEmberError) -> UpstreamError {
     match error {
         CedarEmberError::Timeout | CedarEmberError::Cancelled => UpstreamError::ProviderTimeout,

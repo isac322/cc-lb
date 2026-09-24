@@ -1,3 +1,4 @@
+use cc_lb_control::anthropic_metadata::CedarEmberStatus;
 use cc_lb_engine::SubscriptionQuotaSink;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::{
@@ -17,6 +18,9 @@ struct UsageBody {
     seven_day_opus: Option<UsageWindow>,
     limits: Option<Vec<UsageLimit>>,
     extra_usage: Option<ExtraUsage>,
+    /// Kept as a raw value so a malformed `cedar_ember` block can never fail
+    /// the quota parse; it is validated separately before caching.
+    cedar_ember: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,15 +79,29 @@ pub(super) fn observe_usage_body(
     observed_at_unix_millis: u64,
     sink: &SubscriptionQuotaSink,
     cache: &SubscriptionQuotaCache,
-) -> SchedulerResult<()> {
-    let usage: UsageBody = sonic_rs::from_slice(body)
+) -> SchedulerResult<Option<CedarEmberStatus>> {
+    let mut usage: UsageBody = sonic_rs::from_slice(body)
         .map_err(|error| SchedulerError::Job(format!("oauth usage JSON parse failed: {error}")))?;
+    // The provider omits the block entirely for unenrolled accounts; an
+    // explicit null is the same answer. A present-but-malformed block also
+    // yields None — the caller persists it as a cleared snapshot rather than
+    // leaving a possibly-consumed coupon looking usable.
+    let cedar_ember = match usage.cedar_ember.take() {
+        Some(raw) if !raw.is_null() => match serde_json::from_value::<CedarEmberStatus>(raw) {
+            Ok(status) => Some(status),
+            Err(error) => {
+                tracing::warn!(%upstream_id, %error, "cedar_ember block failed schema validation");
+                None
+            }
+        },
+        _ => None,
+    };
     for record in records_from_usage(upstream_id, usage, observed_at_unix_millis) {
         cache.upsert_observation(upstream_id, &record);
         sink.enqueue(record)
             .map_err(|error| SchedulerError::Job(error.to_string()))?;
     }
-    Ok(())
+    Ok(cedar_ember)
 }
 
 fn records_from_usage(
@@ -98,6 +116,7 @@ fn records_from_usage(
         seven_day_opus,
         limits,
         extra_usage,
+        cedar_ember: _,
     } = usage;
     let mut records = Vec::new();
     push_window(
