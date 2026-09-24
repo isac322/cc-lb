@@ -50,9 +50,9 @@ export interface CedarEmberLimitResets {
 }
 
 export interface LimitResetsResponse {
-  account_id: string;
-  organization_id: string;
-  /** Null when the provider reports no limit-reset data for this account. */
+  account_id: string | null;
+  organization_id: string | null;
+  /** Null when no fresh, identity-bound coupon observation is available. */
   cedar_ember: CedarEmberLimitResets | null;
 }
 
@@ -87,8 +87,8 @@ export const limitResetKeys = {
   detail: (upstreamId: string) => ['limit-resets', upstreamId] as const,
 };
 
-/** The GET hits the provider's live profile + usage on every call, so the
- *  coupon poll runs on a slower cadence than the local quota cache. */
+/** Read the snapshot populated by the shared quota poll; this GET does not
+ *  contact the provider. Match the background observation cadence. */
 const LIMIT_RESET_POLL_MS = 60_000;
 
 /** Mutation key so coupon surfaces can lock while a claim is in flight

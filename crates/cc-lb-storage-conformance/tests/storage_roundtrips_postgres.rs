@@ -177,6 +177,14 @@ fn config_draft_optimistic_revision_postgres() {
 }
 
 #[test]
+fn meta_compare_and_put_postgres() {
+    run_postgres_scenario(
+        "meta_compare_and_put",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::meta_compare_and_put,
+    );
+}
+
+#[test]
 fn pool_quota_history_fable_roundtrip_postgres() {
     run_postgres_scenario(
         "pool_quota_history_fable_roundtrip",

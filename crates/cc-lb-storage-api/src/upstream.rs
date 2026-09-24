@@ -83,6 +83,22 @@ impl UpstreamRecord {
             UpstreamStatus::Active
         }
     }
+
+    /// Fingerprint of the stored OAuth credential ciphertext. Every
+    /// credential write — refresh, reauthorization, replacement — produces
+    /// new ciphertext (random nonce), so this is the authoritative
+    /// "same credential" check for state bound to a specific credential,
+    /// like the polled `cedar_ember` snapshot. `oauth_token_generation` is
+    /// not sufficient: it only advances on `complete_refresh`, not on
+    /// reauthorization.
+    pub fn oauth_credential_fingerprint(&self) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        self.oauth_credentials.as_ref().map(|credentials| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            credentials.ciphertext().hash(&mut hasher);
+            hasher.finish()
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

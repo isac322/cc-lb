@@ -94,6 +94,34 @@ impl MetaStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
         Ok(())
     }
+
+    async fn compare_and_put_meta_value(
+        &self,
+        key: &str,
+        expected: Option<&str>,
+        value: &str,
+    ) -> StorageResult<bool> {
+        let result =
+            match expected {
+                Some(expected) => {
+                    sqlx::query("UPDATE meta SET value = $1 WHERE key = $2 AND value = $3")
+                        .bind(value)
+                        .bind(key)
+                        .bind(expected)
+                        .execute(&self.pool)
+                        .await
+                }
+                None => sqlx::query(
+                    "INSERT INTO meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
+                )
+                .bind(key)
+                .bind(value)
+                .execute(&self.pool)
+                .await,
+            }
+            .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected() == 1)
+    }
 }
 
 fn parse_backend_kind(value: &str) -> StorageResult<BackendKind> {

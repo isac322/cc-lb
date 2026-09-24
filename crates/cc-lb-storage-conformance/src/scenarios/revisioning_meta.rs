@@ -33,6 +33,7 @@ where
     config_history_cap_50(Arc::clone(&backend)).await?;
     config_last_validated_revision(Arc::clone(&backend)).await?;
     meta_contract_version(Arc::clone(&backend)).await?;
+    meta_compare_and_put(Arc::clone(&backend)).await?;
     meta_backend_kind_stamp(Arc::clone(&backend)).await?;
     meta_backend_kind_mismatch(Arc::clone(&backend)).await?;
 
@@ -245,6 +246,97 @@ where
             MetaStore::contract_version(storage.as_ref()).await?,
             CURRENT_CONTRACT_VERSION
         );
+
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown
+}
+
+pub async fn meta_compare_and_put<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    const RACERS: usize = 8;
+    let mut fixture = ConformanceFixture::new(backend).await?;
+    let result: Result<()> = async {
+        let storage = fixture.storage();
+        let key = "conformance_cas";
+
+        // Absent key: `Some(expected)` cannot match, `None` inserts once.
+        assert!(
+            !MetaStore::compare_and_put_meta_value(storage.as_ref(), key, Some("a"), "b").await?
+        );
+        assert_eq!(
+            MetaStore::get_meta_value(storage.as_ref(), key).await?,
+            None
+        );
+        assert!(MetaStore::compare_and_put_meta_value(storage.as_ref(), key, None, "a").await?);
+        assert!(!MetaStore::compare_and_put_meta_value(storage.as_ref(), key, None, "z").await?);
+        assert_eq!(
+            MetaStore::get_meta_value(storage.as_ref(), key)
+                .await?
+                .as_deref(),
+            Some("a")
+        );
+
+        // Present key: only the exact current value matches.
+        assert!(
+            !MetaStore::compare_and_put_meta_value(storage.as_ref(), key, Some("x"), "b").await?
+        );
+        assert!(
+            MetaStore::compare_and_put_meta_value(storage.as_ref(), key, Some("a"), "b").await?
+        );
+        assert_eq!(
+            MetaStore::get_meta_value(storage.as_ref(), key)
+                .await?
+                .as_deref(),
+            Some("b")
+        );
+
+        // Concurrent racers expecting the same value: exactly one wins and
+        // the stored value is the winner's.
+        for (race_key, expected) in [
+            ("conformance_cas_race_present", Some("b")),
+            ("conformance_cas_race_absent", None),
+        ] {
+            if let Some(seed) = expected {
+                MetaStore::put_meta_value(storage.as_ref(), race_key, seed).await?;
+            }
+            let handles = (0..RACERS)
+                .map(|racer| {
+                    let storage = Arc::clone(&storage);
+                    tokio::spawn(async move {
+                        let value = format!("racer-{racer}");
+                        let won = MetaStore::compare_and_put_meta_value(
+                            storage.as_ref(),
+                            race_key,
+                            expected,
+                            &value,
+                        )
+                        .await?;
+                        Ok::<_, StorageError>(won.then_some(value))
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut winners = Vec::new();
+            for handle in handles {
+                if let Some(value) = handle.await?? {
+                    winners.push(value);
+                }
+            }
+            assert_eq!(
+                winners.len(),
+                1,
+                "exactly one CAS racer must win: {winners:?}"
+            );
+            assert_eq!(
+                MetaStore::get_meta_value(storage.as_ref(), race_key).await?,
+                winners.pop()
+            );
+        }
 
         Ok(())
     }

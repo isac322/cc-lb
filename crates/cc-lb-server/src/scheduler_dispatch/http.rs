@@ -17,7 +17,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
-const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// One poll request returns the quota windows and the `cedar_ember`
+/// limit-reset block together. `skip_spend` is deliberately absent so the
+/// provider keeps reporting `extra_usage`.
+const USAGE_PATH: &str = "api/oauth/usage?cedar_ember=1";
 
 pub(super) type JsonHttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
@@ -64,11 +67,15 @@ pub(super) async fn request_refresh(
 
 pub(super) async fn fetch_usage(
     http: &JsonHttpClient,
+    base_url: &Url,
     access_token: &str,
     user_agent: &str,
     cancel: &CancellationToken,
 ) -> SchedulerResult<UsageFetchResponse> {
-    let request = Request::get(USAGE_URL)
+    let url = base_url
+        .join(USAGE_PATH)
+        .map_err(|error| SchedulerError::Job(format!("invalid usage base URL: {error}")))?;
+    let request = Request::get(url.as_str())
         .header("Authorization", format!("Bearer {access_token}"))
         .header("User-Agent", user_agent)
         .header("anthropic-beta", "oauth-2025-04-20")
