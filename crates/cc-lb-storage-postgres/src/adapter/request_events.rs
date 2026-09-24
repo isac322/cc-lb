@@ -735,6 +735,9 @@ async fn request_event_histogram(
         builder.push(" AND ");
         builder.push_bind(status_max);
     }
+    if query.filters.errors_only {
+        builder.push(" AND (r.list_status >= 400 OR r.error_code IS NOT NULL)");
+    }
 
     match query.source_kind.as_deref() {
         Some("all") => {}
@@ -1137,6 +1140,9 @@ fn request_event_matches_filters(
     if let Some(status_class) = filters.status_class
         && !status_class.matches(event.status)
     {
+        return false;
+    }
+    if filters.errors_only && event.status < 400 && event.error_code.is_none() {
         return false;
     }
     if let Some(event_kind) = filters.event_kind

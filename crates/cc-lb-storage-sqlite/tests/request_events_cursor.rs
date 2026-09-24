@@ -394,6 +394,7 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
                 upstream: Some(RequestEventUpstream::AnthropicDirect),
                 upstream_id: Some(upstream_id),
                 status_class: Some(StatusClass::TwoXx),
+                errors_only: false,
                 event_kind: None,
             },
         )

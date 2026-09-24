@@ -143,9 +143,7 @@ export function buildLiveFilters(filters: z.infer<typeof logsSearchSchema>) {
   if (filters.upstream_id) base.upstream_id = filters.upstream_id;
   if (filters.session) base.thread_id = filters.session;
   if (filters.model) base.model = filters.model;
-  // `errors` is a UI-only filter applied client-side in filterLogRows; the
-  // backend `status_class` param cannot express it.
-  if (filters.status && filters.status !== 'errors') {
+  if (filters.status) {
     base.status_class = filters.status;
   }
   if (filters.event_kind) base.event_kind = filters.event_kind;

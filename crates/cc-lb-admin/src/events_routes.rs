@@ -454,6 +454,9 @@ fn apply_filters_to_partial(partial: &RequestEventPartial, filters: &StreamFilte
     {
         return false;
     }
+    if filters.errors_only && partial.upstream_response_status.unwrap_or(0) < 400 {
+        return false;
+    }
     if let Some(event_kind) = filters.event_kind
         && RequestEventKind::effective(partial.source_kind.as_deref(), partial.event_kind)
             != event_kind

@@ -139,6 +139,19 @@ async fn events_recent_returns_structured_429_and_distinct_499_without_control_f
     assert_eq!(broad["error_code"], "upstream_4xx");
     assert_no_fabricated_diagnostics(broad);
 
+    let (status, _, errors, _) = authed_json(
+        app(state.clone()),
+        "GET",
+        "/admin/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=10&status_class=errors",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(errors["count"], 4);
+    assert!(errors["events"].as_array().unwrap().iter().all(|event| {
+        event["status"].as_u64().unwrap_or_default() >= 400 || !event["error_code"].is_null()
+    }));
+
     let (status, _, five_xx, _) = authed_json(
         app(state),
         "GET",
