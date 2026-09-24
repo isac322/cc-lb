@@ -118,6 +118,14 @@ fn config_draft_optimistic_revision_sqlite() {
 }
 
 #[test]
+fn meta_compare_and_put_sqlite() {
+    run_sqlite_scenario(
+        "meta_compare_and_put",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::meta_compare_and_put,
+    );
+}
+
+#[test]
 fn managed_keys_empty_label_roundtrip_sqlite() {
     run_sqlite_scenario(
         "managed_keys_empty_label_roundtrip",

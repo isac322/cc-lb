@@ -191,3 +191,61 @@ fn missing_seven_day_body_marks_only_omitted_windows_absent() {
     assert!(seven_day.status.is_none());
     assert!(seven_day.resets_at_unix_secs.is_none());
 }
+
+fn observe(body: &str) -> (Option<CedarEmberStatus>, SubscriptionQuotaCache) {
+    let cache = SubscriptionQuotaCache::new();
+    let (sink, _rx) = SubscriptionQuotaSink::new();
+    let cedar_ember = observe_usage_body(
+        Uuid::nil(),
+        body.as_bytes(),
+        1_700_000_000_000,
+        &sink,
+        &cache,
+    )
+    .expect("usage body observed");
+    (cedar_ember, cache)
+}
+
+fn five_hour_utilization(cache: &SubscriptionQuotaCache) -> Option<f64> {
+    cache
+        .snapshot_for_upstream(Uuid::nil(), 1_700_000_000_000, 60)
+        .into_iter()
+        .find(|snapshot| snapshot.window == "5h")
+        .and_then(|snapshot| snapshot.utilization)
+}
+
+#[test]
+fn cedar_ember_block_is_returned_alongside_quota() {
+    // One response yields both states: the quota windows land in the cache
+    // and the coupon is handed back for the caller to persist.
+    let (cedar_ember, cache) = observe(
+        r#"{"five_hour":{"utilization":95.0,"resets_at":"2026-09-24T20:00:00Z"},"cedar_ember":{"eligible":true,"at_limit":true,"grants":[{"id":"grant_01","resets_left":1}],"next_grant_id":"grant_01"}}"#,
+    );
+    // The provider reports percent; the quota pipeline stores a fraction.
+    assert_eq!(five_hour_utilization(&cache), Some(0.95));
+    let status = cedar_ember.expect("cedar_ember parsed");
+    assert_eq!(status.next_grant_id.as_deref(), Some("grant_01"));
+}
+
+#[test]
+fn malformed_cedar_ember_does_not_block_quota() {
+    let (cedar_ember, cache) = observe(
+        r#"{"five_hour":{"utilization":95.0,"resets_at":"2026-09-24T20:00:00Z"},"cedar_ember":{"eligible":true,"grants":"not-an-array"}}"#,
+    );
+    assert_eq!(five_hour_utilization(&cache), Some(0.95));
+    // Malformed reads as "no usable coupon"; the caller persists that as a
+    // cleared snapshot, so a prior coupon cannot linger as usable.
+    assert!(cedar_ember.is_none());
+}
+
+#[test]
+fn absent_or_null_cedar_ember_block_yields_none() {
+    for body in [
+        r#"{"five_hour":{"utilization":10.0,"resets_at":"2026-09-24T20:00:00Z"}}"#,
+        r#"{"five_hour":{"utilization":10.0,"resets_at":"2026-09-24T20:00:00Z"},"cedar_ember":null}"#,
+    ] {
+        let (cedar_ember, cache) = observe(body);
+        assert_eq!(five_hour_utilization(&cache), Some(0.1));
+        assert!(cedar_ember.is_none());
+    }
+}

@@ -426,6 +426,23 @@ pub trait MetaStore: Send + Sync {
             message: "put_meta_value is not implemented for this storage backend".to_owned(),
         })
     }
+
+    /// Atomically writes `value` only if the key currently holds `expected`
+    /// (`None` = the key must be absent). Returns `true` when the write
+    /// landed and `false` when the current value differed; exactly one of
+    /// several concurrent callers expecting the same value wins.
+    async fn compare_and_put_meta_value(
+        &self,
+        key: &str,
+        expected: Option<&str>,
+        value: &str,
+    ) -> StorageResult<bool> {
+        let _ = (key, expected, value);
+        Err(StorageError::Fatal {
+            message: "compare_and_put_meta_value is not implemented for this storage backend"
+                .to_owned(),
+        })
+    }
 }
 
 #[async_trait]

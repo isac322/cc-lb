@@ -330,6 +330,9 @@ struct DispatchFixture {
     clock: Arc<TestClock>,
     refresh_entry_calls: Arc<AtomicUsize>,
     claim_calls: Arc<AtomicUsize>,
+    /// Held so the quota sink stays open: dropping the receiver closes the
+    /// channel and every successful poll's enqueue would fail.
+    _quota_rx: tokio::sync::mpsc::Receiver<cc_lb_storage_api::SubscriptionQuotaSample>,
 }
 
 impl DispatchFixture {
@@ -420,6 +423,7 @@ impl DispatchFixture {
                 .principal_view(Arc::new(PrincipalView::from_db(&[], HashMap::new())))
                 .build(),
         ));
+        let (subscription_quota_sink, quota_rx) = cc_lb_engine::SubscriptionQuotaSink::new();
         let dispatch = SchedulerDispatch::new(SchedulerDispatchDeps {
             backend: scheduler.backend.clone(),
             cache_keepalive_pusher: Arc::new(NoopKeepalivePusher),
@@ -433,7 +437,7 @@ impl DispatchFixture {
             ),
             data_dir: dir.path().to_path_buf(),
             lazy_refresher: Some(lazy_refresher),
-            subscription_quota_sink: cc_lb_engine::SubscriptionQuotaSink::new().0,
+            subscription_quota_sink,
             subscription_quota_cache: Arc::new(SubscriptionQuotaCache::new()),
             cancel: CancellationToken::new(),
             replica_id: None,
@@ -453,6 +457,7 @@ impl DispatchFixture {
             clock: test_clock,
             refresh_entry_calls,
             claim_calls,
+            _quota_rx: quota_rx,
         }
     }
 
@@ -738,4 +743,383 @@ impl RouterPlugin for NoRouteRouter {
             reason: "unused in oauth dispatch tests".to_owned(),
         })
     }
+}
+
+/// The real poll path against a loopback provider: `poll_usage` issues one
+/// `GET {base_url}/api/oauth/usage?cedar_ember=1`; the single response updates
+/// the quota cache and persists a durable, credential- and epoch-bound
+/// `cedar_ember` snapshot. The OAuth identity is fetched exactly once per
+/// credential, and only because a coupon was observed. A later malformed
+/// block persists as a cleared snapshot and triggers no profile fetch.
+///
+/// Like the real provider, the loopback only exposes an eligible coupon to a
+/// recognised Claude Code client: any other user agent sees
+/// `eligible: false`. The client version comes from the compat-refreshed
+/// store, not the pinned fallback.
+#[tokio::test]
+async fn poll_usage_persists_quota_and_cedar_ember_from_one_response() {
+    use axum::extract::Request as AxumRequest;
+    use cc_lb_control::anthropic_compat::{CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent};
+    use cc_lb_control::anthropic_metadata::{
+        CedarEmberIdentityRecord, CedarEmberPollRecord, cedar_ember_epoch_meta_key,
+        cedar_ember_identity_meta_key, cedar_ember_meta_key,
+    };
+    use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
+    use cc_lb_storage_api::{AnthropicCompatibilityKvStore, MetaStore};
+
+    const STORED_CLI_VERSION: &str = "2.1.999";
+    let cli_user_agent = claude_code_user_agent(STORED_CLI_VERSION);
+    fn is_cli_client(request: &AxumRequest, cli_user_agent: &str) -> bool {
+        request
+            .headers()
+            .get(http::header::USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            == Some(cli_user_agent)
+    }
+
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let coupon = Arc::new(std::sync::Mutex::new(serde_json::json!({
+        "eligible": true,
+        "at_limit": true,
+        "grants": [{"id": "grant_01", "resets_left": 1}],
+        "next_grant_id": "grant_01"
+    })));
+    let usage_requests = requests.clone();
+    let usage_coupon = coupon.clone();
+    let profile_requests = requests.clone();
+    let usage_cli_user_agent = cli_user_agent.clone();
+    let app = axum::Router::new()
+        .route(
+            "/api/oauth/usage",
+            axum::routing::get(move |request: AxumRequest| {
+                let requests = usage_requests.clone();
+                let coupon = usage_coupon.clone();
+                let recognised = is_cli_client(&request, &usage_cli_user_agent);
+                async move {
+                    requests
+                        .lock()
+                        .expect("requests lock")
+                        .push(request.uri().to_string());
+                    let cedar_ember = if recognised {
+                        coupon.lock().expect("coupon lock").clone()
+                    } else {
+                        serde_json::json!({
+                            "eligible": false,
+                            "ineligible_reason": "surface",
+                            "at_limit": true,
+                            "grants": []
+                        })
+                    };
+                    axum::Json(serde_json::json!({
+                        "five_hour": {"utilization": 95.0, "resets_at": "2026-09-24T20:00:00Z"},
+                        "extra_usage": {"is_enabled": true, "monthly_limit": 30000, "used_credits": 1500},
+                        "cedar_ember": cedar_ember
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/oauth/profile",
+            axum::routing::get(move |request: AxumRequest| {
+                let requests = profile_requests.clone();
+                async move {
+                    requests
+                        .lock()
+                        .expect("requests lock")
+                        .push(request.uri().to_string());
+                    axum::Json(serde_json::json!({
+                        "account": {"uuid": "account-a"},
+                        "organization": {"uuid": "org-shared"}
+                    }))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let base_url = Url::parse(&format!(
+        "http://{}/",
+        listener.local_addr().expect("local addr")
+    ))
+    .expect("loopback url");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve loopback");
+    });
+
+    let fixture = DispatchFixture::new().await;
+    let upstream = fixture.oauth_upstream(true).await;
+    // Point the upstream at the loopback provider.
+    UpstreamStore::update_spec(
+        fixture.storage.as_ref(),
+        upstream.id,
+        upstream.revision,
+        UpstreamUpdate {
+            base_url: Some(Some(base_url)),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("set base url");
+    // A claim already ran once: the poll must stamp this epoch.
+    let epoch = Uuid::new_v4();
+    fixture
+        .storage
+        .put_meta_value(&cedar_ember_epoch_meta_key(upstream.id), &epoch.to_string())
+        .await
+        .expect("seed epoch");
+    // The daily compat refresh already stored a newer CLI version than the
+    // pinned fallback; the poll must present exactly that client.
+    AnthropicCompatibilityKvStore::put_compatibility_kv_value(
+        fixture.storage.as_ref(),
+        CLAUDE_CODE_STABLE_VERSION_KEY,
+        STORED_CLI_VERSION,
+        1_700_000_000,
+        None,
+    )
+    .await
+    .expect("seed stored cli version");
+
+    async fn poll(fixture: &DispatchFixture, upstream_id: Uuid) {
+        let observation = fixture
+            .dispatch
+            .poll_usage(upstream_id, None)
+            .await
+            .expect("poll dispatch");
+        assert!(
+            matches!(observation, OAuthUsagePollObservation::Success { .. }),
+            "poll must succeed: {observation:?}"
+        );
+    }
+    async fn read_coupon(fixture: &DispatchFixture, upstream_id: Uuid) -> CedarEmberPollRecord {
+        let raw = fixture
+            .storage
+            .get_meta_value(&cedar_ember_meta_key(upstream_id))
+            .await
+            .expect("coupon read")
+            .expect("coupon record persisted");
+        serde_json::from_str::<CedarEmberPollRecord>(&raw).expect("coupon record parses")
+    }
+
+    poll(&fixture, upstream.id).await;
+
+    assert_eq!(
+        *requests.lock().expect("requests lock"),
+        vec![
+            "/api/oauth/usage?cedar_ember=1".to_owned(),
+            "/api/oauth/profile".to_owned(),
+        ],
+        "one combined usage request without skip_spend, then a one-time identity fetch"
+    );
+
+    let upstream = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+        .await
+        .expect("reload upstream")
+        .expect("upstream exists");
+    let fingerprint = upstream
+        .oauth_credential_fingerprint()
+        .expect("oauth credentials present");
+    // The fixture clock is pinned at 1_700_000_000s, so the observation
+    // landed at 1_700_000_000_000ms. The provider reports percent; the quota
+    // pipeline stores a fraction.
+    let five_hour_utilization = fixture
+        .dispatch
+        .subscription_quota_cache
+        .snapshot_for_upstream(upstream.id, 1_700_000_000_000, 60)
+        .into_iter()
+        .find(|snapshot| snapshot.window == "5h")
+        .and_then(|snapshot| snapshot.utilization);
+    assert_eq!(five_hour_utilization, Some(0.95));
+
+    let record = read_coupon(&fixture, upstream.id).await;
+    assert_eq!(record.credential_fingerprint, fingerprint);
+    assert_eq!(record.epoch, Some(epoch));
+    assert_eq!(record.observed_at_unix_millis, 1_700_000_000_000);
+    let status = record.status.expect("coupon status persisted");
+    assert!(status.eligible, "CLI client must see the eligible coupon");
+    assert_eq!(status.ineligible_reason, None);
+    assert_eq!(status.next_grant_id.as_deref(), Some("grant_01"));
+    let identity_raw = fixture
+        .storage
+        .get_meta_value(&cedar_ember_identity_meta_key(upstream.id))
+        .await
+        .expect("identity read")
+        .expect("identity persisted");
+    let identity =
+        serde_json::from_str::<CedarEmberIdentityRecord>(&identity_raw).expect("identity parses");
+    assert_eq!(identity.credential_fingerprint, fingerprint);
+    assert_eq!(identity.account_id, "account-a");
+    assert_eq!(identity.organization_id, "org-shared");
+
+    // Next tick: the block is malformed. The quota still lands, the coupon
+    // persists as cleared, and the bound identity is not re-fetched.
+    *coupon.lock().expect("coupon lock") = serde_json::json!({"eligible": true, "grants": "bad"});
+    poll(&fixture, upstream.id).await;
+
+    assert_eq!(
+        requests.lock().expect("requests lock").len(),
+        3,
+        "second poll issues only the usage request"
+    );
+    let record = read_coupon(&fixture, upstream.id).await;
+    assert!(record.status.is_none(), "malformed block clears the coupon");
+    assert_eq!(record.epoch, Some(epoch));
+}
+
+/// A live claim fence makes the poll skip its coupon write (quota still
+/// lands); an expired fence is settled by compare-and-put with a fresh epoch
+/// BEFORE the provider request, and the snapshot carries that epoch.
+#[tokio::test]
+async fn poll_usage_skips_live_fence_and_recovers_expired_fence_before_request() {
+    use cc_lb_control::anthropic_metadata::{
+        CEDAR_EMBER_FENCE_RECOVERY_AFTER_MILLIS, CedarEmberPollRecord, cedar_ember_epoch_fence,
+        cedar_ember_epoch_meta_key, cedar_ember_meta_key,
+    };
+    use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
+    use cc_lb_storage_api::MetaStore;
+
+    // The fixture clock is pinned at 1_700_000_000s.
+    const NOW_MILLIS: u64 = 1_700_000_000_000;
+    let fixture = DispatchFixture::new().await;
+    let upstream = fixture.oauth_upstream(true).await;
+    let epoch_key = cedar_ember_epoch_meta_key(upstream.id);
+    // Epoch values the provider-side handler observed when each usage
+    // request arrived.
+    let epochs_at_request = Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+    let usage_epochs = epochs_at_request.clone();
+    let usage_storage = fixture.storage.clone();
+    let usage_epoch_key = epoch_key.clone();
+    let app = axum::Router::new()
+        .route(
+            "/api/oauth/usage",
+            axum::routing::get(move || {
+                let epochs = usage_epochs.clone();
+                let storage = usage_storage.clone();
+                let key = usage_epoch_key.clone();
+                async move {
+                    let epoch = storage.get_meta_value(&key).await.expect("epoch read");
+                    epochs.lock().expect("epochs lock").push(epoch);
+                    axum::Json(serde_json::json!({
+                        "five_hour": {"utilization": 95.0, "resets_at": "2026-09-24T20:00:00Z"},
+                        "cedar_ember": {
+                            "eligible": true,
+                            "grants": [{"id": "grant_01", "resets_left": 1}],
+                            "next_grant_id": "grant_01"
+                        }
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/oauth/profile",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "account": {"uuid": "account-a"},
+                    "organization": {"uuid": "org-shared"}
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let base_url = Url::parse(&format!(
+        "http://{}/",
+        listener.local_addr().expect("local addr")
+    ))
+    .expect("loopback url");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve loopback");
+    });
+    UpstreamStore::update_spec(
+        fixture.storage.as_ref(),
+        upstream.id,
+        upstream.revision,
+        UpstreamUpdate {
+            base_url: Some(Some(base_url)),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("set base url");
+    async fn poll(fixture: &DispatchFixture, upstream_id: Uuid) {
+        let observation = fixture
+            .dispatch
+            .poll_usage(upstream_id, None)
+            .await
+            .expect("poll dispatch");
+        assert!(
+            matches!(observation, OAuthUsagePollObservation::Success { .. }),
+            "poll must succeed: {observation:?}"
+        );
+    }
+
+    // Live fence: a claim may be in flight. Quota lands, no coupon is
+    // written, and the fence is untouched.
+    let live = cedar_ember_epoch_fence(Uuid::new_v4(), NOW_MILLIS - 1_000);
+    fixture
+        .storage
+        .put_meta_value(&epoch_key, &live)
+        .await
+        .expect("seed live fence");
+    poll(&fixture, upstream.id).await;
+    assert!(
+        fixture
+            .dispatch
+            .subscription_quota_cache
+            .snapshot_for_upstream(upstream.id, NOW_MILLIS, 60)
+            .iter()
+            .any(|snapshot| snapshot.window == "5h"),
+        "quota must land even while the coupon is fenced"
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&cedar_ember_meta_key(upstream.id))
+            .await
+            .expect("coupon read"),
+        None,
+        "no coupon snapshot while a live fence is current"
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .get_meta_value(&epoch_key)
+            .await
+            .expect("epoch read"),
+        Some(live.clone())
+    );
+
+    // Expired fence: abandoned claim. The poll settles it before issuing
+    // its request and stamps the snapshot with the recovered epoch.
+    let expired = cedar_ember_epoch_fence(
+        Uuid::new_v4(),
+        NOW_MILLIS - CEDAR_EMBER_FENCE_RECOVERY_AFTER_MILLIS,
+    );
+    fixture
+        .storage
+        .put_meta_value(&epoch_key, &expired)
+        .await
+        .expect("seed expired fence");
+    poll(&fixture, upstream.id).await;
+    let recovered = fixture
+        .storage
+        .get_meta_value(&epoch_key)
+        .await
+        .expect("epoch read")
+        .expect("epoch present");
+    let recovered_uuid = Uuid::parse_str(&recovered).expect("recovered epoch is settled");
+    assert_eq!(
+        *epochs_at_request.lock().expect("epochs lock"),
+        vec![Some(live), Some(recovered)],
+        "recovery must land before the provider request"
+    );
+    let record = serde_json::from_str::<CedarEmberPollRecord>(
+        &fixture
+            .storage
+            .get_meta_value(&cedar_ember_meta_key(upstream.id))
+            .await
+            .expect("coupon read")
+            .expect("coupon persisted after recovery"),
+    )
+    .expect("coupon record parses");
+    assert_eq!(record.epoch, Some(recovered_uuid));
 }

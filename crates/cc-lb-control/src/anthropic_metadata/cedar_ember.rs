@@ -1,11 +1,12 @@
 //! Cedar Ember (subscription limit-reset) provider calls.
 //!
 //! Anthropic exposes the reset program through the OAuth API surface:
-//! `GET /api/oauth/usage?cedar_ember=1&skip_spend=1` carries the grant status
-//! block and `POST /api/organizations/{org}/reset_rate_limits` consumes a
-//! grant. All calls are keyed off the upstream's configured `base_url` so the
-//! same code path serves production (`https://api.anthropic.com`) and any
-//! operator-configured gateway.
+//! `GET /api/oauth/usage?cedar_ember=1` carries the grant status block and
+//! `POST /api/organizations/{org}/reset_rate_limits` consumes a grant. The
+//! scheduler's usage poll issues that GET itself, so this module only owns
+//! the shared status types and the claim POST. All calls are keyed off the
+//! upstream's configured `base_url` so the same code path serves production
+//! (`https://api.anthropic.com`) and any operator-configured gateway.
 //!
 //! The claim POST is deliberately not retried: a timeout or mid-flight
 //! transport failure leaves the outcome indeterminate (the provider may have
@@ -25,11 +26,11 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use url::Url;
+use uuid::Uuid;
 
 use super::fetchers::{MetadataHttpClient, ProfileResponse};
 
 const PROFILE_PATH: &str = "api/oauth/profile";
-const CEDAR_EMBER_USAGE_PATH: &str = "api/oauth/usage?cedar_ember=1&skip_spend=1";
 const RESET_RATE_LIMITS_PATH_PREFIX: &str = "api/organizations/";
 const RESET_RATE_LIMITS_PATH_SUFFIX: &str = "/reset_rate_limits";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,6 +49,91 @@ pub fn is_valid_grant_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+}
+
+/// MetaStore key holding the `cedar_ember` snapshot written by the usage
+/// poll. Shared by the scheduler (writer) and the admin API (reader).
+pub fn cedar_ember_meta_key(upstream_id: Uuid) -> String {
+    format!("cedar_ember:{upstream_id}")
+}
+
+/// MetaStore key holding the OAuth identity (account/org) bound to the same
+/// credential fingerprint as the coupon snapshot.
+pub fn cedar_ember_identity_meta_key(upstream_id: Uuid) -> String {
+    format!("cedar_ember_identity:{upstream_id}")
+}
+
+/// MetaStore key holding the invalidation epoch. A claim compare-and-puts a
+/// per-attempt pending fence (see [`cedar_ember_epoch_fence`]) over the
+/// settled value it read before dispatching, and compare-and-puts a fresh
+/// UUID over its own fence after any outcome. A snapshot is only servable
+/// while its embedded epoch equals a settled current epoch, so neither a
+/// poll response issued before the claim nor one observed while it was in
+/// flight can resurrect a consumed grant, regardless of write ordering or
+/// clock skew between replicas. The compare-and-put serializes claims per
+/// upstream across replicas: only one claim can hold the fence at a time.
+pub fn cedar_ember_epoch_meta_key(upstream_id: Uuid) -> String {
+    format!("cedar_ember_epoch:{upstream_id}")
+}
+
+const CEDAR_EMBER_EPOCH_FENCE_PREFIX: &str = "pending:";
+
+/// A pending fence older than this is presumed abandoned (handler cancelled
+/// or its settle write failed) and may be settled by the usage poll. Fixed,
+/// not configurable, and deliberately far above the longest a live claim
+/// can hold the fence: the 25 s claim POST timeout plus the 10 s profile
+/// fetch, token refresh and storage round trips stay well under a minute.
+pub const CEDAR_EMBER_FENCE_RECOVERY_AFTER_MILLIS: u64 = 5 * 60 * 1_000;
+
+/// Builds the per-attempt pending fence value
+/// `pending:{attempt}:{started_at_unix_millis}`. The attempt id makes every
+/// fence unique, so a settle compare-and-put can only replace its own fence.
+pub fn cedar_ember_epoch_fence(attempt: Uuid, started_at_unix_millis: u64) -> String {
+    format!("{CEDAR_EMBER_EPOCH_FENCE_PREFIX}{attempt}:{started_at_unix_millis}")
+}
+
+/// Returns the start time of a well-formed pending fence; `None` for a
+/// settled epoch or any unreadable value (never recovered automatically).
+pub fn cedar_ember_fence_started_at_millis(raw: &str) -> Option<u64> {
+    let (attempt, started) = raw
+        .strip_prefix(CEDAR_EMBER_EPOCH_FENCE_PREFIX)?
+        .split_once(':')?;
+    Uuid::parse_str(attempt).ok()?;
+    started.parse().ok()
+}
+
+/// Decodes the stored epoch value. `Some(None)`: no claim ever ran;
+/// `Some(Some(uuid))`: settled epoch; `None`: pending fence or unreadable
+/// value — callers fail closed (poll skips its coupon write, GET serves
+/// nothing, claim refuses to dispatch).
+pub fn settled_cedar_ember_epoch(raw: Option<&str>) -> Option<Option<Uuid>> {
+    match raw {
+        None => Some(None),
+        Some(value) => Uuid::parse_str(value).ok().map(Some),
+    }
+}
+
+/// Durable `cedar_ember` snapshot persisted by the usage poll. `epoch` is the
+/// invalidation epoch observed before the provider request was issued;
+/// `observed_at_unix_millis` is only a freshness timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CedarEmberPollRecord {
+    pub credential_fingerprint: u64,
+    pub epoch: Option<Uuid>,
+    pub observed_at_unix_millis: u64,
+    /// `None` when the provider omitted the block or sent a malformed one —
+    /// both clear any previously usable coupon.
+    pub status: Option<CedarEmberStatus>,
+}
+
+/// OAuth identity bound to the credential that produced the coupon snapshot.
+/// Fetched once per credential (on the first poll that observes a coupon),
+/// never per GET.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CedarEmberIdentityRecord {
+    pub credential_fingerprint: u64,
+    pub account_id: String,
+    pub organization_id: String,
 }
 
 #[derive(Debug, Error)]
@@ -82,7 +168,7 @@ pub enum CedarEmberError {
 /// `cedar_ember` block of the usage response. `grants` retains the provider's
 /// own window names (`five_hour`, `seven_day`, …); callers map them to the
 /// cc-lb short names at the API boundary.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CedarEmberStatus {
     pub eligible: bool,
     #[serde(default)]
@@ -102,7 +188,7 @@ pub struct CedarEmberStatus {
     pub cooldown_until: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CedarEmberGrant {
     pub id: String,
     #[serde(default)]
@@ -199,12 +285,6 @@ where
     })
 }
 
-#[derive(Deserialize)]
-struct CedarEmberUsageEnvelope {
-    #[serde(default)]
-    cedar_ember: Option<CedarEmberStatus>,
-}
-
 /// Live profile fetch keyed off the upstream's base URL. The claim flow needs
 /// the *current* OAuth identity (account/org can change on reauthorization),
 /// so this never reads the cached metadata records.
@@ -227,31 +307,6 @@ pub async fn fetch_oauth_profile_at(
     )
     .await?;
     serde_json::from_slice(&body).map_err(|error| CedarEmberError::Parse(error.to_string()))
-}
-
-/// Returns the `cedar_ember` status block, or `None` when the provider omits
-/// it (account not enrolled). A present-but-malformed block is an error.
-pub async fn fetch_cedar_ember_status(
-    client: &MetadataHttpClient,
-    base_url: &Url,
-    access_token: &str,
-    user_agent: &str,
-    cancel: &CancellationToken,
-) -> Result<Option<CedarEmberStatus>, CedarEmberError> {
-    let url = join_url(base_url, CEDAR_EMBER_USAGE_PATH)?;
-    let body = send_request(
-        client,
-        Request::get(url.as_str()),
-        access_token,
-        user_agent,
-        Full::new(Bytes::new()),
-        FETCH_TIMEOUT,
-        cancel,
-    )
-    .await?;
-    let envelope: CedarEmberUsageEnvelope =
-        serde_json::from_slice(&body).map_err(|error| CedarEmberError::Parse(error.to_string()))?;
-    Ok(envelope.cedar_ember)
 }
 
 /// Borrowed identifiers for a single claim dispatch. Carries no credentials;
