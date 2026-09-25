@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Adding an upstream and connecting a Claude account now share one step-by-step dialog in the admin dashboard. "New upstream" starts by choosing a Claude subscription or an Anthropic API key and continues in the same window. Connect and Reconnect on an OAuth upstream open that dialog at the sign-in step, from the detail page, the reconnect notice, and the Overview summary.
+- The Claude sign-in button is now a plain link prepared in advance, so browsers no longer block it as a popup. The code field accepts the value Claude shows (`code#state`), the bare code, or the whole callback address. It flags a code copied from an older sign-in and submits as soon as a valid value is pasted. A countdown shows the 15-minute sign-in window, with a one-click new link once it expires, and the internal state token is no longer displayed.
+- Reconnect shows which Claude account to sign in with, then reports whether the same account came back. If a different account was connected, the dialog shows the before and after accounts. The message after a fallback to a renewing credential now explains that the connection works and renews itself.
+- Claude sign-in failures are shown in the dialog next to the code field instead of in a separate error toast.
 - Track Claude Code `stable` and `latest` independently in the compatibility store. Usage polling and its account-identity lookup use `latest`, with a `2.1.282` fallback before the first refresh; existing metadata and coupon-claim consumers continue using `stable`.
 - The daily compatibility job refreshes both channels concurrently, preserving each channel's last successful value if its refresh fails. Existing keyed jobs remain readable; newly queued all-channel jobs are not readable by older binaries.
 

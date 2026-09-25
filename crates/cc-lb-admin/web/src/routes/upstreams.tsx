@@ -1,6 +1,4 @@
 import { Meter as BaseMeter } from '@base-ui/react/meter';
-import { Radio as BaseRadio } from '@base-ui/react/radio';
-import { RadioGroup as BaseRadioGroup } from '@base-ui/react/radio-group';
 import { Switch as BaseSwitch } from '@base-ui/react/switch';
 import { Toggle as BaseToggle } from '@base-ui/react/toggle';
 import { ToggleGroup as BaseToggleGroup } from '@base-ui/react/toggle-group';
@@ -37,10 +35,7 @@ import {
   ConfirmDialog,
   cx,
   EmptyState,
-  Field,
   Hint,
-  INPUT_CLASS,
-  Modal,
   Section,
   Skeleton,
   Spinner,
@@ -58,6 +53,10 @@ import {
   type ChartMarker,
 } from '../components/upstreams/buildQuotaChartData';
 import { SidebarCouponNudge } from '../components/upstreams/CouponNudge';
+import {
+  UpstreamConnectDialog,
+  type UpstreamConnectTarget,
+} from '../components/upstreams/connect/UpstreamConnectDialog';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
 import { LimitResetAction } from '../components/upstreams/LimitResetAction';
 import { OAuthReconnectNotice } from '../components/upstreams/OAuthReconnectNotice';
@@ -71,7 +70,6 @@ import { SettingsCard } from '../components/upstreams/SettingsCard';
 import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMinimal';
 import {
   ApiError,
-  type DraftCompleteResponse,
   type OrganizationMetadataInner,
   type QuotaSnapshot,
   type UpstreamOAuthStatusResponse,
@@ -89,15 +87,9 @@ import {
 import {
   type UpdateUpstreamWarmupSettingsRequest,
   type Upstream,
-  useCompleteOauthDraft,
-  useCreateFromOauthDraft,
-  useCreateUpstream,
   useDeleteUpstream,
-  useOAuthComplete,
-  useOAuthStart,
   usePrincipalNameMap,
   useRecentEvents,
-  useStartOauthDraft,
   useStatus,
   useSubscriptionQuotaAnalysis,
   useSubscriptionQuotaLatest,
@@ -115,10 +107,6 @@ const upstreamSearchSchema = z.object({
   selectedId: z.string().optional(),
   action: z.enum(['new', 'reconnect']).optional(),
 });
-
-// INPUT_CLASS carries no disabled styling, but a control locked by an in-flight
-// mutation must read as unavailable rather than merely inert.
-const PENDING_INPUT_CLASS = 'disabled:opacity-50 disabled:cursor-not-allowed';
 
 export const Route = createFileRoute('/upstreams')({
   validateSearch: upstreamSearchSchema,
@@ -175,7 +163,15 @@ function UpstreamsPage() {
     }
     return m;
   }, [status.data]);
-  const [createOpen, setCreateOpen] = useState(false);
+  // One dialog serves every entry point: "New" (header, empty state, and the
+  // ?action=new deep link used by the command palette) and Connect/Reconnect
+  // on an OAuth upstream (card button, reconnect notice, ?action=reconnect).
+  const [connectTarget, setConnectTarget] =
+    useState<UpstreamConnectTarget | null>(null);
+  const openCreate = useCallback(
+    () => setConnectTarget({ mode: 'create' }),
+    [],
+  );
   const handledCreateAction = useRef(false);
   useEffect(() => {
     if (action !== 'new') {
@@ -184,24 +180,16 @@ function UpstreamsPage() {
     }
     if (handledCreateAction.current) return;
     handledCreateAction.current = true;
-    setCreateOpen(true);
+    openCreate();
     navigate({
       replace: true,
       search: (previous) => ({ ...previous, action: undefined }),
     });
-  }, [action, navigate]);
-  // While an OAuth upstream is created but its /oauth/complete hasn't succeeded
-  // yet, the row exists in the DB (we need its id for /oauth/start) but should
-  // be hidden from the list. CreateUpstreamModal calls the setter on POST
-  // success and clears it on completion/cancel.
-  const [pendingCreatedId, setPendingCreatedId] = useState<string | null>(null);
+  }, [action, navigate, openCreate]);
 
   const visibleUpstreams = useMemo(
-    () =>
-      (upstreams.data?.upstreams ?? []).filter(
-        (u) => u.id !== pendingCreatedId,
-      ),
-    [upstreams.data, pendingCreatedId],
+    () => upstreams.data?.upstreams ?? [],
+    [upstreams.data],
   );
 
   // Reconnect nudges derive from the same oauth/status queries the detail
@@ -250,7 +238,7 @@ function UpstreamsPage() {
             size="sm"
             variant="primary"
             iconLeft={<Plus className="w-3 h-3" />}
-            onClick={() => setCreateOpen(true)}
+            onClick={openCreate}
           >
             New
           </Button>
@@ -457,7 +445,7 @@ function UpstreamsPage() {
               title="No upstreams"
               description="Create your first upstream to start routing traffic."
               action={
-                <Button variant="primary" onClick={() => setCreateOpen(true)}>
+                <Button variant="primary" onClick={openCreate}>
                   New upstream
                 </Button>
               }
@@ -478,6 +466,9 @@ function UpstreamsPage() {
             key={selected.id}
             upstream={selected}
             onBack={() => select(undefined)}
+            onConnect={() =>
+              setConnectTarget({ mode: 'reconnect', upstream: selected })
+            }
           />
         ) : upstreams.isLoading ? (
           <UpstreamDetailLoadingShell />
@@ -491,10 +482,10 @@ function UpstreamsPage() {
         )}
       </section>
 
-      <CreateUpstreamModal
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        onPendingCreatedIdChange={setPendingCreatedId}
+      <UpstreamConnectDialog
+        target={connectTarget}
+        onClose={() => setConnectTarget(null)}
+        onCreated={(created) => select(created.id)}
       />
     </div>
   );
@@ -822,71 +813,20 @@ function PaymentWarning({
   );
 }
 
-function OAuthFallbackNotice({
-  fallback,
-  reason,
-  grantedExpiresInSecs,
-}: {
-  fallback: boolean;
-  reason: string | null;
-  grantedExpiresInSecs: number | null;
-}) {
-  if (!fallback) return null;
-  return (
-    <div
-      data-testid="oauth-long-lived-fallback-notice"
-      data-reason={reason ?? 'unknown'}
-      className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1"
-    >
-      <div className="font-medium flex items-center gap-1.5">
-        <Info className="w-3.5 h-3.5" />
-        365-day token unavailable
-      </div>
-      {reason === 'clamped' ? (
-        <p className="opacity-90">
-          Anthropic accepted the 365-day request but granted a shorter lifetime,
-          so the credential was kept refreshable instead of being locked to a
-          token that could not renew itself.
-          {grantedExpiresInSecs != null && (
-            <>
-              {' '}
-              The granted token expires{' '}
-              <RelativeOffsetTime offsetSeconds={grantedExpiresInSecs} />.
-            </>
-          )}
-        </p>
-      ) : reason === 'scope_rejected' ? (
-        <p className="opacity-90">
-          Anthropic refused the 365-day request because the configured
-          oauth.anthropic.scopes include a scope it will not grant a year-long
-          token for, so the credential was kept refreshable instead. It
-          auto-refreshes but needs reauthorization about every 30 days.
-        </p>
-      ) : (
-        <p className="opacity-90">
-          Anthropic refused the 365-day request, so a standard refreshing
-          credential was created instead. It auto-refreshes but needs
-          reauthorization about every 30 days.
-        </p>
-      )}
-    </div>
-  );
-}
-
 function DetailView({
   upstream,
   onBack,
+  onConnect,
 }: {
   upstream: Upstream;
   onBack: () => void;
+  /** Opens the shared connect dialog at the Claude sign-in step. */
+  onConnect: () => void;
 }) {
   const { action } = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const toggle = useUpdateUpstreamWarmupSettings();
   const del = useDeleteUpstream();
-  const oauthStart = useOAuthStart();
-  const oauthComplete = useOAuthComplete();
-  const resetOAuthComplete = oauthComplete.reset;
   const subscriptionMetadataQ = useUpstreamSubscriptionMetadata(upstream.id);
   const triggerSubscriptionMetadataRefresh =
     useTriggerSubscriptionMetadataRefresh();
@@ -900,32 +840,16 @@ function DetailView({
     () => statusQ.data?.upstreams.find((u) => u.id === upstream.id) ?? null,
     [statusQ.data, upstream.id],
   );
-  const [oauthOpen, setOauthOpen] = useState(false);
-  const [oauthState, setOauthState] = useState<{
-    authorize_url?: string;
-    state_token?: string;
-    code?: string;
-  }>({});
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [range, setRange] = useState<'1h' | '6h' | '24h' | '7d'>('7d');
   const [isolatedWindow, setIsolatedWindow] = useState<string | null>(null);
   const [showMoreMeta, setShowMoreMeta] = useState(false);
   const isOauth = upstream.kind === 'anthropic_oauth';
 
-  // Single entry point for the OAuth authorize flow: the card button, the
-  // reconnect notice, and the ?action=reconnect deep link all funnel here so
-  // every surface shares the same modal.
-  const startOAuthReconnect = useCallback(() => {
-    setOauthState({});
-    // A previous completion's result must not leak into a reopened modal.
-    resetOAuthComplete();
-    setOauthOpen(true);
-  }, [resetOAuthComplete]);
-
-  // ?action=reconnect deep link: consume the param exactly once, then start
-  // the existing flow. The ref survives StrictMode's double effect pass;
+  // ?action=reconnect deep link: consume the param exactly once, then open the
+  // connect dialog. The ref survives StrictMode's double effect pass;
   // DetailView is keyed by upstream id, so a selection change remounts and
-  // re-arms it. Cancelling the modal never touches the nudge itself.
+  // re-arms it. Cancelling the dialog never touches the nudge itself.
   const handledReconnectAction = useRef(false);
   useEffect(() => {
     if (action !== 'reconnect') {
@@ -938,16 +862,8 @@ function DetailView({
       replace: true,
       search: (previous) => ({ ...previous, action: undefined }),
     });
-    if (!isOauth || oauthOpen || oauthStart.isPending) return;
-    startOAuthReconnect();
-  }, [
-    action,
-    isOauth,
-    oauthOpen,
-    oauthStart.isPending,
-    startOAuthReconnect,
-    navigate,
-  ]);
+    if (isOauth) onConnect();
+  }, [action, isOauth, onConnect, navigate]);
 
   // Keep a separate wall clock for snapshot freshness/countdowns. Series and
   // analysis requests use stable range keys and resolve their own absolute
@@ -1456,8 +1372,7 @@ function DetailView({
         {reconnectNudge ? (
           <OAuthReconnectNotice
             nudge={reconnectNudge}
-            onReconnect={startOAuthReconnect}
-            pending={oauthStart.isPending}
+            onReconnect={onConnect}
           />
         ) : null}
 
@@ -2076,7 +1991,7 @@ function DetailView({
                       size="sm"
                       className="self-center"
                       iconLeft={<KeyRound className="h-3 w-3" />}
-                      onClick={startOAuthReconnect}
+                      onClick={onConnect}
                     >
                       {hasBoundToken ? 'Reconnect' : 'Connect'}
                     </Button>
@@ -2338,142 +2253,6 @@ function DetailView({
         )}
       </div>
 
-      <Modal
-        open={oauthOpen}
-        onOpenChange={setOauthOpen}
-        title="OAuth Authorization"
-        description="Open the authorize URL, then paste the code below."
-        size="lg"
-        preventDismiss={oauthComplete.isPending || oauthStart.isPending}
-        footer={
-          <>
-            <Button
-              disabled={oauthComplete.isPending || oauthStart.isPending}
-              onClick={() => setOauthOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              loading={oauthComplete.isPending}
-              disabled={
-                !oauthState.code ||
-                !oauthState.state_token ||
-                oauthComplete.isSuccess
-              }
-              onClick={() => {
-                const token = oauthState.state_token;
-                const oauthCode = oauthState.code;
-                if (!token || !oauthCode) return;
-                oauthComplete.mutate(
-                  {
-                    id: upstream.id,
-                    state_token: token,
-                    code: oauthCode,
-                  },
-                  {
-                    onSuccess: (res) => {
-                      toast.success('OAuth connected');
-                      // A fallback outcome must stay visible: the notice
-                      // lives inside this modal, so only close on a clean
-                      // long-lived grant.
-                      if (!res.long_lived_fallback) setOauthOpen(false);
-                    },
-                  },
-                );
-              }}
-            >
-              {oauthComplete.isPending ? 'Completing...' : 'Complete'}
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-3">
-          <OAuthFallbackNotice
-            fallback={oauthComplete.data?.long_lived_fallback ?? false}
-            reason={oauthComplete.data?.fallback_reason ?? null}
-            grantedExpiresInSecs={
-              oauthComplete.data?.granted_expires_in_secs ?? null
-            }
-          />
-          <p className="text-xs text-text-faint">
-            cc-lb requests a year-long token from Anthropic. If Anthropic
-            declines, the credential is automatically kept refreshable instead.
-          </p>
-          {!oauthState.authorize_url ? (
-            <Button
-              variant="primary"
-              loading={oauthStart.isPending}
-              onClick={() => {
-                oauthStart.mutate(
-                  { id: upstream.id },
-                  {
-                    onSuccess: (res) => {
-                      setOauthState({
-                        authorize_url: res.authorize_url,
-                        state_token: res.state_token,
-                        code: '',
-                      });
-                    },
-                  },
-                );
-              }}
-            >
-              {oauthStart.isPending
-                ? 'Starting...'
-                : 'Generate authorization URL'}
-            </Button>
-          ) : (
-            <>
-              <p className="text-xs text-text-faint">
-                1. Open the authorization URL below. 2. Approve access. 3. Copy
-                the returned code and paste it here.
-              </p>
-              <Field label="Authorize URL">
-                <code className="block p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all select-all">
-                  {oauthState.authorize_url ?? ''}
-                </code>
-                <div className="mt-2">
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    disabled={!oauthState.authorize_url}
-                    iconLeft={<ExternalLink className="w-3 h-3" />}
-                    onClick={() => {
-                      if (oauthState.authorize_url) {
-                        window.open(
-                          oauthState.authorize_url,
-                          '_blank',
-                          'noopener,noreferrer',
-                        );
-                      }
-                    }}
-                  >
-                    Open authorization URL
-                  </Button>
-                </div>
-              </Field>
-              <Field label="State Token">
-                <code className="block p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all select-all">
-                  {oauthState.state_token ?? ''}
-                </code>
-              </Field>
-              <Field label="Authorization Code" required>
-                <input
-                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS, 'font-mono')}
-                  value={oauthState.code ?? ''}
-                  onChange={(e) =>
-                    setOauthState((s) => ({ ...s, code: e.target.value }))
-                  }
-                  placeholder="paste code…"
-                  disabled={oauthComplete.isPending}
-                />
-              </Field>
-            </>
-          )}
-        </div>
-      </Modal>
-
       <ConfirmDialog
         open={confirmDeleteOpen}
         onOpenChange={setConfirmDeleteOpen}
@@ -2502,507 +2281,5 @@ function DetailView({
         }
       />
     </>
-  );
-}
-
-// Invariant: every dismissal path is refused while the request owned by the
-// visible step is in flight. A mid-request close runs the reset effect, which
-// would clear the OAuth draft state and the pending-created id before the
-// response lands; both are only safe to discard once the step has settled.
-function CreateUpstreamModal({
-  open,
-  onOpenChange,
-  onPendingCreatedIdChange,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onPendingCreatedIdChange: (id: string | null) => void;
-}) {
-  const create = useCreateUpstream();
-  const startDraft = useStartOauthDraft();
-  const completeDraft = useCompleteOauthDraft();
-  const createFromDraft = useCreateFromOauthDraft();
-
-  const [step, setStep] = useState<
-    'type' | 'configure_non_oauth' | 'oauth_handshake' | 'oauth_confirm'
-  >('type');
-  const [kind, setKind] = useState<'anthropic_api_key' | 'anthropic_oauth'>(
-    'anthropic_oauth',
-  );
-
-  // Non-OAuth state
-  const [name, setName] = useState('');
-  const [baseUrl, setBaseUrl] = useState(DEFAULT_ANTHROPIC_BASE_URL);
-  const [apiKeyValue, setApiKeyValue] = useState('');
-  const [apiKeyEnv, setApiKeyEnv] = useState('ANTHROPIC_API_KEY');
-  const [useEnvVar, setUseEnvVar] = useState(false);
-
-  // OAuth state
-  const [authState, setAuthState] = useState<{
-    authorize_url: string;
-    state_token: string;
-  } | null>(null);
-  const [code, setCode] = useState('');
-  const [draftResult, setDraftResult] = useState<DraftCompleteResponse | null>(
-    null,
-  );
-  const [oauthName, setOauthName] = useState('');
-  const [oauthError, setOauthError] = useState<string | null>(null);
-
-  const createPending = create.isPending;
-  const startDraftPending = startDraft.isPending;
-  const completeDraftPending = completeDraft.isPending;
-  const createFromDraftPending = createFromDraft.isPending;
-  // Only the request owned by the visible step may lock the modal, so a settled
-  // mutation from an earlier step can never keep the user trapped.
-  const stepPending =
-    step === 'configure_non_oauth'
-      ? createPending
-      : step === 'oauth_handshake'
-        ? startDraftPending || completeDraftPending
-        : step === 'oauth_confirm'
-          ? createFromDraftPending
-          : false;
-
-  useEffect(() => {
-    if (!open) {
-      setStep('type');
-      setKind('anthropic_oauth');
-      setName('');
-      setBaseUrl(DEFAULT_ANTHROPIC_BASE_URL);
-      setApiKeyValue('');
-      setApiKeyEnv('ANTHROPIC_API_KEY');
-      setUseEnvVar(false);
-      setAuthState(null);
-      setCode('');
-      setDraftResult(null);
-      setOauthName('');
-      setOauthError(null);
-      onPendingCreatedIdChange(null);
-    }
-  }, [open, onPendingCreatedIdChange]);
-
-  const handleOpenChange = (next: boolean) => {
-    if (!next && stepPending) return;
-    onOpenChange(next);
-  };
-
-  const submitNonOauth = () => {
-    const trimmedName = name.trim();
-    const trimmedBase = baseUrl.trim();
-    const trimmedEnv = apiKeyEnv.trim();
-    const trimmedValue = apiKeyValue.trim();
-    const isApiKey = kind === 'anthropic_api_key';
-    create.mutate(
-      {
-        name: trimmedName,
-        kind,
-        base_url: trimmedBase === '' ? null : trimmedBase,
-        api_key_value:
-          isApiKey && !useEnvVar && trimmedValue !== '' ? trimmedValue : null,
-        api_key_env:
-          isApiKey && useEnvVar && trimmedEnv !== '' ? trimmedEnv : null,
-      },
-      {
-        onSuccess: () => {
-          toast.success('Upstream created');
-          onOpenChange(false);
-        },
-      },
-    );
-  };
-
-  const handleAuthorizeClick = () => {
-    setOauthError(null);
-    startDraft.mutate(undefined, {
-      onSuccess: (res: { authorize_url: string; state_token: string }) => {
-        setAuthState(res);
-        window.open(res.authorize_url, '_blank');
-      },
-      onError: (err: unknown) => {
-        setOauthError(err instanceof Error ? err.message : String(err));
-      },
-    });
-  };
-
-  const handleVerifyCode = () => {
-    if (!authState || !code.trim()) return;
-    setOauthError(null);
-    completeDraft.mutate(
-      { state_token: authState.state_token, code: code.trim() },
-      {
-        onSuccess: (res: DraftCompleteResponse) => {
-          setDraftResult(res);
-          setOauthName(res.suggested_name || '');
-          setStep('oauth_confirm');
-        },
-        onError: (err: unknown) => {
-          setOauthError(err instanceof Error ? err.message : String(err));
-        },
-      },
-    );
-  };
-
-  const submitOauthConfirm = () => {
-    if (!authState || !oauthName.trim()) return;
-    createFromDraft.mutate(
-      { state_token: authState.state_token, name: oauthName.trim() },
-      {
-        onSuccess: () => {
-          toast.success('OAuth upstream created');
-          onOpenChange(false);
-        },
-        // No local onError: a failure keeps the confirm step open and the
-        // global MutationCache toast is the single error surface, so adding one
-        // here would double-report the same failure.
-      },
-    );
-  };
-
-  const renderStepContent = () => {
-    if (step === 'type') {
-      return (
-        <div className="space-y-4">
-          <BaseRadioGroup
-            name="kind"
-            value={kind}
-            onValueChange={(value) => setKind(value)}
-            className="space-y-2"
-          >
-            <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
-              <BaseRadio.Root
-                value="anthropic_oauth"
-                className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle bg-bg transition-colors data-[checked]:border-[color:var(--color-accent)]"
-              >
-                <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
-              </BaseRadio.Root>
-              <div>
-                <div className="font-medium text-text">
-                  Anthropic OAuth (Recommended)
-                </div>
-                <div className="text-xs text-text-faint mt-1">
-                  Use a Claude Max/Pro/Team/Enterprise subscription via OAuth.
-                  Recommended — automatic plan detection and quota tracking via
-                  Anthropic's official APIs.
-                </div>
-              </div>
-            </label>
-            <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
-              <BaseRadio.Root
-                value="anthropic_api_key"
-                className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle bg-bg transition-colors data-[checked]:border-[color:var(--color-accent)]"
-              >
-                <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
-              </BaseRadio.Root>
-              <div>
-                <div className="font-medium text-text">Anthropic API Key</div>
-                <div className="text-xs text-text-faint mt-1">
-                  Use a workspace API key (sk-ant-api03-...). Pay-as-you-go
-                  billing per token.
-                </div>
-              </div>
-            </label>
-          </BaseRadioGroup>
-        </div>
-      );
-    }
-
-    if (step === 'configure_non_oauth') {
-      return (
-        <div className="space-y-3">
-          <Field
-            label="Name"
-            required
-            hint="A unique label, e.g. anthropic-prod"
-          >
-            <input
-              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="anthropic-prod"
-              disabled={createPending}
-            />
-          </Field>
-          <Field label="Base URL">
-            <input
-              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              disabled={createPending}
-            />
-          </Field>
-          {kind === 'anthropic_api_key' ? (
-            useEnvVar ? (
-              <Field
-                label="API Key Env Var"
-                hint="Name of an env var on the server holding the API key"
-                required
-              >
-                <input
-                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS, 'font-mono')}
-                  value={apiKeyEnv}
-                  onChange={(e) => setApiKeyEnv(e.target.value)}
-                  placeholder="ANTHROPIC_API_KEY"
-                  disabled={createPending}
-                />
-                <button
-                  type="button"
-                  className={cx(
-                    'mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2',
-                    PENDING_INPUT_CLASS,
-                  )}
-                  disabled={createPending}
-                  onClick={() => setUseEnvVar(false)}
-                >
-                  Use literal value instead
-                </button>
-              </Field>
-            ) : (
-              <Field
-                label="API Key Value"
-                hint="Literal sk-ant-... key"
-                required
-              >
-                <input
-                  type="password"
-                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS, 'font-mono')}
-                  value={apiKeyValue}
-                  onChange={(e) => setApiKeyValue(e.target.value)}
-                  placeholder="sk-ant-..."
-                  disabled={createPending}
-                />
-                <button
-                  type="button"
-                  className={cx(
-                    'mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2',
-                    PENDING_INPUT_CLASS,
-                  )}
-                  disabled={createPending}
-                  onClick={() => setUseEnvVar(true)}
-                >
-                  Use environment variable instead
-                </button>
-              </Field>
-            )
-          ) : null}
-        </div>
-      );
-    }
-
-    if (step === 'oauth_handshake') {
-      return (
-        <div className="space-y-4">
-          <p className="text-sm text-text-faint">
-            We'll authorize a Claude account via Anthropic. cc-lb requests a
-            year-long token; if Anthropic declines, the credential is
-            automatically kept refreshable instead. Click Authorize, complete
-            the flow, then paste the code below.
-          </p>
-
-          <Button
-            variant="primary"
-            onClick={handleAuthorizeClick}
-            disabled={completeDraftPending}
-            loading={startDraftPending}
-          >
-            {startDraftPending ? 'Starting...' : 'Authorize with Anthropic'}
-          </Button>
-
-          {authState && (
-            <div className="mt-4 space-y-3 p-4 border border-subtle rounded-md bg-overlay-1">
-              <Field label="Authorization Code" required>
-                <textarea
-                  className={cx(
-                    INPUT_CLASS,
-                    PENDING_INPUT_CLASS,
-                    'font-mono min-h-[80px]',
-                  )}
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  placeholder="paste code..."
-                  disabled={completeDraftPending}
-                />
-              </Field>
-              {oauthError && (
-                <div className="text-sm text-red-400">{oauthError}</div>
-              )}
-              <Button
-                onClick={handleVerifyCode}
-                disabled={!code.trim() || startDraftPending}
-                loading={completeDraftPending}
-              >
-                {completeDraftPending
-                  ? 'Verifying...'
-                  : 'Verify and fetch account'}
-              </Button>
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    if (step === 'oauth_confirm') {
-      const orgMeta = draftResult?.organization_metadata;
-      const subMeta = draftResult?.subscription_metadata;
-
-      const fields: { label: string; value: React.ReactNode }[] = [];
-      if (orgMeta?.organization_type)
-        fields.push({ label: 'Plan', value: orgMeta.organization_type });
-      if (orgMeta?.rate_limit_tier)
-        fields.push({ label: 'Rate', value: orgMeta.rate_limit_tier });
-      if (subMeta?.organization_role)
-        fields.push({ label: 'Role', value: subMeta.organization_role });
-      if (orgMeta?.organization_name)
-        fields.push({ label: 'Org', value: orgMeta.organization_name });
-      if (orgMeta?.subscription_created_at_unix_secs)
-        fields.push({
-          label: 'Subscribed',
-          value: (
-            <RelativeTime
-              compact
-              ts={new Date(orgMeta.subscription_created_at_unix_secs * 1000)}
-            />
-          ),
-        });
-      if (orgMeta?.billing_type)
-        fields.push({ label: 'Billing', value: orgMeta.billing_type });
-      if (orgMeta?.has_extra_usage_enabled != null)
-        fields.push({
-          label: 'Extra Usage',
-          value: orgMeta.has_extra_usage_enabled ? 'Enabled' : 'Disabled',
-        });
-      if (orgMeta?.account_display_name || orgMeta?.account_email)
-        fields.push({
-          label: 'Account',
-          value: `${orgMeta.account_display_name || 'Unknown'} (${orgMeta.account_email || 'unknown'})`,
-        });
-
-      return (
-        <div className="space-y-4">
-          <OAuthFallbackNotice
-            fallback={draftResult?.long_lived_fallback ?? false}
-            reason={draftResult?.fallback_reason ?? null}
-            grantedExpiresInSecs={draftResult?.granted_expires_in_secs ?? null}
-          />
-
-          <div className="p-4 border border-subtle rounded-md bg-overlay-1 space-y-3">
-            <h3 className="text-sm font-medium text-text">Account Preview</h3>
-            <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-              {fields.map((f) => (
-                <div key={f.label} className="flex flex-col">
-                  <span className="text-text-faint">{f.label}</span>
-                  <span className="text-text truncate">{f.value}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <Field label="Upstream Name" required>
-            <input
-              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-              value={oauthName}
-              onChange={(e) => setOauthName(e.target.value)}
-              disabled={createFromDraftPending}
-            />
-          </Field>
-        </div>
-      );
-    }
-  };
-
-  const renderFooter = () => {
-    if (step === 'type') {
-      return (
-        <>
-          <Button
-            disabled={stepPending}
-            onClick={() => handleOpenChange(false)}
-          >
-            Cancel
-          </Button>
-          <Button
-            variant="primary"
-            onClick={() =>
-              setStep(
-                kind === 'anthropic_oauth'
-                  ? 'oauth_handshake'
-                  : 'configure_non_oauth',
-              )
-            }
-          >
-            Continue
-          </Button>
-        </>
-      );
-    }
-    if (step === 'configure_non_oauth') {
-      return (
-        <>
-          <Button disabled={createPending} onClick={() => setStep('type')}>
-            Back
-          </Button>
-          <Button
-            variant="primary"
-            disabled={
-              !name.trim() ||
-              (kind === 'anthropic_api_key' &&
-                (useEnvVar ? !apiKeyEnv.trim() : !apiKeyValue.trim()))
-            }
-            loading={createPending}
-            onClick={submitNonOauth}
-          >
-            {createPending ? 'Creating...' : 'Create'}
-          </Button>
-        </>
-      );
-    }
-    if (step === 'oauth_handshake') {
-      return (
-        <Button
-          disabled={startDraftPending || completeDraftPending}
-          onClick={() => setStep('type')}
-        >
-          Back
-        </Button>
-      );
-    }
-    if (step === 'oauth_confirm') {
-      return (
-        <>
-          <Button
-            disabled={createFromDraftPending}
-            onClick={() => setStep('oauth_handshake')}
-          >
-            Back
-          </Button>
-          <Button
-            variant="primary"
-            disabled={!oauthName.trim()}
-            loading={createFromDraftPending}
-            onClick={submitOauthConfirm}
-          >
-            {createFromDraftPending ? 'Saving...' : 'Save'}
-          </Button>
-        </>
-      );
-    }
-  };
-
-  return (
-    <Modal
-      open={open}
-      onOpenChange={handleOpenChange}
-      preventDismiss={stepPending}
-      title="New upstream"
-      description="Register an Anthropic API key or OAuth principal."
-      size={
-        step === 'oauth_handshake' || step === 'oauth_confirm'
-          ? 'lg'
-          : undefined
-      }
-      footer={renderFooter()}
-    >
-      {renderStepContent()}
-    </Modal>
   );
 }
