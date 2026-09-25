@@ -10,10 +10,10 @@ import type { LiveEventMap } from './upsertReducer';
 export const LOG_STATUS_CLASSES = ['2xx', '3xx', '4xx', '5xx'] as const;
 export type LogStatusClass = (typeof LOG_STATUS_CLASSES)[number];
 /**
- * `errors` is a UI-only status filter: rows that ended abnormally — HTTP
- * status >= 400, or a recorded `error_code` on a delivered 2xx (mid-stream
- * error, upstream refusal, …). The backend `status_class` param cannot
- * express it, so it is applied client-side and never sent to the server.
+ * `errors` includes rows that ended abnormally — HTTP status >= 400, or a
+ * recorded `error_code` on a delivered 2xx (mid-stream error, upstream
+ * refusal, …). The backend applies this filter before historical pagination;
+ * client-side filtering also covers live and in-flight rows.
  */
 export const LOG_STATUS_FILTER_VALUES = [
   ...LOG_STATUS_CLASSES,

@@ -9,6 +9,10 @@ All notable changes to this project will be documented in this file.
 - Track Claude Code `stable` and `latest` independently in the compatibility store. Usage polling and its account-identity lookup use `latest`, with a `2.1.282` fallback before the first refresh; existing metadata and coupon-claim consumers continue using `stable`.
 - The daily compatibility job refreshes both channels concurrently, preserving each channel's last successful value if its refresh fails. Existing keyed jobs remain readable; newly queued all-channel jobs are not readable by older binaries.
 
+### Fixed
+
+- The Admin Logs `errors` filter now paginates over matching requests: HTTP statuses of 400 or higher and abnormally completed requests with an `error_code` are selected before the page limit, so older errors are no longer hidden behind pages of successful requests and the row range stays valid. The live tail still applies this filter in the browser, so a request whose upstream status is corrected by a retry (for example 401 followed by 200) leaves the list immediately. ([#862](https://github.com/isac322/cc-lb/issues/862))
+
 ## [0.7.0] - 2026-09-25
 
 ### Added

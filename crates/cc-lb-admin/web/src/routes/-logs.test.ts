@@ -172,9 +172,4 @@ describe('buildHistoricalFilters', () => {
     expect(buildLiveFilters(filters)).not.toHaveProperty('status');
     expect(buildLiveFilters(filters)).not.toHaveProperty('session');
   });
-  it('keeps the client-side errors filter out of the backend contract', () => {
-    const filters = { status: 'errors' as const };
-    expect(buildLiveFilters(filters)).toEqual({});
-    expect(buildHistoricalFilters(filters)).toEqual({});
-  });
 });

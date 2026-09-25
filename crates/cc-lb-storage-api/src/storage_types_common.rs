@@ -26,6 +26,7 @@ pub struct RequestEventStreamFilters {
     pub upstream: Option<cc_lb_request_log::RequestEventUpstream>,
     pub upstream_id: Option<Uuid>,
     pub status_class: Option<StatusClass>,
+    pub errors_only: bool,
     /// Endpoint classification filter. `Some(kind)` matches rows whose
     /// effective kind (renewal via `source_kind` precedence, else stored
     /// `event_kind`, else `unclassified` for historical NULLs) equals `kind`.
